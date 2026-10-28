@@ -132,39 +132,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .parse()
         .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("invalid claim ref url: {err}")))?;
 
-        let balance = compute_txn_balance(txn);
-
-        let dayledger_txn = types::Txn {
-            txn_id: claim_id.clone(),
-            ts: txn.date.to_string(),
-            status: map_txn_status(&txn.status),
-            payee: Some(txn.description.clone()),
-            note: None,
-            comment: if txn.comment.is_empty() {
-                None
-            } else {
-                Some(txn.comment.clone())
-            },
-            balance,
-            claim_refs: vec![daybook_types::doc::FacetRef {
-                r#ref: claim_ref_url,
-                heads: vec![],
-            }],
-            postings: txn
-                .postings
-                .iter()
-                .map(|posting| types::Posting {
-                    account_id: posting.account.clone(),
-                    amount: types::Amount {
-                        decimal: posting.amount.quantity.clone(),
-                        commodity: posting.amount.commodity.clone(),
-                    },
-                    r#type: map_posting_type(&posting.posting_type),
-                })
-                .collect(),
-            decision_log: vec![],
-        };
-
+        let dayledger_txn = project_txn(claim_id.clone(), txn, claim_ref_url);
         let txn_json = serde_json::to_string(&dayledger_txn).map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing txn: {err}"))
         })?;
@@ -343,4 +311,39 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     }
 
     Ok(())
+}
+
+/// Project one parsed hledger transaction into the `Txn` facet stored under `txn_id`, the id
+/// of the claim it was matched to; `claim_ref_url` points back at that claim facet.
+fn project_txn(
+    txn_id: String,
+    txn: &hledger::types::Transaction,
+    claim_ref_url: url::Url,
+) -> types::Txn {
+    types::Txn {
+        txn_id,
+        ts: txn.date.to_string(),
+        status: map_txn_status(&txn.status),
+        payee: Some(txn.description.clone()),
+        note: None,
+        comment: (!txn.comment.is_empty()).then(|| txn.comment.clone()),
+        balance: compute_txn_balance(txn),
+        claim_refs: vec![daybook_types::doc::FacetRef {
+            r#ref: claim_ref_url,
+            heads: vec![],
+        }],
+        postings: txn
+            .postings
+            .iter()
+            .map(|posting| types::Posting {
+                account_id: posting.account.clone(),
+                amount: types::Amount {
+                    decimal: posting.amount.quantity.clone(),
+                    commodity: posting.amount.commodity.clone(),
+                },
+                r#type: map_posting_type(&posting.posting_type),
+            })
+            .collect(),
+        decision_log: vec![],
+    }
 }

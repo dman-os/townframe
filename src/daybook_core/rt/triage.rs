@@ -368,10 +368,7 @@ fn should_processor_run_for_event(
     if let Some(removed) = removed_facet_keys {
         all_changed.extend(removed.iter().cloned());
     }
-    if !all_changed.is_empty() && !changed_intersects_read_set(&all_changed, read_tags, read_keys) {
-        return false;
-    }
-    true
+    all_changed.is_empty() || changed_intersects_read_set(&all_changed, read_tags, read_keys)
 }
 
 fn evaluate_node_predicate(predicate: &NodePredicate, is_local_for_processor: bool) -> bool {

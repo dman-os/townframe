@@ -37,7 +37,6 @@ members = [
   "./src/clay_rt_wcmp",
   "./src/clay_rt_wcmp_wasmi",
   "./src/clay_guest_session",
-  "./src/clay_wcmp_spike",
   "./src/micro_settings_manifest",
   "./src/micro_settings",
   "./src/micro_sample",
@@ -295,6 +294,9 @@ clay_dioxus = { path = "./src/clay_dioxus" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
+# Lives in the `src/wasm_utils_rs` workspace (it is the only root-workspace consumer), but
+# `dayframe_web` links it as a plain path dependency.
+clay_rt_wcmp_web = { path = "./src/clay_rt_wcmp_web" }
 clay_guest_session = { path = "./src/clay_guest_session" }
 clay_mdk = { path = "./src/clay_mdk", default-features = false }
 micro_settings_manifest = { path = "./src/micro_settings_manifest" }

@@ -59,8 +59,8 @@ cargo x plug build-oci --plug-root ./src/plug_test_manifest/
 Two targets describe one product, not two products:
 
 - **Host** (`wasm32-unknown-unknown`): the browser-side modules —
-  `dayframe_web`, `clay_rt_wcmp_web`, `clay_wcmp_spike`. They run the polyfill
-  engine (`wcmp`) on the page's own `WebAssembly`. No WASI.
+  `dayframe_web`, `clay_rt_wcmp_web`. They run the polyfill engine (`wcmp`) on the
+  page's own `WebAssembly`. No WASI.
 - **Guest** (`wasm32-wasip3`): micro components (`micro_counter`, `clay_mdk`
   examples) that both engines instantiate. rustc emits a component directly (no
   adapter). The guest import surface is the WASI 0.3 set listed in ADR 018

@@ -1,6 +1,6 @@
 ---
 name: playwright
-description: Drive a real browser against townframe's web pages (the btress sysadmin app, the clay_wcmp_spike browser host) from the terminal - e2e specs, one-off screenshots, codegen, and page-error triage. Use when a task needs Chromium/Firefox/WebKit, when a Playwright run cannot find its browser, or before adding a new Playwright package.
+description: Drive a real browser against townframe's web pages (the btress sysadmin app, the dayframe web shell) from the terminal - e2e specs, one-off screenshots, codegen, and page-error triage. Use when a task needs Chromium/Firefox/WebKit, when a Playwright run cannot find its browser, or before adding a new Playwright package.
 ---
 
 # Playwright in townframe
@@ -28,8 +28,8 @@ with its own `package.json` pinning `@playwright/test` to the driver version, a
 
 - `src/btress_sysadmin`: the sysadmin login flow; CI starts its servers itself (see the
   `sysadmin e2e` job in `.github/workflows/checks.yml`).
-- `src/clay_wcmp_spike`: ADR 018's browser host. Its config's `webServer` runs
-  `x/spike-wcmp-web.ts`, which prepares the counter component, builds the wasm32 module, runs
+- `src/dayframe_web`: the browser composition shell (ADR 018). Its config's `webServer` runs
+  `x/dayframe-web.ts`, which prepares the counter component, builds the wasm32 host, runs
   `wasm-bindgen` (checked against `Cargo.lock`'s version), and serves the page; the first run
   includes a cold wasm32 build.
 
@@ -37,8 +37,8 @@ Run specs from the package, through the package's own CLI, never a global or wor
 one (those resolve a different version and so a different browser revision):
 
 ```bash
-nix develop .#ci-desktop -c pnpm install --frozen-lockfile --filter @townframe/clay_wcmp_spike
-nix develop .#ci-desktop -c pnpm -C src/clay_wcmp_spike run e2e
+nix develop .#ci-desktop -c pnpm install --frozen-lockfile --filter @townframe/dayframe_web
+nix develop .#ci-desktop -c pnpm -C src/dayframe_web run e2e
 ```
 
 A new package joins `pnpm-workspace.yaml` and gets an `importers:` entry in `pnpm-lock.yaml`
@@ -49,8 +49,8 @@ with the same `@playwright/test` version, so the lock keeps a single Playwright.
 The package CLI also does ad-hoc work, using the same pinned browsers:
 
 ```bash
-pnpm -C src/clay_wcmp_spike exec playwright screenshot http://127.0.0.1:4517/ /tmp/spike.png
-pnpm -C src/clay_wcmp_spike exec playwright codegen http://127.0.0.1:4517/
+pnpm -C src/dayframe_web exec playwright screenshot http://127.0.0.1:4518/ /tmp/dayframe.png
+pnpm -C src/dayframe_web exec playwright codegen http://127.0.0.1:4518/
 ```
 
 Keep artifacts out of the checkout (`/tmp`, `$TMPDIR`); specs write `test-results/` and
@@ -62,7 +62,7 @@ Keep artifacts out of the checkout (`/tmp`, `$TMPDIR`); specs write `test-result
   `panicked at` console line). Specs collect `pageerror` and `console` errors and assert there
   are none, so a panic fails the test immediately instead of surfacing as a locator timeout.
 - A spec that times out waiting on the web server is usually still building: run the
-  `webServer` command by hand (`deno run --allow-all x/spike-wcmp-web.ts --build`) to see the
+  `webServer` command by hand (`deno run --allow-all x/dayframe-web.ts --build`) to see the
   build's own output.
 - Prefer role and label locators (`getByRole("button", { name: ... })`): they are what the
   Dayframe components expose for accessibility, and they survive markup changes.

@@ -2636,6 +2636,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clay_rt_wcmp_web"
+version = "0.1.0"
+dependencies = [
+ "clay_rt_wcmp",
+ "wcmp",
+ "wcmp-wasm-core-web",
+]
+
+[[package]]
 name = "clay_surface"
 version = "0.1.0"
 dependencies = [
@@ -2647,26 +2656,6 @@ dependencies = [
  "proptest",
  "serde_json",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "clay_wcmp_spike"
-version = "0.1.0"
-dependencies = [
- "clay_dioxus",
- "clay_host",
- "clay_surface",
- "dioxus",
- "dioxus-html",
- "js-sys",
- "serde_json",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wcmp",
- "wcmp-wasm-core-wasmi",
- "wcmp-wasm-core-web",
- "web-sys",
 ]
 
 [[package]]
@@ -4104,18 +4093,15 @@ dependencies = [
  "clay_mdk",
  "clay_micro_core",
  "clay_rt_wcmp",
+ "clay_rt_wcmp_web",
  "console_error_panic_hook",
  "dayframe_composition",
  "dioxus",
  "js-sys",
  "micro_counter_manifest",
- "serde_json",
- "tokio",
  "ui",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wcmp",
- "wcmp-wasm-core-web",
  "web-sys",
 ]
 

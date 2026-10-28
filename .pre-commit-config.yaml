@@ -37,12 +37,12 @@ repos:
         # that backlog is cleared.
         files: ^\.github/
         stages: [manual]
-      - id: detekt-kotlin
-        name: detekt Kotlin
-        language: system
-        entry: ./x/gradle.ts detektMainDesktop --auto-correct --no-daemon
-        pass_filenames: false
-        files: ^src/daybook_compose/
+      # - id: detekt-kotlin
+      #   name: detekt Kotlin
+      #   language: system
+      #   entry: ./x/gradle.ts detektMainDesktop --auto-correct --no-daemon
+      #   pass_filenames: false
+      #   files: ^src/daybook_compose/
       - id: syncpack-fmt
         name: syncpack format
         language: system

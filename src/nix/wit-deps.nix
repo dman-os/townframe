@@ -56,7 +56,7 @@ pkgs.runCommand "townframe-wit-deps"
   {
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-Mj1b+NetSYJimREROzcItC75Xpy752YLvNVinTwyD5k=";
+    outputHash = "sha256-bPfUjKvlciNcxdFOmko4jtI72bl9QPN3v1Ihi0bWUkc=";
   }
   ''
     export HOME="$TMPDIR"

@@ -238,125 +238,117 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
 impl drawer::Host for &mut SharedWashCtx {}
 
 impl<T: 'static> drawer::HostWithStore<T> for wasmtime::component::HasSelf<SharedWashCtx> {
-    fn get_doc_at_heads(
+    async fn get_doc_at_heads(
         accessor: &wasmtime::component::Accessor<T, Self>,
         doc_id: drawer::DocId,
         heads: drawer::Heads,
-    ) -> impl std::future::Future<
-        Output = wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>>,
-    > + Send {
-        async move {
-            use crate::rt::dispatch::ActiveDispatchArgs;
-            use crate::rt::dispatch::FacetRoutineArgs;
+    ) -> wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>> {
+        use crate::rt::dispatch::ActiveDispatchArgs;
+        use crate::rt::dispatch::FacetRoutineArgs;
 
-            let heads = match am_utils_rs::parse_commit_heads(&heads) {
-                Ok(val) => val,
-                Err(err) => return Ok(Err(drawer::GetDocError::InvalidHeads(format!("{err:?}")))),
-            };
-            let heads = ChangeHashSet(heads);
+        let heads = match am_utils_rs::parse_commit_heads(&heads) {
+            Ok(val) => val,
+            Err(err) => return Ok(Err(drawer::GetDocError::InvalidHeads(format!("{err:?}")))),
+        };
+        let heads = ChangeHashSet(heads);
 
-            let (plugin, job_id) = accessor.with(|mut access| {
-                let ctx = access.get();
-                let plugin = DaybookPlugin::from_ctx(ctx);
-                let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(ctx)
-                    .ok_or_else(|| wasmtime_err("only wflows are supported as drawer host"))?;
-                let job_id = wflow_plugin
-                    .job_id_of_ctx(ctx)
-                    .ok_or_else(|| wasmtime_err("there should be a job??"))?;
-                Ok::<_, wasmtime::Error>((plugin, job_id))
-            })?;
+        let (plugin, job_id) = accessor.with(|mut access| {
+            let ctx = access.get();
+            let plugin = DaybookPlugin::from_ctx(ctx);
+            let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(ctx)
+                .ok_or_else(|| wasmtime_err("only wflows are supported as drawer host"))?;
+            let job_id = wflow_plugin
+                .job_id_of_ctx(ctx)
+                .ok_or_else(|| wasmtime_err("there should be a job??"))?;
+            Ok::<_, wasmtime::Error>((plugin, job_id))
+        })?;
 
-            let Some(dispatch) = plugin.dispatch_repo.get_by_wflow_job(&job_id[..]).await else {
-                return Err(wasmtime_err(format!(
-                    "no active dispatch found for job: {job_id}"
-                )));
-            };
-            let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
-                branch_path,
-                doc_id: dispatch_doc_id,
-                ..
-            }) = &dispatch.args;
-            if *dispatch_doc_id != doc_id {
-                return Err(wasmtime_err(format!(
-                    "doc_id mismatch for get_doc_at_heads: requested={doc_id} dispatch={dispatch_doc_id}"
-                )));
+        let Some(dispatch) = plugin.dispatch_repo.get_by_wflow_job(&job_id[..]).await else {
+            return Err(wasmtime_err(format!(
+                "no active dispatch found for job: {job_id}"
+            )));
+        };
+        let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            branch_path,
+            doc_id: dispatch_doc_id,
+            ..
+        }) = &dispatch.args;
+        if *dispatch_doc_id != doc_id {
+            return Err(wasmtime_err(format!(
+                "doc_id mismatch for get_doc_at_heads: requested={doc_id} dispatch={dispatch_doc_id}"
+            )));
+        }
+
+        match plugin
+            .get_doc(&doc_id, branch_path, &heads)
+            .await
+            .map_err(wasmtime_err)?
+        {
+            Some(doc) => {
+                let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
+                    id: doc.id.clone(),
+                    facets: doc
+                        .facets
+                        .iter()
+                        .map(|(facet_key, facet_value)| {
+                            (facet_key.to_string(), wit_doc::facet_from(facet_value))
+                        })
+                        .collect(),
+                };
+                Ok(Ok(bind_doc))
             }
-
-            match plugin
-                .get_doc(&doc_id, branch_path, &heads)
-                .await
-                .map_err(wasmtime_err)?
-            {
-                Some(doc) => {
-                    let bind_doc: bindgen_doc::Doc =
-                        binds_guest::townframe::daybook_types::doc::Doc {
-                            id: doc.id.clone(),
-                            facets: doc
-                                .facets
-                                .iter()
-                                .map(|(facet_key, facet_value)| {
-                                    (facet_key.to_string(), wit_doc::facet_from(facet_value))
-                                })
-                                .collect(),
-                        };
-                    Ok(Ok(bind_doc))
-                }
-                None => Ok(Err(drawer::GetDocError::DocNotFound)),
-            }
+            None => Ok(Err(drawer::GetDocError::DocNotFound)),
         }
     }
 
-    fn update_doc_at_heads(
+    async fn update_doc_at_heads(
         accessor: &wasmtime::component::Accessor<T, Self>,
         branch_path: String,
         heads: Option<drawer::Heads>,
         patch: drawer::DocPatch,
-    ) -> impl std::future::Future<Output = wasmtime::Result<Result<(), drawer::UpdateDocError>>> + Send
-    {
-        async move {
-            let heads = match heads {
-                Some(heads) => match am_utils_rs::parse_commit_heads(&heads) {
-                    Ok(val) => Some(ChangeHashSet(val)),
-                    Err(err) => {
-                        return Ok(Err(drawer::UpdateDocError::InvalidHeads(format!(
-                            "{err:?}"
-                        ))));
-                    }
-                },
-                None => None,
-            };
-            let patch = wit_doc::DocPatch {
-                id: patch.id,
-                facets_set: patch.facets_set.into_iter().collect(),
-                facets_remove: patch.facets_remove,
-                user_path: None,
-            };
-            let patch: daybook_types::doc::DocPatch =
-                patch.try_into().map_err(|err: serde_json::Error| {
-                    drawer::UpdateDocError::InvalidPatch(err.to_string())
-                })?;
+    ) -> wasmtime::Result<Result<(), drawer::UpdateDocError>> {
+        let heads = match heads {
+            Some(heads) => match am_utils_rs::parse_commit_heads(&heads) {
+                Ok(val) => Some(ChangeHashSet(val)),
+                Err(err) => {
+                    return Ok(Err(drawer::UpdateDocError::InvalidHeads(format!(
+                        "{err:?}"
+                    ))));
+                }
+            },
+            None => None,
+        };
+        let patch = wit_doc::DocPatch {
+            id: patch.id,
+            facets_set: patch.facets_set.into_iter().collect(),
+            facets_remove: patch.facets_remove,
+            user_path: None,
+        };
+        let patch: daybook_types::doc::DocPatch =
+            patch.try_into().map_err(|err: serde_json::Error| {
+                drawer::UpdateDocError::InvalidPatch(err.to_string())
+            })?;
 
-            let plugin = accessor.with(|mut access| DaybookPlugin::from_ctx(access.get()));
-            match plugin
-                .patch_doc(BranchPath::new(&branch_path), heads, patch)
-                .await
-            {
-                Ok(_) => Ok(Ok(())),
-                Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => {
-                    Ok(Err(drawer::UpdateDocError::DocNotFound))
-                }
-                Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => {
-                    Ok(Err(drawer::UpdateDocError::BranchNotFound))
-                }
-                Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
-                    wasmtime_err("unexpected branch already exists on patch_doc"),
-                ),
-                Err(crate::drawer::types::DrawerError::InvalidKey {
-                    inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
-                }) => Ok(Err(drawer::UpdateDocError::InvalidKey(tag))),
-                Err(crate::drawer::types::DrawerError::Other { inner }) => {
-                    Err(wasmtime_err(format!("unexepcted error: {inner}")))
-                }
+        let plugin = accessor.with(|mut access| DaybookPlugin::from_ctx(access.get()));
+        match plugin
+            .patch_doc(BranchPath::new(&branch_path), heads, patch)
+            .await
+        {
+            Ok(_) => Ok(Ok(())),
+            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => {
+                Ok(Err(drawer::UpdateDocError::DocNotFound))
+            }
+            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => {
+                Ok(Err(drawer::UpdateDocError::BranchNotFound))
+            }
+            Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
+                wasmtime_err("unexpected branch already exists on patch_doc"),
+            ),
+            Err(crate::drawer::types::DrawerError::InvalidKey {
+                inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
+            }) => Ok(Err(drawer::UpdateDocError::InvalidKey(tag))),
+            Err(crate::drawer::types::DrawerError::Other { inner }) => {
+                Err(wasmtime_err(format!("unexepcted error: {inner}")))
             }
         }
     }

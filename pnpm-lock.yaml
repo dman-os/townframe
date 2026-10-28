@@ -61,15 +61,6 @@ importers:
         specifier: 25.5.0
         version: 25.5.0
 
-  src/clay_wcmp_spike:
-    devDependencies:
-      '@playwright/test':
-        specifier: 1.63.0
-        version: 1.63.0
-      '@types/node':
-        specifier: 25.5.0
-        version: 25.5.0
-
   src/dayframe_web:
     devDependencies:
       '@playwright/test':

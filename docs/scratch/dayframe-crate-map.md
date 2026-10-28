@@ -1,9 +1,11 @@
 # Dayframe crate map — what exists, who uses it, what to rename
 
 Status: Living map — updated as crates move; layout decisions settle in ADR
-014/015 Owner: operator + dayframe track Scope: Dependency graph and naming of
-the `dayframe_*`/`clay_*`/`micro_*` workspace crates. Updated: 2026-10-22
-(post-merge crate hierarchy)
+014/018.
+Owner: operator + dayframe track
+Scope: Dependency graph, build targets, and naming of the
+`dayframe_*`/`clay_*`/`micro_*` workspace crates.
+Updated: 2026-10-28 (browser guest engine maps to ADR 018)
 
 Companion to `dayframe-micros.md` (the design log). That file records
 _decisions_; this one records _shape_: the real dependency graph, what each
@@ -752,3 +754,38 @@ activated at all_ (pinned by the fencing tests).
   `clay_rt_wcmp`).
 - ADR 018 is Accepted; Verification records the re-run lanes (engine 75, shell
   61, matrix, web build, Playwright, api/doctor/deno).
+
+### 2026-10-28 — browser shell wired, spike removed, ADR 018 tightened
+
+- `src/clay_wcmp_spike/` and `x/spike-wcmp-web.ts` deleted, the root workspace
+  member and `pnpm-workspace.yaml` entry removed, and the
+  `e2e-wcmp-spike-chromium` job dropped; ADR 018 §Migration step 2 records the
+  deletion and the remaining lanes cover the same behavior.
+- `src/dayframe_web` is the launch shell: `main.rs` is a wasm-gated entrypoint
+  (`mod shell` only on `wasm32`, empty native `main` so the native
+  test/coverage lanes build it without pretending to run a browser) and
+  `shell.rs` holds the fetch → `clay_rt_wcmp_web::load` → `guest_providers` →
+  `web_runtime` → `App` composition. All renderer/composition/guest
+  dependencies moved under `[target.'cfg(target_arch = "wasm32")'.dependencies]`
+  so the native build has no unused dependencies and no GUI link.
+- `src/clay_rt_wcmp_web` carries `#![cfg(target_arch = "wasm32")]` (it lives in
+  the Wasm workspace but the dayframe test lane still walks the dev-dep graph
+  natively) and now also exposes `load`, the seam the shell uses.
+- `cargo x guardrails check-matrix` runs in `ci-desktop` (the native lane links
+  glib through the workspace; `ci-rust` has no glib); the browser adapter step
+  uses `--target wasm32-unknown-unknown --package clay_rt_wcmp_web`.
+- `nixpkgs`' `cargo-llvm-cov` 0.9.0 integration tests fail in the Nix sandbox
+  (`llvm-profdata merge` finds no profile from the fixture crates), so the
+  devshells take `cargo-llvm-cov.overrideAttrs (_: { doCheck = false; })`; the
+  tool binary is what `cargo llvm-cov` lanes need. `cargo llvm-cov --version`
+  answers 0.9.0 in both `ci-rust` and `ci-desktop`.
+- Re-run this turn (`CARGO_TARGET_DIR` scoped to the worktree target):
+  `x/check-dayframe.ts` exit 0; `cargo nextest run -p clay_rt_wcmp -p
+  clay_rt_wcmp_wasmi` 8/8 with the prepared components; native clippy and wasm
+  clippy for `dayframe_web`/`clay_rt_wcmp_web` exit 0; `x/dayframe-web.ts
+  --build` exit 0 (bundle printed, host ≈9.9 MB raw / ≈2.5 MB gzip); Playwright
+  `pnpm -C src/dayframe_web run e2e` 1 passed; `guardrails api --all --check`,
+  `doctor`, `check-matrix` (all three targets) exit 0; `guardrails lint` fails
+  only on the three pre-existing ceilings; `nix flake check` source checks pass
+  except `rust-fmt`, which cannot see the untracked `shell.rs` until it is
+  added to the VCS index.

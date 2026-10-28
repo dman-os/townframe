@@ -61,8 +61,8 @@ _: {
         GDK_SCALE = "2";
       };
 
-      # Every shell that drives a browser (the dev shell, and `ci-desktop` for
-      # `x/spike-wcmp-web.ts`) points playwright at the farm above instead of letting
+      # Every shell that drives a browser (the dev shell, and `ci-desktop` for the
+      # dayframe web e2e) points playwright at the farm above instead of letting
       # it download its own builds.
       playwrightEnv = {
         PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
@@ -182,10 +182,18 @@ _: {
         zizmor
       ];
 
+      # `cargo-llvm-cov` drives the `rust-tests` lane (coverage collection), so it stays in
+      # `rustLintInputs` and is reachable from both `ci-rust` and `ci-desktop`. Upstream 0.9.0's
+      # own integration tests build fixture crates under `-C instrument-coverage` and then
+      # `llvm-profdata merge` them; in the Nix sandbox the fixtures emit no profile data
+      # (`no profile can be merged`), so 14 of them fail and the derivation never installs. The
+      # shell only needs the tool binary, so skip that check phase.
       rustLintInputs = with pkgs; [
+        (cargo-llvm-cov.overrideAttrs (_previousAttrs: {
+          doCheck = false;
+        }))
         cargo-udeps
         cargo-nextest
-        cargo-llvm-cov
         cargo-machete
       ];
 

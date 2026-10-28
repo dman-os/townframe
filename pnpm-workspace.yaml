@@ -1,7 +1,6 @@
 packages:
   - ./src/btress_auth/
   - ./src/btress_sysadmin/
-  - ./src/clay_wcmp_spike/
   - ./src/dayframe_web/
   - .
 patchedDependencies:

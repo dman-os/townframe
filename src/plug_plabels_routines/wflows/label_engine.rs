@@ -303,64 +303,11 @@ pub async fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         return Ok(());
     }
 
-    let mut candidates = Vec::new();
+    let mut candidates = Vec::with_capacity(by_label.len());
     for (label, agg) in &by_label {
-        let prompt_count = agg.prompt_scores.len();
-        if prompt_count == 0 {
-            continue;
+        if let Some(candidate) = label_candidate_metrics(label, agg, null_max)? {
+            candidates.push(candidate);
         }
-        let centroid_score = agg
-            .centroid_score
-            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing centroid score for '{}'", label)))?;
-        let centroid_rowid = agg
-            .centroid_rowid
-            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing centroid rowid for '{}'", label)))?;
-        let prompt_max = agg
-            .prompt_scores
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let prompt_top2_mean = top_k_mean(&agg.prompt_scores, 2)
-            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing prompt scores for '{label}'")))?;
-        let prompt_hits = agg
-            .prompt_scores
-            .iter()
-            .filter(|score| **score >= PROMPT_HIT_MIN_SCORE)
-            .count();
-        let prompt_hit_ratio = (prompt_hits as f64) / (prompt_count as f64);
-        let label_negative_max = if agg.negative_prompt_max.is_finite() {
-            agg.negative_prompt_max
-        } else {
-            f64::NEG_INFINITY
-        };
-        let null_margin = if prompt_max.is_finite() && null_max.is_finite() {
-            prompt_max - null_max
-        } else {
-            f64::NEG_INFINITY
-        };
-        let negative_prompt_margin = if prompt_max.is_finite() && label_negative_max.is_finite() {
-            prompt_max - label_negative_max
-        } else {
-            f64::INFINITY
-        };
-        let composite_score = (0.35 * prompt_top2_mean)
-            + (0.20 * prompt_max)
-            + (0.20 * centroid_score)
-            + (0.15 * prompt_hit_ratio)
-            + (0.05 * negative_prompt_margin.min(1.0))
-            + (0.05 * null_margin.min(1.0));
-        candidates.push(LabelCandidateMetrics {
-            label: label.clone(),
-            centroid_rowid,
-            prompt_count,
-            prompt_max,
-            prompt_top2_mean,
-            prompt_hit_ratio,
-            centroid_score,
-            null_margin,
-            negative_prompt_margin,
-            composite_score,
-        });
     }
 
     candidates.sort_by(|left_candidate, right_candidate| {
@@ -450,6 +397,73 @@ pub async fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         .await?;
     Ok(())
 }
+
+/// Score one label from its aggregated prompt, centroid, and negative-prompt similarities
+/// against the input. `null_max` is the best null-anchor score, which every label must beat.
+/// A label with no positive prompt rows scored is not a candidate (`None`).
+fn label_candidate_metrics(
+    label: &str,
+    agg: &plug_plabels_manifest::label_algo::LabelAgg,
+    null_max: f64,
+) -> Result<Option<LabelCandidateMetrics>, JobErrorX> {
+    let prompt_count = agg.prompt_scores.len();
+    if prompt_count == 0 {
+        return Ok(None);
+    }
+    let centroid_score = agg
+        .centroid_score
+        .ok_or_else(|| JobErrorX::Terminal(ferr!("missing centroid score for '{label}'")))?;
+    let centroid_rowid = agg
+        .centroid_rowid
+        .ok_or_else(|| JobErrorX::Terminal(ferr!("missing centroid rowid for '{label}'")))?;
+    let prompt_max = agg
+        .prompt_scores
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let prompt_top2_mean = top_k_mean(&agg.prompt_scores, 2)
+        .ok_or_else(|| JobErrorX::Terminal(ferr!("missing prompt scores for '{label}'")))?;
+    let prompt_hits = agg
+        .prompt_scores
+        .iter()
+        .filter(|score| **score >= PROMPT_HIT_MIN_SCORE)
+        .count();
+    let prompt_hit_ratio = (prompt_hits as f64) / (prompt_count as f64);
+    let label_negative_max = if agg.negative_prompt_max.is_finite() {
+        agg.negative_prompt_max
+    } else {
+        f64::NEG_INFINITY
+    };
+    let null_margin = if prompt_max.is_finite() && null_max.is_finite() {
+        prompt_max - null_max
+    } else {
+        f64::NEG_INFINITY
+    };
+    let negative_prompt_margin = if prompt_max.is_finite() && label_negative_max.is_finite() {
+        prompt_max - label_negative_max
+    } else {
+        f64::INFINITY
+    };
+    let composite_score = (0.35 * prompt_top2_mean)
+        + (0.20 * prompt_max)
+        + (0.20 * centroid_score)
+        + (0.15 * prompt_hit_ratio)
+        + (0.05 * negative_prompt_margin.min(1.0))
+        + (0.05 * null_margin.min(1.0));
+    Ok(Some(LabelCandidateMetrics {
+        label: label.to_owned(),
+        centroid_rowid,
+        prompt_count,
+        prompt_max,
+        prompt_top2_mean,
+        prompt_hit_ratio,
+        centroid_score,
+        null_margin,
+        negative_prompt_margin,
+        composite_score,
+    }))
+}
+
 async fn load_label_set(
     req: &LabelRequest<'_>,
 ) -> Result<(PseudoLabelCandidatesFacet, String, Option<Vec<String>>), JobErrorX> {

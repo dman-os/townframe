@@ -1,3 +1,8 @@
+// Proving the keyhive maintenance loop `Send` (`runtime2/native.rs`, `Sendable::from_future`)
+// walks the whole `subduction_keyhive::compact` -> `replay_local_secret` async call chain,
+// which is deeper than the default limit of 128.
+#![recursion_limit = "256"]
+
 mod interlude {
     pub use big_sync_core::ObjKey;
     pub use big_sync_core::PartKey;
