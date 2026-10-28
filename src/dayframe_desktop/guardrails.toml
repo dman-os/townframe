@@ -9,6 +9,7 @@ allowed_dependencies = [
     "clay_micro_core",
     "clay_surface",
     "daybook_types",
+    "dayframe_composition",
     "micro_counter_manifest",
     "micro_sample",
     "micro_settings",
@@ -16,3 +17,9 @@ allowed_dependencies = [
     "ui",
 ]
 allow_external_api_types = false
+
+# Desktop is the native launch shell only (ADR 018 §7). The shell is meaningless without
+# the `desktop` renderer feature, so the matrix never builds it bare.
+[builds.native]
+features = ["desktop"]
+required_features = ["desktop"]

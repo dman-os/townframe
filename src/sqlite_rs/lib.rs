@@ -42,7 +42,6 @@ pub use native::run_migrations;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::test_support;
 #[cfg(test)]
-#[cfg(test)]
 #[path = "gen_tests.rs"]
 pub mod gen_tests;
 

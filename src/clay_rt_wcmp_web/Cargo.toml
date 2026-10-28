@@ -1,0 +1,17 @@
+[package]
+name = "clay_rt_wcmp_web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+workspace = "../wasm_utils_rs"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_rt_wcmp.workspace = true
+wcmp.workspace = true
+wcmp-wasm-core-web.workspace = true
+
+[lints]
+workspace = true

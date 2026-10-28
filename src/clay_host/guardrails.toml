@@ -5,3 +5,10 @@ allowed_dependencies = [
     "clay_collection",
 ]
 allow_external_api_types = false
+
+# The browser host (ADR 018) links this crate on wasm32, so both targets are contracts.
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[builds.wasm32-wasip3]

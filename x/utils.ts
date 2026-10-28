@@ -37,3 +37,25 @@ export function toolsDir() {
 export function allProfiles(): string[] {
   return ["auth", "db", "cli"];
 }
+
+/**
+ * Point Cargo at the `.env` `CARGO_TARGET_DIR` when the shell did not set one. The dev shell
+ * sources `.env`, but the CI shells do not, and a target dir inside the checkout is shared by
+ * nothing and copied into the store by path flakes.
+ */
+export async function useDotenvTargetDir() {
+  const dotenvPath = $.relativeDir("../").join(".env");
+  if (Deno.env.get("CARGO_TARGET_DIR") || !await dotenvPath.exists()) {
+    return;
+  }
+  const dotenvTarget = (await dotenvPath.readText())
+    .match(/^(?:export\s+)?CARGO_TARGET_DIR\s*=\s*["']?([^"'\r\n#]+)["']?/m)
+    ?.[1]
+    ?.trim();
+  if (dotenvTarget) {
+    Deno.env.set(
+      "CARGO_TARGET_DIR",
+      $.relativeDir("../").resolve(dotenvTarget).toString(),
+    );
+  }
+}

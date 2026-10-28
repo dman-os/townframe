@@ -1,0 +1,12 @@
+{
+  "name": "@townframe/dayframe_web",
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "25.5.0"
+  },
+  "private": true,
+  "scripts": {
+    "e2e": "playwright test"
+  },
+  "type": "module"
+}

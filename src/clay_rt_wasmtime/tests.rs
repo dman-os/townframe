@@ -1,8 +1,11 @@
 use super::*;
+use clay_surface::SurfaceTree;
 use wasmtime::component::Resource;
 
-fn counter_package() -> WasmPackage {
-    WasmPackage::from_env("counter").expect("prepared counter component is valid")
+async fn counter_package() -> WasmPackage {
+    WasmPackage::from_env("counter")
+        .await
+        .expect("prepared counter component is valid")
 }
 
 #[test]
@@ -15,12 +18,16 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
     let (mut state, _incoming) =
         WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
     let mut resources = state
-        .grant_components(&vec![component; WasmStoreState::MAX_COMPONENT_HANDLES])
+        .grant_components(&vec![component; PresentationHost::MAX_COMPONENT_HANDLES])
         .unwrap();
     let borrowed = Resource::new_borrow(resources[0].rep());
     assert_eq!(
-        convert_mutation(Wire::MountComponent(borrowed), &state.table).unwrap(),
-        Mutation::MountComponent(component)
+        map_mutations(
+            vec![convert_mutation(Wire::MountComponent(borrowed))],
+            |reference| state.table.get(&reference).map(|component| component.0),
+        )
+        .unwrap(),
+        [Mutation::MountComponent(component)]
     );
     assert!(matches!(
         state.grant_components(&[component]),
@@ -30,18 +37,22 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
     let stale_rep = removed.rep();
     HostComponentRef::drop(&mut state, removed).unwrap();
     assert!(
-        convert_mutation(
-            Wire::MountComponent(Resource::new_borrow(stale_rep)),
-            &state.table
+        map_mutations(
+            vec![convert_mutation(Wire::MountComponent(
+                Resource::new_borrow(stale_rep,)
+            ))],
+            |reference| state.table.get(&reference).map(|component| component.0),
         )
         .is_err()
     );
     let replacement = state.grant_components(&[component]).unwrap().pop().unwrap();
     let wrong_type = state.table.push(17_u32).unwrap();
     assert!(
-        convert_mutation(
-            Wire::MountComponent(Resource::new_borrow(wrong_type.rep())),
-            &state.table
+        map_mutations(
+            vec![convert_mutation(Wire::MountComponent(
+                Resource::new_borrow(wrong_type.rep(),)
+            ))],
+            |reference| state.table.get(&reference).map(|component| component.0),
         )
         .is_err()
     );
@@ -50,51 +61,122 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
     for resource in resources {
         HostComponentRef::drop(&mut state, resource).unwrap();
     }
-    assert_eq!(state.component_handles, 0);
+    assert_eq!(state.presentation.component_handles(), 0);
     host.close();
 }
 
 #[test]
 fn ingress_budget_rejects_oversized_batches_before_conversion() {
-    use wit_presentation::Mutation as Wire;
+    use clay_guest_session::ingress_budget;
+    use clay_surface::AttributeValue;
     assert_eq!(
-        ingress_budget(&[Wire::Pop, Wire::CreateText("ok".into())]),
+        ingress_budget::<ComponentRef>(&[Mutation::Pop, Mutation::CreateText("ok".into())]),
         Ok(())
     );
     assert_eq!(
-        ingress_budget(
-            &std::iter::repeat_with(|| Wire::Pop)
-                .take(SurfaceTree::<ComponentRef>::MAX_BATCH_MUTATIONS + 1)
+        ingress_budget::<ComponentRef>(
+            &std::iter::repeat_with(|| Mutation::Pop)
+                .take(clay_surface::SurfaceTree::<ComponentRef>::MAX_BATCH_MUTATIONS + 1)
                 .collect::<Vec<_>>()
         ),
         Err("batch mutation limit")
     );
     assert_eq!(
-        ingress_budget(&[Wire::SetAttribute((
+        ingress_budget::<ComponentRef>(&[Mutation::SetAttribute((
             "title".into(),
             None,
-            wit_presentation::AttributeValue::Text(
-                "x".repeat(SurfaceTree::<ComponentRef>::MAX_STRING_BYTES + 1)
+            AttributeValue::Text(
+                "x".repeat(clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES + 1)
             ),
         ))]),
         Err("string byte limit")
     );
-    let text = "x".repeat(SurfaceTree::<ComponentRef>::MAX_STRING_BYTES);
-    let batch = std::iter::repeat_with(|| Wire::CreateText(text.clone()))
+    let text = "x".repeat(clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES);
+    let batch = std::iter::repeat_with(|| Mutation::CreateText(text.clone()))
         .take(
-            SurfaceTree::<ComponentRef>::MAX_BATCH_BYTES
-                / SurfaceTree::<ComponentRef>::MAX_STRING_BYTES
+            clay_surface::SurfaceTree::<ComponentRef>::MAX_BATCH_BYTES
+                / clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES
                 + 1,
         )
         .collect::<Vec<_>>();
-    assert_eq!(ingress_budget(&batch), Err("batch byte limit"));
+    assert_eq!(
+        ingress_budget::<ComponentRef>(&batch),
+        Err("batch byte limit")
+    );
+
+    let final_text_bytes = clay_surface::SurfaceTree::<ComponentRef>::MAX_BATCH_BYTES
+        - 3 * clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES
+        - 4 * std::mem::size_of::<Mutation<ComponentRef>>()
+        + 1;
+    let texts = [
+        text.clone(),
+        text.clone(),
+        text,
+        "x".repeat(final_text_bytes),
+    ];
+    let resolved = texts
+        .iter()
+        .cloned()
+        .map(Mutation::CreateText)
+        .collect::<Vec<Mutation<ComponentRef>>>();
+    let wire = texts
+        .into_iter()
+        .map(Mutation::CreateText)
+        .collect::<Vec<Mutation<Resource<WasmComponentRef>>>>();
+    assert_eq!(
+        ingress_budget::<ComponentRef>(&resolved),
+        Err("batch byte limit")
+    );
+    assert_eq!(
+        ingress_budget::<Resource<WasmComponentRef>>(&wire),
+        ingress_budget::<ComponentRef>(&resolved)
+    );
 }
 
 #[test]
-fn execution_and_linear_memory_are_bounded_per_incarnation() {
+fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
+    use wit_presentation::HostMountPoint;
+    use wit_presentation::HostSurface;
+
     let host = Host::new();
-    let package = counter_package();
-    let (mut active, _incoming) = package.instantiate(&host, host.start("bounded")).unwrap();
+    let owner = host.start("ingress-budget");
+    let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
+    let (mut state, _incoming) =
+        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+    let placement = state
+        .table
+        .push(Placement::new(
+            writer.clone(),
+            Arc::new(AtomicBool::new(false)),
+        ))
+        .unwrap();
+    let surface = HostMountPoint::open(&mut state, Resource::new_borrow(placement.rep()))
+        .unwrap()
+        .unwrap();
+    let mut edits = std::iter::repeat_with(|| wit_presentation::Mutation::Pop)
+        .take(SurfaceTree::<ComponentRef>::MAX_BATCH_MUTATIONS + 1)
+        .collect::<Vec<_>>();
+    *edits.last_mut().unwrap() =
+        wit_presentation::Mutation::MountComponent(Resource::new_borrow(u32::MAX));
+    assert!(matches!(
+        HostSurface::apply(&mut state, Resource::new_borrow(surface.rep()), edits).unwrap(),
+        Err(wit_presentation::PresentationError::Unsupported(message))
+            if message == "batch mutation limit"
+    ));
+    assert!(!writer.is_live());
+    HostSurface::drop(&mut state, surface).unwrap();
+    HostMountPoint::drop(&mut state, placement).unwrap();
+    host.close();
+}
+
+#[tokio::test]
+async fn execution_and_linear_memory_are_bounded_per_incarnation() {
+    let host = Host::new();
+    let package = counter_package().await;
+    let (mut active, _incoming) = package
+        .instantiate(&host, host.start("bounded"))
+        .await
+        .unwrap();
     let module = wasmtime::Module::new(
         &package.engine,
         r#"(module
@@ -103,20 +185,51 @@ fn execution_and_linear_memory_are_bounded_per_incarnation() {
     )"#,
     )
     .unwrap();
-    let instance = wasmtime::Instance::new(&mut active.store, &module, &[]).unwrap();
+    // The component's async imports set `async_required` on the store, so core-module
+    // entrypoints must use the async variants (`Instance::new_async`,
+    // `Memory::grow_async`, `TypedFunc::call_async`).
+    let instance = wasmtime::Instance::new_async(&mut active.store, &module, &[])
+        .await
+        .unwrap();
     let memory = instance.get_memory(&mut active.store, "memory").unwrap();
-    assert!(memory.grow(&mut active.store, 1024).is_err());
+    assert!(memory.grow_async(&mut active.store, 1024).await.is_err());
     let looping = instance
         .get_typed_func::<(), ()>(&mut active.store, "loop")
         .unwrap();
     active.store.set_fuel(16).unwrap();
-    let trap = looping.call(&mut active.store, ()).unwrap_err();
+    let trap = looping.call_async(&mut active.store, ()).await.unwrap_err();
     assert_eq!(
         trap.downcast_ref::<wasmtime::Trap>(),
         Some(&wasmtime::Trap::OutOfFuel)
     );
     active.refuel();
     assert_eq!(active.store.get_fuel().unwrap(), 50_000_000);
+    host.close();
+}
+
+#[tokio::test]
+async fn close_before_mount_revokes_and_releases_incarnation_owners() {
+    let host = Host::new();
+    let owner = host.start("close-before-mount");
+    let (runtime, driver) = WasmRuntime::activate(
+        &host,
+        owner.clone(),
+        &counter_package().await,
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+    let fuel = runtime.fuel_budget();
+    host.close_instance(&owner).unwrap();
+    let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
+    assert_eq!(
+        runtime.mount(writer.clone(), &[]).err(),
+        Some(PresentationError::Revoked)
+    );
+    assert!(writer.is_live());
+    drop(runtime);
+    drop(driver);
+    assert_eq!(Arc::strong_count(&fuel), 1);
     host.close();
 }
 
@@ -185,9 +298,10 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     let (runtime, driver) = WasmRuntime::activate(
         &host,
         owner.clone(),
-        &counter_package(),
+        &counter_package().await,
         [("counter".into(), document)].into(),
     )
+    .await
     .unwrap();
     let writer = Arc::new(RecordingSink(Mutex::new(Some(SurfaceTree::new()))));
     let surface = runtime.mount(writer.clone(), &[]).unwrap();
@@ -257,18 +371,17 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
         WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let placement = state
         .table
-        .push(WasmPlacement {
-            writer: writer.clone(),
-            revoked: Arc::new(AtomicBool::new(false)),
-            surface_identity: None,
-        })
+        .push(Placement::new(
+            writer.clone(),
+            Arc::new(AtomicBool::new(false)),
+        ))
         .unwrap();
     let surface = HostMountPoint::open(&mut state, Resource::new_borrow(placement.rep()))
         .unwrap()
         .unwrap();
     let identity = HostSurface::identity(&mut state, Resource::new_borrow(surface.rep())).unwrap();
     let mut retained = Vec::new();
-    for _ in 1..WasmStoreState::MAX_SURFACE_HANDLES {
+    for _ in 1..PresentationHost::MAX_SURFACE_HANDLES {
         retained.push(
             HostSurface::retain(&mut state, Resource::new_borrow(surface.rep()))
                 .unwrap()
@@ -336,7 +449,7 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     assert!(writer.is_live());
     HostSurface::drop(&mut state, replacement).unwrap();
     assert!(!writer.is_live());
-    assert_eq!(state.surface_handles, 0);
+    assert_eq!(state.presentation.surface_handles(), 0);
     HostMountPoint::drop(&mut state, placement).unwrap();
     host.close();
 }

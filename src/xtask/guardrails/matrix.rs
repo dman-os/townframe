@@ -156,6 +156,7 @@ pub fn validate(repo: &Repository) -> Res<Vec<Finding>> {
                 .dependencies
                 .iter()
                 .filter(|dependency| dependency.kind.is_none())
+                .filter(|dependency| target_covers(dependency.target.as_deref(), target))
             {
                 let Some(dependency_policy) = policies.get(&dependency.name) else {
                     continue;
@@ -232,9 +233,13 @@ pub fn run(
                     repo.packages[&name].manifest_path.display().to_string(),
                     "-p".into(),
                     name.clone(),
-                    "--lib".into(),
-                    "--no-default-features".into(),
                 ];
+                if repo.packages[&name].has_lib() {
+                    args.push("--lib".into());
+                } else {
+                    args.push("--bins".into());
+                }
+                args.push("--no-default-features".into());
                 if triple != "native" {
                     args.extend([
                         "--target".into(),
@@ -266,11 +271,34 @@ pub fn run(
             }
         }
     }
-    eyre::ensure!(
-        commands > 0,
-        "no declared build matched the requested matrix selection"
-    );
+    // A package-filtered run may legitimately select zero builds (e.g. a wasm-only shell under
+    // `--target native`); only an unfiltered run that produced nothing indicates a broken policy.
+    if package.is_none() {
+        eyre::ensure!(
+            commands > 0,
+            "no declared build matched the requested matrix selection"
+        );
+    }
     Ok(())
+}
+
+/// Does a cargo metadata dependency `target` cfg apply when compiling `build_target`? Unconditional
+/// (`None`) always applies. A `cfg(not(target_arch = "wasm32"))` dependency (Wasmtime) is skipped
+/// for wasm builds; a pure wasm-only cfg is skipped for native. OS-specific cfgs still apply to
+/// the native contract — they are not a target-boundary concern.
+fn target_covers(dependency_target: Option<&str>, build_target: &str) -> bool {
+    let Some(cfg) = dependency_target else {
+        return true;
+    };
+    let excludes_wasm = cfg.contains("not(target_arch = \"wasm32\")")
+        || cfg.contains("not(target_arch=\"wasm32\")");
+    let wants_wasm =
+        cfg.contains("target_arch = \"wasm32\"") || cfg.contains("target_arch=\"wasm32\"");
+    if build_target.starts_with("wasm32") {
+        !excludes_wasm
+    } else {
+        !wants_wasm || excludes_wasm
+    }
 }
 
 fn configurations(build: &Build, defaults: &BTreeSet<String>) -> BTreeSet<BTreeSet<String>> {
@@ -352,6 +380,7 @@ mod tests {
                     manifest_path: dir.join("Cargo.toml"),
                     dependencies: dependencies.clone(),
                     features: BTreeMap::new(),
+                    targets: Vec::new(),
                 },
             );
         }
@@ -415,6 +444,7 @@ mod tests {
             name: "host".into(),
             path: Some("host".into()),
             kind: None,
+            target: None,
         };
         let (_temp, mut repository) = repo(&[
             (
@@ -456,6 +486,29 @@ mod tests {
             .collect();
         assert!(codes.contains("ERROR_PLATFORM_FEATURE"));
         assert!(codes.contains("ERROR_FEATURE_CONTRACT"));
+    }
+
+    #[test]
+    fn skips_dependencies_whose_target_cfg_excludes_the_build_target() {
+        assert!(target_covers(None, "native"));
+        assert!(target_covers(None, "wasm32-unknown-unknown"));
+        assert!(target_covers(
+            Some("cfg(not(target_arch = \"wasm32\"))"),
+            "native"
+        ));
+        assert!(!target_covers(
+            Some("cfg(not(target_arch = \"wasm32\"))"),
+            "wasm32-unknown-unknown"
+        ));
+        assert!(!target_covers(
+            Some("cfg(target_arch = \"wasm32\")"),
+            "native"
+        ));
+        assert!(target_covers(
+            Some("cfg(target_arch = \"wasm32\")"),
+            "wasm32-unknown-unknown"
+        ));
+        assert!(target_covers(Some("cfg(target_os = \"linux\")"), "native"));
     }
 
     #[test]

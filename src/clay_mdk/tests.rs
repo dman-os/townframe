@@ -3,11 +3,16 @@
 //! The host replays each typed batch into a Rust `WriteMutations`. That is the same path the
 //! Blitz-backed native-dom writer takes, so what this test proves about ordering and content holds
 //! for the real renderer; only tree semantics differ.
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+// Wasmtime reaches this test rig only through wash-runtime's re-export, so the
+// host and the runtime can never resolve to two wasmtime copies. The
+// `wasmtime_crate` option below points the generated bindings at the same path.
+use wash_runtime::wasmtime;
 use wasmtime::Engine;
 use wasmtime::Store;
 use wasmtime::component::Component;
@@ -15,6 +20,16 @@ use wasmtime::component::HasSelf;
 use wasmtime::component::Linker;
 use wasmtime::component::Resource;
 use wasmtime::component::ResourceTable;
+use wasmtime_wasi::WasiCtx;
+use wasmtime_wasi::WasiCtxView;
+use wasmtime_wasi::WasiView;
+
+/// An engine whose store admits component-model async, which WASI p3's `wait-for` import forces.
+fn engine() -> wasmtime::Result<Engine> {
+    let mut config = wasmtime::Config::new();
+    config.wasm_component_model_async(true);
+    Engine::new(&config)
+}
 
 fn counter_component() -> Vec<u8> {
     let variable = "DAYFRAME_COUNTER_COMPONENT";
@@ -27,10 +42,12 @@ fn counter_component() -> Vec<u8> {
 }
 
 mod host_bindings {
-    wasmtime::component::bindgen!({
+    wash_runtime::wasmtime::component::bindgen!({
         path: "../clay_guest_session/wit",
         world: "micro-client",
+        wasmtime_crate: wash_runtime::wasmtime,
         imports: { default: trappable },
+        exports: { default: async },
         with: {
             "townframe:dayframe/presentation.surface": super::Surface,
             "townframe:dayframe/presentation.mount-point": super::Placement,
@@ -168,9 +185,9 @@ impl WriteMutations for RecordingWriter {
 /// contract, so a backend is a `WriteMutations` implementation plus event translation.
 enum Backend {
     Recording(Vec<Vec<Mutation>>),
-    /// Committed revisions. The Blitz tree state itself lives in [`TestHost::states`]: a
-    /// `DioxusState` holds `Rc` attribute values, so it is not `Send` and cannot live in Wasmtime's
-    /// resource table.
+    /// Committed revisions. The Blitz tree state lives in [`BLITZ`]: a `DioxusState` holds `Rc`
+    /// attribute values and `BaseDocument` is `!Send`, so neither can live in `TestHost` (which
+    /// must be `Send` for `instantiate_async`) or in Wasmtime's resource table.
     Blitz {
         revisions: u64,
     },
@@ -207,57 +224,87 @@ impl Placement {
     }
 }
 
+/// The Blitz document and per-surface `DioxusState`s. Both are `!Send`, so they live off the
+/// wasmtime store: nextest runs one test per process, cargo-test runs each test on its own worker
+/// thread, and every Blitz-backed host is used from the thread that constructed it. Recording-only
+/// tests never touch this.
+#[derive(Default)]
+struct BlitzTree {
+    doc: Option<BaseDocument>,
+    states: BTreeMap<u64, DioxusState>,
+}
+
+thread_local! {
+    static BLITZ: RefCell<BlitzTree> = RefCell::new(BlitzTree::default());
+}
+
+/// Host state for the presentation/documents WIT world plus WASI p3. Deliberately free of Blitz
+/// types so `instantiate_async` can require `Send`.
 struct TestHost {
     table: ResourceTable,
-    doc: Option<BaseDocument>,
-    /// Per-surface Blitz tree state, keyed by the surface resource's rep.
-    states: BTreeMap<u64, DioxusState>,
+    wasi: WasiCtx,
     routes: BTreeMap<u64, Vec<u32>>,
     next_surface: u64,
 }
 
+impl WasiView for TestHost {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
+}
+
 impl TestHost {
     fn new() -> Self {
+        BLITZ.with(|blitz| *blitz.borrow_mut() = BlitzTree::default());
+        let mut wasi = WasiCtx::builder();
+        wasi.inherit_stderr();
         Self {
             table: ResourceTable::new(),
-            doc: None,
-            states: BTreeMap::new(),
+            wasi: wasi.build(),
             routes: BTreeMap::new(),
             next_surface: 0,
         }
     }
 
-    fn start(
+    async fn start(
         store: &mut Store<Self>,
         component: &Component,
         linker: &Linker<Self>,
     ) -> wasmtime::Result<host_bindings::MicroClient> {
-        let guest = host_bindings::MicroClient::instantiate(&mut *store, component, linker)?;
+        let guest =
+            host_bindings::MicroClient::instantiate_async(&mut *store, component, linker).await?;
         guest
             .townframe_dayframe_micro_lifecycle()
-            .call_activate(store, &[])?
+            .call_activate(store, &[])
+            .await?
             .map_err(wasmtime::Error::msg)?;
         Ok(guest)
     }
 
-    /// Grants a placement rooted at a real node in this host's document, creating the document on
-    /// first use so recording-only hosts never pay for one.
+    /// Grants a placement rooted at a real node in the thread-local document, creating the document
+    /// on first use so recording-only hosts never pay for one.
     fn grant_blitz_placement(&mut self) -> Resource<Placement> {
-        let doc = self
-            .doc
-            .get_or_insert_with(|| BaseDocument::new(DocumentConfig::default()));
-        let mut mutator = doc.mutate();
-        let root = mutator.create_element(
-            QualName {
-                prefix: None,
-                ns: ns!(html),
-                local: LocalName::from("div"),
-            },
-            vec![],
-        );
-        let document_root = mutator.doc.root_node().id;
-        mutator.append_children(document_root, &[root]);
-        drop(mutator);
+        let root = BLITZ.with(|blitz| {
+            let mut blitz = blitz.borrow_mut();
+            let doc = blitz
+                .doc
+                .get_or_insert_with(|| BaseDocument::new(DocumentConfig::default()));
+            let mut mutator = doc.mutate();
+            let root = mutator.create_element(
+                QualName {
+                    prefix: None,
+                    ns: ns!(html),
+                    local: LocalName::from("div"),
+                },
+                vec![],
+            );
+            let document_root = mutator.doc.root_node().id;
+            mutator.append_children(document_root, &[root]);
+            root
+        });
         self.table
             .push(Placement {
                 alive: Arc::new(AtomicBool::new(true)),
@@ -274,24 +321,30 @@ impl TestHost {
             .expect("placement is live")
             .root
             .expect("placement is Blitz-backed");
-        let doc = self
-            .doc
-            .as_ref()
-            .expect("a Blitz placement implies a document");
-        doc.query_selector_all_in(root, "button")
-            .expect("selector is valid")
-            .into_vec()
+        BLITZ.with(|blitz| {
+            let blitz = blitz.borrow();
+            let doc = blitz
+                .doc
+                .as_ref()
+                .expect("a Blitz placement implies a document");
+            doc.query_selector_all_in(root, "button")
+                .expect("selector is valid")
+                .into_vec()
+        })
     }
 
     /// The counter's visible text, read structurally out of the real document rather than parsed
     /// back out of serialized HTML.
     fn counter_text(&self, placement: &Resource<Placement>) -> String {
-        let doc = self.doc.as_ref().expect("document exists");
         let buttons = self.buttons(placement);
         assert_eq!(buttons.len(), 1, "the counter renders exactly one button");
-        doc.get_node(buttons[0])
-            .expect("button is in the document")
-            .text_content()
+        BLITZ.with(|blitz| {
+            let blitz = blitz.borrow();
+            let doc = blitz.doc.as_ref().expect("document exists");
+            doc.get_node(buttons[0])
+                .expect("button is in the document")
+                .text_content()
+        })
     }
 
     /// Whether the counter's button carries a registered click listener. Blitz records listeners
@@ -299,13 +352,17 @@ impl TestHost {
     fn has_click_listener(&self, placement: &Resource<Placement>) -> bool {
         let buttons = self.buttons(placement);
         assert_eq!(buttons.len(), 1, "the counter renders exactly one button");
-        self.doc
-            .as_ref()
-            .expect("document exists")
-            .get_node(buttons[0])
-            .expect("button is in the document")
-            .attr(LocalName::from("click"))
-            .is_some()
+        BLITZ.with(|blitz| {
+            let blitz = blitz.borrow();
+            blitz
+                .doc
+                .as_ref()
+                .expect("document exists")
+                .get_node(buttons[0])
+                .expect("button is in the document")
+                .attr(LocalName::from("click"))
+                .is_some()
+        })
     }
 
     /// Resolves a click targeting `target` in the Blitz document to `(surface_rep, Event)` by
@@ -324,10 +381,11 @@ impl TestHost {
         use dioxus_html::input_data::MouseButton;
         use dioxus_html::input_data::decode_mouse_button_set;
 
-        let doc = self.doc.as_ref()?;
-        let mut current = Some(target);
-        let (rep, node_id, element_id) =
-            loop {
+        BLITZ.with(|blitz| {
+            let blitz = blitz.borrow();
+            let doc = blitz.doc.as_ref()?;
+            let mut current = Some(target);
+            let (rep, node_id, element_id) = loop {
                 let node_id = current?;
                 let node = doc.get_node(node_id)?;
                 if let Some(raw_id) = node
@@ -335,7 +393,7 @@ impl TestHost {
                     .and_then(|value| value.parse::<usize>().ok())
                 {
                     let element_id = ElementId::from_raw(raw_id);
-                    if let Some((&rep, _)) = self.states.iter().find(|(_, state)| {
+                    if let Some((&rep, _)) = blitz.states.iter().find(|(_, state)| {
                         state.try_element_to_node_id(element_id) == Some(node_id)
                     }) {
                         break (rep, node_id, element_id);
@@ -344,36 +402,40 @@ impl TestHost {
                 current = node.parent;
             };
 
-        let rep = *self.routes.get(&rep)?.first()?;
-        let surface = self.table.get(&Resource::<Surface>::new_borrow(rep)).ok()?;
-        let revision = match &*surface.backend.lock().unwrap() {
-            Backend::Blitz { revisions } => *revisions,
-            Backend::Recording(_) => return None,
-        };
-        let node = doc.get_node(node_id)?;
-        let blitz = node.synthetic_click_event_data(Modifiers::empty());
-        let mouse = SerializedMouseData::new(
-            Some(MouseButton::Primary),
-            decode_mouse_button_set(blitz.buttons.bits() as u16),
-            Coordinates::new(
-                ScreenPoint::new(blitz.screen_x() as f64, blitz.screen_y() as f64),
-                ClientPoint::new(blitz.client_x() as f64, blitz.client_y() as f64),
-                ElementPoint::new(blitz.element_x() as f64, blitz.element_y() as f64),
-                PagePoint::new(blitz.page_x() as f64, blitz.page_y() as f64),
-            ),
-            blitz.mods,
-        );
-        let data_json = serde_json::to_string(&EventData::Mouse(mouse)).unwrap();
-        Some((
-            rep,
-            Event {
-                revision,
-                element: element_id.raw().try_into().unwrap(),
-                name: "click".into(),
-                bubbles: true,
-                data_json,
-            },
-        ))
+            let rep = *self.routes.get(&rep)?.first()?;
+            let surface = self.table.get(&Resource::<Surface>::new_borrow(rep)).ok()?;
+            let revision = match &*surface.backend.lock().unwrap() {
+                Backend::Blitz { revisions } => *revisions,
+                Backend::Recording(_) => return None,
+            };
+            let node = doc.get_node(node_id)?;
+            let blitz_click = node.synthetic_click_event_data(Modifiers::empty());
+            let mouse = SerializedMouseData::new(
+                Some(MouseButton::Primary),
+                decode_mouse_button_set(blitz_click.buttons.bits() as u16),
+                Coordinates::new(
+                    ScreenPoint::new(blitz_click.screen_x() as f64, blitz_click.screen_y() as f64),
+                    ClientPoint::new(blitz_click.client_x() as f64, blitz_click.client_y() as f64),
+                    ElementPoint::new(
+                        blitz_click.element_x() as f64,
+                        blitz_click.element_y() as f64,
+                    ),
+                    PagePoint::new(blitz_click.page_x() as f64, blitz_click.page_y() as f64),
+                ),
+                blitz_click.mods,
+            );
+            let data_json = serde_json::to_string(&EventData::Mouse(mouse)).unwrap();
+            Some((
+                rep,
+                Event {
+                    revision,
+                    element: element_id.raw().try_into().unwrap(),
+                    name: "click".into(),
+                    bubbles: true,
+                    data_json,
+                },
+            ))
+        })
     }
 }
 
@@ -481,11 +543,16 @@ impl presentation::HostMountPoint for TestHost {
         })?;
         assert!(self.routes.insert(identity, vec![surface.rep()]).is_none());
         if let Some(root) = root {
-            let previous = self.states.insert(identity, DioxusState::create(root));
-            assert!(
-                previous.is_none(),
-                "surface identity reused while still mounted"
-            );
+            BLITZ.with(|blitz| {
+                let previous = blitz
+                    .borrow_mut()
+                    .states
+                    .insert(identity, DioxusState::create(root));
+                assert!(
+                    previous.is_none(),
+                    "surface identity reused while still mounted"
+                );
+            });
         }
         Ok(Ok(surface))
     }
@@ -500,9 +567,7 @@ impl presentation::HostSurface for TestHost {
         surface: Resource<Surface>,
         edits: Vec<presentation::Mutation>,
     ) -> wasmtime::Result<Result<u64, PresentationError>> {
-        let Self {
-            table, doc, states, ..
-        } = self;
+        let Self { table, .. } = self;
         let surface = table.get_mut(&surface)?;
         if !surface.alive.load(Ordering::Acquire) {
             return Ok(Err(PresentationError::Revoked));
@@ -515,14 +580,19 @@ impl presentation::HostSurface for TestHost {
                 Ok(Ok(batches.len().try_into().unwrap()))
             }
             Backend::Blitz { revisions } => {
-                let state = states
-                    .get_mut(&surface.identity)
-                    .expect("a Blitz surface always has tree state");
-                let doc = doc.as_mut().expect("a Blitz placement implies a document");
-                let mut writer = state.writer(doc);
-                replay(&edits, &mut writer);
-                *revisions += 1;
-                Ok(Ok(*revisions))
+                let applied = BLITZ.with(|blitz| {
+                    let mut blitz = blitz.borrow_mut();
+                    let BlitzTree { doc, states } = &mut *blitz;
+                    let state = states
+                        .get_mut(&surface.identity)
+                        .expect("a Blitz surface always has tree state");
+                    let doc = doc.as_mut().expect("a Blitz placement implies a document");
+                    let mut writer = state.writer(doc);
+                    replay(&edits, &mut writer);
+                    *revisions += 1;
+                    *revisions
+                });
+                Ok(Ok(applied))
             }
         }
     }
@@ -555,15 +625,18 @@ impl presentation::HostSurface for TestHost {
         }
         assert!(routes.is_empty());
         self.routes.remove(&surface.identity);
-        if let Some(state) = self.states.remove(&surface.identity)
-            && let Some(doc) = self.doc.as_mut()
-        {
-            let root = state.element_to_node_id(ElementId::ROOT);
-            let mut mutator = doc.mutate();
-            for child in mutator.child_ids(root) {
-                mutator.remove_and_drop_node(child);
+        BLITZ.with(|blitz| {
+            let mut blitz = blitz.borrow_mut();
+            if let Some(state) = blitz.states.remove(&surface.identity)
+                && let Some(doc) = blitz.doc.as_mut()
+            {
+                let root = state.element_to_node_id(ElementId::ROOT);
+                let mut mutator = doc.mutate();
+                for child in mutator.child_ids(root) {
+                    mutator.remove_and_drop_node(child);
+                }
             }
-        }
+        });
         Ok(())
     }
 }
@@ -773,7 +846,7 @@ fn sdk_retained_surface_shares_identity_tree_and_revocation() -> wasmtime::Resul
     ));
     presentation::HostSurface::drop(&mut host, retained)?;
     assert!(host.buttons(&placement).is_empty());
-    assert!(host.states.is_empty());
+    assert!(BLITZ.with(|blitz| blitz.borrow().states.is_empty()));
     assert!(host.routes.is_empty());
     let next_placement = host.grant_blitz_placement();
     let next =
@@ -895,21 +968,25 @@ fn initial_batch_is_a_real_tree_not_an_opaque_blob() {
     );
 }
 
-#[test]
-fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmtime::Result<()> {
-    let engine = Engine::default();
+#[tokio::test]
+async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmtime::Result<()>
+{
+    let engine = engine()?;
     let component = Component::new(&engine, counter_component())?;
     let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     host_bindings::MicroClient::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
     let mut store = Store::new(&engine, TestHost::new());
-    let first = TestHost::start(&mut store, &component, &linker)?;
+    let first = TestHost::start(&mut store, &component, &linker).await?;
     let events = first.townframe_dayframe_presentation_events();
     let denied = store
         .data_mut()
         .table
         .push(Placement::synthetic(Arc::new(AtomicBool::new(false))))?;
     assert!(matches!(
-        events.call_mount(&mut store, Resource::new_borrow(denied.rep()), &[])?,
+        events
+            .call_mount(&mut store, Resource::new_borrow(denied.rep()), &[])
+            .await?,
         Err(PresentationError::Revoked)
     ));
     let first_lifetime = Arc::new(AtomicBool::new(true));
@@ -918,17 +995,20 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         .table
         .push(Placement::synthetic(first_lifetime.clone()))?;
     let surface = events
-        .call_mount(&mut store, Resource::new_borrow(placement.rep()), &[])?
+        .call_mount(&mut store, Resource::new_borrow(placement.rep()), &[])
+        .await?
         .unwrap();
     let expected_batches = expected_counter_batches(4);
     let element = counter_click_element(&expected_batches[0]);
     let click = |revision| click_event(revision, element);
     for revision in 1..=2 {
-        let response = events.call_dispatch(
-            &mut store,
-            Resource::new_borrow(surface.rep()),
-            &click(revision),
-        )?;
+        let response = events
+            .call_dispatch(
+                &mut store,
+                Resource::new_borrow(surface.rep()),
+                &click(revision),
+            )
+            .await?;
         assert!(!response.prevent_default && !response.stop_propagation);
     }
     assert_batches(
@@ -937,7 +1017,7 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
     );
 
     // A second instance of the same compiled component has a separate counter/address space.
-    let second = TestHost::start(&mut store, &component, &linker)?;
+    let second = TestHost::start(&mut store, &component, &linker).await?;
     let second_events = second.townframe_dayframe_presentation_events();
     let second_placement = store
         .data_mut()
@@ -948,18 +1028,23 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
             &mut store,
             Resource::new_borrow(second_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
-    second_events.call_dispatch(
-        &mut store,
-        Resource::new_borrow(second_surface.rep()),
-        &click(1),
-    )?;
+    second_events
+        .call_dispatch(
+            &mut store,
+            Resource::new_borrow(second_surface.rep()),
+            &click(1),
+        )
+        .await?;
     assert_batches(
         &store.data().table.get(&second_surface)?.batches(),
         &expected_batches[..2],
     );
-    events.call_dispatch(&mut store, Resource::new_borrow(surface.rep()), &click(3))?;
+    events
+        .call_dispatch(&mut store, Resource::new_borrow(surface.rep()), &click(3))
+        .await?;
     let expected = &expected_batches[..4];
     assert_batches(&store.data().table.get(&surface)?.batches(), expected);
 
@@ -967,6 +1052,7 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
     malformed.data_json = "invalid JSON".into();
     let error = events
         .call_dispatch(&mut store, Resource::new_borrow(surface.rep()), &malformed)
+        .await
         .unwrap_err();
     assert_eq!(
         error.downcast_ref::<wasmtime::Trap>(),
@@ -979,6 +1065,7 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
             Resource::new_borrow(second_surface.rep()),
             &click(2),
         )
+        .await
         .unwrap_err();
     assert_eq!(
         error.downcast_ref::<wasmtime::Trap>(),
@@ -991,15 +1078,16 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
     Ok(())
 }
 
-#[test]
-fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
-    let engine = Engine::default();
+#[tokio::test]
+async fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
+    let engine = engine()?;
     let component = Component::new(&engine, counter_component())?;
     let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     host_bindings::MicroClient::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
-    let create = || -> wasmtime::Result<_> {
+    let create = || async {
         let mut store = Store::new(&engine, TestHost::new());
-        let guest = TestHost::start(&mut store, &component, &linker)?;
+        let guest = TestHost::start(&mut store, &component, &linker).await?;
         let alive = Arc::new(AtomicBool::new(true));
         let placement = store
             .data_mut()
@@ -1007,27 +1095,32 @@ fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
             .push(Placement::synthetic(alive.clone()))?;
         let surface = guest
             .townframe_dayframe_presentation_events()
-            .call_mount(&mut store, Resource::new_borrow(placement.rep()), &[])?
+            .call_mount(&mut store, Resource::new_borrow(placement.rep()), &[])
+            .await?
             .unwrap();
-        Ok((store, guest, surface))
+        Ok::<_, wasmtime::Error>((store, guest, surface))
     };
-    let (mut first_store, first_guest, first_surface) = create()?;
-    let (mut second_store, second_guest, second_surface) = create()?;
+    let (mut first_store, first_guest, first_surface) = create().await?;
+    let (mut second_store, second_guest, second_surface) = create().await?;
     let expected_batches = expected_counter_batches(2);
     let element = counter_click_element(&expected_batches[0]);
     let click = |revision| click_event(revision, element);
     let first_events = first_guest.townframe_dayframe_presentation_events();
     let second_events = second_guest.townframe_dayframe_presentation_events();
-    first_events.call_dispatch(
-        &mut first_store,
-        Resource::new_borrow(first_surface.rep()),
-        &click(1),
-    )?;
-    second_events.call_dispatch(
-        &mut second_store,
-        Resource::new_borrow(second_surface.rep()),
-        &click(1),
-    )?;
+    first_events
+        .call_dispatch(
+            &mut first_store,
+            Resource::new_borrow(first_surface.rep()),
+            &click(1),
+        )
+        .await?;
+    second_events
+        .call_dispatch(
+            &mut second_store,
+            Resource::new_borrow(second_surface.rep()),
+            &click(1),
+        )
+        .await?;
     // No `?` inside this chain: an early return would hold the store borrow across the dispatch
     // calls that follow.
     let first_before_close = first_store
@@ -1047,16 +1140,19 @@ fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
             Resource::new_borrow(first_surface.rep()),
             &malformed,
         )
+        .await
         .unwrap_err();
     assert_eq!(
         error.downcast_ref::<wasmtime::Trap>(),
         Some(&wasmtime::Trap::UnreachableCodeReached)
     );
-    second_events.call_dispatch(
-        &mut second_store,
-        Resource::new_borrow(second_surface.rep()),
-        &click(2),
-    )?;
+    second_events
+        .call_dispatch(
+            &mut second_store,
+            Resource::new_borrow(second_surface.rep()),
+            &click(2),
+        )
+        .await?;
     assert_batches(
         &first_store.data().table.get(&first_surface)?.batches(),
         &first_before_close,
@@ -1077,9 +1173,10 @@ struct BlitzRig {
 
 impl BlitzRig {
     fn new() -> wasmtime::Result<Self> {
-        let engine = Engine::default();
+        let engine = engine()?;
         let component = Component::new(&engine, counter_component())?;
         let mut linker = Linker::new(&engine);
+        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
         host_bindings::MicroClient::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| {
             host
         })?;
@@ -1090,8 +1187,8 @@ impl BlitzRig {
         })
     }
 
-    fn spawn(&mut self) -> wasmtime::Result<host_bindings::MicroClient> {
-        TestHost::start(&mut self.store, &self.component, &self.linker)
+    async fn spawn(&mut self) -> wasmtime::Result<host_bindings::MicroClient> {
+        TestHost::start(&mut self.store, &self.component, &self.linker).await
     }
 
     fn grant(&mut self) -> Resource<Placement> {
@@ -1113,7 +1210,7 @@ impl BlitzRig {
     /// Dispatches a click on `target` in the Blitz document by resolving the owning surface and
     /// `data-dioxus-id` element, releasing the document borrow, and invoking the guest's
     /// `presentation-events.dispatch` (which re-entrantly applies mutations into the document).
-    fn click(
+    async fn click(
         &mut self,
         guest: &host_bindings::MicroClient,
         target: NodeId,
@@ -1128,17 +1225,19 @@ impl BlitzRig {
         guest
             .townframe_dayframe_presentation_events()
             .call_dispatch(&mut self.store, Resource::new_borrow(rep), &event)
+            .await
     }
 }
 
-#[test]
-fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime::Result<()> {
+#[tokio::test]
+async fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime::Result<()> {
     let mut rig = BlitzRig::new()?;
-    let guest = rig.spawn()?;
+    let guest = rig.spawn().await?;
     let events = guest.townframe_dayframe_presentation_events();
     let placement = rig.grant();
     let _surface = events
-        .call_mount(&mut rig.store, Resource::new_borrow(placement.rep()), &[])?
+        .call_mount(&mut rig.store, Resource::new_borrow(placement.rep()), &[])
+        .await?
         .unwrap();
 
     // The initial batch built a real retained subtree with a registered listener, not a blob.
@@ -1148,7 +1247,7 @@ fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime::Resul
 
     // Real Blitz DOM clicks on the button node update that same node in place across re-entrant apply.
     for expected in ["1", "2"] {
-        let response = rig.click(&guest, button)?;
+        let response = rig.click(&guest, button).await?;
         assert!(!response.prevent_default && !response.stop_propagation);
         assert_eq!(rig.counter_text(&placement), expected);
         assert_eq!(rig.buttons(&placement), vec![button]);
@@ -1156,11 +1255,11 @@ fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime::Resul
     Ok(())
 }
 
-#[test]
-fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::Result<()> {
+#[tokio::test]
+async fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::Result<()> {
     let mut rig = BlitzRig::new()?;
-    let first = rig.spawn()?;
-    let second = rig.spawn()?;
+    let first = rig.spawn().await?;
+    let second = rig.spawn().await?;
     let first_events = first.townframe_dayframe_presentation_events();
     let second_events = second.townframe_dayframe_presentation_events();
 
@@ -1171,14 +1270,16 @@ fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::Result<
             &mut rig.store,
             Resource::new_borrow(first_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     let _second_surface = second_events
         .call_mount(
             &mut rig.store,
             Resource::new_borrow(second_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
 
     assert_eq!(rig.counter_text(&first_placement), "0");
@@ -1191,19 +1292,20 @@ fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::Result<
     // Both guests address their button as element 1 (`data-dioxus-id="1"`). Routing by Blitz NodeId
     // and per-surface `DioxusState` keeps them apart.
     for _ in 0..2 {
-        rig.click(&first, first_button)?;
+        rig.click(&first, first_button).await?;
     }
-    rig.click(&second, second_button)?;
+    rig.click(&second, second_button).await?;
 
     assert_eq!(rig.counter_text(&first_placement), "2");
     assert_eq!(rig.counter_text(&second_placement), "1");
     Ok(())
 }
 
-#[test]
-fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts() -> wasmtime::Result<()> {
+#[tokio::test]
+async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
+-> wasmtime::Result<()> {
     let mut rig = BlitzRig::new()?;
-    let guest = rig.spawn()?;
+    let guest = rig.spawn().await?;
     let events = guest.townframe_dayframe_presentation_events();
     let first_placement = rig.grant();
     let second_placement = rig.grant();
@@ -1212,14 +1314,16 @@ fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts() -> wasm
             &mut rig.store,
             Resource::new_borrow(first_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     let second = events
         .call_mount(
             &mut rig.store,
             Resource::new_borrow(second_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     let first_identity = presentation::HostSurface::identity(
         rig.store.data_mut(),
@@ -1234,19 +1338,21 @@ fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts() -> wasm
     assert_eq!(rig.store.data().routes[&second_identity].len(), 2);
     let first_button = rig.buttons(&first_placement)[0];
     let second_button = rig.buttons(&second_placement)[0];
-    rig.click(&guest, first_button)?;
+    rig.click(&guest, first_button).await?;
     assert_eq!(rig.counter_text(&first_placement), "1");
     assert_eq!(rig.counter_text(&second_placement), "1");
-    rig.click(&guest, second_button)?;
+    rig.click(&guest, second_button).await?;
     assert_eq!(rig.counter_text(&first_placement), "2");
     assert_eq!(rig.counter_text(&second_placement), "2");
-    events.call_unmount(&mut rig.store, Resource::new_borrow(first.rep()))?;
+    events
+        .call_unmount(&mut rig.store, Resource::new_borrow(first.rep()))
+        .await?;
     assert_eq!(rig.store.data().routes[&first_identity].len(), 1);
     presentation::HostSurface::drop(rig.store.data_mut(), first)?;
     assert!(rig.buttons(&first_placement).is_empty());
-    assert_eq!(rig.store.data().states.len(), 1);
+    assert_eq!(BLITZ.with(|blitz| blitz.borrow().states.len()), 1);
     assert!(!rig.store.data().routes.contains_key(&first_identity));
-    rig.click(&guest, second_button)?;
+    rig.click(&guest, second_button).await?;
     assert_eq!(rig.counter_text(&second_placement), "3");
     assert_eq!(rig.buttons(&second_placement), [second_button]);
 
@@ -1255,7 +1361,8 @@ fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts() -> wasm
             &mut rig.store,
             Resource::new_borrow(first_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     let remounted_identity = presentation::HostSurface::identity(
         rig.store.data_mut(),
@@ -1265,14 +1372,18 @@ fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts() -> wasm
     assert_ne!(remounted_identity, second_identity);
     assert_eq!(rig.counter_text(&first_placement), "3");
     let remounted_button = rig.buttons(&first_placement)[0];
-    rig.click(&guest, remounted_button)?;
+    rig.click(&guest, remounted_button).await?;
     assert_eq!(rig.counter_text(&first_placement), "4");
     assert_eq!(rig.counter_text(&second_placement), "4");
-    events.call_unmount(&mut rig.store, Resource::new_borrow(second.rep()))?;
+    events
+        .call_unmount(&mut rig.store, Resource::new_borrow(second.rep()))
+        .await?;
     presentation::HostSurface::drop(rig.store.data_mut(), second)?;
-    events.call_unmount(&mut rig.store, Resource::new_borrow(remounted.rep()))?;
+    events
+        .call_unmount(&mut rig.store, Resource::new_borrow(remounted.rep()))
+        .await?;
     presentation::HostSurface::drop(rig.store.data_mut(), remounted)?;
-    assert!(rig.store.data().states.is_empty());
+    assert!(BLITZ.with(|blitz| blitz.borrow().states.is_empty()));
     assert!(rig.store.data().routes.is_empty());
 
     let last = events
@@ -1280,23 +1391,26 @@ fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts() -> wasm
             &mut rig.store,
             Resource::new_borrow(first_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     assert_eq!(rig.counter_text(&first_placement), "4");
     let last_button = rig.buttons(&first_placement)[0];
-    rig.click(&guest, last_button)?;
+    rig.click(&guest, last_button).await?;
     assert_eq!(rig.counter_text(&first_placement), "5");
-    events.call_unmount(&mut rig.store, Resource::new_borrow(last.rep()))?;
+    events
+        .call_unmount(&mut rig.store, Resource::new_borrow(last.rep()))
+        .await?;
     presentation::HostSurface::drop(rig.store.data_mut(), last)?;
-    assert!(rig.store.data().states.is_empty());
+    assert!(BLITZ.with(|blitz| blitz.borrow().states.is_empty()));
     assert!(rig.store.data().routes.is_empty());
     Ok(())
 }
 
-#[test]
-fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasmtime::Result<()> {
+#[tokio::test]
+async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasmtime::Result<()> {
     let mut rig = BlitzRig::new()?;
-    let guest = rig.spawn()?;
+    let guest = rig.spawn().await?;
     let events = guest.townframe_dayframe_presentation_events();
     let first_placement = rig.grant();
     let second_placement = rig.grant();
@@ -1305,14 +1419,16 @@ fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasmtime::
             &mut rig.store,
             Resource::new_borrow(first_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     let second = events
         .call_mount(
             &mut rig.store,
             Resource::new_borrow(second_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     let first_identity = presentation::HostSurface::identity(
         rig.store.data_mut(),
@@ -1325,21 +1441,25 @@ fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasmtime::
         .alive
         .store(false, Ordering::Release);
     let button = rig.buttons(&second_placement)[0];
-    rig.click(&guest, button)?;
+    rig.click(&guest, button).await?;
     assert_eq!(rig.counter_text(&second_placement), "1");
     assert_eq!(rig.counter_text(&first_placement), "0");
     assert_eq!(rig.store.data().routes[&first_identity].len(), 1);
-    rig.click(&guest, button)?;
+    rig.click(&guest, button).await?;
     assert_eq!(rig.counter_text(&second_placement), "2");
-    events.call_unmount(&mut rig.store, Resource::new_borrow(first.rep()))?;
+    events
+        .call_unmount(&mut rig.store, Resource::new_borrow(first.rep()))
+        .await?;
     presentation::HostSurface::drop(rig.store.data_mut(), first)?;
     assert!(rig.buttons(&first_placement).is_empty());
     assert!(matches!(
-        events.call_mount(
-            &mut rig.store,
-            Resource::new_borrow(first_placement.rep()),
-            &[]
-        )?,
+        events
+            .call_mount(
+                &mut rig.store,
+                Resource::new_borrow(first_placement.rep()),
+                &[]
+            )
+            .await?,
         Err(PresentationError::Revoked),
     ));
     let replacement_placement = rig.grant();
@@ -1348,28 +1468,33 @@ fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasmtime::
             &mut rig.store,
             Resource::new_borrow(replacement_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     assert_eq!(rig.counter_text(&replacement_placement), "2");
     let replacement_button = rig.buttons(&replacement_placement)[0];
-    rig.click(&guest, replacement_button)?;
+    rig.click(&guest, replacement_button).await?;
     assert_eq!(rig.counter_text(&replacement_placement), "3");
     assert_eq!(rig.counter_text(&second_placement), "3");
-    events.call_unmount(&mut rig.store, Resource::new_borrow(second.rep()))?;
+    events
+        .call_unmount(&mut rig.store, Resource::new_borrow(second.rep()))
+        .await?;
     presentation::HostSurface::drop(rig.store.data_mut(), second)?;
-    events.call_unmount(&mut rig.store, Resource::new_borrow(replacement.rep()))?;
+    events
+        .call_unmount(&mut rig.store, Resource::new_borrow(replacement.rep()))
+        .await?;
     presentation::HostSurface::drop(rig.store.data_mut(), replacement)?;
-    assert!(rig.store.data().states.is_empty());
+    assert!(BLITZ.with(|blitz| blitz.borrow().states.is_empty()));
     assert!(rig.store.data().routes.is_empty());
     Ok(())
 }
 
-#[test]
-fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_siblings()
+#[tokio::test]
+async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_siblings()
 -> wasmtime::Result<()> {
     let mut rig = BlitzRig::new()?;
-    let first = rig.spawn()?;
-    let second = rig.spawn()?;
+    let first = rig.spawn().await?;
+    let second = rig.spawn().await?;
 
     let first_placement = rig.grant();
     let second_placement = rig.grant();
@@ -1379,7 +1504,8 @@ fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_siblings()
             &mut rig.store,
             Resource::new_borrow(first_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
     let _second_surface = second
         .townframe_dayframe_presentation_events()
@@ -1387,34 +1513,37 @@ fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_siblings()
             &mut rig.store,
             Resource::new_borrow(second_placement.rep()),
             &[],
-        )?
+        )
+        .await?
         .unwrap();
 
     let first_button = rig.buttons(&first_placement)[0];
-    let first_text_child = rig
-        .store
-        .data()
-        .doc
-        .as_ref()
-        .unwrap()
-        .get_node(first_button)
-        .unwrap()
-        .children[0];
+    let first_text_child = BLITZ.with(|blitz| {
+        blitz
+            .borrow()
+            .doc
+            .as_ref()
+            .unwrap()
+            .get_node(first_button)
+            .unwrap()
+            .children[0]
+    });
     // Clicking the child text node inside the button bubbles up to the button's `data-dioxus-id`.
-    rig.click(&first, first_text_child)?;
+    rig.click(&first, first_text_child).await?;
     assert_eq!(rig.counter_text(&first_placement), "1");
 
     // Dropping the first surface removes its rendered nodes from the Blitz document while leaving
     // the sibling surface intact and interactive.
     first
         .townframe_dayframe_presentation_events()
-        .call_unmount(&mut rig.store, Resource::new_borrow(first_surface.rep()))?;
+        .call_unmount(&mut rig.store, Resource::new_borrow(first_surface.rep()))
+        .await?;
     presentation::HostSurface::drop(rig.store.data_mut(), first_surface)?;
     assert!(rig.buttons(&first_placement).is_empty());
     assert_eq!(rig.counter_text(&second_placement), "0");
 
     let second_button = rig.buttons(&second_placement)[0];
-    rig.click(&second, second_button)?;
+    rig.click(&second, second_button).await?;
     assert_eq!(rig.counter_text(&second_placement), "1");
     Ok(())
 }

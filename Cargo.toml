@@ -34,13 +34,17 @@ members = [
   "./src/clay_dioxus",
   "./src/clay_mdk",
   "./src/clay_rt_wasmtime",
+  "./src/clay_rt_wcmp",
+  "./src/clay_rt_wcmp_wasmi",
   "./src/clay_guest_session",
+  "./src/clay_wcmp_spike",
   "./src/micro_settings_manifest",
   "./src/micro_settings",
   "./src/micro_sample",
   "./src/micro_counter",
   "./src/micro_counter_manifest",
   "./src/ui",
+  "./src/dayframe_composition",
   "./src/dayframe_web",
   "./src/dayframe_desktop",
   "./src/dayframe_mobile",
@@ -48,6 +52,7 @@ members = [
 ]
 exclude = [
   "src/wasm_utils_rs",
+  "src/clay_rt_wcmp_web",
   "src/plug_test_routines",
   "src/plug_plabels_routines",
   "src/plug_dayledger_routines",
@@ -231,9 +236,24 @@ uniffi = { version = "0.31.0" }
 #
 # wasm
 wasmtime = "48.0.7"
+# `default-features = false` matches wash-runtime's own wasmtime-wasi pin so the
+# two deps do not disagree on the p1/p2 (wiggle) surface; `p3` is what links the
+# WASI 0.3 imports a wasm32-wasip3 component brings in.
+wasmtime-wasi = { version = "48.0.7", default-features = false, features = ["p3"] }
 wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "1bcaebaeba509b8a59fd239e668abe6f02596794" }
 wit-bindgen = "0.62.0"
 wstd = "0.6.8"
+# The browser guest engine (ADR 018). Upstream pins `wasm-bindgen = "=0.2.126"`
+# exactly; this fork moves only that pin to the 0.2.127 the Dioxus fork needs,
+# because one lockfile serves every target. It brings its own
+# `wasmtime-environ` 50 and `wasmparser` 0.261 next to wasmtime 48's.
+wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "687e486c3bbf4c265f7edb5bc13e6c9c91ccee60" }
+wcmp-wasm-core-wasmi = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "687e486c3bbf4c265f7edb5bc13e6c9c91ccee60" }
+wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "687e486c3bbf4c265f7edb5bc13e6c9c91ccee60" }
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "0.4.77"
+js-sys = "0.3.104"
+web-sys = "0.3.104"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
 #
@@ -273,6 +293,8 @@ clay_micro_core = { path = "./src/clay_micro_core" }
 clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
+clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
+clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
 clay_guest_session = { path = "./src/clay_guest_session" }
 clay_mdk = { path = "./src/clay_mdk", default-features = false }
 micro_settings_manifest = { path = "./src/micro_settings_manifest" }
@@ -280,6 +302,7 @@ micro_settings = { path = "./src/micro_settings" }
 micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
+dayframe_composition = { path = "./src/dayframe_composition" }
 
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }

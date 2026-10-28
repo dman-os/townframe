@@ -28,8 +28,8 @@ use std::sync::Mutex;
 /// what [`provider`] assembles for.
 type ApplicationRuntime = clay_micro_core::application::ApplicationRuntime<NativeComponents>;
 
-fn counter_package() -> WasmPackage {
-    super::component_package("counter")
+async fn counter_package() -> WasmPackage {
+    super::component_package("counter").await
 }
 
 /// A native contract that accepts declared contributions: the composition-side half every
@@ -110,7 +110,7 @@ fn manifest() -> MicroManifest {
 fn composed(declared: MicroManifest) -> ApplicationRuntime {
     let mut app = ApplicationRuntime::new();
     app.register_provider(shelf_provider(&app)).unwrap();
-    let counter = provider(&app, declared, counter_package());
+    let counter = provider(&app, declared, || super::component_package("counter"));
     app.register_provider(counter).unwrap();
     app
 }
@@ -197,16 +197,24 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
     let viewer = host.start("viewer");
     let child = host.start("counter child");
     let layout = host.start("wasm layout");
-    let (counter, _counter_driver) =
-        WasmRuntime::activate(&host, child.clone(), &counter_package(), BTreeMap::new()).unwrap();
+    let (counter, _counter_driver) = WasmRuntime::activate(
+        &host,
+        child.clone(),
+        &counter_package().await,
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
     let child_reference = native
         .publish_surface(&child, move |_, writer| {
             counter.mount(Arc::new(writer), &[])
         })
         .unwrap();
-    let package = super::component_package("slots");
+    let package = super::component_package("slots").await;
     let (runtime, _layout_driver) =
-        WasmRuntime::activate(&host, layout.clone(), &package, BTreeMap::new()).unwrap();
+        WasmRuntime::activate(&host, layout.clone(), &package, BTreeMap::new())
+            .await
+            .unwrap();
     let foreign = Host::new();
     let foreign_owner = foreign.start("foreign");
     let foreign_reference = foreign.publish_component(&foreign_owner).unwrap();

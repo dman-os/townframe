@@ -14,6 +14,10 @@ required_features = ["uniffi", "wit", "schemars", "manifest"]
 [builds.wasm32-wasip3]
 required_features = ["wit", "schemars", "manifest"]
 
+# Browser guests reach this crate through clay_docs. uniffi stays native-only.
+[builds.wasm32-unknown-unknown]
+required_features = ["wit", "schemars", "manifest"]
+
 [api]
 target = "x86_64-unknown-linux-gnu"
 default_features = true

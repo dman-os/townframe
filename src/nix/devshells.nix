@@ -59,9 +59,20 @@ _: {
 
       ghjkDevEnv = {
         GDK_SCALE = "2";
+      };
+
+      # Every shell that drives a browser (the dev shell, and `ci-desktop` for
+      # `x/spike-wcmp-web.ts`) points playwright at the farm above instead of letting
+      # it download its own builds.
+      playwrightEnv = {
         PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
         PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";
       };
+
+      # `wasm-bindgen` refuses a module built by a different `wasm-bindgen` crate version,
+      # so this CLI must match the single `wasm-bindgen` in Cargo.lock (0.2.127, pinned
+      # by the Dioxus fork and `wcmp`).
+      wasmBindgenCli = pkgs.wasm-bindgen-cli_0_2_127;
 
       # Android SDK/NDK without Studio (for CI)
       androidSdkOnly = pkgs.androidenv.composeAndroidPackages {
@@ -211,7 +222,7 @@ _: {
         infisical
         cargo-ndk
 
-        wasm-bindgen-cli_0_2_126
+        wasmBindgenCli
         binaryen
         wac-cli
         wasmtime
@@ -324,6 +335,7 @@ _: {
             ++ [
               rustRust
               pkgs.wasm-tools
+              wasmBindgenCli
             ];
           shellHook = ''
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
@@ -333,6 +345,7 @@ _: {
           '';
         }
         // ghjkMainEnv
+        // playwrightEnv
       );
 
       ciComposeShell = pkgs.mkShell (
@@ -378,6 +391,7 @@ _: {
         }
         // ghjkMainEnv
         // ghjkDevEnv
+        // playwrightEnv
         // (androidEnvVars { androidSdk = androidSdkOnly.androidsdk; })
       );
 

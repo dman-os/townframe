@@ -1,0 +1,34 @@
+[package]
+name = "clay_rt_wcmp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# ADR 018 migration step 4: the backend-neutral `wcmp` engine adapter. Native
+# and browser packages supply an engine; bindings, resources, and runtime
+# semantics remain in this crate.
+[lib]
+path = "lib.rs"
+
+[features]
+test-utils = []
+
+[dependencies]
+clay_docs = { workspace = true }
+clay_guest_session = { workspace = true }
+clay_host = { workspace = true }
+clay_surface = { workspace = true }
+wcmp.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+# Browser hosts (wasm32-unknown-unknown): std Instant/SystemTime panic there, so the
+# WASI clocks read performance.now / Date.now instead (ADR 018 §Phase 5).
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["Window", "Performance"] }
+wasm-bindgen-futures.workspace = true
+
+[lints]
+workspace = true

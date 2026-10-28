@@ -1,0 +1,14 @@
+version = 1
+role = "application"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+    "clay_dioxus",
+    "clay_host",
+    "clay_surface",
+]
+allow_external_api_types = false
+
+# The spike is one host for two engines: Wasmi natively, the browser's `WebAssembly` on wasm32.
+[builds.native]
+
+[builds.wasm32-unknown-unknown]

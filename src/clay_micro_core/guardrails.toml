@@ -7,3 +7,12 @@ allowed_dependencies = [
     "daybook_types",
 ]
 allow_external_api_types = false
+
+# Linked by the shared composition on native and wasm32 shells (ADR 018 §7).
+[builds.native]
+features = ["camera", "mltools"]
+
+[builds.wasm32-unknown-unknown]
+features = ["camera", "mltools"]
+
+[builds.wasm32-wasip3]

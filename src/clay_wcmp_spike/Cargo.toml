@@ -1,0 +1,41 @@
+[package]
+name = "clay_wcmp_spike"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# ADR 018 migration step 1: the `wcmp` feasibility spike. It is a workspace member so it shares
+# the lockfile and target dir with the host it is evaluated against; it is not a dependency of
+# anything, and it goes away once `clay_rt_wcmp` exists.
+[lib]
+path = "lib.rs"
+# `cdylib` is the browser page's module (`x/spike-wcmp-web.ts` runs `wasm-bindgen` over it).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clay_host.workspace = true
+clay_surface.workspace = true
+dioxus.workspace = true
+wcmp.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Wasmi rather than wcmp's Wasmtime backend: the latter is Wasmtime 50, a second Cranelift build
+# next to the workspace's Wasmtime 48, and the spike only needs a native core engine.
+wcmp-wasm-core-wasmi.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+clay_dioxus.workspace = true
+dioxus = { workspace = true, features = ["web"] }
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+wasm-bindgen-futures.workspace = true
+wcmp-wasm-core-web.workspace = true
+web-sys = { workspace = true, features = ["Document", "Element", "Response", "Window"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+dioxus-html = { workspace = true, features = ["serialize"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

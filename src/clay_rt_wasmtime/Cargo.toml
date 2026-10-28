@@ -12,7 +12,13 @@ clay_docs = { workspace = true }
 clay_guest_session = { workspace = true }
 clay_host = { workspace = true }
 clay_surface = { workspace = true }
-wasmtime.workspace = true
+# This crate only needs wash-runtime's `wasmtime` re-export, so it opts out of
+# the default features (oci, postgres, nats, webgpu) that would otherwise reach
+# `dayframe_desktop` through `clay_mdk/wasmtime`. Host crates that actually run
+# washlets keep the defaults; feature unification gives them back in a
+# workspace-wide build.
+wash-runtime = { workspace = true, default-features = false }
+wasmtime-wasi.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

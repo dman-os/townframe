@@ -223,10 +223,8 @@ pub use migrations::MigrationState;
 pub use migrations::migration_status;
 pub use migrations::run_migrations;
 pub(super) use query::Executor;
-pub(super) use query::FromRow;
 pub(super) use query::IntoParams;
 pub(super) use query::QueryExecutor;
-pub(super) use query::Sql;
 
 pub use transaction::ReadTx;
 pub use transaction::Savepoint;
@@ -256,7 +254,6 @@ use utils_rs::expect_tags::ERROR_MUTEX;
 // ---------------------------------------------------------------------------
 
 use crate::ExecuteResult;
-use crate::IntoValue;
 use crate::ResultSet;
 use crate::Row;
 use crate::SqlError;
@@ -444,7 +441,7 @@ impl std::fmt::Debug for Database {
     }
 }
 
-struct Lease {
+pub(crate) struct Lease {
     slot: Option<ConnSlot>,
     _permit: OwnedSemaphorePermit,
     db: Arc<DbInner>,
