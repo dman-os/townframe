@@ -702,11 +702,11 @@ impl Reconstruction<'_> {
         binding.ok_or(ClaimHistoryError::MalformedWitness("unbound actor"))
     }
 
-    /// The document `uuid` is bound to in `branchUuids` at `heads`.
+    /// The document `uuid` is bound to in `docUuids` at `heads`.
     fn document(&mut self, uuid: Uuid7, heads: &[ChangeHash]) -> Result<DocId, ClaimHistoryError> {
         let mut bound: Option<DocId> = None;
         for dmeta in self.dmeta_maps(heads)? {
-            for index in self.maps(&dmeta, "branchUuids", heads)? {
+            for index in self.maps(&dmeta, "docUuids", heads)? {
                 let Some(text) = self.scalar(&index, &uuid.to_string(), heads)? else {
                     continue;
                 };

@@ -112,8 +112,7 @@ impl Dmeta {
             if signed.claim.datum_key != *key
                 || self.datum_uuids.get(&signed.claim.chosen_uuid) != Some(key)
                 || (entry.inherited.is_none()
-                    && self.branch_uuids.get(&entry.doc_uuid)
-                        != Some(&signed.claim.origin_document))
+                    && self.doc_uuids.get(&entry.doc_uuid) != Some(&signed.claim.origin_document))
             {
                 return VerificationState::Rejected;
             }

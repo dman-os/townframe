@@ -49,7 +49,7 @@ impl Fixture {
         tx.put_object(&dmeta, "updatedAt", ObjType::List).unwrap();
         let aliases = tx.put_object(&dmeta, "datumUuids", ObjType::Map).unwrap();
         tx.put(&aliases, fixture.alias.to_string(), DATUM).unwrap();
-        let documents = tx.put_object(&dmeta, "branchUuids", ObjType::Map).unwrap();
+        let documents = tx.put_object(&dmeta, "docUuids", ObjType::Map).unwrap();
         tx.put(
             &documents,
             fixture.doc_uuid.to_string(),
@@ -545,7 +545,7 @@ utils_rs::table_tests! {
         let other = DocId::new([8; 32]);
         let (_, documents) = fixture
             .doc
-            .get(&fixture.paths().dmeta, "branchUuids")
+            .get(&fixture.paths().dmeta, "docUuids")
             .unwrap()
             .unwrap();
         let doc_uuid = match binding {

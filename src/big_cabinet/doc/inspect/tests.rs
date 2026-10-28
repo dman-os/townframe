@@ -145,7 +145,7 @@ impl Fixture {
             let dmeta = tx.put_object(&datums, DMETA, ObjType::Map).unwrap();
             let aliases = tx.put_object(&dmeta, "datumUuids", ObjType::Map).unwrap();
             tx.put(&aliases, alias.to_string(), DATUM).unwrap();
-            let bindings = tx.put_object(&dmeta, "branchUuids", ObjType::Map).unwrap();
+            let bindings = tx.put_object(&dmeta, "docUuids", ObjType::Map).unwrap();
             let actors = tx.put_object(&dmeta, "actors", ObjType::Map).unwrap();
             let actor_meta = tx
                 .put_object(&actors, actor.to_string(), ObjType::Map)

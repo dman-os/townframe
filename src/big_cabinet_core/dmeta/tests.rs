@@ -24,7 +24,7 @@ const PORTABLE_PROOF: &str = r#"{
                 "delegation": {"$bytes": "AQID/w=="}
             }
         },
-        "branchUuids": {
+        "docUuids": {
             "01890f3e-1234-7000-8000-000000000009": "zajdk"
         },
         "datumUuids": {
@@ -714,8 +714,8 @@ utils_rs::table_tests! {
             "none" => {}
             "actor" => { dmeta.actors.remove(&claim.actor_uuid).unwrap(); }
             "alias" => { dmeta.datum_uuids.remove(&claim.chosen_uuid).unwrap(); }
-            "document" => { dmeta.branch_uuids.remove(&uuid7(9)).unwrap(); }
-            "rebound document" => { dmeta.branch_uuids.insert(uuid7(9), DocId::new(b"other")).unwrap(); }
+            "document" => { dmeta.doc_uuids.remove(&uuid7(9)).unwrap(); }
+            "rebound document" => { dmeta.doc_uuids.insert(uuid7(9), DocId::new(b"other")).unwrap(); }
             "certificate" => dmeta.actors.get_mut(&claim.actor_uuid).unwrap().delegation = None,
             "issuer" => issuers.clear(),
             other => panic!("unknown case: {other}"),

@@ -2,23 +2,23 @@
 
 Status: human written; up to date.
 
-Documents are the main units of information of the system and have a unique ids.
+Documents are the main units of information of the system and have unique ids.
 
 ## Why
 
-As a p2p system, we need to have a well bound and scoped data records that are easy to transfer across nodes and sync them under changes.
-CRDTs are a great way to ensure that large mutable records are efficiently synced under multi-writers, hard partitions and other p2p hardships.
+As a p2p system, we need to have well-bounded and scoped data records that are easy to transfer and sync across nodes as they change.
+CRDTs are a great way to ensure that large mutable records are efficiently synced with multiple writers, hard partitions and other p2p hardships.
 
-Additionally, we want the documents to be self describing as much as possible to enable flexbility and indepenedent underestanding and evolution. 
-There is no central authority available to adjuidicate schemas and meaning.
-This requires us to have stringent laws around keeping schema changes backward compatible since there's no way of rolling out breaking changes atomically to all nodes. 
+Additionally, we want the documents to be self-describing as much as possible to enable flexibility and independent understanding and evolution.
+There is no central authority available to adjudicate schemas and meaning.
+This requires us to have stringent laws around keeping schema changes backward-compatible since there's no way of rolling out breaking changes atomically to all nodes.
 
 ## How
 
 ### Identity
 
 Documents are identified and authorized through [Keyhive](./keyhive.md) and correspond to document principals in the keyhive authority model.
-All keyhive principals and thus documents are identified by 32 byte ED25519 public keys.
+All keyhive principals and thus documents are identified by 32-byte ED25519 public keys.
 This means that a document id is globally unique.
 
 ### Datums
@@ -26,17 +26,17 @@ This means that a document id is globally unique.
 Documents are made up of datums which are JSON values describing the different aspects of the document.
 Datums are stored in a map with unordered keys that have a format of `key.tag/key-slot`.
 
-The datum tag indicates expected schema of the value under that key.
+The datum tag indicates the expected schema of the value under that key.
 Datum schemas are AT Proto lexicons (with extra sauce) and the tag corresponds to the lexicon NSID.
 
 The `key-slot` allows multiple datums of the same `tag` in the doc.
 It is an untyped string.
-Using a convention for the id, like the plain default `main`, allows for convergence when creating datums concurrent on different nodes.
-For uniqueness, uuids can be used.
-The `key-slot` can also contain fwd slashes and be a path like construct itself.
+Using a convention for the id, like the plain default `main`, allows for convergence when creating datums concurrently on different nodes.
+For uniqueness, UUIDs can be used.
+The `key-slot` can also contain forward slashes and be a path-like construct itself.
 
-Key-slots are expected to be valid utf-8 strings.
-To put non-utf-8 values, the escaping format from Go string literals is used.
+Key-slots are expected to be valid UTF-8 strings.
+To put non-UTF-8 values, the escaping format from Go string literals is used.
 <!--TODO: elaborate how non-utf-8 escaping is used-->
 
 To clarify:
@@ -56,53 +56,53 @@ Some examples of datums:
 
 ### Automerge
 
-Documents are stored using the Automerge data structure, a JSON based CRDT implementation.
-CRDTs are a family of data structures allowing concurrent edits across devices that can then be resolved to a final, merged state in a determinstic and unsupervised manner.
-The design of Automerge requires the full history of the document is kept which can be a feature or a burden depending on the usecase. 
+Documents are stored using the Automerge data structure, a JSON-based CRDT implementation.
+CRDTs are a family of data structures allowing concurrent edits across devices that can then be resolved to a final, merged state in a deterministic and unsupervised manner.
+The design of Automerge requires the full history of the document to be kept which can be a feature or a burden depending on the use case.
 
-Note that the automerge CRDT is actually called a document but to avoid confusion, it'll be called the CRDT on this document.
+Note that the Automerge CRDT is actually called a document but to avoid confusion, it'll be called the CRDT in this document.
 
 #### Heads
 
-In automerge, instead of line diffs as seen in git, we have operations describing changes to JSON objects.
+In Automerge, instead of line diffs as seen in git, we have operations describing changes to JSON objects.
 These operations are bunched up together into transactions or *changes* as they're called.
 A change can be thought of as a single git commit and like git, we have a graph of these changes with parent references indicating what a change builds on top of.
-Like git again, a content addressing hash is used to refer to changes, the change hash.
+Like git again, a content-addressed hash is used to refer to changes, the change hash.
 Unlike git, Automerge uses a set of rules to ensure conflicting values resolve deterministically on all replicas.
-Essentially, you have an append only set of changes and replicas that have the same set read the same values from the CRDT.
+Essentially, you have an append-only set of changes and replicas that have the same set read the same values from the CRDT.
 
 This allows us to sidestep the need to produce new Changes to manually resolve merge conflicts, no merge commits.
 This raises a non-obvious question, without a merge commit, how do we refer to a resolved state of the CRDT that contains both histories?
 Unlike Git, a point in time for the CRDT is not represented by a single hash but a set of hashes.
-Under concurrent history, the set of the hashes serve as a commit reference which logically represents a deterministically merged state anyway.
-We name this set *heads* and serves as our point in time or frontier reference.
+Under concurrent history, the set of hashes serves as a commit reference which logically represents a deterministically merged state anyway.
+We name this set *heads*, which serves as our point in time or frontier reference.
 
-If we produce a new change on a CRDT that has concurrent history, the next change will refer to the current frontier heads as its parents and produce heads that has a single change hash.
+If we produce a new change on a CRDT that has concurrent history, the next change will refer to the current frontier heads as its parents and produce heads that have a single change hash.
 I.e. in most circumstances, a point in time for a doc only has a single hash in the heads.
 Only under concurrent changes do we get heads with more than one hash.
 
 ### DocService
 
 The doc service provides the primary interface for reading and writing documents.
-It provides a key value shaped interface where documents and their datums can be read or writen by their ids.
-It doesn't provide means of editing specific fields of datums and avoids overfitting to the CRDT model.
+It provides a key-value shaped interface where documents and their datums can be read or written by their ids.
+It doesn't provide a means of editing specific fields of datums and avoids overfitting to the CRDT model.
 
-Incoming writes produce the full datum and the datum heads to write at. 
-The datum are then diffed against the value at the supplied heads, and changes are written atop those heads.
+Incoming writes produce the full datum and the datum heads to write at.
+The datums are then diffed against the value at the supplied heads, and changes are written atop those heads.
 This preserves Automerge's concurrent-write semantics when an unobserved remote write has arrived.
 
 <!--
-// FIXME: forgery should be it's own section
+// FIXME: forgery should be its own section
 -->
 
 Additionally, the DocService ensures that incoming writes adhere to the expected schema of the tag.
 This is not just about the incoming datum but also the resulting datum after the write.
-Specifically, if there's a unobserved write and if the incoming datum creates a concurrent write at a previous heads, the resulting shape of the datum under concurrent merges is also evaluated before accepting writes.
+Specifically, if there's an unobserved write and the incoming datum creates a concurrent write at previous heads, the resulting shape of the datum under concurrent merges is also evaluated before accepting writes.
 
 ### Schemas
 
-Datum shapes are primarily defined by AT Proto [lexicons](https://atproto.com/specs/lexicon), a JSON schema relative used by the AT protocol network
-Lexicons are identified by their [NSID](https://atproto.com/specs/nsid)(Namespaced Identifiers), DNS rooted identifiers that are represented in reverse fully qualified host name notation.
+Datum shapes are primarily defined by AT Proto [lexicons](https://atproto.com/specs/lexicon), a JSON schema relative used by the AT protocol network.
+Lexicons are identified by their [NSID](https://atproto.com/specs/nsid) (Namespaced Identifiers), DNS-rooted identifiers that are represented in reverse fully qualified host name notation.
 
 In addition to Lexicons, datum schemas carry an optional JSON schema that is used to define the following extra information not representable in Lexicons.
 - Automerge representation
@@ -114,16 +114,16 @@ In addition to Lexicons, datum schemas carry an optional JSON schema that is use
 Any other JSON schema feature usage is not accepted.
 
 All valid record lexicons are valid datum schemas.
-Asides from the evolvability available to lexicon per its spec, breaking schemas is disallowed and this extends to JSON schema extensions as well.
+Aside from the evolvability available to lexicon per its spec, breaking schemas is disallowed and this extends to JSON schema extensions as well.
 This means the following are disallowed:
 - Changing the Automerge representation annotation
-- Change typed map leaf types
+- Changing typed map leaf types
 
 If a breaking change is required, use a new datum tag instead.
 
 #### Data model
 
-The datum data model is a layering of a subset of the AT proto datamodel to the Automerge data model.
+The datum data model is a layering of a subset of the AT proto data model to the Automerge data model.
 As the canonical storage format, the primary data model of documents is the Automerge data model. Automerge has the following types:
 - Scalars
   - Null
@@ -132,35 +132,35 @@ As the canonical storage format, the primary data model of documents is the Auto
   - Float64 (IEEE 754)
   - Boolean
   - Int64 counters
-  - Int64 timestamps in milliseconds since unix epoch
-  - Utf-8 strings
+  - Int64 timestamps in milliseconds since Unix epoch
+  - UTF-8 strings
   - Byte strings
 - Composites
   - Maps with string keys
   - Lists
   - Text/Collaborative strings
 
-For more information, check out the offical automerge [reference](https://automerge.org/docs/reference/documents/).
+For more information, check out the official Automerge [reference](https://automerge.org/docs/reference/documents/).
 
 The wire and working representation of the data is ATProto Lexicon records which are themselves represented using JSON and consist of the [ATProto data model](https://atproto.com/specs/data-model).
-Datums are then stored in the CRDT using their JSON based Automerge representation with the following clarifications:
-- Incoming `$bytes` objects are stored using byte string scalars in automerge (and not base64).
+Datums are then stored in the CRDT using their JSON-based Automerge representation with the following clarifications:
+- Incoming `$bytes` objects are stored using byte string scalars in Automerge (and not base64).
 - String fields with `datetime` format and found to be in ISO 8601 format will be stored as Automerge timestamps.
-  - This won't apply to other incoming string datetime formats to ensure roundtripping produces byte accurate CIDs for ATProto native data.
+  - This won't apply to other incoming string datetime formats to ensure round-tripping produces byte-accurate CIDs for ATProto native data.
 
 And yes, this means that any ATProto record can be stored in datums.
 
-Note that while techincally  the full ATProto data model is available to program with, the following items currently have no meaning in datums:
+Note that while technically the full ATProto data model is available to program with, the following items currently have no meaning in datums:
 - `cid-link`s or `$link` objects
 
-Additionally, datum writes allow non ATProto supported datatypes under have special rules.
+Additionally, datum writes allow non-ATProto-supported datatypes that have special rules.
 The big one is floats which are representable in Automerge but not in Lexicons.
 Documents can contain floats and writing IEEE 754 floats is allowed.
-The adjustment is that all floats will be returned from the DocService in stringfied decimal format.
+The adjustment is that all floats will be returned from the DocService in stringified decimal format.
 
 Similarly, the ATProto data model only supports integers in i64 format.
-If one needes the uint64 range above i64:MAX, stringified representation is the only avail avenue.
-Non-negative JSON numbers are accepted as input but Uint marked fields are stringifed on return.
+If one needs the uint64 range above i64:MAX, stringified representation is the only available avenue.
+Non-negative JSON numbers are accepted as input but Uint marked fields are stringified on return.
 
 <!--TODO: specify expectations around float/u64 stringification-->
 
@@ -169,9 +169,9 @@ So while the DocService will return stringified floats always, it'll accept IEEE
 
 #### Authoring schemas
 
-The standard lexicon authoring [guidlines and rules](https://atproto.com/specs/lexicon#lexicon-publication-and-resolution) apply.
+The standard lexicon authoring [guidelines and rules](https://atproto.com/specs/lexicon#lexicon-publication-and-resolution) apply.
 Additionally, you might want to:
-- Use byte strings to encode an large array of floats to avoid parsing string parsing costs on reads
+- Use byte strings to encode a large array of floats to avoid string parsing costs on reads
 
 Please explore the atproto spec for more information.
 
@@ -181,13 +181,13 @@ To make datum schemas more evolvable, the following advisories should be conside
 - Use open enums to allow adding more variants
 - Use open unions 
 
-JSON scheman and Lexicons have open objects by default.
-I.e. they allow unknown fields. by default
+JSON schema and Lexicons have open objects by default.
+I.e. they allow unknown fields by default.
 This should generally be preferred to allow forward compatibility.
 
-On open object, it's critical to ensure that any interemediate decoding of the datums retain these additional fields for any data that's expected to come back to the DocService
+On an open object, it's critical to ensure that any intermediate decoding of the datums retains these additional fields for any data that's expected to come back to the DocService.
 If a write has a missing field, the DocService will treat it as a field removal otherwise.
-This expectation also extends to unions: unknown variants shouldn be preserved by any codec that expects to bring back data to the DocService.
+This expectation also extends to unions: unknown variants should be preserved by any codec that expects to bring back data to the DocService.
 
 ### Drawers
 
@@ -199,9 +199,9 @@ Sharing a single document can easily be done through self-group drawers without 
 When we apply changes to a doc, we send them to the peers asap and have them all resolve to the same state.
 But in some cases, we need to delay sending changes to others and keep working on them locally.
 Branches allow us to create a fork from a doc at some point and work on it.
-When satisfied, it's changes can be added back to `/main` in a merge operation.
+When satisfied, its changes can be added back to `/main` in a merge operation.
 
-Each branch is stored as a separate document under a new id in a Automerge CRDT.
+Each branch is stored as a separate document under a new id in an Automerge CRDT.
 The following datums are used to track branch relationships in docs:
 
 ```js
@@ -211,7 +211,7 @@ The following datums are used to track branch relationships in docs:
     path: "/main"
   },
   // branches will have their own branch datum and won't remove their
-  // parent. a parent also carries the branch datum for it's children
+  // parent. a parent also carries the branch datum for its children
   // if it must track them. this means that both datums shown here exist
   // on both parent and child branches
   "org.example.daybook.branch/zBranchDocId": {
@@ -226,12 +226,12 @@ The following datums are used to track branch relationships in docs:
 }
 ```
 
-Note that branches by convention have path based names.
+Note that branches by convention have path-based names.
 By design, branches in the `/tmp` path will never leave that device.
 All other branches are replication candidates.
 
-If intending to share a single document and all it's branches, a single group drawer should be preferred as a unit of sharing.
-Non replicated document branches are excluded from such drawrers will not show up in the `branches` map of their origin document.
+If intending to share a single document and all its branches, a single group drawer should be preferred as a unit of sharing.
+Non-replicated document branches are excluded from such drawers and will not show up in the `branches` map of their origin document.
 
 ### Conflict model
 
@@ -243,40 +243,40 @@ Datums should be designed to allow conflicting writes to resolve gracefully wher
 Automerge does allow querying concurrently [overwritten writes](https://automerge.org/docs/reference/documents/conflicts/) but that API is intentionally not provided for now by the DocService.
 Instead, it's recommended to use the following tricks to allow good multi-writer stories.
 
-When creating new datums, prefer determinstic key-slots for datums if there's the possiblity that a similar process runnning on another node might try to create the same datum.
+When creating new datums, prefer deterministic key-slots for datums if there's the possibility that a similar process running on another node might try to create the same datum.
 Every node writing to `/main` means that they will merge as expected.
 Datums need multiple instances on a doc?
 Use ids deterministically derived from the process that produces it.
 
 An illustrating example for this: a processor that creates a derived datum from another.
 Another node might run the same processor and in most cases, it doesn't make sense to have multiple derivations from the same source datum.
-Determinsitc ids like using the key-slot of the source datums avoids that.
-Note that this concern also extends to any datum internal maps that expects concurrent writers.
+Deterministic ids like using the key-slot of the source datums avoid that.
+Note that this concern also extends to any datum internal maps that expect concurrent writers.
 
 An alternative approach to solve concurrent writes on the same map key is to use competing or sibling sets.
-Arrays that are first cleared and then pushed into during any writes.
-Under concurrent writes, the array will have two values under automerge merge rules.
+Use arrays that are first cleared and then pushed into during any writes.
+Under concurrent writes, the array will have two values under Automerge merge rules.
 This is useful in instances where resolving concurrent writes needs to be manual.
 
-While Automerge happily resolves any concurrent writes under its rules, the results don't always make semantic case.
+While Automerge happily resolves any concurrent writes under its rules, the results don't always make semantic sense.
 Since Lexicons allow specifying extra validation rules care must be taken around schema design to ensure that concurrent writes don't produce semantically breaking values.
-While the DocService prevents writes that produce invalid datums, including after merging with any concurrent changes, this doesn't protect against the case where both writes are done without awereness of the other.
+While the DocService prevents writes that produce invalid datums, including after merging with any concurrent changes, this doesn't protect against the case where both writes are done without awareness of the other.
 For example, a maximum value constraint on a counter can lead to a value above the constraint if concurrent writes produce increments that are under the limit individually but over the limit when combined.
-This mean datums relying on such brittle schemas can't be relied to be valid upon read.
+This means datums relying on such brittle schemas can't be relied upon to be valid upon read.
 
 Right now, an invalid datum also means that it's going to be invalid until a write comes in that brings it back into the right shape.
-This means that legitimate datum writes will be blocked if their writes merged into the broken datum still result in an invalid will be blocked if their writes merged into the invalid datum still result in an invalid datum.
+This means that legitimate datum writes will be blocked if merging them into the invalid datum still results in an invalid datum.
 <!--FIXME: find a good solution for this footgun-->
 
 It's also possible to have concurrent writes break under schema drift.
-For example, it's recommended that any datum that intends to be evolvable to allow unkown keys on maps.
-When new field is later added, if any datum was using that key to store unsanctioned and now incompatible values, this will result in an invalid datum.
+For example, it's recommended that any datum that intends to be evolvable to allow unknown keys on maps.
+When a new field is later added, if any datum was using that key to store unsanctioned and now incompatible values, this will result in an invalid datum.
 This is only avoidable by avoiding using unsanctioned keys.
-The recommendation to allow unkown keys in schemas is intended to improve evolvability and not for storing unsanctioned data.
+The recommendation to allow unknown keys in schemas is intended to improve evolvability and not for storing unsanctioned data.
 
 Branches can be merged back to other branches that have the same origin doc.
 This introduces another hazard that must be avoided when designing datums: mutations done in the branch will be concurrently applied to the origin doc after merge.
-This means that fields that reflect branch speciifc information like the document id must be carefully designed lest after the merge, they conflict and break semantics.
+This means that fields that reflect branch specific information like the document id must be carefully designed lest after the merge, they conflict and break semantics.
 
 <!-- TODO: branches in urls -->
 ### Rust authorship
@@ -357,7 +357,7 @@ This is an illustrative JSON shape, not a signed test vector; angle-bracketed by
             // - set|remove is physically represented as 0|1
             // - valueCIDOrNull is null on removal
             // Note that the valueCID is not the incoming datum write value
-            // but the value that ended up in the CRDT after reconcilliation
+            // but the value that ended up in the CRDT after reconciliation
             // with the existing value
             "signature": { "$bytes": "<base64 signature>" }
             //  when a document is branched into
@@ -375,7 +375,7 @@ This is an illustrative JSON shape, not a signed test vector; angle-bracketed by
 }
 ```
 
-The value CID is CIDv1 raw/BLAKE3-256 over tagged canonical automerge native CBOR with the following rules:
+The value CID is CIDv1 raw/BLAKE3-256 over tagged canonical Automerge native CBOR with the following rules:
 - Automerge native scalars remain distinct (`Text` versus `Str`, `Counter` versus `Int`)
 - Maps have unique keys ordered by encoded bytes
 - Float is binary64, all NaNs normalize to `0x7ff8000000000000`, infinities survive, and signed zeros remain distinct. 
@@ -386,17 +386,17 @@ Using the native encoding allows us to validate signatures without the schema at
 
 #### Anti-forgery
 
-The signature and actors metadata in dmeta is used as an attribution and anti-forgery mechanism.
-Since automerge and big_repo allow any node with write access to a document to modify whatever they want in the CRDT, the signatures provide a means of provenance for authorship.
+The signature and actor metadata in dmeta are used as an attribution and anti-forgery mechanism.
+Since Automerge and big_repo allow any node with write access to a document to modify whatever they want in the CRDT, the signatures provide a means of provenance for authorship.
 
 The default DocService read path rejects reads if the signature is not valid.
 The write path rejects writes on top of forged heads.
-Forgery is a per datum state, a document can still have working.
+Forgery is a per-datum state; a document can still have working datums.
 Missing verification evidence does not authorize an authenticated read or ordinary write.
 
 The signed-claim protocol is portable and designed to be independent of Automerge.
 If layering over another substrate, it mainly affects how verification works.
-Right now, the original `sortedPredecessorSignatures` value is recovored by hydrating the dmeta at the change prior to the new dmeta write.
+Right now, the original `sortedPredecessorSignatures` value is recovered by hydrating the dmeta at the change prior to the new dmeta write.
 Reconstructing an ordinary signature's message from its introduction change is only a storage optimization.
 
 The `inherited` field is used to support validation after a CRDT history-free export or compaction.

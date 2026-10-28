@@ -190,7 +190,7 @@ pub struct big_cabinet_core::dmeta::Cid  {  }
 pub struct big_cabinet_core::dmeta::DatumClaim  { origin_document: DocId, datum_key: DatumKey, chosen_uuid: Uuid7, actor_uuid: Uuid7, operation: ClaimOperation, value_cid: Option < Cid >, predecessors: Vec < SignatureId > }
 pub struct big_cabinet_core::dmeta::DatumMetadata  { updated_at: Vec < Timestamp >, deleted_at: Vec < Timestamp >, signatures: Vec < DatumSignature >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::DatumSignature  { actor_uuid: Uuid7, signature: SignatureBytes, doc_uuid: Uuid7, message: Option < Bytes >, inherited: Option < InheritedWitness >, extra: crate :: datum :: Extra }
-pub struct big_cabinet_core::dmeta::Dmeta  { created_at: Timestamp, updated_at: Vec < Timestamp >, actors: BTreeMap < Uuid7 , ActorMetadata >, branch_uuids: BTreeMap < Uuid7 , DocId >, datum_uuids: BTreeMap < Uuid7 , DatumKey >, datums: BTreeMap < DatumKey , DatumMetadata >, extra: crate :: datum :: Extra }
+pub struct big_cabinet_core::dmeta::Dmeta  { created_at: Timestamp, updated_at: Vec < Timestamp >, actors: BTreeMap < Uuid7 , ActorMetadata >, doc_uuids: BTreeMap < Uuid7 , DocId >, datum_uuids: BTreeMap < Uuid7 , DatumKey >, datums: BTreeMap < DatumKey , DatumMetadata >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::DocIdentity  { id: DocId, created_at: Timestamp }
 pub struct big_cabinet_core::dmeta::InheritedWitness  { origin_doc: DocId, message: Bytes, value: Option < Bytes >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::MultibaseKey  {  }

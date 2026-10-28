@@ -312,7 +312,7 @@ fn check_bindings(
     map: &ObjId,
     submitted: &Value,
 ) -> Result<(), StorageError> {
-    for index in ["actors", "branchUuids", "datumUuids"] {
+    for index in ["actors", "docUuids", "datumUuids"] {
         for (kind, bindings) in tx.get_all(map, index)? {
             if kind != automerge::Value::Object(ObjType::Map) {
                 return Err(StorageError::UnexpectedStorage {

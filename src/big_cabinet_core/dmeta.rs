@@ -184,7 +184,7 @@ pub struct Dmeta {
     /// and this index is how the entry that carries no document id is tied to that claim.
     #[serde(default)]
     #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<Uuid7, String>"))]
-    pub branch_uuids: BTreeMap<Uuid7, DocId>,
+    pub doc_uuids: BTreeMap<Uuid7, DocId>,
     #[serde(default)]
     pub datum_uuids: BTreeMap<Uuid7, DatumKey>,
     #[serde(default)]
@@ -201,7 +201,7 @@ impl Dmeta {
             created_at,
             updated_at: Vec::new(),
             actors: BTreeMap::new(),
-            branch_uuids: BTreeMap::new(),
+            doc_uuids: BTreeMap::new(),
             datum_uuids: BTreeMap::new(),
             datums: BTreeMap::new(),
             extra: crate::datum::Extra::new(),
@@ -218,13 +218,13 @@ impl Dmeta {
     /// the same write, and two concurrent writers that both see it, on the same UUID.
     pub fn doc_uuid(&mut self, document: &DocId, minted: Uuid7) -> Result<Uuid7, DmetaError> {
         if let Some(uuid) = self
-            .branch_uuids
+            .doc_uuids
             .iter()
             .find_map(|(uuid, bound)| (bound == document).then_some(*uuid))
         {
             return Ok(uuid);
         }
-        match self.branch_uuids.entry(minted) {
+        match self.doc_uuids.entry(minted) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(document.clone());
                 Ok(minted)
@@ -351,7 +351,7 @@ pub struct BranchOrigin {
 pub struct DatumSignature {
     pub actor_uuid: Uuid7,
     pub signature: SignatureBytes,
-    // The document this entry was introduced on, through the `branchUuids` binding visible at its
+    // The document this entry was introduced on, through the `docUuids` binding visible at its
     // introduction. A branch or a merge moves the entry to another document unchanged, so the
     // entry cannot assume the document holding it is the one its claim names. (A plain comment: a
     // doc comment would become a description beside the UUID's `$ref`, which Lexicon cannot state.)
@@ -381,7 +381,7 @@ pub enum ClaimOperation {
 pub struct DatumClaim {
     /// The document the claim was made on. A branch or a merge later moves the signature to other
     /// documents unchanged, so this is not necessarily the document that now holds it; the entry
-    /// names this document through its `docUuid` and the `branchUuids` binding.
+    /// names this document through its `docUuid` and the `docUuids` binding.
     pub origin_document: DocId,
     pub datum_key: DatumKey,
     pub chosen_uuid: Uuid7,

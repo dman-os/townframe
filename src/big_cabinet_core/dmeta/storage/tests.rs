@@ -37,7 +37,7 @@ fn fixture() -> Dmeta {
     let key = "org.example.note/main".parse().unwrap();
     dmeta.datum_uuids.insert(Uuid7::new(), key);
     dmeta
-        .branch_uuids
+        .doc_uuids
         .insert(Uuid7::new(), crate::dmeta::DocId::new(b"doc"));
     let key = "org.example.note/main".parse().unwrap();
     dmeta.datums.insert(
@@ -63,7 +63,7 @@ fn signature(dmeta: &Dmeta, byte: u8) -> DatumSignature {
     DatumSignature {
         extra: Default::default(),
         actor_uuid: *dmeta.actors.keys().next().unwrap(),
-        doc_uuid: *dmeta.branch_uuids.keys().next().unwrap(),
+        doc_uuid: *dmeta.doc_uuids.keys().next().unwrap(),
         signature: SignatureBytes::try_from([byte; 64].as_slice()).unwrap(),
         message: Some(Bytes::from(vec![byte, 0])),
         inherited: Some(InheritedWitness {
@@ -449,7 +449,7 @@ fn set_order_duplicates_and_timestamp_precision_do_not_rewrite_equal_entries() {
 #[test]
 fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
     let schema = schema();
-    for index in ["actors", "branchUuids", "datumUuids"] {
+    for index in ["actors", "docUuids", "datumUuids"] {
         let initial = fixture();
         let mut doc = Automerge::new();
         doc.set_actor(ActorId::from([1u8; 32]));
@@ -458,7 +458,7 @@ fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
         let bindings = doc.get(&root, index).unwrap().unwrap().1;
         let uuid = match index {
             "actors" => initial.actors.keys().next().unwrap().to_string(),
-            "branchUuids" => initial.branch_uuids.keys().next().unwrap().to_string(),
+            "docUuids" => initial.doc_uuids.keys().next().unwrap().to_string(),
             _ => initial.datum_uuids.keys().next().unwrap().to_string(),
         };
         let (object, prop) = if index == "actors" {
@@ -476,7 +476,7 @@ fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
                 "actors" => MultibaseKey::try_from([byte; 32].as_slice())
                     .unwrap()
                     .to_string(),
-                "branchUuids" => crate::dmeta::DocId::new([byte]).to_string(),
+                "docUuids" => crate::dmeta::DocId::new([byte]).to_string(),
                 _ => format!("org.example.other{byte}/main"),
             };
             let mut tx = branch.transaction();
@@ -511,7 +511,7 @@ fn rejected_bindings_and_late_codec_errors_roll_back_the_owned_transaction() {
     let mut doc = Automerge::new();
     write(&mut doc, &schema, &initial);
     let heads = doc.get_heads();
-    for index in ["actors", "branchUuids", "datumUuids"] {
+    for index in ["actors", "docUuids", "datumUuids"] {
         for remove in [false, true] {
             let mut submitted = initial.clone();
             match (index, remove) {
@@ -520,9 +520,9 @@ fn rejected_bindings_and_late_codec_errors_roll_back_the_owned_transaction() {
                     submitted.actors.values_mut().next().unwrap().pubkey =
                         MultibaseKey::try_from([9; 32].as_slice()).unwrap();
                 }
-                ("branchUuids", true) => submitted.branch_uuids.clear(),
-                ("branchUuids", false) => {
-                    *submitted.branch_uuids.values_mut().next().unwrap() =
+                ("docUuids", true) => submitted.doc_uuids.clear(),
+                ("docUuids", false) => {
+                    *submitted.doc_uuids.values_mut().next().unwrap() =
                         crate::dmeta::DocId::new(b"other");
                 }
                 (_, true) => submitted.datum_uuids.clear(),

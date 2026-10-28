@@ -472,7 +472,7 @@ async fn signed_outside(
         let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
         tx.put(&entry, "actorUuid", signer.actor_id.to_string())
             .unwrap();
-        let documents = object(&tx, &dmeta, "branchUuids");
+        let documents = object(&tx, &dmeta, "docUuids");
         let doc_uuid = tx
             .keys(&documents)
             .find(|uuid| {
