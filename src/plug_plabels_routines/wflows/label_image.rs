@@ -10,7 +10,7 @@ const IMAGE_LABEL_ALGORITHM_TAG: &str = "label-image/embed-gauntlet-nomic-v1";
 const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-classifier";
 const CANDIDATE_SET_ID: &str = "label-candidates";
 
-pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+pub async fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
@@ -26,21 +26,23 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         &pseudo_label_key,
         &pseudo_label_tag,
         "pseudo-label",
-    )?;
+    )
+    .await?;
 
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
-    let embedding_facet_token = args
-        .primary_doc
-        .facets
-        .iter()
-        .find(|tag| tag.key() == embedding_facet_key && tag.rights().contains(FacetRights::READ))
-        .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!(
-                "embedding facet key '{}' not found with read rights",
-                embedding_facet_key
-            ))
-        })?;
+    let embedding_facet_token = super::find_facet_token(
+        &args.primary_doc.facets,
+        &embedding_facet_key,
+        FacetRights::READ,
+    )
+    .await
+    .ok_or_else(|| {
+        wflow_sdk::JobErrorX::Terminal(ferr!(
+            "embedding facet key '{}' not found with read rights",
+            embedding_facet_key
+        ))
+    })?;
 
     let sqlite_connection =
         tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
@@ -49,16 +51,23 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
 
     let config_facet_key =
         plug_plabels_manifest::types::pseudo_label_candidates_key(CANDIDATE_SET_ID).to_string();
-    let rw_config_token = args
-        .config_docs
-        .iter()
-        .flat_map(|cd| cd.facets.iter())
-        .find(|tag| tag.key() == config_facet_key && tag.rights().contains(FacetRights::UPDATE));
-    let ro_config_token = args
-        .config_docs
-        .iter()
-        .flat_map(|cd| cd.facets.iter())
-        .find(|tag| tag.key() == config_facet_key && tag.rights().contains(FacetRights::READ));
+    let mut rw_config_token = None;
+    let mut ro_config_token = None;
+    for config_doc in &args.config_docs {
+        if rw_config_token.is_none() {
+            rw_config_token =
+                super::find_facet_token(&config_doc.facets, &config_facet_key, FacetRights::UPDATE)
+                    .await;
+        }
+        if ro_config_token.is_none() {
+            ro_config_token =
+                super::find_facet_token(&config_doc.facets, &config_facet_key, FacetRights::READ)
+                    .await;
+        }
+        if rw_config_token.is_some() && ro_config_token.is_some() {
+            break;
+        }
+    }
     let error_facet_key = plug_plabels_manifest::types::pseudo_label_error_key().to_string();
     let error_facet_tag = PlabelFacetTag::PseudoLabelErrorFacet.as_str().to_string();
     let error_facet_target = resolve_facet_write_target(
@@ -67,9 +76,10 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         &error_facet_key,
         &error_facet_tag,
         "pseudo-label-error",
-    )?;
+    )
+    .await?;
 
-    let embedding_raw = embedding_facet_token.get().map_err(|err| {
+    let embedding_raw = embedding_facet_token.get().await.map_err(|err| {
         wflow_sdk::JobErrorX::Terminal(ferr!("error reading embedding facet: {err:?}"))
     })?;
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
@@ -107,7 +117,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let vector_json = daybook_types::doc::embedding_f32_bytes_to_json(&embedding.vector, 768)
         .map_err(wflow_sdk::JobErrorX::Terminal)?;
 
-    cx.effect(|| {
+    cx.effect(async || {
         label_engine::apply_labeling(LabelRequest {
             sqlite_connection,
             rw_config_token,
@@ -120,8 +130,10 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             algorithm_tag: IMAGE_LABEL_ALGORITHM_TAG,
             candidate_set_id: CANDIDATE_SET_ID,
         })
+        .await
         .map(wflow_sdk::Json)
-    })?;
+    })
+    .await?;
 
     Ok(())
 }

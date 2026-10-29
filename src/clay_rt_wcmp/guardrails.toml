@@ -1,0 +1,18 @@
+version = 1
+role = "runtime"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+    "clay_docs",
+    "clay_guest_session",
+    "clay_host",
+    "clay_surface",
+]
+allow_external_api_types = false
+
+# test-utils is exercised only by the native Wasmi adapter's tests.
+[builds.native]
+features = ["test-utils"]
+
+[builds.wasm32-unknown-unknown]
+
+[builds.wasm32-wasip3]

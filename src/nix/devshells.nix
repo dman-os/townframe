@@ -12,7 +12,7 @@ _: {
 
       # The browser farm below is keyed by browser *revision*, so the npm runner that
       # drives it must be the same playwright version as `pkgs.playwright-driver` here
-      # (1.63.0 <-> chromium 1243). A mismatch makes playwright look for a revision this
+      # (1.64.1 <-> chromium 1248). A mismatch makes playwright look for a revision this
       # farm does not have and the sysadmin e2e job dies at browser launch.
       # Nixpkgs' playwright-webkit at the pinned rev links libWPEWebKit against
       # libmanette (gamepad support) but webkit.nix does not list it in buildInputs, so
@@ -59,9 +59,20 @@ _: {
 
       ghjkDevEnv = {
         GDK_SCALE = "2";
+      };
+
+      # Every shell that drives a browser (the dev shell, and `ci-desktop` for the
+      # dayframe web e2e) points playwright at the farm above instead of letting
+      # it download its own builds.
+      playwrightEnv = {
         PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
         PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";
       };
+
+      # `wasm-bindgen` refuses a module built by a different `wasm-bindgen` crate version,
+      # so this CLI must match the single `wasm-bindgen` in Cargo.lock (0.2.127, pinned
+      # by the Dioxus fork and `wcmp`).
+      wasmBindgenCli = pkgs.wasm-bindgen-cli_0_2_127;
 
       # Android SDK/NDK without Studio (for CI)
       androidSdkOnly = pkgs.androidenv.composeAndroidPackages {
@@ -171,10 +182,18 @@ _: {
         zizmor
       ];
 
+      # `cargo-llvm-cov` drives the `rust-tests` lane (coverage collection), so it stays in
+      # `rustLintInputs` and is reachable from both `ci-rust` and `ci-desktop`. Upstream 0.9.0's
+      # own integration tests build fixture crates under `-C instrument-coverage` and then
+      # `llvm-profdata merge` them; in the Nix sandbox the fixtures emit no profile data
+      # (`no profile can be merged`), so 14 of them fail and the derivation never installs. The
+      # shell only needs the tool binary, so skip that check phase.
       rustLintInputs = with pkgs; [
+        (cargo-llvm-cov.overrideAttrs (_previousAttrs: {
+          doCheck = false;
+        }))
         cargo-udeps
         cargo-nextest
-        cargo-llvm-cov
         cargo-machete
       ];
 
@@ -211,7 +230,7 @@ _: {
         infisical
         cargo-ndk
 
-        wasm-bindgen-cli_0_2_126
+        wasmBindgenCli
         binaryen
         wac-cli
         wasmtime
@@ -324,6 +343,7 @@ _: {
             ++ [
               rustRust
               pkgs.wasm-tools
+              wasmBindgenCli
             ];
           shellHook = ''
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
@@ -333,6 +353,7 @@ _: {
           '';
         }
         // ghjkMainEnv
+        // playwrightEnv
       );
 
       ciComposeShell = pkgs.mkShell (
@@ -378,6 +399,7 @@ _: {
         }
         // ghjkMainEnv
         // ghjkDevEnv
+        // playwrightEnv
         // (androidEnvVars { androidSdk = androidSdkOnly.androidsdk; })
       );
 

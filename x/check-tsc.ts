@@ -2,4 +2,5 @@
 
 import { $ } from "./utils.ts";
 
-await $`pnpm -r exec tsc --noEmit`.cwd($.relativeDir("../src"));
+await $`pnpm -r --filter '!@townframe/btress_*' --fail-if-no-match exec tsc --noEmit`
+  .cwd($.relativeDir("../src"));

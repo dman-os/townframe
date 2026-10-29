@@ -5,6 +5,6 @@ allowed_dependencies = ["utils_rs"]
 
 [builds.native]
 
-[builds.wasm32-wasip2]
+[builds.wasm32-wasip3]
 
 [builds.wasm32-unknown-unknown]

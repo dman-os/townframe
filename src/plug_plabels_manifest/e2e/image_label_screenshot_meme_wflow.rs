@@ -62,7 +62,6 @@ async fn long_af_test_image_label_fallback_multi_label_screenshot_meme() -> Res<
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-
     let updated_doc = updated_doc.ok_or_eyre(
         "doc not found with embedding+pseudo-label after screenshot meme image-label pipeline",
     )?;

@@ -10,6 +10,7 @@ path = "main.rs"
 [dependencies]
 dioxus = { workspace = true }
 ui = { workspace = true }
+dayframe_composition = { workspace = true }
 clay_micro_core = { workspace = true }
 clay_docs = { workspace = true }
 clay_dioxus = { workspace = true }

@@ -8,7 +8,7 @@ use plug_dayledger_manifest::types;
 use types::Claim;
 use wflow_sdk::WflowCtx;
 
-pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::WellKnownFacet;
@@ -27,7 +27,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             wflow_sdk::JobErrorX::Terminal(ferr!("note facet token with read rights not found"))
         })?;
 
-    let note_raw = note_token.get().map_err(|err| {
+    let note_raw = note_token.get().await.map_err(|err| {
         wflow_sdk::JobErrorX::Terminal(ferr!("error reading note facet: {err:?}"))
     })?;
     let note_json: daybook_types::doc::FacetRaw =
@@ -79,7 +79,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             continue;
         }
 
-        let claim_raw = claim_token.get().map_err(|err| {
+        let claim_raw = claim_token.get().await.map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("error reading claim facet: {err:?}"))
         })?;
         let claim = serde_json::from_str(&claim_raw).map_err(|err| {
@@ -100,7 +100,8 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         })?;
 
         claim_tag_token
-            .create(claim_id, &claim_json)
+            .create(claim_id.clone(), claim_json)
+            .await
             .map_err(|err| {
                 wflow_sdk::JobErrorX::Terminal(ferr!(
                     "error creating/updating claim facet: {err:?}"
@@ -131,46 +132,17 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .parse()
         .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("invalid claim ref url: {err}")))?;
 
-        let balance = compute_txn_balance(txn);
-
-        let dayledger_txn = types::Txn {
-            txn_id: claim_id.clone(),
-            ts: txn.date.to_string(),
-            status: map_txn_status(&txn.status),
-            payee: Some(txn.description.clone()),
-            note: None,
-            comment: if txn.comment.is_empty() {
-                None
-            } else {
-                Some(txn.comment.clone())
-            },
-            balance,
-            claim_refs: vec![daybook_types::doc::FacetRef {
-                r#ref: claim_ref_url,
-                heads: vec![],
-            }],
-            postings: txn
-                .postings
-                .iter()
-                .map(|posting| types::Posting {
-                    account_id: posting.account.clone(),
-                    amount: types::Amount {
-                        decimal: posting.amount.quantity.clone(),
-                        commodity: posting.amount.commodity.clone(),
-                    },
-                    r#type: map_posting_type(&posting.posting_type),
-                })
-                .collect(),
-            decision_log: vec![],
-        };
-
+        let dayledger_txn = project_txn(claim_id.clone(), txn, claim_ref_url);
         let txn_json = serde_json::to_string(&dayledger_txn).map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing txn: {err}"))
         })?;
 
-        txn_tag_token.create(claim_id, &txn_json).map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("error creating txn facet: {err:?}"))
-        })?;
+        txn_tag_token
+            .create(claim_id.clone(), txn_json)
+            .await
+            .map_err(|err| {
+                wflow_sdk::JobErrorX::Terminal(ferr!("error creating txn facet: {err:?}"))
+            })?;
     }
 
     // ── Account facets ────────────────────────────────────────────────
@@ -231,7 +203,8 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         })?;
 
         account_tag_token
-            .create(account_name, &account_json)
+            .create(account_name.clone(), account_json)
+            .await
             .map_err(|err| {
                 wflow_sdk::JobErrorX::Terminal(ferr!("error creating account facet: {err:?}"))
             })?;
@@ -322,7 +295,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
                 "existing ledger meta facet missing UPDATE right"
             )));
         }
-        let update_result = existing.update(&meta_json).map_err(|err| {
+        let update_result = existing.update(meta_json.clone()).await.map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("denied updating ledger meta facet: {err:?}"))
         })?;
         update_result.map_err(|err| {
@@ -330,11 +303,47 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         })?;
     } else {
         meta_tag_token
-            .create(daybook_types::doc::DEFAULT_FACET_ID, &meta_json)
+            .create(daybook_types::doc::DEFAULT_FACET_ID.to_string(), meta_json)
+            .await
             .map_err(|err| {
                 wflow_sdk::JobErrorX::Terminal(ferr!("error creating ledger meta facet: {err:?}"))
             })?;
     }
 
     Ok(())
+}
+
+/// Project one parsed hledger transaction into the `Txn` facet stored under `txn_id`, the id
+/// of the claim it was matched to; `claim_ref_url` points back at that claim facet.
+fn project_txn(
+    txn_id: String,
+    txn: &hledger::types::Transaction,
+    claim_ref_url: url::Url,
+) -> types::Txn {
+    types::Txn {
+        txn_id,
+        ts: txn.date.to_string(),
+        status: map_txn_status(&txn.status),
+        payee: Some(txn.description.clone()),
+        note: None,
+        comment: (!txn.comment.is_empty()).then(|| txn.comment.clone()),
+        balance: compute_txn_balance(txn),
+        claim_refs: vec![daybook_types::doc::FacetRef {
+            r#ref: claim_ref_url,
+            heads: vec![],
+        }],
+        postings: txn
+            .postings
+            .iter()
+            .map(|posting| types::Posting {
+                account_id: posting.account.clone(),
+                amount: types::Amount {
+                    decimal: posting.amount.quantity.clone(),
+                    commodity: posting.amount.commodity.clone(),
+                },
+                r#type: map_posting_type(&posting.posting_type),
+            })
+            .collect(),
+        decision_log: vec![],
+    }
 }

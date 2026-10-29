@@ -16,7 +16,14 @@ wit-bindgen.workspace = true
 
 [workspace]
 resolver = "3"
-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows"]
+members = [
+    ".",
+    "../plug_test_routines",
+    "../plug_plabels_routines",
+    "../plug_dayledger_routines",
+    "../test_wflows",
+    "../clay_rt_wcmp_web",
+]
 default-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows"]
 
 [workspace.package]
@@ -26,6 +33,9 @@ rust-version = "1.91"
 
 [workspace.dependencies]
 wasm_utils_rs = { path = "." }
+clay_rt_wcmp = { path = "../clay_rt_wcmp" }
+wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "687e486c3bbf4c265f7edb5bc13e6c9c91ccee60" }
+wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "687e486c3bbf4c265f7edb5bc13e6c9c91ccee60" }
 plug_test_manifest = { path = "../plug_test_manifest" }
 plug_plabels_manifest = { path = "../plug_plabels_manifest" }
 plug_dayledger_manifest = { path = "../plug_dayledger_manifest" }
@@ -44,7 +54,7 @@ blake3 = "1.8"
 pastey = "0.1"
 color-eyre = "0.6"
 thiserror = "2"
-wit-bindgen = "0.60.0"
+wit-bindgen = "0.62.0"
 tokio = { version = "1.51", default-features = false }
 axum = { version = "0.8.9", default-features = false }
 axum-extra = { version = "0.12.6", default-features = false }

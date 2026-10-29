@@ -23,8 +23,7 @@ const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-candidates-learner";
 const DOWNSIZE_MAX_SIDE: u32 = 896;
 const DOWNSIZE_JPEG_QUALITY: u8 = 80;
 
-pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
-    use super::resolve_facet_write_target;
+pub async fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::WellKnownFacet;
@@ -34,17 +33,18 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
 
-    let embedding_facet_token = args
-        .primary_doc
-        .facets
-        .iter()
-        .find(|tag| tag.key() == embedding_facet_key && tag.rights().contains(FacetRights::READ))
-        .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "embedding facet key '{}' not found with read rights",
-                embedding_facet_key
-            ))
-        })?;
+    let embedding_facet_token = super::find_facet_token(
+        &args.primary_doc.facets,
+        &embedding_facet_key,
+        FacetRights::READ,
+    )
+    .await
+    .ok_or_else(|| {
+        JobErrorX::Terminal(ferr!(
+            "embedding facet key '{}' not found with read rights",
+            embedding_facet_key
+        ))
+    })?;
     let sqlite_connection =
         tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
             JobErrorX::Terminal(ferr!("missing sqlite connection '{LOCAL_STATE_KEY}'"))
@@ -54,32 +54,45 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     let config_facet_tag = PlabelFacetTag::PseudoLabelCandidatesFacet
         .as_str()
         .to_string();
-    let ro_config_token = args
-        .config_docs
-        .iter()
-        .flat_map(|cd| cd.facets.iter())
-        .find(|tag| tag.key() == config_facet_key && tag.rights().contains(FacetRights::READ));
-    let rw_config_token = args
-        .config_docs
-        .iter()
-        .flat_map(|cd| cd.facets.iter())
-        .find(|tag| tag.key() == config_facet_key && tag.rights().contains(FacetRights::UPDATE));
-    let config_write_target = args.config_docs.iter().find_map(|cd| {
-        resolve_facet_write_target(
-            &cd.facets,
-            &cd.tags,
+    let mut rw_config_token = None;
+    let mut ro_config_token = None;
+    for config_doc in &args.config_docs {
+        if rw_config_token.is_none() {
+            rw_config_token =
+                super::find_facet_token(&config_doc.facets, &config_facet_key, FacetRights::UPDATE)
+                    .await;
+        }
+        if ro_config_token.is_none() {
+            ro_config_token =
+                super::find_facet_token(&config_doc.facets, &config_facet_key, FacetRights::READ)
+                    .await;
+        }
+        if rw_config_token.is_some() && ro_config_token.is_some() {
+            break;
+        }
+    }
+    let mut config_write_target = None;
+    for config_doc in &args.config_docs {
+        if let Ok(target) = super::resolve_facet_write_target(
+            &config_doc.facets,
+            &config_doc.tags,
             &config_facet_key,
             &config_facet_tag,
             "label candidates config",
         )
-        .ok()
-    });
+        .await
+        {
+            config_write_target = Some(target);
+            break;
+        }
+    }
     if rw_config_token.is_none() && ro_config_token.is_none() && config_write_target.is_none() {
         return Ok(());
     }
 
     let embedding_raw = embedding_facet_token
         .get()
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error reading embedding facet: {err:?}")))?;
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing embedding facet json: {err}")))?;
@@ -109,17 +122,15 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         return Ok(());
     }
     let blob_facet_key = parsed_ref.facet_key.to_string();
-    let blob_facet_token = args
-        .primary_doc
-        .facets
-        .iter()
-        .find(|tag| tag.key() == blob_facet_key && tag.rights().contains(FacetRights::READ));
+    let blob_facet_token =
+        super::find_facet_token(&args.primary_doc.facets, &blob_facet_key, FacetRights::READ).await;
     let Some(blob_facet_token) = blob_facet_token else {
         return Ok(());
     };
 
     let blob_raw = blob_facet_token
         .get()
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error reading blob facet: {err:?}")))?;
     let blob_json: daybook_types::doc::FacetRaw = serde_json::from_str(&blob_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing blob facet json: {err}")))?;
@@ -133,12 +144,12 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         return Ok(());
     }
 
-    cx.effect(|| {
+    cx.effect(async || {
         use crate::wit::townframe::daybook::mltools_image_tools;
         use crate::wit::townframe::daybook::mltools_llm_chat;
 
-        let mut proposal_set = load_or_init_proposal_set(rw_config_token, ro_config_token)?;
-        ensure_embedding_cache_schema(sqlite_connection)?;
+        let mut proposal_set = load_or_init_proposal_set(rw_config_token, ro_config_token).await?;
+        ensure_embedding_cache_schema(sqlite_connection).await?;
 
         let downsized = mltools_image_tools::downsize_image_from_blob(
             blob_facet_token.clone(None).map_err(|err| {
@@ -147,13 +158,15 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             DOWNSIZE_MAX_SIDE,
             DOWNSIZE_JPEG_QUALITY,
         )
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error downsizing image: {err}")))?;
 
         let llm_text = mltools_llm_chat::llm_chat_multimodal(
-            &build_multimodal_prompt(),
-            &downsized.bytes,
-            &downsized.mime,
+            build_multimodal_prompt(),
+            downsized.bytes,
+            downsized.mime,
         )
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error calling multimodal llm: {err}")))?;
 
         let Some(parsed_proposal) = parse_llm_answer(&llm_text) else {
@@ -163,8 +176,23 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             return Ok(Json(()));
         };
 
+        let mut centroids = std::collections::HashMap::new();
+        for label in &proposal_set.labels {
+            centroids.insert(
+                label.prompts.clone(),
+                proposal_centroid(sqlite_connection, &label.prompts).await?,
+            );
+        }
+        let new_label_prompts = new_label.prompts.clone();
+        centroids.insert(
+            new_label_prompts,
+            proposal_centroid(sqlite_connection, &new_label.prompts).await?,
+        );
         let merged = merge_label_proposal_with_dedupe(&proposal_set, new_label, |prompts| {
-            proposal_centroid(sqlite_connection, prompts).map_err(|err| eyre::eyre!("{err}"))
+            centroids
+                .get(prompts)
+                .cloned()
+                .ok_or_else(|| eyre::eyre!("missing precomputed proposal centroid"))
         })
         .map_err(|err| JobErrorX::Terminal(err.wrap_err("error merging learned label proposal")))?;
 
@@ -178,27 +206,31 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
                         ))
                     })?;
                 let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
-                target.write(
-                    &facet_raw,
-                    "error updating learned proposal set",
-                    "error creating learned proposal set",
-                )?;
+                target
+                    .write(
+                        &facet_raw,
+                        "error updating learned proposal set",
+                        "error creating learned proposal set",
+                    )
+                    .await?;
             }
         }
 
         Ok(Json(()))
-    })?;
+    })
+    .await?;
 
     Ok(())
 }
 
-fn load_or_init_proposal_set(
+async fn load_or_init_proposal_set(
     rw_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetToken>,
     ro_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetToken>,
 ) -> Result<PseudoLabelCandidatesFacet, JobErrorX> {
     if let Some(token) = ro_config_token {
         let raw = token
             .get()
+            .await
             .map_err(|err| JobErrorX::Terminal(ferr!("error reading config facet: {err:?}")))?;
         let facet_raw: daybook_types::doc::FacetRaw =
             serde_json::from_str(&raw).map_err(|err| {
@@ -210,6 +242,7 @@ fn load_or_init_proposal_set(
     } else if let Some(token) = rw_config_token {
         let raw = token
             .get()
+            .await
             .map_err(|err| JobErrorX::Terminal(ferr!("error reading config facet: {err:?}")))?;
         let facet_raw: daybook_types::doc::FacetRaw =
             serde_json::from_str(&raw).map_err(|err| {
@@ -223,10 +256,12 @@ fn load_or_init_proposal_set(
     }
 }
 
-fn ensure_embedding_cache_schema(
+async fn ensure_embedding_cache_schema(
     sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
 ) -> Result<(), JobErrorX> {
-    sqlite_connection
+    use sqlite_rs::BackendRef;
+    let sqlite = BackendRef::new(sqlite_connection);
+    sqlite
         .execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS learned_label_text_embedding_cache (
@@ -235,38 +270,42 @@ fn ensure_embedding_cache_schema(
                 dim INTEGER NOT NULL,
                 vector BLOB NOT NULL
             ) STRICT;
-            "#,
+            "#
+            .to_string(),
         )
+        .await
         .map_err(|err| {
             JobErrorX::Terminal(ferr!("error initializing learned label cache db: {err:?}"))
         })?;
     Ok(())
 }
 
-fn proposal_centroid(
+async fn proposal_centroid(
     sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     prompts: &[String],
 ) -> Result<Vec<f32>, JobErrorX> {
     let mut vectors = Vec::with_capacity(prompts.len());
     for prompt in prompts {
-        vectors.push(get_or_compute_text_embedding(sqlite_connection, prompt)?);
+        vectors.push(get_or_compute_text_embedding(sqlite_connection, prompt).await?);
     }
     mean_normalized(&vectors)
         .ok_or_else(|| JobErrorX::Terminal(ferr!("unable to compute proposal centroid")))
 }
 
-fn get_or_compute_text_embedding(
+async fn get_or_compute_text_embedding(
     sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     query_text: &str,
 ) -> Result<Vec<f32>, JobErrorX> {
     use crate::wit::townframe::daybook::mltools_embed;
-    use crate::wit::townframe::sqlite::types::SqlValue;
+    use sqlite_rs::BackendRef;
+    use sqlite_rs::SqlValue;
 
-    let cache_rows = sqlite_connection
+    let sqlite = BackendRef::new(sqlite_connection);
+    let cache_rows = sqlite
         .query(
-            "SELECT model_tag, dim, vector FROM learned_label_text_embedding_cache WHERE query_text = ?1",
-            &[SqlValue::Text(query_text.to_string())],
-        )
+            "SELECT model_tag, dim, vector FROM learned_label_text_embedding_cache WHERE query_text = ?1".to_string(),
+            vec![SqlValue::Text(query_text.to_string())],
+        ).await
         .map_err(|err| JobErrorX::Terminal(ferr!("error querying learned label embedding cache: {err:?}")))?;
     if let Some(row) = cache_rows.rows.first() {
         let model_tag = row_text(&cache_rows, row, "model_tag").ok_or_else(|| {
@@ -298,7 +337,8 @@ fn get_or_compute_text_embedding(
         }
     }
 
-    let embed_result = mltools_embed::embed_text(query_text)
+    let embed_result = mltools_embed::embed_text(query_text.to_string())
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error embedding prompt text: {err}")))?;
     if !embed_result
         .model_id
@@ -311,18 +351,18 @@ fn get_or_compute_text_embedding(
         )));
     }
     let vector_bytes = daybook_types::doc::embedding_f32_slice_to_le_bytes(&embed_result.vector);
-    sqlite_connection
+    sqlite
         .execute(
             "INSERT INTO learned_label_text_embedding_cache (query_text, model_tag, dim, vector) \
              VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(query_text) DO UPDATE SET model_tag = excluded.model_tag, dim = excluded.dim, vector = excluded.vector",
-            &[
+             ON CONFLICT(query_text) DO UPDATE SET model_tag = excluded.model_tag, dim = excluded.dim, vector = excluded.vector".to_string(),
+            vec![
                 SqlValue::Text(query_text.to_string()),
                 SqlValue::Text(embed_result.model_id.clone()),
                 SqlValue::Integer(embed_result.dimensions as i64),
                 SqlValue::Blob(vector_bytes),
             ],
-        )
+        ).await
         .map_err(|err| JobErrorX::Terminal(ferr!("error upserting learned label embedding cache: {err:?}")))?;
     Ok(embed_result.vector)
 }

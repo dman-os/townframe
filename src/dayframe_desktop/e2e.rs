@@ -1,5 +1,6 @@
 use crate::composition::Application;
-use crate::composition::DesktopRuntime;
+use crate::composition::CompositionRuntime;
+use crate::composition::desktop_runtime;
 use blitz_dom::BaseDocument;
 use blitz_dom::DocumentConfig;
 use blitz_dom::LocalName;
@@ -217,12 +218,12 @@ struct SettingsFixture {
 
 impl SettingsFixture {
     async fn start() -> Self {
-        fn composed(runtime: DesktopRuntime) -> Element {
+        fn composed(runtime: CompositionRuntime) -> Element {
             let runtime = use_signal(move || runtime);
             rsx! { Application { runtime } }
         }
 
-        let runtime = DesktopRuntime::new();
+        let runtime = desktop_runtime();
         let application = runtime.application.clone();
         let mock = application.mock_documents();
         let counter_facet = application

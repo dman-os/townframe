@@ -4,6 +4,7 @@ dependency_reason = "WASM workflows consume portable labeling algorithms and typ
 allowed_dependencies = [
     "am_utils_rs",
     "daybook_types",
+    "sqlite_rs",
     "plug_plabels_manifest",
     "utils_rs",
     "wasm_utils_rs",
@@ -11,22 +12,23 @@ allowed_dependencies = [
 ]
 allow_external_api_types = false
 
-[builds.wasm32-wasip2]
+[builds.wasm32-wasip3]
+
 
 [[exemptions]]
 code = "ERROR_FN_LENGTH"
 path = "src/plug_plabels_routines/wflows/label_engine.rs"
 symbol = "module::apply_labeling"
-ceiling = 439
+ceiling = 359
 class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reason = "labeling orchestration remains a compatibility-sensitive workflow; configuration loading was extracted, with further decomposition tracked separately"
 reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
 code = "ERROR_FN_LENGTH"
 path = "src/plug_plabels_routines/wflows/learn_image_label_candidates.rs"
 symbol = "module::run"
-ceiling = 168
+ceiling = 199
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"

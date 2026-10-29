@@ -31,19 +31,19 @@ interface sqlite-connection {
   use types.{sql-value, result-set, execute-result, query-error};
 
   resource transaction {
-    query: func(query: string, params: list<sql-value>) -> result<result-set, query-error>;
-    execute: func(query: string, params: list<sql-value>) -> result<execute-result, query-error>;
-    execute-batch: func(query: string) -> result<execute-result, query-error>;
-    commit: func() -> result<_, query-error>;
-    rollback: func() -> result<_, query-error>;
+    query: async func(query: string, params: list<sql-value>) -> result<result-set, query-error>;
+    execute: async func(query: string, params: list<sql-value>) -> result<execute-result, query-error>;
+    execute-batch: async func(query: string) -> result<execute-result, query-error>;
+    commit: async func() -> result<_, query-error>;
+    rollback: async func() -> result<_, query-error>;
   }
 
   resource connection {
-    query: func(query: string, params: list<sql-value>) -> result<result-set, query-error>;
-    execute: func(query: string, params: list<sql-value>) -> result<execute-result, query-error>;
-    execute-batch: func(query: string) -> result<execute-result, query-error>;
+    query: async func(query: string, params: list<sql-value>) -> result<result-set, query-error>;
+    execute: async func(query: string, params: list<sql-value>) -> result<execute-result, query-error>;
+    execute-batch: async func(query: string) -> result<execute-result, query-error>;
     sqlite-file-path: func() -> string;
-    begin-transaction: func() -> result<transaction, query-error>;
+    begin-transaction: async func() -> result<transaction, query-error>;
   }
 }
 

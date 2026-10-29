@@ -590,10 +590,10 @@ fn test_wflows_wasm_path() -> Res<String> {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| repo_root.join("src/wasm_utils_rs/target"));
-    let path = target_dir.join("wasm32-wasip2/release/test_wflows.wasm");
+    let path = target_dir.join("wasm32-wasip3/release/test_wflows.wasm");
     eyre::ensure!(
         path.is_file(),
-        "{} not found; build with `cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml --release --target wasm32-wasip2 -p test_wflows`",
+        "{} not found; build with `cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml --release --target wasm32-wasip3 -p test_wflows`",
         path.display()
     );
     Ok(path.to_string_lossy().to_string())

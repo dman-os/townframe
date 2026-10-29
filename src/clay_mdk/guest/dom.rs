@@ -30,7 +30,10 @@ impl GuestDom {
         use dioxus::prelude::*;
 
         dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-        let targets = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let targets = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
+            u64,
+            dioxus_core::RenderTargetId,
+        )>::new()));
         let root_targets = targets.clone();
         let mut dom = dioxus_core::VirtualDom::new_with_props(
             move |()| {

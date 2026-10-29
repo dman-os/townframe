@@ -235,9 +235,11 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
     }
 }
 
-impl drawer::Host for SharedWashCtx {
+impl drawer::Host for &mut SharedWashCtx {}
+
+impl<T: 'static> drawer::HostWithStore<T> for wasmtime::component::HasSelf<SharedWashCtx> {
     async fn get_doc_at_heads(
-        &mut self,
+        accessor: &wasmtime::component::Accessor<T, Self>,
         doc_id: drawer::DocId,
         heads: drawer::Heads,
     ) -> wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>> {
@@ -250,12 +252,17 @@ impl drawer::Host for SharedWashCtx {
         };
         let heads = ChangeHashSet(heads);
 
-        let plugin = DaybookPlugin::from_ctx(self);
-        let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(self)
-            .ok_or_else(|| wasmtime_err("only wflows are supported as drawer host"))?;
-        let job_id = wflow_plugin
-            .job_id_of_ctx(self)
-            .expect("there should be a job??");
+        let (plugin, job_id) = accessor.with(|mut access| {
+            let ctx = access.get();
+            let plugin = DaybookPlugin::from_ctx(ctx);
+            let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(ctx)
+                .ok_or_else(|| wasmtime_err("only wflows are supported as drawer host"))?;
+            let job_id = wflow_plugin
+                .job_id_of_ctx(ctx)
+                .ok_or_else(|| wasmtime_err("there should be a job??"))?;
+            Ok::<_, wasmtime::Error>((plugin, job_id))
+        })?;
+
         let Some(dispatch) = plugin.dispatch_repo.get_by_wflow_job(&job_id[..]).await else {
             return Err(wasmtime_err(format!(
                 "no active dispatch found for job: {job_id}"
@@ -268,8 +275,7 @@ impl drawer::Host for SharedWashCtx {
         }) = &dispatch.args;
         if *dispatch_doc_id != doc_id {
             return Err(wasmtime_err(format!(
-                "doc_id mismatch for get_doc_at_heads: requested={} dispatch={}",
-                doc_id, dispatch_doc_id
+                "doc_id mismatch for get_doc_at_heads: requested={doc_id} dispatch={dispatch_doc_id}"
             )));
         }
 
@@ -296,7 +302,7 @@ impl drawer::Host for SharedWashCtx {
     }
 
     async fn update_doc_at_heads(
-        &mut self,
+        accessor: &wasmtime::component::Accessor<T, Self>,
         branch_path: String,
         heads: Option<drawer::Heads>,
         patch: drawer::DocPatch,
@@ -323,7 +329,7 @@ impl drawer::Host for SharedWashCtx {
                 drawer::UpdateDocError::InvalidPatch(err.to_string())
             })?;
 
-        let plugin = DaybookPlugin::from_ctx(self);
+        let plugin = accessor.with(|mut access| DaybookPlugin::from_ctx(access.get()));
         match plugin
             .patch_doc(BranchPath::new(&branch_path), heads, patch)
             .await

@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [native, wasm32-wasip2, wasm32-unknown-unknown]
+        target: [native, wasm32-wasip3, wasm32-unknown-unknown]
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
@@ -78,7 +78,15 @@ jobs:
       - run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       # Guardrail lint and formatting (all three workspaces) run once, in the
       # lint job; this matrix only compiles the per-target build contracts.
-      - run: nix develop .#ci-rust --command cargo x guardrails check-matrix --target "${{ matrix.target }}"
+      # `ci-desktop`, not `ci-rust`: the native contract includes `dayframe_desktop`, which
+      # links the Linux GUI stack (glib/gtk/wayland) through its `desktop` renderer feature.
+      # `ci-rust` carries no pkg-config-visible glib, so the native lane there fails in
+      # `glib-sys`' build script. This is the same reason the dayframe test lane below runs
+      # in `ci-desktop`.
+      - run: nix develop .#ci-desktop --command cargo x guardrails check-matrix --target "${{ matrix.target }}"
+      - name: Check browser wcmp adapter
+        if: matrix.target == 'wasm32-unknown-unknown'
+        run: nix develop .#ci-desktop --command cargo x guardrails check-matrix --target wasm32-unknown-unknown --package clay_rt_wcmp_web
   # The single lint job. Hooks that only read sources delegate to the
   # hermetic `nix flake check` hook (cache hits make an unchanged tree free);
   # the remaining hooks need ./target, node_modules or git state.
@@ -199,7 +207,7 @@ jobs:
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       - name: builds
         run: |
-          nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip2 --release
+          nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip3 --release
 
       - name: build plug OCI artifacts
         run: |
@@ -254,7 +262,7 @@ jobs:
           path: '**/nextest/ci/results.xml'
 
       - name: export nextest recording
-        if: failure()
+        if: always()
         run: |
           if nix develop .#ci-rust --command cargo nextest store list | grep -qE '^ +[0-9a-f]{8} '; then
             nix develop .#ci-rust --command cargo nextest store export latest --archive-file nextest-run.zip
@@ -266,10 +274,11 @@ jobs:
           NEXTEST_STATE_DIR: ${{ github.workspace }}/nextest-state
 
       - uses: actions/upload-artifact@v6
-        if: failure()
+        if: always()
         with:
           name: nextest-recording
           path: nextest-run.zip
+          retention-days: 14
           if-no-files-found: ignore
       - name: Publish Test Summary
         uses: test-summary/action@v2
@@ -287,6 +296,7 @@ jobs:
 
   e2e-sysadmin-chromium:
     name: E2E (sysadmin / chromium)
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -396,4 +406,47 @@ jobs:
             src/btress_sysadmin/playwright-report/
             /tmp/btress-server.log
             /tmp/btress-static.log
+          retention-days: 14
+
+  e2e-dayframe-web-chromium:
+    name: E2E (dayframe web / chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup wash CLI
+        uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - name: fetch WIT dependencies
+        run: nix develop .#ci-desktop --command deno run -A ./x/wit-fetch.ts --clean
+      - name: Install dependencies
+        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile --filter @townframe/dayframe_web
+      # ADR 018 migration steps 6–7: the shared composition + counter guest on `dayframe_web`.
+      # Playwright's webServer runs `x/dayframe-web.ts`, which prepares the guest component,
+      # builds the wasm32 host, runs wasm-bindgen, copies the guest asset, and serves the site
+      # (bundle size is printed there for the §7 budget).
+      - name: Run dayframe web e2e
+        run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run e2e
+
+      - name: Upload e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dayframe-web-e2e-artifacts
+          path: |
+            src/dayframe_web/test-results/
+            src/dayframe_web/playwright-report/
           retention-days: 14

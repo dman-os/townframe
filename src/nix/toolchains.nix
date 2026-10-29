@@ -3,7 +3,7 @@
 # `nix build .#daybook-cli` compiles with the exact rustc the CI shells use.
 { pkgs }:
 let
-  rustVersion = "2026-08-16";
+  rustVersion = "2026-09-17";
 in
 {
   inherit rustVersion;
@@ -16,7 +16,7 @@ in
     ];
     targets = [
       "wasm32-unknown-unknown"
-      "wasm32-wasip2"
+      "wasm32-wasip3"
     ]
     ++ (
       if pkgs.stdenv.hostPlatform.isLinux then
@@ -34,7 +34,7 @@ in
     extensions = [ "rust-src" ];
     targets = [
       "wasm32-unknown-unknown"
-      "wasm32-wasip2"
+      "wasm32-wasip3"
       "armv7-linux-androideabi"
       "aarch64-linux-android"
       "i686-linux-android"
@@ -47,7 +47,7 @@ in
     extensions = [ "rust-src" ];
     targets = [
       "wasm32-unknown-unknown"
-      "wasm32-wasip2"
+      "wasm32-wasip3"
       "armv7-linux-androideabi"
       "aarch64-linux-android"
       "i686-linux-android"
