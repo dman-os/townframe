@@ -1,8 +1,8 @@
 # Agent engineering guardrails — open items
 
-Status: PR #70 merged; post-merge reconciliation and follow-up planning (see §0.4–0.5)
+Status: PR #70 merged; post-merge reconciliation and follow-up planning (see §0.4–0.6)
 Owner: operator + agent engineering track
-Updated: 2026-10-21 (shakeout and source audit; approval provenance restored)
+Updated: 2026-10-27 (Cabinet merge validation; earlier approval provenance preserved)
 Scope: Rust workspace only. The Kotlin/Compose app (`src/daybook_compose`) is being
 deleted and replaced with Rust, so every Kotlin item (detekt thresholds,
 `ForbiddenImport`, the generated `uniffi/*.kt`) is explicitly out of scope.
@@ -336,6 +336,72 @@ scaffolding). None requires un-shelving sccache or a whole-workspace lint cleanu
 References read for this proposal on 2026-10-21:
 - [Crane quick start: reusable dependency artifacts, packages, apps and checks](https://crane.dev/examples/quick-start.html).
 - [ORAS copy: OCI layout import/export and registry upload](https://oras.land/docs/commands/oras_cp/).
+
+### 0.6 Cabinet merge validation (2026-10-27)
+
+Scope: reconcile the Cabinet stack with merge `90e8c2d85288ff0b22f060f076e20b0c2a288731`,
+replace Cabinet/Node's SQLx boundary with `sqlite_rs`, and investigate the resulting gates.
+This is not a new authorization for the architectural cleanup proposals above.
+
+Completed in the working tree:
+
+- Cabinet's authority, commands, grants, drawers, facet-set and facet-reference stores use
+  `Database`, leased transactions, and six generated SQL units. Their first migrations retain
+  existing table shapes and have reviewed path/hash registrations in Cabinet's policy.
+- Node passes the shared SQLite runtime into BigRepo. Reopen tests construct a fresh runtime;
+  rollback, recovery, first-boot identity, legacy-authority refusal, cursor monotonicity, and
+  post-commit notifications are exercised. Grant retraction happens before waiting for the
+  shared writer, with a held-writer regression test.
+- Added exemption-free native policies for `big_cabinet`, `big_cabinet_core`, `big_node`,
+  `service_core_rs`, `service_client_rs`, `service_utils_rs`, `macros`, and `sqlx_utils_rs`.
+  These policies do not enroll new public API snapshots or claim Wasm support. The standalone
+  legacy `sqlx_utils_rs` crate remains; Cabinet and Node no longer depend on it.
+- Fixed the missed runtime argument in BigRepo's sync-interest test. Normalized generated SQL
+  Rust to exactly one terminal newline: two regression assertions failed before the generator
+  fix and pass afterward. The twelve older generated units have no resulting diff.
+- Applied the repository formatter, including merged import layouts and `paseo.json`.
+  Rust changes outside Cabinet/Node, `big_repo/interest.rs`, and `xtask/sql.rs` were checked
+  against formatting their `HEAD` contents and are formatting-only.
+
+Verification used `nix develop .#ci-rust -c ./x/agent-build.ts --` for Cargo commands:
+
+- `cargo nextest run --locked -p big_cabinet -p big_node`: **362 passed, 0 skipped**.
+- `cargo nextest run --locked -p xtask -E 'test(sql::tests::)'`: **8 passed**, 10 filtered out.
+- `cargo nextest run -p big_repo -E 'test(repo_sync_demand_incremental_peer_scope_and_consumer_grace)'`:
+  **1 passed**, 441 filtered out.
+- `cargo clippy --locked --all-targets --all-features -p big_cabinet -p big_node -p big_repo -p big_cabinet_core -p service_core_rs -p service_client_rs -p service_utils_rs -p macros -p sqlx_utils_rs -p xtask`: passed.
+- `cargo x sql gen --check --all`: all **18** units current; Cabinet contributes 60 queries.
+- `cargo x guardrails api --all --check`: all five enrolled snapshots match;
+  `cargo x guardrails doctor`: passed.
+- `cargo x guardrails check-matrix --package <package> --target native`: actual isolated
+  native configurations passed for each of the eight new policies, not just a dry run.
+- `nix flake check`: passed on x86_64-linux after formatting; `git diff --check`: passed.
+  No full-workspace test run, full target-matrix run, or Wasm verification is implied.
+
+**Repository guardrail lint remains failing: 68 diagnostics across 915 source modules.**
+There are no missing-policy, dependency-boundary, target/feature-contract, or migration-history
+findings. The residuals are not covered by new exemptions. Reproduce with
+`cargo x guardrails lint`; the inventory below pins the current failure rather than treating
+successful builds as a green lint verdict.
+
+| Area | Count | Findings and concrete sites |
+|---|---:|---|
+| `big_cabinet` | 20 | Six oversized functions: `DocsService::observe_availability`, the `ObserveFacets` handler, `DocsService::recover`, `creation_and_recovery_grant_originating_actor_not_bound_signer`, drawer `run_script`, and the scoped-query test. Seven oversized inline test modules in `doc/{availability,claim_history,inspect}.rs`, `grants.rs`, `index/{facet_ref,facet_set}.rs`, and `schema.rs`. Wildcard exports in `authority.rs`, `doc.rs`, and `drawer.rs`; shared async state in authority/grants; drawer module has 42 items against 40; `drawer/e2e/model.rs::crash_through` uses `allow`. |
+| `big_cabinet_core` | 17 | Six oversized functions: `normalize_authoring`, `Compiler::position`, `Overlay::apply` (500 against 160), `check_supplement`, `accepts`, and `native_at`. Seven oversized inline test modules in `dmeta.rs`, `dmeta/{attribution,native,storage}.rs`, `facet/{input,lexicon}.rs`, and `schema_compat.rs`. Module item budgets exceeded in `doc.rs`, `drawer/protocol.rs`, and `schema_compat.rs`; `facet/codec/target.rs::reconcile_json` uses `allow`. |
+| `big_repo` | 9 | Sync-interest test length/inline-module budgets; hub `handle_cmd` 467 against 461 and `handle_evt` 448 against 420; doc-worker inline tests 833 against 752 and missing `spawn_doc_worker` lint reason; `BigKeyhiveHandle` 43 methods against 41 and `BigRepo` 71 against 64. The hub-test exemption is stale and can only be lowered, to 331, not broadened. |
+| `big_sync` | 2 | Oversized `subscription_sources_incremental_union_peer_scope_drop_and_reconnect` test and `BigSyncWorker::handle_msg`. |
+| `macros` | 2 | Oversized `enum_shape` and `string_enum_shape`. |
+| `service_client_rs` | 3 | Wildcard exports in `lib.rs`/`xrpc.rs`; shared async state in `xrpc/iroh.rs`. |
+| `service_utils_rs` | 8 | Seven wildcard exports in `admission.rs`, `client.rs`, `context.rs`, `operation.rs`, `sample.rs`, `xrpc.rs`, and `xrpc/ws.rs`; `dispatch_subscription` is 161 lines against 160. |
+| Documentation | 7 | ADR identity collisions 014–017: Cabinet drawers / Dayframe application architecture; documents / Clay composition; facet schema / Dayframe architecture; authority / Clay collection. Broken targets `docs/wiki/keyhive.md` from `docs/wiki/docs.md:18` and `docs/wiki/big_repo.md` from `docs/wiki/drawer.md:196`. `lexicon-authoring` lacks its required AGENTS reference. |
+
+The merge diff against its main parent adds the four colliding Cabinet ADRs and the two
+wiki pages carrying missing targets. Resolving ADR identities needs an explicit identity
+policy; none were silently renamed here. The remaining source findings require focused
+cleanup, not larger ceilings or mechanical replacement of async locks. A separate design
+question remains whether multiple live `Grants` instances may share a namespace: their gate
+caches and mutation mutexes are instance-local; the migration does not establish cross-instance
+coordination.
 
 ## 1. Decisions locked by the operator
 

@@ -2,14 +2,18 @@
 resolver = "3"
 members = [
   "./src/am_utils_rs",
+  "./src/big_cabinet/",
+  "./src/big_cabinet_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
+  "./src/big_node/",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
   "./src/daybook_pdk",
   "./src/daybook_types",
+  "./src/macros",
   "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
@@ -17,6 +21,9 @@ members = [
   "./src/plug_plabels_manifest",
   "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
+  "./src/service_core_rs/",
+  "./src/service_client_rs/",
+  "./src/service_utils_rs/",
   "./src/sqlite_rs/",
   "./src/utils_rs",
   "./src/wash_plugin_sqlite/",
@@ -80,6 +87,9 @@ am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
+service_core_rs = { path = "./src/service_core_rs", default-features = false }
+service_client_rs = { path = "./src/service_client_rs", default-features = false }
+service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
 daybook_pdk = { path = "./src/daybook_pdk", default-features = false }
@@ -93,6 +103,7 @@ wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
+big_node = { path = "./src/big_node/" }
 clay_collection = { path = "./src/clay_collection" }
 clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }
@@ -117,7 +128,9 @@ dayframe_composition = { path = "./src/dayframe_composition" }
 #
 # meta
 syn = { version = "2", features = ["extra-traits"] }
-# bon = "3.9"
+proc-macro2 = "1"
+quote = "1"
+bon = "3.9"
 
 #
 # futures
@@ -130,6 +143,7 @@ async-lock = "3.4.2"
 future_form = "0.3.1"
 # ahash = "0.8"
 time = { version = "0.3", default-features = false, features = ["serde"] }
+jiff = { version = "0.2", features = ["serde"] }
 uuid = { version = "1", features = ["serde"] }
 once_cell = "1"
 parking_lot = "0.12"
@@ -239,7 +253,7 @@ qrcode = { version = "0.14.1", default-features = false }
 #
 # testing
 insta = { version =  "1.44", features = ["yaml", "filters"] }
-proptest = "1"
+proptest = "1.12"
 tempfile = "3"
 loom = "0.7.2"
 
@@ -259,7 +273,7 @@ wasmtime = "48.0.7"
 # two deps do not disagree on the p1/p2 (wiggle) surface; `p3` is what links the
 # WASI 0.3 imports a wasm32-wasip3 component brings in.
 wasmtime-wasi = { version = "48.0.7", default-features = false, features = ["p3"] }
-wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "1bcaebaeba509b8a59fd239e668abe6f02596794" }
+wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "1bcaebaeba509b8a59fd239e668abe6f02596794", default-features = false }
 wit-bindgen = "0.62.0"
 wstd = "0.6.8"
 # The browser guest engine (ADR 018). Upstream pins `wasm-bindgen = "=0.2.126"`

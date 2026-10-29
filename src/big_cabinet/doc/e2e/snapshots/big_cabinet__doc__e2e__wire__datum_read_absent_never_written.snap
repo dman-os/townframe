@@ -1,0 +1,11 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: read
+---
+{
+  "status": "absent",
+  "version": {
+    "heads": [],
+    "clock": 0
+  }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "big_node"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+big_cabinet = { path = "../big_cabinet" }
+big_cabinet_core = { path = "../big_cabinet_core" }
+big_repo.workspace = true
+secrets_rs.workspace = true
+service_utils_rs.workspace = true
+sqlite_rs.workspace = true
+utils_rs.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+big_sync_core.workspace = true
+serde_json.workspace = true
+keyring-core = { version = "1.0", default-features = false }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

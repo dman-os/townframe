@@ -31,6 +31,117 @@ use big_sync_core::TaskCounts;
 pub struct BigSyncWorkerHandle {
     host_tx: tokio::sync::mpsc::Sender<BigSyncWorkerMsg>,
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
+    subscription_tx: tokio::sync::mpsc::UnboundedSender<SubscriptionMsg>,
+    subscription_events: tokio::sync::broadcast::Sender<SubscriptionEvent>,
+}
+
+#[derive(Clone)]
+pub struct SubscriptionSource(Arc<SubscriptionSourceInner>);
+
+struct SubscriptionSourceInner {
+    id: u64,
+    tx: tokio::sync::mpsc::UnboundedSender<SubscriptionMsg>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubscriptionUpdate {
+    pub parts: HashMap<PartKey, BackendId>,
+    pub objects: HashMap<ObjKey, BackendId>,
+    pub removed_parts: HashSet<PartKey>,
+    pub removed_objects: HashSet<ObjKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionEvent {
+    pub peer_id: PeerKey,
+    pub update: SubscriptionUpdate,
+}
+
+impl SubscriptionSource {
+    pub async fn update(&self, peer_id: PeerKey, update: SubscriptionUpdate) -> Res<()> {
+        let (resp, rx) = tokio::sync::oneshot::channel();
+        self.0
+            .tx
+            .send(SubscriptionMsg::Update {
+                id: self.0.id,
+                peer_id,
+                update,
+                resp,
+            })
+            .map_err(|_| ferr!(ERROR_CHANNEL))?;
+        rx.await.wrap_err(ERROR_CHANNEL)??;
+        Ok(())
+    }
+
+    pub async fn remove_peer(&self, peer_id: PeerKey) -> Res<()> {
+        let (resp, rx) = tokio::sync::oneshot::channel();
+        self.0
+            .tx
+            .send(SubscriptionMsg::RemovePeer {
+                id: self.0.id,
+                peer_id,
+                resp,
+            })
+            .map_err(|_| ferr!(ERROR_CHANNEL))?;
+        rx.await.wrap_err(ERROR_CHANNEL)?;
+        Ok(())
+    }
+}
+
+impl Drop for SubscriptionSourceInner {
+    fn drop(&mut self) {
+        let _closed = self.tx.send(SubscriptionMsg::RemoveSource { id: self.id });
+    }
+}
+
+enum SubscriptionMsg {
+    Update {
+        id: u64,
+        peer_id: PeerKey,
+        update: SubscriptionUpdate,
+        resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
+    },
+    RemovePeer {
+        id: u64,
+        peer_id: PeerKey,
+        resp: tokio::sync::oneshot::Sender<()>,
+    },
+    RemoveSource {
+        id: u64,
+    },
+}
+
+#[derive(Default)]
+struct PeerSubscriptions {
+    parts: HashMap<PartKey, BackendId>,
+    objects: HashMap<ObjKey, BackendId>,
+}
+
+/// The change to one peer's effective (configured ∪ subscribed) routes caused by a
+/// single subscription or configuration delta. Only keys the delta named are ever
+/// recomputed, so a one-object interest change costs O(1) routes, not a rebuild and
+/// re-clone of the peer's whole route set.
+#[derive(Default)]
+struct SubscriptionDelta {
+    /// Routes that became effective, or whose effective backend changed.
+    parts: HashMap<PartKey, BackendId>,
+    objects: HashMap<ObjKey, BackendId>,
+    /// Routes that stopped being effective.
+    removed_parts: HashSet<PartKey>,
+    removed_objects: HashSet<ObjKey>,
+    /// Routes that became effective and were not effective before: the machine's
+    /// additions. A backend change to an already-effective route is not one.
+    added_parts: HashSet<PartKey>,
+    added_objects: HashSet<ObjKey>,
+}
+
+impl SubscriptionDelta {
+    fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+            && self.objects.is_empty()
+            && self.removed_parts.is_empty()
+            && self.removed_objects.is_empty()
+    }
 }
 
 type SharedPartitionStore = Arc<dyn crate::part_store::HostPartStore>;
@@ -119,6 +230,7 @@ pub struct StopToken {
 pub struct WorkerSnapshot {
     pub label: &'static str,
     pub peer_parts: HashMap<PeerKey, HashMap<PartKey, BackendId>>,
+    pub peer_objects: HashMap<PeerKey, HashMap<ObjKey, BackendId>>,
     pub full_sync_waiters: HashMap<u64, Vec<(PeerKey, PartKey)>>,
     pub last_object_syncs: Vec<(PeerKey, PartKey, big_sync_core::ObjKey, std::time::Instant)>,
     pub task_counts: TaskCounts,
@@ -145,6 +257,7 @@ impl WorkerSnapshot {
     pub fn convergence_eq(&self, other: &Self) -> bool {
         self.label == other.label
             && self.peer_parts == other.peer_parts
+            && self.peer_objects == other.peer_objects
             && self.full_sync_waiters == other.full_sync_waiters
             && self.last_object_syncs == other.last_object_syncs
             && self.task_counts == other.task_counts
@@ -187,6 +300,20 @@ impl StopToken {
 }
 
 impl BigSyncWorkerHandle {
+    pub fn subscription_source(&self) -> SubscriptionSource {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        SubscriptionSource(Arc::new(SubscriptionSourceInner {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            tx: self.subscription_tx.clone(),
+        }))
+    }
+
+    pub fn subscribe_subscription_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<SubscriptionEvent> {
+        self.subscription_events.subscribe()
+    }
+
     pub fn subscribe_stats(
         &self,
     ) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
@@ -369,6 +496,7 @@ pub fn spawn_big_sync_worker_with_options(
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
     let (stats_tx, _) = tokio::sync::broadcast::channel(1024);
+    let (subscription_events, _) = tokio::sync::broadcast::channel(1024);
 
     let mut machine = big_sync_core::BigSyncMachine::default();
     if let Some(backoff) = max_task_backoff {
@@ -378,6 +506,7 @@ pub fn spawn_big_sync_worker_with_options(
         machine.set_default_sync_mode(sync_mode);
     }
     let (host_tx, host_rx) = tokio::sync::mpsc::channel(64);
+    let (subscription_tx, subscription_rx) = tokio::sync::mpsc::unbounded_channel();
     let (sync_tx, sync_rx) = mpsc::bounded(64, "SyncWorkers".into(), "BigSyncMachine".into());
     let (task_tx, task_rx) = mpsc::bounded(64, "BigSync tasks".into(), "BigSyncMachine".into());
     let mut worker = BigSyncWorker {
@@ -393,11 +522,14 @@ pub fn spawn_big_sync_worker_with_options(
         sync_spawn_queue: default(),
 
         host_rx,
+        subscription_rx,
+        subscriptions: default(),
         sync_tx,
         sync_rx,
         task_tx,
         task_rx,
         stats_tx: stats_tx.clone(),
+        subscription_events: subscription_events.clone(),
         full_sync_waiters: default(),
 
         rpc_clients: default(),
@@ -467,7 +599,12 @@ pub fn spawn_big_sync_worker_with_options(
         tokio::task::spawn(async move { fut.await.unwrap() }.instrument(span.or_current()));
 
     Ok((
-        BigSyncWorkerHandle { host_tx, stats_tx },
+        BigSyncWorkerHandle {
+            host_tx,
+            stats_tx,
+            subscription_tx,
+            subscription_events,
+        },
         StopToken {
             cancel_token,
             join_handle,
@@ -510,6 +647,8 @@ struct BigSyncWorker {
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
 
     host_rx: tokio::sync::mpsc::Receiver<BigSyncWorkerMsg>,
+    subscription_rx: tokio::sync::mpsc::UnboundedReceiver<SubscriptionMsg>,
+    subscriptions: HashMap<u64, HashMap<PeerKey, PeerSubscriptions>>,
     machine: BigSyncMachine,
 
     machine_spawn_queue: VecDeque<MachineTask>,
@@ -520,6 +659,7 @@ struct BigSyncWorker {
     task_rx: mpsc::Receiver<MachineTaskMsg>,
     task_tx: mpsc::Sender<MachineTaskMsg>,
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
+    subscription_events: tokio::sync::broadcast::Sender<SubscriptionEvent>,
     full_sync_waiters: HashMap<u64, tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>>,
 
     tasks: HashMap<TaskId, TaskDeets>,
@@ -531,7 +671,9 @@ struct BigSyncWorker {
 }
 
 struct PeerState {
+    configured_parts: HashMap<PartKey, BackendId>,
     parts: HashMap<PartKey, BackendId>,
+    configured_objects: HashMap<ObjKey, BackendId>,
     objects: HashMap<ObjKey, BackendId>,
 }
 
@@ -653,6 +795,9 @@ impl BigSyncWorker {
                     debug!(worker = %self.label, ?evt, "big_sync worker received sync event");
                     self.machine.handle_evt(evt);
                 }
+                Some(msg) = self.subscription_rx.recv() => {
+                    self.handle_subscription(msg);
+                }
                 msg = self.host_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
@@ -726,6 +871,263 @@ impl BigSyncWorker {
         Ok(())
     }
 
+    /// The backend a part route for `peer_id` resolves to across the peer's configured
+    /// routes and every subscription source, or `None` when no route covers it. All
+    /// covering routes must agree on the backend.
+    fn covered_part(&self, peer_id: &PeerKey, part: &PartKey) -> Option<BackendId> {
+        let mut covered = self
+            .peers
+            .get(peer_id)
+            .and_then(|peer| peer.configured_parts.get(part))
+            .cloned();
+        for subscription in self
+            .subscriptions
+            .values()
+            .filter_map(|source| source.get(peer_id))
+        {
+            if let Some(backend) = subscription.parts.get(part) {
+                match &covered {
+                    Some(existing) => {
+                        assert_eq!(existing, backend, "part subscription backend conflict")
+                    }
+                    None => covered = Some(Arc::clone(backend)),
+                }
+            }
+        }
+        covered
+    }
+
+    /// The backend an object route for `peer_id` resolves to, as in [`Self::covered_part`].
+    fn covered_object(&self, peer_id: &PeerKey, object: &ObjKey) -> Option<BackendId> {
+        let mut covered = self
+            .peers
+            .get(peer_id)
+            .and_then(|peer| peer.configured_objects.get(object))
+            .cloned();
+        for subscription in self
+            .subscriptions
+            .values()
+            .filter_map(|source| source.get(peer_id))
+        {
+            if let Some(backend) = subscription.objects.get(object) {
+                match &covered {
+                    Some(existing) => {
+                        assert_eq!(existing, backend, "object subscription backend conflict")
+                    }
+                    None => covered = Some(Arc::clone(backend)),
+                }
+            }
+        }
+        covered
+    }
+
+    /// Recomputes the peer's effective routes for exactly the touched keys, applying
+    /// any change to the stored effective set, and returns what changed. `None` when
+    /// the peer is not registered: subscriptions for unknown peers are stored and
+    /// take effect when the peer is set.
+    fn recompute_effective_routes(
+        &mut self,
+        peer_id: &PeerKey,
+        touched_parts: HashSet<PartKey>,
+        touched_objects: HashSet<ObjKey>,
+    ) -> Option<SubscriptionDelta> {
+        self.peers.get(peer_id)?;
+        let mut delta = SubscriptionDelta::default();
+        for part in touched_parts {
+            let covered = self.covered_part(peer_id, &part);
+            let peer = self.peers.get_mut(peer_id).expect(ERROR_IMPOSSIBLE);
+            match (peer.parts.get(&part).cloned(), covered) {
+                (Some(existing), Some(backend)) if existing == backend => {}
+                (Some(_), Some(backend)) => {
+                    peer.parts.insert(part.clone(), Arc::clone(&backend));
+                    delta.parts.insert(part, backend);
+                }
+                (None, Some(backend)) => {
+                    peer.parts.insert(part.clone(), Arc::clone(&backend));
+                    delta.parts.insert(part.clone(), backend);
+                    delta.added_parts.insert(part);
+                }
+                (Some(_), None) => {
+                    peer.parts.remove(&part);
+                    delta.removed_parts.insert(part);
+                }
+                (None, None) => {}
+            }
+        }
+        for object in touched_objects {
+            let covered = self.covered_object(peer_id, &object);
+            let peer = self.peers.get_mut(peer_id).expect(ERROR_IMPOSSIBLE);
+            match (peer.objects.get(&object).cloned(), covered) {
+                (Some(existing), Some(backend)) if existing == backend => {}
+                (Some(_), Some(backend)) => {
+                    peer.objects.insert(object.clone(), Arc::clone(&backend));
+                    delta.objects.insert(object, backend);
+                }
+                (None, Some(backend)) => {
+                    peer.objects.insert(object.clone(), Arc::clone(&backend));
+                    delta.objects.insert(object.clone(), backend);
+                    delta.added_objects.insert(object);
+                }
+                (Some(_), None) => {
+                    peer.objects.remove(&object);
+                    delta.removed_objects.insert(object);
+                }
+                (None, None) => {}
+            }
+        }
+        Some(delta)
+    }
+
+    /// Hands one effective-route delta to the machine as an incremental `UpdatePeer`
+    /// and, when anyone observes subscription events, as a `SubscriptionEvent` carrying
+    /// the same delta. `create_peer` forces the machine event for a newly set peer
+    /// whose effective set is still empty, so the machine learns the peer exists.
+    fn publish_subscription_delta(
+        &mut self,
+        peer_id: &PeerKey,
+        delta: SubscriptionDelta,
+        create_peer: bool,
+    ) {
+        if delta.is_empty() && !create_peer {
+            return;
+        }
+        let event =
+            (self.subscription_events.receiver_count() > 0 && !delta.is_empty()).then(|| {
+                SubscriptionEvent {
+                    peer_id: peer_id.clone(),
+                    update: SubscriptionUpdate {
+                        parts: delta.parts,
+                        objects: delta.objects,
+                        removed_parts: delta.removed_parts.clone(),
+                        removed_objects: delta.removed_objects.clone(),
+                    },
+                }
+            });
+        self.machine
+            .handle_evt(BigSyncEvent::UpdatePeer(big_sync_core::UpdatePeerEvent {
+                peer_id: peer_id.clone(),
+                added_parts: delta.added_parts,
+                removed_parts: delta.removed_parts,
+                added_objects: delta.added_objects,
+                removed_objects: delta.removed_objects,
+            }));
+        if let Some(event) = event {
+            let _unobserved = self.subscription_events.send(event);
+        }
+    }
+
+    /// Every route must name a registered backend. The first part, then the first object,
+    /// naming an unknown backend is the error, and the caller applies nothing.
+    fn validate_routes(
+        &self,
+        parts: &HashMap<PartKey, BackendId>,
+        objects: &HashMap<ObjKey, BackendId>,
+    ) -> Result<(), BigSyncWorkerError> {
+        for (part_id, backend_id) in parts {
+            if !self.sync_backends.contains_key(backend_id) {
+                return Err(BigSyncWorkerError::UnknownBackend {
+                    backend_id: Arc::clone(backend_id),
+                    part_id: part_id.clone(),
+                });
+            }
+        }
+        for (obj_id, backend_id) in objects {
+            if !self.sync_backends.contains_key(backend_id) {
+                return Err(BigSyncWorkerError::UnknownObjectBackend {
+                    backend_id: Arc::clone(backend_id),
+                    obj_id: obj_id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_subscription(&mut self, msg: SubscriptionMsg) {
+        match msg {
+            SubscriptionMsg::Update {
+                id,
+                peer_id,
+                update,
+                resp,
+            } => {
+                if let Err(err) = self.validate_routes(&update.parts, &update.objects) {
+                    let _cancelled = resp.send(Err(err));
+                    return;
+                }
+                let touched_parts: HashSet<_> = update
+                    .parts
+                    .keys()
+                    .chain(update.removed_parts.iter())
+                    .cloned()
+                    .collect();
+                let touched_objects: HashSet<_> = update
+                    .objects
+                    .keys()
+                    .chain(update.removed_objects.iter())
+                    .cloned()
+                    .collect();
+                let source = self.subscriptions.entry(id).or_default();
+                let subscription = source.entry(peer_id.clone()).or_default();
+                for part in update.removed_parts {
+                    subscription.parts.remove(&part);
+                }
+                for object in update.removed_objects {
+                    subscription.objects.remove(&object);
+                }
+                subscription.parts.extend(update.parts);
+                subscription.objects.extend(update.objects);
+                if subscription.parts.is_empty() && subscription.objects.is_empty() {
+                    source.remove(&peer_id);
+                }
+                if source.is_empty() {
+                    self.subscriptions.remove(&id);
+                }
+                if let Some(delta) =
+                    self.recompute_effective_routes(&peer_id, touched_parts, touched_objects)
+                {
+                    self.publish_subscription_delta(&peer_id, delta, false);
+                }
+                let _cancelled = resp.send(Ok(()));
+            }
+            SubscriptionMsg::RemovePeer { id, peer_id, resp } => {
+                let removed = self
+                    .subscriptions
+                    .get_mut(&id)
+                    .and_then(|source| source.remove(&peer_id));
+                if let Some(removed) = removed {
+                    if self
+                        .subscriptions
+                        .get(&id)
+                        .is_some_and(|source| source.is_empty())
+                    {
+                        self.subscriptions.remove(&id);
+                    }
+                    if let Some(delta) = self.recompute_effective_routes(
+                        &peer_id,
+                        removed.parts.into_keys().collect(),
+                        removed.objects.into_keys().collect(),
+                    ) {
+                        self.publish_subscription_delta(&peer_id, delta, false);
+                    }
+                }
+                let _cancelled = resp.send(());
+            }
+            SubscriptionMsg::RemoveSource { id } => {
+                if let Some(source) = self.subscriptions.remove(&id) {
+                    for (peer_id, removed) in source {
+                        if let Some(delta) = self.recompute_effective_routes(
+                            &peer_id,
+                            removed.parts.into_keys().collect(),
+                            removed.objects.into_keys().collect(),
+                        ) {
+                            self.publish_subscription_delta(&peer_id, delta, false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn handle_msg(&mut self, msg: BigSyncWorkerMsg) -> Res<()> {
         match msg {
             BigSyncWorkerMsg::SetPeer {
@@ -735,64 +1137,10 @@ impl BigSyncWorker {
                 objects,
                 resp,
             } => {
-                for (part_id, backend_id) in &parts {
-                    if !self.sync_backends.contains_key(backend_id) {
-                        resp.send(Err(BigSyncWorkerError::UnknownBackend {
-                            backend_id: Arc::clone(backend_id),
-                            part_id: part_id.clone(),
-                        }))
-                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                        .ok();
-                        return Ok(());
-                    }
-                }
-                for (obj_id, backend_id) in &objects {
-                    if !self.sync_backends.contains_key(backend_id) {
-                        resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
-                            backend_id: Arc::clone(backend_id),
-                            obj_id: obj_id.clone(),
-                        }))
-                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                        .ok();
-                        return Ok(());
-                    }
-                }
-                self.rpc_clients.lock().expect(ERROR_MUTEX).insert(
-                    peer_id.clone(),
-                    Arc::new(crate::rpc::ScopedRpcClient {
-                        scope_key: Arc::clone(&self.scope_key),
-                        inner: client,
-                    }) as SharedPeerRpcClient,
-                );
-                self.peers.insert(
-                    peer_id.clone(),
-                    PeerState {
-                        parts: parts.clone(),
-                        objects: objects.clone(),
-                    },
-                );
-                let part_count = parts.len();
-                let object_count = objects.len();
-                let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
-                    peer_id: peer_id.clone(),
-                    parts: parts.into_keys().collect(),
-                    objects: objects.into_keys().collect(),
-                });
-                self.machine.handle_evt(evt);
-                resp.send(Ok(()))
-                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                    .ok();
-                tracing::debug!(peer_id = %peer_id, part_count, object_count, "accept set peer");
+                self.handle_set_peer(peer_id, client, parts, objects, resp);
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
-                self.peers.remove(&peer_id);
-                self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
-                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent {
-                    peer_id: peer_id.clone(),
-                });
-                self.machine.handle_evt(evt);
-                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
-                tracing::debug!(peer_id = %peer_id, "accept remove peer");
+                self.handle_remove_peer(peer_id, resp);
             }
             BigSyncWorkerMsg::SetReplayHoldMs { hold_ms, resp } => {
                 self.machine.set_replay_hold_ms(hold_ms);
@@ -805,36 +1153,7 @@ impl BigSyncWorker {
                 part_ids,
                 resp,
             } => {
-                for peer_id in &peer_ids {
-                    let Some(peer_state) = self.peers.get(peer_id) else {
-                        resp.send(Err(BigSyncWorkerError::UnknownPeer {
-                            peer_id: peer_id.clone(),
-                        }))
-                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                        .ok();
-                        return Ok(());
-                    };
-                    for part_id in &part_ids {
-                        if !peer_state.parts.contains_key(part_id) {
-                            resp.send(Err(BigSyncWorkerError::UnknownPart {
-                                peer_id: peer_id.clone(),
-                                part_id: part_id.clone(),
-                            }))
-                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                            .ok();
-                            return Ok(());
-                        }
-                    }
-                }
-                let old = self.full_sync_waiters.insert(waiter_id, resp);
-                assert!(old.is_none(), "fishy");
-                self.machine.handle_evt(BigSyncEvent::WaitForFullSync(
-                    big_sync_core::WaitForFullSyncEvent {
-                        waiter_id,
-                        peer_ids,
-                        part_ids,
-                    },
-                ));
+                self.handle_wait_for_full_sync(waiter_id, peer_ids, part_ids, resp);
             }
             #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::ReapZombieTasks { timeout, resp } => {
@@ -848,23 +1167,7 @@ impl BigSyncWorker {
             }
             #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::Snapshot { resp } => {
-                let snapshot = WorkerSnapshot {
-                    label: self.label,
-                    peer_parts: self
-                        .peers
-                        .iter()
-                        .map(|(peer_id, peer_state)| (peer_id.clone(), peer_state.parts.clone()))
-                        .collect(),
-                    full_sync_waiters: self.machine.debug_full_sync_waiters(),
-                    last_object_syncs: self.machine.debug_last_object_syncs(),
-                    task_counts: self.machine.task_counts(),
-                    active_machine_tasks: self.tasks.len(),
-                    active_sync_tasks: self.sync_tasks.len(),
-                    zombie_tasks: self.zombie_tasks.len(),
-                    peer_part_sync_flags: self.machine.debug_peer_part_sync_flags(),
-                    replay_pages: self.machine.debug_replay_pages(),
-                };
-                resp.send(snapshot)
+                resp.send(self.snapshot())
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
@@ -879,6 +1182,172 @@ impl BigSyncWorker {
             }
         }
         Ok(())
+    }
+
+    fn handle_set_peer(
+        &mut self,
+        peer_id: PeerKey,
+        client: SharedWireRpcClient,
+        parts: HashMap<PartKey, BackendId>,
+        objects: HashMap<ObjKey, BackendId>,
+        resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
+    ) {
+        if let Err(err) = self.validate_routes(&parts, &objects) {
+            resp.send(Err(err))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
+            return;
+        }
+        self.rpc_clients.lock().expect(ERROR_MUTEX).insert(
+            peer_id.clone(),
+            Arc::new(crate::rpc::ScopedRpcClient {
+                scope_key: Arc::clone(&self.scope_key),
+                inner: client,
+            }) as SharedPeerRpcClient,
+        );
+        let is_new = !self.peers.contains_key(&peer_id);
+        // A newly set peer starts with no effective routes, so routes a subscription
+        // registered for it before it was set can only become effective now.
+        let mut subscription_parts = HashSet::new();
+        let mut subscription_objects = HashSet::new();
+        if is_new {
+            for subscription in self
+                .subscriptions
+                .values()
+                .filter_map(|source| source.get(&peer_id))
+            {
+                subscription_parts.extend(subscription.parts.keys().cloned());
+                subscription_objects.extend(subscription.objects.keys().cloned());
+            }
+        }
+        let peer = self
+            .peers
+            .entry(peer_id.clone())
+            .or_insert_with(|| PeerState {
+                configured_parts: HashMap::new(),
+                configured_objects: HashMap::new(),
+                parts: HashMap::new(),
+                objects: HashMap::new(),
+            });
+        let part_count = parts.len();
+        let object_count = objects.len();
+        // Only routes the configuration change names can change effectiveness:
+        // subscription coverage of every other route is untouched by it, except on a
+        // newly set peer, whose pre-registered subscription routes take effect here.
+        let mut touched_parts: HashSet<_> = peer
+            .configured_parts
+            .keys()
+            .chain(parts.keys())
+            .cloned()
+            .collect();
+        touched_parts.extend(subscription_parts);
+        let mut touched_objects: HashSet<_> = peer
+            .configured_objects
+            .keys()
+            .chain(objects.keys())
+            .cloned()
+            .collect();
+        touched_objects.extend(subscription_objects);
+        peer.configured_parts = parts;
+        peer.configured_objects = objects;
+        let delta = self
+            .recompute_effective_routes(&peer_id, touched_parts, touched_objects)
+            .expect(ERROR_IMPOSSIBLE);
+        self.publish_subscription_delta(&peer_id, delta, is_new);
+        resp.send(Ok(()))
+            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+            .ok();
+        tracing::debug!(peer_id = %peer_id, part_count, object_count, "accept set peer");
+    }
+
+    fn handle_remove_peer(&mut self, peer_id: PeerKey, resp: tokio::sync::oneshot::Sender<()>) {
+        let previous = self.peers.remove(&peer_id);
+        self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
+        let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent {
+            peer_id: peer_id.clone(),
+        });
+        self.machine.handle_evt(evt);
+        if self.subscription_events.receiver_count() > 0
+            && let Some(previous) = previous
+            && (!previous.parts.is_empty() || !previous.objects.is_empty())
+        {
+            let _unobserved = self.subscription_events.send(SubscriptionEvent {
+                peer_id: peer_id.clone(),
+                update: SubscriptionUpdate {
+                    removed_parts: previous.parts.into_keys().collect(),
+                    removed_objects: previous.objects.into_keys().collect(),
+                    ..Default::default()
+                },
+            });
+        }
+        resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
+        tracing::debug!(peer_id = %peer_id, "accept remove peer");
+    }
+
+    /// The waiter reaches the machine only if every requested peer is known and already
+    /// syncs every requested part; otherwise the first missing peer or part is the reply.
+    fn handle_wait_for_full_sync(
+        &mut self,
+        waiter_id: u64,
+        peer_ids: HashSet<PeerKey>,
+        part_ids: HashSet<PartKey>,
+        resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
+    ) {
+        for peer_id in &peer_ids {
+            let Some(peer_state) = self.peers.get(peer_id) else {
+                resp.send(Err(BigSyncWorkerError::UnknownPeer {
+                    peer_id: peer_id.clone(),
+                }))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
+                return;
+            };
+            for part_id in &part_ids {
+                if !peer_state.parts.contains_key(part_id) {
+                    resp.send(Err(BigSyncWorkerError::UnknownPart {
+                        peer_id: peer_id.clone(),
+                        part_id: part_id.clone(),
+                    }))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+                    return;
+                }
+            }
+        }
+        let old = self.full_sync_waiters.insert(waiter_id, resp);
+        assert!(old.is_none(), "fishy");
+        self.machine.handle_evt(BigSyncEvent::WaitForFullSync(
+            big_sync_core::WaitForFullSyncEvent {
+                waiter_id,
+                peer_ids,
+                part_ids,
+            },
+        ));
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn snapshot(&self) -> WorkerSnapshot {
+        WorkerSnapshot {
+            label: self.label,
+            peer_parts: self
+                .peers
+                .iter()
+                .map(|(peer_id, peer_state)| (peer_id.clone(), peer_state.parts.clone()))
+                .collect(),
+            peer_objects: self
+                .peers
+                .iter()
+                .map(|(id, peer)| (id.clone(), peer.objects.clone()))
+                .collect(),
+            full_sync_waiters: self.machine.debug_full_sync_waiters(),
+            last_object_syncs: self.machine.debug_last_object_syncs(),
+            task_counts: self.machine.task_counts(),
+            active_machine_tasks: self.tasks.len(),
+            active_sync_tasks: self.sync_tasks.len(),
+            zombie_tasks: self.zombie_tasks.len(),
+            peer_part_sync_flags: self.machine.debug_peer_part_sync_flags(),
+            replay_pages: self.machine.debug_replay_pages(),
+        }
     }
 
     async fn batch_stop_tasks(&mut self) -> Res<()> {
@@ -1251,7 +1720,9 @@ mod tests {
         let peer_id = PeerKey::random();
         let obj_id = ObjKey::random();
         let peer = PeerState {
+            configured_parts: HashMap::new(),
             parts: [(PartKey::random(), Arc::from("backend"))].into(),
+            configured_objects: HashMap::new(),
             objects: HashMap::new(),
         };
         let task = SyncTask {
@@ -1277,6 +1748,7 @@ mod tests {
         WorkerSnapshot {
             label: "big_sync test",
             peer_parts: HashMap::new(),
+            peer_objects: HashMap::new(),
             full_sync_waiters: HashMap::new(),
             last_object_syncs: Vec::new(),
             task_counts,

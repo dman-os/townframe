@@ -418,4 +418,3 @@ pub async fn walker_state_value(db: &impl crate::sqlite_rs_alias::QueryExecutor,
     let set = db.query(WALKER_STATE_VALUE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace), crate::sqlite_rs_alias::IntoValue::into_value(consumer_id), crate::sqlite_rs_alias::IntoValue::into_value(state_key)]).await?;
     set.optional()
 }
-

@@ -492,18 +492,6 @@ impl BigKeyhiveHandle {
         BTreeMap::new()
     }
 
-    /// Whether this hive holds a document node for `id`.
-    ///
-    /// The `Identifier`-addressed twin of [`Self::get_group`]: an id is a
-    /// membered subject when it names either, and a caller that resolves the
-    /// kind itself must ask in the same order `agents_for_membered` does.
-    pub(crate) async fn has_document(&self, id: Identifier) -> bool {
-        self.keyhive
-            .get_document(KhDocumentId::from(id))
-            .await
-            .is_some()
-    }
-
     /// The graph an admitted event names, or why it names none.
     ///
     /// A `CgkaOperation` names its document; a `Delegated`/`Revoked` names the
@@ -580,6 +568,29 @@ impl BigKeyhiveHandle {
         None
     }
 
+    /// What [`Access`] `agent` holds on this doc/group through its own delegation, ignoring
+    /// whatever it reaches through the groups it is a member of. None if it is not a member.
+    pub async fn direct_access_on(
+        &self,
+        agent: &Identifier,
+        membered_id: Identifier,
+    ) -> Option<Access> {
+        let keyhive = self.keyhive.as_ref();
+        let membered =
+            if let Some(doc) = keyhive.get_document(KhDocumentId::from(membered_id)).await {
+                Membered::Document(KhDocumentId::from(membered_id), doc)
+            } else {
+                Membered::Group(
+                    KhGroupId::from(membered_id),
+                    keyhive.get_group(KhGroupId::from(membered_id)).await?,
+                )
+            };
+        membered
+            .get_capability(agent)
+            .await
+            .map(|delegation| delegation.payload.can())
+    }
+
     /// All groups AND docs `agent` can reach, with [`Access`].
     pub async fn membered_for_agent(&self, agent: &Identifier) -> HashMap<[u8; 32], Access> {
         let keyhive = self.keyhive.as_ref();
@@ -650,10 +661,10 @@ impl BigKeyhiveHandle {
 
     pub(crate) async fn document_ids_containing_group(
         &self,
-        group_id: Identifier,
+        group_id: KhGroupId,
     ) -> BTreeSet<DocumentId> {
         self.keyhive
-            .document_ids_containing_group(KhGroupId::from(group_id))
+            .document_ids_containing_group(group_id)
             .await
             .into_iter()
             .map(|id| DocumentId::new(id.to_bytes()))
@@ -1110,15 +1121,6 @@ impl BigKeyhiveHandle {
         Ok((BigKeyhiveGroup { id, inner }, hashes))
     }
 
-    pub(crate) async fn group_document_ids(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
-        self.keyhive
-            .document_ids_containing_group(group.id())
-            .await
-            .into_iter()
-            .map(|doc_id| DocumentId::new(doc_id.as_bytes()))
-            .collect()
-    }
-
     pub(crate) async fn add_member_to_group(
         &self,
         member: impl Into<BigKeyhiveAuthority>,
@@ -1153,6 +1155,53 @@ impl BigKeyhiveHandle {
         let mut hashes = persist_cgka_update_ops(protocol, update.cgka_ops).await?;
         if let Some(hash) = persist_delegation(protocol, update.delegation).await? {
             hashes.push(hash);
+        }
+        Ok((affected_docs, hashes))
+    }
+
+    /// Revoke every delegation `group` holds for `member`, with an explicit content frontier
+    /// per document the group governs. A member the group does not list directly is an empty
+    /// update: Keyhive revokes direct delegations only, and reports nothing to persist.
+    pub(crate) async fn remove_member_from_group(
+        &self,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+        after_content: BTreeMap<DocumentId, Vec<Vec<u8>>>,
+        protocol: &BigRepoKeyhiveProtocol,
+    ) -> Res<(BTreeSet<DocumentId>, Vec<EventHash>)> {
+        use keyhive_core::principal::membered::Membered;
+
+        let identifier = member.into().into_identifier();
+        let group_id = group.id();
+        let kh = self.keyhive.as_ref();
+        let after_content = after_content
+            .into_iter()
+            .map(|(doc_id, refs)| Ok((keyhive_doc_id(doc_id)?, refs)))
+            .collect::<Res<BTreeMap<_, _>>>()?;
+        let update = kh
+            .revoke_member_with_manual_content(
+                identifier,
+                true,
+                &Membered::Group(group_id, group.shared()),
+                after_content,
+            )
+            .await
+            .map_err(|err| ferr!("group member removal failed: {err}"))?;
+        let affected_docs = update
+            .cgka_ops()
+            .iter()
+            .map(|op| DocumentId::new(op.payload().doc_id().as_bytes()))
+            .collect();
+        let mut hashes = persist_cgka_update_ops(protocol, update.cgka_ops().to_vec()).await?;
+        for revocation in update.revocations() {
+            if let Some(hash) = persist_revocation(protocol, Arc::clone(revocation)).await? {
+                hashes.push(hash);
+            }
+        }
+        for redelegation in update.redelegations() {
+            if let Some(hash) = persist_delegation(protocol, Arc::clone(redelegation)).await? {
+                hashes.push(hash);
+            }
         }
         Ok((affected_docs, hashes))
     }

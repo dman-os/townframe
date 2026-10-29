@@ -26,7 +26,9 @@
 ## Stack
 
 - Top
-  - [ ] Built in updater
+  - [x] Facet writing skill
+  - [ ] Guardarails should fail for currently not valid exemptions
+  - [ ] Operation::XRPC sucks
   - [x] Per sink switch/index rebuild
   - [ ] Some std::mem::take sites can be a drain()
   - [x] Rewrite big_sync_core
@@ -121,6 +123,7 @@
   - [ ] store gc
   - [ ] Remove blobs from facet_set
   - [ ] download to tmp dir
+- [ ] Built in updater
 
 - [ ] Cleanup and show it to people
 

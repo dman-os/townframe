@@ -312,7 +312,11 @@ impl<M> KeyhiveAccessReader<M> {
     /// groups first; the two can only disagree on an id that is both a document
     /// and a group, which one keypair cannot produce.
     async fn access_subject(&self, id: Identifier) -> Res<Option<AccessSubject>> {
-        if self.keyhive.has_document(id).await {
+        if self
+            .keyhive
+            .keyhive_document_exists(crate::DocumentId::new(id.to_bytes()))
+            .await?
+        {
             return Ok(Some(AccessSubject::Document(id)));
         }
         if self.keyhive.get_group(KhGroupId::from(id)).await.is_some() {

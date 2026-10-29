@@ -77,4 +77,3 @@ pub async fn tags_for_doc(db: &impl crate::sqlite_rs_alias::QueryExecutor, docum
     let set = db.query(TAGS_FOR_DOC_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(document_id)]).await?;
     set.all()
 }
-

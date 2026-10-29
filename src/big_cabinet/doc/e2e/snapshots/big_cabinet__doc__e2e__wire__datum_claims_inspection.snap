@@ -1,0 +1,133 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: claims_inspection()
+---
+{
+  "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+  "datumKey": "org.example.note/main",
+  "heads": [
+    "0707070707070707070707070707070707070707070707070707070707070707"
+  ],
+  "scope": "unsafeUnattributedSignatureEvidence",
+  "evidence": [
+    {
+      "marker": "marker-1",
+      "result": {
+        "status": "verifiedSignature",
+        "evidence": {
+          "signature": {
+            "actorUuid": "02020202-0202-7202-8202-020202020202",
+            "signature": {
+              "$bytes": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw=="
+            },
+            "docUuid": "03030303-0303-7303-8303-030303030303"
+          },
+          "actorPublicKey": "zYMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "claim": {
+            "originDocument": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+            "datumKey": "org.example.note/main",
+            "chosenUuid": "01010101-0101-7101-8101-010101010101",
+            "actorUuid": "02020202-0202-7202-8202-020202020202",
+            "operation": "Set",
+            "valueCid": [
+              1,
+              85,
+              30,
+              32,
+              6,
+              68,
+              74,
+              73,
+              22,
+              238,
+              111,
+              236,
+              210,
+              102,
+              110,
+              183,
+              144,
+              176,
+              110,
+              221,
+              99,
+              59,
+              180,
+              181,
+              130,
+              135,
+              36,
+              69,
+              121,
+              173,
+              109,
+              239,
+              95,
+              217,
+              94,
+              11
+            ],
+            "predecessors": [
+              [
+                1,
+                85,
+                30,
+                32,
+                118,
+                89,
+                140,
+                41,
+                192,
+                50,
+                112,
+                123,
+                202,
+                43,
+                244,
+                186,
+                242,
+                10,
+                84,
+                186,
+                183,
+                170,
+                47,
+                102,
+                237,
+                109,
+                113,
+                62,
+                215,
+                253,
+                103,
+                49,
+                8,
+                92,
+                8,
+                27
+              ]
+            ]
+          },
+          "introductionMarker": "marker-1",
+          "introductionHash": "0505050505050505050505050505050505050505050505050505050505050505",
+          "parents": [
+            "0606060606060606060606060606060606060606060606060606060606060606"
+          ],
+          "resultingHeads": [
+            "0707070707070707070707070707070707070707070707070707070707070707"
+          ],
+          "automergeActor": {
+            "$bytes": "AQID"
+          }
+        }
+      }
+    },
+    {
+      "marker": "marker-2",
+      "result": {
+        "status": "pending",
+        "reason": "verification could not complete"
+      }
+    }
+  ]
+}

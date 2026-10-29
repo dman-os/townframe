@@ -39,4 +39,3 @@ pub const UPSERT_EDGE_SQL: &str = include_str!("queries/upsert_edge.sql");
 pub async fn upsert_edge(db: &impl crate::sqlite_rs_alias::Executor, origin_doc_id: String, origin_facet_key: String, target_doc_id: String, target_facet_key: String, reference_kind: String, origin_heads: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_EDGE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc_id), crate::sqlite_rs_alias::IntoValue::into_value(origin_facet_key), crate::sqlite_rs_alias::IntoValue::into_value(target_doc_id), crate::sqlite_rs_alias::IntoValue::into_value(target_facet_key), crate::sqlite_rs_alias::IntoValue::into_value(reference_kind), crate::sqlite_rs_alias::IntoValue::into_value(origin_heads)]).await
 }
-

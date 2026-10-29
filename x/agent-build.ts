@@ -111,18 +111,6 @@ async function dotenvValue(
   return undefined;
 }
 
-function resolveTargetSubdir(worktree: string): string {
-  const explicitSide = Deno.env.get("CONTESTANT_SIDE");
-  if (explicitSide === "a" || explicitSide === "b") {
-    return `side-${explicitSide}`;
-  }
-  const match = worktree.match(/^generation-\d+-([ab])$/);
-  if (match) {
-    return `side-${match[1]}`;
-  }
-  return worktree;
-}
-
 async function resolveCargoTargetDir(
   worktreeRoot: string,
 ): Promise<string | undefined> {
@@ -143,7 +131,7 @@ async function resolveCargoTargetDir(
   if (/^generation-\d+-[ab]$/.test($.path(absolute).basename())) {
     absolute = $.path(absolute).parent()!.toString();
   }
-  const targetSubdir = resolveTargetSubdir(worktree);
+  const targetSubdir = worktree;
   const shared = Deno.env.get("TOWNFRAME_SHARED_TARGET_DIR") === "1" ||
     $.path(absolute).basename() === targetSubdir;
   const resolved = shared

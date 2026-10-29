@@ -106,7 +106,7 @@ async fn reserved_doc_finalization_creates_the_document_with_the_callers_coparen
     assert!(!owner.keyhive_document_exists(doc_id.clone()).await?);
     assert!(
         !owner
-            .group_document_ids(&coparent_group)
+            .document_ids_containing_group(coparent_group.id())
             .await
             .contains(&doc_id)
     );
@@ -125,13 +125,13 @@ async fn reserved_doc_finalization_creates_the_document_with_the_callers_coparen
     assert!(owner.keyhive_document_exists(doc_id.clone()).await?);
     assert!(
         owner
-            .group_document_ids(&coparent_group)
+            .document_ids_containing_group(coparent_group.id())
             .await
             .contains(&doc_id)
     );
     assert!(
         !owner
-            .group_document_ids(&other_group)
+            .document_ids_containing_group(other_group.id())
             .await
             .contains(&doc_id),
         "finalization must grant only the caller-passed coparents"
@@ -527,7 +527,10 @@ async fn group_creation_succeeds_once_the_coparent_material_is_present() -> Res<
         .create_group_with_parents(vec![peer_authority], &protocol)
         .await?;
     assert!(
-        owner.group_document_ids(&group).await.is_empty(),
+        owner
+            .document_ids_containing_group(group.id())
+            .await
+            .is_empty(),
         "a group created with no documents yet must still be a live handle"
     );
     Ok(())

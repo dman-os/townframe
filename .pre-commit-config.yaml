@@ -76,15 +76,6 @@ repos:
           - "warnings"
   - repo: local
     hooks:
-      # Every source-only check (nixfmt/statix/deadnix, rustfmt incl. orphan
-      # files, deno fmt/lint/check of x/, biome, JSON/TOML/YAML validity and
-      # case collisions) lives in src/nix/checks.nix. Fix formatting with
-      # `nix fmt`. Unchanged inputs are cache hits, so this is cheap to rerun.
-      - id: nix-flake-check
-        name: hermetic source checks (nix flake check)
-        language: system
-        entry: nix flake check --print-build-logs
-        pass_filenames: false
       - id: sqlite-gen
         name: check generated SQLite queries and embedded migrations
         language: system

@@ -89,6 +89,11 @@ pub enum Runtime2Cmd {
         resp:
             futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
     },
+    AcquireDocInterest {
+        doc_id: DocumentId,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::interest::PendingDocLease>>,
+    },
     GetDocHandle {
         doc_id: DocumentId,
         lease: crate::runtime2::DocLeaseKind,
@@ -221,7 +226,7 @@ pub enum Runtime2Cmd {
     /// Test-only: whether `peer_id` currently has a registered connection in
     /// the hub. Lets a lifecycle test assert the deregistration invariant
     /// directly instead of inferring it from an asynchronous sync failure.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     HasConnectedPeer {
         peer_id: PeerKey,
         #[educe(Debug(ignore))]
@@ -273,7 +278,7 @@ pub enum Runtime2Cmd {
     /// content-carrying sync-session apply route, reproducing the
     /// worker-stopping race (handle resolved, then the receiver dropped)
     /// deterministically.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     FailNextContentApplyRoute {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
@@ -283,7 +288,7 @@ pub enum Runtime2Cmd {
     /// `peer_id`'s active round, stamped one seq ahead of the hub's current
     /// `admitted_head`. The reply carries that seq so the test can then inject
     /// the matching admission event and prove the completion was deferred.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     InjectKeyhiveCompletionForTest {
         peer_id: PeerKey,
         #[educe(Debug(ignore))]
@@ -292,7 +297,7 @@ pub enum Runtime2Cmd {
     /// Test-only seam: hand an event directly to the hub's event handler,
     /// bypassing the event channel so a test can drive event ordering
     /// deterministically (no peer, no scheduler, no hold).
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     InjectRuntime2EvtForTest {
         evt: Box<Runtime2Evt>,
         #[educe(Debug(ignore))]
@@ -301,11 +306,58 @@ pub enum Runtime2Cmd {
     /// Test-only seam: report the currently active quiescence probe's barrier
     /// id (`None` once resolved), so a test can assert a pending probe restarted
     /// rather than resolving over work routed behind its fence.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     QuiescenceProbeBarrierForTest {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<Option<u64>>,
     },
+}
+
+impl Runtime2Cmd {
+    /// Whether the command does no domain work: control and read-only query
+    /// commands must not bump hub activity, or they would restart a pending
+    /// quiescence probe.
+    pub(super) fn is_control_only(&self) -> bool {
+        let control_only = matches!(
+            self,
+            Runtime2Cmd::WaitForQuiescence { .. }
+                | Runtime2Cmd::Unfreeze
+                | Runtime2Cmd::RegisterDocLease { .. }
+                | Runtime2Cmd::ReleaseDocLease { .. }
+                | Runtime2Cmd::ReleaseInternalLease { .. }
+                // Read-only doc-worker queries: never restart a pending probe,
+                // or a caller polling head state while waiting for quiescence
+                // would restart it forever. Everything that routes *work* into
+                // a worker — `PutDoc`, `CommitDelta`, `GetDocHandle`'s
+                // `AcquireHandle`, `ApplySyncSession`, and
+                // `EnsureCausalCoverage`'s `ReconcileCausalCoverage` — is
+                // activity and must bump, so a probe placed before that routing
+                // restarts and fences the work rather than resolving over it.
+                | Runtime2Cmd::DocHeadState { .. }
+                | Runtime2Cmd::InspectDocHeadState { .. }
+        );
+        // The test-only event-hold seam performs no domain work, so it must not
+        // restart a quiescence probe either; the same goes for the test-only
+        // state/barrier queries below.
+        #[cfg(any(test, feature = "test-support"))]
+        let control_only = control_only
+            || matches!(
+                self,
+                Runtime2Cmd::HoldEvents { .. }
+                    | Runtime2Cmd::ResumeEvents { .. }
+                    | Runtime2Cmd::HasDocWorker { .. }
+            );
+        // The in-crate-only state/barrier queries are `cfg(test)`: no consumer
+        // crate reaches them through `test-support`.
+        #[cfg(test)]
+        let control_only = control_only
+            || matches!(
+                self,
+                Runtime2Cmd::HasConnectedPeer { .. }
+                    | Runtime2Cmd::QuiescenceProbeBarrierForTest { .. }
+            );
+        control_only
+    }
 }
 
 /// Events from background workers / keyhive listener / sync sessions / doc-workers.
@@ -392,6 +444,9 @@ pub enum Runtime2Evt {
     },
     DocWorkerStopped {
         doc_id: DocumentId,
+        /// Incarnation that stopped: an evicted worker's stop can land after a
+        /// replacement was installed, and must not remove the replacement.
+        generation: u64,
         error: Option<String>,
     },
     DocWorkerMaterializationPending {
@@ -447,6 +502,12 @@ pub enum DocWorkerMsg {
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         resp:
             futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
+    },
+    AcquireInterest {
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::interest::PendingDocLease>>,
         #[educe(Debug(ignore))]
         _lease: crate::runtime2::DocWorkerInternalLease,
     },

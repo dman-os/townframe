@@ -48,4 +48,3 @@ pub const UPSERT_META_SQL: &str = include_str!("queries/upsert_meta.sql");
 pub async fn upsert_meta(db: &impl crate::sqlite_rs_alias::Executor, key: String, value: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_META_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(key), crate::sqlite_rs_alias::IntoValue::into_value(value)]).await
 }
-

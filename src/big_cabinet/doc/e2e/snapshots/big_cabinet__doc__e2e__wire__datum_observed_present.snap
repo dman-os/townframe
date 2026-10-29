@@ -1,0 +1,22 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: observed
+---
+{
+  "kind": "entry",
+  "revision": 7,
+  "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+  "datumKey": "org.example.note/main",
+  "datum": {
+    "state": "present",
+    "docHeads": [
+      "0101010101010101010101010101010101010101010101010101010101010101"
+    ],
+    "version": {
+      "heads": [
+        "0202020202020202020202020202020202020202020202020202020202020202"
+      ],
+      "clock": 0
+    }
+  }
+}

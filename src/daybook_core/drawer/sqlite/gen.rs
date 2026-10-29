@@ -91,4 +91,3 @@ pub const UPSERT_LOCAL_BRANCH_SQL: &str = include_str!("queries/upsert_local_bra
 pub async fn upsert_local_branch(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, branch_path: String, branch_doc_id: Vec<u8>, vtag_version: String, vtag_actor_id: String, updated_at: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_LOCAL_BRANCH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(branch_path), crate::sqlite_rs_alias::IntoValue::into_value(branch_doc_id), crate::sqlite_rs_alias::IntoValue::into_value(vtag_version), crate::sqlite_rs_alias::IntoValue::into_value(vtag_actor_id), crate::sqlite_rs_alias::IntoValue::into_value(updated_at)]).await
 }
-

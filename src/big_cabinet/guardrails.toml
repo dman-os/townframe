@@ -1,0 +1,29 @@
+version = 1
+role = "runtime"
+dependency_reason = "Cabinet composes repository storage, signed datums, authority secrets, and hosted services."
+allowed_dependencies = [
+    "big_cabinet_core",
+    "big_repo",
+    "big_sync",
+    "big_sync_core",
+    "secrets_rs",
+    "service_utils_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
+
+[migrations]
+"src/big_cabinet/authority/sqlite/migrations/001_authority.sql" = "dc3aaf9edd46b7ad210d66982e7ab07e6e8e3f3e6c8b66a91420a2ea82c0ceaa"
+"src/big_cabinet/doc/sqlite/migrations/001_commands.sql" = "aaa1c0302ac480daef3055e0200cfddfc868cfeff4d509233bca021060b702db"
+"src/big_cabinet/drawer/sqlite/migrations/001_drawers.sql" = "30ef666572b0d13966ed0f77e9f0f3a5a7e3e1bc2b7f456201a51f9890cb904d"
+"src/big_cabinet/grants/sqlite/migrations/001_grants.sql" = "edb7fc250a18bc27e1acaf04f61cefe73a5077ab9fc4baa9f09ae74adeb58380"
+"src/big_cabinet/index/datum_ref/sqlite/migrations/001_init.sql" = "6f48d99e84520d17824e28824447e8919cf8c20a91df29f2002d8b4162001f37"
+"src/big_cabinet/index/datum_set/sqlite/migrations/001_init.sql" = "5ae10c8c2ce066a47e276b380556a693f72d12e108db9c1103dba4873df12845"

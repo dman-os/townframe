@@ -58,6 +58,8 @@ use bucket::BucketMachine;
 pub mod mpsc;
 pub mod part_store;
 use part_store::*;
+mod peer_routes;
+use peer_routes::*;
 pub mod rpc;
 use rpc::*;
 pub mod scheduler;
@@ -117,6 +119,19 @@ structstruck::strike! {
                 pub parts: Set<PartKey>,
                 /// Objects to follow directly from the peer.
                 pub objects: Set<ObjKey>,
+            }
+        ),
+        UpdatePeer (
+            pub struct UpdatePeerEvent {
+                pub peer_id: PeerKey,
+                /// Partitions newly synced from the peer
+                pub added_parts: Set<PartKey>,
+                /// Partitions no longer synced from the peer
+                pub removed_parts: Set<PartKey>,
+                /// Objects newly followed directly from the peer
+                pub added_objects: Set<ObjKey>,
+                /// Objects no longer followed directly from the peer
+                pub removed_objects: Set<ObjKey>,
             }
         ),
         RemovePeer (
@@ -974,7 +989,74 @@ impl BigSyncMachine {
 
     pub fn handle_evt(&mut self, evt: BigSyncEvent) {
         match evt {
-            BigSyncEvent::SetPeer(evt) => self.handle_set_peer_evt(evt),
+            BigSyncEvent::SetPeer(evt) => {
+                let SetPeerEvent {
+                    peer_id,
+                    parts,
+                    objects,
+                } = evt;
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    part_count = parts.len(),
+                    object_count = objects.len(),
+                    "set peer event"
+                );
+                // A full re-assertion is diffed against current state here so the
+                // route-change path below only ever pays for, and only ever acts on,
+                // the delta.
+                let (added_parts, removed_parts, added_objects, removed_objects) =
+                    match self.peers.get(&peer_id) {
+                        Some(peer_state) => (
+                            parts
+                                .iter()
+                                .filter(|part_id| !peer_state.parts.contains_key(*part_id))
+                                .cloned()
+                                .collect(),
+                            peer_state
+                                .parts
+                                .keys()
+                                .filter(|part_id| !parts.contains(*part_id))
+                                .cloned()
+                                .collect(),
+                            objects.difference(&peer_state.objects).cloned().collect(),
+                            peer_state.objects.difference(&objects).cloned().collect(),
+                        ),
+                        None => (parts, Set::new(), objects, Set::new()),
+                    };
+                self.handle_peer_route_change(
+                    peer_id,
+                    added_parts,
+                    removed_parts,
+                    added_objects,
+                    removed_objects,
+                    true,
+                );
+            }
+            BigSyncEvent::UpdatePeer(evt) => {
+                let UpdatePeerEvent {
+                    peer_id,
+                    added_parts,
+                    removed_parts,
+                    added_objects,
+                    removed_objects,
+                } = evt;
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    added_part_count = added_parts.len(),
+                    removed_part_count = removed_parts.len(),
+                    added_object_count = added_objects.len(),
+                    removed_object_count = removed_objects.len(),
+                    "update peer event"
+                );
+                self.handle_peer_route_change(
+                    peer_id,
+                    added_parts,
+                    removed_parts,
+                    added_objects,
+                    removed_objects,
+                    false,
+                );
+            }
             BigSyncEvent::RemovePeer(evt) => self.handle_remove_peer_evt(evt),
             BigSyncEvent::WaitForFullSync(evt) => {
                 let WaitForFullSyncEvent {
@@ -1095,20 +1177,20 @@ impl BigSyncMachine {
 
 // peer support
 impl BigSyncMachine {
-    fn handle_set_peer_evt(
+    /// Applies one peer route delta: added parts get a strategy decision, removed parts
+    /// and objects are torn down, and everything the delta does not name is left exactly
+    /// as it was. `redecide_pending` is set only by a full `SetPeer` re-assertion, which
+    /// restarts strategy decisions still pending for surviving parts; an incremental
+    /// update never disturbs a decision it did not name.
+    fn handle_peer_route_change(
         &mut self,
-        SetPeerEvent {
-            peer_id,
-            parts,
-            objects,
-        }: SetPeerEvent,
+        peer_id: PeerKey,
+        added_parts: Set<PartKey>,
+        removed_parts: Set<PartKey>,
+        added_objects: Set<ObjKey>,
+        removed_objects: Set<ObjKey>,
+        redecide_pending: bool,
     ) {
-        tracing::debug!(
-            peer_id = %peer_id,
-            part_count = parts.len(),
-            object_count = objects.len(),
-            "set peer event"
-        );
         // Incrementally update peer state: preserve sync_workers, cursor_machine,
         // and resolved parts while stopping only pending/obsolete strategy tasks.
         self.all_seen_peer.insert(peer_id.clone());
@@ -1138,47 +1220,25 @@ impl BigSyncMachine {
             bucket_cmd_buf: default(),
             parts: default(),
         });
-        let old_part_ids: Set<_> = peer_state.parts.keys().cloned().collect();
-        let removed_parts: Set<_> = old_part_ids.difference(&parts).cloned().collect();
-        let mut pending_parts = Set::new();
-        let mut pending_tasks = Set::new();
-        for part_id in old_part_ids.intersection(&parts) {
-            if matches!(
-                peer_state.parts.get(part_id),
-                Some(PeerPartState {
-                    strat: PeerPartStrategy::Pending(_)
-                })
-            ) && let Some(PeerPartState {
-                strat: PeerPartStrategy::Pending(task_id),
-            }) = peer_state.parts.remove(part_id)
-            {
-                pending_parts.insert(part_id.clone());
-                pending_tasks.insert(task_id);
+        // The object delta is applied up front so every route check below reads the
+        // final object set.
+        for obj_id in &removed_objects {
+            peer_state.objects.remove(obj_id);
+        }
+        for obj_id in &added_objects {
+            peer_state.objects.insert(obj_id.clone());
+        }
+        let pending_parts = if redecide_pending {
+            let (pending_parts, pending_tasks) =
+                take_pending_decisions(&mut peer_state, &removed_parts);
+            for task_id in pending_tasks {
+                let _state = self.tasks.cancel(task_id).expect(ERROR_UNRECONIZED);
             }
-        }
-        for task_id in pending_tasks {
-            let _state = self.tasks.cancel(task_id).expect(ERROR_UNRECONIZED);
-        }
-        for part_id in removed_parts.iter() {
-            let Some(state) = peer_state.parts.remove(part_id) else {
-                continue;
-            };
-            match state.strat {
-                PeerPartStrategy::Pending(_) | PeerPartStrategy::Cursor(_) => {}
-                PeerPartStrategy::Bucket(strat) => {
-                    for task_id in strat
-                        .active_leaf_tasks
-                        .into_keys()
-                        .chain(strat.active_list_tasks.into_keys())
-                    {
-                        let _state = self.tasks.cancel(task_id).expect(ERROR_UNRECONIZED);
-                    }
-                }
-            }
-        }
-        for part_id in &removed_parts {
-            peer_state.cursor_machine.remove_part(part_id.clone());
-        }
+            pending_parts
+        } else {
+            Set::new()
+        };
+        teardown_removed_parts(&mut peer_state, &mut self.tasks, &removed_parts);
         // Deferred work is allowed to outlive the event that created it, but
         // not the peer route that gives its part hints meaning. In particular,
         // a cancelled removal may leave a re-sync parked in
@@ -1187,54 +1247,14 @@ impl BigSyncMachine {
         peer_state.pending_removals.retain(|_, pending| {
             pending
                 .remaining_hints
-                .retain(|part_id| parts.contains(part_id));
+                .retain(|part_id| !removed_parts.contains(part_id));
             pending
                 .re_added_parts
-                .retain(|part_id| parts.contains(part_id));
+                .retain(|part_id| !removed_parts.contains(part_id));
             !pending.remaining_hints.is_empty() || !pending.re_added_parts.is_empty()
         });
 
-        // A queued sync task owns a snapshot of its hints, so mutating only
-        // SyncWorkerState would leave the queued task stale. Stop and replace
-        // every affected task with a fresh snapshot. Object-routed tasks remain
-        // valid with no part hints; part-routed tasks with no surviving hints
-        // are simply obsolete.
-        let affected_sync_workers: Vec<_> = peer_state
-            .sync_workers
-            .iter()
-            .filter(|(_, worker)| !worker.part_hints.is_disjoint(&removed_parts))
-            .map(|(obj_id, _)| obj_id.clone())
-            .collect();
-        for obj_id in affected_sync_workers {
-            let mut worker = peer_state
-                .sync_workers
-                .remove(&obj_id)
-                .expect(ERROR_IMPOSSIBLE);
-            let _state = self.tasks.cancel(worker.task_id).expect(ERROR_UNRECONIZED);
-            worker.part_hints.retain(|part_id| parts.contains(part_id));
-            if worker.part_hints.is_empty() && !objects.contains(&obj_id) {
-                // The task is dropped here and nothing will complete it, so the
-                // replay it owed is abandoned: forget the claim instead of keeping
-                // a cursor slot no completion can settle.
-                peer_state.cursor_machine.abandon_obj_sync(&obj_id);
-                continue;
-            }
-            worker.task_id = self.tasks.spawn(
-                std::time::Instant::now(),
-                TaskSeed::Sync(SyncTaskSeed {
-                    kind: SyncTaskKind::Sync,
-                    part_hints: worker.part_hints.clone(),
-                    deets: SyncTaskDeets {
-                        peer_id: peer_id.clone(),
-                        obj_id: obj_id.clone(),
-                        remote_payload: worker.remote_payload.clone(),
-                    },
-                }),
-            );
-            let old = peer_state.sync_workers.insert(obj_id, worker);
-            assert!(old.is_none(), "fishy");
-        }
-        let added_parts: Set<_> = parts.difference(&old_part_ids).cloned().collect();
+        restart_hinted_sync_workers(&mut peer_state, &mut self.tasks, &peer_id, &removed_parts);
         let decision_parts: Set<_> = pending_parts.union(&added_parts).cloned().collect();
         if !decision_parts.is_empty() {
             let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
@@ -1259,7 +1279,7 @@ impl BigSyncMachine {
             .sync_workers
             .iter()
             .filter_map(|(obj_id, worker)| {
-                (worker.part_hints.is_empty() && !objects.contains(obj_id))
+                (worker.part_hints.is_empty() && !peer_state.objects.contains(obj_id))
                     .then_some(obj_id.clone())
             })
             .collect();
@@ -1275,21 +1295,17 @@ impl BigSyncMachine {
             // backend again instead of reading as already in flight.
             peer_state.cursor_machine.abandon_obj_sync(&obj_id);
         }
-        peer_state.objects = objects;
         // A target the embedder has dropped stops being blocked with it: a part or object that
         // comes back is a fresh entry, and only the client ever changes the target set.
-        let wanted: Set<ReplayRoute> = parts
-            .iter()
-            .cloned()
-            .map(ReplayRoute::Part)
-            .chain(peer_state.objects.iter().cloned().map(ReplayRoute::Object))
-            .collect();
         peer_state
             .replay_subscription
             .blocked
-            .retain(|route| wanted.contains(route));
+            .retain(|route| match route {
+                ReplayRoute::Part(part_id) => !removed_parts.contains(part_id),
+                ReplayRoute::Object(obj_id) => !removed_objects.contains(obj_id),
+            });
         self.stat_machine
-            .set_peer(peer_id.clone(), parts.iter().cloned());
+            .set_peer(peer_id.clone(), added_parts.iter().cloned());
         for part_id in &decision_parts {
             self.stat_machine
                 .mark_peer_part_pending(peer_id.clone(), part_id.clone(), true);

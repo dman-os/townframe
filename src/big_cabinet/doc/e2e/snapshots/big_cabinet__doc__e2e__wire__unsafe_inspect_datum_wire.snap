@@ -1,0 +1,12 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: "UnsafeInspectDatum\n{\n    capability: capability(1), doc_id: document(1), datum_key:\n    key(\"main\"), heads: vec![hash(1)],\n}"
+---
+{
+  "capability": "01010101-0101-0101-0101-010101010101",
+  "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+  "datumKey": "org.example.note/main",
+  "heads": [
+    "0101010101010101010101010101010101010101010101010101010101010101"
+  ]
+}

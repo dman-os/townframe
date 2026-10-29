@@ -1,0 +1,8 @@
+version = 1
+role = "runtime"
+dependency_reason = "Service hosting and lifecycle management implement service-core contracts and reuse service-client transports."
+allowed_dependencies = ["service_client_rs", "service_core_rs"]
+allow_external_api_types = false
+
+[builds.native]
+features = ["iroh-http"]

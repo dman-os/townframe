@@ -4,6 +4,8 @@ dependency_reason = "initial guardrail baseline"
 allowed_dependencies = ["utils_rs"]
 allow_external_api_types = false
 
+[builds.native]
+
 [builds.wasm32-wasip3]
 
 [[exemptions]]

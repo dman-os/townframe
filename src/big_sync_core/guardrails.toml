@@ -30,15 +30,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 [[exemptions]]
 code = "ERROR_FN_LENGTH"
 path = "src/big_sync_core/lib.rs"
-symbol = "module::BigSyncMachine::handle_set_peer_evt"
-ceiling = 195
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_FN_LENGTH"
-path = "src/big_sync_core/lib.rs"
 symbol = "module::BigSyncMachine::handle_set_peer_strat"
 ceiling = 168
 class = "LEGACY_DEBT"

@@ -1,5 +1,7 @@
 # `big_sync`
 
+Status: human written; uptodate.
+
 Big Sync is an efficent sync coordinator for large lists of objects.
 
 # Why

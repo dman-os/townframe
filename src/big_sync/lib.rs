@@ -63,6 +63,9 @@ pub use worker::BackendId;
 pub use worker::BigSyncWorkerError;
 pub use worker::BigSyncWorkerHandle;
 pub use worker::StopToken;
+pub use worker::SubscriptionEvent;
+pub use worker::SubscriptionSource;
+pub use worker::SubscriptionUpdate;
 pub use worker::SyncTaskRunOutcome;
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;

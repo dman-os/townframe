@@ -836,4 +836,3 @@ pub const UPDATE_SECRET_BLOB_SQL: &str = include_str!("queries/update_secret_blo
 pub async fn update_secret_blob(db: &impl crate::sqlite_rs_alias::Executor, dek_id: String, dek_version: i64, ciphertext: Vec<u8>, nonce: Vec<u8>, scope_id: i64, kind: i64, blob_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPDATE_SECRET_BLOB_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(dek_id), crate::sqlite_rs_alias::IntoValue::into_value(dek_version), crate::sqlite_rs_alias::IntoValue::into_value(ciphertext), crate::sqlite_rs_alias::IntoValue::into_value(nonce), crate::sqlite_rs_alias::IntoValue::into_value(scope_id), crate::sqlite_rs_alias::IntoValue::into_value(kind), crate::sqlite_rs_alias::IntoValue::into_value(blob_id)]).await
 }
-

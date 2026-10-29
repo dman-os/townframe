@@ -115,4 +115,3 @@ pub async fn plug_pin_hashes(db: &impl crate::sqlite_rs_alias::QueryExecutor, pl
     let set = db.query(PLUG_PIN_HASHES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)]).await?;
     set.all()
 }
-

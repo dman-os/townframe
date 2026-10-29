@@ -1,0 +1,11 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: error
+---
+{
+  "UnknownHeads": {
+    "heads": [
+      "0909090909090909090909090909090909090909090909090909090909090909"
+    ]
+  }
+}

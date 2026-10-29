@@ -1,0 +1,7 @@
+version = 1
+role = "tooling"
+dependency_reason = "Datum declaration procedural macros parse and generate Rust syntax without depending on runtime crates."
+allowed_dependencies = []
+allow_external_api_types = false
+
+[builds.native]

@@ -80,4 +80,3 @@ pub const UPSERT_DISPATCH_SQL: &str = include_str!("queries/upsert_dispatch.sql"
 pub async fn upsert_dispatch(db: &impl crate::sqlite_rs_alias::Executor, id: String, status: String, payload_json: String, wflow_job_id: Option<String>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_DISPATCH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(id), crate::sqlite_rs_alias::IntoValue::into_value(status), crate::sqlite_rs_alias::IntoValue::into_value(payload_json), crate::sqlite_rs_alias::IntoValue::into_value(wflow_job_id)]).await
 }
-

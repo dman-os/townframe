@@ -1,0 +1,1 @@
+DROP TABLE big_cabinet_datum_ref_edges;

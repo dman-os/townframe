@@ -87,7 +87,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_FN_LENGTH"
 path = "src/big_repo/runtime2/hub.rs"
 symbol = "module::Runtime2Hub < F , R >::handle_cmd"
-ceiling = 461
+ceiling = 425
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
@@ -96,7 +96,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_FN_LENGTH"
 path = "src/big_repo/runtime2/hub.rs"
 symbol = "module::Runtime2Hub < F , R >::handle_evt"
-ceiling = 420
+ceiling = 413
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
@@ -202,18 +202,9 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
 code = "ERROR_INLINE_TEST_MOD"
-path = "src/big_repo/runtime2/doc_worker.rs"
-symbol = "module::tests"
-ceiling = 752
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_INLINE_TEST_MOD"
 path = "src/big_repo/runtime2/hub.rs"
 symbol = "module::tests"
-ceiling = 384
+ceiling = 331
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
 reference = "docs/scratch/agent-guardrails-open-items.md"
@@ -402,15 +393,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_SEND_DISCARDED"
 path = "src/big_repo/lib.rs"
 symbol = "module::watch_connection_end"
-ceiling = 1
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_SEND_DISCARDED"
-path = "src/big_repo/runtime2/doc_worker.rs"
-symbol = "module::tests::spawn_fake_hub_ack"
 ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"

@@ -95,6 +95,7 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - Keep instrumentation in its own commit, separate from fixes and pin bumps: the forks move and the logs must be droppable independently.
 - Diagnosis playbooks live in `.agents/skills/`: `stress-sync-investigation` (hunt loop, log triage, load-only hangs), `fork-pinning-and-upstream-sync` (patch/pin lifecycle, upstream PRs, CI), `rr-debugging` (deterministic repros only), `message-ordering-audit` (causal ordering across hub command/event/mailbox surfaces).
 - Dayframe UI work has its own playbooks in `.agents/skills/`: `dayframe-design-language` (tokens, components, layout contract), `dayframe-native-dev-loop` (native build, screenshots, AT-SPI inspection), `blitz-dioxus-native-limits` (pinned Blitz capability bounds).
+- Cabinet datum/Lexicon work has its own playbook in `.agents/skills/`: `lexicon-authoring` (open unions, string vocabularies, empty-member convention, unknown-member carrying, admission/codec test chain).
 - Browser automation has `.agents/skills/playwright` (flake-pinned browser farm, per-package `@playwright/test` pins, the `dayframe_web` e2e).
 ## VCS
 
@@ -102,9 +103,12 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 >
 > Don't be lazy with solutions, why would you be? The world is your oyster. You can build and change whatever you need to, one small step at a time.
 
-- CRITICAL: Never ever use git commands. Never! 
-  - In most machine's you're working on, `jj` is being used and the safest looking git commands could mess up the `jj` state destroying work.
-  - Even if on other machines, git mutation commands are too destructive and unsafe.
+- **INSIDE AGENT DUEL / ARENA WORKTREES** (when `$PASEO_CURRENT_BRANCH` is set or working directory is under `.agent-duel/worktrees`):
+  - **CRITICAL: NEVER USE `jj` (Jujutsu). Use standard `git` commands ONLY.**
+  - Agent Duel's promotion and battle engine is Git-based. Do NOT run any `jj` commands, and do NOT touch or initialize `.jj`.
+  - When committing, use standard `git add` and `git commit`.
+- **OUTSIDE AGENT DUEL (standalone host developer sessions)**:
+  - In most machines you're working on, `jj` is being used. Avoid raw git mutations that could mess up the `jj` state.
 
 ### Resolving conflicts
 

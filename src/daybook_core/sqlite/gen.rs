@@ -23,4 +23,3 @@ pub const KV_UPSERT_SQL: &str = include_str!("queries/kv_upsert.sql");
 pub async fn kv_upsert(db: &impl crate::sqlite_rs_alias::Executor, key: String, value: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(KV_UPSERT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(key), crate::sqlite_rs_alias::IntoValue::into_value(value)]).await
 }
-

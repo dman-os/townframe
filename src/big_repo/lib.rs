@@ -1,6 +1,10 @@
-// Proving the keyhive maintenance loop `Send` (`runtime2/native.rs`, `Sendable::from_future`)
-// walks the whole `subduction_keyhive::compact` -> `replay_local_secret` async call chain,
-// which is deeper than the default limit of 128.
+// The `Send` auto-trait proof for the keyhive maintenance loop's future
+// (runtime2/native.rs) unfolds subduction_keyhive's deeply generic async chain
+// (compact -> replay_local_secret -> import_*), where every opaque `impl Future`
+// adds several trait-selection frames. That overflows rustc's default 128-step
+// recursion budget, which nightly reports as the crate-wide
+// `recursion_depth_exceeding_limit` lint (rust-lang/rust#159228); raising the
+// limit lets the proof complete.
 #![recursion_limit = "256"]
 
 mod interlude {
@@ -44,6 +48,10 @@ mod backend;
 #[expect(unused)]
 mod changes;
 mod encrypted_blob;
+mod interest;
+pub use interest::DocInterest;
+pub use interest::DocSyncDemand;
+pub use interest::DocSyncDemandDriver;
 pub mod ephemeral;
 pub(crate) mod handler;
 mod keyhive;
@@ -250,6 +258,11 @@ pub struct BigRepo {
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
     #[educe(Debug(ignore))]
     ephemeral: BigEphemeral,
+    /// Test-only seam: documents whose next [`Self::get_doc`] fails as a repository error, so an
+    /// embedder's recovery path can be shown to propagate a lookup failure it cannot classify.
+    #[cfg(any(test, feature = "test-support"))]
+    #[educe(Debug(ignore))]
+    doc_lookup_faults: std::sync::Mutex<std::collections::HashSet<DocumentId>>,
     #[educe(Debug(ignore))]
     keyhive_protocol: handler::BigRepoKeyhiveProtocol,
     #[educe(Debug(ignore))]
@@ -378,14 +391,6 @@ impl BigRepo {
     }
     pub(crate) fn sqlite_store(&self) -> SqliteBigRepoStore {
         self.sqlite_store.clone()
-    }
-
-    /// The keyhive sidecar storage (archives, WAL events, local secret
-    /// material). Test-only: lets tier tests trigger compaction and inspect
-    /// durable keyhive state exactly as a production shutdown would leave it.
-    #[cfg(test)]
-    pub(crate) fn keyhive_storage(&self) -> BigRepoKeyhiveStorage {
-        self.keyhive_storage.clone()
     }
 
     async fn boot_inner(
@@ -520,6 +525,8 @@ impl BigRepo {
             sqlite_store: subduction_storage.clone(),
             runtime,
             ephemeral,
+            #[cfg(any(test, feature = "test-support"))]
+            doc_lookup_faults: std::sync::Mutex::new(std::collections::HashSet::new()),
             keyhive_protocol,
             keyhive_dispatcher,
             change_manager,
@@ -560,10 +567,6 @@ impl BigRepo {
         self.automerge_frontier_group_scope.set(scope);
     }
 
-    /// The current live Automerge frontier worker scope.
-    pub fn automerge_frontier_group_scope(&self) -> WorkerGroupScope {
-        self.automerge_frontier_group_scope.get()
-    }
     pub fn keyhive(&self) -> &BigKeyhiveHandle {
         &self.keyhive
     }
@@ -674,6 +677,24 @@ impl BigRepo {
 
 // main methods
 impl BigRepo {
+    pub fn sync_demand(&self) -> DocSyncDemand {
+        self.runtime.interests.subscribe()
+    }
+
+    pub fn drive_sync_demand(
+        &self,
+        worker: &big_sync::BigSyncWorkerHandle,
+        peers: tokio::sync::watch::Receiver<HashSet<PeerKey>>,
+    ) -> DocSyncDemandDriver {
+        self.sync_demand()
+            .drive(worker.subscription_source(), peers)
+    }
+
+    pub async fn interest(self: &Arc<Self>, doc_id: DocumentId) -> Res<DocInterest> {
+        let lease = self.runtime.acquire_doc_interest(doc_id.clone()).await?;
+        Ok(DocInterest::new(Arc::clone(self), doc_id, lease))
+    }
+
     #[tracing::instrument(
         skip_all,
         fields(%document_id, %self.local_peer_id)
@@ -682,7 +703,26 @@ impl BigRepo {
         self: &Arc<Self>,
         document_id: &DocumentId,
     ) -> Res<DocLookup<BigDocHandle>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.doc_lookup_faults.lock().unwrap().remove(document_id) {
+            return Err(ferr!("injected document lookup failure for {document_id}"));
+        }
         let out = self.runtime.get_doc_handle(document_id.clone()).await?;
+        Ok(out.map_ready(|handle| BigDocHandle {
+            repo: Arc::clone(self),
+            handle,
+        }))
+    }
+
+    #[tracing::instrument(skip_all, fields(%document_id, %self.local_peer_id))]
+    pub async fn get_doc_for_projection(
+        self: &Arc<Self>,
+        document_id: &DocumentId,
+    ) -> Res<DocLookup<BigDocHandle>> {
+        let out = self
+            .runtime
+            .acquire_internal_doc_handle(document_id.clone())
+            .await?;
         Ok(out.map_ready(|handle| BigDocHandle {
             repo: Arc::clone(self),
             handle,
@@ -817,46 +857,11 @@ impl BigRepo {
         })
     }
 
-    /// Test-only seam: close the local doc-worker mailbox for `doc_id` on the
-    /// next content-carrying sync-session apply, so that apply route fails
-    /// while a later empty reconsider can still spawn a fresh worker. See
-    /// [`Runtime2Handle::fail_next_content_apply_route_for_test`].
+    /// Test-only seam: the next [`Self::get_doc`] for `doc_id` fails with a repository error
+    /// instead of answering. One-shot; the lookup after it behaves normally.
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn fail_next_content_apply_route(&self, doc_id: DocumentId) -> Res<()> {
-        self.runtime
-            .fail_next_content_apply_route_for_test(doc_id)
-            .await?;
-        Ok(())
-    }
-
-    /// Test-only: whether `peer_id` currently has a registered connection in
-    /// this repo's hub. Connection-lifecycle tests assert the deregistration
-    /// invariant with this instead of inferring it from a sync failure.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn has_connected_peer(&self, peer_id: PeerKey) -> Res<bool> {
-        self.runtime.has_connected_peer_for_test(peer_id).await
-    }
-
-    /// Test-only: deliver a synthetic keyhive sync completion for `peer_id`'s
-    /// active round, stamped one seq ahead of the hub's admitted head. Returns
-    /// the seq so the test can inject the matching admission event.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn inject_keyhive_completion_for_test(&self, peer_id: PeerKey) -> Res<u64> {
-        self.runtime
-            .inject_keyhive_completion_for_test(peer_id)
-            .await
-    }
-
-    /// Test-only: hand an event directly to the hub's event handler.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn inject_runtime2_evt_for_test(&self, evt: runtime2::Runtime2Evt) -> Res<()> {
-        self.runtime.inject_runtime2_evt_for_test(evt).await
-    }
-
-    /// Test-only: the active quiescence probe's barrier id (`None` if resolved).
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn quiescence_probe_barrier_for_test(&self) -> Res<Option<u64>> {
-        self.runtime.quiescence_probe_barrier_for_test().await
+    pub fn fail_next_doc_lookup(&self, doc_id: DocumentId) {
+        self.doc_lookup_faults.lock().unwrap().insert(doc_id);
     }
 
     /// Whether the repository currently stores a sedimentree with `doc_id`.
@@ -866,7 +871,7 @@ impl BigRepo {
 
     /// Return the documents currently administered by `group`.
     pub async fn documents_in_group(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
-        self.keyhive.group_document_ids(group).await
+        self.keyhive.document_ids_containing_group(group.id()).await
     }
 
     /// List document IDs with a durable reservation. A reservation is the
@@ -1025,30 +1030,30 @@ impl BigRepo {
         Ok(group)
     }
 
-    /// Add a principal to a group and propagate reader membership into every
-    /// document governed by that group. Reader additions also create one
-    /// history checkpoint per affected document.
-    pub async fn add_member_to_group(
+    /// The sedimentree frontier of every document `group` governs that is locally
+    /// materialized, keyed by document: the `after_content` a membership change on the group
+    /// is signed over.
+    async fn group_content_frontier(
         self: &Arc<Self>,
-        member: impl Into<BigKeyhiveAuthority>,
         group: &BigKeyhiveGroup,
-        access: keyhive_core::access::Access,
-    ) -> Res<()> {
-        let mut docs = BTreeMap::new();
-        for doc_id in self.keyhive.group_document_ids(group).await {
+    ) -> Res<BTreeMap<DocumentId, Vec<Vec<u8>>>> {
+        let mut after_content = BTreeMap::new();
+        for doc_id in self.keyhive.document_ids_containing_group(group.id()).await {
             // A document can be created concurrently with this grant - the encryption
             // worker creates key documents at runtime - and such a document is already in
-            // Keyhive's graph (`group_document_ids` sees it) while big_repo cannot hand out
-            // a handle for it yet. Both `GetDocError` variants mean only that, and neither
-            // is fatal: the document joins `affected_docs` below, where its checkpoint is
+            // Keyhive's graph (`document_ids_containing_group` sees it) while big_repo cannot
+            // hand out a handle for it yet. Both `GetDocError` variants mean only that, and
+            // neither is fatal: the document joins `affected_docs` below, where its checkpoint is
             // derived per document; it has no pre-grant history to record, because it did
             // not exist when the grant was conceived; and Keyhive accepts the delegation
             // without an entry for it (the raced-in shape this replaces proved as much by
             // completing the grant). Failing here over an unmaterialized member killed
             // clone provisions outright.
             match self.get_doc(&doc_id).await?.into_ready(doc_id.clone()) {
-                Ok(doc) => {
-                    docs.insert(doc_id, doc);
+                Ok(_doc) => {
+                    let heads = self.doc_head_state(doc_id.clone()).await?.sedimentree_heads;
+                    after_content
+                        .insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
                 }
                 Err(err @ (GetDocError::NotFound(_) | GetDocError::PendingMaterialization(_))) => {
                     tracing::debug!(
@@ -1060,12 +1065,20 @@ impl BigRepo {
                 }
             }
         }
+        Ok(after_content)
+    }
 
-        let mut after_content = BTreeMap::new();
-        for doc_id in docs.keys().cloned() {
-            let heads = self.doc_head_state(doc_id.clone()).await?.sedimentree_heads;
-            after_content.insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
-        }
+    /// Add a principal to a group and propagate reader membership into every
+    /// document governed by that group. Reader additions also create one
+    /// history checkpoint per affected document.
+    pub async fn add_member_to_group(
+        self: &Arc<Self>,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+        access: keyhive_core::access::Access,
+    ) -> Res<()> {
+        let after_content = self.group_content_frontier(group).await?;
+        let preflighted: BTreeSet<DocumentId> = after_content.keys().cloned().collect();
 
         let (affected_docs, _hashes) = self
             .keyhive
@@ -1077,16 +1090,16 @@ impl BigRepo {
         if access.is_reader() {
             for doc_id in &affected_docs {
                 // `affected_docs` is read off the live Keyhive graph after the grant has
-                // landed, while `docs` above is the snapshot taken before it. A document
-                // created inside that window joins the group and is legitimately affected
-                // without having been preflighted: the encryption worker creates key
-                // documents at runtime, so the snapshot is not stable across the grant.
+                // landed, while `preflighted` above is the snapshot taken before it. A
+                // document created inside that window joins the group and is legitimately
+                // affected without having been preflighted: the encryption worker creates
+                // key documents at runtime, so the snapshot is not stable across the grant.
                 // The invariant "every affected document was preflighted" is therefore not
                 // enforceable, and enforcing it failed the whole grant - a clone provision
                 // that raced a key-document creation died outright. The checkpoint does not
                 // need the snapshot: it is derived per document here, and when the causal
                 // keys are still in flight the durable event consumer retries.
-                if !docs.contains_key(doc_id) {
+                if !preflighted.contains(doc_id) {
                     tracing::debug!(
                         %doc_id,
                         "document joined the group between the pre-grant snapshot and the \
@@ -1099,6 +1112,29 @@ impl BigRepo {
             }
         }
 
+        self.wait_for_keyhive_reconciliation().await?;
+        Ok(())
+    }
+
+    /// Remove a principal from a group, signing the revocation over the current frontier of
+    /// every document the group governs, and rotate the keys of every document the removed
+    /// member can no longer reach. Every other member keeps its access: a member the removed
+    /// one had delegated to is re-delegated by this node.
+    pub async fn remove_member_from_group(
+        self: &Arc<Self>,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+    ) -> Res<()> {
+        let after_content = self.group_content_frontier(group).await?;
+        let (affected_docs, _hashes) = self
+            .keyhive
+            .remove_member_from_group(member, group, after_content, &self.keyhive_protocol)
+            .await?;
+        for doc_id in &affected_docs {
+            if !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
+                tracing::debug!(%doc_id, "group revocation causal checkpoint deferred to durable event reconciliation");
+            }
+        }
         self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }

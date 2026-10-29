@@ -1,327 +1,251 @@
-# ADR 007: Logical Document, Branch, and Drawer Identity
+# ADR 007: Doc and Branch Identity
 
-**Status:** Proposed.
+**Status:** Partially implemented — `DocumentId` unification, `db+datum` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` core datum with concrete parent references and pinned fork heads, and `dmeta.docUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
 
 ## Context
 
-Daybook presents logical documents, branches, and drawers. The current storage
-stack presents Automerge documents, BigRepo documents, Keyhive authority
-documents and groups, and Sedimentree history. Those physical concepts are
-useful implementation machinery, but they must not define the stable application
-API: Daybook may eventually support non-Automerge documents or a different
-authority system.
+A branch is implemented as another BigRepo/Automerge doc. The older design added a
+second `BranchId` identity, a logical-document layer above the physical docs, branch
+publication state, and branch-local authority scope. That duplicated the identity the
+hosting doc already has and coupled branching to drawers and authority.
 
-The existing drawer-wide document map also combines several independent
-concerns:
+Branches, drawer entries, and Keyhive authority are independent facts. A branch may be
+available without its origin, may be admitted to a different drawer, or may remain local.
+The origin and branch may also be received independently.
 
-- the identity of a logical document;
-- the physical object containing each branch;
-- mutable branch names and discovery;
-- drawer membership and authority;
-- lookup state used by repository projections.
-
-That coupling becomes incorrect once one document belongs to multiple drawers, a
-branch has a narrower authority scope than its main branch, or a client receives
-a branch directly without first loading a drawer-wide index.
-
-There is also a creation-time cycle. A branch should identify the physical
-BigRepo document that contains it, but BigRepo currently learns that identifier
-only after creating initial Automerge content. Writing the identifier afterward
-requires a second Automerge change and therefore a second Sedimentree commit.
-Small documents, especially drawer descriptors, may otherwise remain at one
-commit for their entire lifetime. Avoiding a mandatory second commit is
-therefore a meaningful storage and synchronization optimization, not merely
-cosmetic.
-
-## Terminology
-
-- **Physical document:** the BigRepo object that stores one branch's content and
-  history.
-- **Branch ID:** the physical document ID of a branch.
-- **Document ID:** the Branch ID of the logical document's main branch.
-- **Branch directory:** system metadata on the main branch that declares
-  discoverable shared branches.
-- **Branch identity:** system metadata on every branch that identifies the
-  branch and its logical document.
-- **Drawer:** an idiocentric authority, synchronization, retention,
-  organization, and resolution context described by a logical document.
-- **Accepted logical view:** the branch and drawer relationships that pass
-  structural, provenance, and authority validation. Replicated bytes are not
-  necessarily accepted claims.
+There is also a creation-time cycle. A doc's datums should name the doc's own ID, but
+BigRepo used to learn that ID only after creating initial Automerge content. Writing it
+afterward needs a second Automerge change and so a second Sedimentree commit. Small docs,
+drawer descriptors especially, may otherwise stay at one commit for their whole lifetime,
+so avoiding a mandatory second commit is a real storage and sync saving, not cosmetic.
 
 ## Decision
 
-### 1. Logical and physical branch identity coincide
+### Every branch is a doc
 
-Every `BranchId` is the physical BigRepo document ID containing that branch. The
-main branch's `BranchId` is also its logical `DocumentId`:
+Every ordinary doc and every branch is identified by `DocumentId`. There is no separate
+`BranchId` domain type:
 
 ```text
-DocumentId = main BranchId = main physical document ID
-BranchId   = branch physical document ID
+ordinary doc       = DocumentId
+branch doc         = DocumentId
+physical BigRepo ID = DocumentId
 ```
 
-This equality is an implementation invariant, not permission for stable Daybook
-APIs to expose raw BigRepo, Automerge, Keyhive, or Sedimentree handles. Public
-APIs expose logical Daybook IDs and operations. The identifiers may cease to be
-byte-identical under a future backend without forcing application callers to
-understand that migration.
+A branch name or path is a label in branch metadata, not identity. Renaming it does not
+change the branch doc ID.
 
-A branch can be addressed directly by its `BranchId`. Resolving the hierarchy
-“branch B belongs to document D” is only necessary for operations that need
-logical-document context, such as listing siblings, applying inherited
-authority, or merging into the main branch.
+Public APIs address the branch doc directly by `DocumentId`. They do not expose a
+logical-document wrapper whose identity differs from the physical doc.
 
-Branch names are optional and mutable. They are relationships in a directory,
-not identifiers. Renaming a branch never changes its `BranchId`.
+The equality of doc ID and physical BigRepo ID is an implementation invariant, not
+permission for Daybook APIs to hand out raw BigRepo, Automerge, Keyhive, or Sedimentree
+handles. Public APIs expose Daybook IDs and operations, so the identifiers can stop being
+byte-identical under a future backend without application callers having to understand
+that migration.
 
-### 2. BigRepo allocates IDs before initial content
+### Branch links are weak, local relationships
 
-BigRepo will support allocation of a physical document ID before the first
-Automerge change. The creator can therefore place the final `DocumentId` and
-`BranchId` in system metadata in the same change that creates the user content.
+A normal branch is a new `DocumentId` whose initial Automerge state is forked (`fork_at`)
+from the origin document at the requested heads, and a merge (`MergeDoc`) merges one
+history-sharing document's Automerge changes into another (`doc.merge`). Because the
+Automerge changes themselves travel between origin and branch, datums are not copied by
+value and signatures authored on either document reconstruct at their introducing changes
+wherever those changes land (ADR 020 §5). History-truncating compaction is not a branch:
+documents that do not share genesis changes cannot be merged (`UnrelatedHistory`).
 
-The current pipeline does not provide this guarantee. It first constructs the
-initial Automerge heads, then calls Keyhive `generate_doc(parents, heads)` and
-persists the resulting CGKA and delegation events, and only afterward sends
-`PutDoc` to persist and materialize the physical document. Besides learning the
-ID too late to include it in the first change, this can publish the document to
-its intended drawer groups before any peer can retrieve its Sedimentree.
+Creating branch B from doc A at path `/draft` writes B's identity datum on B and, unless
+the branch is stealth, announces B on A:
 
-Creation will instead separate local identity allocation from authority
-publication and use an idempotent state machine:
+On B, and on A when non-stealth, `org.example.daybook.branch/<B>` holds:
+
+```json
+{
+  "path": "/draft",
+  "from": {
+    "datumRef": "db+datum:/<A>/org.example.daybook.branch/<A>",
+    "heads": ["<fork-head>"]
+  }
+}
+```
+
+The reference names the concrete parent document, not `self`: the target must remain A
+when this datum travels between documents. The pinned heads are the selected fork frontier,
+not A's current frontier when the announcement is written. The initial branch change is the
+durable source of this value during crash recovery. `from` is optional for root metadata;
+like every datum reference it is a weak address and does not assert the parent datum exists.
+
+Keying B's datum by `<B>` (`org.example.daybook.branch/<B>`) rather than `/main` keeps the
+datum merge-safe: when B is merged back into A, or a nested branch C is merged into B, the
+target acquires the source's `branch/<source-id>` datum without overwriting its own
+`branch/<self-id>`. Any document resolves its own branch path by reading
+`org.example.daybook.branch/<self-id>`. There is no `branches/main`, `byId`, or `byPath`
+map. Per-branch keys preserve concurrent branches with the same label; generic datum-reference
+backlinks can discover children through their `from.datumRef`.
+
+Announcing a branch on A (`stealth: false`) mutates A and therefore requires `Write`
+access on A (in addition to `Read` on A and `Create` for B's placement); a caller with
+only `Read` access on A is refused with `Denied`. Setting `stealth: true` skips the
+`org.example.daybook.branch/<B>` write on A and requires only `Read` on A plus
+`Create` for B's placement.
+
+The links are weak. Reading either side does not require the other doc to be locally
+present, readable, or still available. A branch created from B records the new
+relationship in B and the new branch; branch information is not propagated through every
+ancestor or sibling.
+
+`BranchDoc` owns `org.example.daybook.branch/*` and signs these datums with `DocsRepo`'s
+system actor after
+checking the caller's access. Ordinary `CreateDoc` and `WriteDatums` calls cannot
+set or remove them (`SystemDatum`), while `ReadDatums` and `ListDatums` read them like any
+other datum.
+
+Merging B's Automerge changes into A does not delete B or remove either datum. A merge
+is not branch destruction: B remains an ordinary doc with its own ID and history. Any
+later lifecycle operation that removes a branch link is explicit and is not implied by a
+merge.
+
+### Branches and drawers are orthogonal
+
+Creating a branch does not admit it to any drawer containing its origin. The caller may
+explicitly add the new branch doc to a drawer as a separate operation. The origin is not
+an authority parent of its branches, and direct grants over the origin do not propagate
+through branch metadata.
+
+Consequently branch datums contain neither `BranchPublication` nor `AuthorityScope`.
+Publication, retention, and access are drawer and Keyhive concerns.
+
+### Drawers are idiocentric contexts
+
+A `DrawerId` is the `DocumentId` of a doc carrying the drawer descriptor datum (ADR 019),
+not a Keyhive group ID. The descriptor names the groups and whatever provider hints its
+author knows, but there is no global `DrawerId → provider` or `DrawerId → authority
+state` mapping. A peer learns about a drawer through a grant, local configuration, sync,
+or an explicit share, and two peers can legitimately know different authority history and
+provider sets for the same drawer. Provider identity, current reachability, and
+authorization are separate facts: knowing that node N may serve a drawer neither proves
+that N is online nor grants the requester access.
+
+One doc may be entered in several drawers. An entry makes the drawer a context through
+which the doc is synced, retained, organized, authorized, or resolved; it does not clone
+the doc or change its identity.
+
+### Initial identity precedes publication
+
+BigRepo allocates the final doc identity before initial content. DocsRepo can then
+write final IDs, initial content, dmeta, and branch metadata in the first Automerge
+change, persist its Sedimentree, initialize Keyhive state, and only then expose it through
+its requested drawer.
+
+Creation is recoverable and idempotent:
 
 ```text
 IdentityAllocatedLocally
   -> InitialContentBuilt
   -> SedimentreePersistedLocally
-  -> KeyhiveDocumentInitialized
-  -> IntendedGroupsAttached
+  -> KeyhiveDocInitialized
+  -> DrawerAccessEstablished
+  -> DrawerEntryPublished
   -> Complete
 ```
 
-`IdentityAllocatedLocally` allocates the final document ID and document keys
-without publishing the document into any intended external group. A local SQLite
-pending-allocation table is the durable source of truth for recovery and garbage
-collection. A checkout-local Keyhive group may additionally make pending
-documents enumerable, but must not be the sole record.
+A successful creation never advertises a doc whose initial bytes were not persisted.
+The earlier pipeline built the initial heads, then called Keyhive `generate_doc` and
+persisted its CGKA and delegation events, and only then persisted the doc: besides
+learning the ID too late for the first change, it could publish the doc to its groups
+before any peer could retrieve its Sedimentree. Allocation is therefore separate from
+publication. `IdentityAllocatedLocally` reserves the final ID and doc keys without
+attaching the doc to any intended external group; BigRepo's doc reservation
+(`allocate_id` / `abandon_allocation`) and DocsRepo's command ledger are the durable
+records recovery reads. A checkout-local Keyhive group may additionally make pending docs
+enumerable but must never be the only record. Because the initial Sedimentree is persisted
+before Keyhive state exists, learning the doc's authority from Keyhive implies the
+creating checkout already stored its first commit. Retrying any completed transition is
+safe.
 
-After allocation, the creator builds one initial Automerge change containing the
-final IDs and persists its Sedimentree locally. Only then may BigRepo initialize
-the replicated Keyhive document state and attach it to the drawer or other
-intended parent groups. Consequently, learning the authority relationship from
-Keyhive implies that the creating checkout had already stored the initial
-Sedimentree. Retrying any completed transition must be safe.
+The rules are:
 
-The following rules apply:
+- IDs are globally unique and never reused.
+- A pending allocation may be reclaimed only while it has neither local Sedimentree
+  content nor replicated Keyhive doc state.
+- Once either exists, recovery completes publication instead of reclaiming the ID or
+  keys.
+- Any Sedimentree content, authority reference, drawer entry, or other durable reference
+  prevents reclamation.
+- Drawer access and the drawer entry are always the last steps. The initial Keyhive
+  creation path never receives drawer groups merely because the create request named a
+  drawer.
 
-- IDs are globally unique and are never reused.
-- Garbage collection may remove an expired pending allocation only when it has
-  neither local Sedimentree content nor replicated Keyhive document state.
-- Once local Sedimentree content or Keyhive document state exists, recovery
-  completes publication instead of reclaiming the ID or keys.
-- Any Sedimentree content, authority reference, branch-directory reference, or
-  other durable reference prevents collection.
-- Intended group attachment is always the final publication step. The initial
-  Keyhive creation path must not receive drawer groups merely because the
-  higher-level create operation requested them.
+Allocation, content, and publication are not one distributed transaction. The
+requirement is explicit, recoverable intermediate states, so a crash never leaves an
+ambiguous object.
 
-This ADR does not require the allocation and content stages to be one
-distributed transaction. It requires explicit, recoverable intermediate states
-so crashes do not produce ambiguous objects.
+### Discovery is contextual
 
-### 3. Branch topology is stored in system-managed facets
+There is no global branch directory. A doc can list branches it created, while local
+indexes can project branch links visible to the current node. Receiving a branch directly
+does not require first loading an origin-wide directory.
 
-Branch topology is durable document metadata and must synchronize across
-checkouts. It will use the normal facet representation and read APIs, while
-writes are reserved to branch-management operations.
+A branch link grants no access, retention, publication, or provider discovery. Missing or
+unauthorized linked docs remain unresolved weak references.
 
-Every branch contains a `daybook.branch` facet with at least:
+### Datum addresses have no URI authority
 
-```text
-BranchIdentity {
-    document_id: DocumentId,
-    branch_id: BranchId,
-    created_from: optional BranchVersion,
-}
-```
-
-The main branch contains a `daybook.branches` directory keyed by stable
-`BranchId` values. A declaration may contain:
+A datum address uses an absolute path under the `db+datum` scheme:
 
 ```text
-BranchDeclaration {
-    name: optional String,
-    publication: Shared,
-    scope: AuthorityScope,
-    created_from: optional BranchVersion,
-}
+db+datum:/<doc-id>/<datum-tag>/<datum-key-slot...>
 ```
 
-The exact schema belongs to the later facet-schema and dmeta work. The durable
-invariants are:
+There is no URI authority component. Drawers are access/collection contexts and nodes are
+providers; neither identifies the datum. The doc ID is the first path component.
 
-- map keys are `BranchId`, never mutable names;
-- every branch identifies itself and its logical main document;
-- a main-directory entry points to the same logical document claimed by the
-  branch;
-- dmeta provenance records who introduced or changed each declaration;
-- ordinary facet-write capabilities cannot mutate branch system facets;
-- branch-service operations validate authority before authoring those facets.
-
-A separate metadata-only physical document per logical document is rejected. It
-would double the minimum durable object count and add another object that every
-reader must locate and synchronize.
-
-### 4. Replication and acceptance are distinct
-
-Peers may receive malformed, conflicting, or deliberately forged Automerge
-changes. Such changes still replicate as physical history. They do not
-automatically enter Daybook's accepted logical view.
-
-When both directions are available, the logical service validates:
+`self` is reserved in the doc position for a reference relative to the doc containing the
+datum:
 
 ```text
-main directory: D declares branch B
-branch identity: B declares document D and branch B
+db+datum:/self/org.example.daybook.blob/main
 ```
 
-It also validates the applicable system-facet schema, signed provenance, and
-historical authority rules defined by the dmeta ADR. Missing or invalid evidence
-classifies a declaration as malformed, unauthorized, or unverifiable. Callers
-must not receive it as an ordinary accepted branch.
+This lets a datum copied into a branch retain internal references unchanged. `self` is
+not a concrete `DocumentId`.
 
-This is not local anti-forgery of the underlying CRDT. It is validation of
-claims at the logical service boundary.
-
-### 5. Branch discovery is authority-scoped
-
-There is no single globally visible branch directory:
-
-- Shared branches are discovered through `daybook.branches` on the main branch.
-- Group-private branches are discovered through authorized group feeds and their
-  `daybook.branch` facets. They are not listed publicly merely to improve
-  discovery.
-- Local branches are discovered through checkout-local state until explicitly
-  published.
-
-The logical branch-list operation merges only the sources visible to its caller.
-This preserves targeted discovery for public corpora without leaking the
-existence of private branches.
-
-Publishing a local branch writes its branch identity, commits the appropriate
-authority and storage relationships, and then adds it to the applicable shared
-directory. Recovery must tolerate partial progress using the same explicit
-lifecycle discipline as physical creation.
-
-### 6. Drawers are documents and idiocentric contexts
-
-A `DrawerId` is the `DocumentId` of a logical document containing a
-system-managed `daybook.drawer` descriptor facet. It is not a Keyhive group ID.
-
-The descriptor can identify the authority groups and useful provider hints known
-to its author, but no global `DrawerId -> provider` or
-`DrawerId -> authority state` mapping exists. A peer learns about a drawer
-through a grant, local configuration, synchronization, or an explicit share. Two
-peers can legitimately know different authority history and provider sets for
-the same drawer.
-
-Provider identity, current reachability, and authorization are separate facts.
-Knowing that node N may serve a drawer neither proves that N is online nor
-grants the requester access.
-
-One logical document may belong to several drawers. Membership means that the
-drawer is a context through which the document is synchronized, retained,
-organized, authorized, or resolved; it does not clone or change the document's
-identity.
-
-Adding a logical document to a drawer includes:
-
-- its main branch; and
-- every shared branch whose authority scope is applicable to that drawer.
-
-It does not silently publish or widen a local branch or a branch with narrower
-private authority. Those require an explicit publication or authority operation.
-
-### 7. Addresses carry optional resolution context
-
-The canonical identity remains the ID. Address syntax selects a strict
-resolution strategy:
+The datum key slot is the entire path remainder after the datum tag, including `/`. For
+example, a dpath key slot beginning with `/photos` intentionally produces:
 
 ```text
-db:<id>                    local knowledge only
-db://<drawer-id>/<id>      resolve through one drawer context
-db+iroh://<node-id>/<id>   bootstrap directly from one Iroh node
+db+datum:/zDoc/org.example.daybook.dpath//photos/beach.jpg
 ```
 
-`<id>` may be a logical `DocumentId` or a directly addressed `BranchId`. The
-parser and typed API must preserve which form the caller supplied where
-branch-specific behavior matters.
+A datum address is only an address. It grants no access, implies no retention, and does
+not establish that the target exists or is reachable. Node/provider locators are a later,
+separate URL design.
 
-Resolution does not fall through from one strategy to another. In particular,
-failure to resolve a drawer-context address does not trigger an implicit global
-search or reinterpret the drawer as a node. Additional global naming systems, if
-introduced, use explicit locator forms.
-
-### 8. Document and drawer events are separate
-
-Content and branch lifecycle events belong to a document event model. Drawer
-membership and descriptor changes belong to a drawer event model. A content
-update does not fabricate a drawer update, and removal from one drawer is not
-deletion of the logical document.
-
-The durable processing model for these changes is defined by ADR 008. Existing
-drawer-wide branch lookup state and synthetic `DocUpdated` events are migration
-inputs, not the new source of truth.
+Whatever that design adds, each locator form selects one strict resolution strategy (local
+knowledge, one drawer context, or bootstrap from one named node) and resolution never
+falls through from one strategy to another. A failed drawer-context resolution does not
+trigger an implicit global search or reinterpret the drawer as a node; any global naming
+system uses its own explicit locator form.
 
 ## Consequences
 
-### Positive
+- A new doc or branch is self-identifying in its first Automerge commit, so tiny docs
+  avoid an otherwise mandatory second Sedimentree commit.
+- BigRepo and DocsRepo carry an explicit allocation, recovery, and reclamation lifecycle.
+- Branches use the same doc APIs, authority substrate, and datum machinery as other docs.
+- Branch creation and drawer admission remain separately observable operations.
+- Branch links tolerate partial replication and asymmetric access.
+- Merge does not silently destroy branch identity or metadata.
+- Indexes key physical and branch-specific work by `DocumentId`; no compatibility
+  `BranchId` wrapper remains.
+- Existing branch schemas, ADRs, and indexes must remove logical-document identity,
+  publication, and authority-scope fields.
 
-- A new logical document or branch can be fully self-identifying in its first
-  Automerge commit.
-- Most tiny documents can avoid an otherwise mandatory second Sedimentree
-  commit.
-- Direct branch addressing and targeted public branch discovery are both
-  efficient.
-- Branch names can change without identity migration.
-- Private branch existence need not leak through the public main branch.
-- Multiple-drawer membership no longer confuses document identity or deletion
-  semantics.
-- Logical APIs remain portable to non-Automerge and non-Keyhive backends.
+## Deferred
 
-### Costs and trade-offs
-
-- BigRepo gains an explicit allocation/recovery/garbage-collection lifecycle.
-- Branch relationships are deliberately redundant in both directions and require
-  validation.
-- Private and local branch discovery still needs scoped indexes or feeds.
-- Replicated physical state can contain claims excluded from the accepted
-  logical view.
-- Adding a document to a drawer may require applying membership to several
-  shared physical branch documents.
-
-## Migration
-
-1. Add pre-content physical ID allocation and durable creation recovery to
-   BigRepo.
-2. Define schemas and privileged mutation operations for `daybook.branch`,
-   `daybook.branches`, and `daybook.drawer`.
-3. Write branch identity in the initial commit of newly created documents and
-   branches.
-4. Build accepted branch discovery from system facets and authority-scoped
-   feeds.
-5. Move callers from drawer-wide branch maps to logical document and branch
-   APIs.
-6. Remove synthetic drawer content-update events after ADR 008's durable walkers
-   replace their consumers.
-
-## Deferred decisions
-
-- The exact dmeta v2 encoding, signed revision format, and historical authority
-  proof.
-- The final authority-scope schema.
-- Retention duration and implementation details for abandoned pre-authority
-  allocations.
-- Representation and creation rules for future non-Automerge documents.
+- Explicit branch-link removal or branch-doc deletion policy.
+- Node/provider URL syntax and public discovery.
+- Future non-Automerge doc representations.
+- Retention duration and the reclamation sweep for allocations abandoned before any
+  content or Keyhive state existed.
 - Any optional global identity or naming overlay.

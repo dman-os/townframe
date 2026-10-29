@@ -74,4 +74,3 @@ pub async fn names_by_ids(db: &impl crate::sqlite_rs_alias::QueryExecutor, ids: 
     let set = db.query(NAMES_BY_IDS_SQL, &[ids.into_value()?]).await?;
     set.all()
 }
-

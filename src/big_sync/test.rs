@@ -557,6 +557,37 @@ impl NodeHarness {
             .await
     }
 
+    /// Configures `remote` on this node's worker with exactly these routes over an ungated
+    /// in-memory client. Unlike [`Self::connect_to`] it grants no part membership.
+    async fn set_peer_routes(
+        &self,
+        remote: &NodeHarness,
+        parts: HashMap<PartKey, crate::BackendId>,
+        objects: HashMap<ObjKey, crate::BackendId>,
+    ) -> Res<()> {
+        self.handle
+            .set_peer(
+                remote.peer_id.clone(),
+                Arc::new(remote.rpc.in_memory_client(self.peer_id.clone())),
+                parts,
+                objects,
+            )
+            .await
+    }
+
+    /// Asserts the worker's effective per-peer routes: configured routes unioned with every
+    /// subscription source's routes.
+    async fn assert_worker_routes(
+        &self,
+        parts: &HashMap<PeerKey, HashMap<PartKey, crate::BackendId>>,
+        objects: &HashMap<PeerKey, HashMap<ObjKey, crate::BackendId>>,
+    ) -> Res<()> {
+        let snapshot = self.handle.snapshot().await?;
+        assert_eq!(&snapshot.peer_parts, parts);
+        assert_eq!(&snapshot.peer_objects, objects);
+        Ok(())
+    }
+
     async fn seed_obj(&self, obj: ObjKey, payload: serde_json::Value) -> Res<()> {
         let (peer_ids, stores): (Vec<_>, Vec<_>) = {
             let stores = self.world.stores.lock().expect(ERROR_MUTEX);
@@ -910,6 +941,363 @@ where
         rpc,
         rpc_stop,
     })
+}
+
+/// Three nodes where `local` subscribes to objects and an embedder part on `remote` through
+/// two sources (`first`, plus its clone, and `second`) and to `isolated` on `other` through
+/// `second` alone, before either peer is configured on `local`'s worker. `configured` is
+/// seeded on `remote` but only ever reaches `local` as a configured route.
+struct SubscriptionScenario {
+    local: NodeHarness,
+    remote: NodeHarness,
+    other: NodeHarness,
+    events: tokio::sync::broadcast::Receiver<crate::SubscriptionEvent>,
+    first: crate::SubscriptionSource,
+    first_clone: crate::SubscriptionSource,
+    second: crate::SubscriptionSource,
+    embedder_part: PartKey,
+    configured: ObjKey,
+    shared: ObjKey,
+    dynamic: ObjKey,
+    isolated: ObjKey,
+}
+
+impl SubscriptionScenario {
+    async fn boot() -> Res<Self> {
+        use crate::SubscriptionUpdate;
+
+        let world = Arc::new(TestWorld::default());
+        let local = boot_node(Arc::clone(&world), 10).await?;
+        let events = local.handle.subscribe_subscription_events();
+        let remote = boot_node(Arc::clone(&world), 11).await?;
+        let other = boot_node(world, 12).await?;
+        let configured = gen_obj_id(901);
+        let shared = gen_obj_id(902);
+        let dynamic = gen_obj_id(903);
+        let isolated = gen_obj_id(904);
+        for obj in [&configured, &shared, &dynamic] {
+            remote
+                .seed_obj(obj.clone(), payload("seed", 1, remote.peer_id.clone()))
+                .await?;
+        }
+        other
+            .seed_obj(isolated.clone(), payload("other", 1, other.peer_id.clone()))
+            .await?;
+        let embedder_part = PartKey::new("embedder-part");
+        remote.store.ensure_part(embedder_part.clone()).await?;
+        remote
+            .store
+            .add_part_member(
+                embedder_part.clone(),
+                local.peer_id.clone(),
+                keyhive_core::access::Access::Read,
+            )
+            .await?;
+        let first = local.handle.subscription_source();
+        let first_clone = first.clone();
+        let second = local.handle.subscription_source();
+        first
+            .update(
+                remote.peer_id.clone(),
+                SubscriptionUpdate {
+                    parts: [(embedder_part.clone(), TEST_BACKEND_ID.into())].into(),
+                    objects: [(shared.clone(), TEST_BACKEND_ID.into())].into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        first
+            .update(
+                remote.peer_id.clone(),
+                SubscriptionUpdate {
+                    objects: [(dynamic.clone(), TEST_BACKEND_ID.into())].into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        second
+            .update(
+                remote.peer_id.clone(),
+                SubscriptionUpdate {
+                    parts: [(embedder_part.clone(), TEST_BACKEND_ID.into())].into(),
+                    objects: [(shared.clone(), TEST_BACKEND_ID.into())].into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        second
+            .update(
+                other.peer_id.clone(),
+                SubscriptionUpdate {
+                    objects: [(isolated.clone(), TEST_BACKEND_ID.into())].into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(Self {
+            local,
+            remote,
+            other,
+            events,
+            first,
+            first_clone,
+            second,
+            embedder_part,
+            configured,
+            shared,
+            dynamic,
+            isolated,
+        })
+    }
+}
+
+#[tokio::test]
+async fn subscription_sources_incremental_union_peer_scope_drop_and_reconnect() -> Res<()> {
+    use crate::SubscriptionEvent;
+    use crate::SubscriptionUpdate;
+
+    let SubscriptionScenario {
+        local,
+        remote,
+        other,
+        mut events,
+        first,
+        first_clone,
+        second,
+        embedder_part,
+        configured,
+        shared,
+        dynamic,
+        isolated,
+    } = SubscriptionScenario::boot().await?;
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    let parts: HashMap<_, _> = [(test_part(), TEST_BACKEND_ID.into())].into();
+    let configured_objects: HashMap<_, _> = [(configured.clone(), TEST_BACKEND_ID.into())].into();
+    local
+        .set_peer_routes(&remote, parts.clone(), configured_objects.clone())
+        .await?;
+    local
+        .set_peer_routes(&other, HashMap::new(), HashMap::new())
+        .await?;
+    let expected_parts = HashMap::from([
+        (
+            remote.peer_id.clone(),
+            [test_part(), embedder_part.clone()]
+                .into_iter()
+                .map(|part| (part, TEST_BACKEND_ID.into()))
+                .collect(),
+        ),
+        (other.peer_id.clone(), HashMap::new()),
+    ]);
+    let mut expected_objects = HashMap::from([
+        (
+            remote.peer_id.clone(),
+            [configured.clone(), shared.clone(), dynamic.clone()]
+                .into_iter()
+                .map(|obj| (obj, TEST_BACKEND_ID.into()))
+                .collect::<HashMap<_, _>>(),
+        ),
+        (
+            other.peer_id.clone(),
+            [(isolated.clone(), TEST_BACKEND_ID.into())].into(),
+        ),
+    ]);
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: remote.peer_id.clone(),
+            update: SubscriptionUpdate {
+                parts: expected_parts[&remote.peer_id].clone(),
+                objects: expected_objects[&remote.peer_id].clone(),
+                ..Default::default()
+            },
+        }
+    );
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: other.peer_id.clone(),
+            update: SubscriptionUpdate {
+                objects: expected_objects[&other.peer_id].clone(),
+                ..Default::default()
+            },
+        }
+    );
+    local
+        .assert_worker_routes(&expected_parts, &expected_objects)
+        .await?;
+    local
+        .set_peer_routes(&remote, HashMap::new(), HashMap::new())
+        .await?;
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: remote.peer_id.clone(),
+            update: SubscriptionUpdate {
+                removed_parts: [test_part()].into(),
+                removed_objects: [configured.clone()].into(),
+                ..Default::default()
+            },
+        }
+    );
+    let snapshot = local.handle.snapshot().await?;
+    assert_eq!(
+        snapshot.peer_parts[&remote.peer_id],
+        [(embedder_part.clone(), TEST_BACKEND_ID.into())].into()
+    );
+    assert_eq!(
+        snapshot.peer_objects[&remote.peer_id],
+        [shared.clone(), dynamic.clone()]
+            .into_iter()
+            .map(|obj| (obj, TEST_BACKEND_ID.into()))
+            .collect()
+    );
+    local
+        .set_peer_routes(&remote, parts.clone(), configured_objects.clone())
+        .await?;
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: remote.peer_id.clone(),
+            update: SubscriptionUpdate {
+                parts: parts.clone(),
+                objects: configured_objects.clone(),
+                ..Default::default()
+            },
+        }
+    );
+    local
+        .assert_worker_routes(&expected_parts, &expected_objects)
+        .await?;
+    let error = first
+        .update(
+            remote.peer_id.clone(),
+            SubscriptionUpdate {
+                objects: [(gen_obj_id(905), Arc::from("unknown-backend"))].into(),
+                removed_objects: [dynamic.clone()].into(),
+                removed_parts: [embedder_part.clone()].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::BigSyncWorkerError>(),
+        Some(crate::BigSyncWorkerError::UnknownObjectBackend { .. })
+    ));
+    first
+        .update(
+            remote.peer_id.clone(),
+            SubscriptionUpdate {
+                removed_objects: [shared.clone(), configured].into(),
+                removed_parts: [embedder_part.clone(), test_part()].into(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    drop(first);
+    local
+        .assert_worker_routes(&expected_parts, &expected_objects)
+        .await?;
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    local.handle.remove_peer(remote.peer_id.clone()).await?;
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: remote.peer_id.clone(),
+            update: SubscriptionUpdate {
+                removed_parts: expected_parts[&remote.peer_id].keys().cloned().collect(),
+                removed_objects: expected_objects[&remote.peer_id].keys().cloned().collect(),
+                ..Default::default()
+            },
+        }
+    );
+    local
+        .set_peer_routes(&remote, parts.clone(), configured_objects.clone())
+        .await?;
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: remote.peer_id.clone(),
+            update: SubscriptionUpdate {
+                parts: expected_parts[&remote.peer_id].clone(),
+                objects: expected_objects[&remote.peer_id].clone(),
+                ..Default::default()
+            },
+        }
+    );
+    local
+        .assert_worker_routes(&expected_parts, &expected_objects)
+        .await?;
+    first_clone.remove_peer(remote.peer_id.clone()).await?;
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: remote.peer_id.clone(),
+            update: SubscriptionUpdate {
+                removed_objects: [dynamic.clone()].into(),
+                ..Default::default()
+            },
+        }
+    );
+    expected_objects
+        .get_mut(&remote.peer_id)
+        .expect(ERROR_IMPOSSIBLE)
+        .remove(&dynamic);
+    local
+        .assert_worker_routes(&expected_parts, &expected_objects)
+        .await?;
+    second.remove_peer(remote.peer_id.clone()).await?;
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: remote.peer_id.clone(),
+            update: SubscriptionUpdate {
+                removed_parts: [embedder_part].into(),
+                removed_objects: [shared].into(),
+                ..Default::default()
+            },
+        }
+    );
+    expected_objects.insert(remote.peer_id.clone(), configured_objects.clone());
+    let configured_parts = HashMap::from([
+        (remote.peer_id.clone(), parts),
+        (other.peer_id.clone(), HashMap::new()),
+    ]);
+    local
+        .assert_worker_routes(&configured_parts, &expected_objects)
+        .await?;
+    drop(second);
+    assert_eq!(
+        events.recv().await?,
+        SubscriptionEvent {
+            peer_id: other.peer_id.clone(),
+            update: SubscriptionUpdate {
+                removed_objects: [isolated].into(),
+                ..Default::default()
+            },
+        }
+    );
+    local
+        .assert_worker_routes(
+            &configured_parts,
+            &HashMap::from([
+                (remote.peer_id.clone(), configured_objects),
+                (other.peer_id.clone(), HashMap::new()),
+            ]),
+        )
+        .await?;
+    drop(first_clone);
+    local.stop().await?;
+    remote.stop().await?;
+    other.stop().await?;
+    Ok(())
 }
 
 async fn boot_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {

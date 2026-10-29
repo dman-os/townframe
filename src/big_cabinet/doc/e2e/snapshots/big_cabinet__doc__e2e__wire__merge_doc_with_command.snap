@@ -1,0 +1,16 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: request
+---
+{
+  "capability": "01010101-0101-0101-0101-010101010101",
+  "command": "merge-1",
+  "sourceId": "z8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+  "at": {
+    "at": "heads",
+    "heads": [
+      "0202020202020202020202020202020202020202020202020202020202020202"
+    ]
+  },
+  "targetId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+}

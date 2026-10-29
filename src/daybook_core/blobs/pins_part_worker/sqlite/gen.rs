@@ -24,4 +24,3 @@ pub async fn doc_blob_hashes(db: &impl crate::sqlite_rs_alias::QueryExecutor, do
     let set = db.query(DOC_BLOB_HASHES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id)]).await?;
     set.all()
 }
-
