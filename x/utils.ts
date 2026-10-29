@@ -76,7 +76,7 @@ export async function useDotenvTargetDir() {
   }
 
   if (/^generation-\d+-[ab]$/.test($.path(configured).basename())) {
-    configured = $.path(configured).parent().toString();
+    configured = $.path(configured).parent()!.toString();
   }
 
   const shared = Deno.env.get("TOWNFRAME_SHARED_TARGET_DIR") === "1" ||

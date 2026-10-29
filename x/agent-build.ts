@@ -141,7 +141,7 @@ async function resolveCargoTargetDir(
     );
   }
   if (/^generation-\d+-[ab]$/.test($.path(absolute).basename())) {
-    absolute = $.path(absolute).parent().toString();
+    absolute = $.path(absolute).parent()!.toString();
   }
   const targetSubdir = resolveTargetSubdir(worktree);
   const shared = Deno.env.get("TOWNFRAME_SHARED_TARGET_DIR") === "1" ||
