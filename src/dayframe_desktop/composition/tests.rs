@@ -31,11 +31,13 @@ fn desktop_runtime_links_wasmtime_counter_with_shared_native_providers() {
         .map(|manifest| manifest.id.as_str())
         .collect();
     assert_eq!(registered, declared);
-    assert!(runtime
-        .application
-        .provider_descriptors()
-        .iter()
-        .any(|descriptor| descriptor.id.as_str() == micro_counter_manifest::ID));
+    assert!(
+        runtime
+            .application
+            .provider_descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id.as_str() == micro_counter_manifest::ID)
+    );
     runtime.application.host().close();
 }
 
@@ -174,12 +176,14 @@ fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_resta
         runtime.application.output::<WasmMicro>("counter"),
         Err(AccessError::Revoked)
     ));
-    assert!(output::<SettingsMicro, _>(&runtime.application, "settings")
-        .unwrap()
-        .sections
-        .snapshot()
-        .unwrap()
-        .is_empty());
+    assert!(
+        output::<SettingsMicro, _>(&runtime.application, "settings")
+            .unwrap()
+            .sections
+            .snapshot()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         first_sample.watch().current().unwrap_err(),
         AccessError::Revoked

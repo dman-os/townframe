@@ -64,16 +64,7 @@ export async function useDotenvTargetDir() {
   }
 
   const worktree = $.path(Deno.cwd()).basename();
-  let subdir = worktree;
-  const explicitSide = Deno.env.get("CONTESTANT_SIDE");
-  if (explicitSide === "a" || explicitSide === "b") {
-    subdir = `side-${explicitSide}`;
-  } else {
-    const match = worktree.match(/^generation-\d+-([ab])$/);
-    if (match) {
-      subdir = `side-${match[1]}`;
-    }
-  }
+  const subdir = worktree;
 
   if (/^generation-\d+-[ab]$/.test($.path(configured).basename())) {
     configured = $.path(configured).parent()!.toString();

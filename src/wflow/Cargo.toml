@@ -41,7 +41,7 @@ sqlite_rs.workspace = true
 
 #
 # wasm
-wash-runtime.workspace = true
+wash-runtime = { workspace = true, features = ["wasi-config"] }
 wasmtime = { workspace = true, optional = true }
 
 #

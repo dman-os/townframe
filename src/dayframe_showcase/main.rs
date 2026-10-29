@@ -1,11 +1,11 @@
 #[cfg(feature = "desktop")]
+use dioxus::desktop::DesktopContext;
+#[cfg(feature = "desktop")]
 use dioxus::desktop::tao::event::Event as DesktopEvent;
 #[cfg(feature = "desktop")]
 use dioxus::desktop::tao::event::WindowEvent as DesktopWindowEvent;
 #[cfg(feature = "desktop")]
 use dioxus::desktop::use_wry_event_handler;
-#[cfg(feature = "desktop")]
-use dioxus::desktop::DesktopContext;
 use dioxus::prelude::*;
 use dioxus_native::winit::event::WindowEvent as NativeWindowEvent;
 use dioxus_native::winit::window::Window;

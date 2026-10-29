@@ -3,10 +3,7 @@
 # `nix build .#daybook-cli` compiles with the exact rustc the CI shells use.
 { pkgs }:
 let
-  # Keep this on 2026-08-16 until wasmtime-wasi-http 47.0.4 (via the wash-runtime
-  # dependency) compiles again: newer nightlies fail its `wasmtime::component::bindgen!`
-  # expansion with E0283 (`HasData::Data` inference) during the packaged CLI build.
-  rustVersion = "2026-08-16";
+  rustVersion = "2026-09-17";
 in
 {
   inherit rustVersion;

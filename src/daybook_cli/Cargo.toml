@@ -22,7 +22,7 @@ daybook_core = { workspace = true }
 daybook_types = { workspace = true }
 oci-client = { version = "0.15.0", default-features = false, features = ["rustls-tls-native-roots"] }
 url = { version = "2.5.7", features = ["serde"] }
-wash-runtime = { workspace = true }
+wash-runtime = { workspace = true, features = ["wasi-logging"] }
 wash_plugin_sqlite.workspace = true
 sqlite_rs.workspace = true
 
