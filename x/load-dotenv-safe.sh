@@ -39,15 +39,27 @@ load_dotenv_safe_file() {
 
 scope_cargo_target_dir() {
   local configured="${CARGO_TARGET_DIR:-}"
-  local worktree
+  local worktree subdir
   if [[ -z "$configured" || "${TOWNFRAME_SHARED_TARGET_DIR:-0}" == "1" ]]; then
     return 0
   fi
   worktree="${PWD##*/}"
-  if [[ "${configured##*/}" == "$worktree" ]]; then
+  if [[ -n "${CONTESTANT_SIDE:-}" && ("$CONTESTANT_SIDE" == "a" || "$CONTESTANT_SIDE" == "b") ]]; then
+    subdir="side-$CONTESTANT_SIDE"
+  elif [[ "$worktree" =~ ^generation-[0-9]+-([ab])$ ]]; then
+    subdir="side-${BASH_REMATCH[1]}"
+  else
+    subdir="$worktree"
+  fi
+
+  if [[ "${configured##*/}" =~ ^generation-[0-9]+-([ab])$ ]]; then
+    configured="${configured%/*}"
+  fi
+
+  if [[ "${configured##*/}" == "$subdir" ]]; then
     return 0
   fi
-  export CARGO_TARGET_DIR="${configured%/}/$worktree"
+  export CARGO_TARGET_DIR="${configured%/}/$subdir"
   mkdir -p "$CARGO_TARGET_DIR"
 }
 
