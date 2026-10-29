@@ -20,6 +20,12 @@ use tokio::sync::watch;
 #[cfg(test)]
 mod tests;
 
+pub mod presentation;
+pub use presentation::Placement;
+pub use presentation::PresentationHost;
+pub use presentation::Surface;
+pub use presentation::ingress_budget;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub handles: usize,
@@ -53,7 +59,7 @@ impl State {
             return Err(AccessError::Denied);
         }
         *handles += 1;
-        Ok(Lease(self.clone()))
+        Ok(Lease(Arc::clone(self)))
     }
 }
 
@@ -134,7 +140,7 @@ impl Access {
             .expect("document watch identity overflow");
         let (cancel, cancelled) = watch::channel(());
         permit.send(Work {
-            state: self.lease.0.clone(),
+            state: Arc::clone(&self.lease.0),
             cancel: cancelled,
             source: Source::Watch {
                 id,
@@ -160,7 +166,7 @@ impl Access {
         let operation = self.access.mutate(route, mutation)?;
         let (cancel, cancelled) = watch::channel(());
         permit.send(Work {
-            state: self.lease.0.clone(),
+            state: Arc::clone(&self.lease.0),
             cancel: cancelled,
             source: Source::Operation {
                 operation: operation.clone(),
@@ -263,6 +269,64 @@ impl Work {
 
     pub fn released(&self) -> bool {
         self.cancel.has_changed().is_err() || self.state.host.check(&self.state.instance).is_err()
+    }
+}
+
+/// Outcome of one delivery attempt, reported by an engine adapter to [`drive`].
+#[derive(Debug, PartialEq)]
+pub enum DeliveryOutcome {
+    /// The guest accepted the delivery; watch work is rescheduled.
+    Delivered,
+    /// The work was already released; do not reschedule it.
+    Skipped,
+    /// The incarnation is gone; stop driving.
+    Stopped,
+    /// The guest trapped; close the instance and stop driving.
+    Trapped,
+}
+
+/// Drive document deliveries into a guest until the instance closes, the work
+/// channel ends, or the guest traps (ADR 018 §2: document delivery is
+/// engine-neutral). The adapter's `deliver` closure performs the engine-specific
+/// call — lock the incarnation, refuel, invoke — and reports the outcome; every
+/// scheduling, rescheduling, and close decision lives here so both engines
+/// deliver identically.
+pub async fn drive(
+    host: Host,
+    instance: Instance,
+    mut incoming: mpsc::Receiver<Work>,
+    pending_limit: usize,
+    mut deliver: impl FnMut(&Work, Delivery) -> DeliveryOutcome,
+) {
+    use futures::StreamExt;
+    let mut pending = futures::stream::FuturesUnordered::new();
+    loop {
+        let ready = tokio::select! {
+            _ = host.await_close(&instance) => return,
+            work = incoming.recv(), if pending.len() < pending_limit => {
+                let Some(work) = work else { return };
+                pending.push(work.wait());
+                continue;
+            }
+            ready = pending.next(), if !pending.is_empty() => ready.unwrap(),
+        };
+        let Some((work, delivery)) = ready else {
+            continue;
+        };
+        let repeat = !matches!(delivery, Delivery::Completed(_));
+        match deliver(&work, delivery) {
+            DeliveryOutcome::Delivered => {
+                if repeat {
+                    pending.push(work.wait());
+                }
+            }
+            DeliveryOutcome::Skipped => {}
+            DeliveryOutcome::Stopped => return,
+            DeliveryOutcome::Trapped => {
+                host.close_instance(&instance).unwrap();
+                return;
+            }
+        }
     }
 }
 

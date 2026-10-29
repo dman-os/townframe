@@ -20,6 +20,7 @@ utils_rs.workspace = true
 wasm_utils_rs.workspace = true
 am_utils_rs.workspace = true
 wflow_sdk.workspace = true
+sqlite_rs.workspace = true
 daybook_types = { workspace = true, features = ["wit"] }
 serde_json.workspace = true
 color-eyre.workspace = true

@@ -11,7 +11,11 @@ allow_external_api_types = false
 [builds.native]
 required_features = ["uniffi", "wit", "schemars", "manifest"]
 
-[builds.wasm32-wasip2]
+[builds.wasm32-wasip3]
+required_features = ["wit", "schemars", "manifest"]
+
+# Browser guests reach this crate through clay_docs. uniffi stays native-only.
+[builds.wasm32-unknown-unknown]
 required_features = ["wit", "schemars", "manifest"]
 
 [api]
@@ -26,15 +30,6 @@ symbol = "module::interlude"
 ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_INLINE_TEST_MOD"
-path = "src/daybook_types/manifest.rs"
-symbol = "module::tests"
-ceiling = 574
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
 reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]

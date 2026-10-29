@@ -1,0 +1,14 @@
+version = 1
+role = "runtime"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+    "clay_docs",
+    "clay_guest_session",
+    "clay_host",
+    "clay_rt_wcmp",
+    "clay_surface",
+    "daybook_types",
+]
+allow_external_api_types = false
+
+[builds.native]

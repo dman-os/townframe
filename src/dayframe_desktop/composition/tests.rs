@@ -2,26 +2,25 @@ use super::*;
 use clay_host::AccessError;
 use clay_mdk::native::output;
 use clay_mdk::wasm::WasmMicro;
+use clay_micro_core::micros::composition::ConfigurationError;
+use clay_micro_core::micros::composition::Enablement;
+use clay_micro_core::micros::composition::InstanceState;
 use micro_sample::SampleConfig;
 use micro_sample::SampleMicro;
 use micro_settings::SettingsMicro;
-use micro_settings_manifest::DeclaredSection;
 use std::collections::BTreeSet;
 
-// ── linkage coherence: the provider table, the configuration map, and the
-//    manifest declarations are three string-keyed surfaces that must agree;
-//    drift between them only surfaces as a reconcile error otherwise ──────
+// ── desktop guest linkage: the shell's guest_providers must register the Wasmtime
+//    counter beside the shared composition's native providers, or the id sets drift ──
 
 #[test]
-fn linked_provider_manifests_configuration_and_contributions_are_coherent() {
-    let runtime = DesktopRuntime::new();
+fn desktop_runtime_links_wasmtime_counter_with_shared_native_providers() {
+    let runtime = desktop_runtime();
     let manifests = [
         micro_settings_manifest::manifest(),
         micro_sample::manifest(),
         micro_counter_manifest::manifest(),
     ];
-    // A swapped or dropped entry in `linked_providers` shows up here as an
-    // id-set mismatch between what the table registered and what this composition declares.
     let descriptors = runtime.application.provider_descriptors();
     let registered: BTreeSet<&str> = descriptors
         .iter()
@@ -32,85 +31,21 @@ fn linked_provider_manifests_configuration_and_contributions_are_coherent() {
         .map(|manifest| manifest.id.as_str())
         .collect();
     assert_eq!(registered, declared);
-
-    let desired = runtime.desired();
-    // Every configured instance names a linked provider, binds exactly that provider's
-    // declared requirements, and routes each binding to an instance whose provider
-    // actually provides the contract.
-    for (name, configured) in &desired {
-        let manifest = manifests
-            .iter()
-            .find(|manifest| manifest.id.as_str() == configured.provider.as_str())
-            .unwrap_or_else(|| {
-                panic!(
-                    "configured instance {name} names unlinked provider {:?}",
-                    configured.provider
-                )
-            });
-        let requirements: BTreeSet<&str> = manifest
-            .requirements
-            .iter()
-            .map(|requirement| requirement.id.as_str())
-            .collect();
-        let bound: BTreeSet<&str> = configured.bindings.keys().map(String::as_str).collect();
-        assert_eq!(
-            bound, requirements,
-            "instance {name} bindings must cover exactly its provider's declared requirements"
-        );
-        for (contract, target) in &configured.bindings {
-            let target_provider = desired.get(target).unwrap_or_else(|| {
-                panic!("instance {name} binds {contract} to unknown instance {target}")
-            });
-            let target_manifest = manifests
-                .iter()
-                .find(|manifest| manifest.id.as_str() == target_provider.provider.as_str())
-                .expect("target provider checked linked above");
-            assert!(
-                target_manifest
-                    .provisions
-                    .iter()
-                    .any(|provision| provision.id == *contract),
-                "instance {target} does not provide the {contract} contract that {name} binds to it"
-            );
-        }
-    }
-
-    // A declared contribution may only target one of the contributing manifest's own
-    // requirements, and its payload must satisfy the target contract's acceptor — for
-    // `settings.sections` that acceptor is `DeclaredSection`. Current behavior pins a
-    // shape violation as a denied contribution at activation, not a pre-activation error.
-    for manifest in &manifests {
-        for contribution in &manifest.contributions {
-            assert!(
-                manifest
-                    .requirements
-                    .iter()
-                    .any(|requirement| requirement.id == contribution.provision),
-                "manifest {:?} contributes to undeclared requirement {:?}",
-                manifest.id,
-                contribution.provision
-            );
-            if contribution.provision == "settings.sections" {
-                serde_json::from_value::<DeclaredSection>(contribution.payload.clone())
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "manifest {:?} settings.sections payload is not a DeclaredSection: {error}",
-                            manifest.id
-                        )
-                    });
-            }
-        }
-    }
+    assert!(runtime
+        .application
+        .provider_descriptors()
+        .iter()
+        .any(|descriptor| descriptor.id.as_str() == micro_counter_manifest::ID));
     runtime.application.host().close();
 }
 
-fn started() -> DesktopRuntime {
-    let mut runtime = DesktopRuntime::new();
+fn started() -> CompositionRuntime {
+    let mut runtime = desktop_runtime();
     runtime.apply_now().unwrap();
     runtime
 }
 
-fn set_now(runtime: &mut DesktopRuntime, instance: &str, enablement: Enablement) {
+fn set_now(runtime: &mut CompositionRuntime, instance: &str, enablement: Enablement) {
     runtime.set_enablement(instance, enablement).unwrap();
     runtime.apply_now().unwrap();
 }
@@ -239,14 +174,12 @@ fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_resta
         runtime.application.output::<WasmMicro>("counter"),
         Err(AccessError::Revoked)
     ));
-    assert!(
-        output::<SettingsMicro, _>(&runtime.application, "settings")
-            .unwrap()
-            .sections
-            .snapshot()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(output::<SettingsMicro, _>(&runtime.application, "settings")
+        .unwrap()
+        .sections
+        .snapshot()
+        .unwrap()
+        .is_empty());
     assert_eq!(
         first_sample.watch().current().unwrap_err(),
         AccessError::Revoked

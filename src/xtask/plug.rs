@@ -1,5 +1,5 @@
 //! Plug OCI packaging: runs a manifest crate's native `manifest` binary, builds the
-//! sibling routines component for `wasm32-wasip2`, and writes an OCI image layout
+//! sibling routines component for `wasm32-wasip3`, and writes an OCI image layout
 //! (Wasm layers plus a plug-manifest layer) under `target/oci/<plug id>`.
 
 use crate::interlude::*;
@@ -302,7 +302,7 @@ async fn build_plug_wasm_component(workspace_root: &Path, plug_root: &Path) -> R
             "--lib",
             "--release",
             "--target",
-            "wasm32-wasip2",
+            "wasm32-wasip3",
             "--manifest-path",
             &plug_root.join("Cargo.toml").display().to_string(),
         ])
@@ -334,7 +334,7 @@ async fn read_build_component_bytes(
         component_url
     );
     let wasm_path = wasm_target_dir
-        .join("wasm32-wasip2")
+        .join("wasm32-wasip3")
         .join("release")
         .join(component_name);
     tokio::fs::read(&wasm_path)

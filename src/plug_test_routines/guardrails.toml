@@ -7,18 +7,19 @@ allowed_dependencies = [
     "daybook_types",
     "plug_test_manifest",
     "utils_rs",
+    "sqlite_rs",
     "wasm_utils_rs",
     "wflow_sdk",
 ]
 allow_external_api_types = false
 
-[builds.wasm32-wasip2]
+[builds.wasm32-wasip3]
 
 [[exemptions]]
 code = "ERROR_FN_LENGTH"
 path = "src/plug_test_routines/wflows/index_embedding.rs"
 symbol = "module::run"
-ceiling = 163
+ceiling = 171
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"

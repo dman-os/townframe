@@ -1,21 +1,17 @@
-use dioxus::prelude::*;
-use ui::ThemeMode;
-use ui::ThemeRoot;
+//! Entry point for the browser composition shell (ADR 018 §7).
+//!
+//! The shell only has behaviour in a browser: it fetches the counter guest and compiles it on
+//! the page's own `WebAssembly` engine. Cargo nonetheless builds every workspace binary for
+//! the native test and coverage lanes, where there is no window, no guest fetch, and no
+//! renderer, so the native binary is deliberately empty instead of pretending to run.
 
+#[cfg(target_arch = "wasm32")]
+mod shell;
+
+#[cfg(target_arch = "wasm32")]
 fn main() {
-    dioxus::launch(App);
+    shell::main();
 }
 
-#[component]
-fn App() -> Element {
-    rsx! {
-        ThemeRoot {
-            family: "material".to_string(),
-            mode: ThemeMode::Dark,
-            main {
-                class: "min-h-screen box-border bg-background p-6 font-sans text-foreground",
-                h1 { "Dayframe" }
-            }
-        }
-    }
-}
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {}

@@ -30,6 +30,28 @@ pub struct Package {
     pub manifest_path: PathBuf,
     pub dependencies: Vec<Dependency>,
     pub features: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub targets: Vec<PackageTarget>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PackageTarget {
+    #[serde(default)]
+    pub kind: Vec<String>,
+}
+
+impl Package {
+    /// Does this package have a library target the matrix can `clippy --lib`?
+    pub fn has_lib(&self) -> bool {
+        self.targets.iter().any(|target| {
+            target.kind.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
+                )
+            })
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -37,6 +59,11 @@ pub struct Dependency {
     pub name: String,
     pub path: Option<PathBuf>,
     pub kind: Option<String>,
+    /// Cargo metadata's `target` cfg expression (`cfg(not(target_arch = "wasm32"))`, …), or
+    /// `None` for an unconditional dependency. Target-boundary checks skip a dependency whose
+    /// cfg excludes the build target being compiled.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(Deserialize)]

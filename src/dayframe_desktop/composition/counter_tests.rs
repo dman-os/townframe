@@ -1,11 +1,15 @@
 use super::*;
+use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
 use clay_host::AccessError;
 use clay_host::ComponentRef;
 use clay_host::Instance;
 use clay_mdk::native::output;
 use clay_mdk::wasm::WasmMicro;
+use clay_micro_core::micros::composition::Enablement;
+use clay_micro_core::micros::composition::InstanceState;
 use clay_surface::SurfaceTree;
+use dioxus::prelude::*;
 use dioxus_core::RenderTargetId;
 use dioxus_core::VirtualDom;
 use dioxus_html::EventData;
@@ -41,7 +45,7 @@ fn click(dom: &mut VirtualDom, tree: &mut SurfaceTree) {
 
 #[test]
 fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disablement() {
-    let mut runtime = DesktopRuntime::new();
+    let mut runtime = desktop_runtime();
     runtime.apply_now().unwrap();
     let app = runtime.application.clone();
     let settings = output::<SettingsMicro, _>(&app, "settings").unwrap();
@@ -103,10 +107,8 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
     assert!(first.instance != second.instance);
     let sections = settings.sections.snapshot().unwrap();
     assert_eq!(sections.len(), 2);
-    assert!(
-        sections
-            .values()
-            .any(|entry| entry.detail == second.surface())
-    );
+    assert!(sections
+        .values()
+        .any(|entry| entry.detail == second.surface()));
     app.host().close();
 }

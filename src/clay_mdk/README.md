@@ -20,8 +20,8 @@ The same authoring vocabulary has two backends:
   surfaces of one incarnation.
 
 `view` (Dioxus slot/hook glue for host-linked views), `wasmtime` (host-side provider assembly
-for guests), and `wit`/`mirror` (document-mirror authoring over the WIT surface) complete the
-feature set.
+for guests), `wcmp` (the browser-engine twin of that provider assembly, ADR 018), and
+`wit`/`mirror` (document-mirror authoring over the WIT surface) complete the feature set.
 
 ## Manifests and contracts
 
@@ -42,11 +42,14 @@ native, self-contained micro may keep `manifest()` inline (see `micro_sample`).
 
 1. Write the crate(s) following `micro_sample` (native) or `micro_counter` +
    `micro_counter_manifest` (guest).
-2. Append one entry to `linked_providers` in `dayframe_desktop/composition.rs` — a manifest plus
-   its backend (`activate` fn or `component_package("name")`). Contribution targets are declared
-   in *your* manifest; you never name another micro's contract from composition code.
-3. Add the instance's entry to the configuration maps in `DesktopRuntime::new` (bindings route
-   your requirements to providers by instance name).
+2. Append one entry to the shell's guest providers — `dayframe_desktop/composition.rs`
+   (`guest_providers`) for Wasmtime, `dayframe_web/main.rs` (`guest_providers`) for `wcmp` — a
+   manifest plus its backend (`activate` fn, `component_package("name")`, or the `wcmp`
+   package factory). Contribution targets are declared in *your* manifest; you never name
+   another micro's contract from composition code.
+3. Add the instance's entry to the configuration maps in
+   `dayframe_composition::CompositionRuntime::new` (bindings route your requirements to
+   providers by instance name).
 4. Name the crate `micro_<name>` (and `micro_<name>_manifest`) and it joins the gate
    automatically: `x/check-dayframe.ts` derives its package list from `cargo metadata` by
    prefix. A Wasm guest also gets one entry in the script's `components` table; load the prepared

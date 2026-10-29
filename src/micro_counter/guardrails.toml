@@ -6,3 +6,6 @@ allowed_dependencies = [
     "micro_counter_manifest",
 ]
 allow_external_api_types = false
+
+# The guest itself: one wasm32-wasip3 component lineage (ADR 018 Phase 1).
+[builds.wasm32-wasip3]

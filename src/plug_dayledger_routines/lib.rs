@@ -51,23 +51,24 @@ mod wasm_runtime {
     struct Component;
 
     impl crate::wit::exports::townframe::wflow::bundle::Guest for Component {
-        fn run(args: crate::wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
+        async fn run(args: crate::wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
             use crate::wflows::*;
             wflow_sdk::route_wflows!(args, {
-                "parse-hledger" => |cx, _args: serde_json::Value| {
-                    parse_hledger::run(cx)
+                "parse-hledger" => |cx, _args: serde_json::Value| async move {
+                    parse_hledger::run(cx).await
                 },
                 // NOTE: route_wflows! matches keys as `:literal` patterns, so the routine key
                 // must be inlined here rather than referenced via INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY.
-                "init-note-editor-config" => |cx, _args: serde_json::Value| {
-                    init_note_editor_config::run(cx)
+                "init-note-editor-config" => |cx, _args: serde_json::Value| async move {
+                    init_note_editor_config::run(cx).await
                 },
             })
+            .await
         }
     }
 
     impl crate::wit::exports::townframe::daybook::stateless_view::Guest for Component {
-        fn render_facet_view(
+        async fn render_facet_view(
             args: crate::wit::exports::townframe::daybook::stateless_view::RenderFacetViewArgs,
         ) -> Result<
             crate::wit::exports::townframe::daybook::stateless_view::RenderViewResponse,
@@ -100,7 +101,7 @@ mod wasm_runtime {
                     )
                 })?;
 
-            let ledger_meta_raw = ledger_meta_token.get().map_err(|err| {
+            let ledger_meta_raw = ledger_meta_token.get().await.map_err(|err| {
                 crate::wit::exports::townframe::daybook::stateless_view::RenderViewError::Denied(
                     format!("error reading ledger meta facet: {err:?}"),
                 )

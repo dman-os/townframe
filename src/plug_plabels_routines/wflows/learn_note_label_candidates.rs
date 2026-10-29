@@ -21,8 +21,7 @@ const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
 const CANDIDATE_SET_CONFIG_FACET_ID: &str = "label-candidates";
 const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-candidates-learner";
 
-pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
-    use super::resolve_facet_write_target;
+pub async fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::WellKnownFacet;
@@ -31,17 +30,15 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     let args = facet_routine::get_args();
     let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note).to_string();
 
-    let note_facet_token = args
-        .primary_doc
-        .facets
-        .iter()
-        .find(|tag| tag.key() == note_facet_key && tag.rights().contains(FacetRights::READ))
-        .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "note facet key '{}' not found with read rights",
-                note_facet_key
-            ))
-        })?;
+    let note_facet_token =
+        super::find_facet_token(&args.primary_doc.facets, &note_facet_key, FacetRights::READ)
+            .await
+            .ok_or_else(|| {
+                JobErrorX::Terminal(ferr!(
+                    "note facet key '{}' not found with read rights",
+                    note_facet_key
+                ))
+            })?;
 
     let sqlite_connection =
         tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
@@ -52,26 +49,38 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     let config_facet_tag = PlabelFacetTag::PseudoLabelCandidatesFacet
         .as_str()
         .to_string();
-    let rw_config_token = args
-        .config_docs
-        .iter()
-        .flat_map(|cd| cd.facets.iter())
-        .find(|tag| tag.key() == config_facet_key && tag.rights().contains(FacetRights::UPDATE));
-    let ro_config_token = args
-        .config_docs
-        .iter()
-        .flat_map(|cd| cd.facets.iter())
-        .find(|tag| tag.key() == config_facet_key && tag.rights().contains(FacetRights::READ));
-    let config_write_target = args.config_docs.iter().find_map(|cd| {
-        resolve_facet_write_target(
-            &cd.facets,
-            &cd.tags,
+    let mut rw_config_token = None;
+    let mut ro_config_token = None;
+    for config_doc in &args.config_docs {
+        if rw_config_token.is_none() {
+            rw_config_token =
+                super::find_facet_token(&config_doc.facets, &config_facet_key, FacetRights::UPDATE)
+                    .await;
+        }
+        if ro_config_token.is_none() {
+            ro_config_token =
+                super::find_facet_token(&config_doc.facets, &config_facet_key, FacetRights::READ)
+                    .await;
+        }
+        if rw_config_token.is_some() && ro_config_token.is_some() {
+            break;
+        }
+    }
+    let mut config_write_target = None;
+    for config_doc in &args.config_docs {
+        if let Ok(target) = super::resolve_facet_write_target(
+            &config_doc.facets,
+            &config_doc.tags,
             &config_facet_key,
             &config_facet_tag,
             "label candidates config",
         )
-        .ok()
-    });
+        .await
+        {
+            config_write_target = Some(target);
+            break;
+        }
+    }
     if rw_config_token.is_none() && ro_config_token.is_none() {
         warn!(
             has_write_target = config_write_target.is_some(),
@@ -84,6 +93,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
 
     let note_raw = note_facet_token
         .get()
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error reading note facet: {err:?}")))?;
     let note_json: daybook_types::doc::FacetRaw = serde_json::from_str(&note_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing note facet json: {err}")))?;
@@ -97,14 +107,15 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         return Ok(());
     }
 
-    cx.effect(|| {
+    cx.effect(async || {
         use crate::wit::townframe::daybook::mltools_llm_chat;
 
-        let mut proposal_set = load_or_init_proposal_set(rw_config_token, ro_config_token)?;
-        ensure_embedding_cache_schema(sqlite_connection)?;
+        let mut proposal_set = load_or_init_proposal_set(rw_config_token, ro_config_token).await?;
+        ensure_embedding_cache_schema(sqlite_connection).await?;
 
         let note_snippet = note_prompt_snippet(&note.content);
-        let llm_text = mltools_llm_chat::llm_chat(&build_note_prompt(&note_snippet))
+        let llm_text = mltools_llm_chat::llm_chat(build_note_prompt(&note_snippet))
+            .await
             .map_err(|err| JobErrorX::Terminal(ferr!("error calling note llm: {err}")))?;
 
         let Some(parsed_proposal) = parse_llm_answer(&llm_text) else {
@@ -114,8 +125,23 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             return Ok(Json(()));
         };
 
+        let mut centroids = std::collections::HashMap::new();
+        for label in &proposal_set.labels {
+            centroids.insert(
+                label.prompts.clone(),
+                proposal_centroid(sqlite_connection, &label.prompts).await?,
+            );
+        }
+        let new_label_prompts = new_label.prompts.clone();
+        centroids.insert(
+            new_label_prompts,
+            proposal_centroid(sqlite_connection, &new_label.prompts).await?,
+        );
         let merged = merge_label_proposal_with_dedupe(&proposal_set, new_label, |prompts| {
-            proposal_centroid(sqlite_connection, prompts).map_err(|err| eyre::eyre!("{err}"))
+            centroids
+                .get(prompts)
+                .cloned()
+                .ok_or_else(|| eyre::eyre!("missing precomputed proposal centroid"))
         })
         .map_err(|err| JobErrorX::Terminal(err.wrap_err("error merging learned label proposal")))?;
 
@@ -133,7 +159,8 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
                     &facet_raw,
                     "error updating learned proposal set",
                     "error creating learned proposal set",
-                )?;
+                )
+                .await?;
             } else if ro_config_token.is_some() && rw_config_token.is_none() {
                 warn!(
                     "merged learned proposal set but only read-only config is available; skipping write"
@@ -142,18 +169,20 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         }
 
         Ok(Json(()))
-    })?;
+    })
+    .await?;
 
     Ok(())
 }
 
-fn load_or_init_proposal_set(
+async fn load_or_init_proposal_set(
     rw_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetToken>,
     ro_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetToken>,
 ) -> Result<PseudoLabelCandidatesFacet, JobErrorX> {
     if let Some(token) = ro_config_token {
         let raw = token
             .get()
+            .await
             .map_err(|err| JobErrorX::Terminal(ferr!("error reading ro config facet: {err:?}")))?;
         let facet_raw: daybook_types::doc::FacetRaw =
             serde_json::from_str(&raw).map_err(|err| {
@@ -167,6 +196,7 @@ fn load_or_init_proposal_set(
     } else if let Some(token) = rw_config_token {
         let raw = token
             .get()
+            .await
             .map_err(|err| JobErrorX::Terminal(ferr!("error reading config facet: {err:?}")))?;
         let facet_raw: daybook_types::doc::FacetRaw =
             serde_json::from_str(&raw).map_err(|err| {
@@ -180,10 +210,12 @@ fn load_or_init_proposal_set(
     }
 }
 
-fn ensure_embedding_cache_schema(
+async fn ensure_embedding_cache_schema(
     sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
 ) -> Result<(), JobErrorX> {
-    sqlite_connection
+    use sqlite_rs::BackendRef;
+    let sqlite = BackendRef::new(sqlite_connection);
+    sqlite
         .execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS learned_label_text_embedding_cache (
@@ -192,38 +224,42 @@ fn ensure_embedding_cache_schema(
                 dim INTEGER NOT NULL,
                 vector BLOB NOT NULL
             ) STRICT;
-            "#,
+            "#
+            .to_string(),
         )
+        .await
         .map_err(|err| {
             JobErrorX::Terminal(ferr!("error initializing learned label cache db: {err:?}"))
         })?;
     Ok(())
 }
 
-fn proposal_centroid(
+async fn proposal_centroid(
     sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     prompts: &[String],
 ) -> Result<Vec<f32>, JobErrorX> {
     let mut vectors = Vec::with_capacity(prompts.len());
     for prompt in prompts {
-        vectors.push(get_or_compute_text_embedding(sqlite_connection, prompt)?);
+        vectors.push(get_or_compute_text_embedding(sqlite_connection, prompt).await?);
     }
     mean_normalized(&vectors)
         .ok_or_else(|| JobErrorX::Terminal(ferr!("unable to compute proposal centroid")))
 }
 
-fn get_or_compute_text_embedding(
+async fn get_or_compute_text_embedding(
     sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
     query_text: &str,
 ) -> Result<Vec<f32>, JobErrorX> {
     use crate::wit::townframe::daybook::mltools_embed;
-    use crate::wit::townframe::sqlite::types::SqlValue;
+    use sqlite_rs::BackendRef;
+    use sqlite_rs::SqlValue;
 
-    let cache_rows = sqlite_connection
+    let sqlite = BackendRef::new(sqlite_connection);
+    let cache_rows = sqlite
         .query(
-            "SELECT model_tag, dim, vector FROM learned_label_text_embedding_cache WHERE query_text = ?1",
-            &[SqlValue::Text(query_text.to_string())],
-        )
+            "SELECT model_tag, dim, vector FROM learned_label_text_embedding_cache WHERE query_text = ?1".to_string(),
+            vec![SqlValue::Text(query_text.to_string())],
+        ).await
         .map_err(|err| JobErrorX::Terminal(ferr!("error querying learned label embedding cache: {err:?}")))?;
     if let Some(row) = cache_rows.rows.first() {
         let model_tag = row_text(&cache_rows, row, "model_tag").ok_or_else(|| {
@@ -255,7 +291,8 @@ fn get_or_compute_text_embedding(
         }
     }
 
-    let embed_result = mltools_embed::embed_text(query_text)
+    let embed_result = mltools_embed::embed_text(query_text.to_string())
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error embedding prompt text: {err}")))?;
     if !embed_result
         .model_id
@@ -268,18 +305,18 @@ fn get_or_compute_text_embedding(
         )));
     }
     let vector_bytes = daybook_types::doc::embedding_f32_slice_to_le_bytes(&embed_result.vector);
-    sqlite_connection
+    sqlite
         .execute(
             "INSERT INTO learned_label_text_embedding_cache (query_text, model_tag, dim, vector) \
              VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(query_text) DO UPDATE SET model_tag = excluded.model_tag, dim = excluded.dim, vector = excluded.vector",
-            &[
+             ON CONFLICT(query_text) DO UPDATE SET model_tag = excluded.model_tag, dim = excluded.dim, vector = excluded.vector".to_string(),
+            vec![
                 SqlValue::Text(query_text.to_string()),
                 SqlValue::Text(embed_result.model_id.clone()),
                 SqlValue::Integer(embed_result.dimensions as i64),
                 SqlValue::Blob(vector_bytes),
             ],
-        )
+        ).await
         .map_err(|err| JobErrorX::Terminal(ferr!("error upserting learned label embedding cache: {err:?}")))?;
     Ok(embed_result.vector)
 }

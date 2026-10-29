@@ -1,11 +1,12 @@
+use crate::composition::desktop_runtime;
 use crate::composition::Application;
-use crate::composition::DesktopRuntime;
+use crate::composition::CompositionRuntime;
+use blitz_dom::ns;
 use blitz_dom::BaseDocument;
 use blitz_dom::DocumentConfig;
 use blitz_dom::LocalName;
 use blitz_dom::NodeId;
 use blitz_dom::QualName;
-use blitz_dom::ns;
 use clay_dioxus::NativeComponents;
 use clay_host::AccessError;
 use clay_mdk::wasm::WasmMicro;
@@ -15,17 +16,17 @@ use dioxus::prelude::*;
 use dioxus_core::ElementId;
 use dioxus_core::RenderTargetId;
 use dioxus_core::VirtualDom;
-use dioxus_html::EventData;
-use dioxus_html::Modifiers;
-use dioxus_html::SerializedHtmlEventConverter;
-use dioxus_html::SerializedMouseData;
 use dioxus_html::geometry::ClientPoint;
 use dioxus_html::geometry::Coordinates;
 use dioxus_html::geometry::ElementPoint;
 use dioxus_html::geometry::PagePoint;
 use dioxus_html::geometry::ScreenPoint;
-use dioxus_html::input_data::MouseButton;
 use dioxus_html::input_data::decode_mouse_button_set;
+use dioxus_html::input_data::MouseButton;
+use dioxus_html::EventData;
+use dioxus_html::Modifiers;
+use dioxus_html::SerializedHtmlEventConverter;
+use dioxus_html::SerializedMouseData;
 use dioxus_native_dom::DioxusState;
 use micro_sample::SampleMicro;
 use micro_settings::SettingsMicro;
@@ -217,12 +218,12 @@ struct SettingsFixture {
 
 impl SettingsFixture {
     async fn start() -> Self {
-        fn composed(runtime: DesktopRuntime) -> Element {
+        fn composed(runtime: CompositionRuntime) -> Element {
             let runtime = use_signal(move || runtime);
             rsx! { Application { runtime } }
         }
 
-        let runtime = DesktopRuntime::new();
+        let runtime = desktop_runtime();
         let application = runtime.application.clone();
         let mock = application.mock_documents();
         let counter_facet = application

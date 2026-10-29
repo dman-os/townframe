@@ -535,6 +535,7 @@ impl KvStore for SqliteKvStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlite_rs::QueryExecutor;
     use wflow_core::kvstore::tests::test_kv_store_concurrency;
     use wflow_core::kvstore::tests::test_kv_store_impl;
 

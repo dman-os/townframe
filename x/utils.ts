@@ -76,7 +76,7 @@ export async function useDotenvTargetDir() {
   }
 
   if (/^generation-\d+-[ab]$/.test($.path(configured).basename())) {
-    configured = $.path(configured).parent().toString();
+    configured = $.path(configured).parent()!.toString();
   }
 
   const shared = Deno.env.get("TOWNFRAME_SHARED_TARGET_DIR") === "1" ||
@@ -87,4 +87,3 @@ export async function useDotenvTargetDir() {
   await Deno.mkdir(resolved, { recursive: true });
   Deno.env.set("CARGO_TARGET_DIR", resolved);
 }
-

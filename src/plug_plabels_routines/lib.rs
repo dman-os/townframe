@@ -14,7 +14,6 @@ mod wit {
         path: "wit",
         world: "bundle",
         // generate_all,
-        // async: true,
         with: {
             "wasi:keyvalue/store@0.2.0-draft": wasm_utils_rs::wit::wasi::keyvalue::store,
             "wasi:keyvalue/atomics@0.2.0-draft": wasm_utils_rs::wit::wasi::keyvalue::atomics,
@@ -50,6 +49,16 @@ mod wit {
     });
 }
 
+use crate::wit::townframe::sqlite::types as sqlite_types;
+sqlite_rs::impl_wit_sqlite_backend!(
+    crate::wit::townframe::sqlite::sqlite_connection::Connection,
+    sqlite_types,
+);
+sqlite_rs::impl_wit_sqlite_backend!(
+    crate::wit::townframe::sqlite::sqlite_connection::Transaction,
+    sqlite_types,
+);
+
 mod wflows;
 
 mod wasm_runtime {
@@ -60,65 +69,49 @@ mod wasm_runtime {
 
     struct Component;
 
-    pub(crate) fn row_text(
-        set: &crate::wit::townframe::sqlite::types::ResultSet,
-        row: &[crate::wit::townframe::sqlite::types::SqlValue],
-        name: &str,
-    ) -> Option<String> {
-        row_value(set, row, name).and_then(|value| match value {
-            crate::wit::townframe::sqlite::types::SqlValue::Text(value) => Some(value.clone()),
-            _ => None,
-        })
+    use sqlite_rs::ResultSet;
+    use sqlite_rs::Row;
+    use sqlite_rs::SqlValue;
+
+    pub(crate) fn row_text(_set: &ResultSet, row: &Row, name: &str) -> Option<String> {
+        row.get(name).ok()
     }
 
-    pub(crate) fn row_i64(
-        set: &crate::wit::townframe::sqlite::types::ResultSet,
-        row: &[crate::wit::townframe::sqlite::types::SqlValue],
-        name: &str,
-    ) -> Option<i64> {
-        row_value(set, row, name).and_then(|value| match value {
-            crate::wit::townframe::sqlite::types::SqlValue::Integer(value) => Some(*value),
-            _ => None,
-        })
+    pub(crate) fn row_i64(_set: &ResultSet, row: &Row, name: &str) -> Option<i64> {
+        row.get(name).ok()
     }
 
-    pub(crate) fn row_blob(
-        set: &crate::wit::townframe::sqlite::types::ResultSet,
-        row: &[crate::wit::townframe::sqlite::types::SqlValue],
-        name: &str,
-    ) -> Option<Vec<u8>> {
-        row_value(set, row, name).and_then(|value| match value {
-            crate::wit::townframe::sqlite::types::SqlValue::Blob(value) => Some(value.clone()),
-            _ => None,
-        })
+    pub(crate) fn row_blob(_set: &ResultSet, row: &Row, name: &str) -> Option<Vec<u8>> {
+        row.get(name).ok()
     }
 
     pub(crate) fn row_value<'a>(
-        set: &'a crate::wit::townframe::sqlite::types::ResultSet,
-        row: &'a [crate::wit::townframe::sqlite::types::SqlValue],
+        set: &'a ResultSet,
+        row: &'a Row,
         name: &str,
-    ) -> Option<&'a crate::wit::townframe::sqlite::types::SqlValue> {
+    ) -> Option<&'a SqlValue> {
         let idx = set.columns.iter().position(|column| column == name)?;
-        row.get(idx)
+        row.value_at(idx)
     }
 
     impl crate::wit::exports::townframe::wflow::bundle::Guest for Component {
-        fn run(args: crate::wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
+        async fn run(args: crate::wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
             use crate::wflows::*;
             wflow_sdk::route_wflows!(args, {
-                "label-note" => |cx, _args: serde_json::Value| {
-                    label_note::run(cx)
+                "label-note" => |cx, _args: serde_json::Value| async move {
+                    label_note::run(cx).await
                 },
-                "label-image" => |cx, _args: serde_json::Value| {
-                    label_image::run(cx)
+                "label-image" => |cx, _args: serde_json::Value| async move {
+                    label_image::run(cx).await
                 },
-                "learn-image-label-candidates" => |cx, _args: serde_json::Value| {
-                    learn_image_label_candidates::run(cx)
+                "learn-image-label-candidates" => |cx, _args: serde_json::Value| async move {
+                    learn_image_label_candidates::run(cx).await
                 },
-                "learn-note-label-candidates" => |cx, _args: serde_json::Value| {
-                    learn_note_label_candidates::run(cx)
+                "learn-note-label-candidates" => |cx, _args: serde_json::Value| async move {
+                    learn_note_label_candidates::run(cx).await
                 },
             })
+            .await
         }
     }
 }

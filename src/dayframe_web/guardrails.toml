@@ -2,6 +2,19 @@ version = 1
 role = "application"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
+    "clay_dioxus",
+    "clay_mdk",
+    "clay_micro_core",
+    "clay_rt_wcmp",
+    "clay_rt_wcmp_web",
+    "dayframe_composition",
+    "micro_counter_manifest",
     "ui",
 ]
 allow_external_api_types = false
+
+# Web shell: engine-neutral composition + `wcmp` guest fetch (ADR 018 §7). The shell is
+# meaningless without the `web` renderer feature, so the matrix never builds it bare.
+[builds.wasm32-unknown-unknown]
+features = ["web"]
+required_features = ["web"]

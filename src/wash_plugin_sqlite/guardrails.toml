@@ -15,3 +15,12 @@ ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
 reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/wash_plugin_sqlite/lib.rs"
+symbol = "module"
+ceiling = 1
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "transaction resources are concurrently callable async WIT resources; one tokio mutex serializes each transaction's SQLite state without blocking the component task"
+reference = "docs/scratch/agent-guardrails-open-items.md"

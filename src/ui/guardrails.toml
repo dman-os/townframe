@@ -4,3 +4,8 @@ dependency_reason = "dayframe microkernel layering: engine-neutral contracts at 
 allowed_dependencies = [
 ]
 allow_external_api_types = false
+
+# Theme tokens render under both shells (ADR 018 §7).
+[builds.native]
+
+[builds.wasm32-unknown-unknown]

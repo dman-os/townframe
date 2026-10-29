@@ -12,7 +12,7 @@
 # Deliberately not here (they need build artifacts, a package manager's module
 # tree, or facts about the host): `cargo x sql gen --check` and
 # `cargo x guardrails lint|api` (building xtask in the store would discard the
-# warm ./target), clippy/check-matrix/nextest/llvm-cov (need ./target plus the
+# warm ./target), clippy/check-matrix/nextest (need ./target plus the
 # agent-build jobserver), tsc/detekt/gradle/playwright (node_modules or the
 # Android SDK), and `cargo x guardrails doctor` (asserts facts about the
 # invoking shell's environment, which a sandbox cannot represent). Those stay
@@ -168,6 +168,16 @@ _: {
                         yaml.safe_load(path.read_text())
                 except Exception as err:
                     failures.append(f"{rel}: {err}")
+
+            playwright_version = "${pkgs.playwright-driver.version}"
+            for path in sorted((root / "src").glob("*/package.json")):
+                package = json.loads(path.read_text())
+                runner_version = package.get("devDependencies", {}).get("@playwright/test")
+                if runner_version is not None and runner_version != playwright_version:
+                    failures.append(
+                        f"{path.relative_to(root)}: @playwright/test must match "
+                        f"playwright-driver {playwright_version}, got {runner_version}"
+                    )
 
             for failure in failures:
                 print(failure, file=sys.stderr)

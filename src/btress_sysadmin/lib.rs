@@ -10,17 +10,9 @@ mod server;
 #[cfg(feature = "ssr")]
 mod wit {
     wit_bindgen::generate!({
+        path: "wit",
         generate_all,
-        // async: true,
-        with: {
-            "wasi:http/types@0.2.6": wasip2::http::types,
-            "wasi:http/incoming-handler@0.2.6": wasip2::http::incoming_handler,
-
-            "wasi:io/streams@0.2.6": wasip2::io::streams,
-            "wasi:io/error@0.2.6": wasip2::io::error,
-            "wasi:io/poll@0.2.6": wasip2::io::poll,
-            // "wasi:http/outgoing-handler@0.2.6": wasip2::http::outgoing_handler,
-        }
+        async: ["export:wasi:http/handler@0.3.0#handle"],
     });
 }
 
@@ -32,12 +24,31 @@ pub fn hydrate() {
     leptos::mount::hydrate_body(App);
 }
 
+#[cfg(all(feature = "ssr", target_os = "wasi"))]
+#[unsafe(no_mangle)]
+unsafe extern "Rust" fn __getrandom_v03_custom(
+    dest: *mut u8,
+    len: usize,
+) -> Result<(), getrandom_03::Error> {
+    let destination = unsafe { core::slice::from_raw_parts_mut(dest, len) };
+    let mut offset = 0;
+    while offset < len {
+        let random = wit::wasi::random::random::get_random_bytes((len - offset) as u64);
+        if random.is_empty() {
+            return Err(getrandom_03::Error::UNEXPECTED);
+        }
+        let amount = random.len().min(len - offset);
+        destination[offset..offset + amount].copy_from_slice(&random[..amount]);
+        offset += amount;
+    }
+    Ok(())
+}
 #[cfg(feature = "ssr")]
 use crate::interlude::*;
 #[cfg(feature = "ssr")]
-use wasip2::http::types::IncomingRequest;
+use wit::wasi::http::types::Request;
 #[cfg(feature = "ssr")]
-use wasip2::http::types::ResponseOutparam;
+use wit::wasi::http::types::Response;
 
 #[cfg(feature = "ssr")]
 struct Component;
@@ -46,17 +57,11 @@ struct Component;
 wit::export!(Component with_types_in wit);
 
 #[cfg(feature = "ssr")]
-impl wit::exports::wasi::http::incoming_handler::Guest for Component {
-    // #[expect(async_fn_in_trait)]
-    fn handle(request: IncomingRequest, response_out: ResponseOutparam) {
+impl wit::exports::wasi::http::handler::Guest for Component {
+    async fn handle(request: Request) -> Result<Response, wit::wasi::http::types::ErrorCode> {
         any_spawner::Executor::init_tokio().expect(ERROR_TOKIO);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect(ERROR_TOKIO);
-        let local = tokio::task::LocalSet::new();
-        local
-            .block_on(&rt, server::server_main(request, response_out))
-            .expect("error handling request");
+        Ok(server::server_main(request)
+            .await
+            .expect("error handling request"))
     }
 }

@@ -49,6 +49,13 @@ fn wasm_workspace_target_dir() -> std::path::PathBuf {
         })
 }
 
+fn sysadmin_host_interfaces() -> Vec<WitInterface> {
+    vec![
+        WitInterface::from("wasi:http/handler@0.3.0"),
+        WitInterface::from("wasi:random/random@0.3.0"),
+    ]
+}
+
 async fn run_inner(
     sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
 ) -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
@@ -89,7 +96,6 @@ async fn run_inner(
             components: vec![Component {
                 name: "btress-auth".to_string(),
                 bytes: auth_component_bytes.into(),
-                digest: None,
                 local_resources: LocalResources {
                     environment: HashMap::from([
                         (
@@ -110,13 +116,14 @@ async fn run_inner(
                 },
                 pool_size: 1,
                 max_invocations: 0,
+                ..Component::default()
             }],
             host_interfaces: vec![
                 WitInterface::from("townframe:api-utils/http-service"),
                 WitInterface::from("townframe:sqlite/sqlite-connection"),
                 WitInterface::from("townframe:api-utils/mail"),
                 // Required for the ingress to route HTTP to this workload.
-                WitInterface::from("wasi:http/incoming-handler@0.2.6"),
+                WitInterface::from("wasi:http/handler@0.3.0"),
                 // The component imports wasi:logging (jco keeps unused world imports);
                 // the TracingLogger plugin provides it when declared here.
                 WitInterface::from("wasi:logging/logging@0.1.0-draft"),
@@ -141,7 +148,7 @@ async fn run_inner(
     println!("Host started: {}", sysadmin_host.friendly_name());
 
     let target_dir = wasm_workspace_target_dir();
-    let component_path = target_dir.join("wasm/wasm32-wasip2/wasm-release/btress_sysadmin.wasm");
+    let component_path = target_dir.join("wasm/wasm32-wasip3/wasm-release/btress_sysadmin.wasm");
     let component_bytes = std::fs::read(&component_path)?;
     let site_dir = target_dir.join("site");
 
@@ -158,7 +165,6 @@ async fn run_inner(
             components: vec![Component {
                 name: "btress-sysadmin".to_string(),
                 bytes: component_bytes.into(),
-                digest: None,
                 local_resources: LocalResources {
                     environment: HashMap::from([
                         (
@@ -177,8 +183,9 @@ async fn run_inner(
                 },
                 pool_size: 1,
                 max_invocations: 0,
+                ..Component::default()
             }],
-            host_interfaces: vec![WitInterface::from("wasi:http/incoming-handler@0.2.6")],
+            host_interfaces: sysadmin_host_interfaces(),
             volumes: vec![Volume {
                 name: "public".to_string(),
                 volume_type: VolumeType::HostPath(HostPathVolume {

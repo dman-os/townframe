@@ -2,6 +2,8 @@ use super::ActivationError;
 use super::WasmIncarnation;
 use super::WasmStoreState;
 use super::bindings::townframe::dayframe::documents as wit;
+use super::first_poll;
+use super::wasmtime;
 use clay_docs::DocumentRef;
 use clay_docs::DocumentSnapshot;
 use clay_docs::FacetMutation;
@@ -18,71 +20,43 @@ pub use clay_guest_session::Operation as WasmOperation;
 pub use clay_guest_session::Watch as WasmDocumentWatch;
 use clay_guest_session::Work;
 use clay_host::AccessError;
-use clay_host::Host;
-use clay_host::Instance;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tokio::sync::mpsc;
 use wasmtime::component::Resource;
 
-pub(super) async fn drive(
-    host: Host,
-    instance: Instance,
-    incarnation: Arc<Mutex<Option<WasmIncarnation>>>,
-    mut incoming: mpsc::Receiver<Work>,
-    pending_limit: usize,
-) {
-    let mut pending = FuturesUnordered::new();
-    loop {
-        let ready = tokio::select! {
-            _ = host.await_close(&instance) => return,
-            work = incoming.recv(), if pending.len() < pending_limit => {
-                let Some(work) = work else { return };
-                pending.push(work.wait());
-                continue;
-            }
-            ready = pending.next(), if !pending.is_empty() => ready.unwrap(),
-        };
-        let Some((work, delivery)) = ready else {
-            continue;
-        };
-        let repeat = !matches!(delivery, Delivery::Completed(_));
-        let result = {
-            let mut guard = incarnation.lock().unwrap();
-            if work.released() {
-                continue;
-            }
-            let Some(active) = guard.as_mut() else { return };
-            active.refuel();
-            let events = active.client.townframe_dayframe_document_events();
-            let result = match delivery {
-                Delivery::Changed { id, snapshot } => {
-                    events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot))
-                }
-                Delivery::Lagged(id) => events.call_lagged(&mut active.store, id),
-                Delivery::Completed(receipt) => {
-                    events.call_completed(&mut active.store, &receipt_to_wire(receipt))
-                }
-            };
-            if result.is_err() {
-                guard.take();
-            }
-            result
-        };
-        if result.is_err() {
-            host.close_instance(&instance).unwrap();
-            return;
-        }
-        if repeat {
-            pending.push(work.wait());
-        }
+pub(super) fn deliver(
+    incarnation: &Arc<Mutex<Option<WasmIncarnation>>>,
+    work: &Work,
+    delivery: Delivery,
+) -> clay_guest_session::DeliveryOutcome {
+    use clay_guest_session::DeliveryOutcome;
+    if work.released() {
+        return DeliveryOutcome::Skipped;
     }
+    let mut guard = incarnation.lock().unwrap();
+    let Some(active) = guard.as_mut() else {
+        return DeliveryOutcome::Stopped;
+    };
+    active.refuel();
+    let events = active.client.townframe_dayframe_document_events();
+    let result = match delivery {
+        Delivery::Changed { id, snapshot } => {
+            first_poll(events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot)))
+        }
+        Delivery::Lagged(id) => first_poll(events.call_lagged(&mut active.store, id)),
+        Delivery::Completed(receipt) => {
+            first_poll(events.call_completed(&mut active.store, &receipt_to_wire(receipt)))
+        }
+    };
+    if result.is_err() {
+        guard.take();
+        return DeliveryOutcome::Trapped;
+    }
+    DeliveryOutcome::Delivered
 }
 
-pub(super) fn activate(
+pub(super) async fn activate(
     active: &mut WasmIncarnation,
     configs: BTreeMap<String, DocumentRef>,
 ) -> Result<(), ActivationError> {
@@ -109,6 +83,7 @@ pub(super) fn activate(
         .client
         .townframe_dayframe_micro_lifecycle()
         .call_activate(&mut active.store, &bindings)
+        .await
         .map_err(|trap| {
             ActivationError::Initialization(format!("guest trapped during activation: {trap:#}"))
         })?

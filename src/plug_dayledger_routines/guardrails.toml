@@ -10,13 +10,13 @@ allowed_dependencies = [
 ]
 allow_external_api_types = false
 
-[builds.wasm32-wasip2]
+[builds.wasm32-wasip3]
 
 [[exemptions]]
 code = "ERROR_FN_LENGTH"
 path = "src/plug_dayledger_routines/wflows/parse_hledger.rs"
 symbol = "module::run"
-ceiling = 330
+ceiling = 304
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"

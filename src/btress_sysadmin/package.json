@@ -1,7 +1,7 @@
 {
   "name": "@townframe/btress_sysadmin",
   "devDependencies": {
-    "@playwright/test": "1.63.0",
+    "@playwright/test": "1.64.1",
     "@types/node": "25.5.0"
   },
   "private": true,

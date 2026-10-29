@@ -19,7 +19,7 @@ in
     ];
     targets = [
       "wasm32-unknown-unknown"
-      "wasm32-wasip2"
+      "wasm32-wasip3"
     ]
     ++ (
       if pkgs.stdenv.hostPlatform.isLinux then
@@ -37,7 +37,7 @@ in
     extensions = [ "rust-src" ];
     targets = [
       "wasm32-unknown-unknown"
-      "wasm32-wasip2"
+      "wasm32-wasip3"
       "armv7-linux-androideabi"
       "aarch64-linux-android"
       "i686-linux-android"
@@ -50,7 +50,7 @@ in
     extensions = [ "rust-src" ];
     targets = [
       "wasm32-unknown-unknown"
-      "wasm32-wasip2"
+      "wasm32-wasip3"
       "armv7-linux-androideabi"
       "aarch64-linux-android"
       "i686-linux-android"

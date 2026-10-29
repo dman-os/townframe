@@ -10,17 +10,18 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 color-eyre.workspace = true
 utils_rs = { workspace = true, default-features = false }
 tempfile.workspace = true
-thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
 rusqlite = { version = "0.32", features = ["hooks"] }
-serde.workspace = true
-serde_json.workspace = true
 sqlite-vec.workspace = true
 libsqlite3-sys = "0.30.1"
-
 # Desktop builds link the system SQLite the nix shells provide. The Android NDK
 # and the Windows toolchain ship no `sqlite3` to link against (the previous
 # sqlx backend always bundled), so those targets compile SQLite in.

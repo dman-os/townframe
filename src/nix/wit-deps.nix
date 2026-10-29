@@ -56,10 +56,11 @@ pkgs.runCommand "townframe-wit-deps"
   {
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-Mj1b+NetSYJimREROzcItC75Xpy752YLvNVinTwyD5k=";
+    outputHash = "sha256-bPfUjKvlciNcxdFOmko4jtI72bl9QPN3v1Ihi0bWUkc=";
   }
   ''
     export HOME="$TMPDIR"
+    export WKG_CONFIG_FILE=${repoRoot + "/.config/wkg.toml"}
     # The sandbox has no /etc/ssl; wash's reqwest client reads SSL_CERT_FILE
     # (verified: pointing it at an unloadable file reproduces the panic).
     export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt

@@ -12,14 +12,12 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }
-# Captured test output belongs in the uploaded artifacts, not the job log: at RUST_LOG_TEST=debug a
-# single failing test can emit thousands of lines. The failure detail is in the `nextest-results`
-# JUnit artifact (store-failure-output below) and in the `nextest-recording` zip.
 failure-output = "never"
  
 [profile.ci.junit]
 path = "target/nextest/ci/results.xml"
-store-failure-output = true
+store-failure-output = false
+store-success-output = false
 
 # Nightly cron runs keep the CI retry schedule but report any test that needed a retry as a
 # failure, so a flake surfaces as a red run with its seed instead of hiding behind a green
@@ -30,4 +28,5 @@ flaky-result = "fail"
 
 [profile.nightly.junit]
 path = "target/nextest/ci/results.xml"
-store-failure-output = true
+store-failure-output = false
+store-success-output = false

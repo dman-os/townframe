@@ -66,6 +66,7 @@ pub trait Contributable: Provision {
     ) -> Result<(), AccessError>;
 }
 
+#[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
 type Acceptor = Arc<
     dyn Fn(&Instance, &serde_json::Value, ComponentRef) -> Result<(), AccessError> + Send + Sync,
 >;
@@ -76,6 +77,9 @@ type Acceptor = Arc<
 /// target — can still reach the acceptor; [`Context::require`] and [`output`] downcast the value.
 struct Envelope {
     value: Arc<dyn Any + Send + Sync>,
+    /// Contribution acceptor, only routed by an engine adapter (`wasmtime`/`wcmp`) or exercised
+    /// by this crate's own tests. Engine-less hosts publish the contract value alone.
+    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
     accept: Option<Acceptor>,
 }
 
@@ -147,6 +151,7 @@ impl<R: RendererRegistry> Context<R> {
 
     /// The composition activation this context mediates. Backend adapters (the wasm provider)
     /// reach through it to stage controller publications; micro code does not.
+    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
     pub(crate) fn activation(&self) -> &MicroActivation {
         &self.activation
     }
@@ -154,11 +159,13 @@ impl<R: RendererRegistry> Context<R> {
     /// The renderer registry this activation publishes into. Backend adapters need it for
     /// renderer-specific publication shapes; micro code publishes through
     /// [`Context::publish_component`] instead.
+    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
     pub(crate) fn registry(&self) -> &R {
         &self.registry
     }
 
     /// The configuration documents granted for this activation, keyed by manifest binding name.
+    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
     pub(crate) fn configs(&self) -> &BTreeMap<String, DocumentRef> {
         &self.configs
     }
@@ -185,35 +192,46 @@ impl<R: RendererRegistry> Context<R> {
     /// Stage a provision for commit when this activation succeeds. A failed or dropped
     /// activation rolls back every staged publication.
     pub fn publish<T: Provision>(&self, value: T) {
-        self.activation.publish_erased(
-            T::ID,
-            T::VERSION,
-            Arc::new(Envelope {
-                value: Arc::new(value),
-                accept: None,
-            }),
-        );
+        #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
+        let envelope = Envelope {
+            value: Arc::new(value),
+            accept: None,
+        };
+        #[cfg(not(any(test, feature = "wasmtime", feature = "wcmp")))]
+        let envelope = Envelope {
+            value: Arc::new(value),
+        };
+        self.activation
+            .publish_erased(T::ID, T::VERSION, Arc::new(envelope));
     }
 
     /// [`Context::publish`] for a contract that accepts declared contributions; the backend
     /// routes a contributor's manifest entries to this value's [`Contributable::contribute`].
+    /// Without an engine adapter linked there is no backend to route them, so the contract
+    /// value is published alone (the trait bound still documents the contract's shape).
     pub fn publish_contributable<T: Contributable>(&self, value: T) {
-        let acceptor = value.clone();
-        self.activation.publish_erased(
-            T::ID,
-            T::VERSION,
-            Arc::new(Envelope {
+        #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
+        let envelope = {
+            let acceptor = value.clone();
+            Envelope {
                 value: Arc::new(value),
                 accept: Some(Arc::new(move |contributor, payload, surface| {
                     acceptor.contribute(contributor, payload, surface)
                 })),
-            }),
-        );
+            }
+        };
+        #[cfg(not(any(test, feature = "wasmtime", feature = "wcmp")))]
+        let envelope = Envelope {
+            value: Arc::new(value),
+        };
+        self.activation
+            .publish_erased(T::ID, T::VERSION, Arc::new(envelope));
     }
 
     /// Land this incarnation's declared contributions (a backend step, run after the micro has
     /// activated and published `surface`). Each names a declared requirement; the bound
     /// provider must have published it as contributable.
+    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
     pub(crate) fn contribute(
         &self,
         contributions: &[crate::Contribution],

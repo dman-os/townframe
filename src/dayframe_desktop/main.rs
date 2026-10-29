@@ -17,7 +17,7 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    let runtime = use_signal(composition::DesktopRuntime::new);
+    let runtime = use_signal(composition::desktop_runtime);
     rsx! {
         ThemeRoot {
             family: "material".to_string(),

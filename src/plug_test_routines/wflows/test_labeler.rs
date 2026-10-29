@@ -3,7 +3,7 @@ use wflow_sdk::JobErrorX;
 use wflow_sdk::Json;
 use wflow_sdk::WflowCtx;
 
-pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+pub async fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::WellKnownFacetTag;
@@ -23,17 +23,20 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
 
     use daybook_types::doc::WellKnownFacet;
 
-    cx.effect(|| {
+    cx.effect(async || {
         let new_facet: daybook_types::doc::FacetRaw =
             WellKnownFacet::LabelGeneric("test_label".into()).into();
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
-        working_facet_target.write(
-            &new_facet,
-            "access error updating facet",
-            "access error creating facet",
-        )?;
+        working_facet_target
+            .write(
+                &new_facet,
+                "access error updating facet",
+                "access error creating facet",
+            )
+            .await?;
         Ok(Json(()))
-    })?;
+    })
+    .await?;
 
     Ok(())
 }

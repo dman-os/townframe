@@ -4,9 +4,22 @@ dependency_reason = "initial guardrail baseline"
 allowed_dependencies = ["utils_rs"]
 allow_external_api_types = false
 
+[builds.native]
+
+[builds.wasm32-wasip3]
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/sqlite_rs/native.rs"
+symbol = "module::tests"
+ceiling = 582
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
 [[exemptions]]
 code = "ERROR_SHARED_ASYNC_STATE"
-path = "src/sqlite_rs/lib.rs"
+path = "src/sqlite_rs/native.rs"
 symbol = "module"
 ceiling = 1
 class = "LEGACY_DEBT"

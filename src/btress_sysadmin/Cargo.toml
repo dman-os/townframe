@@ -29,7 +29,7 @@ thiserror = "2"
 
 #
 # wasm
-wit-bindgen = { version = "0.60.0", features = ["async-spawn"], optional = true }
+wit-bindgen = { version = "0.62.0", features = ["async-spawn", "futures-stream", "inter-task-wakeup"], optional = true }
 console_error_panic_hook = { version = "0.1.7", optional = true}
 wasm-bindgen = { version = "0.2.126", optional = true }
 wasm-bindgen-futures = { version = "0.4.76", optional = true }
@@ -42,13 +42,13 @@ axum-extra = { version = "0.12.6", default-features = false, features = ["cookie
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.7", features = ["util", "sensitive-headers", "trace"], optional = true }
 http = "1"
+futures-util = { version = "0.3", optional = true }
 
 #
 # web
 leptos = { version = "0.8.20" }
 leptos_meta = "0.8.6"
 leptos_router = "0.8.15"
-wasip2 = { version = "1.0.4", optional = true }
 any_spawner = { version = "0.3.0", features = ["tracing", "tokio"], optional = true }
 web-sys = { version = "0.3.103", features = ["Storage", "MediaQueryList", "Window", "Request", "RequestInit", "RequestCredentials", "Response", "Headers", "SubmitEvent", "Event", "EventTarget", "HtmlFormElement", "FormData"] }
 
@@ -79,7 +79,8 @@ ssr = [
     "dep:wit-bindgen",
     "dep:tower",
     "dep:tower-http",
-    "dep:wasip2",
+    "dep:futures-util",
+    "dep:getrandom-03",
     "dep:any_spawner",
     "leptos/ssr",
     "leptos_meta/ssr",
@@ -89,20 +90,18 @@ ssr = [
 [package.metadata.leptos]
 tailwind-input-file = "./styles/tailwind.css"
 site-root = "target/site"
-
 lib-profile-release = "wasm-release"
-lib-features = ["hydrate"]
 front-target-dir = "target/front"
 
 #
 # SSR
 bin-profile-release = "wasm-release"
-bin-target-triple = "wasm32-wasip2"
+bin-target-triple = "wasm32-wasip3"
 bin-target-dir = "target/wasm"
 bin-features = ["ssr"]
 
 # Single-crate workspace: cargo-leptos assumes packages live under their workspace root
-# (it failed with "Could not remove base" as a src/wasm_utils_rs member), and a standalone
+# (it failed to remove base as a src/wasm_utils_rs member), and a standalone
 # closure keeps root-workspace feature unification out of hydrate builds.
 [workspace]
 

@@ -1,6 +1,21 @@
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"', '--cfg', 'tokio_unstable']
 
+[target.wasm32-wasip3]
+# `--allow-multiple-definition`: clay_mdk defines a strong no-op
+# `__pthread_tsd_run_dtors` to override wasi-sdk v34 libc's strong definition
+# (which sweeps TSD destructors on every ReallocStart, mid-`activate`). Our
+# object precedes `libc.a` on the link line, so first definition wins.
+# wasm-component-ld takes the flag bare (no `-Wl,` prefix).
+rustflags = [
+  '--cfg',
+  'getrandom_backend="custom"',
+  '--cfg',
+  'tokio_unstable',
+  '-C',
+  'link-arg=--allow-multiple-definition',
+]
+
 [alias]
 x = "run --package xtask --"
 

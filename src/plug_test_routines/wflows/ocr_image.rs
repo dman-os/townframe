@@ -3,7 +3,7 @@ use wflow_sdk::JobErrorX;
 use wflow_sdk::Json;
 use wflow_sdk::WflowCtx;
 
-pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+pub async fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
@@ -40,9 +40,10 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         JobErrorX::Terminal(ferr!("access error cloning blob facet token: {err:?}"))
     })?;
     let ocr_result = mltools_ocr::ocr_image(blob_ocr_token)
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error running OCR: {err}")))?;
 
-    cx.effect(|| {
+    cx.effect(async || {
         let new_facet: daybook_types::doc::FacetRaw =
             WellKnownFacet::Note(daybook_types::doc::Note {
                 mime: "text/plain".to_string(),
@@ -51,14 +52,17 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             .into();
 
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
-        working_facet_target.write(
-            &new_facet,
-            "access error updating note with OCR result",
-            "access error creating note with OCR result",
-        )?;
+        working_facet_target
+            .write(
+                &new_facet,
+                "access error updating note with OCR result",
+                "access error creating note with OCR result",
+            )
+            .await?;
 
         Ok(Json(()))
-    })?;
+    })
+    .await?;
 
     Ok(())
 }

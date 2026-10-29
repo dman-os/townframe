@@ -4,7 +4,7 @@ use plug_dayledger_manifest::note_editor_config::note_editor_config_facet_key;
 use plug_dayledger_manifest::note_editor_config::upsert_hledger_note_mime_option;
 use wflow_sdk::WflowCtx;
 
-pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
 
@@ -38,7 +38,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
                 "core note editor config facet token missing READ or UPDATE right"
             )));
         }
-        let raw = config_token.get().map_err(|err| {
+        let raw = config_token.get().await.map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!(
                 "error reading core note editor config facet: {err:?}"
             ))
@@ -50,7 +50,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         })?;
         let next_raw =
             serde_json::to_string(&upsert_hledger_note_mime_option(config)).expect(ERROR_JSON);
-        let update_result = config_token.update(&next_raw).map_err(|err| {
+        let update_result = config_token.update(next_raw).await.map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!(
                 "denied updating core note editor config facet: {err:?}"
             ))
@@ -82,9 +82,10 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     .expect(ERROR_JSON);
     config_tag_token
         .create(
-            plug_dayledger_manifest::NOTE_EDITOR_CONFIG_FACET_ID,
-            &next_raw,
+            plug_dayledger_manifest::NOTE_EDITOR_CONFIG_FACET_ID.to_string(),
+            next_raw,
         )
+        .await
         .map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!(
                 "error creating core note editor config facet: {err:?}"
