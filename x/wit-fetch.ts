@@ -7,6 +7,7 @@ import { $ } from "./utils.ts";
 const clean = $.argv.includes("--clean");
 const generateAuthTypes = $.argv.includes("--generate-auth-types");
 const witConfigFiles = ["wkg.toml", "wkg.lock"];
+const registryConfig = $.relativeDir("../.config/wkg.toml");
 
 // `wit_bindgen::generate!` copies WIT doc comments into the generated Rust
 // bindings, and rustdoc treats a fenced block in a doc comment as a doctest.
@@ -89,7 +90,10 @@ for (const dir of dirs) {
   const crateDir = $.relativeDir(`../src/${dir}/`);
 
   console.log(`== wash wit fetch in ${dir} ==`);
-  await $`wash ${args}`.cwd(crateDir);
+  await $`wash ${args}`.cwd(crateDir).env(
+    "WKG_CONFIG_FILE",
+    registryConfig.toString(),
+  );
 
   for (const path of await tagBareDocFences(`src/${dir}/wit/deps`)) {
     console.log(`tagged bare doc-comment fences in ${path}`);

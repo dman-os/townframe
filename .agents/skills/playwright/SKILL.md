@@ -9,7 +9,7 @@ The flake owns the browsers. `src/nix/devshells.nix` builds a browser farm from
 `pkgs.playwright-driver` (`playwrightBrowsers`) and exports it as `PLAYWRIGHT_BROWSERS_PATH`
 (with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`) in the `dev` shell and in `ci-desktop`. Playwright
 looks browsers up by *revision*, so the npm runner must be exactly the `playwright-driver`
-version of the pinned nixpkgs (currently 1.63.0, chromium revision 1243). A different version
+version of the pinned nixpkgs (currently 1.64.1, chromium revision 1248). A different version
 asks for a revision the farm does not have and dies at browser launch with "Executable doesn't
 exist". Check the pair before blaming anything else:
 

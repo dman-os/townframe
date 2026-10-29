@@ -1,0 +1,19 @@
+[namespace_registries.wasi]
+registry = "wasi.dev"
+
+[namespace_registries.wasi.metadata]
+preferredProtocol = "oci"
+
+[namespace_registries.wasi.metadata.oci]
+registry = "ghcr.io"
+namespacePrefix = "webassembly/"
+
+[namespace_registries.wasmcloud]
+registry = "wasmcloud.com"
+
+[namespace_registries.wasmcloud.metadata]
+preferredProtocol = "oci"
+
+[namespace_registries.wasmcloud.metadata.oci]
+registry = "ghcr.io"
+namespacePrefix = "wasmcloud/interfaces/"

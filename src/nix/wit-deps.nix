@@ -60,6 +60,7 @@ pkgs.runCommand "townframe-wit-deps"
   }
   ''
     export HOME="$TMPDIR"
+    export WKG_CONFIG_FILE=${repoRoot + "/.config/wkg.toml"}
     # The sandbox has no /etc/ssl; wash's reqwest client reads SSL_CERT_FILE
     # (verified: pointing it at an unloadable file reproduces the panic).
     export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt

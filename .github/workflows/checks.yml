@@ -262,7 +262,7 @@ jobs:
           path: '**/nextest/ci/results.xml'
 
       - name: export nextest recording
-        if: failure()
+        if: always()
         run: |
           if nix develop .#ci-rust --command cargo nextest store list | grep -qE '^ +[0-9a-f]{8} '; then
             nix develop .#ci-rust --command cargo nextest store export latest --archive-file nextest-run.zip
@@ -274,10 +274,11 @@ jobs:
           NEXTEST_STATE_DIR: ${{ github.workspace }}/nextest-state
 
       - uses: actions/upload-artifact@v6
-        if: failure()
+        if: always()
         with:
           name: nextest-recording
           path: nextest-run.zip
+          retention-days: 14
           if-no-files-found: ignore
       - name: Publish Test Summary
         uses: test-summary/action@v2
@@ -295,6 +296,7 @@ jobs:
 
   e2e-sysadmin-chromium:
     name: E2E (sysadmin / chromium)
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

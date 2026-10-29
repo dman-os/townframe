@@ -3,12 +3,6 @@
 #
 # nextest deliberately keeps the record store settings out of repository configuration
 # (`.config/nextest.toml`), so this file exists only to make CI recording reproducible.
-#
-# Recording writes every test's captured stdout/stderr to the record store, which the
-# `rust tests` job exports as a portable recording artifact when it fails. This complements
-# `profile.ci.junit.store-failure-output` in `.config/nextest.toml`, which carries failure
-# output inside the JUnit report (the nextest store directory itself is deprecated and only
-# holds JUnit output now).
 
 [experimental]
 record = true

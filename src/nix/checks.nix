@@ -169,6 +169,16 @@ _: {
                 except Exception as err:
                     failures.append(f"{rel}: {err}")
 
+            playwright_version = "${pkgs.playwright-driver.version}"
+            for path in sorted((root / "src").glob("*/package.json")):
+                package = json.loads(path.read_text())
+                runner_version = package.get("devDependencies", {}).get("@playwright/test")
+                if runner_version is not None and runner_version != playwright_version:
+                    failures.append(
+                        f"{path.relative_to(root)}: @playwright/test must match "
+                        f"playwright-driver {playwright_version}, got {runner_version}"
+                    )
+
             for failure in failures:
                 print(failure, file=sys.stderr)
             if failures:
