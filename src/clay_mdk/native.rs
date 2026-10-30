@@ -127,6 +127,7 @@ impl<T: Clone + Send + Sync + 'static> Collection<T> {
 /// the host or the registry (ADR 015 §7); the provider adapter below constructs it.
 pub struct Context<R: RendererRegistry> {
     activation: MicroActivation,
+    broker: clay_micro_core::micros::CompositionBroker,
     registry: R,
     roots: HostedCollection<RootMount>,
     configs: BTreeMap<String, DocumentRef>,
@@ -141,8 +142,10 @@ impl<R: RendererRegistry> Context<R> {
         roots: HostedCollection<RootMount>,
         configs: BTreeMap<String, DocumentRef>,
     ) -> Self {
+        let broker = activation.broker().clone();
         Self {
             activation,
+            broker,
             registry,
             roots,
             configs,
@@ -168,6 +171,33 @@ impl<R: RendererRegistry> Context<R> {
     #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
     pub(crate) fn configs(&self) -> &BTreeMap<String, DocumentRef> {
         &self.configs
+    }
+
+    /// Static contributions to a contract this micro provides, readable while their contributors
+    /// are idle. A shell micro (a toolbar, a settings list) renders these payloads and calls
+    /// [`Context::accept`] for the ones it shows; the host knows only that the row is accepted.
+    pub fn declarations(&self, contract: &str) -> Vec<clay_micro_core::micros::Declaration> {
+        self.broker.declarations(contract)
+    }
+
+    /// The rows this activation currently accepts: contributor instance -> contract.
+    pub fn accepted(&self) -> BTreeMap<String, String> {
+        self.broker.accepted()
+    }
+
+    /// Replace the rows this activation accepts. Accepting a declared row keeps its contributor
+    /// live; withdrawing the last reason to run evicts it. The host validates each row's contract
+    /// against the contributor's manifest on the next reconciliation.
+    pub fn accept(&self, rows: BTreeMap<String, String>) {
+        self.broker.accept(rows);
+    }
+
+    /// Accept every declared contribution to a contract this micro provides, now and in the
+    /// future. Use this when the micro renders a growing registry and has no per-row policy;
+    /// [`Context::accept`] is for the cases where it hides or orders individual rows.
+    pub fn accept_all(&self, contracts: &[&str]) {
+        self.broker
+            .accept_all(contracts.iter().map(|contract| (*contract).to_owned()));
     }
 
     /// This activation's incarnation identity. Plain data; operations validate it host-side.

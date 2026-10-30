@@ -46,6 +46,11 @@ pub struct ConfiguredMicro {
 pub struct CompositionPolicy {
     pub eager: BTreeSet<String>,
     pub demand: BTreeMap<String, BTreeMap<String, String>>,
+    /// Contracts a consumer accepts in full, keyed by consumer instance. Unlike `demand`, which
+    /// names individual contributors, this is a standing rule: every currently or later declared
+    /// contribution to that contract is accepted. A toolbar that lists every registered button
+    /// says it once here; a toolbar that hides and reorders some uses `demand`.
+    pub accept_all: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Observable result of a reconciliation, not a promise that a declaration is a live provision.
@@ -85,6 +90,11 @@ pub enum ConfigurationError {
     UnknownInstance(String),
     #[error("configuration is not hydrated")]
     Loading,
+    #[error("{consumer} accepts contracts it does not provide: {contracts:?}")]
+    UndeclaredAcceptance {
+        consumer: String,
+        contracts: Vec<String>,
+    },
     #[error("{consumer} accepts {contract} from {contributor}, which does not declare it")]
     UndeclaredContribution {
         consumer: String,
@@ -856,6 +866,25 @@ fn live_instances(
             }
         }
     }
+    for (consumer, contracts) in &policy.accept_all {
+        let Some(entry) = desired.get(consumer) else {
+            return Err(ConfigurationError::UnknownInstance(consumer.clone()));
+        };
+        let provides = definitions.get(&entry.provider).is_some_and(|definition| {
+            contracts.iter().all(|contract| {
+                definition
+                    .provisions
+                    .iter()
+                    .any(|provision| &provision.id == contract)
+            })
+        });
+        if !provides {
+            return Err(ConfigurationError::UndeclaredAcceptance {
+                consumer: consumer.clone(),
+                contracts: contracts.iter().cloned().collect(),
+            });
+        }
+    }
     let mut live: BTreeSet<String> = desired
         .iter()
         .filter(|(name, configuration)| {
@@ -874,6 +903,21 @@ fn live_instances(
             }
             if let Some(rows) = policy.demand.get(name) {
                 live.extend(rows.keys().cloned());
+            }
+            if let Some(contracts) = policy.accept_all.get(name) {
+                live.extend(
+                    desired
+                        .iter()
+                        .filter(|(contributor, entry)| {
+                            *contributor != name
+                                && registry.get(&entry.provider).is_some_and(|contributions| {
+                                    contributions.iter().any(|contribution| {
+                                        contracts.contains(&contribution.provision)
+                                    })
+                                })
+                        })
+                        .map(|(contributor, _)| contributor.clone()),
+                );
             }
         }
         live.retain(|name| {

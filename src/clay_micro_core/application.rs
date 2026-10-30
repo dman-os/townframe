@@ -90,7 +90,6 @@ pub struct ApplicationRuntime<R: RendererRegistry> {
     providers: MicroRegistry,
     documents: clay_docs::DocumentService,
     composition: Rc<RefCell<Option<Composition>>>,
-    policy: Rc<RefCell<CompositionPolicy>>,
     policy_explicit: Rc<Cell<bool>>,
     configuration: Rc<RefCell<Configuration>>,
     events: tokio::sync::watch::Sender<()>,
@@ -120,7 +119,6 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
             providers: MicroRegistry::new(documents.clone()),
             documents,
             composition: Rc::new(RefCell::new(Some(Composition::default()))),
-            policy: Rc::default(),
             policy_explicit: Rc::default(),
             configuration: Rc::default(),
             events: tokio::sync::watch::channel(()).0,
@@ -303,17 +301,18 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
     /// locked-down/static compositions behaving as before; malleable shells opt into demand.
     fn effective_policy(&self, desired: &BTreeMap<String, ConfiguredMicro>) -> CompositionPolicy {
         if self.policy_explicit.get() {
-            return self.policy.borrow().clone();
+            return self.providers.policy().borrow().clone();
         }
         CompositionPolicy {
             eager: desired.keys().cloned().collect(),
             demand: BTreeMap::new(),
+            accept_all: BTreeMap::new(),
         }
     }
 
     pub fn set_policy(&self, policy: CompositionPolicy) {
         self.policy_explicit.set(true);
-        *self.policy.borrow_mut() = policy;
+        *self.providers.policy().borrow_mut() = policy;
         let mut configuration = self.configuration.borrow_mut();
         configuration.revision += 1;
         configuration.settled = None;
@@ -330,7 +329,7 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
     }
 
     pub fn policy(&self) -> CompositionPolicy {
-        self.policy.borrow().clone()
+        self.providers.policy().borrow().clone()
     }
 
     pub fn set_eager_roots(&self, roots: BTreeSet<String>) {
@@ -401,7 +400,9 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
                 configuration.error = Some(error);
             }
         }
+        let projected = configuration.desired.clone();
         drop(configuration);
+        self.providers.project_instances(&projected);
         self.events.send_replace(());
     }
 
@@ -431,6 +432,8 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
             }
             configuration.revision
         };
+        let projected = self.configuration.borrow().desired.clone();
+        self.providers.project_instances(&projected);
         self.events.send_replace(());
         self.wait_revision(revision).await
     }
