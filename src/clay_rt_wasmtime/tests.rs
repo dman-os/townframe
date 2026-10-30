@@ -544,3 +544,58 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     HostMountPoint::drop(&mut state, placement).unwrap();
     host.close();
 }
+
+// ── One engine per process, and a precompiled artifact cache (F10/W6) ────
+
+#[tokio::test]
+async fn packages_share_one_engine_and_one_linker() {
+    let first = counter_package().await;
+    let second = counter_package().await;
+    assert!(Engine::same(&first.engine, &second.engine));
+    assert!(Arc::ptr_eq(&first.linker, &second.linker));
+    assert!(Engine::same(&first.engine, &engine().unwrap()));
+}
+
+#[tokio::test]
+async fn precompiled_artifacts_are_reused_by_content() {
+    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
+        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let bytes = std::fs::read(path).unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "clay-component-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let artifact = {
+        let engine = engine().unwrap();
+        // The cache directory is process-global configuration; this test owns it for its duration.
+        let previous = std::env::var_os("DAYFRAME_COMPONENT_CACHE");
+        // SAFETY: tests in this binary do not read this variable concurrently except through
+        // this test, which restores it before returning.
+        unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", &directory) };
+        let first = compile_component(&engine, &bytes).unwrap();
+        let artifact = cache_path(&engine, &bytes).unwrap();
+        assert!(artifact.exists(), "a cold compile publishes its artifact");
+        let modified = std::fs::metadata(&artifact).unwrap().modified().unwrap();
+        let second = compile_component(&engine, &bytes).unwrap();
+        assert_eq!(
+            std::fs::metadata(&artifact).unwrap().modified().unwrap(),
+            modified,
+            "a warm load must not recompile"
+        );
+        drop((first, second));
+        match previous {
+            Some(previous) => unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", previous) },
+            None => unsafe { std::env::remove_var("DAYFRAME_COMPONENT_CACHE") },
+        }
+        artifact
+    };
+    // A warm load produces a component on the shared engine, from the published artifact.
+    let package = WasmPackage::from_bytes(&bytes).await.unwrap();
+    assert!(Engine::same(&package.engine, &engine().unwrap()));
+    assert!(artifact.exists());
+    std::fs::remove_dir_all(directory).ok();
+}
