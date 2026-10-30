@@ -448,9 +448,13 @@ run closes the incarnation; its configuration and declarations remain. Cycles ca
 themselves alive because reachability starts at roots.
 
 Manifest contributions are a **static declaration registry**, readable without activation
-(`MicroRegistry::contribution_registry`). A shell renders labels/icons and other semantic payloads
-from declarations, and accepts rows into its demand set; acceptance is what activates the
-contributor. Rows naming an unknown, disabled, or undeclared contribution are configuration
+(`MicroRegistry::contribution_registry`, and `Context::declarations` during an activation). A shell
+renders labels/icons and other semantic payloads from declarations, and accepts rows into its
+demand set; acceptance is what activates the contributor. A micro is its own broker: it may
+`accept` individual rows (hide/reorder) or `accept_all` a contract it provides, which is a standing
+rule that also covers contributors installed later, so a growing registry does not require
+re-activating the shell micro. The composition root therefore names only eager roots, never the
+contributors a micro hosts. Rows naming an unknown, disabled, or undeclared contribution are configuration
 errors, not silent no-ops. This resolves the former "exact demand triggers unresolved": the
 consumer micro decides from its own configuration; the host knows only roots, bindings, and
 accepted rows. Eviction is always correct as a cold start from documents; freezing/snapshotting

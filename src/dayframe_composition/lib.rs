@@ -100,16 +100,12 @@ impl CompositionRuntime {
         application.install_configuration_source(configuration.clone());
         // Eager roots are the only explicit start (ADR 014 §Composition and lifecycle):
         // `settings` is the shell's first panel, and `sample` mounts the sample panel. `counter`
-        // is installed but idle until the live settings panel accepts its declared
-        // `settings.sections` contribution, which is the toolbar/reverse-dependency case.
+        // is installed but idle until the settings micro activates and accepts its declared
+        // `settings.sections` contribution — the composition root never names it.
         application.set_eager_roots(std::collections::BTreeSet::from([
             "settings".into(),
             "sample".into(),
         ]));
-        application.set_demand(
-            "settings",
-            BTreeMap::from([("counter".into(), "settings.sections".into())]),
-        );
 
         Self {
             application,

@@ -690,6 +690,16 @@ Open within W4 (not blocking): what happens to a visible surface whose micro is 
 `SurfaceTree` (OLE presentation cache) until interaction. Default is (a) until the cost probe
 says otherwise.
 
+**Built (broker pass):** `CompositionBroker` on every activation (`MicroActivation::broker`,
+`Context::{declarations,accepted,accept,accept_all}`); the registry owns the shared policy cell and
+the desired-projection, and a micro's acceptance wakes the driver like a shell edit. `accept_all`
+is a standing rule over a contract, so late-installed contributors join without re-activating the
+consumer. `micro_settings` now accepts `settings.sections` itself, so `dayframe_composition` no
+longer names the counter anywhere — the desktop e2e still exercises activation, disable, re-enable
+and trap through that path. Pinned by
+`application::tests::a_consumer_micro_activates_declared_contributors_without_the_root_naming_them`,
+`composition::tests::accept_all_*`.
+
 **Built in this pass:** `CompositionPolicy { eager, demand }` separate from installation
 configuration; `InstanceState::Idle`; transitive root-reachability in
 `clay_micro_core/micros/composition.rs`; `MicroProvider::contributions` +
@@ -699,8 +709,8 @@ the lifecycle crate); `ApplicationRuntime::{set_policy,set_eager_roots,set_deman
 but unbound never activates; eager consumer pulls supplier but not unrelated micros; demand
 activates and withdrawal evicts; undeclared rows are errors; disabled contributors never start.
 Legacy compositions default to all-enabled-eager until a root sets a policy. **Not built:**
-automatic demand edges from host mounts/subscriptions/invokes, idle grace, failure-state UI,
-freezing.
+automatic demand edges from host mounts/subscriptions/invokes (a micro accepts explicitly today),
+idle grace, guest-side (wasm) access to the broker, freezing.
 
 ## 4. Workstreams (agreed direction; each becomes an ADR or amendment before code)
 
@@ -709,7 +719,7 @@ freezing.
 | W1 | Collection waist redesign: spec, WIT package, Rust rendering; demand = subscription; listing+hydrate; verdict rows; scope disposal; id namespacing; node adapter coverage definition | F1, F2, F8 | Q1–Q3 |
 | W2 | Sync presentation exports stay; suspension is trap-equivalent (not host panic); entry-gate alignment; guest-internal async under Dioxus once-then-spawn | F4 | Q4 — **done 2026-10-30**, except A2's MDK half (decided, not built) |
 | W3 | Micro configuration + boot composition model (datum-backed, persistence abstracted); composition root names no micro | F5 | Q5 |
-| W4 | Micro lifecycle = binding-derived liveness; static contribution registry; eager roots; eviction; failure states honoured by shells — design §3.4 | F3, F5 | Q6 |
+| W4 | Micro lifecycle = binding-derived liveness; static contribution registry; micro-owned acceptance (`accept`/`accept_all`); eager roots; eviction; failure states honoured by shells — §3.4, done except host-edge auto-edges and idle grace | F3, F5 | Q6 |
 | W5 | Portability tiers: isomorphic MDK, portable manifest crates, platform escape hatch; port Settings | F6 | Q9, W1 |
 | W6 | Package identity + caching on both engines; `InstancePre` on wasmtime (model on `daybook_core::rt` / `wash-runtime`); dedupe `clay_mdk::{wasm,wcmp}` and the two `clay_rt_*` adapters — shared engine/linker + precompiled cache **done**, package identity/`InstancePre`/wcmp cache open | F7, F10 | Q8 |
 | W7 | Reintroduce `dayframe_app`; mobile shell | F5 | W3, W4 |
