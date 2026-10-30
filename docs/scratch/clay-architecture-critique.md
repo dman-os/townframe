@@ -171,6 +171,31 @@ glue → guest wasm → JS glue → host-wasm for every import. Should some pres
 JS, or should more of clay's browser runtime live in wasm to avoid the extra hop? Are we leaning
 directly on Dioxus here? **Needs measurement before deciding** — see §3 Q7.
 
+### F10 (S1) The native wasm runtime has no real package layer — fix soon
+
+- `WasmPackage::from_bytes` builds a fresh `Config` + `Engine` **per package** and re-registers
+  the whole WASI p3 + `MicroClient` surface on a fresh `Linker` per package:
+  `src/clay_rt_wasmtime/lib.rs:346-364`. Wasmtime's model is one `Engine` per process. Measured
+  (§3.3): an extra Engine + Linker costs ~40 µs and no measurable RSS, so the defect is
+  structural, not raw cost. With one engine per package there is nowhere to put process-wide
+  policy: the memory reservation (4 GiB of address space per instance today, §3.3), the pooling
+  allocator, epoch interruption, and the compilation cache. Stores and components from different
+  packages also can't interoperate.
+- The two engines disagree: `WcmpPackage::load(engine, bytes)` takes a shared engine
+  (`src/clay_rt_wcmp/lib.rs:278`); the wasmtime adapter does not.
+- The only loading path is `from_env` (`DAYFRAME_<NAME>_COMPONENT`), and the "package cache" in
+  `clay_mdk::wasm::component_package` is a static map keyed by that `&'static str` name. It is a
+  test fixture shipped as the runtime's package layer: no content identity, no precompiled
+  (`Component::serialize`/`deserialize`) cache, no `InstancePre`.
+
+Operator: look at **`daybook_core::rt`** (`src/daybook_core/rt.rs`, `rt/wash_plugin.rs`) and
+**`wash-runtime`** (`crates/wash-runtime/src/engine/` at the pinned rev — one shared `Engine`
+built via `EngineBuilder`, pooling allocator with read-back limits, per-workload `InstancePre`,
+warm instance pools, trap remediation) for how composition on top of wasmtime should work; the
+previous passes were pointed there and did not adopt it. Fix shape: one runtime-owned engine
+passed in (matching wcmp), one linker per engine, per-package `Component` + `InstancePre`,
+packages keyed by content digest with a precompiled-artifact cache. Folds into W6.
+
 ### F8 (S2) Cross-hop lifecycle and identity are incomplete
 
 - Consumer `dispose_scope` withdraws only local overlays; there is no upstream scope-disposal
@@ -558,6 +583,106 @@ sleeping guest pinned on the wcmp engine
 (`clay_rt_wcmp_wasmi::tests::guest_blocking_in_dispatch_fails_as_trap_on_the_wcmp_engine`) and the
 async-import enumeration test (`clay_rt_wcmp::wasi::tests::async_linked_wasi_imports_are_enumerated_and_pinned`).
 
+## 3.3 Activation cost model, measured (2026-10-30)
+
+Question: can a few thousand enabled wasm micros be started eagerly (Cordis-style), or does
+activation have to be demand-driven? Measured with a throwaway probe on `clay_rt_wasmtime`. Setup:
+release profile, x86-64 Linux, current `WasmPackage` config (fuel + component-model async,
+default allocator), release guests. Each instance was activated, mounted into a host-side
+`SurfaceTree` mirror, and sent one real click. Drivers were not spawned, so per-instance tokio
+tasks are excluded.
+
+| | `micro_counter` (Dioxus guest) | `slots` (no Dioxus) |
+|---|---|---|
+| artifact | 1.23 MiB | 0.10 MiB |
+| cranelift compile (`Component::new`) | 160 ms | 20 ms |
+| precompiled (`serialize`) size | 3.57 MiB | 0.35 MiB |
+| precompiled load (`deserialize_file`) | 0.47 ms, +0.89 MiB RSS | 0.26 ms, +0.42 MiB RSS |
+| precompiled load from memory (`deserialize`) | +3.57 MiB RSS | +0.35 MiB RSS |
+| activate (instantiate + config) per instance | 0.12 ms, +0.18 MiB RSS | 0.06 ms, +0.04 MiB RSS |
+| mount per instance | 0.04 ms, +0.016 MiB | 0.02 ms, +0.018 MiB |
+| dispatch (click → re-render) | 0.04 ms | — |
+| 3000 instances of one package, mounted | 605 MiB, ~0.5 s | 162 MiB, ~0.2 s |
+| address space reserved per instance | 4162 MiB | 4162 MiB |
+
+Reading:
+- **Instances are cheap; distinct code is what costs.** The 3000-instance rows share one compiled
+  component. Distinct micros each bring their own code. For 3000 Dioxus-sized micros:
+  - cold compile ≈ 8 core-minutes;
+  - precompiled cache on disk ≈ 10.5 GiB, plus ≈ 3.6 GB of `.wasm`;
+  - code RSS when mapped from file ≈ 2.6 GiB (≈ 10.5 GiB when deserialized from memory);
+  - instance state on top ≈ 0.5 GiB.
+  Each Dioxus micro statically links its own copy of the Dioxus runtime, which accounts for most
+  of the 1.2 MiB.
+- **Eager start is affordable only under all three conditions:**
+  - micros share code: one package exporting many micros (Cordis §6.5's granularity-by-package),
+    or micros are small (slots-sized: ≈ 0.4 MiB code + 0.06 MiB instance each, so ≈ 1.4 GiB for
+    3000 distinct ones);
+  - a content-addressed precompiled cache exists (F10/W6); without it, every boot recompiles;
+  - the memory reservation is tuned. The default 4 GiB + guard reservation per linear memory caps
+    a 47-bit address space at ~30k instances, and a kernel with 39-bit user VA (256 GiB) at ~60.
+    `Config::memory_reservation` sized to the store limit, or a sized pooling allocator, removes
+    the cap at the cost of explicit bounds checks. This is one-engine policy (F10).
+- **Lazy activation saves code loading, not instance cost.** A demand-driven micro that is never
+  needed never has its code deserialized or mapped. That is the only large saving lazy activation
+  buys at this scale. Shared-code packaging buys most of the same for eager start.
+- Browser (napkin, not measured): wcmp compiles with `WebAssembly.compile` from bytes on every page
+  load, with no streaming compile and no code cache (F7). Instance cost there is again small, and
+  the dominant term is download + compile of distinct code. That makes the same packaging and
+  caching levers apply even more strongly.
+- An extra Engine + Linker per package (F10) measured at ~40 µs and no visible RSS.
+
+### 3.4 W4 design: binding-derived liveness (core mechanism implemented 2026-10-30)
+
+Operator decisions, superseding the eager-start / Cordis-availability reading of ADR 014's
+"exact demand triggers unresolved":
+
+- **Not a process model.** Micros are singletons. No `spawn`, no `close`, no explicit stop.
+  Disable (config datum) is the only intentional stop, per §3.1.
+- **Alive iff reachable from an eager root through held bindings.** A *binding* is any
+  host-routed edge the host can count: a mounted surface, a live subscription, an in-flight
+  invoke. The host already owns all of them (separate address spaces). First binding appears →
+  activate; last one dropped → idle grace, then evict. Reachability (tracing, not refcount) so a
+  cycle of bindings cannot keep itself alive.
+- **Eager roots are the only explicit start.** The shell's composition datum names them.
+- **Contributions become static registry rows the host holds without an instance** (VS Code
+  `contributes`, OSGi whiteboard registry). Today `contributions` is applied only *after* the
+  micro runs, so the toolbar can only discover a button by booting it. This is the change that
+  makes laziness possible at all.
+- **"Who may write a registry row" = the micro's own manifest.** No arbitrary writes into
+  another micro's clients collection; a row names its own micro and is dropped on
+  disable/uninstall. The toolbar's own config datum decides which rows it accepts and their
+  order (override records), and mounting an accepted row is the binding that activates it.
+  The host knows nothing about toolbars; it knows "row targets T" and "T holds a mount on X".
+- **Enable-time init** (`InitManifest`/`InitRunMode::PerInstall`, `daybook_types/manifest.rs:567`,
+  `daybook_core/rt.rs:1181`) stays for genuinely dynamic registration (Chrome `onInstalled`),
+  writing to the same registry under the same self-only rule. Not needed for the toolbar case.
+- **Freezing is an optimization only.** Eviction must always be correct as a cold start from
+  documents; a later Evicted-with-snapshot state may make resume fast. Blocked on wasmtime not
+  exposing component memory/globals, and on resource-handle tables; wcmp equivalent unproven.
+- Prior art naming: systemd `WantedBy` for reverse edges, socket activation for bind-starts;
+  Android bound services (alive while any client bound, `startService` for the explicit root);
+  OSGi delayed/immediate components + whiteboard; React/Compose presence-derived lifetime;
+  Cloudflare Durable Object eviction criteria (no in-flight call, timer, or open stream);
+  Fuchsia bind-starts + stop-idle escrow.
+
+Open within W4 (not blocking): what happens to a visible surface whose micro is evicted —
+(a) keep the binding, so data changes re-activate it; or (b) show the host's last mirrored
+`SurfaceTree` (OLE presentation cache) until interaction. Default is (a) until the cost probe
+says otherwise.
+
+**Built in this pass:** `CompositionPolicy { eager, demand }` separate from installation
+configuration; `InstanceState::Idle`; transitive root-reachability in
+`clay_micro_core/micros/composition.rs`; `MicroProvider::contributions` +
+`MicroFactory::with_contributions` + `MicroRegistry::contribution_registry` (no MDK dependency in
+the lifecycle crate); `ApplicationRuntime::{set_policy,set_eager_roots,set_demand,contribution_registry}`;
+`dayframe_composition` now names only `settings` as an eager root. Pinning tests cover: enabled
+but unbound never activates; eager consumer pulls supplier but not unrelated micros; demand
+activates and withdrawal evicts; undeclared rows are errors; disabled contributors never start.
+Legacy compositions default to all-enabled-eager until a root sets a policy. **Not built:**
+automatic demand edges from host mounts/subscriptions/invokes, idle grace, failure-state UI,
+freezing.
+
 ## 4. Workstreams (agreed direction; each becomes an ADR or amendment before code)
 
 | # | Workstream | Resolves | Depends on |
@@ -565,9 +690,9 @@ async-import enumeration test (`clay_rt_wcmp::wasi::tests::async_linked_wasi_imp
 | W1 | Collection waist redesign: spec, WIT package, Rust rendering; demand = subscription; listing+hydrate; verdict rows; scope disposal; id namespacing; node adapter coverage definition | F1, F2, F8 | Q1–Q3 |
 | W2 | Sync presentation exports stay; suspension is trap-equivalent (not host panic); entry-gate alignment; guest-internal async under Dioxus once-then-spawn | F4 | Q4 — **done 2026-10-30**, except A2's MDK half (decided, not built) |
 | W3 | Micro configuration + boot composition model (datum-backed, persistence abstracted); composition root names no micro | F5 | Q5 |
-| W4 | Micro lifecycle model (Android/iOS cues); demand-driven activation; failure states honoured by shells | F3, F5 | Q6 |
+| W4 | Micro lifecycle = binding-derived liveness; static contribution registry; eager roots; eviction; failure states honoured by shells — design §3.4 | F3, F5 | Q6 |
 | W5 | Portability tiers: isomorphic MDK, portable manifest crates, platform escape hatch; port Settings | F6 | Q9, W1 |
-| W6 | Package identity + caching on both engines; dedupe `clay_mdk::{wasm,wcmp}` and the two `clay_rt_*` adapters | F7 | Q8 |
+| W6 | Package identity + caching on both engines; one shared engine/linker + `InstancePre` on wasmtime (model on `daybook_core::rt` / `wash-runtime`); dedupe `clay_mdk::{wasm,wcmp}` and the two `clay_rt_*` adapters — **soon** | F7, F10 | Q8 |
 | W7 | Reintroduce `dayframe_app`; mobile shell | F5 | W3, W4 |
 | W8 | Browser isolation controls (fuel instrumentation or equivalent, memory cap) | F9 | — |
 | W9 | Measure browser hop cost; decide JS vs wasm placement of presentation helpers | F7 | Q7 |

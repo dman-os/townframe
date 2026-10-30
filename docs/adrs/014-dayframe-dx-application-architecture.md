@@ -436,7 +436,27 @@ does not grant unrestricted cross-micro DOM querying or make internal DOM struct
 
 Configured enablement, dependency availability, implementation activation, and presentation mounting
 are different facts. The design MUST permit enabled functionality to remain unloaded/inactive until
-needed; exact demand triggers and descriptor requirements remain unresolved.
+needed.
+
+**Amendment (2026-10-30, binding-derived liveness; core mechanism implemented):** micros are
+singletons, not processes: there is no spawn/close API and disablement is the only intentional
+stop. An instance is live iff it is reachable from an **eager root** through live bindings. Eager
+roots, named by the shell's composition policy, are the only explicit start. Declared requirement
+bindings pull their supplier live; accepted contribution rows pull their contributor live.
+Enablement alone yields `InstanceState::Idle`, with no instance. Withdrawing the last reason to
+run closes the incarnation; its configuration and declarations remain. Cycles cannot keep
+themselves alive because reachability starts at roots.
+
+Manifest contributions are a **static declaration registry**, readable without activation
+(`MicroRegistry::contribution_registry`). A shell renders labels/icons and other semantic payloads
+from declarations, and accepts rows into its demand set; acceptance is what activates the
+contributor. Rows naming an unknown, disabled, or undeclared contribution are configuration
+errors, not silent no-ops. This resolves the former "exact demand triggers unresolved": the
+consumer micro decides from its own configuration; the host knows only roots, bindings, and
+accepted rows. Eviction is always correct as a cold start from documents; freezing/snapshotting
+is a later optimization, never a correctness requirement. Host-side liveness tracking of mounts,
+subscriptions, and in-flight invokes is not yet automatic: those edges currently enter through
+the composition policy's demand set.
 
 Boot configuration selects root instances. Downstream creation occurs through an explicitly granted
 instantiation capability and MUST name an owning lifetime. Instantiating a child is an owned effect;
