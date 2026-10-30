@@ -27,22 +27,22 @@ use std::sync::atomic::Ordering;
 /// The cached package for one prepared guest component. The host process compiles a component
 /// once and reuses the linker across incarnations, so composition code caches per guest name.
 /// `x/check-dayframe.ts` prepares the artifact and exports its path. Compilation happens
-/// outside the cache lock so concurrent activations do not serialize on it.
-pub async fn component_package(name: &'static str) -> WasmPackage {
+/// outside the cache lock so concurrent activations do not serialize on it. A missing or
+/// invalid artifact is an activation failure the reconciler retains as `Failed` (ADR 014),
+/// not a host panic: the shell stays up and reports it.
+pub async fn component_package(name: &'static str) -> Result<WasmPackage, String> {
     static CACHE: std::sync::Mutex<BTreeMap<&'static str, WasmPackage>> =
         std::sync::Mutex::new(BTreeMap::new());
     if let Some(package) = CACHE.lock().unwrap().get(name) {
-        return package.clone();
+        return Ok(package.clone());
     }
-    let package = WasmPackage::from_env(name)
-        .await
-        .expect("prepared component must be valid");
-    CACHE
+    let package = WasmPackage::from_env(name).await?;
+    Ok(CACHE
         .lock()
         .unwrap()
         .entry(name)
         .or_insert_with(|| package.clone())
-        .clone()
+        .clone())
 }
 
 /// The published controller of an activated wasm micro: its incarnation identity, the surface
@@ -121,18 +121,19 @@ impl WasmMicro {
 }
 
 /// Turn a wasm micro (manifest + package factory) into a composition provider. The package
-/// is compiled inside the async activation, not at composition-construction time. The
-/// composition root calls this; micro crates never build providers themselves. After the guest
-/// activates, each contribution its manifest declares is routed to the contract it names with
-/// the guest's published surface (see [`crate::native::Contributable`]); a failure rolls the
-/// incarnation back.
+/// is compiled inside the async activation, not at composition-construction time, and a
+/// factory error (fetch, compile, missing artifact) is an activation failure the reconciler
+/// retains until configuration changes — never a shell panic. The composition root calls this;
+/// micro crates never build providers themselves. After the guest activates, each contribution
+/// its manifest declares is routed to the contract it names with the guest's published surface
+/// (see [`crate::native::Contributable`]); a failure rolls the incarnation back.
 pub fn provider<Fut>(
     application: &ApplicationRuntime<NativeComponents>,
     manifest: MicroManifest,
     package: impl Fn() -> Fut + 'static,
 ) -> MicroFactory
 where
-    Fut: Future<Output = WasmPackage> + 'static,
+    Fut: Future<Output = Result<WasmPackage, String>> + 'static,
 {
     let descriptor = compose_descriptor(&manifest);
     assert!(
@@ -164,7 +165,7 @@ where
         let roots = roots.clone();
         let package = package.clone();
         async move {
-            let package = package().await;
+            let package = package().await.map_err(ActivationError::Initialization)?;
             let configs = match &config {
                 Some(grant) => {
                     activation.grant_config(&grant.name, routine_facets(&grant.facets))?

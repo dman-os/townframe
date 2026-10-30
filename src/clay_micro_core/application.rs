@@ -590,7 +590,7 @@ impl<R: RendererRegistry> Driver<'_, R> {
                             (
                                 name.clone(),
                                 match config.enablement {
-                                    Enablement::Enabled => InstanceState::Stopped,
+                                    Enablement::Enabled => InstanceState::Faulted,
                                     Enablement::Disabled => InstanceState::Disabled,
                                 },
                             )

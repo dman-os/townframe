@@ -129,15 +129,12 @@ impl CompositionRuntime {
         Ok(())
     }
 
+    /// Every reconciler state is a legitimate shell state, `Failed`/`Faulted` included: the
+    /// reconciler retains a failure until configuration changes, and the shell's job is to show
+    /// it in the micro's status row rather than tear the whole application down (ADR 014
+    /// §Composition and lifecycle). Nothing is concealed behind an empty panel because a failed
+    /// micro publishes no root.
     pub fn apply_states(&mut self, states: BTreeMap<String, InstanceState>) {
-        // Activation failures are unexpected for these linked providers and mock grants.
-        // Do not conceal one behind an empty panel. Blocked/stopped states are legitimate lifecycle states.
-        assert!(
-            !states
-                .values()
-                .any(|state| matches!(state, InstanceState::Failed(_))),
-            "micro activation failed: {states:?}"
-        );
         self.states = states;
     }
 

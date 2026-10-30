@@ -52,9 +52,12 @@ pub struct CompositionPolicy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstanceState {
     Disabled,
-    /// The incarnation was explicitly closed outside configuration reconciliation. It stays stopped
-    /// until its configuration changes; dependency withdrawal alone does not enter this state.
-    Stopped,
+    /// The incarnation ended outside reconciliation while still desired: a guest trap, a runtime
+    /// fault, the micro closing itself, or host shutdown. There is no intentional stop other than
+    /// disablement (ADR 014 §Composition and lifecycle), so this is a fault. It is retained — never
+    /// retried automatically — until the instance's configuration or policy changes; a retry is a
+    /// configuration revision. Dependency withdrawal alone does not enter this state.
+    Faulted,
     /// Enabled and installed, but nothing binds it: no instance exists.
     Idle,
     UnavailableProvider(MicroId),
@@ -455,7 +458,7 @@ struct Pending {
 }
 
 struct Closing {
-    stop_if_unchanged: Option<ConfiguredMicro>,
+    fault_if_unchanged: Option<ConfiguredMicro>,
     ended: watch::Receiver<Option<CloseReason>>,
     closed: super::LocalFuture,
 }
@@ -464,7 +467,7 @@ struct Closing {
 pub struct Composition {
     active: BTreeMap<String, Active>,
     failed: BTreeMap<String, Failed>,
-    stopped: BTreeMap<String, ConfiguredMicro>,
+    faulted: BTreeMap<String, ConfiguredMicro>,
     pending: BTreeMap<String, Pending>,
     closing: BTreeMap<String, Closing>,
 }
@@ -492,7 +495,7 @@ impl Composition {
     fn retire(
         &mut self,
         name: String,
-        stop_if_unchanged: Option<ConfiguredMicro>,
+        fault_if_unchanged: Option<ConfiguredMicro>,
         ended: watch::Receiver<Option<CloseReason>>,
     ) {
         let mut observer = ended.clone();
@@ -501,7 +504,7 @@ impl Composition {
                 .insert(
                     name,
                     Closing {
-                        stop_if_unchanged,
+                        fault_if_unchanged,
                         ended,
                         closed: Box::pin(async move {
                             observer.wait_for(Option::is_some).await.unwrap();
@@ -572,10 +575,10 @@ impl Composition {
         self.closing.retain(|name, closing| {
             let reason = *closing.ended.borrow();
             if reason == Some(CloseReason::Requested)
-                && let Some(configuration) = &closing.stop_if_unchanged
+                && let Some(configuration) = &closing.fault_if_unchanged
                 && desired.get(name) == Some(configuration)
             {
-                self.stopped.insert(name.clone(), configuration.clone());
+                self.faulted.insert(name.clone(), configuration.clone());
             }
             reason.is_none()
         });
@@ -584,7 +587,7 @@ impl Composition {
                           ended: &watch::Receiver<Option<CloseReason>>| {
             let reason = *ended.borrow();
             if reason == Some(CloseReason::Requested) && desired.get(name) == Some(configuration) {
-                self.stopped.insert(name.clone(), configuration.clone());
+                self.faulted.insert(name.clone(), configuration.clone());
             }
             reason.is_none()
         };
@@ -593,7 +596,7 @@ impl Composition {
         self.pending.retain(|name, pending| {
             retain(name, &pending.configuration, &pending.activation.ended)
         });
-        self.stopped
+        self.faulted
             .retain(|name, configuration| desired.get(name) == Some(configuration));
         self.failed
             .retain(|name, failed| desired.get(name) == Some(&failed.configuration));
@@ -614,8 +617,8 @@ impl Composition {
             }
             let state = if !definitions.contains_key(&configuration.provider) {
                 InstanceState::UnavailableProvider(configuration.provider.clone())
-            } else if self.stopped.contains_key(&name) {
-                InstanceState::Stopped
+            } else if self.faulted.contains_key(&name) {
+                InstanceState::Faulted
             } else if self.active.contains_key(&name) {
                 InstanceState::Active
             } else {
@@ -725,10 +728,10 @@ impl Composition {
                 .borrow()
                 .expect("closure completed without a terminal reason");
             if reason == CloseReason::Requested
-                && let Some(configuration) = closing.stop_if_unchanged
+                && let Some(configuration) = closing.fault_if_unchanged
                 && desired.get(&name) == Some(&configuration)
             {
-                self.stopped.insert(name, configuration);
+                self.faulted.insert(name, configuration);
             }
             return;
         }
@@ -741,7 +744,7 @@ impl Composition {
         let reason = *pending.activation.ended.borrow();
         if let Some(reason) = reason {
             if reason == CloseReason::Requested {
-                self.stopped.insert(name, pending.configuration);
+                self.faulted.insert(name, pending.configuration);
             }
             return;
         }
