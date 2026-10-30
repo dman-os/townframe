@@ -2676,6 +2676,7 @@ dependencies = [
 name = "clay_rt_wasmtime"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "clay_docs",
  "clay_guest_session",
  "clay_host",

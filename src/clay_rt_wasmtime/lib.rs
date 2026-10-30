@@ -91,6 +91,8 @@ pub(crate) fn first_poll<F: Future>(call: F) -> Result<F::Output, Suspended> {
 /// path instead of a bare `wasmtime::` dependency.
 pub(crate) use wash_runtime::wasmtime;
 
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use wasmtime::Config;
 use wasmtime::Engine;
 use wasmtime::Store;
@@ -316,6 +318,123 @@ pub struct WasmPackage {
     linker: Arc<Linker<WasmStoreState>>,
 }
 
+/// The process-wide engine. Wasmtime's model is one engine per process: it owns the code and
+/// type registries, the allocator, and every policy that has to be uniform (memory reservation,
+/// epoch interruption, compilation cache). One engine per package (`F10`) leaves nowhere to put
+/// those, so packages share this.
+pub fn engine() -> Result<Engine, String> {
+    static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
+    ENGINE
+        .get_or_init(|| {
+            let mut config = Config::new();
+            config.consume_fuel(true);
+            // WASI p3 lifts stream/future types through the component-model async builtins, and
+            // `p3::add_to_linker` registers at least one `async func` import
+            // (`monotonic-clock.wait-for`), so the store requires `*_async` entrypoints: async
+            // export bindings + `instantiate_async`.
+            config.wasm_component_model_async(true);
+            // Stores cap linear memory at 64 MiB (`WasmStoreState::new`). Wasmtime otherwise
+            // reserves 4 GiB of address space per memory, which caps a 39-bit user address space
+            // at tens of instances; reserving the store limit keeps static memories (no bounds
+            // checks) while making the per-instance cost 64 MiB of untouched VA.
+            config.memory_reservation(RESERVED_MEMORY_BYTES);
+            config.memory_guard_size(MEMORY_GUARD_BYTES);
+            Engine::new(&config).map_err(|error| error.to_string())
+        })
+        .clone()
+}
+
+/// Linear-memory reservation per instance, matching the store limit in [`WasmStoreState::new`].
+const RESERVED_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+/// Wasmtime requires a guard size that is a multiple of the host page size; one page catches the
+/// overflow a guest would otherwise write into its neighbour.
+const MEMORY_GUARD_BYTES: u64 = 64 * 1024;
+
+/// The linker is identical for every package on the shared engine (WASI p3 plus the micro
+/// client), so it is built once rather than rebuilt per micro.
+fn linker(engine: &Engine) -> Result<Arc<Linker<WasmStoreState>>, String> {
+    static LINKER: OnceLock<Result<Arc<Linker<WasmStoreState>>, String>> = OnceLock::new();
+    LINKER
+        .get_or_init(|| {
+            let mut linker = Linker::new(engine);
+            wasmtime_wasi::p3::add_to_linker(&mut linker).map_err(|error| error.to_string())?;
+            MicroClient::add_to_linker::<_, HasSelf<WasmStoreState>>(&mut linker, |state| state)
+                .map_err(|error| error.to_string())?;
+            Ok(Arc::new(linker))
+        })
+        .clone()
+}
+
+/// Compile a component, reusing a precompiled artifact when one exists.
+///
+/// A cold compile of a Dioxus-sized micro is ~160 ms, and demand-driven activation now puts that
+/// on the user's first click. The cache is keyed by the artifact bytes plus the engine's own
+/// compatibility hash, so a wasmtime upgrade or a config change invalidates it instead of loading
+/// incompatible machine code. A missing or unusable cache entry is repaired by compiling.
+fn compile_component(engine: &Engine, bytes: &[u8]) -> Result<Component, String> {
+    let Some(path) = cache_path(engine, bytes) else {
+        return Component::new(engine, bytes).map_err(|error| error.to_string());
+    };
+    if path.exists() {
+        // SAFETY: this file was written by this module and is only ever read afterwards; nothing
+        // may modify it while it is mapped. A corrupt or incompatible file fails to load and is
+        // recompiled rather than trusted.
+        if let Ok(component) = unsafe { Component::deserialize_file(engine, &path) } {
+            return Ok(component);
+        }
+    }
+    let compiled = engine
+        .precompile_component(bytes)
+        .map_err(|error| error.to_string())?;
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory).map_err(|error| {
+            format!(
+                "cannot create component cache {}: {error}",
+                directory.display()
+            )
+        })?;
+    }
+    // Write-then-rename so a concurrent reader never maps a partial artifact.
+    static TEMP: AtomicU64 = AtomicU64::new(0);
+    let temporary = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&temporary, &compiled).map_err(|error| {
+        format!(
+            "cannot write component cache {}: {error}",
+            temporary.display()
+        )
+    })?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| format!("cannot publish component cache {}: {error}", path.display()))?;
+    Component::new(engine, bytes).map_err(|error| error.to_string())
+}
+
+/// `$DAYFRAME_COMPONENT_CACHE`, else the XDG/home cache, keyed by content and engine
+/// compatibility. `None` means the process has no cache location at all (no `HOME`, no
+/// `XDG_CACHE_HOME`); compilation then happens in memory only.
+fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
+    let directory = match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
+        Some(directory) => PathBuf::from(directory),
+        None => {
+            let base = std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
+                })?;
+            base.join("dayframe").join("components")
+        }
+    };
+    let mut key = blake3::Hasher::new();
+    key.update(bytes);
+    let mut compatibility = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&engine.precompile_compatibility_hash(), &mut compatibility);
+    key.update(&std::hash::Hasher::finish(&compatibility).to_le_bytes());
+    Some(directory.join(format!("{}.cwasm", key.finalize().to_hex())))
+}
+
 impl WasmPackage {
     /// Load a component artifact prepared by `x/check-dayframe.ts`, named by the environment
     /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `slots` →
@@ -344,22 +463,13 @@ impl WasmPackage {
     }
 
     pub async fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, String> {
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        // WASI p3 lifts stream/future types through the component-model async builtins, and
-        // `p3::add_to_linker` registers at least one `async func` import (`monotonic-clock.wait-for`),
-        // so the store requires `*_async` entrypoints: async export bindings + `instantiate_async`.
-        config.wasm_component_model_async(true);
-        let engine = Engine::new(&config).map_err(|error| error.to_string())?;
-        let component = Component::new(&engine, bytes).map_err(|err| err.to_string())?;
-        let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p3::add_to_linker(&mut linker).map_err(|err| err.to_string())?;
-        MicroClient::add_to_linker::<_, HasSelf<WasmStoreState>>(&mut linker, |state| state)
-            .map_err(|err| err.to_string())?;
+        let engine = engine()?;
+        let component = compile_component(&engine, bytes.as_ref())?;
+        let linker = linker(&engine)?;
         Ok(Self {
             engine,
             component,
-            linker: Arc::new(linker),
+            linker,
         })
     }
 
