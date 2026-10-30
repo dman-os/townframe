@@ -464,7 +464,7 @@ async fn host_close_cancels_provider_without_releasing_its_gate() {
     runtime.host().close();
     assert_eq!(
         configure.await,
-        Ok(BTreeMap::from([("pending".into(), InstanceState::Stopped)]))
+        Ok(BTreeMap::from([("pending".into(), InstanceState::Faulted)]))
     );
     assert_eq!(gate.dropped.get(), 1);
     assert!(gate.finish.borrow_mut().pop().unwrap().send(()).is_err());
@@ -627,7 +627,7 @@ async fn reports_recheck_earlier_incarnation_after_later_await() {
     assert_eq!(
         configure.await,
         Ok(BTreeMap::from([
-            ("a-ready".into(), InstanceState::Stopped),
+            ("a-ready".into(), InstanceState::Faulted),
             ("z-pending".into(), InstanceState::Active),
         ]))
     );
@@ -1188,8 +1188,8 @@ async fn late_registration_activates_blocked_instances_without_manual_reconcilia
             assert_eq!(
                 fixture.reports.borrow().clone(),
                 Ok(BTreeMap::from([
-                    ("consumer".into(), InstanceState::Stopped),
-                    ("supplier".into(), InstanceState::Stopped),
+                    ("consumer".into(), InstanceState::Faulted),
+                    ("supplier".into(), InstanceState::Faulted),
                 ]))
             );
         })
@@ -1352,7 +1352,7 @@ async fn independent_stop_withdraws_dependents_but_does_not_restart_the_provider
                         requirements: vec![Facility::ID.into()],
                     },
                 ),
-                ("supplier".into(), InstanceState::Stopped),
+                ("supplier".into(), InstanceState::Faulted),
             ]));
             fixture
                 .reports

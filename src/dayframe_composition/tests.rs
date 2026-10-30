@@ -119,3 +119,49 @@ fn locked_settings_instance_cannot_flip_enablement() {
     );
     runtime.application.host().close();
 }
+
+// ── failure is a state the shell shows, not a reason to abort (ADR 014; F3) ──
+
+/// A package factory that cannot produce its guest (fetch, HTTP status, compile, missing
+/// artifact) is the common web failure. The reconciler retains it as `Failed` on that one
+/// instance; every other micro keeps running; a configuration revision is the retry.
+#[test]
+fn unfetchable_guest_fails_its_own_instance_and_leaves_the_rest_running() {
+    let mut runtime = CompositionRuntime::new(|application| {
+        vec![clay_mdk::native::provider(
+            application,
+            micro_counter_manifest::manifest(),
+            |_| Err(clay_host::AccessError::Denied),
+        )]
+    });
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["settings"], InstanceState::Active);
+    assert_eq!(runtime.states["sample"], InstanceState::Active);
+    assert!(
+        matches!(runtime.states["counter"], InstanceState::Failed(_)),
+        "{:?}",
+        runtime.states["counter"]
+    );
+    // Retained, not retried, by an unrelated reconcile.
+    runtime.apply_now().unwrap();
+    assert!(matches!(
+        runtime.states["counter"],
+        InstanceState::Failed(_)
+    ));
+    // Disable then re-enable is the retry; the provider still fails, so it fails again rather
+    // than silently going idle.
+    runtime
+        .set_enablement("counter", Enablement::Disabled)
+        .unwrap();
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["counter"], InstanceState::Disabled);
+    runtime
+        .set_enablement("counter", Enablement::Enabled)
+        .unwrap();
+    runtime.apply_now().unwrap();
+    assert!(matches!(
+        runtime.states["counter"],
+        InstanceState::Failed(_)
+    ));
+    runtime.application.host().close();
+}
