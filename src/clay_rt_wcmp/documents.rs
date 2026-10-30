@@ -38,7 +38,7 @@ pub(super) fn deliver(
         return DeliveryOutcome::Stopped;
     };
     let events = active.client.townframe_dayframe_document_events();
-    let result = match delivery {
+    let outcome = match delivery {
         Delivery::Changed { id, snapshot } => {
             first_poll(events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot)))
         }
@@ -47,7 +47,13 @@ pub(super) fn deliver(
             first_poll(events.call_completed(&mut active.store, &receipt_to_wire(receipt)))
         }
     };
-    if result.is_err() {
+    // A suspension (Suspended) or a guest trap both withdraw the incarnation: document
+    // callbacks are the same class of contract violation as a presentation call that fails.
+    let trapped = match outcome {
+        Ok(outcome) => outcome.is_err(),
+        Err(super::Suspended) => true,
+    };
+    if trapped {
         guard.take();
         return DeliveryOutcome::Trapped;
     }

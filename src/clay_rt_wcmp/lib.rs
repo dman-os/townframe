@@ -5,7 +5,7 @@
 //! browser adapters supply only their engine. Surface and placement state, grant checks,
 //! handle caps, ingress budgets, and document delivery are delegated to
 //! `clay_guest_session`, so engines cannot diverge. Presentation calls poll the guest
-//! once and panic on `Pending` (ADR 018 §3); activation is async.
+//! once and treat a suspension as a trap (ADR 018 §3 as amended); activation is async.
 
 mod documents;
 mod wasi;
@@ -117,13 +117,24 @@ impl WcmpStoreState {
     }
 }
 
-/// Drive a presentation call to completion on its first poll. Our WIT has no async function,
-/// stream, or future, so a guest call that returns `Pending` has suspended where the contract has
-/// no suspension point: that is a broken invariant (ADR 018 §3), not a condition to wait out.
-pub fn first_poll<F: Future>(call: F) -> F::Output {
+/// Marks a presentation call that suspended on its first poll: a guest contract violation
+/// (the sync exports promise a decision before the listener closure returns), handled at
+/// every call site exactly like a trap — withdraw the surface, close the instance.
+#[derive(Debug, thiserror::Error)]
+#[error("guest presentation call suspended on its first poll")]
+pub struct Suspended;
+
+/// Drive a presentation call to completion on its first poll. The WIT *exports* are sync-typed
+/// (ADR 018 §3), but the WASI p3 *imports* are lifted through component-model async, so a guest
+/// can still suspend inside a sync-typed export — synchronous exports do not imply non-suspending
+/// execution. Both failure shapes are handled identically: a guest that blocks inside a sync-typed
+/// call fails with the spec's `CannotBlock` cause (`Ready(Err)`), and a guest that suspends returns
+/// `Pending`, mapped to [`Suspended`]. Either way the caller withdraws the surface and closes the
+/// instance — never a host panic.
+pub fn first_poll<F: Future>(call: F) -> Result<F::Output, Suspended> {
     match std::pin::pin!(call).poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("guest presentation call suspended on its first poll"),
+        Poll::Ready(output) => Ok(output),
+        Poll::Pending => Err(Suspended),
     }
 }
 
@@ -411,7 +422,7 @@ impl WcmpRuntime {
             ))
             .map_err(|_| PresentationError::Revoked)?;
         let placement_rep = placement.rep();
-        let mounted = first_poll(
+        let mounted = match first_poll(
             active
                 .client
                 .townframe_dayframe_presentation_events()
@@ -420,7 +431,12 @@ impl WcmpRuntime {
                     Resource::new_borrow(placement_rep),
                     components,
                 ),
-        );
+        ) {
+            Ok(outcome) => outcome,
+            Err(Suspended) => Err(wcmp::Error::Internal {
+                message: "guest presentation call suspended on its first poll".into(),
+            }),
+        };
         let placement = active
             .store
             .data_mut()
@@ -480,7 +496,7 @@ impl WcmpRuntime {
         let Some(active) = guard.as_mut() else {
             return EventResponse::default();
         };
-        let outcome = first_poll(
+        let outcome = match first_poll(
             active
                 .client
                 .townframe_dayframe_presentation_events()
@@ -495,7 +511,12 @@ impl WcmpRuntime {
                         data_json: event.data_json,
                     },
                 ),
-        );
+        ) {
+            Ok(outcome) => outcome,
+            Err(Suspended) => Err(wcmp::Error::Internal {
+                message: "guest presentation call suspended on its first poll".into(),
+            }),
+        };
         match outcome {
             Ok(response) => EventResponse {
                 prevent_default: response.prevent_default,
@@ -514,12 +535,17 @@ impl WcmpRuntime {
         let mut guard = self.incarnation.borrow_mut();
         let trapped = match guard.as_mut() {
             Some(active) if self.host.check(&self.instance).is_ok() => {
-                let outcome = first_poll(
+                let outcome = match first_poll(
                     active
                         .client
                         .townframe_dayframe_presentation_events()
                         .call_unmount(&mut active.store, Resource::new_borrow(surface)),
-                );
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(Suspended) => Err(wcmp::Error::Internal {
+                        message: "guest presentation call suspended on its first poll".into(),
+                    }),
+                };
                 match outcome {
                     Ok(()) => {
                         wit_presentation::HostSurface::drop(

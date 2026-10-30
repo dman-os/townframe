@@ -233,6 +233,97 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     host.close();
 }
 
+/// W2 spike: a guest whose sync-typed `dispatch` blocks via `std::thread::sleep` (which lifts
+/// to the async `monotonic-clock.wait-until` import).
+/// The component model's may-not-suspend rule must surface the block as `Err` (CannotBlock)
+/// on the first poll — not `Pending`, not a host panic — and the host must handle it as a
+/// trap: withdraw the surface, close the instance. Pinned by `sleeper_fixture`.
+#[tokio::test]
+async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
+    struct LiveSink(AtomicBool);
+
+    impl SurfaceSink<ComponentRef> for LiveSink {
+        fn is_live(&self) -> bool {
+            !self.0.load(Ordering::Acquire)
+        }
+
+        fn apply(&self, _edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            Ok(0)
+        }
+
+        fn withdraw(&self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let host = Host::new();
+    let owner = host.start("sleeper");
+    let ended = host.observe_instance(&owner).unwrap();
+    let package = WasmPackage::from_env("sleeper")
+        .await
+        .expect("prepared sleeper component is valid");
+    let (runtime, driver) = WasmRuntime::activate(&host, owner.clone(), &package, BTreeMap::new())
+        .await
+        .unwrap();
+    let writer = Arc::new(LiveSink(AtomicBool::new(false)));
+    let session = runtime
+        .mount(Arc::clone(&writer) as _, &[])
+        .expect("mount must complete before dispatch blocks");
+    assert!(writer.is_live());
+
+    let suspended_before = suspended_count();
+    // A real event so the guest's dispatch runs; the sleeper sleeps inside it.
+    let response = session.handler()(Event {
+        revision: 1,
+        element: clay_surface::NodeId::try_from(1_u32).unwrap(),
+        name: "click".into(),
+        bubbles: true,
+        data_json: "{}".into(),
+    });
+    // Trap-equivalent: default response, surface withdrawn, instance closed.
+    assert_eq!(response, EventResponse::default());
+    assert!(
+        !writer.is_live(),
+        "a blocked dispatch withdraws the surface"
+    );
+    assert_eq!(
+        host.check(&owner),
+        Err(clay_host::AccessError::Revoked),
+        "a blocked dispatch closes the instance"
+    );
+    assert_eq!(
+        *ended.borrow(),
+        Some(clay_host::CloseReason::Requested),
+        "closure is reported to the terminal observer"
+    );
+    // The block must surface as Ready(Err) (CannotBlock), never as Pending/Suspended.
+    assert_eq!(
+        suspended_count(),
+        suspended_before,
+        "wasmtime must fail a blocking sync-typed call with CannotBlock on the first poll, \
+         not return Pending"
+    );
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
+#[test]
+fn first_poll_maps_pending_to_suspended_and_ready_to_output() {
+    use std::task::Poll;
+
+    struct AlwaysPending;
+    impl std::future::Future for AlwaysPending {
+        type Output = ();
+        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    assert!(matches!(first_poll(AlwaysPending), Err(Suspended)));
+    assert!(matches!(first_poll(std::future::ready(())), Ok(())));
+}
+
 #[tokio::test]
 async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     use clay_docs::DocumentGrant;
