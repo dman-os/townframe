@@ -171,7 +171,7 @@ glue → guest wasm → JS glue → host-wasm for every import. Should some pres
 JS, or should more of clay's browser runtime live in wasm to avoid the extra hop? Are we leaning
 directly on Dioxus here? **Needs measurement before deciding** — see §3 Q7.
 
-### F10 (S1) The native wasm runtime has no real package layer — fix soon
+### F10 (S1) The native wasm runtime has no real package layer — shared engine/cache built, instance layer open
 
 - `WasmPackage::from_bytes` builds a fresh `Config` + `Engine` **per package** and re-registers
   the whole WASI p3 + `MicroClient` surface on a fresh `Linker` per package:
@@ -195,6 +195,17 @@ warm instance pools, trap remediation) for how composition on top of wasmtime sh
 previous passes were pointed there and did not adopt it. Fix shape: one runtime-owned engine
 passed in (matching wcmp), one linker per engine, per-package `Component` + `InstancePre`,
 packages keyed by content digest with a precompiled-artifact cache. Folds into W6.
+
+**Addressed 2026-10-30 (`b67d5e68`+):** `clay_rt_wasmtime::engine()` is one process-wide engine
+(one `Config`, one compatibility hash) and `linker()` one process-wide linker; `WasmPackage` holds
+only the compiled component plus clones of both. Linear-memory reservation is set to the 64 MiB
+store limit with a one-page guard, so per-instance address space is 64 MiB rather than 4 GiB.
+`compile_component` caches precompiled artifacts under `$DAYFRAME_COMPONENT_CACHE` (default
+`$XDG_CACHE_HOME/dayframe/components`), keyed by blake3(wasm bytes + `precompile_compatibility_hash`),
+written via temp-file + rename and repaired by recompiling when loading fails. Tests pin shared
+engine/linker identity and that a warm load does not rewrite the artifact. **Open:** content
+identity for packages (the `component_package` name cache is still the only lookup), `InstancePre`,
+pooling allocator, and the same cache on wcmp (F7).
 
 ### F8 (S2) Cross-hop lifecycle and identity are incomplete
 
@@ -692,7 +703,7 @@ freezing.
 | W3 | Micro configuration + boot composition model (datum-backed, persistence abstracted); composition root names no micro | F5 | Q5 |
 | W4 | Micro lifecycle = binding-derived liveness; static contribution registry; eager roots; eviction; failure states honoured by shells — design §3.4 | F3, F5 | Q6 |
 | W5 | Portability tiers: isomorphic MDK, portable manifest crates, platform escape hatch; port Settings | F6 | Q9, W1 |
-| W6 | Package identity + caching on both engines; one shared engine/linker + `InstancePre` on wasmtime (model on `daybook_core::rt` / `wash-runtime`); dedupe `clay_mdk::{wasm,wcmp}` and the two `clay_rt_*` adapters — **soon** | F7, F10 | Q8 |
+| W6 | Package identity + caching on both engines; `InstancePre` on wasmtime (model on `daybook_core::rt` / `wash-runtime`); dedupe `clay_mdk::{wasm,wcmp}` and the two `clay_rt_*` adapters — shared engine/linker + precompiled cache **done**, package identity/`InstancePre`/wcmp cache open | F7, F10 | Q8 |
 | W7 | Reintroduce `dayframe_app`; mobile shell | F5 | W3, W4 |
 | W8 | Browser isolation controls (fuel instrumentation or equivalent, memory cap) | F9 | — |
 | W9 | Measure browser hop cost; decide JS vs wasm placement of presentation helpers | F7 | Q7 |

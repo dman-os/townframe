@@ -18,6 +18,7 @@ clay_surface = { workspace = true }
 # washlets keep the defaults; feature unification gives them back in a
 # workspace-wide build.
 wash-runtime = { workspace = true, default-features = false }
+blake3.workspace = true
 wasmtime-wasi.workspace = true
 futures.workspace = true
 serde_json.workspace = true
