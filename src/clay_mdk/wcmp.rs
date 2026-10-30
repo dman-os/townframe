@@ -99,6 +99,17 @@ where
         "Wcmp manifest must declare its wasm.controller provision"
     );
     let config = manifest.config.clone();
+    // The same declarations are both routed on activation (below) and readable from the static
+    // registry while this micro is idle, which is what lets a consumer list its rows without
+    // booting their contributors (ADR 014 §Composition and lifecycle).
+    let registry_rows = manifest
+        .contributions
+        .iter()
+        .map(|contribution| clay_micro_core::micros::MicroContribution {
+            provision: contribution.provision.clone(),
+            payload: contribution.payload.clone(),
+        })
+        .collect();
     let contributions = Rc::new(manifest.contributions);
     let registry = application.renderer();
     let roots = application.root_mounts();
@@ -124,4 +135,5 @@ where
             Ok(())
         }
     })
+    .with_contributions(registry_rows)
 }

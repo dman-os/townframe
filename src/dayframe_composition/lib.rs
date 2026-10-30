@@ -98,10 +98,18 @@ impl CompositionRuntime {
         ]);
         let configuration = MockConfiguration::with_locked(locked, dynamic);
         application.install_configuration_source(configuration.clone());
-        // Only settings is an explicit start. Sample and counter are enabled but idle until a
-        // live binding (here their settings.sections requirement) pulls them in; installing a
-        // micro no longer implies booting it (ADR 014 §Composition and lifecycle).
-        application.set_eager_roots(std::collections::BTreeSet::from(["settings".into()]));
+        // Eager roots are the only explicit start (ADR 014 §Composition and lifecycle):
+        // `settings` is the shell's first panel, and `sample` mounts the sample panel. `counter`
+        // is installed but idle until the live settings panel accepts its declared
+        // `settings.sections` contribution, which is the toolbar/reverse-dependency case.
+        application.set_eager_roots(std::collections::BTreeSet::from([
+            "settings".into(),
+            "sample".into(),
+        ]));
+        application.set_demand(
+            "settings",
+            BTreeMap::from([("counter".into(), "settings.sections".into())]),
+        );
 
         Self {
             application,
