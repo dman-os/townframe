@@ -15,6 +15,7 @@ await useDotenvTargetDir();
 const isolated = ["--config", 'resolver.feature-unification="selected"'];
 await $`cargo build --locked ${isolated} -p micro_counter --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example slots --target wasm32-wasip3`;
+await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --target wasm32-wasip3`;
 const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
   .json<{ target_directory: string; packages: { name: string }[] }>();
 const target = $.path(metadata.target_directory);
@@ -25,6 +26,7 @@ await Deno.mkdir(directory.toString(), { recursive: true });
 const components: Record<string, [string, string]> = {
   counter: ["wasm32-wasip3/debug/micro_counter.wasm", "counter"],
   slots: ["wasm32-wasip3/debug/examples/slots.wasm", "slots"],
+  sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
 };
 const componentEnv: Record<string, string> = {};
 for (const name in components) {

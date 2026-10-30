@@ -55,3 +55,55 @@ fn unsupported(interface: &str, method: &str) -> Error {
         feature: format!("`{interface}#{method}` in clay_rt_wcmp's WASI host"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// A4's checking test (ADR 015 R5): enumerate the async-linked WASI imports.
+    ///
+    /// Every `func_wrap_concurrent` registration is a suspension point a guest can reach from
+    /// inside a sync-typed presentation call, because the WASI imports are linked into the same
+    /// instance that serves `mount`/`dispatch`/`unmount`. Today that is exactly the
+    /// monotonic-clock pair — `wait-for` and `wait-until` (the world imports the whole
+    /// interface, so both must be registered) — and the may-not-suspend rule makes blocking on
+    /// them fail with `CannotBlock` instead of hanging (pinned behaviorally by the `sleeper`
+    /// fixture on both engines). Growing this set widens the surface where that runtime net is
+    /// the only thing between a guest and a stalled presentation call, so the durable fix is the
+    /// link-time split (a presentation world with no async imports). This test is the trigger:
+    /// adding a third async import fails here and forces that split, or a deliberate ADR
+    /// amendment, rather than silently enlarging the contract's exception list.
+    #[test]
+    fn async_linked_wasi_imports_are_enumerated_and_pinned() {
+        let wasi_directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("wasi");
+        let mut registrations = Vec::new();
+        let mut entries: Vec<_> = std::fs::read_dir(&wasi_directory)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", wasi_directory.display()))
+            .map(|entry| entry.expect("wasi directory entry reads").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+            .collect();
+        entries.sort();
+        for path in entries {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            // This test module lives in `mod.rs`, so scan production code only — otherwise the
+            // needle matches the scanner itself.
+            let production = source
+                .split_once("#[cfg(test)]")
+                .map_or(source.as_str(), |(head, _)| head);
+            let count = production.matches("func_wrap_concurrent").count();
+            if count > 0 {
+                registrations.push((
+                    path.file_name()
+                        .expect("wasi source has a file name")
+                        .to_string_lossy()
+                        .into_owned(),
+                    count,
+                ));
+            }
+        }
+        assert_eq!(
+            registrations,
+            [("clocks.rs".to_string(), 2)],
+            "the async-linked WASI import set changed; see the doc comment on this test"
+        );
+    }
+}
