@@ -5,8 +5,11 @@
 //! pattern the plug crates established (`plug_<name>_manifest` holds shared types and tests;
 //! the micro crate itself compiles to wasm where applicable). Manifest data is written in Rust
 //! so compatibility is type-checked; an OCI packaging step remains future work (ADR 015
-//! Deferred). Contract types are portable MDK vocabulary: no host or composition crate types
-//! cross this boundary (ADR 015 §Boundary correction).
+//! Deferred). Contract types are *intended* as portable MDK vocabulary with no host or
+//! composition crate types crossing the boundary (ADR 015 §Boundary correction) — **not yet
+//! true**: this crate still imports `clay_mdk::native::{AccessError, Collection, …}`, so a
+//! guest cannot implement or consume its typed provisions. Porting the contents to isomorphic
+//! vocabulary is workstream W5 (finding F6, `docs/scratch/clay-architecture-critique.md`).
 use clay_mdk::ComponentRef;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;

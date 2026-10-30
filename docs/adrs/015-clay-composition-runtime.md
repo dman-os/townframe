@@ -2,8 +2,14 @@
 
 **Status:** Accepted. Migration stages 1–8 and the crate-map phases 1–4
 (`docs/scratch/dayframe-crate-map.md` §7–§8) are implemented; crate names below are as built.
+*Section status corrections (2026-10-30, see `docs/scratch/clay-architecture-critique.md` §5):*
+§9's portability claim for `micro_<name>_manifest` crates is **false as built** — as of the
+critique, `micro_settings_manifest` imports `clay_mdk::native::{AccessError, Collection, …}`, so
+a guest cannot implement or consume its typed provisions (finding F6). The manifest *pattern* is
+decided; portable contents are not built.
 **Amended by:** ADR 017 (collection substrate: §4 optimistic visibility, §6 contribution
-collections), ADR 018 (browser engine, Proposed: §1 Shape W, §8, §Deferred).
+collections), ADR 018 (browser engine: §3 rewrites R5's sync/async failure semantics;
+§1 Shape W, §8, §Deferred remain Proposed).
 **Amends:** ADR 014 (crate layout and seam placement; its data-runtime and micro-amendment
 semantics are retained and quoted, not replaced). Builds on the settled rules in
 `docs/scratch/dayframe-micros.md` (D1–D13) and the original design transcript
@@ -63,11 +69,14 @@ linear memory, called synchronously. Native micros are simply linked into the ho
 client behind the same `DocumentService` boundary; `outcome_unknown` is normal there, not an
 edge case.
 
-**Rejected for now: Web-Worker guests.** `presentation-events.dispatch` returns
+**Rejected: Web-Worker guests.** `presentation-events.dispatch` returns
 `EventResponse { prevent_default, stop_propagation }` synchronously because the DOM requires
-`preventDefault()` during the handler. A worker boundary forces everything async. Alternatives
-(Dioxus-liveview-style declarative prevent-default, or async dispatch with default-always-runs)
-are deferred until a second real engine forces the question (D10).
+`preventDefault()` during the handler. A worker boundary forces everything async, so the sync
+decision cannot be made there. R5 considered the alternatives this rules out — a
+Dioxus-liveview-style declarative prevent-default, and async dispatch with default-always-runs —
+and rejects both: the second real engine (wcmp, ADR 018) arrived without forcing either, because
+both engines call the guest synchronously in-realm. If a worker-isolated engine is ever proposed,
+that proposal must argue the rejection, not assume the deferral is still open.
 
 **Cross-cutting rule:** a type may rely on process-local affordances (`Rc`, closures, Dioxus
 values, `Any`) only if it stays on one side of an address-space boundary *and* the same
@@ -97,8 +106,61 @@ below is derived from them.
   value could not be serialized for a wasm guest without changing meaning, it does not belong
   in a shared collection.
 - **R5 — Synchronous presentation, asynchronous data** (settled ground rule,
-  `dayframe-micros.md:50-51`). Rendering and event dispatch are sync; watches, mutations,
-  receipts, configuration are async with explicit receipts.
+  `dayframe-micros.md:50-51`; amended by ADR 018 §3 as rewritten 2026-10-30).
+  Rendering and event dispatch are sync; watches, mutations, receipts,
+  configuration are async with explicit receipts. *Status: decided, built, pinned*
+  — except the MDK's guest-side spawn rule below, which is decided, not built.
+
+  The sync side is precise about *what* is synchronous:
+
+  - `mount`, `dispatch`, and `unmount` are **sync-typed WIT functions with sync
+    lift**. The listener closure in `clay_surface::render` must receive the
+    `EventResponse` (the `prevent_default` / `stop_propagation` decision) before
+    it returns to the browser, exactly as Dioxus's own web/desktop listeners do
+    (`packages/web/src/dom.rs`, `SpawnIfAsync` in `packages/core/src/events.rs`).
+  - The **first poll of a presentation call must yield a result, not `Pending`**.
+    A conforming guest that blocks inside a sync-typed call fails with the
+    component model's structured `CannotBlock` cause (`Ready(Err)`) on that first
+    poll — the spec's may-not-suspend machinery, not our invention. A guest that
+    actually returns `Pending` is a contract violation; the host treats it as a
+    trap-equivalent: withdraw the surface, close the incarnation, report
+    `PresentationError::Revoked` / `EventResponse::default()`. Never a host panic.
+    *Pinned by* `clay_rt_wasmtime::tests::guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending`
+    (sleeper fixture blocks via `std::thread::sleep`, which pulls the async
+    `monotonic-clock.wait-until` import) and
+    `first_poll_maps_pending_to_suspended_and_ready_to_output`.
+   - **Guests may use async internally** under the same rule Dioxus gives its own
+     handlers: the code before a handler's first `.await` contributes to the
+     prevent-default decision; the remainder is spawned inside the guest's runtime.
+     No WIT change, so nothing on the host side needs building for this. *Status:
+     decided, not built* — the MDK does not yet mirror `SpawnIfAsync` (poll once,
+     then spawn), and the two ordering tests that would pin the rule (a handler
+     setting the flag before its first `await` is honoured; one setting it after is
+     not) do not exist. Until they do, the rule is a documented contract with no
+     enforcement in guest code.
+   - **No concurrent calls into one instance.** The engine's entry gate
+     (component-model instance exclusivity) is the floor; our one-event-at-a-time
+     delivery policy per incarnation is the stricter house rule on top. A handler
+     needing concurrency spawns inside the guest; it does not overlap calls.
+   - **Async host imports are not reachable during presentation calls.** Today
+     this is enforced by the trap-equivalent failure above; the durable fix is a
+     link-time split (presentation world with no async imports). Until that split
+     exists, that failure mode is the safety net. The deferral is checked, not
+     merely declared: the sleeping guest is pinned to fail closed on *both* engines
+     (`clay_rt_wasmtime::tests::guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending`,
+     `clay_rt_wcmp_wasmi::tests::guest_blocking_in_dispatch_fails_as_trap_on_the_wcmp_engine`),
+     and `clay_rt_wcmp::wasi::tests::async_linked_wasi_imports_are_enumerated_and_pinned`
+     enumerates the async-linked WASI imports so that widening this exception list
+     fails a test and forces the split instead of passing silently. Wasmtime has no
+     equivalent grep test: its WASI surface is linked wholesale by
+     `wasmtime_wasi::p3::add_to_linker`, so it is not enumerable from our source —
+     the sleeper fixture is that engine's net, and it is the only one.
+  - **Native micros are unaffected**: they run as plain Rust inside the listener
+    closure and are synchronous by construction.
+  - Data-side operations (watches, mutations, receipts, configuration, and any
+    future collection/query exports) stay **async-typed** where they may suspend;
+    the entry gate serializes them against presentation calls on the same
+    instance.
 - **R6 — Engine-neutral resources are opaque ids plus host side maps.** Engine handle tables
   (Wasmtime's `ResourceTable` or the browser engine's equivalent) store only `Send` data;
   non-`Send` renderer state lives in host-owned side maps keyed by those ids (D10's discovered
@@ -451,8 +513,9 @@ focused tests; no stage may weaken a settled semantic (D1–D13, ADR 014).
   has, because native micros use the same MDK.
 - The host kernel shrinks to lifecycle + authority + collections; documents, composition, and
   rendering are replaceable layers around it.
-- The sync-dispatch decision excludes Web-Worker guests until declarative prevent-default is
-  designed; this is recorded, not discovered.
+- The sync-dispatch decision excludes Web-Worker guests, and R5 rejects the declarative
+  prevent-default alternative rather than leaving it open; a worker-isolated engine proposal must
+  argue against that rejection. This is recorded, not discovered.
 - We accept a large mechanical rename as one PR stage rather than shimming old paths; the
   interface break is intentional (breaking changes are preferred over compatibility shims).
 
@@ -491,8 +554,9 @@ API sketches above:
 
 ## Deferred
 
-- Cross-process guests and wRPC-style transports; Web-Worker guests; declarative
-  prevent-default.
+- Cross-process guests and wRPC-style transports.
+- Web-Worker guests and declarative prevent-default are **rejected**, not deferred: §1 Shape W
+  records the rejection and R5 records why the second engine did not reopen it.
 - The browser engine (ADR 018); hot-patch/reload of guests; OCI packaging of micro manifests.
 - Collection WIT transport and cross-guest id namespacing (ADR 017 §Not yet implemented).
 - One micro source compiled to both backends (today native and guest micros share the entry

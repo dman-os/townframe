@@ -1,6 +1,13 @@
 # ADR 014: dayframe_dx Application Architecture
 
 **Status:** Accepted.
+*Section status corrections (2026-10-30, see `docs/scratch/clay-architecture-critique.md` §5):*
+§1 (`dayframe_app` crate), §7 (feature modules as vertical slices), and §8 (gates controlling
+release) have **no implementation** — there is no `dayframe_app` crate and feature gates do not
+control anything. The amendment §"Initial micro provider seam" ("not a hand-written list of
+concrete micros") is **contradicted by as-built code**: `dayframe_composition` hard-codes
+`micro_settings` / `micro_sample` / `micro_counter` imports and installs `MockConfiguration`
+(finding F5). These sections are *decided, not built*.
 **Supersedes:** ADR 016, `dayframe_dx Architecture — Pieces, Faces, and the Composition Root`.
 **Amended by:** ADR 015 (crate layout and seam placement), ADR 017 (collection substrate and
 optimistic-write visibility), ADR 018 (browser guest engine, Proposed).

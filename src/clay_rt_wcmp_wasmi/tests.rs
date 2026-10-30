@@ -115,6 +115,73 @@ async fn counter_activates_and_mount_dispatch_unmount_complete_on_first_poll() {
     host.close();
 }
 
+/// The wcmp counterpart of the wasmtime spike: a guest whose sync-typed `dispatch` blocks via
+/// `std::thread::sleep` (lifted to the async `monotonic-clock.wait-until` import) must be handled
+/// as a trap — default response, surface withdrawn,
+/// incarnation closed — never as a host panic or a hang. This pins *our adapter's* behavior on
+/// the polyfill engine (the one the browser backend shares), which upstream `wcmp`'s own
+/// `CannotBlock` test does not cover. Pinned by `sleeper_fixture`.
+#[tokio::test]
+async fn guest_blocking_in_dispatch_fails_as_trap_on_the_wcmp_engine() {
+    struct LiveSink(AtomicBool);
+
+    impl SurfaceSink<ComponentRef> for LiveSink {
+        fn is_live(&self) -> bool {
+            !self.0.load(Ordering::Acquire)
+        }
+
+        fn apply(&self, _edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            Ok(0)
+        }
+
+        fn withdraw(&self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let host = Host::new();
+    let owner = host.start("sleeper");
+    let ended = host.observe_instance(&owner).unwrap();
+    let package = WcmpPackage::from_env("sleeper")
+        .await
+        .expect("prepared sleeper component is valid");
+    let (runtime, driver) =
+        WcmpRuntime::activate(&host, owner.clone(), package.as_shared(), BTreeMap::new())
+            .await
+            .unwrap();
+    let writer = Arc::new(LiveSink(AtomicBool::new(false)));
+    let session = runtime
+        .mount(Arc::clone(&writer) as _, &[])
+        .expect("mount must complete before dispatch blocks");
+    assert!(writer.is_live());
+
+    let response = session.handler()(Event {
+        revision: 1,
+        element: NodeId::try_from(1_u32).unwrap(),
+        name: "click".into(),
+        bubbles: true,
+        data_json: "{}".into(),
+    });
+    assert_eq!(response, EventResponse::default());
+    assert!(
+        !writer.is_live(),
+        "a blocked dispatch withdraws the surface"
+    );
+    assert_eq!(
+        host.check(&owner),
+        Err(clay_host::AccessError::Revoked),
+        "a blocked dispatch closes the incarnation"
+    );
+    assert_eq!(
+        *ended.borrow(),
+        Some(clay_host::CloseReason::Requested),
+        "closure is reported to the terminal observer"
+    );
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
 #[tokio::test]
 async fn close_before_mount_revokes_the_incarnation() {
     let package = WcmpPackage::from_env("counter")

@@ -49,14 +49,39 @@ use wasmtime_wasi::WasiCtx;
 use wasmtime_wasi::WasiCtxView;
 use wasmtime_wasi::WasiView;
 
+/// Marks a presentation call that suspended on its first poll: a guest contract violation
+/// (the sync exports promise a decision before the listener closure returns), handled at
+/// every call site exactly like a trap — withdraw the surface, close the instance.
+#[derive(Debug, thiserror::Error)]
+#[error("guest presentation call suspended on its first poll")]
+pub(crate) struct Suspended;
+
+/// Test probe: how many presentation calls hit [`Suspended`] (i.e. returned `Pending`)
+/// rather than completing or failing on the first poll. The W2 spike asserts a guest that
+/// blocks inside `dispatch` fails with the engine's `CannotBlock` (`Ready(Err)`) and never
+/// increments this counter.
+#[cfg(test)]
+pub(crate) fn suspended_count() -> u64 {
+    SUSPENDED.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+static SUSPENDED: AtomicU64 = AtomicU64::new(0);
+
 /// Drive a presentation or document call to completion on its first poll. The WIT world has no
 /// async export (ADR 018 §3); WASI p3 lifts the *imports* through component-model async, which
-/// forces async `call_*` bindings, but a guest call that returns `Pending` has suspended where
-/// the contract has no suspension point — that is a broken invariant, not a condition to wait out.
-pub(crate) fn first_poll<F: Future>(call: F) -> F::Output {
+/// forces async `call_*` bindings. A conforming guest that blocks inside a sync-typed call fails
+/// with the spec's `CannotBlock` cause on the first poll (`Ready(Err)`); a guest that actually
+/// suspends returns `Pending` and is treated as [`Suspended`], i.e. as a trap. Either way the
+/// caller withdraws the surface and closes the instance — never a host panic.
+pub(crate) fn first_poll<F: Future>(call: F) -> Result<F::Output, Suspended> {
     match std::pin::pin!(call).poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("guest presentation call suspended on its first poll"),
+        Poll::Ready(output) => Ok(output),
+        Poll::Pending => {
+            #[cfg(test)]
+            SUSPENDED.fetch_add(1, Ordering::Relaxed);
+            Err(Suspended)
+        }
     }
 }
 
@@ -485,7 +510,7 @@ impl WasmRuntime {
                         return EventResponse::default();
                     };
                     active.refuel();
-                    let outcome = first_poll(
+                    match first_poll(
                         active
                             .client
                             .townframe_dayframe_presentation_events()
@@ -494,11 +519,20 @@ impl WasmRuntime {
                                 Resource::new_borrow(surface_rep),
                                 &wit_event,
                             ),
-                    );
-                    if outcome.is_err() {
-                        guard.take();
+                    ) {
+                        Ok(outcome) => {
+                            if outcome.is_err() {
+                                guard.take();
+                            }
+                            outcome
+                        }
+                        Err(Suspended) => {
+                            guard.take();
+                            Err(wasmtime::Error::msg(
+                                "guest presentation call suspended on its first poll",
+                            ))
+                        }
                     }
-                    outcome
                 };
                 match result {
                     Ok(response) => EventResponse {
@@ -517,12 +551,17 @@ impl WasmRuntime {
                 let trapped = if let Some(active) = guard.as_mut() {
                     let outcome = if drop_host.check(&drop_instance).is_ok() {
                         active.refuel();
-                        first_poll(
+                        match first_poll(
                             active
                                 .client
                                 .townframe_dayframe_presentation_events()
                                 .call_unmount(&mut active.store, Resource::new_borrow(surface_rep)),
-                        )
+                        ) {
+                            Ok(outcome) => outcome,
+                            Err(Suspended) => Err(wasmtime::Error::msg(
+                                "guest presentation call suspended on its first poll",
+                            )),
+                        }
                     } else {
                         Ok(())
                     };
@@ -573,7 +612,7 @@ impl WasmRuntime {
             .map_err(|_| PresentationError::Revoked)?;
         let placement_rep = placement.rep();
         active.refuel();
-        let mount_result = first_poll(
+        let mount_result = match first_poll(
             active
                 .client
                 .townframe_dayframe_presentation_events()
@@ -582,7 +621,12 @@ impl WasmRuntime {
                     Resource::new_borrow(placement_rep),
                     &components,
                 ),
-        );
+        ) {
+            Ok(outcome) => outcome,
+            Err(Suspended) => Err(wasmtime::Error::msg(
+                "guest presentation call suspended on its first poll",
+            )),
+        };
         let placement = active
             .store
             .data_mut()

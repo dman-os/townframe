@@ -2,6 +2,10 @@
 
 **Status:** Accepted. Implemented in `clay_collection`, consumed by `clay_host` (contribution
 collections), `clay_docs` (document facets), and `clay_mdk::view::use_collection`.
+*Section status corrections (2026-10-30, see `docs/scratch/clay-architecture-critique.md` §5):*
+§1 "demand-scoped answering / no second mechanism" and §5 "demand is a narrowing token" are
+**decided, not built** — as built, every batch is eagerly broadcast to every attached relay and
+`release` does not stop delivery; see §Not yet implemented and finding F1.
 **Amends:** ADR 015 §4 (optimistic-write visibility, contribution collections) and §6
 (contribution collections are built on this substrate rather than a host-private store).
 **Context documents:** the session design log in `docs/scratch/dayframe-micros.md` (Turn 31,

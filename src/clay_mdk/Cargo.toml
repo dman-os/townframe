@@ -13,6 +13,12 @@ path = "slot_fixture.rs"
 crate-type = ["cdylib"]
 required-features = ["dioxus"]
 
+[[example]]
+name = "sleeper"
+path = "sleeper_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["dioxus"]
+
 [dependencies]
 clay_collection = { workspace = true }
 wit-bindgen.workspace = true

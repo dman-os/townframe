@@ -86,13 +86,56 @@ second engine is the agreed trigger to split it rather than copy it:
 
 ### 3. Activation is async; presentation calls stay synchronous
 
+*Status: decided, built, pinned (rewritten 2026-10-30; supersedes the earlier
+"panic on pending / our WIT has no suspension point" wording).*
+
 - Compiling and instantiating move into activation, which is already async on
   both engines. `WasmPackage::from_bytes` and `clay_mdk::wasm::provider` change
   signature accordingly; no compatibility shim.
-- `mount`, `dispatch`, and `unmount` stay synchronous (ADR 015 R5, sync
-  dispatch). On `wcmp` they poll the guest call once and panic if it is still
-  pending: our WIT contains no suspension point, so a pending call is a broken
-  invariant, not a recoverable condition.
+- `mount`, `dispatch`, and `unmount` stay **sync-typed WIT functions with sync
+  lift** (ADR 015 R5 as amended). The host drives each with one poll of the
+  guest call future.
+
+  The old justification — "our WIT has no suspension point, so a pending call is
+  a broken invariant" — was wrong while WASI p3 async imports
+  (`wasi:clocks/monotonic-clock`'s `wait-for` and `wait-until`, linked via
+  `func_wrap_concurrent`; the world imports the whole interface, so a guest that
+  touches either — e.g. `std::thread::sleep` → `wait-until` — must find both
+  registered) share the instance. Synchronous *exports* do not imply
+  non-suspending *execution* when async imports are linked. The Component Model
+  anticipates
+  exactly this: function type (`func` vs `func async`) and lift mode are
+  independent axes; a sync-lifted call sets the instance's **may-not-suspend**
+  flag for its length, and a blocking builtin inside fails with the structured
+  **`CannotBlock`** cause after running ready work — it does not hang and does
+  not suspend.
+
+  What the host does with the first poll, for both engines:
+
+  | First-poll outcome | Meaning | Host action |
+  |---|---|---|
+  | `Ready(Ok(response))` | Guest returned a decision | Deliver `EventResponse` |
+  | `Ready(Err(CannotBlock or trap))` | Guest blocked or trapped inside the sync call | Trap-equivalent: withdraw surface, close incarnation, `EventResponse::default()` |
+  | `Pending` | Guest suspended where the contract forbids suspension (non-conforming) | Same trap-equivalent handling — never a host panic |
+
+  `first_poll` returns `Result<Output, Suspended>`; `Suspended` and an inner
+  `Err` both take the trap path. Document deliveries (`changed` / `lagged` /
+  `completed`) use the same rule. Both engines were empirically confirmed to
+  take the `Ready(Err)` row for the sleeping guest — the `Pending` row is a
+  defensive path for non-conforming guests, not an observed behavior.
+   *Pinned by* `clay_rt_wasmtime::tests::guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending`
+   and `clay_rt_wcmp_wasmi::tests::guest_blocking_in_dispatch_fails_as_trap_on_the_wcmp_engine`
+   (the same sleeping guest on both engines), plus
+   `first_poll_maps_pending_to_suspended_and_ready_to_output` for the mapping itself.
+
+- **Entry gate (what "something else comes in" means).** Per component
+  *instance* (all exports of one micro share one record): async-typed tasks
+  queue at the instance's entry gate and wait while another task holds
+  exclusivity (a sync task holds it until return; a callback task between
+  events). Sync-typed tasks ignore the gate — they run to completion and legally
+  cannot block. Future data/collection exports should be **async-typed** so the
+  gate serializes them against presentation calls; our one-event-at-a-time
+  delivery policy per incarnation stays as the stricter house rule.
 - Web-Worker guests remain rejected for the reason ADR 015 §1 records.
 
 ### 4. Publish the instance, not the runtime
@@ -182,9 +225,11 @@ between `activate` and `mount`.
 
 ## Migration
 
-1. **Guest target on `wasm32-wasip3`:** `micro_counter` and `clay_mdk`'s
-   `slots` example build as components; `x/check-dayframe.ts` prepares them
-   under `DAYFRAME_COUNTER_COMPONENT` / `DAYFRAME_SLOTS_COMPONENT`.
+1. **Guest target on `wasm32-wasip3`:** `micro_counter`, `clay_mdk`'s
+   `slots` example, and `clay_mdk`'s `sleeper` fixture (§3's blocking guest)
+   build as components; `x/check-dayframe.ts` prepares them under
+   `DAYFRAME_COUNTER_COMPONENT` / `DAYFRAME_SLOTS_COMPONENT` /
+   `DAYFRAME_SLEEPER_COMPONENT`.
    `clay_rt_wasmtime` drives them through wasmtime-wasi `p3`; `clay_rt_wcmp`
    registers the fail-loudly WASI host (§8). **Done.**
 2. **Spike** against the real counter component: `wcmp::bindgen!` over our WIT;
@@ -220,7 +265,9 @@ between `activate` and `mount`.
   ceiling enforced by instantiation-time import limits acceptable, or must it be
   upstreamed?
 - Is `WebAssembly.promising` first-poll completion guaranteed for every
-  non-suspending export in every target browser, or only observed? The
-  panic-on-pending rule depends on the answer; it is observed in Chromium only.
-  Firefox and WebKit are untested.
+  non-suspending export in every target browser, or only observed? §3's rule now
+  fails suspension *closed* rather than panicking, so a wrong answer no longer
+  crashes the host — it means a conforming guest gets its surface revoked for
+  honouring the contract, and we would need a per-browser workaround. It is
+  observed in Chromium only; Firefox and WebKit are untested.
 - Bundle size budget for the web host, given two `wasmparser` versions.

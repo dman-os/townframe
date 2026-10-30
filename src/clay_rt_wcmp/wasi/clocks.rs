@@ -33,6 +33,19 @@ pub(super) fn define_monotonic_clock<T: 'static>(linker: &mut Linker<T>) -> Resu
             sleep(Duration::from_nanos(how_long)).await;
             Ok(())
         },
+    )?;
+    // The world imports the whole monotonic-clock interface, so `wait-until` must be
+    // registered even though our guests reach it only through `std::thread::sleep`-style
+    // code. Marks are nanoseconds on the same origin as `now`; an elapsed mark returns
+    // immediately.
+    clock.func_wrap_concurrent(
+        "wait-until",
+        |_: &wcmp::Accessor<T>, (when,): (u64,)| async move {
+            let remaining =
+                Duration::from_nanos(when).saturating_sub(Duration::from_nanos(monotonic_nanos()));
+            sleep(remaining).await;
+            Ok(())
+        },
     )
 }
 
