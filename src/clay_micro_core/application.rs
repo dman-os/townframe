@@ -2,6 +2,7 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use crate::micros::MicroDescriptor;
@@ -9,6 +10,7 @@ use crate::micros::MicroProvider;
 use crate::micros::MicroRegistry;
 use crate::micros::MicroRegistryError;
 use crate::micros::composition::Composition;
+use crate::micros::composition::CompositionPolicy;
 use crate::micros::composition::ConfigurationError;
 use crate::micros::composition::ConfigurationSnapshot;
 use crate::micros::composition::ConfigurationSource;
@@ -88,6 +90,8 @@ pub struct ApplicationRuntime<R: RendererRegistry> {
     providers: MicroRegistry,
     documents: clay_docs::DocumentService,
     composition: Rc<RefCell<Option<Composition>>>,
+    policy: Rc<RefCell<CompositionPolicy>>,
+    policy_explicit: Rc<Cell<bool>>,
     configuration: Rc<RefCell<Configuration>>,
     events: tokio::sync::watch::Sender<()>,
     reports: tokio::sync::watch::Sender<Report>,
@@ -116,6 +120,8 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
             providers: MicroRegistry::new(documents.clone()),
             documents,
             composition: Rc::new(RefCell::new(Some(Composition::default()))),
+            policy: Rc::default(),
+            policy_explicit: Rc::default(),
             configuration: Rc::default(),
             events: tokio::sync::watch::channel(()).0,
             reports: tokio::sync::watch::channel(Ok(BTreeMap::new())).0,
@@ -287,7 +293,62 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
                 }
             }
         }
-        Composition::validate(&self.providers, desired)
+        Composition::validate(&self.providers, desired, &self.effective_policy(desired))
+    }
+
+    /// Liveness authority, separate from installation configuration. Eager roots are the only
+    /// explicit start; demand rows are accepted static contributions. Changing either wakes the
+    /// driver, which activates newly live instances and evicts newly idle ones.
+    /// Until a composition root sets a policy, every enabled entry is an eager root. That keeps
+    /// locked-down/static compositions behaving as before; malleable shells opt into demand.
+    fn effective_policy(&self, desired: &BTreeMap<String, ConfiguredMicro>) -> CompositionPolicy {
+        if self.policy_explicit.get() {
+            return self.policy.borrow().clone();
+        }
+        CompositionPolicy {
+            eager: desired.keys().cloned().collect(),
+            demand: BTreeMap::new(),
+        }
+    }
+
+    pub fn set_policy(&self, policy: CompositionPolicy) {
+        self.policy_explicit.set(true);
+        *self.policy.borrow_mut() = policy;
+        let mut configuration = self.configuration.borrow_mut();
+        configuration.revision += 1;
+        configuration.settled = None;
+        drop(configuration);
+        self.events.send_replace(());
+    }
+
+    /// Static declarations from every registered provider, including idle ones. Shells render
+    /// labels, icons and other semantic payloads without activating their contributors.
+    pub fn contribution_registry(
+        &self,
+    ) -> BTreeMap<crate::micros::MicroId, Vec<crate::micros::MicroContribution>> {
+        self.providers.contribution_registry()
+    }
+
+    pub fn policy(&self) -> CompositionPolicy {
+        self.policy.borrow().clone()
+    }
+
+    pub fn set_eager_roots(&self, roots: BTreeSet<String>) {
+        let mut policy = self.policy();
+        policy.eager = roots;
+        self.set_policy(policy);
+    }
+
+    /// Accept or withdraw a static contribution on behalf of a consumer micro. Withdrawing the
+    /// last reason to run evicts the contributor; its declaration remains in the registry.
+    pub fn set_demand(&self, consumer: &str, rows: BTreeMap<String, String>) {
+        let mut policy = self.policy();
+        if rows.is_empty() {
+            policy.demand.remove(consumer);
+        } else {
+            policy.demand.insert(consumer.to_owned(), rows);
+        }
+        self.set_policy(policy);
     }
 
     fn accept_snapshot(
@@ -553,6 +614,7 @@ impl<R: RendererRegistry> Driver<'_, R> {
                 &self.application.host,
                 &self.application.providers,
                 &desired,
+                &self.application.effective_policy(&desired),
             );
             let report = match error {
                 Some(error) => Err(error),

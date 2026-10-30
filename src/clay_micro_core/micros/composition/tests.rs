@@ -1,4 +1,5 @@
 use super::*;
+use crate::micros::MicroContribution;
 use crate::micros::MicroFactory;
 use crate::micros::MicroProvision;
 use crate::micros::Provision;
@@ -74,6 +75,43 @@ impl Fixture {
         }
     }
 
+    fn policy(&self) -> CompositionPolicy {
+        // Legacy fixture semantics: every enabled entry is an eager root.
+        CompositionPolicy {
+            eager: self.desired.keys().cloned().collect(),
+            demand: BTreeMap::new(),
+        }
+    }
+
+    fn reconcile_with(&mut self, policy: &CompositionPolicy) -> BTreeMap<String, InstanceState> {
+        self.try_reconcile_with(policy).unwrap()
+    }
+
+    fn try_reconcile_with(
+        &mut self,
+        policy: &CompositionPolicy,
+    ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                loop {
+                    let states = self.composition.update(
+                        &self.host,
+                        &self.registry,
+                        &self.desired,
+                        policy,
+                    )?;
+                    if self.composition.is_settled() {
+                        return Ok(states);
+                    }
+                    let name = self.composition.next().await;
+                    self.composition.complete(name, &self.desired);
+                }
+            })
+    }
+
     fn try_reconcile(&mut self) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -86,9 +124,12 @@ impl Fixture {
         &mut self,
     ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
         loop {
-            let states = self
-                .composition
-                .update(&self.host, &self.registry, &self.desired)?;
+            let states = self.composition.update(
+                &self.host,
+                &self.registry,
+                &self.desired,
+                &self.policy(),
+            )?;
             if self.composition.is_settled() {
                 return Ok(states);
             }
@@ -216,7 +257,12 @@ fn pending_observer_records_closure_before_first_poll() {
     let mut fixture = Fixture::new();
     fixture
         .composition
-        .update(&fixture.host, &fixture.registry, &fixture.desired)
+        .update(
+            &fixture.host,
+            &fixture.registry,
+            &fixture.desired,
+            &fixture.policy(),
+        )
         .unwrap();
     let source = fixture.composition.pending["z-source"]
         .activation
@@ -275,7 +321,12 @@ async fn pending_completion_retains_observer_until_concurrent_cleanup_finishes()
     fixture.desired.retain(|name, _| name == "z-source");
     fixture
         .composition
-        .update(&fixture.host, &fixture.registry, &fixture.desired)
+        .update(
+            &fixture.host,
+            &fixture.registry,
+            &fixture.desired,
+            &fixture.policy(),
+        )
         .unwrap();
     let name = fixture.composition.next().await;
     let instance = fixture.composition.pending[&name]
@@ -312,7 +363,12 @@ async fn pending_completion_retains_observer_until_concurrent_cleanup_finishes()
     assert_eq!(
         fixture
             .composition
-            .update(&fixture.host, &fixture.registry, &fixture.desired)
+            .update(
+                &fixture.host,
+                &fixture.registry,
+                &fixture.desired,
+                &fixture.policy()
+            )
             .unwrap(),
         BTreeMap::from([("z-source".into(), InstanceState::Stopped)])
     );
@@ -365,7 +421,12 @@ async fn settlement_waits_for_retiring_incarnation_under_concurrent_close() {
     assert_eq!(
         fixture
             .composition
-            .update(&fixture.host, &fixture.registry, &fixture.desired)
+            .update(
+                &fixture.host,
+                &fixture.registry,
+                &fixture.desired,
+                &fixture.policy()
+            )
             .unwrap(),
         BTreeMap::from([("z-source".into(), InstanceState::Disabled)])
     );
@@ -388,7 +449,12 @@ async fn settlement_waits_for_retiring_incarnation_under_concurrent_close() {
     assert_eq!(
         fixture
             .composition
-            .update(&fixture.host, &fixture.registry, &fixture.desired)
+            .update(
+                &fixture.host,
+                &fixture.registry,
+                &fixture.desired,
+                &fixture.policy()
+            )
             .unwrap(),
         BTreeMap::from([("z-source".into(), InstanceState::Activating)])
     );
@@ -432,7 +498,12 @@ async fn settlement_retains_cancelled_activation_until_terminal_before_first_pol
         fixture.desired.retain(|name, _| name == "z-source");
         fixture
             .composition
-            .update(&fixture.host, &fixture.registry, &fixture.desired)
+            .update(
+                &fixture.host,
+                &fixture.registry,
+                &fixture.desired,
+                &fixture.policy(),
+            )
             .unwrap();
         let name = fixture.composition.next().await;
         let original = fixture.composition.pending[&name]
@@ -447,7 +518,12 @@ async fn settlement_retains_cancelled_activation_until_terminal_before_first_pol
         fixture.desired.get_mut("z-source").unwrap().enablement = Enablement::Disabled;
         fixture
             .composition
-            .update(&fixture.host, &fixture.registry, &fixture.desired)
+            .update(
+                &fixture.host,
+                &fixture.registry,
+                &fixture.desired,
+                &fixture.policy(),
+            )
             .unwrap();
         assert_eq!(*ended.borrow(), None);
         assert!(
@@ -458,7 +534,12 @@ async fn settlement_retains_cancelled_activation_until_terminal_before_first_pol
         assert_eq!(
             fixture
                 .composition
-                .update(&fixture.host, &fixture.registry, &fixture.desired)
+                .update(
+                    &fixture.host,
+                    &fixture.registry,
+                    &fixture.desired,
+                    &fixture.policy()
+                )
                 .unwrap(),
             BTreeMap::from([("z-source".into(), InstanceState::Activating)])
         );
@@ -466,7 +547,12 @@ async fn settlement_retains_cancelled_activation_until_terminal_before_first_pol
         fixture.desired.clear();
         fixture
             .composition
-            .update(&fixture.host, &fixture.registry, &fixture.desired)
+            .update(
+                &fixture.host,
+                &fixture.registry,
+                &fixture.desired,
+                &fixture.policy(),
+            )
             .unwrap();
         assert!(!fixture.composition.is_settled());
         release.send(()).unwrap();
@@ -962,7 +1048,15 @@ impl Metamorphic {
         loop {
             let states = self
                 .composition
-                .update(&self.host, &self.registry, desired)
+                .update(
+                    &self.host,
+                    &self.registry,
+                    desired,
+                    &CompositionPolicy {
+                        eager: desired.keys().cloned().collect(),
+                        demand: BTreeMap::new(),
+                    },
+                )
                 .unwrap();
             if self.composition.is_settled() {
                 return states;
@@ -1201,4 +1295,148 @@ fn persisted_composition_shape_is_pinned() {
         ),
     ]);
     insta::assert_yaml_snapshot!(serde_json::to_value(&desired).unwrap());
+}
+
+// ── Binding-derived liveness (ADR 014 §Composition and lifecycle) ───────
+
+#[test]
+fn enabled_without_eager_roots_or_bindings_never_activates() {
+    let mut fixture = Fixture::new();
+    let states = fixture.reconcile_with(&CompositionPolicy::default());
+    assert_eq!(
+        states,
+        BTreeMap::from([
+            ("a-dependent".into(), InstanceState::Idle),
+            ("unrelated".into(), InstanceState::Idle),
+            ("z-source".into(), InstanceState::Idle),
+        ])
+    );
+    assert!(fixture.activations.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_eager_consumer_pulls_its_declared_supplier_but_not_unrelated_micros() {
+    let mut fixture = Fixture::new();
+    let states = fixture.reconcile_with(&CompositionPolicy {
+        eager: BTreeSet::from(["a-dependent".into()]),
+        demand: BTreeMap::new(),
+    });
+    assert_eq!(states["a-dependent"], InstanceState::Active);
+    assert_eq!(states["z-source"], InstanceState::Active);
+    assert_eq!(states["unrelated"], InstanceState::Idle);
+    assert_eq!(
+        *fixture.activations.lock().unwrap(),
+        vec!["z-source", "a-dependent"]
+    );
+}
+
+#[test]
+fn accepted_static_contributions_activate_and_withdrawal_evicts() {
+    let mut fixture = Fixture::new();
+    fixture.registry.register(
+        MicroFactory::new(
+            MicroDescriptor {
+                id: MicroId::new("button"),
+                version: 1,
+                provisions: vec![],
+                requirements: vec![],
+            },
+            |_| Ok(()),
+        )
+        .with_contributions(vec![MicroContribution {
+            provision: Facility::ID.into(),
+            payload: serde_json::json!({"label": "Open"}),
+        }]),
+    );
+    // The registry row is readable while its contributor has no instance.
+    assert_eq!(
+        fixture.registry.contribution_registry()[&MicroId::new("button")][0].payload,
+        serde_json::json!({"label": "Open"})
+    );
+    fixture
+        .desired
+        .insert("button".into(), configuration("button", BTreeMap::new()));
+    let mut policy = CompositionPolicy {
+        eager: BTreeSet::from(["z-source".into()]),
+        demand: BTreeMap::from([(
+            "z-source".into(),
+            BTreeMap::from([("button".into(), Facility::ID.into())]),
+        )]),
+    };
+    let states = fixture.reconcile_with(&policy);
+    assert_eq!(states["button"], InstanceState::Active);
+    assert_eq!(states["a-dependent"], InstanceState::Idle);
+    assert!(
+        fixture
+            .registry
+            .output_erased("button", Facility::ID, 1)
+            .is_err()
+    );
+
+    policy.demand.clear();
+    let states = fixture.reconcile_with(&policy);
+    assert_eq!(states["button"], InstanceState::Idle);
+    assert_eq!(states["z-source"], InstanceState::Active);
+    // Eviction closes the incarnation; a later demand row creates a fresh one.
+    assert_eq!(fixture.host.check(&fixture.instance("z-source")), Ok(()));
+}
+
+#[test]
+fn a_demand_row_must_name_a_declared_contribution() {
+    let mut fixture = Fixture::new();
+    let error = fixture
+        .try_reconcile_with(&CompositionPolicy {
+            eager: BTreeSet::from(["z-source".into()]),
+            demand: BTreeMap::from([(
+                "z-source".into(),
+                BTreeMap::from([("unrelated".into(), Facility::ID.into())]),
+            )]),
+        })
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ConfigurationError::UndeclaredContribution {
+            consumer: "z-source".into(),
+            contributor: "unrelated".into(),
+            contract: Facility::ID.into(),
+        }
+    );
+}
+
+#[test]
+fn demand_never_activates_a_disabled_contributor() {
+    let mut fixture = Fixture::new();
+    fixture.registry.register(
+        MicroFactory::new(
+            MicroDescriptor {
+                id: MicroId::new("button"),
+                version: 1,
+                provisions: vec![],
+                requirements: vec![],
+            },
+            |_| Ok(()),
+        )
+        .with_contributions(vec![MicroContribution {
+            provision: Facility::ID.into(),
+            payload: serde_json::json!({}),
+        }]),
+    );
+    let mut disabled = configuration("button", BTreeMap::new());
+    disabled.enablement = Enablement::Disabled;
+    fixture.desired.insert("button".into(), disabled);
+    let states = fixture.reconcile_with(&CompositionPolicy {
+        eager: BTreeSet::from(["z-source".into()]),
+        demand: BTreeMap::from([(
+            "z-source".into(),
+            BTreeMap::from([("button".into(), Facility::ID.into())]),
+        )]),
+    });
+    assert_eq!(states["button"], InstanceState::Disabled);
+    assert!(
+        !fixture
+            .activations
+            .lock()
+            .unwrap()
+            .contains(&"button".into())
+    );
 }

@@ -27,13 +27,25 @@ pub enum Enablement {
     Disabled,
 }
 
-/// Desired boot instance. The map key is its stable configured identity; an activation creates a
-/// fresh runtime identity. A binding names the supplier instance for one declared contract.
+/// Desired configured instance. The map key is its stable configured identity; an activation
+/// creates a fresh runtime identity. A binding names the supplier instance for one declared
+/// contract. Enablement is installation, not liveness: an enabled micro with no eager root or
+/// demand binding is idle and never instantiates (ADR 014 §Composition and lifecycle).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConfiguredMicro {
     pub provider: MicroId,
     pub enablement: Enablement,
     pub bindings: BTreeMap<String, String>,
+}
+
+/// Liveness inputs, kept separate from installation configuration: enablement installs a micro,
+/// this decides whether an instance exists. Eager roots are the only explicit start. `demand`
+/// maps consumer instance -> accepted registry rows (contributor instance -> contract); it is the
+/// host-visible form of a shell micro's "which of my declared contributions do I show" decision.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompositionPolicy {
+    pub eager: BTreeSet<String>,
+    pub demand: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// Observable result of a reconciliation, not a promise that a declaration is a live provision.
@@ -43,6 +55,8 @@ pub enum InstanceState {
     /// The incarnation was explicitly closed outside configuration reconciliation. It stays stopped
     /// until its configuration changes; dependency withdrawal alone does not enter this state.
     Stopped,
+    /// Enabled and installed, but nothing binds it: no instance exists.
+    Idle,
     UnavailableProvider(MicroId),
     Blocked {
         requirements: Vec<String>,
@@ -68,6 +82,12 @@ pub enum ConfigurationError {
     UnknownInstance(String),
     #[error("configuration is not hydrated")]
     Loading,
+    #[error("{consumer} accepts {contract} from {contributor}, which does not declare it")]
+    UndeclaredContribution {
+        consumer: String,
+        contributor: String,
+        contract: String,
+    },
     #[error("configuration request was superseded")]
     Superseded,
     #[error(transparent)]
@@ -453,12 +473,20 @@ impl Composition {
     pub fn validate(
         registry: &MicroRegistry,
         desired: &BTreeMap<String, ConfiguredMicro>,
+        policy: &CompositionPolicy,
     ) -> Result<(), ConfigurationError> {
         let definitions = registry
             .descriptors()
             .map(|descriptor| (descriptor.id.clone(), descriptor))
             .collect();
-        activation_order(&definitions, desired).map(|_| ())
+        activation_order(&definitions, desired)?;
+        live_instances(
+            &definitions,
+            desired,
+            policy,
+            &registry.contribution_registry(),
+        )?;
+        Ok(())
     }
 
     fn retire(
@@ -500,12 +528,19 @@ impl Composition {
         host: &Host,
         registry: &MicroRegistry,
         desired: &BTreeMap<String, ConfiguredMicro>,
+        policy: &CompositionPolicy,
     ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
         let definitions: BTreeMap<_, _> = registry
             .descriptors()
             .map(|descriptor| (descriptor.id.clone(), descriptor))
             .collect();
         let order = activation_order(&definitions, desired)?;
+        let live = live_instances(
+            &definitions,
+            desired,
+            policy,
+            &registry.contribution_registry(),
+        )?;
         let retiring = self
             .active
             .extract_if(.., |name, active| {
@@ -567,8 +602,16 @@ impl Composition {
             .filter(|(_, config)| config.enablement == Enablement::Disabled)
             .map(|(name, _)| (name.clone(), InstanceState::Disabled))
             .collect();
+        for (name, configuration) in desired.iter().filter(|(name, _)| !live.contains(*name)) {
+            if configuration.enablement == Enablement::Enabled {
+                states.insert(name.clone(), InstanceState::Idle);
+            }
+        }
         for name in order {
             let configuration = &desired[&name];
+            if !live.contains(&name) {
+                continue;
+            }
             let state = if !definitions.contains_key(&configuration.provider) {
                 InstanceState::UnavailableProvider(configuration.provider.clone())
             } else if self.stopped.contains_key(&name) {
@@ -774,6 +817,69 @@ impl Composition {
                     },
                 );
             }
+        }
+    }
+}
+
+/// Transitive liveness: eager roots plus everything reachable through demand bindings.
+/// Declared requirement bindings pull a supplier live; accepted registry rows pull their
+/// contributor live. Disabled entries are never roots, so an idle cycle cannot keep itself alive.
+/// Rows naming an unknown, disabled, or undeclared contribution are rejected, not ignored.
+fn live_instances(
+    definitions: &BTreeMap<MicroId, MicroDescriptor>,
+    desired: &BTreeMap<String, ConfiguredMicro>,
+    policy: &CompositionPolicy,
+    registry: &BTreeMap<MicroId, Vec<super::MicroContribution>>,
+) -> Result<BTreeSet<String>, ConfigurationError> {
+    for (consumer, rows) in &policy.demand {
+        if !desired.contains_key(consumer) {
+            return Err(ConfigurationError::UnknownInstance(consumer.clone()));
+        }
+        for (contributor, contract) in rows {
+            let Some(entry) = desired.get(contributor) else {
+                return Err(ConfigurationError::UnknownInstance(contributor.clone()));
+            };
+            let declared = registry.get(&entry.provider).is_some_and(|contributions| {
+                contributions
+                    .iter()
+                    .any(|contribution| &contribution.provision == contract)
+            });
+            if !declared {
+                return Err(ConfigurationError::UndeclaredContribution {
+                    consumer: consumer.clone(),
+                    contributor: contributor.clone(),
+                    contract: contract.clone(),
+                });
+            }
+        }
+    }
+    let mut live: BTreeSet<String> = desired
+        .iter()
+        .filter(|(name, configuration)| {
+            configuration.enablement == Enablement::Enabled && policy.eager.contains(*name)
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    loop {
+        let before = live.len();
+        for (name, configuration) in desired {
+            if !live.contains(name) || configuration.enablement == Enablement::Disabled {
+                continue;
+            }
+            for supplier in configuration.bindings.values() {
+                live.insert(supplier.clone());
+            }
+            if let Some(rows) = policy.demand.get(name) {
+                live.extend(rows.keys().cloned());
+            }
+        }
+        live.retain(|name| {
+            desired
+                .get(name)
+                .is_some_and(|entry| entry.enablement == Enablement::Enabled)
+        });
+        if live.len() == before {
+            return Ok(live);
         }
     }
 }

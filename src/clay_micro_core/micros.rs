@@ -25,6 +25,8 @@ use clay_host::HostedCollection;
 use clay_host::Instance;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
+use serde::Deserialize;
+use serde::Serialize;
 
 use tokio::sync::watch;
 
@@ -159,12 +161,21 @@ pub struct MicroProvision {
 /// contracts; they are metadata, not authority grants. This is the composition core's whole view
 /// of a micro: the authoring-side manifest (identity, ACL, contributions) belongs to the MDK, and
 /// its adapter lowers it into this descriptor.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MicroDescriptor {
     pub id: MicroId,
     pub version: u32,
     pub provisions: Vec<MicroProvision>,
     pub requirements: Vec<MicroProvision>,
+}
+
+/// One static declaration. `provision` names a declared requirement of the contributor;
+/// `payload` is the acceptor's semantic data. Deliberately free of MDK types: this crate is the
+/// lifecycle boundary, and declarations are plain wire data.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MicroContribution {
+    pub provision: String,
+    pub payload: serde_json::Value,
 }
 
 /// Provision values staged by an activation before commit. Glossary: ADR 015 §Vocabulary.
@@ -310,6 +321,10 @@ impl MicroActivation {
 /// the common instance/lifecycle boundary.
 pub trait MicroProvider {
     fn descriptor(&self) -> MicroDescriptor;
+    /// Static declaration registry rows, readable without an instance (ADR 014 §Composition).
+    fn contributions(&self) -> Vec<MicroContribution> {
+        Vec::new()
+    }
     fn activate<'a>(
         &'a self,
         context: MicroActivation,
@@ -333,6 +348,7 @@ type ActivateFn =
 /// back all owned effects and staged provisions.
 pub struct MicroFactory {
     descriptor: MicroDescriptor,
+    contributions: Vec<MicroContribution>,
     activate: ActivateFn,
 }
 
@@ -353,14 +369,26 @@ impl MicroFactory {
     {
         Self {
             descriptor,
+            contributions: Vec::new(),
             activate: Rc::new(move |context| Box::pin(activate(context))),
         }
+    }
+
+    /// Attach the manifest's declared contributions. They are registry data, not activation
+    /// effects: a shell can enumerate them while this micro is idle.
+    pub fn with_contributions(mut self, contributions: Vec<MicroContribution>) -> Self {
+        self.contributions = contributions;
+        self
     }
 }
 
 impl MicroProvider for MicroFactory {
     fn descriptor(&self) -> MicroDescriptor {
         self.descriptor.clone()
+    }
+
+    fn contributions(&self) -> Vec<MicroContribution> {
+        self.contributions.clone()
     }
 
     fn activate<'a>(
@@ -557,6 +585,15 @@ impl MicroRegistry {
         drop(providers);
         self.changes.send_replace(());
         Ok(())
+    }
+
+    /// Static declaration registry, keyed by provider id. No activation required.
+    pub fn contribution_registry(&self) -> BTreeMap<MicroId, Vec<MicroContribution>> {
+        self.providers
+            .borrow()
+            .iter()
+            .map(|(id, provider)| (id.clone(), provider.contributions()))
+            .collect()
     }
 
     pub fn descriptors(&self) -> impl Iterator<Item = MicroDescriptor> {

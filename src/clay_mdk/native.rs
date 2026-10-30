@@ -327,6 +327,14 @@ pub fn provider<R: RendererRegistry + 'static>(
     let descriptor = compose_descriptor(&manifest);
     let config = manifest.config.clone();
     let activate = std::rc::Rc::new(activate);
+    let contributions = manifest
+        .contributions
+        .iter()
+        .map(|contribution| clay_micro_core::micros::MicroContribution {
+            provision: contribution.provision.clone(),
+            payload: contribution.payload.clone(),
+        })
+        .collect();
     MicroFactory::new(descriptor, move |activation| {
         let configs = match &config {
             Some(grant) => activation.grant_config(&grant.name, routine_facets(&grant.facets))?,
@@ -335,6 +343,7 @@ pub fn provider<R: RendererRegistry + 'static>(
         let context = Context::new(activation, registry.clone(), roots.clone(), configs);
         activate(&context)
     })
+    .with_contributions(contributions)
 }
 
 /// Host-side retrieval of an MDK-published provision (composition roots and tests).
