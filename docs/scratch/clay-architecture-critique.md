@@ -69,7 +69,7 @@ ADR 017 §1 "no second mechanism exists for guest-provided collections" is false
 Operator: the waist must be designed properly, expressed in WIT and in Rust, and must be able to
 carry docs, cross-micro collections, and host-side collection services uniformly.
 
-### F3 (S1) The lifecycle failure model is defeated by the shells
+### F3 (S1) The lifecycle failure model is defeated by the shells — fixed 2026-10-30
 
 - `CompositionRuntime::apply_states` asserts no instance is `Failed`:
   `src/dayframe_composition/lib.rs:120-129`.
@@ -79,6 +79,14 @@ carry docs, cross-micro collections, and host-side collection services uniformly
   repeatedly invoke a failing provider", `docs/adrs/014-dayframe-dx-application-architecture.md:518-520`).
 
 The reconciler has a `Failed` state; the shipped composition refuses to tolerate it.
+
+**Fixed:** `apply_states` no longer asserts; `Failed`/`Faulted` are rendered in the status row.
+Package factories for `clay_mdk::{wasm,wcmp}::provider` return `Result<Package, String>`, so a
+web fetch/HTTP/compile failure becomes `ActivationError::Initialization` → `Failed` on that
+instance (the web shell's `expect`s are gone). `InstanceState::Stopped` is renamed `Faulted`
+with the model's meaning: ended while still desired, retained, retry = configuration revision;
+there is no intentional stop other than disablement. Pinned by
+`dayframe_composition::tests::unfetchable_guest_fails_its_own_instance_and_leaves_the_rest_running`.
 
 ### F4 (S1) The "no suspension point" invariant behind `first_poll` is false — fixed 2026-10-30 (W2)
 

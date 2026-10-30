@@ -82,14 +82,16 @@ impl WcmpMicro {
 }
 
 /// Turn a `wcmp` micro (manifest + package factory) into a composition provider. The package is
-/// fetched/compiled inside the async activation, never at composition-construction time.
+/// fetched/compiled inside the async activation, never at composition-construction time; a
+/// factory error (fetch, HTTP status, compile) is an activation failure the reconciler retains
+/// until configuration changes — never a shell panic.
 pub fn provider<Fut>(
     application: &ApplicationRuntime<NativeComponents>,
     manifest: MicroManifest,
     package: impl Fn() -> Fut + 'static,
 ) -> MicroFactory
 where
-    Fut: Future<Output = WcmpPackage> + 'static,
+    Fut: Future<Output = Result<WcmpPackage, String>> + 'static,
 {
     let descriptor = compose_descriptor(&manifest);
     assert!(
@@ -121,7 +123,7 @@ where
         let roots = roots.clone();
         let package = package.clone();
         async move {
-            let package = package().await;
+            let package = package().await.map_err(ActivationError::Initialization)?;
             let configs = match &config {
                 Some(grant) => {
                     activation.grant_config(&grant.name, routine_facets(&grant.facets))?

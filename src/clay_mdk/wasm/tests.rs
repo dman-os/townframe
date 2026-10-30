@@ -29,7 +29,9 @@ use std::sync::Mutex;
 type ApplicationRuntime = clay_micro_core::application::ApplicationRuntime<NativeComponents>;
 
 async fn counter_package() -> WasmPackage {
-    super::component_package("counter").await
+    super::component_package("counter")
+        .await
+        .expect("prepared counter component is valid")
 }
 
 /// A native contract that accepts declared contributions: the composition-side half every
@@ -210,7 +212,9 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
             counter.mount(Arc::new(writer), &[])
         })
         .unwrap();
-    let package = super::component_package("slots").await;
+    let package = super::component_package("slots")
+        .await
+        .expect("prepared slots component is valid");
     let (runtime, _layout_driver) =
         WasmRuntime::activate(&host, layout.clone(), &package, BTreeMap::new())
             .await
@@ -288,7 +292,7 @@ async fn wasm_guest_trap_or_disablement_closes_instance_and_withdraws_owned_entr
     assert!(shelved(&app).0.is_empty());
     assert_eq!(
         app.configure(&config).await.unwrap()["counter"],
-        InstanceState::Stopped
+        InstanceState::Faulted
     );
     config.get_mut("counter").unwrap().enablement = Enablement::Disabled;
     assert_eq!(

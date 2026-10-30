@@ -217,7 +217,7 @@ fn disabling_a_provider_blocks_dependents_and_reenabling_restores_fresh_incarnat
 }
 
 #[test]
-fn terminal_observers_distinguish_requested_stop_from_dependency_withdrawal() {
+fn terminal_observers_distinguish_fault_from_dependency_withdrawal() {
     let mut fixture = Fixture::new();
     fixture.reconcile();
     let source = fixture.instance("z-source");
@@ -227,16 +227,16 @@ fn terminal_observers_distinguish_requested_stop_from_dependency_withdrawal() {
         fixture.host.observe_instance(&source),
         Err(AccessError::Revoked)
     ));
-    let mut stopped = active_states();
-    stopped.insert("z-source".into(), InstanceState::Stopped);
-    stopped.insert(
+    let mut faulted = active_states();
+    faulted.insert("z-source".into(), InstanceState::Faulted);
+    faulted.insert(
         "a-dependent".into(),
         InstanceState::Blocked {
             requirements: vec![Facility::ID.into()],
         },
     );
-    assert_eq!(fixture.reconcile(), stopped);
-    assert_eq!(fixture.reconcile(), stopped);
+    assert_eq!(fixture.reconcile(), faulted);
+    assert_eq!(fixture.reconcile(), faulted);
     fixture.desired.get_mut("z-source").unwrap().enablement = Enablement::Disabled;
     fixture.reconcile();
     fixture.desired.get_mut("z-source").unwrap().enablement = Enablement::Enabled;
@@ -270,7 +270,7 @@ fn pending_observer_records_closure_before_first_poll() {
         .clone();
     fixture.host.close_instance(&source).unwrap();
     let states = fixture.reconcile();
-    assert_eq!(states["z-source"], InstanceState::Stopped);
+    assert_eq!(states["z-source"], InstanceState::Faulted);
     assert_eq!(
         states["a-dependent"],
         InstanceState::Blocked {
@@ -303,13 +303,13 @@ fn closure_inside_activation_is_observed_before_completion() {
     )]);
     assert_eq!(
         fixture.reconcile(),
-        BTreeMap::from([("self-closing".into(), InstanceState::Stopped)])
+        BTreeMap::from([("self-closing".into(), InstanceState::Faulted)])
     );
     assert!(fixture.composition.active.is_empty());
     assert!(fixture.composition.pending.is_empty());
     fixture.desired.clear();
     assert!(fixture.reconcile().is_empty());
-    assert!(fixture.composition.stopped.is_empty());
+    assert!(fixture.composition.faulted.is_empty());
 }
 
 #[tokio::test]
@@ -370,7 +370,7 @@ async fn pending_completion_retains_observer_until_concurrent_cleanup_finishes()
                 &fixture.policy()
             )
             .unwrap(),
-        BTreeMap::from([("z-source".into(), InstanceState::Stopped)])
+        BTreeMap::from([("z-source".into(), InstanceState::Faulted)])
     );
     assert!(fixture.composition.active.is_empty());
     assert!(fixture.composition.pending.is_empty());

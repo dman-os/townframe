@@ -37,14 +37,11 @@ async fn fetch_component_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// Compile the fetched counter component on the browser's `WebAssembly` engine through the
 /// shared `clay_rt_wcmp` seam. Re-activation after disable/enable re-runs this factory; each
 /// incarnation re-fetches because `WcmpPackage` is not `Clone` and only lives for that
-/// activation.
-async fn counter_package() -> clay_rt_wcmp::WcmpPackage {
-    let bytes = fetch_component_bytes(COUNTER_COMPONENT_URL)
-        .await
-        .expect("counter component must be fetchable");
-    clay_rt_wcmp_web::load(&bytes)
-        .await
-        .expect("fetched counter component must be valid")
+/// activation. A fetch or compile failure is the counter's activation failure, reported in its
+/// status row; the rest of the shell keeps running.
+async fn counter_package() -> Result<clay_rt_wcmp::WcmpPackage, String> {
+    let bytes = fetch_component_bytes(COUNTER_COMPONENT_URL).await?;
+    clay_rt_wcmp_web::load(&bytes).await
 }
 
 /// Engine providers this shell links into the shared composition: the counter on `wcmp`.

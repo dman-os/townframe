@@ -9,4 +9,4 @@ expression: steps
 - "consumer-rebound: Ok({\"consumer\": Active, \"supplier\": Active, \"supplier-2\": Active})"
 - "cleared: Ok({})"
 - "reconfigured: Ok({\"consumer\": Active, \"supplier\": Active})"
-- "host-closed: Ok({\"consumer\": Stopped, \"supplier\": Stopped})"
+- "host-closed: Ok({\"consumer\": Faulted, \"supplier\": Faulted})"
