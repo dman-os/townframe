@@ -80,6 +80,7 @@ impl Fixture {
         CompositionPolicy {
             eager: self.desired.keys().cloned().collect(),
             demand: BTreeMap::new(),
+            accept_all: BTreeMap::new(),
         }
     }
 
@@ -1055,6 +1056,7 @@ impl Metamorphic {
                     &CompositionPolicy {
                         eager: desired.keys().cloned().collect(),
                         demand: BTreeMap::new(),
+                        accept_all: BTreeMap::new(),
                     },
                 )
                 .unwrap();
@@ -1320,6 +1322,7 @@ fn an_eager_consumer_pulls_its_declared_supplier_but_not_unrelated_micros() {
     let states = fixture.reconcile_with(&CompositionPolicy {
         eager: BTreeSet::from(["a-dependent".into()]),
         demand: BTreeMap::new(),
+        accept_all: BTreeMap::new(),
     });
     assert_eq!(states["a-dependent"], InstanceState::Active);
     assert_eq!(states["z-source"], InstanceState::Active);
@@ -1362,6 +1365,7 @@ fn accepted_static_contributions_activate_and_withdrawal_evicts() {
             "z-source".into(),
             BTreeMap::from([("button".into(), Facility::ID.into())]),
         )]),
+        accept_all: BTreeMap::new(),
     };
     let states = fixture.reconcile_with(&policy);
     assert_eq!(states["button"], InstanceState::Active);
@@ -1391,6 +1395,7 @@ fn a_demand_row_must_name_a_declared_contribution() {
                 "z-source".into(),
                 BTreeMap::from([("unrelated".into(), Facility::ID.into())]),
             )]),
+            accept_all: BTreeMap::new(),
         })
         .unwrap_err();
     assert_eq!(
@@ -1430,6 +1435,7 @@ fn demand_never_activates_a_disabled_contributor() {
             "z-source".into(),
             BTreeMap::from([("button".into(), Facility::ID.into())]),
         )]),
+        accept_all: BTreeMap::new(),
     });
     assert_eq!(states["button"], InstanceState::Disabled);
     assert!(
@@ -1438,5 +1444,76 @@ fn demand_never_activates_a_disabled_contributor() {
             .lock()
             .unwrap()
             .contains(&"button".into())
+    );
+}
+
+#[test]
+fn accept_all_activates_every_declared_contributor_and_later_ones() {
+    let mut fixture = Fixture::new();
+    let button = |id: &str| {
+        MicroFactory::new(
+            MicroDescriptor {
+                id: MicroId::new(id),
+                version: 1,
+                provisions: vec![],
+                requirements: vec![],
+            },
+            |_| Ok(()),
+        )
+        .with_contributions(vec![MicroContribution {
+            provision: Facility::ID.into(),
+            payload: serde_json::json!({}),
+        }])
+    };
+    let mut policy = CompositionPolicy {
+        eager: BTreeSet::from(["z-source".into()]),
+        demand: BTreeMap::new(),
+        accept_all: BTreeMap::from([(
+            "z-source".into(),
+            BTreeSet::from([Facility::ID.to_owned()]),
+        )]),
+    };
+    // A standing acceptance, not a per-row decision: contributors installed after the consumer
+    // activated join without the consumer being re-activated.
+    fixture.reconcile_with(&policy);
+    fixture.registry.register(button("button-a")).unwrap();
+    fixture.desired.insert(
+        "button-a".into(),
+        configuration("button-a", BTreeMap::new()),
+    );
+    fixture.reconcile_with(&policy);
+    fixture.registry.register(button("button-b")).unwrap();
+    fixture.desired.insert(
+        "button-b".into(),
+        configuration("button-b", BTreeMap::new()),
+    );
+    let states = fixture.reconcile_with(&policy);
+    assert_eq!(states["button-a"], InstanceState::Active);
+    assert_eq!(states["button-b"], InstanceState::Active);
+    policy.accept_all.clear();
+    let states = fixture.reconcile_with(&policy);
+    assert_eq!(states["button-a"], InstanceState::Idle);
+    assert_eq!(states["button-b"], InstanceState::Idle);
+}
+
+#[test]
+fn accept_all_must_name_a_contract_the_consumer_provides() {
+    let mut fixture = Fixture::new();
+    let error = fixture
+        .try_reconcile_with(&CompositionPolicy {
+            eager: BTreeSet::from(["z-source".into()]),
+            demand: BTreeMap::new(),
+            accept_all: BTreeMap::from([(
+                "z-source".into(),
+                BTreeSet::from(["not.a.provision".to_owned()]),
+            )]),
+        })
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ConfigurationError::UndeclaredAcceptance {
+            consumer: "z-source".into(),
+            contracts: vec!["not.a.provision".into()],
+        }
     );
 }

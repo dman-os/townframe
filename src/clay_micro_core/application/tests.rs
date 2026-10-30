@@ -1,5 +1,6 @@
 use super::*;
 use crate::micros::ActivationError;
+use crate::micros::MicroContribution;
 use crate::micros::MicroFactory;
 use crate::micros::MicroId;
 use crate::micros::MicroProvision;
@@ -1703,4 +1704,75 @@ async fn three_overlapping_configures_settle_exactly_the_latest_revision() {
     assert_eq!(gate.dropped.get(), 2);
     assert_eq!(gate.instances.borrow().len(), 2);
     runtime.host().close();
+}
+
+// ── a micro is its own broker (ADR 014 §Composition and lifecycle) ──────
+
+/// The consumer reads the static registry during its own activation, accepts the contract it
+/// provides, and the contributor is pulled live by that acceptance. The composition root names
+/// only the eager root; it never names the contributor.
+#[tokio::test]
+async fn a_consumer_micro_activates_declared_contributors_without_the_root_naming_them() {
+    let mut application = ApplicationRuntime::new();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let declaration_log = seen.clone();
+    application
+        .providers
+        .register(MicroFactory::new(
+            MicroDescriptor {
+                id: MicroId::new("shelf"),
+                version: 1,
+                requirements: vec![],
+                provisions: vec![MicroProvision {
+                    id: Facility::ID.into(),
+                    version: 1,
+                }],
+            },
+            move |activation| {
+                let declarations = activation.broker().declarations(Facility::ID);
+                *declaration_log.lock().unwrap() = declarations
+                    .iter()
+                    .map(|declaration| (declaration.instance.clone(), declaration.payload.clone()))
+                    .collect();
+                activation.broker().accept_all([Facility::ID.to_owned()]);
+                activation.publish(Facility(activation.instance()));
+                Ok(())
+            },
+        ))
+        .unwrap();
+    application
+        .providers
+        .register(
+            MicroFactory::new(
+                MicroDescriptor {
+                    id: MicroId::new("button"),
+                    version: 1,
+                    requirements: vec![],
+                    provisions: vec![],
+                },
+                |_| Ok(()),
+            )
+            .with_contributions(vec![MicroContribution {
+                provision: Facility::ID.into(),
+                payload: serde_json::json!({"label": "Open"}),
+            }]),
+        )
+        .unwrap();
+    application.set_eager_roots(BTreeSet::from(["shelf".into()]));
+    let states = application
+        .configure(&BTreeMap::from([
+            ("shelf".into(), configured("shelf")),
+            ("button".into(), configured("button")),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(states["shelf"], InstanceState::Active);
+    assert_eq!(states["button"], InstanceState::Active);
+    // Readable without an instance, which is what makes a toolbar possible at all.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("button".to_owned(), serde_json::json!({"label": "Open"}))]
+    );
+    assert!(application.policy().accept_all.contains_key("shelf"));
+    application.host().close();
 }
