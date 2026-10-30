@@ -2,12 +2,10 @@
 //! controls, and the `Application` shell UI. Engine-specific guest providers (Wasmtime on
 //! desktop, `wcmp` on the web) are injected by the launch shells; this crate owns only the
 //! engine-neutral half of the composition root (ADR 018 §7).
+use clay_dioxus::use_component_recovery;
 use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
-use clay_dioxus::use_component_recovery;
 use clay_micro_core::application::ApplicationRuntime;
-use clay_micro_core::micros::MicroFactory;
-use clay_micro_core::micros::MicroId;
 use clay_micro_core::micros::composition::ConfigurationError;
 use clay_micro_core::micros::composition::ConfigurationSnapshot;
 use clay_micro_core::micros::composition::ConfigurationSource;
@@ -15,6 +13,8 @@ use clay_micro_core::micros::composition::ConfiguredMicro;
 use clay_micro_core::micros::composition::Enablement;
 use clay_micro_core::micros::composition::InstanceState;
 use clay_micro_core::micros::composition::MockConfiguration;
+use clay_micro_core::micros::MicroFactory;
+use clay_micro_core::micros::MicroId;
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
@@ -98,6 +98,10 @@ impl CompositionRuntime {
         ]);
         let configuration = MockConfiguration::with_locked(locked, dynamic);
         application.install_configuration_source(configuration.clone());
+        // Only settings is an explicit start. Sample and counter are enabled but idle until a
+        // live binding (here their settings.sections requirement) pulls them in; installing a
+        // micro no longer implies booting it (ADR 014 §Composition and lifecycle).
+        application.set_eager_roots(std::collections::BTreeSet::from(["settings".into()]));
 
         Self {
             application,
