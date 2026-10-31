@@ -406,6 +406,7 @@ impl DatumSetStore {
     pub async fn reachable_docs(
         &self,
         drawer_id: &DocId,
+        transitive: bool,
         at_least: DrawerAccess,
     ) -> Res<BTreeSet<DocId>> {
         let mut query = Sql::new(
@@ -417,7 +418,13 @@ impl DatumSetStore {
                  ) AS candidate
                 WHERE "#,
         );
-        push_in_drawer(&mut query, "candidate.doc_id", drawer_id, true, at_least);
+        push_in_drawer(
+            &mut query,
+            "candidate.doc_id",
+            drawer_id,
+            transitive,
+            at_least,
+        );
         query.push(" ORDER BY candidate.doc_id");
         query
             .query(&self.sql)
@@ -426,6 +433,24 @@ impl DatumSetStore {
             .into_iter()
             .map(|row| Ok(row.get::<String>("doc_id")?.parse::<DocId>()?))
             .collect()
+    }
+
+    /// Whether `drawer_id` is projected as a self-doc drawer: its descriptor is its content
+    /// doc, so under a non-transitive parent it counts as one of the parent's own docs
+    /// (ADR 026 §6) rather than as a drawer whose docs are pulled in.
+    pub async fn is_self_doc(&self, drawer_id: &DocId) -> Res<bool> {
+        let mut query = Sql::new(
+            "SELECT json_extract(descriptor_json, '$.layout.$type') AS layout FROM big_cabinet_drawers WHERE drawer_id = ",
+        );
+        query.bind(drawer_id.to_string());
+        let rows = query.query(&self.sql).await?.rows;
+        Ok(rows.first().is_some_and(|row| {
+            row.get::<Option<String>>("layout")
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("org.example.daybook.drawer.selfDoc")
+        }))
     }
 
     /// The drawers `drawer_id` is nested under, itself included.
@@ -1348,7 +1373,9 @@ fn push_conjunction(
 /// The reach CTE from `drawer/sqlite/queries/scoped_docs.sql`, correlated on the candidate doc.
 ///
 /// `transitive: false` keeps only the root reach row, which drops the child-link branch: the
-/// drawer's own document entries and, for a `selfDoc` layout, the drawer document itself. The root
+/// drawer's own document entries, for a `selfDoc` layout the drawer document itself, and its
+/// own self-doc children — a self-doc child is one of the drawer's own docs (ADR 026 §6),
+/// while a single-group child's docs stay the child's. The root
 /// level is the requested `at_least`, which is the caller's grant on the drawer as far as the
 /// threshold matters: the caller was admitted at that level, and attenuating by a higher grant
 /// cannot change whether a document clears the same threshold.
@@ -1396,7 +1423,27 @@ fn push_in_drawer(
                      , reachable.level
                   FROM reachable
                   JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
-                 WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
+                 WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'"#,
+    );
+    if !transitive {
+        // `reachable` holds only the root here, so this adds exactly the root's own
+        // self-doc children at the level their child entry confers.
+        query.push(
+            r#"
+                UNION ALL
+                SELECT links.child_id
+                     , MIN(reachable.level, levels.level)
+                  FROM reachable
+                  JOIN big_cabinet_drawer_children AS links ON links.parent_id = reachable.drawer_id
+                  JOIN levels ON levels.access = links.access
+                  JOIN big_cabinet_drawers AS parent ON parent.drawer_id = reachable.drawer_id
+                  JOIN big_cabinet_drawers AS child ON child.drawer_id = links.child_id
+                 WHERE json_extract(parent.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
+                   AND json_extract(child.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'"#,
+        );
+    }
+    query.push(
+        r#"
             )
             SELECT 1
               FROM entries

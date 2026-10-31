@@ -1667,6 +1667,7 @@ async fn in_drawer_follows_the_reach_cte_with_and_without_transitivity() {
     seed_drawer(&sql, &child, "org.example.daybook.drawer.singleGroup").await;
     seed_drawer(&sql, &self_doc, "org.example.daybook.drawer.selfDoc").await;
     seed_drawer_child(&sql, &root, &child, "Write").await;
+    seed_drawer_child(&sql, &root, &self_doc, "Read").await;
     for (doc_id, access) in [
         (doc(1), "Read"),
         (doc(2), "Write"),
@@ -1714,7 +1715,7 @@ async fn in_drawer_follows_the_reach_cte_with_and_without_transitivity() {
             )
             .await
             .unwrap(),
-        BTreeSet::from([doc(1), doc(2), doc(4), doc(5)])
+        BTreeSet::from([doc(1), doc(2), doc(4), doc(5), doc(12)])
     );
     assert_eq!(
         store
@@ -1728,7 +1729,7 @@ async fn in_drawer_follows_the_reach_cte_with_and_without_transitivity() {
             )
             .await
             .unwrap(),
-        BTreeSet::from([doc(1), doc(2)])
+        BTreeSet::from([doc(1), doc(2), doc(12)])
     );
     assert_eq!(
         store
@@ -1757,6 +1758,20 @@ async fn in_drawer_follows_the_reach_cte_with_and_without_transitivity() {
             .await
             .unwrap(),
         BTreeSet::from([doc(4), doc(5)])
+    );
+    assert_eq!(
+        store
+            .reachable_docs(&root, false, DrawerAccess::Read)
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(1), doc(2), doc(12)])
+    );
+    assert_eq!(
+        store
+            .reachable_docs(&root, true, DrawerAccess::Read)
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(1), doc(2), doc(4), doc(5), doc(12)])
     );
     // A `selfDoc` drawer reaches its own document, which need not carry an entry.
     assert_eq!(
@@ -1807,7 +1822,7 @@ async fn in_drawer_follows_the_reach_cte_with_and_without_transitivity() {
             )
             .await
             .unwrap(),
-        BTreeSet::from([doc(2)])
+        BTreeSet::from([doc(2), doc(12)])
     );
 }
 

@@ -372,6 +372,126 @@ async fn a_child_drawer_confers_access_through_its_parent() {
 }
 
 #[tokio::test]
+async fn a_self_doc_child_takes_only_a_doc_grant_at_the_entry_level() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let bob = node.actor("bob").await;
+    let parent = node.collection(&alice, "team").await;
+    let home = node.collection(&alice, "home").await;
+    let doc = node.create_doc(&alice, &home, "letter").await.unwrap();
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            CreateDrawer {
+                capability: node.drawer_capability(&alice, &[&home]).await.unwrap(),
+                command: command("declare letter"),
+                layout: CreateLayout::SelfDoc {
+                    doc_id: doc.clone(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    // A self-doc parent has no docs group to delegate, so it cannot adopt children.
+    let err = node
+        .drawers()
+        .call(
+            RequestContext::root(),
+            AddChild {
+                capability: node
+                    .drawer_capability(&alice, &[&doc, &parent])
+                    .await
+                    .unwrap(),
+                command: command("self-doc adopts"),
+                parent_id: doc.clone(),
+                child_id: parent.clone(),
+                access: Access::Read,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(op(err), DrawersError::SelfDoc(doc.clone()));
+
+    node.grant(&alice, &parent, &bob, Access::Read).await;
+    assert_eq!(
+        node.read_note(&bob, &doc).await.unwrap_err(),
+        DocsError::Denied
+    );
+
+    let (_, parent_docs) = groups_of(&node.view(&alice, &parent).await.unwrap());
+    let doc_bytes = doc.to_bytes32().unwrap();
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            AddChild {
+                capability: node
+                    .drawer_capability(&alice, &[&parent, &doc])
+                    .await
+                    .unwrap(),
+                command: command("adopt letter"),
+                parent_id: parent.clone(),
+                child_id: doc.clone(),
+                access: Access::Read,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        node.roster_datums(&parent).await[&child_entry_key(&doc)],
+        json!({"access": "Read"})
+    );
+    assert_eq!(
+        node.view(&alice, &parent).await.unwrap().children,
+        BTreeMap::from([(doc.clone(), Access::Read)])
+    );
+    // Exactly `Read` on the doc itself: no meta widening and no group delegation exists.
+    assert_eq!(
+        node.keyhive_level(parent_docs, doc_bytes).await,
+        Some(KeyhiveAccess::Read)
+    );
+    assert!(node.read_note(&bob, &doc).await.is_ok());
+    assert_eq!(
+        node.write_note(&bob, &doc, "edit").await.unwrap_err(),
+        DocsError::Denied
+    );
+    assert_eq!(
+        node.list_docs(&bob, &parent, 0, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|listed| listed.doc_id.clone())
+            .collect::<Vec<_>>(),
+        vec![doc.clone()]
+    );
+
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            RemoveChild {
+                capability: node.drawer_capability(&alice, &[&parent]).await.unwrap(),
+                command: command("disown letter"),
+                parent_id: parent.clone(),
+                child_id: doc.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !node
+            .roster_datums(&parent)
+            .await
+            .contains_key(&child_entry_key(&doc))
+    );
+    assert_eq!(node.keyhive_level(parent_docs, doc_bytes).await, None);
+    assert_eq!(
+        node.read_note(&bob, &doc).await.unwrap_err(),
+        DocsError::Denied
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn a_self_doc_drawer_is_the_doc_itself() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;

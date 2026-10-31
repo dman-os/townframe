@@ -2,7 +2,6 @@ use super::*;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
-use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::drawer::DrawerAccess as Access;
@@ -57,33 +56,36 @@ pub(super) async fn boot(
             },
         )
         .await?;
-    let placement = format!("drawer {}", drawer.drawer_id);
-    let create_cap = docs
+    // The node-local inventory is a drawer meta doc (ADR 026 §5): DrawerService
+    // creates it, grants the meta group, and writes the slot; the workers' fallback
+    // pins land there for docs no drawer claims an inventory for.
+    let meta_cap = drawers
         .client
         .call(
             context.child(),
-            MintDocCapability {
+            MintDrawerCapability {
                 authorization: Authorization::identity(signer),
-                scope: DocScope {
-                    create: BTreeSet::from([placement.clone()]),
-                    ..Default::default()
+                scope: DrawerScope {
+                    create: false,
+                    drawers: BTreeMap::from([(drawer.drawer_id.clone(), Access::Admin)]),
                 },
                 rights: Rights::USE,
             },
         )
         .await?;
-    let inventory = docs
+    let inventory = drawers
         .client
         .call(
             context.child(),
-            CreateDoc {
-                capability: create_cap.capability_id,
+            big_cabinet_core::drawer::protocol::CreateMetaDoc {
+                capability: meta_cap.capability_id,
                 command: "big-blobs-inventory-document-v1".to_owned().try_into()?,
-                placement,
-                datums: BTreeMap::new(),
+                drawer_id: drawer.drawer_id.clone(),
+                kind: big_blobs::workers::INVENTORY_KIND.to_owned(),
             },
         )
         .await?;
+    let inventory_doc = inventory.doc_id;
     let local = drawers.local();
     let capability = docs
         .client
@@ -92,8 +94,8 @@ pub(super) async fn boot(
             MintDocCapability {
                 authorization: Authorization::identity(signer),
                 scope: DocScope {
-                    read: BTreeSet::from([inventory.doc_id.clone()]),
-                    write: BTreeSet::from([inventory.doc_id.clone()]),
+                    read: BTreeSet::from([inventory_doc.clone()]),
+                    write: BTreeSet::from([inventory_doc.clone()]),
                     drawers: BTreeMap::from([
                         (local.present_id.clone(), Access::Read),
                         (local.originated_id.clone(), Access::Write),
@@ -117,7 +119,8 @@ pub(super) async fn boot(
         service: Arc::clone(&blobs.service),
         docs: docs.client.clone(),
         capability: capability.capability_id,
-        inventory: inventory.doc_id,
+        inventory: inventory_doc,
+        drawers: vec![local.present_id.clone(), local.originated_id.clone()],
         datum_set,
         parts,
         repo: Arc::clone(repo),

@@ -13,6 +13,90 @@ pub(super) fn meta_access(access: Access) -> Access {
     access.max(Access::Read)
 }
 
+/// One Keyhive delegation a child entry stands on. A single-group child takes the parent's
+/// groups onto its own groups; a self-doc child has no groups, so it takes the parent's docs
+/// group onto its doc itself at exactly `access` — the same grant shape as a `docEntry`, with
+/// no meta-group delegation and no `meta_access` widening (ADR 026 §6).
+pub(super) enum ChildDelegation {
+    Groups {
+        member: BigKeyhiveGroup,
+        group: BigKeyhiveGroup,
+        access: Access,
+    },
+    Doc {
+        docs_group: BigKeyhiveGroup,
+        doc: DocId,
+        access: Access,
+    },
+}
+
+impl ChildDelegation {
+    pub(super) fn access(&self) -> Access {
+        match self {
+            Self::Groups { access, .. } | Self::Doc { access, .. } => *access,
+        }
+    }
+
+    pub(super) async fn current(&self, core: &Core) -> Result<Option<Access>, DrawersError> {
+        match self {
+            Self::Groups { member, group, .. } => {
+                Ok(core
+                    .group_level(member, group)
+                    .await
+                    .map(|level| match level {
+                        KeyhiveAccess::Relay => Access::Relay,
+                        KeyhiveAccess::Read => Access::Read,
+                        KeyhiveAccess::Edit => Access::Write,
+                        KeyhiveAccess::Admin => Access::Admin,
+                    }))
+            }
+            Self::Doc {
+                docs_group, doc, ..
+            } => core.docs_group_level(docs_group, doc).await,
+        }
+    }
+
+    pub(super) async fn grant(&self, core: &Core) -> Result<(), DrawersError> {
+        match self {
+            Self::Groups {
+                member,
+                group,
+                access,
+            } => core
+                .big_repo
+                .add_member_to_group(member.clone(), group, keyhive_access(*access))
+                .await
+                .map_err(keyhive_error),
+            Self::Doc {
+                docs_group,
+                doc,
+                access,
+            } => core
+                .big_repo
+                .grant_doc_access(doc.clone(), docs_group.clone(), keyhive_access(*access))
+                .await
+                .map_err(keyhive_error),
+        }
+    }
+
+    pub(super) async fn revoke(&self, core: &Core) -> Result<(), DrawersError> {
+        match self {
+            Self::Groups { member, group, .. } => core
+                .big_repo
+                .remove_member_from_group(member.clone(), group)
+                .await
+                .map_err(keyhive_error),
+            Self::Doc {
+                docs_group, doc, ..
+            } => core
+                .big_repo
+                .revoke_doc_access(doc.clone(), docs_group.clone())
+                .await
+                .map_err(keyhive_error),
+        }
+    }
+}
+
 impl Core {
     /// The level `member` holds on `group` in Keyhive, `None` when it holds nothing.
     pub(super) async fn group_level(
@@ -26,21 +110,50 @@ impl Core {
             .await
     }
 
-    /// The two delegations a child entry at `access` stands on — `(member, group, level)`: the
-    /// parent's docs group onto the child's docs group, and the parent's meta group onto the
-    /// child's meta group.
+    /// The delegations a child entry at `access` stands on. A self-doc *parent* is refused
+    /// here through `groups` — it has no docs group to delegate — while a self-doc *child*
+    /// under a single-group parent takes only the doc delegation (ADR 026 §6).
     pub(super) async fn child_delegations(
         &self,
         parent: &DrawerId,
         child: &DrawerId,
         access: Access,
-    ) -> Result<[(BigKeyhiveGroup, BigKeyhiveGroup, KeyhiveAccess); 2], DrawersError> {
+    ) -> Result<Vec<ChildDelegation>, DrawersError> {
         let (parent_meta, parent_docs) = self.groups(parent).await?;
-        let (child_meta, child_docs) = self.groups(child).await?;
-        Ok([
-            (parent_docs, child_docs, keyhive_access(access)),
-            (parent_meta, child_meta, keyhive_access(meta_access(access))),
-        ])
+        let child_record = self
+            .ensure_drawer(&RequestContext::root(), child)
+            .await?
+            .ok_or_else(|| DrawersError::UnknownDrawer(child.clone()))?;
+        match child_record.layout_kind() {
+            Some(LayoutKind::SelfDoc) => Ok(vec![ChildDelegation::Doc {
+                docs_group: parent_docs,
+                doc: child.clone(),
+                access,
+            }]),
+            Some(LayoutKind::SingleGroup) => {
+                let (child_meta, child_docs) = self.groups(child).await?;
+                Ok(vec![
+                    ChildDelegation::Groups {
+                        member: parent_docs,
+                        group: child_docs,
+                        access,
+                    },
+                    ChildDelegation::Groups {
+                        member: parent_meta,
+                        group: child_meta,
+                        access: meta_access(access),
+                    },
+                ])
+            }
+            None => Err(DrawersError::ForeignLayout(
+                child_record
+                    .descriptor
+                    .layout
+                    .tag()
+                    .unwrap_or("unknown")
+                    .to_owned(),
+            )),
+        }
     }
 
     /// Publish the entry `child` at `access` on `parent` unless the roster already lists it so.
@@ -86,33 +199,24 @@ impl Core {
         access: Access,
     ) -> Result<WriteReceipt, DrawersError> {
         let delegations = self.child_delegations(parent, child, access).await?;
-        for (member, group, wanted) in &delegations {
-            if self
-                .group_level(member, group)
-                .await
-                .is_none_or(|current| current < *wanted)
+        for delegation in &delegations {
+            if delegation
+                .current(self)
+                .await?
+                .is_none_or(|current| current < delegation.access())
             {
-                self.big_repo
-                    .add_member_to_group(member.clone(), group, *wanted)
-                    .await
-                    .map_err(keyhive_error)?;
+                delegation.grant(self).await?;
             }
         }
         let written = self.publish_child(context, parent, child, access).await?;
-        for (member, group, wanted) in &delegations {
-            if self
-                .group_level(member, group)
-                .await
-                .is_some_and(|current| current > *wanted)
+        for delegation in &delegations {
+            if delegation
+                .current(self)
+                .await?
+                .is_some_and(|current| current > delegation.access())
             {
-                self.big_repo
-                    .remove_member_from_group(member.clone(), group)
-                    .await
-                    .map_err(keyhive_error)?;
-                self.big_repo
-                    .add_member_to_group(member.clone(), group, *wanted)
-                    .await
-                    .map_err(keyhive_error)?;
+                delegation.revoke(self).await?;
+                delegation.grant(self).await?;
             }
         }
         match written {

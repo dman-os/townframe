@@ -26,6 +26,7 @@ use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DatumVersion;
 use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::DocsProtocol;
@@ -263,8 +264,8 @@ impl DocumentBlobs {
             };
             let blob: Blob = serde_json::from_value(value.clone())?;
             let plaintext = plaintext_id(&blob)?;
-            let (jwk_key, default_cipher_key) = representation_keys(doc_id, blob_key, &plaintext)?;
-            let mut cipher_keys = match resolution_keys(doc_id, &blob, &plaintext) {
+            let (jwk_key, default_cipher_key) = representation_keys(blob_key)?;
+            let via_keys = match resolution_keys(doc_id, &blob, &plaintext) {
                 Ok(keys) => keys,
                 Err(reason) => {
                     report.deferred.push(DocumentDeferral {
@@ -274,12 +275,31 @@ impl DocumentBlobs {
                     continue;
                 }
             };
-            if read
-                .datums
-                .get(&default_cipher_key)
-                .is_some_and(|datum| !matches!(datum, DatumRead::Absent { .. }))
-            {
-                cipher_keys.insert(default_cipher_key.clone());
+            // Resolution order (ADR 026 §§2-3): the naming-convention slot
+            // in this doc first, then any `?via=` hint left on the Blob,
+            // then the legacy hashed representation slot. New writes only
+            // ever create the naming-convention slot; the other two are
+            // read fallbacks for documents written before ADR 026.
+            let mut cipher_keys: Vec<DatumKey> = Vec::new();
+            let push_key = |key: DatumKey, keys: &mut Vec<DatumKey>| {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            };
+            let present = |key: &DatumKey| {
+                read.datums
+                    .get(key)
+                    .is_some_and(|datum| !matches!(datum, DatumRead::Absent { .. }))
+            };
+            if present(&default_cipher_key) {
+                push_key(default_cipher_key.clone(), &mut cipher_keys);
+            }
+            for key in via_keys {
+                push_key(key, &mut cipher_keys);
+            }
+            let (_, legacy_cipher_key) = legacy_representation_keys(doc_id, blob_key, &plaintext)?;
+            if present(&legacy_cipher_key) {
+                push_key(legacy_cipher_key, &mut cipher_keys);
             }
             if cipher_keys.is_empty() {
                 let result = self
@@ -289,7 +309,6 @@ impl DocumentBlobs {
                         &read,
                         &mut heads,
                         blob_key,
-                        value,
                         &blob,
                         &plaintext,
                         &jwk_key,
@@ -309,7 +328,6 @@ impl DocumentBlobs {
                             &read,
                             &mut heads,
                             blob_key,
-                            value,
                             &blob,
                             &plaintext,
                             &cipher_key,
@@ -440,7 +458,6 @@ impl DocumentBlobs {
         read: &DatumsRead,
         heads: &mut Vec<ChangeHash>,
         blob_key: &DatumKey,
-        raw: &Value,
         blob: &Blob,
         plaintext: &BlobId,
         jwk_key: &DatumKey,
@@ -452,21 +469,15 @@ impl DocumentBlobs {
                 ciphertext: None,
             }));
         };
-        let key = match read.datums.get(jwk_key) {
+        let (key, new_jwk) = match read.datums.get(jwk_key) {
             Some(DatumRead::Accepted { value, .. }) => match master_key(value) {
-                Some(key) => key,
+                Some(key) => (key, None),
                 None => return Ok(Err(DeferralReason::UnsupportedKey)),
             },
             None | Some(DatumRead::Absent { .. }) => {
                 let key = MasterKey::random();
                 let jwk = serde_json::to_value(JwkOct::from_master_key(&key))?;
-                if let Err(reason) = self
-                    .write(context, doc_id, heads, [(jwk_key.clone(), jwk)].into())
-                    .await?
-                {
-                    return Ok(Err(reason));
-                }
-                key
+                (key, Some(jwk))
             }
             Some(_) => {
                 return Ok(Err(DeferralReason::DatumUnavailable {
@@ -475,9 +486,12 @@ impl DocumentBlobs {
                 }));
             }
         };
-        eyre::ensure!(!heads.is_empty(), "a staged JWK has no document heads");
-        let key_heads = heads.iter().map(ToString::to_string).collect();
         let encoding = EncodingParams::DEFAULT;
+        // Amended ADR 003 §19 ordering (ADR 026 §§2-3,10): the §11 pass and
+        // pair registration happen first, with the cipherBlob value computed
+        // in memory; the JWK and cipherBlob are then written into the
+        // content doc in one transaction, which is the commit point. The
+        // encryptor no longer writes `Blob.urls`.
         let c_hash = self
             .provider
             .install_with_provenance(
@@ -492,6 +506,18 @@ impl DocumentBlobs {
             .await?;
         let ciphertext = BlobId::new(*c_hash.as_bytes());
         let c_len = self.ciphertext_length(c_hash).await?;
+        // A pre-existing JWK is pinned at the current doc heads, exactly as
+        // the staged write pinned it before. A JWK minted by this write
+        // cannot name the write's own resulting heads inside its own
+        // payload, so it carries empty `key_ref_heads`: for an in-doc
+        // naming-convention reference that means "the heads at which the
+        // cipherBlob itself was written" (see `key`), which is precisely
+        // the single transaction that also wrote the JWK.
+        let key_heads = if new_jwk.is_some() {
+            Vec::new()
+        } else {
+            heads.iter().map(ToString::to_string).collect()
+        };
         let cipher = CipherBlob {
             representation: Representation {
                 digest: ciphertext.digest_str(),
@@ -512,10 +538,11 @@ impl DocumentBlobs {
             },
             extra: Default::default(),
         };
-        let mut set = BTreeMap::from([(cipher_key.clone(), serde_json::to_value(cipher)?)]);
-        if let Some(updated) = resolution_value(doc_id, raw, blob, plaintext, cipher_key)? {
-            set.insert(blob_key.clone(), updated);
+        let mut set = BTreeMap::new();
+        if let Some(jwk) = new_jwk {
+            set.insert(jwk_key.clone(), jwk);
         }
+        set.insert(cipher_key.clone(), serde_json::to_value(cipher)?);
         if let Err(reason) = self.write(context, doc_id, heads, set).await? {
             return Ok(Err(reason));
         }
@@ -532,32 +559,62 @@ impl DocumentBlobs {
         &self,
         context: &RequestContext,
         doc_id: &DocId,
+        cipher_key: &DatumKey,
+        cipher_version: &DatumVersion,
         cipher: &CipherBlob,
     ) -> Attempt<MasterKey> {
         let Some((key_doc, jwk_key, query_heads)) = legacy_reference(doc_id, &cipher.key_ref)
         else {
             return Ok(Err(DeferralReason::UnsupportedReference));
         };
-        if jwk_key.tag().as_str() != Jwk::ID || cipher.key_ref_heads.is_empty() {
+        if jwk_key.tag().as_str() != Jwk::ID {
             return Ok(Err(DeferralReason::UnsupportedReference));
         }
-        let mut heads = cipher
-            .key_ref_heads
-            .iter()
-            .map(|head| head.parse::<ChangeHash>())
-            .collect::<Result<Vec<_>, _>>()?;
-        heads.sort();
-        heads.dedup();
-        if query_heads.is_some_and(|query| query != heads) {
-            return Ok(Err(DeferralReason::UnsupportedReference));
-        }
+        // ADR 026 §2: an in-doc (`self`/co-located) reference is accepted
+        // when the cipherBlob follows the naming convention, i.e. its JWK
+        // sits in the same doc at the same slot. Truly external references
+        // still require pinned heads, as before.
+        let in_doc_naming = key_doc == *doc_id
+            && DatumKey::new(Jwk::ID, cipher_key.slot_bytes().to_vec())
+                .ok()
+                .as_ref()
+                == Some(&jwk_key);
+        let (at, read_doc) = if cipher.key_ref_heads.is_empty() {
+            if !in_doc_naming {
+                return Ok(Err(DeferralReason::UnsupportedReference));
+            }
+            if query_heads.is_some() {
+                return Ok(Err(DeferralReason::UnsupportedReference));
+            }
+            // Empty heads on an in-doc reference mean "the same heads as
+            // the cipherBlob holding the reference": the cipherBlob's own
+            // datum version is the write that also wrote (or already
+            // contained) the JWK, so resolving there pins the exact key
+            // even if the JWK datum is later overwritten. Fixtures that
+            // carry no version heads fall back to the current state.
+            if cipher_version.heads.is_empty() {
+                (At::Current, key_doc.clone())
+            } else {
+                let mut heads = cipher_version.heads.clone();
+                heads.sort();
+                heads.dedup();
+                (At::Heads(heads), key_doc.clone())
+            }
+        } else {
+            let mut heads = cipher
+                .key_ref_heads
+                .iter()
+                .map(|head| head.parse::<ChangeHash>())
+                .collect::<Result<Vec<_>, _>>()?;
+            heads.sort();
+            heads.dedup();
+            if query_heads.is_some_and(|query| query != heads) {
+                return Ok(Err(DeferralReason::UnsupportedReference));
+            }
+            (At::Heads(heads), key_doc.clone())
+        };
         let read = match self
-            .read(
-                context,
-                &key_doc,
-                At::Heads(heads),
-                Some([jwk_key.clone()].into()),
-            )
+            .read(context, &read_doc, at, Some([jwk_key.clone()].into()))
             .await?
         {
             Ok(read) => read,
@@ -581,19 +638,19 @@ impl DocumentBlobs {
         context: &RequestContext,
         doc_id: &DocId,
         read: &DatumsRead,
-        heads: &mut Vec<ChangeHash>,
+        _heads: &mut Vec<ChangeHash>,
         blob_key: &DatumKey,
-        raw: &Value,
         blob: &Blob,
         plaintext: &BlobId,
         cipher_key: &DatumKey,
     ) -> Attempt<RetainedRepresentation> {
-        let Some(DatumRead::Accepted { value, .. }) = read.datums.get(cipher_key) else {
+        let Some(DatumRead::Accepted { value, version }) = read.datums.get(cipher_key) else {
             return Ok(Err(DeferralReason::DatumUnavailable {
                 doc_id: doc_id.clone(),
                 datum_key: cipher_key.clone(),
             }));
         };
+        let cipher_version = version.clone();
         let content_encoding: String = serde_json::from_value(value["contentEncoding"].clone())?;
         if content_encoding != CONTENT_ENCODING_AES128GCM {
             return Ok(Err(DeferralReason::UnsupportedEncoding {
@@ -614,7 +671,10 @@ impl DocumentBlobs {
         let ciphertext: BlobId = cipher.representation.digest.parse()?;
         let c_hash = Hash::from(ciphertext.to_bytes32());
         let p_hash = Hash::from(plaintext.to_bytes32());
-        let key = match self.key(context, doc_id, &cipher).await? {
+        let key = match self
+            .key(context, doc_id, cipher_key, &cipher_version, &cipher)
+            .await?
+        {
             Ok(key) => key,
             Err(reason) => return Ok(Err(reason)),
         };
@@ -692,13 +752,6 @@ impl DocumentBlobs {
             "reconstructed ciphertext length differs from CipherBlob metadata"
         );
         drop(plaintext_tag);
-        if let Some(updated) = resolution_value(doc_id, raw, blob, plaintext, cipher_key)?
-            && let Err(reason) = self
-                .write(context, doc_id, heads, [(blob_key.clone(), updated)].into())
-                .await?
-        {
-            return Ok(Err(reason));
-        }
         Ok(Ok(RetainedRepresentation {
             blob_key: blob_key.clone(),
             cipher_key: cipher_key.clone(),
@@ -826,7 +879,21 @@ fn command_id(request: &WriteDatums) -> Res<CommandId> {
     Ok(format!("big-blobs-v1-{digest}").try_into()?)
 }
 
-fn representation_keys(
+/// ADR 026 §3 naming convention: the cipherBlob for a Blob lives at
+/// `cipherBlob/<the Blob datum's key slot>` and its JWK at
+/// `jwk/<the same slot>`, in the same doc. One slot per Blob datum key:
+/// no plaintext-digest discriminator on new writes.
+fn representation_keys(blob_key: &DatumKey) -> Res<(DatumKey, DatumKey)> {
+    let slot = blob_key.slot_bytes().to_vec();
+    Ok((
+        DatumKey::new(Jwk::ID, slot.clone())?,
+        DatumKey::new(CipherBlob::ID, slot)?,
+    ))
+}
+
+/// Pre-ADR-026 hashed slots (`big-blobs-<blake3(doc||blob||plaintext)>`),
+/// retained only as a read fallback for documents already written.
+fn legacy_representation_keys(
     doc_id: &DocId,
     blob_key: &DatumKey,
     plaintext: &BlobId,
@@ -950,32 +1017,6 @@ fn resolution_keys(
         }
     }
     Ok(keys)
-}
-
-fn resolution_value(
-    doc_id: &DocId,
-    raw: &Value,
-    blob: &Blob,
-    plaintext: &BlobId,
-    cipher_key: &DatumKey,
-) -> Res<Option<Value>> {
-    if resolution_keys(doc_id, blob, plaintext)
-        .map_err(|_| eyre::eyre!("unsupported Blob resolution reference"))?
-        .contains(cipher_key)
-    {
-        return Ok(None);
-    }
-    let mut url = Url::parse(&format!("db+blob:///{plaintext}"))?;
-    url.query_pairs_mut()
-        .append_pair("via", &cipher_key.to_string());
-    let mut urls = blob.urls.clone().unwrap_or_default();
-    urls.push(url.into());
-    let mut updated = raw.clone();
-    updated
-        .as_object_mut()
-        .expect("accepted Blob is an object")
-        .insert("urls".into(), serde_json::to_value(urls)?);
-    Ok(Some(updated))
 }
 
 #[cfg(test)]

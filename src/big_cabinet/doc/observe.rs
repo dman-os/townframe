@@ -390,11 +390,12 @@ impl DocsService {
     /// The documents a roster entry can change membership for.
     ///
     /// A `docEntry` names its document in the key, so adding, narrowing or removing it
-    /// re-evaluates exactly that document. A `childEntry` names a drawer whose link moved: the
-    /// child's whole reachable set joins or leaves with it, so that set is re-evaluated even
-    /// after the link is gone (the child still reaches its own documents). The drawer's
-    /// descriptor, roster and meta datums can change what its layout reaches, so those
-    /// re-evaluate the drawer's own reach.
+    /// re-evaluates exactly that document. A `childEntry` names a drawer whose link moved:
+    /// transitively the child's whole reachable set joins or leaves with it, so that set is
+    /// re-evaluated even after the link is gone (the child still reaches its own documents);
+    /// non-transitively only a self-doc child moves, as one of the drawer's own docs. The
+    /// drawer's descriptor, roster and meta datums can change what its layout reaches, so
+    /// those re-evaluate the drawer's own reach at the clause's transitivity.
     ///
     /// A roster edit is only re-evaluated when its drawer and the predicate's drawer can see
     /// each other in the containment tree, so an unrelated drawer's edit costs nothing.
@@ -402,12 +403,12 @@ impl DocsService {
         store: &DatumSetStore,
         owner: &DocId,
         key: &DatumKey,
-        drawers: &[(DocId, DrawerAccess)],
+        drawers: &[(DocId, bool, DrawerAccess)],
     ) -> Result<BTreeSet<DocId>, DocsError> {
         let target = entry_target(key);
         let owner_ancestors = store.drawer_ancestors(owner).await.map_err(repository)?;
         let mut affected = BTreeSet::new();
-        for (drawer_id, at_least) in drawers {
+        for (drawer_id, transitive, at_least) in drawers {
             let related = owner == drawer_id
                 || owner_ancestors.contains(drawer_id)
                 || store
@@ -418,6 +419,13 @@ impl DocsService {
             if !related {
                 continue;
             }
+            // Non-transitively a drawer reaches only its own entries and its own self-doc
+            // children (ADR 026 §6), so a roster move in a descendant drawer cannot move
+            // membership here at all. Pulling the descendant's reachable set in anyway
+            // would make `page_events` emit `leave` for documents that never entered.
+            if !transitive && owner != drawer_id {
+                continue;
+            }
             match key.tag().as_str() {
                 DrawerDocEntry::ID => {
                     if let Some(doc_id) = &target {
@@ -426,18 +434,22 @@ impl DocsService {
                 }
                 DrawerChildEntry::ID => {
                     if let Some(child) = &target {
-                        affected.extend(
-                            store
-                                .reachable_docs(child, *at_least)
-                                .await
-                                .map_err(repository)?,
-                        );
+                        if *transitive {
+                            affected.extend(
+                                store
+                                    .reachable_docs(child, true, *at_least)
+                                    .await
+                                    .map_err(repository)?,
+                            );
+                        } else if store.is_self_doc(child).await.map_err(repository)? {
+                            affected.insert(child.clone());
+                        }
                     }
                 }
                 _ => {
                     affected.extend(
                         store
-                            .reachable_docs(owner, *at_least)
+                            .reachable_docs(owner, *transitive, *at_least)
                             .await
                             .map_err(repository)?,
                     );
@@ -531,17 +543,17 @@ fn observed(membership: DatumMembership) -> ObservedDatum {
     }
 }
 
-/// Every `InDrawer` clause the predicate names, nested ones included, with the level it asks
-/// for. A roster change is re-evaluated against this set: a drawer under a `Not` or an `Or`
+/// Every `InDrawer` clause the predicate names, nested ones included, with the transitivity
+/// and level it asks for. A roster change is re-evaluated against this set: a drawer under a `Not` or an `Or`
 /// still decides membership, so collecting only the anchors would miss it.
-fn predicate_drawers(predicate: &Predicate) -> Vec<(DocId, DrawerAccess)> {
-    fn collect(predicate: &Predicate, drawers: &mut Vec<(DocId, DrawerAccess)>) {
+fn predicate_drawers(predicate: &Predicate) -> Vec<(DocId, bool, DrawerAccess)> {
+    fn collect(predicate: &Predicate, drawers: &mut Vec<(DocId, bool, DrawerAccess)>) {
         match predicate {
             Predicate::InDrawer {
                 drawer_id,
+                transitive,
                 at_least,
-                ..
-            } => drawers.push((drawer_id.clone(), *at_least)),
+            } => drawers.push((drawer_id.clone(), *transitive, *at_least)),
             Predicate::And { clauses } | Predicate::Or { clauses } => {
                 for clause in clauses {
                     collect(clause, drawers);

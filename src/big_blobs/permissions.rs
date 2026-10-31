@@ -37,6 +37,29 @@ pub(crate) async fn seed(
     Ok(())
 }
 
+/// Seed the plaintext part of `drawer` from live Keyhive state (ADR 026 §7): its
+/// members are the agents holding access on the drawer's docs group.
+pub(crate) async fn seed_drawer(
+    repo: &SharedBigRepo,
+    parts: &SharedPartStore,
+    drawer: &DocId,
+    docs_group: [u8; 32],
+) -> Res<()> {
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&docs_group)?;
+    let identifier = big_repo::keyhive_core::principal::identifier::Identifier::from(key);
+    let agents = repo.keyhive().agents_for_membered(identifier).await;
+    parts
+        .set_part_members(
+            crate::workers::plaintext_part(drawer),
+            agents
+                .into_iter()
+                .map(|(id, access)| (PeerKey::new(id.to_bytes()), access))
+                .collect(),
+        )
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn run(
     repo: SharedBigRepo,
     queue: WorkQueue,

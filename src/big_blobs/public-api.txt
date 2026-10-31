@@ -14,6 +14,8 @@ pub big_blobs::schema::fn registration () -> SchemaRegistrationGroup < 'static >
 pub big_blobs::service::async fn boot (config : Config) -> Res < (Blobs , StopToken) >
 pub big_blobs::workers::async fn boot (config : WorkerConfig) -> Res < (BlobWorkers , StopToken) >
 pub big_blobs::workers::fn inventory_part (document : & DocId) -> PartKey
+pub big_blobs::workers::fn plaintext_part (drawer : & DocId) -> PartKey
+pub const big_blobs::workers::INVENTORY_KIND: & str
 pub enum big_blobs::documents::DeferralReason { Document { doc_id : DocId , error : DocsError , }, DatumUnavailable { doc_id : DocId , datum_key : DatumKey , }, BytesUnavailable { plaintext : BlobId , ciphertext : Option < BlobId > , }, UnsupportedEncoding { content_encoding : String , }, UnsupportedReference, UnsupportedKey }
 pub enum big_blobs::service::Storage { Memory, Filesystem (PathBuf) }
 pub impl big_blobs::documents::DocumentBlobs::async fn claims (& self , context : & RequestContext , doc_id : & DocId) -> Res < DocumentClaims >
@@ -68,7 +70,7 @@ pub struct big_blobs::service::Blobs  { service: Arc < BlobService >, host: Arc 
 pub struct big_blobs::service::Config  { storage: Storage, sql: Database, authority: Client < AuthorityProtocol >, namespace: Namespace }
 pub struct big_blobs::sync::BlobSyncBackend  {  }
 pub struct big_blobs::workers::BlobWorkers  { projection: Arc < BlobProjection >, parts: SharedPartStore, inventory: DocId }
-pub struct big_blobs::workers::WorkerConfig  { sql: Database, service: Arc < BlobService >, docs: Client < DocsProtocol >, capability: CapId, inventory: DocId, datum_set: Arc < DatumSetStore >, parts: SharedPartStore, repo: big_repo :: SharedBigRepo, policy: watch :: Receiver < u64 > }
+pub struct big_blobs::workers::WorkerConfig  { sql: Database, service: Arc < BlobService >, docs: Client < DocsProtocol >, capability: CapId, inventory: DocId, drawers: Vec < DocId >, datum_set: Arc < DatumSetStore >, parts: SharedPartStore, repo: big_repo :: SharedBigRepo, policy: watch :: Receiver < u64 > }
 pub type big_blobs::encrypt::Res< T > = eyre :: Result < T >
 pub use big_blobs::encrypt::codec :: decrypt_bytes
 pub use big_blobs::encrypt::codec :: encrypt_bytes

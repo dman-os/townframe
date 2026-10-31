@@ -49,6 +49,7 @@ pub impl big_cabinet::index::StopToken::async fn stop (self)
 pub impl big_cabinet::index::datum_ref::DatumRefStore::async fn new (sql : Database) -> Res < Self >
 pub impl big_cabinet::index::datum_ref::DatumRefStore::async fn query (& self , selector : DatumRefQuery) -> Res < Vec < DatumRefEdge > >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn drawer_ancestors (& self , drawer_id : & DocId) -> Res < BTreeSet < DocId > >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn is_self_doc (& self , drawer_id : & DocId) -> Res < bool >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn matching_docs (& self , predicate : & Predicate , docs : & BTreeSet < DocId > ,) -> Res < BTreeSet < DocId > >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn new (sql : Database , schemas : Arc < SchemaRepo >) -> Res < Self >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn open_all (& self , after : u64 ,) -> Result < KeyedFrontierRevisionReader < '_ , DatumRoute , DatumMembership > , KeyedFrontierError >
@@ -56,7 +57,7 @@ pub impl big_cabinet::index::datum_set::DatumSetStore::async fn open_tags (& sel
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn query (& self , selector : DatumSetQuery) -> Res < Vec < DatumRecord > >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn query_docs (& self , docs : & BTreeSet < DocId > , tag : Option < & DatumTag > , key : Option < & DatumKey > ,) -> Res < Vec < DatumRecord > >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn query_predicate (& self , predicate : & Predicate) -> Res < Vec < DatumRecord > >
-pub impl big_cabinet::index::datum_set::DatumSetStore::async fn reachable_docs (& self , drawer_id : & DocId , at_least : DrawerAccess ,) -> Res < BTreeSet < DocId > >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn reachable_docs (& self , drawer_id : & DocId , transitive : bool , at_least : DrawerAccess ,) -> Res < BTreeSet < DocId > >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn run (& self , repo : SharedBigRepo , concurrency : NonZeroUsize) -> Res < () >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn source_revision (& self) -> Res < u64 >
 pub impl big_cabinet::schema::SchemaHandle::fn compiled (& self) -> & CompiledSchema

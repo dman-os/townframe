@@ -322,7 +322,61 @@ async fn existing(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stages_key_before_claim_and_reuses_the_signed_pinned_state() -> Res<()> {
+async fn legacy_hashed_representation_without_via_hint_still_resolves() -> Res<()> {
+    let plain = b"legacy hashed representation";
+    let harness = Harness::new(plain).await?;
+    let _tag = harness.put(plain).await?;
+    let key = MasterKey::random();
+    let encoding = EncodingParams::DEFAULT;
+    let ciphertext = encrypt_with_rs(&key, plain, encoding.record_size, encoding.padding);
+    let plaintext = BlobId::new(*Hash::new(plain).as_bytes());
+    let (jwk_key, cipher_key) =
+        legacy_representation_keys(&harness.docs.doc_id, &blob_key(), &plaintext)?;
+    harness.replace(
+        jwk_key.clone(),
+        accepted(serde_json::to_value(JwkOct::from_master_key(&key))?),
+    );
+    let cipher = serde_json::json!({
+        "representation": {"digest": BlobId::new(*Hash::new(&ciphertext).as_bytes()).digest_str(), "lengthOctets": ciphertext.len()},
+        "contentEncoding": CONTENT_ENCODING_AES128GCM,
+        "encodingParameters": encoding.to_encoding_parameters(),
+        "keyRef": format!("db+facet:///self/{jwk_key}"),
+        "keyRefHeads": [ChangeHash([1; 32]).to_string()],
+    });
+    harness.replace(cipher_key.clone(), accepted(cipher));
+    let report = harness.reconcile().await?;
+    assert!(report.deferred.is_empty(), "{:?}", report.deferred);
+    assert_eq!(report.retained.len(), 1);
+    assert_eq!(report.retained[0].cipher_key, cipher_key);
+    assert_eq!(
+        report.retained[0].ciphertext.to_bytes32(),
+        *Hash::new(&ciphertext).as_bytes()
+    );
+    assert!(harness.docs.state.lock().unwrap().writes.is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_doc_key_resolves_at_cipher_heads_after_jwk_overwrite() -> Res<()> {
+    let plain = b"concurrent encryptor key pin";
+    let harness = Harness::new(plain).await?;
+    let _tag = harness.put(plain).await?;
+    let report = harness.reconcile().await?;
+    assert_eq!(report.retained.len(), 1);
+    let (jwk_key, _) = representation_keys(&blob_key())?;
+    let other = MasterKey::random();
+    harness.docs.state.lock().unwrap().current.datums.insert(
+        jwk_key,
+        accepted(serde_json::to_value(JwkOct::from_master_key(&other))?),
+    );
+    let again = harness.reconcile().await?;
+    assert!(again.deferred.is_empty(), "{:?}", again.deferred);
+    assert_eq!(again.retained, report.retained);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_key_and_cipher_in_one_transaction_and_reuses_the_signed_pinned_state() -> Res<()> {
     let plain = vec![0x63; 4 * 65536 + 39];
     let harness = Harness::new(&plain).await?;
     let _tag = harness.put(&plain).await?;
@@ -330,19 +384,27 @@ async fn stages_key_before_claim_and_reuses_the_signed_pinned_state() -> Res<()>
     assert!(report.deferred.is_empty());
     assert_eq!(report.retained.len(), 1);
     let retained = &report.retained[0];
+    // Naming convention (ADR 026 §3): cipherBlob/<blob slot>, jwk/<same>.
+    assert_eq!(
+        retained.cipher_key,
+        DatumKey::from_text(CipherBlob::ID, "main")?
+    );
     let cipher = harness.cipher(&retained.cipher_key);
     let jwk_key = {
         let state = harness.docs.state.lock().unwrap();
-        assert_eq!(state.writes.len(), 2);
-        assert_eq!(state.writes[0].set.len(), 1);
-        let (jwk_key, jwk_value) = state.writes[0].set.first_key_value().unwrap();
-        let jwk_key = jwk_key.clone();
-        assert_eq!(jwk_key.tag().as_str(), Jwk::ID);
+        assert_eq!(state.writes.len(), 1);
+        assert_eq!(state.writes[0].set.len(), 2);
+        assert!(!state.writes[0].set.contains_key(&blob_key()));
+        let jwk_key = DatumKey::from_text(Jwk::ID, "main")?;
+        let jwk_value = &state.writes[0].set[&jwk_key];
+        assert!(state.writes[0].set.contains_key(&retained.cipher_key));
         assert_eq!(
             cipher.key_ref,
             format!("db+facet:///{}/{jwk_key}", harness.docs.doc_id)
         );
-        assert_eq!(cipher.key_ref_heads, vec![ChangeHash([2; 32]).to_string()]);
+        // Minted in the same transaction as the cipherBlob, so it cannot
+        // name that write's own heads; empty means "the cipherBlob's heads".
+        assert!(cipher.key_ref_heads.is_empty());
         let key = master_key(jwk_value).unwrap();
         let expected = encrypt_bytes(&key, &plain);
         assert_eq!(
@@ -358,14 +420,11 @@ async fn stages_key_before_claim_and_reuses_the_signed_pinned_state() -> Res<()>
         assert!(report.claims.pins.is_empty());
         assert!(report.claims.deferred.is_empty());
         assert_eq!(report.claims.is_claimed(&retained.ciphertext), Some(true));
-        assert_eq!(state.writes[1].set.len(), 2);
-        let updated = &state.writes[1].set[&blob_key()];
+        // The encryptor no longer writes `Blob.urls` (ADR 026 §3).
         assert_eq!(
-            updated["futureMetadata"],
-            blob_value(&plain)["futureMetadata"]
+            state.current.datums[&blob_key()],
+            accepted(blob_value(&plain))
         );
-        assert_eq!(updated["urls"][0], "https://example.invalid/original");
-        assert_eq!(updated["urls"].as_array().unwrap().len(), 2);
         jwk_key
     };
     harness
@@ -379,7 +438,7 @@ async fn stages_key_before_claim_and_reuses_the_signed_pinned_state() -> Res<()>
         .assert_pending_pair(Hash::from(retained.ciphertext.to_bytes32()))
         .await?;
     let state = harness.docs.state.lock().unwrap();
-    assert_eq!(state.writes.len(), 2);
+    assert_eq!(state.writes.len(), 1);
     assert!(
         state
             .reads
@@ -411,7 +470,7 @@ async fn missing_bytes_defer_without_key_or_cipher_writes_and_arrival_completes(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stored_plaintext_survives_gc_during_both_staged_writes() -> Res<()> {
+async fn stored_plaintext_survives_gc_during_the_commit_write() -> Res<()> {
     let plain = vec![0x4b; 2 * 65536 + 31];
     let gc = Arc::new(GcControl::default());
     let harness = Harness::with_options(
@@ -435,7 +494,7 @@ async fn stored_plaintext_survives_gc_during_both_staged_writes() -> Res<()> {
     );
     assert!(report.deferred.is_empty());
     assert_eq!(report.retained.len(), 1);
-    assert_eq!(harness.docs.state.lock().unwrap().writes.len(), 2);
+    assert_eq!(harness.docs.state.lock().unwrap().writes.len(), 1);
     assert_eq!(
         harness
             .store
@@ -495,12 +554,11 @@ async fn plaintext_outboard_without_readable_bytes_defers_before_staging_keys() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn claim_conflict_retains_durable_stage_and_restart_reuses_key_cipher_and_command() -> Res<()>
-{
+async fn commit_conflict_leaves_no_claim_and_restart_mints_a_fresh_pair() -> Res<()> {
     let plain = b"crash after encryption before claim";
     let harness = Harness::new(plain).await?;
     let _tag = harness.put(plain).await?;
-    harness.docs.state.lock().unwrap().conflict_at = Some(2);
+    harness.docs.state.lock().unwrap().conflict_at = Some(1);
     let report = harness.reconcile().await?;
     assert!(report.retained.is_empty());
     assert_eq!(report.claims.is_claimed(&BlobId::new([88; 32])), None);
@@ -517,26 +575,38 @@ async fn claim_conflict_retains_durable_stage_and_restart_reuses_key_cipher_and_
             ..
         }
     ));
+    // The §11 pass ran before the commit point, so its pair is rooted in
+    // the PairRoots ledger with no claim naming it; the boot drain is
+    // what releases such orphans (ADR 026 §10's loser path).
     assert_eq!(harness.roots.unresolved().await?.len(), 1);
+    let orphan = harness.roots.unresolved().await?[0].cipher_hash;
     let restarted = harness.reconciler();
     let report = restarted
         .reconcile(&RequestContext::root(), &harness.docs.doc_id)
         .await?;
     assert!(report.deferred.is_empty());
     assert_eq!(report.retained.len(), 1);
+    // The JWK was never durably staged apart from the cipherBlob, so the
+    // retry mints a fresh key and therefore a different representation.
+    assert_ne!(
+        Hash::from(report.retained[0].ciphertext.to_bytes32()),
+        orphan
+    );
     {
         let state = harness.docs.state.lock().unwrap();
-        assert_eq!(state.writes.len(), 3);
-        assert_eq!(
-            state.writes[0].set.keys().next().unwrap().tag().as_str(),
-            Jwk::ID
-        );
-        assert_eq!(state.writes[1].command, state.writes[2].command);
-        assert!(state.writes[1].set == state.writes[2].set);
+        assert_eq!(state.writes.len(), 2);
+        assert_eq!(state.writes[0].set.len(), 2);
+        assert_eq!(state.writes[1].set.len(), 2);
+        assert_ne!(state.writes[0].command, state.writes[1].command);
     }
-    harness
-        .assert_pending_pair(Hash::from(report.retained[0].ciphertext.to_bytes32()))
-        .await?;
+    // Both the orphan and the claimed pair stay rooted until the drain.
+    let pending = harness.roots.unresolved().await?;
+    assert_eq!(pending.len(), 2);
+    assert!(
+        pending
+            .iter()
+            .any(|row| row.cipher_hash == Hash::from(report.retained[0].ciphertext.to_bytes32()))
+    );
     Ok(())
 }
 
@@ -562,7 +632,7 @@ async fn filesystem_restart_restores_virtual_pairs_and_finishes_interrupted_clai
             roots: PairRoots::boot(sql.clone()).await?,
         };
         if interrupted_claim {
-            harness.docs.state.lock().unwrap().conflict_at = Some(2);
+            harness.docs.state.lock().unwrap().conflict_at = Some(1);
         }
         let tag = harness.put(&plain).await?;
         let first = harness.reconcile().await?;
@@ -637,6 +707,21 @@ async fn filesystem_restart_restores_virtual_pairs_and_finishes_interrupted_clai
         let restored = harness.reconcile().await?;
         assert!(restored.deferred.is_empty());
         assert_eq!(restored.retained.len(), 1);
+        if interrupted_claim {
+            // No durable JWK survived the conflicted commit, so the retry
+            // mints a fresh pair; the orphan stays in PairRoots for the drain.
+            let fresh = Hash::from(restored.retained[0].ciphertext.to_bytes32());
+            assert_ne!(fresh, ciphertext);
+            assert_eq!(
+                harness.store.blobs().get_bytes(fresh).await?.len() as u64,
+                restored.retained[0].length_octets
+            );
+            assert!(has_pair_tags(&harness.store, fresh).await?);
+            assert_eq!(harness.roots.unresolved().await?.len(), 2);
+            assert_eq!(harness.docs.state.lock().unwrap().writes.len(), 2);
+            harness.store.shutdown().await?;
+            continue;
+        }
         assert_eq!(
             restored.retained[0].ciphertext.to_bytes32(),
             *ciphertext.as_bytes()
@@ -646,11 +731,7 @@ async fn filesystem_restart_restores_virtual_pairs_and_finishes_interrupted_clai
         harness.assert_pending_pair(ciphertext).await?;
         {
             let state = harness.docs.state.lock().unwrap();
-            assert_eq!(state.writes.len(), if interrupted_claim { 3 } else { 2 });
-            if interrupted_claim {
-                assert_eq!(state.writes[1].command, state.writes[2].command);
-                assert_eq!(state.writes[1].set, state.writes[2].set);
-            }
+            assert_eq!(state.writes.len(), 1);
         }
         harness.store.shutdown().await?;
     }
@@ -658,7 +739,7 @@ async fn filesystem_restart_restores_virtual_pairs_and_finishes_interrupted_clai
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stage_conflict_does_not_encrypt_or_retry_or_process_more_stale_blobs() -> Res<()> {
+async fn commit_conflict_does_not_retry_or_process_more_stale_blobs() -> Res<()> {
     let harness = Harness::new(b"conflict").await?;
     let _tag = harness.put(b"conflict").await?;
     harness.replace(
@@ -670,7 +751,9 @@ async fn stage_conflict_does_not_encrypt_or_retry_or_process_more_stale_blobs() 
     assert!(report.retained.is_empty());
     assert_eq!(report.deferred.len(), 1);
     assert_eq!(harness.docs.state.lock().unwrap().writes.len(), 1);
-    assert!(harness.roots.unresolved().await?.is_empty());
+    // The §11 pass precedes the commit point, so exactly one orphan pair
+    // is rooted for the PairRoots drain; the second blob is not processed.
+    assert_eq!(harness.roots.unresolved().await?.len(), 1);
     assert_eq!(harness.current().datums.len(), 2);
     Ok(())
 }
@@ -713,8 +796,8 @@ async fn typed_encoding_parameters_preserve_extensions_and_reconstruct_both_padd
         cipher["encodingParameters"]["futureMetadata"] = extension.clone();
         cipher["representation"]["futureMetadata"] = extension.clone();
         cipher["futureMetadata"] = extension;
-        let plaintext = BlobId::new(*Hash::new(plain).as_bytes());
-        let (_, cipher_key) = representation_keys(&harness.docs.doc_id, &blob_key(), &plaintext)?;
+        let _plaintext_id = BlobId::new(*Hash::new(plain).as_bytes());
+        let (_, cipher_key) = representation_keys(&blob_key())?;
         harness
             .docs
             .state
@@ -761,15 +844,12 @@ async fn typed_encoding_parameters_preserve_extensions_and_reconstruct_both_padd
             .await?;
         {
             let state = harness.docs.state.lock().unwrap();
-            assert_eq!(state.writes.len(), 1);
-            assert_eq!(state.writes[0].set.len(), 1);
-            let updated = &state.writes[0].set[&blob_key()];
-            assert_eq!(
-                updated["futureMetadata"],
-                blob_value(plain)["futureMetadata"]
-            );
-            assert_eq!(updated["urls"][0], "https://example.invalid/original");
-            assert_eq!(updated["urls"].as_array().unwrap().len(), 2);
+            // Reuse writes nothing: no `Blob.urls` update (ADR 026 §3).
+            assert!(state.writes.is_empty());
+            assert!(matches!(
+                &state.current.datums[&blob_key()],
+                DatumRead::Accepted { value, .. } if value == &blob_value(plain)
+            ));
             assert!(matches!(
                 &state.current.datums[&cipher_key],
                 DatumRead::Accepted { value, .. } if value == &cipher
@@ -778,7 +858,7 @@ async fn typed_encoding_parameters_preserve_extensions_and_reconstruct_both_padd
         let again = harness.reconcile().await?;
         assert!(again.deferred.is_empty());
         assert_eq!(again.retained, report.retained);
-        assert_eq!(harness.docs.state.lock().unwrap().writes.len(), 1);
+        assert!(harness.docs.state.lock().unwrap().writes.is_empty());
         assert_eq!(serde_json::to_value(harness.cipher(&cipher_key))?, cipher);
     }
     Ok(())
@@ -964,7 +1044,7 @@ async fn unavailable_external_key_does_not_block_other_blobs_in_the_owner_docume
     assert_eq!(report.retained.len(), 1);
     assert_eq!(report.retained[0].blob_key, independent);
     let state = harness.docs.state.lock().unwrap();
-    assert_eq!(state.writes.len(), 2);
+    assert_eq!(state.writes.len(), 1);
     assert!(matches!(
         &state.current.datums[&cipher_key],
         DatumRead::Accepted { value, .. } if value == &cipher
@@ -1026,11 +1106,7 @@ async fn unaccepted_key_and_cipher_slots_never_supply_values_or_get_overwritten(
     ] {
         let harness = Harness::new(plain).await?;
         let _tag = harness.put(plain).await?;
-        let (jwk_key, cipher_key) = representation_keys(
-            &harness.docs.doc_id,
-            &blob_key(),
-            &BlobId::new(*Hash::new(plain).as_bytes()),
-        )?;
+        let (jwk_key, cipher_key) = representation_keys(&blob_key())?;
         for key in [jwk_key, cipher_key] {
             let original = harness.current();
             harness.replace(key.clone(), datum.clone());
@@ -1253,7 +1329,7 @@ async fn release_candidates_require_last_representation_and_pin_claim_to_disappe
     assert_eq!(claims.is_claimed(&retained.ciphertext), Some(false));
     assert_eq!(claims.release_candidates(&previous), previous);
     assert!(has_pair_tags(&harness.store, Hash::from(retained.ciphertext.to_bytes32())).await?);
-    assert_eq!(harness.docs.state.lock().unwrap().writes.len(), 2);
+    assert_eq!(harness.docs.state.lock().unwrap().writes.len(), 1);
     Ok(())
 }
 

@@ -669,6 +669,151 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
 }
 
 #[tokio::test]
+async fn non_transitive_poll_includes_self_doc_children_but_not_child_drawer_docs() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let bob = node.actor("bob").await;
+    let parent = node.collection(&alice, "poll-parent").await;
+    let child = node.collection(&alice, "poll-child").await;
+    let home = node.collection(&alice, "poll-home").await;
+    let direct = node.create_doc(&alice, &parent, "direct").await.unwrap();
+    let in_child = node.create_doc(&alice, &child, "in-child").await.unwrap();
+    let self_doc = node.create_doc(&alice, &home, "self-doc").await.unwrap();
+    for doc in [&direct, &in_child, &self_doc] {
+        wait_for_datum_set(&node, &alice, doc).await;
+    }
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            CreateDrawer {
+                capability: node.drawer_capability(&alice, &[&home]).await.unwrap(),
+                command: command("declare self-doc"),
+                layout: CreateLayout::SelfDoc {
+                    doc_id: self_doc.clone(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    node.grant(&alice, &parent, &bob, Access::Read).await;
+
+    // The ADR 026 §9 worker shape, with the harness note tag standing for its datum tags.
+    let note_tag = DatumTag::new(NOTE).unwrap();
+    let mut poll = crate::test_poll::Poller::new(
+        node.docs(),
+        PollDatums {
+            capability: node
+                .mint_doc(
+                    &bob,
+                    DocScope {
+                        drawers: [(parent.clone(), Access::Read)].into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            predicate: Predicate::And {
+                clauses: vec![
+                    Predicate::InDrawer {
+                        drawer_id: parent.clone(),
+                        transitive: false,
+                        at_least: Access::Read,
+                    },
+                    Predicate::HasTag {
+                        tag: note_tag.clone(),
+                    },
+                ],
+            },
+            datums: DatumSelection::Of {
+                tags: [note_tag].into(),
+                keys: BTreeSet::new(),
+            },
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    );
+    let mut entered = BTreeSet::new();
+    loop {
+        let page = poll.page(0).await.unwrap();
+        for event in page.events {
+            if let DatumEvent::Enter { doc_id, .. } = event {
+                entered.insert(doc_id);
+            }
+        }
+        if page.caught_up {
+            break;
+        }
+    }
+    assert_eq!(entered, BTreeSet::from([direct]));
+
+    // Linking a single-group child does not move its docs into a non-transitive poll:
+    // neither an enter on link nor a spurious leave on unlink.
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            AddChild {
+                capability: node
+                    .drawer_capability(&alice, &[&parent, &child])
+                    .await
+                    .unwrap(),
+                command: command("link child"),
+                parent_id: parent.clone(),
+                child_id: child.clone(),
+                access: Access::Read,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(poll.next().await.unwrap().is_none());
+    // Linking a self-doc child moves exactly its doc in, and unlinking moves it out.
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            AddChild {
+                capability: node
+                    .drawer_capability(&alice, &[&parent, &self_doc])
+                    .await
+                    .unwrap(),
+                command: command("link self-doc"),
+                parent_id: parent.clone(),
+                child_id: self_doc.clone(),
+                access: Access::Read,
+            },
+        )
+        .await
+        .unwrap();
+    next_enter(&mut poll, &self_doc).await;
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            RemoveChild {
+                capability: node.drawer_capability(&alice, &[&parent]).await.unwrap(),
+                command: command("unlink child"),
+                parent_id: parent.clone(),
+                child_id: child.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(poll.next().await.unwrap().is_none());
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            RemoveChild {
+                capability: node.drawer_capability(&alice, &[&parent]).await.unwrap(),
+                command: command("unlink self-doc"),
+                parent_id: parent.clone(),
+                child_id: self_doc.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    next_leave(&mut poll, &self_doc).await;
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_changes() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
