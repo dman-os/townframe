@@ -78,13 +78,11 @@ pub enum big_cabinet_core::authority::CapabilityStatus { Live, Retracted }
 pub enum big_cabinet_core::dmeta::ClaimOperation { Set, Remove }
 pub enum big_cabinet_core::dmeta::DmetaError { # [error ("an actor or datum alias must be an RFC 9562 UUIDv7")] InvalidUuidVersion, # [error ("a datum UUID alias cannot be rebound to another key")] ReboundAlias, # [error ("signed message evidence is unavailable")] MissingMessage, # [error ("signature and claim contexts disagree")] WrongContext, # [error ("claim operation and value CID disagree")] InvalidClaim, # [error ("malformed datum claim: {0}")] MalformedClaim (& 'static str), # [error ("invalid Ed25519 public key")] InvalidPublicKey, # [error ("invalid Ed25519 signature")] InvalidSignature }
 pub enum big_cabinet_core::doc::At { Current, Heads (Vec < ChangeHash >) }
-pub enum big_cabinet_core::doc::DatumObserved { Entry { revision : u64 , doc_id : DocId , datum_key : DatumKey , datum : ObservedDatum , }, ReplayComplete { through : u64 , } }
+pub enum big_cabinet_core::doc::DatumEvent { Enter { revision : u64 , doc_id : DocId , datums : BTreeMap < DatumKey , ObservedDatum > , }, Datum { revision : u64 , doc_id : DocId , datum_key : DatumKey , datum : ObservedDatum , }, Leave { revision : u64 , doc_id : DocId } }
 pub enum big_cabinet_core::doc::DatumRead { Accepted { value : Json , version : DatumVersion , }, Absent { version : DatumVersion , }, Pending { reason : String , version : DatumVersion , value : Option < Json > , }, Rejected { reason : String , }, Undecodable { reason : String , version : DatumVersion , } }
 pub enum big_cabinet_core::doc::DatumRefSelector { Origin { doc_id : DocId , # [serde (default , skip_serializing_if = "Option::is_none")] datum_key : Option < DatumKey > , }, Target { doc_id : DocId , # [serde (default , skip_serializing_if = "Option::is_none")] datum_key : Option < DatumKey > , } }
-pub enum big_cabinet_core::doc::DatumSelector { All, Doc { doc_id : DocId }, Tag { tag : DatumTag }, Route { doc_id : DocId , datum_key : DatumKey }, Key { datum_key : DatumKey } }
 pub enum big_cabinet_core::doc::DocsError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("document access policy failed: {0}")] Access (String), # [error ("document repository failed: {0}")] Repository (String), # [error ("document is not locally available")] DocNotFound, # [error ("requested heads are unknown: {heads:?}")] UnknownHeads { heads : Vec < ChangeHash > }, # [error ("a command id is 1..=256 bytes")] InvalidCommand, # [error ("command {command} is still in flight; retry once it resolves")] CommandInFlight { command : CommandId }, # [error ("command {command} was already used for a different request")] CommandReused { command : CommandId }, # [error ("no schema is registered for datum tag {datum_tag}")] UnknownSchema { datum_tag : String }, # [error ("datum {datum_key} is managed by the repository and cannot be written directly")] SystemDatum { datum_key : DatumKey }, # [error ("datum {datum_key} is both set and removed")] SetAndRemoved { datum_key : DatumKey }, # [error ("datum {datum_key} value is invalid: {reason}")] InvalidValue { datum_key : DatumKey , reason : String }, # [error ("the write condition no longer holds at {heads:?}")] Conflict { heads : Vec < ChangeHash > , datums : BTreeMap < DatumKey , DatumVersion > , }, # [error ("datum {datum_key} at the write's base is not accepted: {verdict:?}")] BaseNotAccepted { datum_key : DatumKey , verdict : Unaccepted , }, # [error ("inspection evidence is pending: {reason}")] Pending { reason : String }, # [error ("inspection resource limit: {reason}")] ResourceRefused { reason : String }, # [error ("unsupported inspection evidence: {reason}")] Unsupported { reason : String }, # [error ("malformed inspection evidence: {reason}")] MalformedEvidence { reason : String }, # [error ("the documents share no history, so one cannot be merged into the other")] UnrelatedHistory }
-pub enum big_cabinet_core::doc::ObserveScope { Doc { doc_id : DocId , }, Tag { tag : DatumTag , }, Drawer { drawer_id : DocId , # [serde (default , skip_serializing_if = "Option::is_none")] tag : Option < DatumTag > , } }
-pub enum big_cabinet_core::doc::ObservedDatum { Present { doc_heads : Vec < ChangeHash > , version : DatumVersion , }, Removed { doc_heads : Option < Vec < ChangeHash > > , version : DatumVersion , }, AccessLost }
+pub enum big_cabinet_core::doc::ObservedDatum { Present { doc_heads : Vec < ChangeHash > , version : DatumVersion , }, Removed { doc_heads : Option < Vec < ChangeHash > > , version : DatumVersion , } }
 pub enum big_cabinet_core::doc::Unaccepted { Pending { reason : String }, Rejected { reason : String } }
 pub enum big_cabinet_core::doc::WriteMode { IfDocUnchanged { heads : Vec < ChangeHash > , }, IfDatumsUnchanged { datums : BTreeMap < DatumKey , DatumVersion > , }, AtHeads { heads : Vec < ChangeHash > , }, AtCurrent }
 pub enum big_cabinet_core::drawer::DrawerAccess { Relay, Read, Write, Admin }
@@ -92,7 +90,7 @@ pub enum big_cabinet_core::drawer::DrawerLayout { SelfDoc (SelfDocLayout), Singl
 pub enum big_cabinet_core::drawer::EntryAccess { # [serde (rename = "Relay")] Relay, # [serde (rename = "Read")] Read, # [serde (rename = "Write")] Write, # [serde (rename = "Admin")] Admin, # [datum (other)] Unknown (String) }
 pub enum big_cabinet_core::drawer::LayoutKind { SelfDoc, SingleGroup }
 pub enum big_cabinet_core::drawer::protocol::CreateLayout { SelfDoc { doc_id : DocId }, SingleGroup }
-pub enum big_cabinet_core::drawer::protocol::DrawersError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("document repository failed: {0}")] Docs (DocsError), # [error ("document repository transport failed: {0}")] DocsUnavailable (String), # [error ("keyhive failed: {0}")] Keyhive (String), # [error ("drawer state failed: {0}")] Storage (String), # [error ("{0} is not a drawer this node knows")] UnknownDrawer (DrawerId), # [error ("{0} is a self-doc drawer: it holds only itself and cannot take entries or members")] SelfDoc (DrawerId), # [error ("{0} is already a drawer")] AlreadyDrawer (DocId), # [error ("a drawer cannot be its own child")] SelfChild, # [error ("{0} is not an entry of this drawer")] NotAnEntry (DocId), # [error ("the drawer's descriptor states a layout this build does not know: {0}")] ForeignLayout (String), # [error ("command {command} is still in flight; retry once it resolves")] CommandInFlight { command : CommandId }, # [error ("command {command} was already used for a different request")] CommandReused { command : CommandId }, # [error ("the drawer's roster could not be read: {0}")] RosterUnreadable (String) }
+pub enum big_cabinet_core::drawer::protocol::DrawersError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("document repository failed: {0}")] Docs (DocsError), # [error ("document repository transport failed: {0}")] DocsUnavailable (String), # [error ("keyhive failed: {0}")] Keyhive (String), # [error ("drawer state failed: {0}")] Storage (String), # [error ("{0} is not a drawer this node knows")] UnknownDrawer (DrawerId), # [error ("{0} is a self-doc drawer: it holds only itself and cannot take entries or members")] SelfDoc (DrawerId), # [error ("{0} is already a drawer")] AlreadyDrawer (DocId), # [error ("a drawer cannot be its own child")] SelfChild, # [error ("{0} is not an entry of this drawer")] NotAnEntry (DocId), # [error ("the drawer's descriptor states a layout this build does not know: {0}")] ForeignLayout (String), # [error ("command {command} is still in flight; retry once it resolves")] CommandInFlight { command : CommandId }, # [error ("command {command} was already used for a different request")] CommandReused { command : CommandId }, # [error ("the drawer's roster could not be read: {0}")] RosterUnreadable (String), # [error ("{0} is not a valid meta-doc kind")] InvalidMetaDocKind (String) }
 pub enum big_cabinet_core::drawer::protocol::Principal { Peer { peer_id : GroupKey }, Group { group_id : GroupKey } }
 pub enum big_cabinet_core::query::Anchor { Drawer { drawer_id : DocId , at_least : DrawerAccess , }, Doc { doc_id : DocId , } }
 pub enum big_cabinet_core::query::DatumSelection { All, # [doc = " The union of these tags and these keys."] Of { # [serde (default)] tags : BTreeSet < DatumTag > , # [serde (default)] keys : BTreeSet < DatumKey > , } }
@@ -137,6 +135,7 @@ pub impl big_cabinet_core::drawer::DrawerChildEntry::fn new (access : DrawerAcce
 pub impl big_cabinet_core::drawer::DrawerDocEntry::fn new (access : DrawerAccess) -> Self
 pub impl big_cabinet_core::drawer::DrawerLayout::fn known (& self) -> Option < LayoutKind >
 pub impl big_cabinet_core::drawer::DrawerLayout::fn tag (& self) -> Option < & str >
+pub impl big_cabinet_core::drawer::DrawerMetaDoc::fn new (doc_id : DocId) -> Self
 pub impl big_cabinet_core::drawer::DrawerRoster::fn inline () -> Self
 pub impl big_cabinet_core::drawer::EntryAccess::fn as_str (& self) -> & str
 pub impl big_cabinet_core::drawer::EntryAccess::fn known (& self) -> Option < DrawerAccess >
@@ -213,17 +212,16 @@ pub struct big_cabinet_core::doc::BranchDoc  { capability: CapId, command: Comma
 pub struct big_cabinet_core::doc::CommandId  {  }
 pub struct big_cabinet_core::doc::CreateDoc  { capability: CapId, command: CommandId, placement: String, datums: BTreeMap < DatumKey , Json > }
 pub struct big_cabinet_core::doc::DatumListing  { heads: Vec < ChangeHash >, datums: BTreeMap < DatumKey , DatumVersion > }
+pub struct big_cabinet_core::doc::DatumPage  { events: Vec < DatumEvent >, through: u64, caught_up: bool }
 pub struct big_cabinet_core::doc::DatumVersion  { heads: Vec < ChangeHash >, clock: u64 }
 pub struct big_cabinet_core::doc::DatumsRead  { heads: Vec < ChangeHash >, datums: BTreeMap < DatumKey , DatumRead > }
 pub struct big_cabinet_core::doc::DocScope  { read: BTreeSet < DocId >, write: BTreeSet < DocId >, create: BTreeSet < String >, drawers: BTreeMap < DocId , DrawerAccess > }
 pub struct big_cabinet_core::doc::ListDatums  { capability: CapId, doc_id: DocId, at: At }
 pub struct big_cabinet_core::doc::MergeDoc  { capability: CapId, command: Option < CommandId >, source_id: DocId, at: At, target_id: DocId }
 pub struct big_cabinet_core::doc::MintDocCapability  { authorization: Authorization, scope: DocScope, rights: Rights }
-pub struct big_cabinet_core::doc::ObserveDatums  { capability: CapId, scope: ObserveScope, after: u64 }
-pub struct big_cabinet_core::doc::QueriedDatum  { doc_id: DocId, datum_key: DatumKey, doc_heads: Vec < ChangeHash >, version: DatumVersion }
+pub struct big_cabinet_core::doc::PollDatums  { capability: CapId, predicate: Predicate, datums: DatumSelection, after: u64, limit: u32, hold_ms: u32 }
 pub struct big_cabinet_core::doc::QueriedDatumRef  { origin_doc_id: DocId, origin_datum_key: DatumKey, path: String, target_doc_id: DocId, target_datum_key: DatumKey, ref_heads: Vec < ChangeHash > }
 pub struct big_cabinet_core::doc::QueryDatumRefs  { capability: CapId, drawer_id: Option < DocId >, selector: DatumRefSelector }
-pub struct big_cabinet_core::doc::QueryDatums  { capability: CapId, drawer_id: Option < DocId >, selector: DatumSelector }
 pub struct big_cabinet_core::doc::ReadDatums  { capability: CapId, doc_id: DocId, at: At, datums: Option < BTreeSet < DatumKey > >, optimistic: bool }
 pub struct big_cabinet_core::doc::WriteDatums  { capability: CapId, command: Option < CommandId >, doc_id: DocId, mode: WriteMode, set: BTreeMap < DatumKey , Json >, remove: BTreeSet < DatumKey > }
 pub struct big_cabinet_core::doc::WriteReceipt  { doc_id: DocId, heads: Vec < ChangeHash > }
@@ -231,6 +229,7 @@ pub struct big_cabinet_core::drawer::Drawer  { layout: DrawerLayout, extra: crat
 pub struct big_cabinet_core::drawer::DrawerChildEntry  { access: EntryAccess, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::drawer::DrawerDocEntry  { access: EntryAccess, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::drawer::DrawerGroups  { meta_group: GroupKey, docs_group: GroupKey }
+pub struct big_cabinet_core::drawer::DrawerMetaDoc  { doc_id: DocId, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::drawer::DrawerRoster  { empty: Option < bool >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::drawer::GroupKey  { 0: [u8 ; 32] }
 pub struct big_cabinet_core::drawer::InvalidGroupKey  { 0: String }
@@ -242,10 +241,11 @@ pub struct big_cabinet_core::drawer::UnknownLayoutTag  { 0: String }
 pub struct big_cabinet_core::drawer::protocol::AddChild  { capability: CapId, command: CommandId, parent_id: DrawerId, child_id: DrawerId, access: Access }
 pub struct big_cabinet_core::drawer::protocol::AddDoc  { capability: CapId, command: CommandId, drawer_id: DrawerId, doc_id: DocId, access: Access }
 pub struct big_cabinet_core::drawer::protocol::CreateDrawer  { capability: CapId, command: CommandId, layout: CreateLayout }
+pub struct big_cabinet_core::drawer::protocol::CreateMetaDoc  { capability: CapId, command: CommandId, drawer_id: DrawerId, kind: String }
 pub struct big_cabinet_core::drawer::protocol::DrawerCreated  { drawer_id: DrawerId, heads: Vec < ChangeHash > }
 pub struct big_cabinet_core::drawer::protocol::DrawerRecord  { drawer_id: DrawerId, descriptor: Drawer }
 pub struct big_cabinet_core::drawer::protocol::DrawerScope  { drawers: BTreeMap < DrawerId , Access >, create: bool }
-pub struct big_cabinet_core::drawer::protocol::DrawerView  { drawer_id: DrawerId, layout: DrawerLayout, descriptor: Drawer, access: Access, docs: BTreeMap < DocId , Access >, children: BTreeMap < DrawerId , Access > }
+pub struct big_cabinet_core::drawer::protocol::DrawerView  { drawer_id: DrawerId, layout: DrawerLayout, descriptor: Drawer, access: Access, docs: BTreeMap < DocId , Access >, children: BTreeMap < DrawerId , Access >, meta_docs: BTreeMap < String , DocId > }
 pub struct big_cabinet_core::drawer::protocol::ForgetDrawer  { capability: CapId, drawer_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::GetDrawer  { capability: CapId, drawer_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::GrantDrawer  { capability: CapId, drawer_id: DrawerId, subject_id: Uuid7, access: Access }
@@ -257,6 +257,7 @@ pub struct big_cabinet_core::drawer::protocol::ListKnownDrawers  { capability: C
 pub struct big_cabinet_core::drawer::protocol::ListedDoc  { doc_id: DocId, access: Access, via: Option < DrawerId > }
 pub struct big_cabinet_core::drawer::protocol::ListedDrawer  { drawer_id: DrawerId, layout: DrawerLayout, descriptor: Drawer, access: Access }
 pub struct big_cabinet_core::drawer::protocol::LocalDrawers  { present_id: DrawerId, originated_id: DrawerId, registry_id: DrawerId }
+pub struct big_cabinet_core::drawer::protocol::MetaDocCreated  { drawer_id: DrawerId, kind: String, doc_id: DocId, heads: Vec < ChangeHash > }
 pub struct big_cabinet_core::drawer::protocol::MintDrawerCapability  { authorization: Authorization, scope: DrawerScope, rights: Rights }
 pub struct big_cabinet_core::drawer::protocol::RememberDrawer  { capability: CapId, drawer_id: DrawerId, mirror: bool }
 pub struct big_cabinet_core::drawer::protocol::RemoveChild  { capability: CapId, command: CommandId, parent_id: DrawerId, child_id: DrawerId }
