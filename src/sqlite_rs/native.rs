@@ -400,8 +400,7 @@ impl ConnSlot {
                     if attempt < 99
                         && matches!(
                             err.code,
-                            rusqlite::ErrorCode::DatabaseBusy
-                                | rusqlite::ErrorCode::DatabaseLocked
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
                         ) =>
                 {
                     std::thread::sleep(std::time::Duration::from_millis(10));

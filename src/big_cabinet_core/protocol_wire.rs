@@ -20,9 +20,9 @@ use crate::doc::ObserveDocAvailability;
 use crate::doc::PollDatums;
 use crate::doc::ReadDatums;
 use crate::drawer::protocol::DrawersProtocol;
+use crate::drawer::protocol::GetDrawer;
 use crate::query::DatumSelection;
 use crate::query::Predicate;
-use crate::drawer::protocol::GetDrawer;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -96,11 +96,7 @@ fn core_protocol_metadata_wire() {
             .contains(&MintCapability::XRPC)
     );
     assert!(DocsProtocol::OPERATIONS.unary.contains(&ReadDatums::XRPC));
-    assert!(
-        DocsProtocol::OPERATIONS
-            .unary
-            .contains(&PollDatums::XRPC)
-    );
+    assert!(DocsProtocol::OPERATIONS.unary.contains(&PollDatums::XRPC));
     assert!(DrawersProtocol::OPERATIONS.unary.contains(&GetDrawer::XRPC));
     assert_eq!(PollDatums::XRPC.output_schema, "DatumPage");
     assert_eq!(PollDatums::XRPC.nsid, "org.example.daybook.docs.pollDatums");
@@ -434,9 +430,7 @@ fn core_protocol_envelopes_wire() {
                 ],
             },
             datums: DatumSelection::Of {
-                tags: std::collections::BTreeSet::from([
-                    crate::DatumTag::new("entry").unwrap(),
-                ]),
+                tags: std::collections::BTreeSet::from([crate::DatumTag::new("entry").unwrap()]),
                 keys: std::collections::BTreeSet::new(),
             },
             after: 12,

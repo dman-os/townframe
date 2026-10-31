@@ -365,7 +365,10 @@ pub enum DatumEvent {
         datum_key: DatumKey,
         datum: ObservedDatum,
     },
-    Leave { revision: u64, doc_id: DocId },
+    Leave {
+        revision: u64,
+        doc_id: DocId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
