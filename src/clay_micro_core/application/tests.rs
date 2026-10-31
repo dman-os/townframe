@@ -1708,14 +1708,31 @@ async fn three_overlapping_configures_settle_exactly_the_latest_revision() {
 
 // ── a micro is its own broker (ADR 014 §Composition and lifecycle) ──────
 
-/// The consumer reads the static registry during its own activation, accepts the contract it
-/// provides, and the contributor is pulled live by that acceptance. The composition root names
-/// only the eager root; it never names the contributor.
-#[tokio::test]
-async fn a_consumer_micro_activates_declared_contributors_without_the_root_naming_them() {
-    let mut application = ApplicationRuntime::new();
+fn bound<const N: usize>(provider: &str, bindings: [(&str, &str); N]) -> ConfiguredMicro {
+    ConfiguredMicro {
+        provider: MicroId::new(provider),
+        enablement: Enablement::Enabled,
+        bindings: bindings
+            .iter()
+            .map(|(contract, supplier)| ((*contract).to_owned(), (*supplier).to_owned()))
+            .collect(),
+    }
+}
+
+/// `shelf` provides `Facility`, reads its declarations, hands its broker out (as a UI hook
+/// would) and accepts the contract; `button` requires `Facility` from `shelf` and declares a
+/// contribution to it. `fail_shelf` makes the shelf activation fail after accepting.
+fn broker_fixture(
+    application: &mut ApplicationRuntime,
+    fail_shelf: bool,
+) -> (
+    Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    Arc<Mutex<Option<crate::micros::CompositionBroker>>>,
+) {
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let escaped = Arc::new(Mutex::new(None));
     let declaration_log = seen.clone();
+    let escape = escaped.clone();
     application
         .providers
         .register(MicroFactory::new(
@@ -1729,12 +1746,16 @@ async fn a_consumer_micro_activates_declared_contributors_without_the_root_namin
                 }],
             },
             move |activation| {
-                let declarations = activation.broker().declarations(Facility::ID);
+                let declarations = activation.broker().declarations(Facility::ID)?;
                 *declaration_log.lock().unwrap() = declarations
                     .iter()
                     .map(|declaration| (declaration.instance.clone(), declaration.payload.clone()))
                     .collect();
-                activation.broker().accept_all([Facility::ID.to_owned()]);
+                activation.broker().accept_all([Facility::ID.to_owned()])?;
+                *escape.lock().unwrap() = Some(activation.broker().clone());
+                if fail_shelf {
+                    return Err(AccessError::Denied);
+                }
                 activation.publish(Facility(activation.instance()));
                 Ok(())
             },
@@ -1747,7 +1768,10 @@ async fn a_consumer_micro_activates_declared_contributors_without_the_root_namin
                 MicroDescriptor {
                     id: MicroId::new("button"),
                     version: 1,
-                    requirements: vec![],
+                    requirements: vec![MicroProvision {
+                        id: Facility::ID.into(),
+                        version: 1,
+                    }],
                     provisions: vec![],
                 },
                 |_| Ok(()),
@@ -1758,14 +1782,25 @@ async fn a_consumer_micro_activates_declared_contributors_without_the_root_namin
             }]),
         )
         .unwrap();
-    application.set_eager_roots(BTreeSet::from(["shelf".into()]));
-    let states = application
-        .configure(&BTreeMap::from([
-            ("shelf".into(), configured("shelf")),
-            ("button".into(), configured("button")),
-        ]))
-        .await
-        .unwrap();
+    application.set_eager_roots(EagerRoots::Named(BTreeSet::from(["shelf".into()])));
+    (seen, escaped)
+}
+
+fn broker_desired() -> BTreeMap<String, ConfiguredMicro> {
+    BTreeMap::from([
+        ("shelf".into(), configured("shelf")),
+        ("button".into(), bound("button", [(Facility::ID, "shelf")])),
+    ])
+}
+
+/// The consumer reads the static registry during its own activation, accepts the contract it
+/// provides, and the contributor is pulled live by that acceptance. The composition root names
+/// only the eager root; it never names the contributor.
+#[tokio::test]
+async fn a_consumer_micro_activates_declared_contributors_without_the_root_naming_them() {
+    let mut application = ApplicationRuntime::new();
+    let (seen, _) = broker_fixture(&mut application, false);
+    let states = application.configure(&broker_desired()).await.unwrap();
     assert_eq!(states["shelf"], InstanceState::Active);
     assert_eq!(states["button"], InstanceState::Active);
     // Readable without an instance, which is what makes a toolbar possible at all.
@@ -1774,5 +1809,57 @@ async fn a_consumer_micro_activates_declared_contributors_without_the_root_namin
         vec![("button".to_owned(), serde_json::json!({"label": "Open"}))]
     );
     assert!(application.policy().accept_all.contains_key("shelf"));
+    application.host().close();
+}
+
+/// A broker handle that outlives its incarnation (a retained UI hook, a spawned task) is revoked:
+/// it can neither read on behalf of the successor nor keep contributors alive after disable.
+#[tokio::test]
+async fn a_broker_handle_is_revoked_with_its_incarnation() {
+    let mut application = ApplicationRuntime::new();
+    let (_, escaped) = broker_fixture(&mut application, false);
+    let mut desired = broker_desired();
+    application.configure(&desired).await.unwrap();
+    let stale = escaped.lock().unwrap().clone().unwrap();
+    assert_eq!(stale.accepted(), Ok(BTreeMap::new()));
+    assert_eq!(
+        stale.declarations(Facility::ID).map(|rows| rows.len()),
+        Ok(1)
+    );
+
+    desired.get_mut("shelf").unwrap().enablement = Enablement::Disabled;
+    let states = application.configure(&desired).await.unwrap();
+    assert_eq!(states["shelf"], InstanceState::Disabled);
+    assert_eq!(states["button"], InstanceState::Idle);
+    assert_eq!(
+        stale.accept_all([Facility::ID.to_owned()]),
+        Err(AccessError::Revoked)
+    );
+    assert_eq!(stale.accept(BTreeMap::new()), Err(AccessError::Revoked));
+    assert_eq!(stale.declarations(Facility::ID), Err(AccessError::Revoked));
+    assert_eq!(stale.accepted(), Err(AccessError::Revoked));
+    assert!(application.policy().accept_all.is_empty());
+
+    // The successor incarnation starts clean and accepts for itself; the stale handle stays dead.
+    desired.get_mut("shelf").unwrap().enablement = Enablement::Enabled;
+    let states = application.configure(&desired).await.unwrap();
+    assert_eq!(states["button"], InstanceState::Active);
+    assert_eq!(stale.accepted(), Err(AccessError::Revoked));
+    application.host().close();
+}
+
+/// Acceptance written during an activation that then fails is rolled back with everything else
+/// the activation staged: the failed consumer keeps nothing alive.
+#[tokio::test]
+async fn a_failed_activation_rolls_back_its_acceptance() {
+    let mut application = ApplicationRuntime::new();
+    broker_fixture(&mut application, true);
+    let states = application.configure(&broker_desired()).await.unwrap();
+    assert!(
+        matches!(states["shelf"], InstanceState::Failed(_)),
+        "{states:?}"
+    );
+    assert_eq!(states["button"], InstanceState::Idle);
+    assert!(application.policy().accept_all.is_empty());
     application.host().close();
 }

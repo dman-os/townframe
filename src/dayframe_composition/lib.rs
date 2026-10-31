@@ -10,6 +10,7 @@ use clay_micro_core::micros::composition::ConfigurationError;
 use clay_micro_core::micros::composition::ConfigurationSnapshot;
 use clay_micro_core::micros::composition::ConfigurationSource;
 use clay_micro_core::micros::composition::ConfiguredMicro;
+use clay_micro_core::micros::composition::EagerRoots;
 use clay_micro_core::micros::composition::Enablement;
 use clay_micro_core::micros::composition::InstanceState;
 use clay_micro_core::micros::composition::MockConfiguration;
@@ -102,10 +103,10 @@ impl CompositionRuntime {
         // `settings` is the shell's first panel, and `sample` mounts the sample panel. `counter`
         // is installed but idle until the settings micro activates and accepts its declared
         // `settings.sections` contribution — the composition root never names it.
-        application.set_eager_roots(std::collections::BTreeSet::from([
+        application.set_eager_roots(EagerRoots::Named(std::collections::BTreeSet::from([
             "settings".into(),
             "sample".into(),
-        ]));
+        ])));
 
         Self {
             application,
