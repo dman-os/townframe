@@ -3,6 +3,7 @@ role = "runtime"
 dependency_reason = "initial guardrail baseline"
 allowed_dependencies = [
     "am_utils_rs",
+    "big_blobs",
     "big_repo",
     "big_sync",
     "big_sync_core",
@@ -18,15 +19,6 @@ allowed_dependencies = [
     "wflow",
 ]
 allow_external_api_types = false
-
-[[exemptions]]
-code = "ERROR_ALLOW_ATTRIBUTE"
-path = "src/daybook_core/blobs/encrypt/download.rs"
-symbol = "module::consume_decrypted"
-ceiling = 1
-class = "LEGACY_DEBT"
-reason = 'initial guardrail baseline: use a narrow #[expect(..., reason = "...")] so obsolete suppressions fail'
-reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
 code = "ERROR_ALLOW_ATTRIBUTE"
@@ -89,15 +81,6 @@ symbol = "module::iroh_sync_offline_divergent_branch_merge_converges"
 ceiling = 2
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_FN_LENGTH"
-path = "src/daybook_core/blobs/encrypt/download.rs"
-symbol = "module::download_encrypted"
-ceiling = 186
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
@@ -374,7 +357,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_INLINE_TEST_MOD"
 path = "src/daybook_core/blobs/pin_worker.rs"
 symbol = "module::tests"
-ceiling = 1149
+ceiling = 1147
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
 reference = "docs/scratch/agent-guardrails-open-items.md"
@@ -419,24 +402,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_LINT_REASON"
 path = "src/daybook_core/authority.rs"
 symbol = "module::RepoAuthority::blob_inventories_parent"
-ceiling = 1
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_LINT_REASON"
-path = "src/daybook_core/blobs/encrypt/serve.rs"
-symbol = "module::CipherBlobProvider::install_with_provenance"
-ceiling = 1
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_LINT_REASON"
-path = "src/daybook_core/blobs/encrypt/serve.rs"
-symbol = "module::CipherBlobProvider::register_pair_with_provenance"
 ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: give the lint expectation a nonempty reason"

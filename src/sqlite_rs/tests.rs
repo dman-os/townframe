@@ -41,6 +41,32 @@ fn a_connection_that_loses_the_race_to_enter_wal_waits_for_the_winner() {
     assert_eq!(mode, "wal");
 }
 
+#[test]
+fn concurrent_openers_converge_on_wal_without_failing_busy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("openers.sqlite");
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    ConnSlot::open(&path, &RuntimeConfig::default(), Arc::default(), true).map(drop)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle
+                .join()
+                .expect("opener panicked")
+                .expect("concurrent opener failed");
+        }
+    });
+    let mode: String = RusConnection::open(&path)
+        .expect("reopen")
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("journal mode");
+    assert_eq!(mode, "wal");
+}
+
 #[tokio::test]
 async fn lazy_handle_opens_nothing() {
     let rt = runtime();

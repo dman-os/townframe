@@ -381,13 +381,33 @@ impl ConnSlot {
     ) -> SqlResult<Self> {
         let conn = RusConnection::open(path).map_err(SqlError::from)?;
         for (pragma, value) in [
-            ("journal_mode", "WAL"),
-            ("foreign_keys", "ON"),
             ("busy_timeout", "5000"),
+            ("foreign_keys", "ON"),
             ("synchronous", "NORMAL"),
         ] {
             conn.pragma_update(None, pragma, value)
                 .map_err(SqlError::from)?;
+        }
+        // Two connections opened concurrently on the same fresh file both try
+        // the rollback->WAL transition. SQLite refuses the loser with
+        // `SQLITE_BUSY` without consulting the busy handler, so retry until
+        // the winner's conversion is visible. The busy handler above still
+        // covers the case where the winner holds a write transaction.
+        for attempt in 0..100 {
+            match conn.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => break,
+                Err(rusqlite::Error::SqliteFailure(err, _))
+                    if attempt < 99
+                        && matches!(
+                            err.code,
+                            rusqlite::ErrorCode::DatabaseBusy
+                                | rusqlite::ErrorCode::DatabaseLocked
+                        ) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
         conn.pragma_update(None, "cache_size", cfg.cache_size_kib)
             .map_err(SqlError::from)?;

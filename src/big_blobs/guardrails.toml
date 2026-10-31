@@ -1,0 +1,40 @@
+version = 1
+role = "runtime"
+dependency_reason = "Blob storage, encryption and retention compose repository reads, Cabinet drawers and datum indexes, and the big_sync blob partitions they project into."
+allowed_dependencies = [
+    "big_blobs_core",
+    "big_cabinet",
+    "big_cabinet_core",
+    "big_repo",
+    "big_sync",
+    "big_sync_core",
+    "service_utils_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/big_blobs/interlude.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: crate-private prelude module carried over with the encrypt files from daybook_core's interlude; export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_blobs/encrypt/download.rs"
+symbol = "module::download_encrypted"
+ceiling = 186
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]

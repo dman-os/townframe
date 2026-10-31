@@ -805,3 +805,70 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
     );
     node.stop().await;
 }
+
+#[tokio::test]
+async fn a_meta_doc_is_created_granted_and_projected() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let home = node.collection(&alice, "home").await;
+    let capability = node.drawer_capability(&alice, &[&home]).await.unwrap();
+    let request = CreateMetaDoc {
+        capability,
+        command: command("meta-1"),
+        drawer_id: home.clone(),
+        kind: "blobInventory".to_owned(),
+    };
+
+    let created = node
+        .drawers()
+        .call(RequestContext::root(), request.clone())
+        .await
+        .unwrap();
+    assert_ne!(created.doc_id, home, "a meta doc has its own id");
+    assert_eq!(created.kind, "blobInventory");
+    assert_eq!(created.drawer_id, home);
+    let view = node.view(&alice, &home).await.unwrap();
+    assert_eq!(
+        view.meta_docs,
+        BTreeMap::from([("blobInventory".to_owned(), created.doc_id.clone())])
+    );
+
+    // The command replay answers the same doc rather than making a second one.
+    let replayed = node
+        .drawers()
+        .call(RequestContext::root(), request)
+        .await
+        .unwrap();
+    assert_eq!(replayed, created);
+    assert_eq!(
+        node.view(&alice, &home).await.unwrap().meta_docs,
+        view.meta_docs
+    );
+
+    // A slot that cannot name a key is refused before anything is created.
+    let error = node
+        .drawers()
+        .call(
+            RequestContext::root(),
+            CreateMetaDoc {
+                capability,
+                command: command("meta-2"),
+                drawer_id: home.clone(),
+                kind: "..".to_owned(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            service_utils_rs::ClientError::Operation(DrawersError::InvalidMetaDocKind(ref kind))
+                if kind == ".."
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        node.view(&alice, &home).await.unwrap().meta_docs,
+        view.meta_docs
+    );
+}

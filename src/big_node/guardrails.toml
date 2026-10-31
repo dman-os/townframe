@@ -2,9 +2,12 @@ version = 1
 role = "application"
 dependency_reason = "The node owns Cabinet and BigRepo lifetimes; its tests exercise their public domain and sync contracts."
 allowed_dependencies = [
+    "big_blobs",
+    "big_blobs_core",
     "big_cabinet",
     "big_cabinet_core",
     "big_repo",
+    "big_sync",
     "big_sync_core",
     "secrets_rs",
     "service_utils_rs",

@@ -92,6 +92,8 @@ pub enum DrawersError {
     CommandReused { command: CommandId },
     #[error("the drawer's roster could not be read: {0}")]
     RosterUnreadable(String),
+    #[error("{0} is not a valid meta-doc kind")]
+    InvalidMetaDocKind(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +146,22 @@ pub struct AddDoc {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateMetaDoc {
+    pub capability: CapId,
+    pub command: CommandId,
+    pub drawer_id: DrawerId,
+    pub kind: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetaDocCreated {
+    pub drawer_id: DrawerId,
+    pub kind: String,
+    pub doc_id: DocId,
+    pub heads: Vec<ChangeHash>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoveDoc {
     pub capability: CapId,
     pub command: CommandId,
@@ -182,6 +200,7 @@ pub struct DrawerView {
     pub access: Access,
     pub docs: BTreeMap<DocId, Access>,
     pub children: BTreeMap<DrawerId, Access>,
+    pub meta_docs: BTreeMap<String, DocId>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -302,6 +321,7 @@ operations! {
     MintDrawerCapability => Capability, procedure, "mintDrawerCapability";
     CreateDrawer => DrawerCreated, procedure, "createDrawer";
     AddDoc => WriteReceipt, procedure, "addDoc";
+    CreateMetaDoc => MetaDocCreated, procedure, "createMetaDoc";
     RemoveDoc => WriteReceipt, procedure, "removeDoc";
     AddChild => WriteReceipt, procedure, "addChild";
     RemoveChild => WriteReceipt, procedure, "removeChild";
@@ -324,6 +344,7 @@ declare_service_protocol! {
             MintDrawerCapability(MintDrawerCapability),
             CreateDrawer(CreateDrawer),
             AddDoc(AddDoc),
+            CreateMetaDoc(CreateMetaDoc),
             RemoveDoc(RemoveDoc),
             AddChild(AddChild),
             RemoveChild(RemoveChild),

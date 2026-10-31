@@ -15,6 +15,7 @@ const ECHO_OPERATION: XrpcOperation = XrpcOperation {
     input: HttpInput::JsonBody,
     output_schema: "EchoOutput",
     error_schema: "TestError",
+    long_poll: false,
 };
 
 /// Answers every HTTP/1 exchange with its own JSON request body and counts

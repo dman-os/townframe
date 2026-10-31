@@ -15,15 +15,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
 code = "ERROR_DOC_LINK"
-path = "docs/adrs/001-blob-inventories.md"
-symbol = "../../src/daybook_core/index/doc_blobs.rs"
-ceiling = 1
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: relative link target does not exist; fix it or explicitly classify historical debt"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_DOC_LINK"
 path = "docs/scratch/bigsync-reconciliation-open-items.md"
 symbol = "./adrs/012-bigsync-reconciliation-strategy.md"
 ceiling = 1

@@ -2,6 +2,7 @@ use automerge::Automerge;
 use automerge::ChangeHash;
 use automerge::ObjId;
 use automerge::ObjType;
+use automerge::PatchLog;
 use automerge::Prop;
 use automerge::ROOT;
 use automerge::ReadDoc;
@@ -9,6 +10,11 @@ use automerge::Value;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
+use big_cabinet_core::datum::CompiledSchema;
+use big_cabinet_core::datum::declared_references;
+use big_cabinet_core::datum::hydrate_value;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::query::Predicate;
 use big_repo::AutomergeFrontierEvent;
 use big_repo::AutomergeFrontierRevisionStore;
 use big_repo::AutomergeFrontierSelector;
@@ -45,6 +51,11 @@ use tokio::sync::Notify;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::async_trait;
 use utils_rs::prelude::ferr;
+
+use super::datum_ref::DatumRefEdge;
+use crate::doc::gate::Gate;
+use crate::doc::gate::Verdict;
+use crate::schema::SchemaRepo;
 
 mod queries {
     include!("datum_set/sqlite/gen.rs");
@@ -157,6 +168,11 @@ struct Prepared {
     previous: Option<DocState>,
     slots: BTreeMap<DatumKey, DatumMembership>,
     replace_all: bool,
+    /// The declared references of every gate-accepted route this projection
+    /// scanned, keyed by origin. A route whose tag declares no reference
+    /// position is absent rather than empty, so `settle` replaces only the
+    /// edges of routes the projection actually read.
+    ref_edges: BTreeMap<DatumRoute, Vec<DatumRefEdge>>,
 }
 
 #[derive(Clone)]
@@ -164,10 +180,16 @@ pub struct DatumSetStore {
     sql: Database,
     frontier: SqliteKeyedFrontier<DatumSetCodec>,
     input_state: SqliteDeltaWalkerStateRepo,
+    /// The compiled schemas that decide which datum tags declare references,
+    /// and therefore which routes this worker extracts edges for.
+    schemas: Arc<SchemaRepo>,
+    /// Settlement counter tests watch instead of polling the index.
+    #[cfg(test)]
+    settled: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl DatumSetStore {
-    pub async fn new(sql: Database) -> Res<Self> {
+    pub async fn new(sql: Database, schemas: Arc<SchemaRepo>) -> Res<Self> {
         sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
             .await?;
         let frontier = SqliteKeyedFrontier::new(
@@ -180,11 +202,25 @@ impl DatumSetStore {
         let input_state =
             SqliteDeltaWalkerStateRepo::new(sql.clone(), DATUM_SET_ID, "automerge-frontier")
                 .await?;
+        #[cfg(test)]
+        let (settled, _) = tokio::sync::watch::channel(0);
         Ok(Self {
             sql,
             frontier,
             input_state,
+            schemas,
+            #[cfg(test)]
+            settled: Arc::new(settled),
         })
+    }
+
+    /// Watch the number of settled projections. A test that has driven a change
+    /// through the repository waits on this instead of polling the index for
+    /// convergence; the entries and the reference edges of one revision land in
+    /// the same settle, so one bump covers both.
+    #[cfg(test)]
+    pub(crate) fn subscribe_settled(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.settled.subscribe()
     }
 
     /// Open the frontier across every tag namespace, for consumers (such as
@@ -305,6 +341,123 @@ impl DatumSetStore {
             .collect()
     }
 
+    /// Every live route of the documents that satisfy `predicate`, ordered by route.
+    ///
+    /// The predicate compiles to one boolean expression over the candidate document id, and the
+    /// entries are the outer scan: a document no route names cannot appear, which is what a datum
+    /// query is asking for. No document is hydrated and no datum value is read.
+    pub async fn query_predicate(&self, predicate: &Predicate) -> Res<Vec<DatumRecord>> {
+        let mut query = Sql::new(
+            r#"SELECT doc_id
+                 , datum_key
+                 , doc_heads
+                 , datum_heads
+                 , clock
+              FROM big_cabinet_datum_set_entries AS entry
+             WHERE "#,
+        );
+        push_predicate(&mut query, "entry.doc_id", predicate);
+        query.push(" ORDER BY doc_id, datum_key");
+        query
+            .query(&self.sql)
+            .await?
+            .rows
+            .into_iter()
+            .map(datum_record)
+            .collect()
+    }
+
+    /// The subset of `docs` whose document satisfies `predicate`.
+    ///
+    /// `docs` is the candidate universe, so the query does not scan the entries table at its top
+    /// level: `IsDoc` and `InDrawer` can match a document that carries no live datum. That is also
+    /// what makes a `Not` answerable here — the caller bound the candidates, so the negation never
+    /// enumerates the node.
+    pub async fn matching_docs(
+        &self,
+        predicate: &Predicate,
+        docs: &BTreeSet<DocId>,
+    ) -> Res<BTreeSet<DocId>> {
+        if docs.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let mut query = Sql::new("SELECT candidate.value AS doc_id FROM json_each(");
+        query
+            .bind(serde_json::to_string(docs)?)
+            .push(") AS candidate WHERE ");
+        push_predicate(&mut query, "candidate.value", predicate);
+        query.push(" ORDER BY candidate.value");
+        query
+            .query(&self.sql)
+            .await?
+            .rows
+            .into_iter()
+            .map(|row| Ok(row.get::<String>("doc_id")?.parse::<DocId>()?))
+            .collect()
+    }
+
+    /// The documents a drawer reaches at `at_least`.
+    ///
+    /// A `childEntry` change can add or remove a whole subtree at once, and the page names only
+    /// the parent drawer, so the documents to re-evaluate are the child's reachable set. The
+    /// candidate universe is every document any drawer lists plus every drawer document, and the
+    /// reach test is the same CTE `matching_docs` uses, so a roster change and a predicate
+    /// re-evaluation cannot disagree about what a drawer reaches.
+    pub async fn reachable_docs(
+        &self,
+        drawer_id: &DocId,
+        at_least: DrawerAccess,
+    ) -> Res<BTreeSet<DocId>> {
+        let mut query = Sql::new(
+            r#"SELECT DISTINCT candidate.doc_id AS doc_id
+                 FROM (
+                     SELECT doc_id FROM big_cabinet_drawer_docs
+                     UNION
+                     SELECT drawer_id AS doc_id FROM big_cabinet_drawers
+                 ) AS candidate
+                WHERE "#,
+        );
+        push_in_drawer(&mut query, "candidate.doc_id", drawer_id, true, at_least);
+        query.push(" ORDER BY candidate.doc_id");
+        query
+            .query(&self.sql)
+            .await?
+            .rows
+            .into_iter()
+            .map(|row| Ok(row.get::<String>("doc_id")?.parse::<DocId>()?))
+            .collect()
+    }
+
+    /// The drawers `drawer_id` is nested under, itself included.
+    ///
+    /// This is the `ancestors` CTE rooted at a drawer. A page can carry roster entries for every
+    /// drawer on the node; a poll re-evaluates the affected documents only when the changed drawer
+    /// is its anchor or a descendant of it, so an unrelated roster edit costs nothing.
+    pub async fn drawer_ancestors(&self, drawer_id: &DocId) -> Res<BTreeSet<DocId>> {
+        let mut query = Sql::new(
+            r#"WITH RECURSIVE reached(drawer_id) AS (
+                   SELECT "#,
+        );
+        query.bind(drawer_id.to_string()).push(
+            r#"
+                   UNION
+                   SELECT links.parent_id
+                     FROM reached
+                     JOIN big_cabinet_drawer_children AS links ON links.child_id = reached.drawer_id
+                     JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = links.parent_id
+                    WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
+               )
+               SELECT drawer_id FROM reached ORDER BY drawer_id"#,
+        );
+        query
+            .query(&self.sql)
+            .await?
+            .rows
+            .into_iter()
+            .map(|row| Ok(row.get::<String>("drawer_id")?.parse::<DocId>()?))
+            .collect()
+    }
+
     async fn settle(&self, prepared: Prepared) -> Res<()> {
         let mut transaction = self.sql.begin_write().await?;
         let doc_id = prepared.work.doc_id.to_string();
@@ -373,9 +526,19 @@ impl DatumSetStore {
                 }
                 DatumMembership::Removed { .. } => {
                     queries::delete_entry(&transaction, doc_id.clone(), key.to_string()).await?;
+                    // A removed datum states no references and was not scanned,
+                    // so the edges its last accepted value published are stale.
+                    if self.extracts_references(key.tag().as_str()) {
+                        queries::delete_edges(&transaction, doc_id.clone(), key.to_string())
+                            .await?;
+                    }
                 }
             }
         }
+        // Replace the edges of every route this projection scanned. Doing it in
+        // the entries' transaction is what lets a reader ask for the edges as of
+        // one datum-set revision: both move with the same cursor.
+        write_edges(&transaction, prepared.ref_edges).await?;
         queries::put_doc(
             &transaction,
             doc_id,
@@ -383,8 +546,18 @@ impl DatumSetStore {
         )
         .await?;
         transaction.commit().await?;
+        #[cfg(test)]
+        self.settled.send_modify(|settles| *settles += 1);
         self.frontier.notify_changed();
         Ok(())
+    }
+
+    /// Whether this worker extracts reference edges for the tag: its schema is
+    /// known and declares at least one `reference` position.
+    fn extracts_references(&self, datum_tag: &str) -> bool {
+        self.schemas
+            .resolve_for_read(datum_tag)
+            .is_some_and(|schema| schema.compiled().declares_references())
     }
 }
 
@@ -603,6 +776,187 @@ impl<'a> DocView<'a> {
 }
 
 impl DatumSetStore {
+    /// One read of the document, projected into the datum memberships it states
+    /// and the declared references those memberships publish.
+    ///
+    /// `None` defers the delta instead of settling a partial view: the document
+    /// is missing changes its heads name, so neither the membership nor the
+    /// value a reference-declaring datum hydrates to is visible yet.
+    fn project(
+        &self,
+        doc: &mut Automerge,
+        work: Work,
+        previous: Option<DocState>,
+    ) -> Res<Option<Prepared>> {
+        let Some(heads) = work.state.heads.as_deref() else {
+            return Ok(None);
+        };
+        if !doc.get_missing_deps(heads).is_empty() {
+            return Ok(None);
+        }
+        let (slots, replace_all) = {
+            let baseline = previous
+                .as_ref()
+                .filter(|state| state.epoch == work.state.epoch);
+            let view = DocView::new(doc, heads)?;
+            view.project(baseline)?
+        };
+        let ref_edges = self.reference_edges(doc, &work.doc_id, heads, &slots)?;
+        Ok(Some(Prepared {
+            work,
+            previous,
+            slots,
+            replace_all,
+            ref_edges,
+        }))
+    }
+
+    /// The declared references of every gate-accepted datum in this projection,
+    /// keyed by the route they were read from.
+    ///
+    /// Only reference-declaring tags are opened: the gate verify and the
+    /// hydration walk sit in the worker's hot path, and a tag whose schema
+    /// declares no `reference` position can never publish an edge.
+    fn reference_edges(
+        &self,
+        doc: &mut Automerge,
+        doc_id: &DocId,
+        heads: &[ChangeHash],
+        slots: &BTreeMap<DatumKey, DatumMembership>,
+    ) -> Res<BTreeMap<DatumRoute, Vec<DatumRefEdge>>> {
+        let mut edges = BTreeMap::new();
+        for (key, membership) in slots {
+            let DatumMembership::Present { .. } = membership else {
+                continue;
+            };
+            let Some(schema) = self.schemas.resolve_for_read(key.tag().as_str()) else {
+                continue;
+            };
+            if !schema.compiled().declares_references() {
+                continue;
+            }
+            let route = DatumRoute {
+                doc_id: doc_id.clone(),
+                datum_key: key.clone(),
+            };
+            edges.insert(
+                route.clone(),
+                edges_from(doc, &route, heads, schema.compiled())?,
+            );
+        }
+        Ok(edges)
+    }
+
+    /// Catch the reference edges up with the tags this build newly declares references on.
+    ///
+    /// The worker extracts edges only for the revisions it projects, so a tag whose schema starts
+    /// declaring a `reference` position has stored entries and no edges: the frontier has already
+    /// moved past them. `big_cabinet_datum_set_ref_tags` records the tags caught up this way; at
+    /// boot, before the worker consumes anything, every unseen reference tag re-extracts from its
+    /// stored entries at the `doc_heads` each entry recorded — the revision that entry itself
+    /// describes, so the edges agree with the membership beside them.
+    ///
+    /// A tag is marked seen only once every document holding its entries was read and every one of
+    /// its routes extracted. One that is not local stays unseen and is retried at the next boot:
+    /// the frontier does not re-emit a document that materializes at heads the index already
+    /// settled, so skipping it here would leave its edges empty for good.
+    pub(crate) async fn backfill_reference_tags(
+        &self,
+        repo: &SharedBigRepo,
+        concurrency: NonZeroUsize,
+    ) -> Res<()> {
+        let seen: BTreeSet<String> = queries::ref_tags(&self.sql).await?.into_iter().collect();
+        let unseen: BTreeSet<String> = self
+            .schemas
+            .reference_tags()
+            .into_iter()
+            .filter(|tag| !seen.contains(tag))
+            .collect();
+        if unseen.is_empty() {
+            return Ok(());
+        }
+        let unseen = Arc::new(unseen);
+        let mut docs = queries::ref_tag_docs(&self.sql, serde_json::to_string(&unseen)?)
+            .await?
+            .into_iter()
+            .map(|doc_id| Ok(doc_id.parse::<DocId>()?))
+            .collect::<Res<Vec<DocId>>>()?
+            .into_iter();
+        let tasks = FuturesUnordered::new();
+        tokio::pin!(tasks);
+        let mut complete = true;
+        loop {
+            while tasks.len() < concurrency.get() {
+                let Some(doc_id) = docs.next() else {
+                    break;
+                };
+                let store = self.clone();
+                let repo = Arc::clone(repo);
+                let unseen = Arc::clone(&unseen);
+                tasks.push(async move { store.backfill_doc(&repo, &unseen, doc_id).await });
+            }
+            let Some(extracted) = tasks.next().await else {
+                break;
+            };
+            complete &= extracted?;
+        }
+        if complete {
+            let transaction = self.sql.begin_write().await?;
+            for tag in unseen.iter() {
+                queries::put_ref_tag(&transaction, tag.clone()).await?;
+            }
+            transaction.commit().await?;
+        }
+        Ok(())
+    }
+
+    /// Whether every one of `doc`'s stored routes in `tags` had its edges extracted.
+    async fn backfill_doc(
+        &self,
+        repo: &SharedBigRepo,
+        tags: &BTreeSet<String>,
+        doc_id: DocId,
+    ) -> Res<bool> {
+        let handle = match repo.get_doc_for_projection(&doc_id).await? {
+            DocLookup::Ready(handle) => handle,
+            DocLookup::Missing | DocLookup::PendingMaterialization => return Ok(false),
+        };
+        let routes: Vec<(DatumRoute, Vec<ChangeHash>)> = self
+            .query(DatumSetQuery::Doc(doc_id))
+            .await?
+            .into_iter()
+            .filter(|record| tags.contains(record.route.datum_key.tag().as_str()))
+            .map(|record| (record.route, record.doc_heads))
+            .collect();
+        let mut edges = BTreeMap::new();
+        let mut extracted = true;
+        handle
+            .with_document(|doc| -> Res<()> {
+                for (route, heads) in &routes {
+                    let Some(schema) = self
+                        .schemas
+                        .resolve_for_read(route.datum_key.tag().as_str())
+                    else {
+                        continue;
+                    };
+                    // Stored heads the document no longer carries cannot be read; leave the tag
+                    // unseen so a later boot retries once the changes are local.
+                    if !doc.get_missing_deps(heads).is_empty() {
+                        extracted = false;
+                        continue;
+                    }
+                    edges.insert(
+                        route.clone(),
+                        edges_from(doc, route, heads, schema.compiled())?,
+                    );
+                }
+                Ok(())
+            })
+            .await??;
+        write_edges(&self.sql, edges).await?;
+        Ok(extracted)
+    }
+
     async fn prepare(&self, repo: &SharedBigRepo, work: Work) -> Res<Option<Prepared>> {
         let previous = self.doc_state(&work.doc_id).await?;
         if previous
@@ -614,16 +968,18 @@ impl DatumSetStore {
                 previous,
                 slots: BTreeMap::new(),
                 replace_all: false,
+                ref_edges: BTreeMap::new(),
             }));
         }
-        let Some(heads) = &work.state.heads else {
+        if work.state.heads.is_none() {
             return Ok(Some(Prepared {
                 work,
                 previous,
                 slots: BTreeMap::new(),
                 replace_all: true,
+                ref_edges: BTreeMap::new(),
             }));
-        };
+        }
         if previous
             .as_ref()
             .is_some_and(|state| state.heads == work.state.heads && state.epoch == work.state.epoch)
@@ -633,30 +989,19 @@ impl DatumSetStore {
                 previous,
                 slots: BTreeMap::new(),
                 replace_all: false,
+                ref_edges: BTreeMap::new(),
             }));
         }
         let handle = match repo.get_doc_for_projection(&work.doc_id).await? {
             DocLookup::Ready(handle) => handle,
             DocLookup::Missing | DocLookup::PendingMaterialization => return Ok(None),
         };
-        let projection = handle
-            .with_document_read(|doc| -> Res<_> {
-                if !doc.get_missing_deps(heads).is_empty() {
-                    return Ok(None);
-                }
-                let view = DocView::new(doc, heads)?;
-                let baseline = previous
-                    .as_ref()
-                    .filter(|state| state.epoch == work.state.epoch);
-                Ok(Some(view.project(baseline)?))
-            })
-            .await?;
-        Ok(projection.map(|(slots, replace_all)| Prepared {
-            work,
-            previous,
-            slots,
-            replace_all,
-        }))
+        // Extraction pins the doc at the delta's heads, which automerge only
+        // offers through a transaction, so the projection takes the doc mutably
+        // even though it writes nothing to it.
+        handle
+            .with_document(|doc| self.project(doc, work, previous))
+            .await?
     }
 
     pub async fn run(&self, repo: SharedBigRepo, concurrency: NonZeroUsize) -> Res<()> {
@@ -671,6 +1016,10 @@ impl DatumSetStore {
         shutdown: impl std::future::Future<Output = ()> + Send,
         ready: &mut Option<tokio::sync::oneshot::Sender<Res<()>>>,
     ) -> Res<()> {
+        // Before consuming anything: the frontier only carries revisions the worker has not settled
+        // yet, so the edges of a tag that newly declares references would never be extracted from
+        // the entries already stored for it.
+        self.backfill_reference_tags(&repo, concurrency).await?;
         let source = AutomergeFrontierRevisionStore::new(repo.frontier_part_store());
         self.drive(
             &source,
@@ -838,6 +1187,234 @@ impl RevisionedStore for DatumSetStore {
                 )])))
                 .await?,
         ))
+    }
+}
+
+/// The edges one route's value states at `heads`.
+///
+/// The caller has already established that the document carries those heads, so extraction is not
+/// allowed to park here. Only a gate-accepted value publishes edges: a rejected or pending datum's
+/// value is not what its signatures cover, and an accepted but undecodable value states nothing the
+/// schema can read.
+fn edges_from(
+    doc: &mut Automerge,
+    route: &DatumRoute,
+    heads: &[ChangeHash],
+    schema: &CompiledSchema,
+) -> Res<Vec<DatumRefEdge>> {
+    let Verdict::Accepted {
+        native: Some(_), ..
+    } = Gate::new(doc, heads).verify(&route.datum_key)
+    else {
+        return Ok(Vec::new());
+    };
+    let tx = doc
+        .transaction_at(PatchLog::null(), heads)
+        .expect("a null patch log matches any document");
+    let edges = (|| -> Res<Vec<DatumRefEdge>> {
+        let Some((Value::Object(ObjType::Map), datums)) = tx.get(ROOT, "datums")? else {
+            return Ok(Vec::new());
+        };
+        let value = match hydrate_value(
+            &tx,
+            &datums,
+            route.datum_key.to_string().as_str().into(),
+            schema,
+        ) {
+            Ok(value) => value,
+            Err(_) => return Ok(Vec::new()),
+        };
+        Ok(declared_references(schema, &value)
+            .into_iter()
+            .map(|found| DatumRefEdge {
+                origin: route.clone(),
+                path: found.path,
+                target: DatumRoute {
+                    doc_id: found.reference.document().resolve(&route.doc_id),
+                    datum_key: found.reference.key().clone(),
+                },
+                ref_heads: found.heads,
+            })
+            .collect())
+    })();
+    tx.rollback();
+    edges
+}
+
+/// Replace the stored edges of every route in `edges` with the extracted ones. Routes absent from
+/// the map keep their edges, which is how a projection that only re-read some of a document's
+/// datums leaves the others' references alone.
+async fn write_edges(
+    db: &impl crate::sqlite_rs_alias::Executor,
+    edges: BTreeMap<DatumRoute, Vec<DatumRefEdge>>,
+) -> Res<()> {
+    for (route, edges) in edges {
+        queries::delete_edges(db, route.doc_id.to_string(), route.datum_key.to_string()).await?;
+        for edge in &edges {
+            queries::insert_edge(
+                db,
+                edge.origin.doc_id.to_string(),
+                edge.origin.datum_key.to_string(),
+                edge.path.clone(),
+                edge.target.doc_id.to_string(),
+                edge.target.datum_key.to_string(),
+                serde_json::to_vec(&edge.ref_heads)?,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Append the SQL boolean for `predicate` over the candidate document column `doc`.
+///
+/// Every clause is one indexed question about the candidate document: `EXISTS` over the entries
+/// table for tags and keys, the reference-edge join for `HasReferenceTo`, and a correlated reach
+/// CTE for `InDrawer`. The combinators are the SQL boolean operators, so the caller gets one
+/// statement and no document set crosses into Rust.
+fn push_predicate(query: &mut Sql, doc: &str, predicate: &Predicate) {
+    match predicate {
+        Predicate::HasTag { tag } => {
+            query
+                .push("EXISTS (SELECT 1 FROM big_cabinet_datum_set_entries AS match WHERE match.doc_id = ")
+                .push(doc)
+                .push(" AND match.datum_tag = ")
+                .bind(tag.to_string())
+                .push(")");
+        }
+        Predicate::HasKey { key } => {
+            query
+                .push("EXISTS (SELECT 1 FROM big_cabinet_datum_set_entries AS match WHERE match.doc_id = ")
+                .push(doc)
+                .push(" AND match.datum_key = ")
+                .bind(key.to_string())
+                .push(")");
+        }
+        Predicate::IsDoc { doc_id } => {
+            query.push(doc).push(" = ").bind(doc_id.to_string());
+        }
+        Predicate::InDrawer {
+            drawer_id,
+            transitive,
+            at_least,
+        } => push_in_drawer(query, doc, drawer_id, *transitive, *at_least),
+        Predicate::HasReferenceTo {
+            target_tag,
+            target_doc,
+        } => {
+            query
+                .push("EXISTS (SELECT 1 FROM big_cabinet_datum_ref_edges AS edge JOIN big_cabinet_datum_set_entries AS target ON target.doc_id = edge.target_doc AND target.datum_key = edge.target_datum WHERE edge.origin_doc = ")
+                .push(doc)
+                .push(" AND target.datum_tag = ")
+                .bind(target_tag.to_string());
+            if let Some(target_doc) = target_doc {
+                query
+                    .push(" AND target.doc_id = ")
+                    .bind(target_doc.to_string());
+            }
+            query.push(")");
+        }
+        Predicate::And { clauses } => push_conjunction(query, clauses, " AND ", "1", doc),
+        Predicate::Or { clauses } => push_conjunction(query, clauses, " OR ", "0", doc),
+        Predicate::Not { inner } => {
+            query.push("NOT (");
+            push_predicate(query, doc, inner);
+            query.push(")");
+        }
+    }
+}
+
+fn push_conjunction(
+    query: &mut Sql,
+    clauses: &[Predicate],
+    operator: &str,
+    empty: &str,
+    doc: &str,
+) {
+    if clauses.is_empty() {
+        query.push(empty);
+        return;
+    }
+    query.push("(");
+    for (index, clause) in clauses.iter().enumerate() {
+        if index != 0 {
+            query.push(operator);
+        }
+        push_predicate(query, doc, clause);
+    }
+    query.push(")");
+}
+
+/// The reach CTE from `drawer/sqlite/queries/scoped_docs.sql`, correlated on the candidate doc.
+///
+/// `transitive: false` keeps only the root reach row, which drops the child-link branch: the
+/// drawer's own document entries and, for a `selfDoc` layout, the drawer document itself. The root
+/// level is the requested `at_least`, which is the caller's grant on the drawer as far as the
+/// threshold matters: the caller was admitted at that level, and attenuating by a higher grant
+/// cannot change whether a document clears the same threshold.
+fn push_in_drawer(
+    query: &mut Sql,
+    doc: &str,
+    drawer_id: &DocId,
+    transitive: bool,
+    at_least: DrawerAccess,
+) {
+    let level = drawer_level(at_least);
+    query.push(
+        r#"EXISTS (
+            WITH RECURSIVE levels(access, level) AS (
+                VALUES ('Relay', 0), ('Read', 1), ('Write', 2), ('Admin', 3)
+            ), reachable(drawer_id, level) AS (
+                SELECT "#,
+    );
+    query.bind(drawer_id.to_string()).push(", ").bind(level);
+    if transitive {
+        query.push(
+            r#"
+                UNION
+                SELECT links.child_id
+                     , MIN(reachable.level, levels.level)
+                  FROM reachable
+                  JOIN big_cabinet_drawer_children AS links ON links.parent_id = reachable.drawer_id
+                  JOIN levels ON levels.access = links.access
+                  JOIN big_cabinet_drawers AS parent ON parent.drawer_id = reachable.drawer_id
+                 WHERE json_extract(parent.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'"#,
+        );
+    }
+    query.push(
+        r#"
+            ), entries(doc_id, level) AS (
+                SELECT docs.doc_id
+                     , MIN(reachable.level, levels.level)
+                  FROM reachable
+                  JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
+                  JOIN big_cabinet_drawer_docs AS docs ON docs.drawer_id = reachable.drawer_id
+                  JOIN levels ON levels.access = docs.access
+                 WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
+                UNION ALL
+                SELECT reachable.drawer_id
+                     , reachable.level
+                  FROM reachable
+                  JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
+                 WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
+            )
+            SELECT 1
+              FROM entries
+             WHERE entries.doc_id = "#,
+    );
+    query
+        .push(doc)
+        .push(" AND entries.level >= ")
+        .bind(level)
+        .push(")");
+}
+
+fn drawer_level(access: DrawerAccess) -> i64 {
+    match access {
+        DrawerAccess::Relay => 0,
+        DrawerAccess::Read => 1,
+        DrawerAccess::Write => 2,
+        DrawerAccess::Admin => 3,
     }
 }
 

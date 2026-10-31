@@ -76,25 +76,34 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
             .await
             .unwrap();
     }
-    let mut events = node
-        .docs()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability: doc_caps[1],
-                scope: ObserveScope::Tag {
-                    tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
-                },
-                after: 0,
+    let mut poll = crate::test_poll::Poller::new(
+        node.docs(),
+        PollDatums {
+            capability: doc_caps[1],
+            predicate: Predicate::IsDoc {
+                doc_id: doc.clone(),
             },
-        )
-        .await
-        .unwrap();
+            datums: DatumSelection::Of {
+                tags: [big_cabinet_core::DatumTag::new(NOTE).unwrap()]
+                    .into_iter()
+                    .collect(),
+                keys: BTreeSet::new(),
+            },
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    );
     let mut present = false;
-    let mut replay_complete = false;
-    while !present || !replay_complete {
-        match events.next().await.unwrap().unwrap() {
-            DatumObserved::Entry {
+    while !present {
+        match poll.next().await.unwrap().expect("the note never replayed") {
+            DatumEvent::Enter { doc_id, datums, .. } => {
+                assert_eq!(doc_id, doc);
+                present = datums
+                    .values()
+                    .any(|d| matches!(d, ObservedDatum::Present { .. }));
+            }
+            DatumEvent::Datum {
                 doc_id,
                 datum: ObservedDatum::Present { .. },
                 ..
@@ -102,8 +111,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
                 assert_eq!(doc_id, doc);
                 present = true;
             }
-            DatumObserved::ReplayComplete { .. } => replay_complete = true,
-            other => panic!("expected the note or replay completion, got {other:?}"),
+            DatumEvent::Datum { .. } | DatumEvent::Leave { .. } => {}
         }
     }
 
@@ -149,12 +157,16 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
             ClientError::Operation(DocsError::Denied)
         );
     }
+    let cursor = poll.cursor();
     assert_eq!(
-        events.next().await.unwrap(),
+        poll.next().await,
         Err(ClientError::Operation(DocsError::Denied))
     );
-    assert!(events.next().await.is_none());
-    drop(events);
+    assert_eq!(
+        poll.cursor(),
+        cursor,
+        "a denied poll must not move the cursor"
+    );
     for actor in [&alice, &bob, &node.drawers_actor] {
         assert_eq!(
             node.mint_doc(actor, doc_scope.clone()).await.unwrap_err(),

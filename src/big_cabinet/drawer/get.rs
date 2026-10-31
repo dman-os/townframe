@@ -24,6 +24,7 @@ impl DrawerService {
         Ok(DrawerView {
             docs: core.state.docs_of(&record.drawer_id).await?,
             children: core.state.children_of(&record.drawer_id).await?,
+            meta_docs: core.state.meta_docs_of(&record.drawer_id).await?,
             drawer_id: record.drawer_id,
             layout: record.descriptor.layout.clone(),
             descriptor,
@@ -74,6 +75,7 @@ mod tests {
             access: Access::Relay,
             docs: BTreeMap::from([(DocId::new([3; 32]), Access::Read)]),
             children: BTreeMap::from([(DocId::new([4; 32]), Access::Write)]),
+            meta_docs: BTreeMap::from([("blobInventory".to_owned(), DocId::new([5; 32]))]),
         };
         let value = serde_json::to_value(&view).expect("serialize");
         assert_eq!(
@@ -87,6 +89,7 @@ mod tests {
                 "access": "Relay",
                 "docs": { DocId::new([3; 32]).to_string(): "Read" },
                 "children": { DocId::new([4; 32]).to_string(): "Write" },
+                "metaDocs": { "blobInventory": DocId::new([5; 32]).to_string() },
             })
         );
         assert_eq!(

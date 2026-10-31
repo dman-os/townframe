@@ -3,6 +3,15 @@
 **Status:** Accepted — implemented by `DrawerService` (`src/big_cabinet/drawer.rs`)
 for the self-doc and single-group layouts; the deferred list at the end is unchanged.
 
+Amended since acceptance: self-doc drawers may be child drawers, and their shape is
+derived from Keyhive rather than declared (see "Child entries"). Drawer meta docs are
+added (see "Meta docs"), together with the publicness contract they depend on. Both are
+designed with [ADR 026](026-drawer-native-blobs.md) and are not implemented yet; the
+implemented parts keep their own notes. The projection that answers drawer reach is
+being re-based onto the datum-set frontier by
+[ADR 024](024-indexes-are-fed-by-the-change-stream.md), and drawer observation by
+[ADR 025](025-cabinet-datum-predicates-and-polling.md).
+
 ## Scope
 
 [The drawer FDR](../fdrs/001-drawers-as-document-collections.md) defines the
@@ -33,7 +42,8 @@ The self-group layout and managed-participant layout are not implemented.
 
 A self-doc drawer cannot grow in place. To create a collection around it, Cabinet
 creates a new single-group drawer with a new `DrawerId` and adds the original doc as a
-`docEntry`. The original doc keeps its ID and may remain a self-doc drawer
+`docEntry`, or as a `childEntry` when the doc should stay a drawer in its own right
+(see "Child entries"). The original doc keeps its ID and may remain a self-doc drawer
 independently. This avoids changing the meaning and disclosure boundary of an existing
 identity.
 
@@ -149,6 +159,58 @@ Child traversal computes recursive set union, terminates on already visited draw
 and uses the strongest effective access when a doc is reachable by several independent
 paths. Keyhive reachability alone never creates an official entry.
 
+### Self-doc children
+
+A self-doc drawer may be a child. What it never does is enter the parent's meta group:
+its descriptor *is* its content doc, and the meta group is readable by Relay-level
+participants (see "Publicness"), so a self-doc doc must never be delegated to any meta
+group.
+
+Linking a self-doc child at `access` therefore arranges exactly one delegation: the
+parent's **docs group** on the child doc, at `access`. That is the same Keyhive shape as
+a `docEntry`, but the roster lists it as a drawer with its own identity and grants.
+There is no meta-group delegation, and the `meta_access` widening of `Relay` to `Read`
+applies to single-group children only. The four access levels mean the same thing for a
+self-doc child as for a single-group one; at `Relay` there is simply no child metadata
+to enumerate beyond the parent's own entry.
+
+Adding a self-doc child is not the docs-only child relationship excluded above. That
+exclusion exists because the parent could not otherwise tell which reachable docs are
+official entries. A self-doc child has exactly one official entry, which the parent's
+entry itself names.
+
+**The child entry does not state the child's layout.** An earlier design carried
+`{ access, layout }` so that a Relay-level parent, which cannot read a self-doc child's
+descriptor, would learn the child's shape. That duplicates the child's own descriptor,
+lets the two disagree, and would freeze a child's layout until every parent rewrote its
+entry.
+
+No stated layout and no derived one is needed. A child entry always names a drawer, and
+a drawer's shape is a fact of its own descriptor: `childEntry` and `docEntry` are
+distinct datum tags, so the projection never has to guess whether a link names a drawer
+or a bare doc. Listing and reach queries read the child's descriptor through the
+existing `big_cabinet_drawers.descriptor_json` join (`scoped_docs.sql`, `ancestors.sql`),
+which is always readable to the rows that consult it: `readable_in_drawer` admits a
+drawer only at `DrawerAccess::Read` or stronger, and `Relay` orders below `Read`. A node
+holding a child at Relay does not list it in `scoped_docs` — its meta-group walk and
+ciphertext retention (ADR 005 adoption) do not depend on the child's layout either.
+
+What the projection does check, at admission, is that the child's Keyhive delegations
+match its descriptor layout:
+
+- `selfDoc`: the parent's docs group is delegated on the child doc, and the parent's
+  meta group holds nothing on it;
+- `singleGroup`: both group-to-group delegations are present.
+
+A child entry whose delegations do not match the stated descriptor is not admitted, and
+a meta group holding a self-doc doc is refused loudly as a defect. This is a
+consistency check against the child's own descriptor, not a second source of truth: the
+layout stays where it always was.
+
+The invariant that makes this safe: no meta group is ever delegated a self-doc doc.
+`AddChild` never does it (above), the meta-doc op refuses self-doc drawers (see "Meta
+docs"), and `AddDoc` grants the docs group only.
+
 ## Datums
 
 The first-version vocabulary is:
@@ -158,7 +220,11 @@ org.example.daybook.drawer
 org.example.daybook.drawer.roster
 org.example.daybook.drawer.docEntry
 org.example.daybook.drawer.childEntry
+org.example.daybook.drawer.metaDoc
 ```
+
+`drawer.metaDoc` is added with the meta docs section below; the other four are the
+first-version vocabulary.
 
 Datum tags are grouped by dotted names. Drawer values carry no ad-hoc version integer;
 compatible evolution occurs under the datum identity, while incompatible meanings need a
@@ -227,6 +293,64 @@ fields when the sharding design below is implemented.
 
 Group ids in the descriptor are the 32 identifier bytes as multibase base58btc, the text
 form every other 32-byte key in this tree has.
+
+## Meta docs
+
+A drawer's metadata doc carries its descriptor and roster. Some drawer-scoped state is
+churny enough that it must not grow that doc's history, which every participant and
+relay syncs: blob inventories ([ADR 026](026-drawer-native-blobs.md)) are the first, and
+the roster shards designed below are the same shape. Such state lives in a separate
+**meta doc**, referenced from the metadata doc by one fixed slot per kind:
+
+```jsonc
+{
+  "org.example.daybook.drawer.metaDoc/blobInventory": { "docId": "zBlobInventoryA" }
+}
+```
+
+`kind` is the key id, an open string vocabulary. Cabinet projects it but does not
+interpret it; the owning domain does (`big_blobs_core` owns `blobInventory`). One slot
+per kind means concurrent creators write the same datum, so Automerge last-writer-wins
+leaves one value rather than two live references.
+
+A meta doc is created by a DrawerService op, because only DrawerService can make a doc
+metadata-class and then reference it. The order is delegation before entry, as for a
+`docEntry`: create the doc, `grant_doc_access(doc, metaGroup, Admin)` exactly as
+`create_collection` does for the metadata doc, then write the slot. The op requires
+drawer Write, refuses self-doc drawers (which have no meta group), and is ledgered like
+`create_collection`. Per [ADR 024](024-indexes-are-fed-by-the-change-stream.md) it
+projects nothing itself: the drawer projection picks the slot up from the change stream,
+admits it only when Keyhive shows the doc delegated to the drawer's meta group, and
+exposes it through a projected `big_cabinet_drawer_meta_docs` row plus an `ancestors`
+branch at the Admin bound the metadata doc itself gets. Without the delegation check, a
+drawer writer could name an arbitrary doc id and gain Cabinet reach to it.
+
+Keyhive access comes from the meta group: Relay-level principals already hold it at
+Read, so relays read meta docs, and Write participants hold it at Edit. A meta doc is
+never a `docEntry` — entries go into the docs group, which a Relay-level principal holds
+only as ciphertext, and would also list the doc as drawer content.
+
+The loser of a concurrent creation is retired by its creator, which knows the doc from
+its ledger row, by revoking the meta group's grant on it. Other writers re-seed the
+winner from their own observed state, as adds only. ADR 026 §5 specifies that path for
+inventories.
+
+## Publicness
+
+Everything granted Read to a drawer's meta group is visible to every participant,
+**including Relay-level ones**, because an invite at Relay grants Read on the meta group
+so that the canonical roster can be enumerated. That covers the descriptor, the roster,
+and every meta doc. So:
+
+- no private datums — names, descriptions, icons, notes — on a single-group drawer's
+  metadata doc or on a meta doc. Private drawer metadata belongs in a `docEntry`.
+- a self-doc drawer has no separate metadata. Linked as a child or listed as an entry,
+  it is reached only through the parent's docs group, so its content stays ciphertext to
+  Relay-level participants. The only metadata about it is the parent's roster entry.
+
+This is the boundary the "Self-doc children" rule protects. It is also why meta docs are
+not a privacy channel: they exist to keep history out of the metadata doc, not to keep
+content out of it.
 
 ## Actors and node authority
 

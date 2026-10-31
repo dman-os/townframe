@@ -429,6 +429,38 @@ impl State {
             .collect())
     }
 
+    /// The metadata docs a drawer's doc carries, keyed by kind, as last projected.
+    pub(crate) async fn meta_docs_of(
+        &self,
+        drawer: &DrawerId,
+    ) -> Result<BTreeMap<String, DocId>, DrawersError> {
+        let rows = sqlite::meta_docs(&self.sql, drawer.to_string())
+            .await
+            .map_err(storage)?;
+        Ok(rows
+            .iter()
+            .map(|row| (row.kind.clone(), id_column(&row.doc_id)))
+            .collect())
+    }
+
+    pub(crate) async fn put_meta_doc(
+        &self,
+        drawer: &DrawerId,
+        kind: &str,
+        doc: &DocId,
+    ) -> Result<(), DrawersError> {
+        sqlite::put_meta_doc(
+            &self.sql,
+            drawer.to_string(),
+            kind.to_owned(),
+            doc.to_string(),
+        )
+        .await
+        .map_err(storage)?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Replace a drawer's roster rows with what its doc says now: the rescan after a boot or a
     /// read that found the projection behind the doc.
     pub(crate) async fn replace_roster(
@@ -436,6 +468,7 @@ impl State {
         drawer: &DrawerId,
         docs: &BTreeMap<DocId, Access>,
         children: &BTreeMap<DrawerId, Access>,
+        meta_docs: &BTreeMap<String, DocId>,
     ) -> Result<(), DrawersError> {
         let transaction = self.sql.begin_write().await.map_err(storage)?;
         let id = drawer.to_string();
@@ -451,7 +484,13 @@ impl State {
             .into_iter()
             .map(|row| (id_column(&row.child_id), access_column(&row.access)))
             .collect();
-        if &stored_docs == docs && &stored_children == children {
+        let stored_meta_docs: BTreeMap<_, _> = sqlite::meta_docs(&transaction, id.clone())
+            .await
+            .map_err(storage)?
+            .into_iter()
+            .map(|row| (row.kind, id_column(&row.doc_id)))
+            .collect();
+        if &stored_docs == docs && &stored_children == children && &stored_meta_docs == meta_docs {
             transaction.rollback().await.map_err(storage)?;
             return Ok(());
         }
@@ -459,6 +498,9 @@ impl State {
             .await
             .map_err(storage)?;
         sqlite::clear_children(&transaction, id.clone())
+            .await
+            .map_err(storage)?;
+        sqlite::clear_meta_docs(&transaction, id.clone())
             .await
             .map_err(storage)?;
         for (table, source, target, entries) in [
@@ -496,6 +538,27 @@ impl State {
                 query.execute(&transaction).await.map_err(storage)?;
             }
         }
+        let mut entries = meta_docs.iter().peekable();
+        while entries.peek().is_some() {
+            let mut query = Sql::new("INSERT INTO ");
+            query
+                .ident("big_cabinet_drawer_meta_docs")
+                .push(" (drawer_id, kind, doc_id) VALUES ");
+            for (index, (kind, doc_id)) in entries.by_ref().take(256).enumerate() {
+                if index != 0 {
+                    query.push(", ");
+                }
+                query
+                    .push("(")
+                    .bind(&id)
+                    .push(", ")
+                    .bind(kind)
+                    .push(", ")
+                    .bind(doc_id.to_string())
+                    .push(")");
+            }
+            query.execute(&transaction).await.map_err(storage)?;
+        }
         transaction.commit().await.map_err(storage)?;
         self.notify_changed();
         Ok(())
@@ -516,8 +579,9 @@ mod tests {
         let [drawer, old_doc, old_child] = [240_u8, 241, 242].map(|value| DocId::new([value; 32]));
         let before_docs = BTreeMap::from([(old_doc.clone(), Access::Read)]);
         let before_children = BTreeMap::from([(old_child.clone(), Access::Write)]);
+        let before_meta = BTreeMap::from([("timeline".to_owned(), DocId::new([243; 32]))]);
         state
-            .replace_roster(&drawer, &before_docs, &before_children)
+            .replace_roster(&drawer, &before_docs, &before_children, &before_meta)
             .await
             .unwrap();
         let mut changes = state.subscribe_changes();
@@ -536,6 +600,10 @@ mod tests {
             .map(|id| (id, Access::Read))
             .collect();
         *children.last_entry().unwrap().get_mut() = Access::Relay;
+        let meta = BTreeMap::from([
+            ("timeline".to_owned(), docs.keys().next().unwrap().clone()),
+            ("index".to_owned(), DocId::new([244; 32])),
+        ]);
         sql.execute_batch(
             "CREATE TRIGGER fail_roster_child BEFORE INSERT ON big_cabinet_drawer_children
              WHEN NEW.access = 'Relay'
@@ -544,7 +612,7 @@ mod tests {
         .await
         .unwrap();
         let error = state
-            .replace_roster(&drawer, &docs, &children)
+            .replace_roster(&drawer, &docs, &children, &meta)
             .await
             .unwrap_err();
         assert!(
@@ -553,17 +621,19 @@ mod tests {
         assert!(!changes.has_changed().unwrap());
         assert_eq!(state.docs_of(&drawer).await.unwrap(), before_docs);
         assert_eq!(state.children_of(&drawer).await.unwrap(), before_children);
+        assert_eq!(state.meta_docs_of(&drawer).await.unwrap(), before_meta);
         sql.execute_batch("DROP TRIGGER fail_roster_child")
             .await
             .unwrap();
         state
-            .replace_roster(&drawer, &docs, &children)
+            .replace_roster(&drawer, &docs, &children, &meta)
             .await
             .unwrap();
         changes.changed().await.unwrap();
         assert_eq!(*changes.borrow_and_update(), 2);
         assert_eq!(state.docs_of(&drawer).await.unwrap(), docs);
         assert_eq!(state.children_of(&drawer).await.unwrap(), children);
+        assert_eq!(state.meta_docs_of(&drawer).await.unwrap(), meta);
         assert_eq!(
             sqlite::doc_entry(&snapshot, drawer.to_string(), old_doc.to_string())
                 .await
@@ -578,17 +648,23 @@ mod tests {
         );
         snapshot.rollback().await.unwrap();
         state
-            .replace_roster(&drawer, &docs, &children)
+            .replace_roster(&drawer, &docs, &children, &meta)
             .await
             .unwrap();
         assert!(!changes.has_changed().unwrap());
         state
-            .replace_roster(&drawer, &BTreeMap::new(), &BTreeMap::new())
+            .replace_roster(
+                &drawer,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            )
             .await
             .unwrap();
         assert!(changes.has_changed().unwrap());
         assert!(state.docs_of(&drawer).await.unwrap().is_empty());
         assert!(state.children_of(&drawer).await.unwrap().is_empty());
+        assert!(state.meta_docs_of(&drawer).await.unwrap().is_empty());
     }
 
     #[tokio::test]

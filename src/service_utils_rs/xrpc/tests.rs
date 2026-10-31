@@ -14,6 +14,7 @@ use crate::operation::XrpcOperation;
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::header;
+use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -39,6 +40,7 @@ const QUERY_OPERATION: XrpcOperation = XrpcOperation {
     input: HttpInput::Query,
     output_schema: "EchoOutput",
     error_schema: "TestError",
+    long_poll: false,
 };
 const PROCEDURE_OPERATION: XrpcOperation = XrpcOperation {
     nsid: "org.example.test.write",
@@ -47,6 +49,7 @@ const PROCEDURE_OPERATION: XrpcOperation = XrpcOperation {
     input: HttpInput::JsonBody,
     output_schema: "WriteOutput",
     error_schema: "TestError",
+    long_poll: false,
 };
 const NUMERIC_QUERY_OPERATION: XrpcOperation = XrpcOperation {
     nsid: "org.example.test.numeric",
@@ -55,7 +58,42 @@ const NUMERIC_QUERY_OPERATION: XrpcOperation = XrpcOperation {
     input: HttpInput::Query,
     output_schema: "NumericOutput",
     error_schema: "TestError",
+    long_poll: false,
 };
+const LONG_POLL_OPERATION: XrpcOperation =
+    XrpcOperation::query("org.example.test.poll").long_poll();
+
+fn query_request(operation: XrpcOperation, value: &str) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("/xrpc/{}?value={value}", operation.nsid))
+        .body(axum::body::Body::empty())
+        .expect("request")
+}
+
+fn holding_handler(
+    started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    release: Arc<tokio::sync::Notify>,
+) -> impl Fn(
+    RequestContext,
+    HttpMetadata,
+    EchoParams,
+) -> BoxFuture<'static, Result<Value, XrpcHandlerError>>
++ Send
++ Sync
++ 'static {
+    move |_context, _metadata, _params| {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        Box::pin(async move {
+            if let Some(sender) = started.lock().expect("started lock").take() {
+                sender.send(()).expect("started receiver");
+            }
+            release.notified().await;
+            Ok(json!({"value": "released"}))
+        })
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EchoParams {
@@ -1601,6 +1639,169 @@ async fn repeated_normal_connections_complete_under_connection_bound() {
 }
 
 #[tokio::test]
+async fn exhausted_long_poll_pool_still_admits_ordinary_requests() {
+    use hyper::service::Service;
+    use hyper_util::service::TowerToHyperService;
+
+    let (started_sender, started_receiver) = oneshot::channel();
+    let started = Arc::new(Mutex::new(Some(started_sender)));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
+    router
+        .register(XrpcOperationHandler::typed(
+            LONG_POLL_OPERATION,
+            holding_handler(Arc::clone(&started), Arc::clone(&release)),
+        ))
+        .expect("long-poll registration");
+    router
+        .register(XrpcOperationHandler::typed(
+            QUERY_OPERATION,
+            |_context, _metadata, params: EchoParams| async move {
+                Ok(json!({"value": params.value}))
+            },
+        ))
+        .expect("query registration");
+    let service = TowerToHyperService::new(router.into_router());
+
+    let held = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .call(query_request(LONG_POLL_OPERATION, "held"))
+                .await
+                .expect("long-poll call")
+        }
+    });
+    started_receiver.await.expect("long poll started");
+    let ordinary = service
+        .call(query_request(QUERY_OPERATION, "ordinary"))
+        .await
+        .expect("ordinary call");
+    assert_eq!(ordinary.status(), StatusCode::OK);
+    release.notify_one();
+    assert_eq!(held.await.expect("held join").status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn exhausted_ordinary_requests_still_admit_long_polls() {
+    use hyper::service::Service;
+    use hyper_util::service::TowerToHyperService;
+
+    let (started_sender, started_receiver) = oneshot::channel();
+    let started = Arc::new(Mutex::new(Some(started_sender)));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
+    router
+        .register(XrpcOperationHandler::typed(
+            QUERY_OPERATION,
+            holding_handler(Arc::clone(&started), Arc::clone(&release)),
+        ))
+        .expect("query registration");
+    router
+        .register(XrpcOperationHandler::typed(
+            LONG_POLL_OPERATION,
+            |_context, _metadata, _params: EchoParams| async move {
+                Ok(json!({"value": "polled"}))
+            },
+        ))
+        .expect("long-poll registration");
+    let service = TowerToHyperService::new(router.into_router());
+
+    let held = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .call(query_request(QUERY_OPERATION, "held"))
+                .await
+                .expect("ordinary call")
+        }
+    });
+    started_receiver.await.expect("ordinary request started");
+    let long_poll = service
+        .call(query_request(LONG_POLL_OPERATION, "poll"))
+        .await
+        .expect("long-poll call");
+    assert_eq!(long_poll.status(), StatusCode::OK);
+    release.notify_one();
+    assert_eq!(held.await.expect("held join").status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn each_admission_class_refuses_when_its_own_pool_is_exhausted() {
+    use hyper::service::Service;
+    use hyper_util::service::TowerToHyperService;
+
+    let (ordinary_started_sender, ordinary_started_receiver) = oneshot::channel();
+    let ordinary_started = Arc::new(Mutex::new(Some(ordinary_started_sender)));
+    let ordinary_release = Arc::new(tokio::sync::Notify::new());
+    let (long_poll_started_sender, long_poll_started_receiver) = oneshot::channel();
+    let long_poll_started = Arc::new(Mutex::new(Some(long_poll_started_sender)));
+    let long_poll_release = Arc::new(tokio::sync::Notify::new());
+    let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
+    router
+        .register(XrpcOperationHandler::typed(
+            QUERY_OPERATION,
+            holding_handler(Arc::clone(&ordinary_started), Arc::clone(&ordinary_release)),
+        ))
+        .expect("query registration");
+    router
+        .register(XrpcOperationHandler::typed(
+            LONG_POLL_OPERATION,
+            holding_handler(
+                Arc::clone(&long_poll_started),
+                Arc::clone(&long_poll_release),
+            ),
+        ))
+        .expect("long-poll registration");
+    let service = TowerToHyperService::new(router.into_router());
+
+    let ordinary_held = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .call(query_request(QUERY_OPERATION, "held"))
+                .await
+                .expect("ordinary call")
+        }
+    });
+    ordinary_started_receiver
+        .await
+        .expect("ordinary request started");
+    let long_poll_held = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .call(query_request(LONG_POLL_OPERATION, "held"))
+                .await
+                .expect("long-poll call")
+        }
+    });
+    long_poll_started_receiver.await.expect("long poll started");
+
+    let ordinary_refused = service
+        .call(query_request(QUERY_OPERATION, "again"))
+        .await
+        .expect("ordinary refusal");
+    assert_eq!(ordinary_refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    let long_poll_refused = service
+        .call(query_request(LONG_POLL_OPERATION, "again"))
+        .await
+        .expect("long-poll refusal");
+    assert_eq!(long_poll_refused.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    ordinary_release.notify_one();
+    long_poll_release.notify_one();
+    assert_eq!(
+        ordinary_held.await.expect("ordinary join").status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        long_poll_held.await.expect("long-poll join").status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn unsupported_subscription_is_explicit() {
     let subscription = XrpcOperation {
         nsid: "org.example.test.events",
@@ -1609,6 +1810,7 @@ async fn unsupported_subscription_is_explicit() {
         input: HttpInput::Query,
         output_schema: "Event",
         error_schema: "TestError",
+        long_poll: false,
     };
     let mut router = XrpcRouter::new(1024);
     assert_eq!(

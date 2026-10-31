@@ -23,6 +23,30 @@ pub(crate) fn record_of(drawer_id: &DrawerId, descriptor: &Drawer) -> DrawerReco
 }
 
 impl Core {
+    /// Whether Keyhive shows `doc` delegated to the drawer's meta group, which is the only
+    /// evidence that admits a `metaDoc` reference. A writer can put any doc id in the slot; without
+    /// this check the reference would hand every drawer writer Cabinet reach to that doc.
+    pub(crate) async fn meta_doc_admitted(
+        &self,
+        meta: &BigKeyhiveGroup,
+        doc: &DocId,
+    ) -> Result<bool, DrawersError> {
+        let key =
+            ed25519_dalek::VerifyingKey::from_bytes(&doc.to_bytes32().map_err(keyhive_error)?)
+                .map_err(|_| keyhive_error(format!("{doc} is not a valid Ed25519 point")))?;
+        Ok(self
+            .big_repo
+            .keyhive()
+            .direct_access_on(
+                &meta.id().into(),
+                big_repo::keyhive_core::principal::identifier::Identifier::from(key),
+            )
+            .await
+            .is_some_and(|access| access >= KeyhiveAccess::Admin))
+    }
+}
+
+impl Core {
     /// Declare `doc` a self-doc drawer by writing the descriptor on it with the caller's own
     /// capability: DocsRepo enforces Write, signs the datum as the caller, and its command ledger
     /// makes the command idempotent. The drawer ledger row ensures that if a crash falls after the
@@ -310,6 +334,101 @@ impl Core {
             .await?;
         self.ledger.finish(&row.command, &created).await
     }
+
+    /// A metadata-class doc for one fixed slot on a single-group drawer: create the doc as this
+    /// service (DocsRepo's ledger replays the same command after a crash), put the drawer's meta
+    /// group in charge of it, then name it in the slot. The grant precedes the entry so a
+    /// projected reference never outlives the delegation that admits it.
+    pub(crate) async fn create_meta_doc(
+        &self,
+        context: &RequestContext,
+        command: &CommandId,
+        op: Op,
+    ) -> Result<MetaDocCreated, DrawersError> {
+        let Op::CreateMetaDoc {
+            drawer_id,
+            kind,
+            doc_id,
+        } = op
+        else {
+            unreachable!("create_meta_doc runs under a create-meta-doc row: {op:?}")
+        };
+        let slot =
+            meta_doc_key(&kind).map_err(|_| DrawersError::InvalidMetaDocKind(kind.clone()))?;
+        let (meta, _) = self.groups(&drawer_id).await?;
+        let doc_id = match doc_id {
+            Some(doc_id) => doc_id,
+            None => {
+                let receipt = self
+                    .as_signer(
+                        context,
+                        self.issuer,
+                        DocScope {
+                            create: [METADATA_PLACEMENT.into()].into(),
+                            ..Default::default()
+                        },
+                        |capability| async move {
+                            self.docs()
+                                .call(
+                                    context.child(),
+                                    CreateDoc {
+                                        capability,
+                                        command: command.clone(),
+                                        placement: METADATA_PLACEMENT.into(),
+                                        datums: BTreeMap::new(),
+                                    },
+                                )
+                                .await
+                                .map_err(docs_error)
+                        },
+                    )
+                    .await?;
+                self.big_repo
+                    .grant_doc_access(receipt.doc_id.clone(), meta, KeyhiveAccess::Admin)
+                    .await
+                    .map_err(keyhive_error)?;
+                self.ledger
+                    .record(
+                        command,
+                        &Op::CreateMetaDoc {
+                            drawer_id: drawer_id.clone(),
+                            kind: kind.clone(),
+                            doc_id: Some(receipt.doc_id.clone()),
+                        },
+                    )
+                    .await?;
+                receipt.doc_id
+            }
+        };
+        let entry = DrawerMetaDoc::new(doc_id.clone());
+        let receipt = self
+            .write_roster(
+                context,
+                &drawer_id,
+                None,
+                BTreeMap::from([(slot, datum_value(&entry))]),
+                std::collections::BTreeSet::new(),
+            )
+            .await?;
+        self.state.put_meta_doc(&drawer_id, &kind, &doc_id).await?;
+        Ok(MetaDocCreated {
+            drawer_id: drawer_id.clone(),
+            kind,
+            doc_id,
+            heads: receipt.heads,
+        })
+    }
+
+    pub(crate) async fn resume_create_meta_doc(
+        &self,
+        context: &RequestContext,
+        row: &ledger::Row,
+    ) -> Result<(), DrawersError> {
+        let created = self
+            .create_meta_doc(context, &row.command, row.op.clone())
+            .await?;
+        self.ledger.finish(&row.command, &created).await
+    }
 }
 
 impl DrawerService {
@@ -428,6 +547,52 @@ impl Handler<CreateDrawer> for DrawerService {
         request: Envelope<CreateDrawer>,
     ) -> Result<ResponseEnvelope<DrawerCreated>, DrawersError> {
         Ok(self.create(&request.context, request.params).await?.into())
+    }
+}
+
+impl DrawerService {
+    async fn create_meta_doc(
+        &self,
+        context: &RequestContext,
+        params: CreateMetaDoc,
+    ) -> Result<MetaDocCreated, DrawersError> {
+        let caller = self.core.invocation(context, params.capability).await?;
+        let actor = &caller.signer;
+        self.core
+            .authorize(context, &caller.authority, &params.drawer_id, Access::Write)
+            .await?;
+        if meta_doc_key(&params.kind).is_err() {
+            return Err(DrawersError::InvalidMetaDocKind(params.kind));
+        }
+        let request_digest = digest(&(
+            "createMetaDoc",
+            actor.actor_id,
+            &params.drawer_id,
+            &params.kind,
+        ));
+        let op = Op::CreateMetaDoc {
+            drawer_id: params.drawer_id.clone(),
+            kind: params.kind.clone(),
+            doc_id: None,
+        };
+        self.core
+            .ledger
+            .run(&params.command, request_digest, actor.actor_id, op, |op| {
+                self.core.create_meta_doc(context, &params.command, op)
+            })
+            .await
+    }
+}
+
+impl Handler<CreateMetaDoc> for DrawerService {
+    async fn call(
+        &self,
+        request: Envelope<CreateMetaDoc>,
+    ) -> Result<ResponseEnvelope<MetaDocCreated>, DrawersError> {
+        Ok(self
+            .create_meta_doc(&request.context, request.params)
+            .await?
+            .into())
     }
 }
 

@@ -28,6 +28,9 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+#[path = "blob_tests.rs"]
+mod blobs;
+
 const NOTE: &str = "org.example.note";
 
 fn key() -> DatumKey {
@@ -82,6 +85,7 @@ fn config<'a>(
         schemas: schemas(),
         secrets,
         index_concurrency: NonZeroUsize::new(2).unwrap(),
+        blob_storage: big_blobs::Storage::Memory,
     }
 }
 
@@ -196,7 +200,9 @@ async fn shutdown(node: BigNode, stop: StopToken) {
     let authority = Arc::downgrade(&node.authority.host);
     let authority_service = Arc::downgrade(&node.authority.service);
     let indexes = Arc::clone(&node.indexes);
-    assert_eq!(indexes.live_tasks(), 2);
+    // One live task: `datum_set` is the sole index worker (ADR 024 folds the
+    // datum_ref edge projection into it; `datum_ref` is a read surface only).
+    assert_eq!(indexes.live_tasks(), 1);
     drop(node);
     stop.stop().await.unwrap();
     assert_eq!(indexes.live_tasks(), 0);
@@ -286,7 +292,7 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
 
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
-    let persisted = DatumSetStore::new(sql.clone()).await.unwrap();
+    let persisted = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
     assert_eq!(persisted.source_revision().await.unwrap(), cursor);
     assert_eq!(persisted.latest_revision().await.unwrap(), output_revision);
     assert_eq!(
@@ -376,116 +382,6 @@ async fn failed_docs_recovery_unwinds_the_partial_node() {
         !database.exists(),
         "partial-node cleanup retained a Cabinet SQL context"
     );
-}
-
-#[tokio::test]
-async fn failed_reference_initialization_joins_the_started_datum_worker() {
-    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
-    let sql = runtime.ephemeral(&[]).unwrap();
-    big_cabinet::index::DatumRefStore::new(sql.clone())
-        .await
-        .unwrap();
-    sql.execute(
-        "INSERT INTO big_cabinet_datum_ref_progress VALUES (?, -1)",
-        (NOTE,),
-    )
-    .await
-    .unwrap();
-    let secrets = secrets().await;
-    let (repo, stop) = BigRepo::boot(
-        Arc::clone(&runtime),
-        config(&secrets, &runtime, sql.clone(), StorageConfig::Memory).repo,
-    )
-    .await
-    .unwrap();
-    let references = Arc::strong_count(&repo);
-    match Indexes::boot(
-        Arc::clone(&repo),
-        schemas(),
-        sql.clone(),
-        NonZeroUsize::new(2).unwrap(),
-    )
-    .await
-    {
-        Err(error) => assert!(
-            error
-                .to_string()
-                .contains("datum-ref revision is out of range")
-        ),
-        Ok(_) => panic!("a negative reference cursor must reject index startup"),
-    }
-    assert_eq!(Arc::strong_count(&repo), references);
-    drop(repo);
-    stop.stop().await.unwrap();
-    drop(sql);
-}
-
-#[tokio::test]
-async fn failed_reference_initialization_unwinds_disk_node_and_allows_reopen() {
-    let directory = tempfile::tempdir().unwrap();
-    let repo_path = directory.path().join("repo");
-    let sql_path = directory.path().join("cabinet.sqlite");
-    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
-    let secrets = secrets().await;
-    let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
-    big_cabinet::index::DatumRefStore::new(sql.clone())
-        .await
-        .unwrap();
-    sql.execute(
-        "INSERT INTO big_cabinet_datum_ref_progress (datum_tag, revision) VALUES (?, -1)",
-        (NOTE,),
-    )
-    .await
-    .unwrap();
-    match BigNode::boot(config(
-        &secrets,
-        &runtime,
-        sql.clone(),
-        StorageConfig::Disk {
-            path: repo_path.clone(),
-        },
-    ))
-    .await
-    {
-        Err(error) => assert_eq!(error.to_string(), "datum-ref revision is out of range"),
-        Ok((node, stop)) => {
-            shutdown(node, stop).await;
-            panic!("a negative reference cursor must reject node startup");
-        }
-    }
-    let repaired = sql
-        .execute(
-            "UPDATE big_cabinet_datum_ref_progress SET revision = 0 WHERE datum_tag = ?",
-            (NOTE,),
-        )
-        .await
-        .unwrap();
-    assert_eq!(repaired.rows_affected, 1);
-    drop(sql);
-    drop(runtime);
-
-    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
-    let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
-    let revision: i64 = sql
-        .query(
-            "SELECT revision FROM big_cabinet_datum_ref_progress WHERE datum_tag = ?",
-            (NOTE,),
-        )
-        .await
-        .unwrap()
-        .one()
-        .unwrap();
-    assert_eq!(revision, 0);
-    let (node, stop) = BigNode::boot(config(
-        &secrets,
-        &runtime,
-        sql.clone(),
-        StorageConfig::Disk { path: repo_path },
-    ))
-    .await
-    .unwrap();
-    shutdown(node, stop).await;
-    drop(sql);
 }
 
 #[tokio::test]

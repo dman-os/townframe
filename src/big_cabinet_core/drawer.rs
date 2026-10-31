@@ -14,6 +14,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::datum::DatumMember;
+use crate::dmeta::DocId;
 
 /// The descriptor: `org.example.daybook.drawer/main` on the doc whose id is the `DrawerId`.
 #[macros::datum(authority = "org.example.daybook")]
@@ -271,6 +272,32 @@ impl DrawerChildEntry {
     pub fn new(access: DrawerAccess) -> Self {
         Self {
             access: access.into(),
+            extra: Default::default(),
+        }
+    }
+}
+
+/// `org.example.daybook.drawer.metaDoc/<kind>`: a fixed slot naming a metadata-class doc
+/// that belongs to the drawer — an inventory, a keys document, a future shard. `kind` is an
+/// open string vocabulary carried in the key slot; Cabinet projects the reference but does
+/// not interpret it ([ADR 019](../../../docs/adrs/019-cabinet-drawers-and-selective-mirroring.md),
+/// [ADR 026](../../../docs/adrs/026-drawer-native-blobs.md)). Concurrent creators write the
+/// same key, so Automerge's last-writer-wins leaves exactly one doc named.
+#[macros::datum(authority = Drawer::ID, name = "metaDoc")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawerMetaDoc {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub doc_id: DocId,
+    #[serde(flatten)]
+    pub extra: crate::datum::Extra,
+}
+
+impl DrawerMetaDoc {
+    pub fn new(doc_id: DocId) -> Self {
+        Self {
+            doc_id,
             extra: Default::default(),
         }
     }
@@ -569,6 +596,7 @@ mod tests {
                 Declaration::of::<DrawerRoster>().unwrap(),
                 Declaration::of::<DrawerDocEntry>().unwrap(),
                 Declaration::of::<DrawerChildEntry>().unwrap(),
+                Declaration::of::<DrawerMetaDoc>().unwrap(),
                 Declaration::of::<KnownDrawerEntry>().unwrap(),
             ])
         }
@@ -590,12 +618,13 @@ mod tests {
                     DrawerRoster::ID,
                     DrawerDocEntry::ID,
                     DrawerChildEntry::ID,
+                    DrawerMetaDoc::ID,
                     KnownDrawerEntry::ID,
                 ]
             );
             let bundle = Bundle::new(&universe, Vec::new());
             let lexicons = bundle.lexicons().unwrap();
-            assert_eq!(lexicons.len(), 7);
+            assert_eq!(lexicons.len(), 8);
             let drawer = &lexicons[0].file;
             assert_eq!(drawer["id"], Drawer::ID);
             let layout = &drawer["defs"]["main"]["properties"]["layout"];

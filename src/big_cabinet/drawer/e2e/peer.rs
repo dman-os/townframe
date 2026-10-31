@@ -122,30 +122,27 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
         )
         .await
         .unwrap();
-    let mut observations = reader
-        .docs()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability,
-                scope: ObserveScope::Doc {
-                    doc_id: doc.clone(),
-                },
-                after: 0,
-            },
-        )
-        .await
-        .unwrap();
     let (key, _) = note("");
+    let mut observations = crate::test_poll::Poller::doc(reader.docs(), capability, doc.clone());
     loop {
-        match observations.next().await.unwrap().unwrap() {
-            DatumObserved::Entry {
+        match observations
+            .next()
+            .await
+            .unwrap()
+            .expect("the note never replayed")
+        {
+            DatumEvent::Enter { doc_id, datums, .. }
+                if doc_id == doc && datums.contains_key(&key) =>
+            {
+                break;
+            }
+            DatumEvent::Datum {
                 doc_id,
                 datum_key,
                 datum: ObservedDatum::Present { .. },
                 ..
             } if doc_id == doc && datum_key == key => break,
-            DatumObserved::Entry { .. } | DatumObserved::ReplayComplete { .. } => {}
+            _ => {}
         }
     }
     let expected = json!({"$type": NOTE, "value": "shared-note"});

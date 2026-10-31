@@ -1,11 +1,11 @@
 use super::*;
 use crate::blobs::blob_id_to_iroh_hash;
-use crate::blobs::encrypt::TAG_CT_PREFIX;
-use crate::blobs::encrypt::TAG_PT_PREFIX;
-use crate::blobs::encrypt::get_decrypted;
 use crate::index::facet_set::DocFacetTagMembership;
 use crate::test_support::DaybookTestContext;
 use crate::test_support::test_cx;
+use big_blobs::encrypt::TAG_CT_PREFIX;
+use big_blobs::encrypt::TAG_PT_PREFIX;
+use big_blobs::encrypt::get_decrypted;
 use daybook_types::doc::BlobPin;
 
 /// The worker's context, built the way `rt` builds it (the group comes from
@@ -178,7 +178,7 @@ async fn eligible_document_gets_a_servable_representation() -> Res<()> {
         doc_id.clone(),
         BranchPathBuf::from(MAIN_BRANCH),
     );
-    let decrypted = crate::blobs::encrypt::get_decrypted(&worker.store, &keys, c_hash).await?;
+    let decrypted = big_blobs::encrypt::get_decrypted(&worker.store, &keys, c_hash).await?;
     assert_eq!(decrypted, plaintext_bytes);
 
     // The commit point, and it is what makes the document *resolve*.
@@ -413,7 +413,7 @@ async fn released_representation_is_reinstalled_with_a_fresh_key_by_the_next_pas
         None,
     )
     .await?;
-    crate::blobs::encrypt::drop_pair_tags(&worker.store, c1_hash).await?;
+    big_blobs::encrypt::drop_pair_tags(&worker.store, c1_hash).await?;
     assert!(
         read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
             .await?
@@ -480,7 +480,7 @@ async fn released_representation_is_reinstalled_with_a_fresh_key_by_the_next_pas
         doc_id.clone(),
         BranchPathBuf::from(MAIN_BRANCH),
     );
-    let decrypted = crate::blobs::encrypt::get_decrypted(&worker.store, &keys, c2_hash).await?;
+    let decrypted = big_blobs::encrypt::get_decrypted(&worker.store, &keys, c2_hash).await?;
     assert_eq!(decrypted, plaintext_bytes);
     let blob = read_blob(&ctx.drawer_repo, &doc_id, &blob_key)
         .await?
@@ -558,7 +558,7 @@ async fn released_inventory_pin_with_absent_plaintext_is_not_resurrected_by_the_
         None,
     )
     .await?;
-    crate::blobs::encrypt::drop_pair_tags(&worker.store, c1_hash).await?;
+    big_blobs::encrypt::drop_pair_tags(&worker.store, c1_hash).await?;
     // Now the plaintext is gone too: a fresh store with nothing in it is
     // the state every released blob ends in once GC has run.
     let fresh = tempfile::tempdir()?;

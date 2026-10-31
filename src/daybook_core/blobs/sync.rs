@@ -754,17 +754,17 @@ mod tests {
     async fn blob_sync_obj_settles_for_a_virtually_possessed_cipher_representation() -> Res<()> {
         let (backend, _part_store, blobs_repo, _temp_root) = build_blob_backend().await?;
         let runtime = sqlite_rs::SqliteRuntime::new(default());
-        let pair_roots = crate::blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
-        let key = crate::blobs::encrypt::MasterKey::random();
+        let pair_roots = big_blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
+        let key = big_blobs::encrypt::MasterKey::random();
         // The full add pass installs and registers as one act: P gets stored
         // bytes, C gets the virtual entry, and the pair roots both under the
         // `ct:`/`pt:` tags.
-        let (c, p_hash) = crate::blobs::encrypt::add_encrypted(
+        let (c, p_hash) = big_blobs::encrypt::add_encrypted(
             &blobs_repo.iroh_store(),
             &blobs_repo.cipher_provider(),
             &pair_roots,
             &key,
-            crate::blobs::encrypt::EncodingParams::DEFAULT,
+            big_blobs::encrypt::EncodingParams::DEFAULT,
             b"cipherblob virtual possession",
         )
         .await?;
@@ -867,14 +867,14 @@ mod tests {
         );
 
         let runtime = sqlite_rs::SqliteRuntime::new(default());
-        let pair_roots = crate::blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
-        let key = crate::blobs::encrypt::MasterKey::random();
-        let (c, _p_hash) = crate::blobs::encrypt::add_encrypted(
+        let pair_roots = big_blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
+        let key = big_blobs::encrypt::MasterKey::random();
+        let (c, _p_hash) = big_blobs::encrypt::add_encrypted(
             &blobs_repo_a.iroh_store(),
             &blobs_repo_a.cipher_provider(),
             &pair_roots,
             &key,
-            crate::blobs::encrypt::EncodingParams::DEFAULT,
+            big_blobs::encrypt::EncodingParams::DEFAULT,
             b"ciphertext served on demand to a pairless relay",
         )
         .await?;
@@ -884,7 +884,7 @@ mod tests {
             "the object identity is the ciphertext digest itself"
         );
         assert!(
-            !crate::blobs::encrypt::has_pair_tags(&blobs_repo_b.iroh_store(), c).await?,
+            !big_blobs::encrypt::has_pair_tags(&blobs_repo_b.iroh_store(), c).await?,
             "the relay holds no pair: nothing of its own is virtual"
         );
 

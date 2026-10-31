@@ -67,6 +67,13 @@ pub(crate) enum Op {
         doc_id: DocId,
         owner_id: Option<Uuid7>,
     },
+    /// A metadata-class doc for one fixed slot on a single-group drawer. `doc_id` is recorded
+    /// once the doc exists, so a resume does not depend on the DocsRepo ledger replaying it.
+    CreateMetaDoc {
+        drawer_id: DrawerId,
+        kind: String,
+        doc_id: Option<DocId>,
+    },
     /// A principal invited to a drawer's groups. Both memberships are re-asserted by a resume;
     /// adding a member that is already there is a no-op in Keyhive.
     Invite {
@@ -128,7 +135,8 @@ impl LedgerFailure for DrawersError {
             | Self::SelfChild
             | Self::NotAnEntry(_)
             | Self::CommandInFlight { .. }
-            | Self::CommandReused { .. } => false,
+            | Self::CommandReused { .. }
+            | Self::InvalidMetaDocKind(_) => false,
         }
     }
 }

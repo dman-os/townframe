@@ -1,29 +1,11 @@
-//! `ObserveDatums`: doc-scoped observation over the ungated `datum_set`
-//! projection, filtered by the same read access as gated reads (ADR 009 §6).
+//! `PollDatums` doc-scoped reads over the ungated `datum_set` projection: replay current state,
+//! then hold for membership and version changes (ADR 009 §6, ADR 025).
 
 use super::*;
-use futures::StreamExt;
-
-/// The next frontier entry on an observation stream, skipping the
-/// replay-complete marker.
-async fn next_entry(
-    events: &mut (impl futures::Stream<Item = Result<DatumObserved, ClientError<DocsError>>> + Unpin),
-) -> (DocId, DatumKey, ObservedDatum) {
-    loop {
-        match events.next().await.unwrap().unwrap() {
-            DatumObserved::Entry {
-                doc_id,
-                datum_key,
-                datum,
-                ..
-            } => return (doc_id, datum_key, datum),
-            DatumObserved::ReplayComplete { .. } => continue,
-        }
-    }
-}
+use crate::test_poll::Poller;
 
 #[tokio::test]
-async fn doc_observation_replays_then_streams_membership_and_versions() {
+async fn doc_poll_replays_then_reports_versions_and_removal() {
     let node = Node::boot().await;
     let alice = node.writer("alice").await;
     let created = node
@@ -31,30 +13,18 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
         .await
         .unwrap();
     let document = created.doc_id.clone();
-    let mut events = node
-        .client()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability: node
-                    .capability(
-                        &alice,
-                        DocScope {
-                            read: BTreeSet::from([document.clone()]),
-                            ..DocScope::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
-                scope: ObserveScope::Doc {
-                    doc_id: document.clone(),
-                },
-                after: 0,
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                read: BTreeSet::from([document.clone()]),
+                ..DocScope::default()
             },
         )
         .await
         .unwrap();
-    let (doc_id, datum_key, datum) = next_entry(&mut events).await;
+    let mut poll = Poller::doc(node.client(), capability, document.clone());
+    let (doc_id, datum_key, datum) = poll.next_datum().await;
     assert_eq!(doc_id, document);
     assert_eq!(datum_key, key("main"));
     let ObservedDatum::Present { version, .. } = &datum else {
@@ -74,7 +44,7 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
     .unwrap();
     let mut clock = first_clock;
     while clock <= first_clock {
-        let (_, _, datum) = next_entry(&mut events).await;
+        let (_, _, datum) = poll.next_datum().await;
         if let ObservedDatum::Present { version, .. } = &datum {
             clock = version.clock;
         }
@@ -84,17 +54,16 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
         .await
         .unwrap();
     loop {
-        let (_, _, datum) = next_entry(&mut events).await;
+        let (_, _, datum) = poll.next_datum().await;
         if matches!(datum, ObservedDatum::Removed { .. }) {
             break;
         }
     }
-    drop(events);
     node.stop().await;
 }
 
 #[tokio::test]
-async fn tag_observation_hides_documents_the_observer_cannot_read() {
+async fn a_scoped_caller_needs_an_anchor_that_reaches_the_document() {
     let node = Node::boot().await;
     let alice = node.writer("alice").await;
     let mallory = node.writer("mallory").await;
@@ -118,45 +87,34 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
         .await
         .unwrap();
 
-    // Doc scope refuses at establishment, like a gated read.
-    let refused = node
-        .client()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability,
-                scope: ObserveScope::Doc {
-                    doc_id: created.doc_id.clone(),
-                },
-                after: 0,
-            },
-        )
+    // An `IsDoc` anchor re-authorizes the named document, so a doc the caller cannot read is
+    // refused before any page is read.
+    let refused = Poller::doc(node.client(), capability, created.doc_id.clone())
+        .page(0)
         .await;
     assert!(
         matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
         "{refused:?}"
     );
 
-    let mut events = node
-        .client()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability,
-                scope: ObserveScope::Tag {
-                    tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
-                },
-                after: 0,
-            },
-        )
-        .await
-        .unwrap();
-    // Alice's document was never delivered to Mallory, so it is silently
-    // omitted rather than named by an `AccessLost` entry: the first entry is
-    // Mallory's own document.
-    let (doc_id, _, datum) = next_entry(&mut events).await;
+    // A tag predicate names no resource, so a scoped caller cannot use it: it would enumerate
+    // documents the capability does not bound.
+    let refused = Poller::tag(
+        node.client(),
+        capability,
+        big_cabinet_core::DatumTag::new(NOTE).unwrap(),
+    )
+    .page(0)
+    .await;
+    assert!(
+        matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
+        "{refused:?}"
+    );
+
+    // The document the caller does read replays its own state and nothing of Alice's.
+    let mut own_poll = Poller::doc(node.client(), capability, own.doc_id.clone());
+    let (doc_id, _, datum) = own_poll.next_datum().await;
     assert_eq!(doc_id, own.doc_id);
     assert!(matches!(datum, ObservedDatum::Present { .. }), "{datum:?}");
-    drop(events);
     node.stop().await;
 }

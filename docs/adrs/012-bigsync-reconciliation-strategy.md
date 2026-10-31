@@ -690,6 +690,11 @@ they are not merely a constraint on it.
 
 ### 9. Event delivery is a client-driven long-poll page, not a push stream
 
+[ADR 023](023-cursor-consumption-is-long-poll.md) generalises this decision to every
+service surface in the repo that exposes a cursor, and states the bar for a push
+subscription and the rules a long-poll surface must follow. `replay_page` remains the
+reference implementation. What follows is big_sync's own design and its refinements.
+
 `PeerReplayTask` is replaced. Instead of one long-lived task per peer/connection
 forwarding every event of a whole target set, delivery becomes discrete pages:
 

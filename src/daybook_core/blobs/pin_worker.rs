@@ -10,8 +10,6 @@ use daybook_types::doc::WellKnownFacet;
 use daybook_types::doc::WellKnownFacetTag;
 use tokio_util::sync::CancellationToken;
 
-use crate::blobs::pair_roots::PairRoots;
-use crate::blobs::pair_roots::UnresolvedPair;
 use crate::blobs::sqlite::queries;
 use crate::drawer::DrawerRepo;
 use crate::drawer::MaterializationWake;
@@ -19,6 +17,8 @@ use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::FacetSetRevisionStore;
 use crate::index::facet_set::FacetSetSelector;
 use crate::repos::RepoStopToken;
+use big_blobs::pair_roots::PairRoots;
+use big_blobs::pair_roots::UnresolvedPair;
 use big_sync::DeltaWalkerStateRepo as _;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
 use big_sync_core::concurrent_delta_walker::ConcurrentDelta;
@@ -536,7 +536,7 @@ impl Ctx {
             let Some(blob_id) = crate::blobs::digest_str_to_blob_id_lenient(hash) else {
                 eyre::bail!("cannot release a pair for {hash}: not a blob digest");
             };
-            crate::blobs::encrypt::drop_pair_tags(
+            big_blobs::encrypt::drop_pair_tags(
                 &self.store,
                 crate::blobs::blob_id_to_iroh_hash(blob_id),
             )
@@ -602,8 +602,7 @@ impl Ctx {
             .filter_map(|digest| crate::blobs::digest_str_to_blob_id_lenient(digest))
             .collect();
         for pair in unresolved {
-            let rooted =
-                crate::blobs::encrypt::has_pair_tags(&self.store, pair.cipher_hash).await?;
+            let rooted = big_blobs::encrypt::has_pair_tags(&self.store, pair.cipher_hash).await?;
             let blob_id = crate::blobs::BlobId::new(*pair.cipher_hash.as_bytes());
             let pin_recorded = pinned.contains(&blob_id);
             let facet_names = match &pair.claimed_by {
@@ -629,7 +628,7 @@ impl Ctx {
                         "releasing a pair an earlier run rooted but no facet or pin ever \
                          claimed: its tags were the only roots (ADR 003 §19)"
                     );
-                    crate::blobs::encrypt::drop_pair_tags(&self.store, pair.cipher_hash).await?;
+                    big_blobs::encrypt::drop_pair_tags(&self.store, pair.cipher_hash).await?;
                     self.pair_roots.clear(pair.cipher_hash).await?;
                 }
                 DrainAction::KeepUnprovenanced => {
@@ -1998,7 +1997,7 @@ mod tests {
             docs_inventory_doc_id: docs_inventory_doc_id.clone(),
             encryption_inventory_doc_id,
             store: test_context.rt.blobs_repo.iroh_store(),
-            pair_roots: crate::blobs::pair_roots::PairRoots::boot(test_context.rt.rcx.sql.clone())
+            pair_roots: big_blobs::pair_roots::PairRoots::boot(test_context.rt.rcx.sql.clone())
                 .await?,
             inventory_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
@@ -2213,7 +2212,7 @@ mod tests {
         let test_context = test_cx(utils_rs::function_full!()).await?;
         let sql = test_context.rt.rcx.sql.clone();
         let store = test_context.rt.blobs_repo.iroh_store();
-        let roots = crate::blobs::pair_roots::PairRoots::boot(sql.clone()).await?;
+        let roots = big_blobs::pair_roots::PairRoots::boot(sql.clone()).await?;
 
         let plaintext = test_context
             .rt
@@ -2293,7 +2292,7 @@ mod tests {
         let drawer = Arc::clone(&test_context.drawer_repo);
         let sql = test_context.rt.rcx.sql.clone();
         let store = test_context.rt.blobs_repo.iroh_store();
-        let roots = crate::blobs::pair_roots::PairRoots::boot(sql.clone()).await?;
+        let roots = big_blobs::pair_roots::PairRoots::boot(sql.clone()).await?;
         let encryption_inventory_doc_id = drawer
             .resolve_doc_id_for_branch_doc_id(
                 test_context.rt.rcx.encryption_inventory_doc_id.clone(),
@@ -2317,11 +2316,9 @@ mod tests {
         // The facet the crash did not get to write, authored the way the encryption
         // worker writes it: a cipherBlob facet carries the digest in the multihash
         // spelling, and it is the facet's value - not its key - that names `C`.
-        let (key_doc_id, key_heads) = crate::test_support::stage_key_doc(
-            &drawer,
-            &crate::blobs::encrypt::MasterKey::random(),
-        )
-        .await?;
+        let (key_doc_id, key_heads) =
+            crate::test_support::stage_key_doc(&drawer, &big_blobs::encrypt::MasterKey::random())
+                .await?;
         let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
         let cipher_digest = crate::blobs::blob_id_to_digest_str(cipher.clone());
         // A plain document first: a cipherBlob facet is system-managed, so it takes
@@ -2400,12 +2397,12 @@ mod tests {
         // ciphertext hash; the pt tag's *value* names the plaintext.
         for (prefix, named, valued) in [
             (
-                crate::blobs::encrypt::TAG_CT_PREFIX,
+                big_blobs::encrypt::TAG_CT_PREFIX,
                 cipher.clone(),
                 cipher.clone(),
             ),
             (
-                crate::blobs::encrypt::TAG_PT_PREFIX,
+                big_blobs::encrypt::TAG_PT_PREFIX,
                 cipher.clone(),
                 plaintext.clone(),
             ),
@@ -2430,11 +2427,11 @@ mod tests {
     ) -> Res<bool> {
         let ct = store
             .tags()
-            .get(pair_tag_name(crate::blobs::encrypt::TAG_CT_PREFIX, cipher))
+            .get(pair_tag_name(big_blobs::encrypt::TAG_CT_PREFIX, cipher))
             .await?;
         let pt = store
             .tags()
-            .get(pair_tag_name(crate::blobs::encrypt::TAG_PT_PREFIX, cipher))
+            .get(pair_tag_name(big_blobs::encrypt::TAG_PT_PREFIX, cipher))
             .await?;
         Ok(ct.is_some() && pt.is_some())
     }
@@ -2537,7 +2534,7 @@ mod tests {
         // The facet is system-managed, so it takes the scope the encryption
         // worker will write it with rather than an ordinary user write.
         let (key_doc_id, key_heads) =
-            crate::test_support::stage_key_doc(drawer, &crate::blobs::encrypt::MasterKey::random())
+            crate::test_support::stage_key_doc(drawer, &big_blobs::encrypt::MasterKey::random())
                 .await?;
         let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
         let cipher_facet_key = FacetKey::from(WellKnownFacetTag::CipherBlob);

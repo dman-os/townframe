@@ -18,6 +18,11 @@ WITH RECURSIVE levels(access, level) AS (
      WHERE :document AND docs.doc_id = :target_id
        AND json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
     UNION
+    SELECT meta.drawer_id
+         , 3
+      FROM big_cabinet_drawer_meta_docs AS meta
+     WHERE meta.doc_id = :target_id
+    UNION
     SELECT links.parent_id
          , MIN(reached.level, levels.level)
       FROM reached

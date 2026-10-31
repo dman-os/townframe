@@ -1,6 +1,15 @@
-# ADR: Encrypted Blob Mirrors and Key Storage
+# ADR 003: Encrypted Blob Mirrors and Key Storage
 
-**Status:** Proposed
+**Status:** Proposed, amended by [ADR 026](026-drawer-native-blobs.md).
+
+§19's key documents, `keyScope`, `grp:` domain naming, its staging and registration
+steps, and its write of `Blob.urls` are **withdrawn**: the JWK is co-located with the
+cipherBlob in the content doc (§2 and §6 of this ADR, restored), slots are keyed per blob
+inside the doc, and a doc you cannot write is branched rather than given a companion key
+doc. Everything else stands: the RFC 8188 representation, derived salt and reproducible
+generation (§8–§9), single-pass creation (§11), the virtual provider (§12), the `PairRoots`
+ledger and the deliberate release path (§19), rotation (§15), length hiding (§17) and
+random access (§20). §19 carries the amendment inline.
 
 ## Context
 
@@ -120,6 +129,12 @@ The RFC 8188 `keyid` is always empty (see §8) and therefore omitted from the fa
 
 ### 4. Blob → cipherBlob resolution
 
+**Amended by ADR 026 §3.** Resolution is a naming convention inside the same doc: the
+cipherBlob for a Blob slot lives at `cipherBlob/<blob datum key>`, with its JWK at
+`jwk/<same key>`. The encryptor therefore does not write `Blob.urls`, which also makes
+writable and read-only docs differ only in *where* the cipherBlob lives. A `?via=` entry
+stays legal as an optional hint.
+
 The Blob records encrypted mirrors through its `urls` field.
 
 Conceptually:
@@ -233,6 +248,13 @@ new agent reads JWK
 No per-blob recovery recipients or additional HPKE layer are required.
 
 ### 7. Multiple facets and access domains
+
+**Amended by ADR 026 §3.** The default domain is the **document**, and slots inside it
+are keyed per blob. A doc in two drawers has one ciphertext: a relay holding both already
+links them by doc id, and with the JWK co-located every reader of the doc reads every
+slot's key, so per-drawer keys would narrow nothing. The anti-correlation motivation below
+still holds where it applies — identical plaintext in *different* docs, i.e. branches and
+copies, which get their own slots because they are different docs.
 
 A document may contain multiple cipherBlob/JWK facet pairs, differentiated using facet key IDs.
 
@@ -707,7 +729,18 @@ cipherBlob therefore never needs a special plaintext mode.
 performs them, what the metadata is keyed by, and the order the steps must
 happen in, because none of these are derivable from §14 alone.
 
-#### Domains are named, and the facet key is the name
+**Amended by [ADR 026](026-drawer-native-blobs.md).** The first three subsections
+below — domain naming, separate key documents and `keyScope` — are withdrawn, and the
+ordering loses its key-document steps. "Pins are derived from facets", "The release path
+is deliberate" and the `PairRoots` ledger stand unchanged. "One worker per group" is
+replaced by drawer-native observation.
+
+#### Domains are named, and the facet key is the name (**withdrawn**)
+
+**Withdrawn by ADR 026 §3.** Domains are no longer named by Keyhive group, and the facet
+key is no longer the domain name. The default domain is the document, and slots inside it
+are keyed `cipherBlob/<blob datum key>` with the JWK at `jwk/<same key>`. Prefixes other
+than `grp:` were reserved for non-group domains; that reservation goes with `grp:`.
 
 A facet key names the encryption domain a representation belongs to:
 
@@ -744,7 +777,17 @@ ciphertext digest. A cipherBlob that names a blob facet in another document
 has no sibling to lean on and must use a keyid scheme that does not derive
 from that document's readership - an open shape, deferred to cross-document
 keyRef (Deferred Decisions).
-#### JWK and cipherBlob are placed in different documents, deliberately
+#### JWK and cipherBlob are placed in different documents, deliberately (**withdrawn**)
+
+**Withdrawn by ADR 026 §1–§2.** The reasoning below assumes a party with Read on the
+content doc that must not decrypt — "anyone who may serve a representation must know
+which representation to serve", and "a retention domain can be given the cipherBlob
+without ever being given the key". In the drawer model no such party exists: relays hold
+content docs at Keyhive `Relay`, i.e. ciphertext only, and learn representation digests
+from the drawer's inventory, never from the cipherBlob; anyone with Read on the doc sees
+the Blob datum and is entitled to the plaintext. The JWK is co-located with the
+cipherBlob, and §5–§6's placement is restored. A doc that cannot be written is branched
+rather than given a companion key doc (ADR 026 §4).
 
 `keyRef` names the JWK facet that holds the encryption key, addressing a
 document explicitly: `self` for one in the same document, or a document id
@@ -769,7 +812,14 @@ with mere storers or readers of the ciphertext. It is not enforced by omitting
 a field: it is enforced by the facets living in documents with different
 readers.
 
-#### `keyScope` chooses how many key documents a domain has
+#### `keyScope` chooses how many key documents a domain has (**withdrawn**)
+
+**Withdrawn by ADR 026 §3.** There is one JWK per blob slot, in the content doc, so the
+choice disappears. The two reasons below survive as properties of that keying rather than
+of a scope setting: rotation is per blob, and because the salt is derived from (key,
+plaintext digest, framing), identical plaintext in two docs of different audiences does
+not produce identical representation digests. Within one doc, one JWK per blob slot keeps
+plaintext equality invisible there too.
 
 A domain's configuration carries:
 
@@ -822,6 +872,23 @@ store's garbage collector treats as roots, so they are sufficient to keep both
 the representation and the plaintext it is served from alive.
 
 #### Ordering, and the commit point
+
+**Amended by ADR 026 §2–§3.** With the JWK co-located there is no key document to stage
+or commit, so steps 2–4 collapse into the cipherBlob write, and the claim and its key are
+written in one Automerge transaction. Step 6 is gone: resolution is by naming convention
+inside the doc (§4 as amended), so nothing writes `Blob.urls`.
+
+```text
+1. §11 pass over P: compute C, install the virtual entry, register the pair
+2. write the JWK and cipherBlob facets into the content doc, in one
+   transaction: the claim and the key it resolves      <- commit point
+3. derive and write the pin for C
+```
+
+The remaining reasoning below is unchanged in substance: the representation is servable
+before anything points at it, a pin is written only after the representation is servable,
+and recovery is by re-derivation, because the §11 pass is deterministic. The registration
+sweep over the staging plane disappears with the staging plane.
 
 Cross-document steps cannot share an Automerge transaction, so order is the
 only atomicity available, and it has to be chosen so that every prefix of the
@@ -915,7 +982,18 @@ representations re-derive byte-identically and `register_pair` re-roots
 the pair, so even that window is self-healing as long as the re-encryption
 run happens before a GC collects the unrooted bytes.
 
-#### One worker per group, using the existing group machinery
+#### One worker per group, using the existing group machinery (**replaced**)
+
+**Replaced by ADR 026 §5, §7 and §9, and
+[ADR 025](025-cabinet-datum-predicates-and-polling.md).** Maintenance is per **drawer**,
+triggered by that drawer's `metaDoc/blobInventory` slot, and it observes through Cabinet's
+`PollDatums` with an `InDrawer { transitive: false }` predicate rather than through group
+parts. Roster joins and leaves arrive on the same cursor as datum changes, because the
+drawer projection is frontier-fed
+([ADR 024](024-indexes-are-fed-by-the-change-stream.md)). `WorkerGroupScope` and the
+group-part machinery stay for blob **partitions**, whose access mirrors the drawer's
+groups (ADR 001 §6 as amended); they are no longer the gate for which documents a worker
+reads.
 
 Maintenance is per group and reuses the existing worker scope and part worker
 templates:

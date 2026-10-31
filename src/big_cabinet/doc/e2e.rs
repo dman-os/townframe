@@ -27,6 +27,7 @@ use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::doc::ObservedDatum;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
@@ -140,7 +141,7 @@ impl Node {
         .await
         .unwrap();
         let datum_set = Arc::new(
-            DatumSetStore::new(sqlite_rs::test_support::db(&[]).unwrap().clone())
+            DatumSetStore::new(sqlite_rs::test_support::db(&[]).unwrap().clone(), schemas())
                 .await
                 .unwrap(),
         );

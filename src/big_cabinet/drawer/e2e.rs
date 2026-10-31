@@ -19,20 +19,19 @@ use big_cabinet_core::datum::DatumDecl;
 use big_cabinet_core::datum::Universe;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CreateDoc;
-use big_cabinet_core::doc::DatumObserved;
+use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumRefSelector;
-use big_cabinet_core::doc::DatumSelector;
-use big_cabinet_core::doc::ObserveDatums;
-use big_cabinet_core::doc::ObserveScope;
 use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::QueriedDatumRef;
 use big_cabinet_core::doc::QueryDatumRefs;
-use big_cabinet_core::doc::QueryDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::LayoutKind;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
@@ -41,7 +40,6 @@ use big_sync_core::keyed_frontier::FrontierEntry;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
-use futures::StreamExt;
 use secrets_rs::SecretStore;
 use serde_json::Value;
 use serde_json::json;
@@ -128,7 +126,6 @@ struct Node {
     datum_set: Arc<DatumSetStore>,
     datum_set_task: Option<tokio::task::JoinHandle<()>>,
     datum_ref: Arc<DatumRefStore>,
-    datum_ref_task: Option<tokio::task::JoinHandle<()>>,
     docs: Option<DocsRepo>,
     docs_stop: Option<StopToken>,
     drawers: Option<Drawers>,
@@ -189,7 +186,7 @@ impl Node {
         .await
         .unwrap();
         let sql = runtime.ephemeral(&[]).unwrap();
-        let datum_set = Arc::new(DatumSetStore::new(sql.clone()).await.unwrap());
+        let datum_set = Arc::new(DatumSetStore::new(sql.clone(), schemas()).await.unwrap());
         let datum_set_task = {
             let store = (*datum_set).clone();
             let repo = Arc::clone(&repo);
@@ -200,16 +197,8 @@ impl Node {
                     .unwrap();
             })
         };
+        // The edges the datum-set worker writes; it has no worker of its own.
         let datum_ref = Arc::new(DatumRefStore::new(sql.clone()).await.unwrap());
-        let datum_ref_task = {
-            let store = (*datum_ref).clone();
-            let repo = Arc::clone(&repo);
-            let schemas = schemas();
-            let datum_set = (*datum_set).clone();
-            tokio::spawn(async move {
-                store.run(repo, schemas, datum_set).await.unwrap();
-            })
-        };
         let mut node = Self {
             authority,
             authority_stop: Some(authority_stop),
@@ -223,7 +212,6 @@ impl Node {
             datum_set,
             datum_set_task: Some(datum_set_task),
             datum_ref,
-            datum_ref_task: Some(datum_ref_task),
             docs: None,
             docs_stop: None,
             drawers: None,
@@ -823,10 +811,6 @@ impl Node {
 
     async fn stop(mut self) {
         self.stop_services().await;
-        if let Some(task) = self.datum_ref_task.take() {
-            task.abort();
-            drop(task.await);
-        }
         if let Some(task) = self.datum_set_task.take() {
             task.abort();
             drop(task.await);

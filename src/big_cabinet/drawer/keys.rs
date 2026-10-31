@@ -10,6 +10,7 @@ use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerChildEntry;
 use big_cabinet_core::drawer::DrawerDocEntry;
+use big_cabinet_core::drawer::DrawerMetaDoc;
 use big_cabinet_core::drawer::DrawerRoster;
 use big_cabinet_core::drawer::GroupKey;
 use big_cabinet_core::drawer::KnownDrawerEntry;
@@ -27,6 +28,12 @@ pub(crate) fn known_entry_key(drawer_id: &DrawerId) -> DatumKey {
 
 pub(crate) fn roster_key() -> DatumKey {
     DatumKey::from_text(DrawerRoster::ID, "main").expect("the roster key is well formed")
+}
+
+/// The fixed slot a single-group drawer's metadata doc carries for one kind of metadata-class
+/// doc. `kind` comes from outside, so an invalid slot is a refusal rather than a panic.
+pub(crate) fn meta_doc_key(kind: &str) -> Result<DatumKey, big_cabinet_core::ReferenceError> {
+    DatumKey::from_text(DrawerMetaDoc::ID, kind)
 }
 
 pub(crate) fn doc_entry_key(doc: &DocId) -> DatumKey {

@@ -1,11 +1,120 @@
 use super::*;
+use crate::index::DatumRefQuery;
+use crate::index::DatumRefStore;
 use automerge::transaction::Transactable;
+use big_cabinet_core::datum::Bundle;
+use big_cabinet_core::datum::DatumDecl;
+use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::datum::Universe;
+use big_cabinet_core::dmeta::BranchPath;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
+use sqlite_rs::IntoValue;
+
+/// An empty schema repo: these tests project memberships, and a tag with no known schema
+/// declares no reference position, so nothing here extracts edges. The reference tests below
+/// build their own repo.
+fn schemas() -> Arc<SchemaRepo> {
+    Arc::new(SchemaRepo::open(Vec::new()).unwrap())
+}
+
+const NOTE: &str = "org.example.note";
 
 fn key(name: &str) -> DatumKey {
-    format!("org.example.note/{name}").parse().unwrap()
+    format!("{NOTE}/{name}").parse().unwrap()
+}
+
+/// A repo whose `org.example.note` declares a `reference` position: the settle, removal, and
+/// backfill paths extract and clear edges only for tags whose schema is known to declare one.
+fn ref_schemas() -> Arc<SchemaRepo> {
+    let lexicon = serde_json::json!({
+        "lexicon": 1,
+        "id": NOTE,
+        "defs": {"main": {"type": "record", "key": "tid", "record": {
+            "type": "object",
+            "required": ["value"],
+            "properties": {
+                "value": {"type": "string"},
+                "link": {"type": "string"}
+            }
+        }}}
+    });
+    let supplement = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "value": {"type": "string"},
+            "link": {"type": "string", "x-automerge": "reference"}
+        }
+    });
+    let universe = Universe {
+        datums: vec![DatumDecl {
+            id: NOTE.to_owned(),
+            name: "Note".to_owned(),
+            schema: schemars::Schema::try_from(supplement).unwrap(),
+            flags: Vec::new(),
+        }],
+        types: Vec::new(),
+    };
+    let bundle = Bundle::new(&universe, Vec::new());
+    Arc::new(
+        SchemaRepo::open([crate::schema::SchemaRegistrationGroup::new(
+            Some(bundle),
+            [crate::schema::SchemaRegistration::new(NOTE, lexicon)],
+            Vec::new(),
+        )])
+        .unwrap(),
+    )
+}
+
+fn ephemeral() -> Database {
+    sqlite_rs::SqliteRuntime::new(Default::default())
+        .ephemeral(&[])
+        .unwrap()
+}
+
+fn route(doc: u8, name: &str) -> DatumRoute {
+    DatumRoute {
+        doc_id: DocId::new([doc; 32]),
+        datum_key: key(name),
+    }
+}
+
+fn edge(origin: &DatumRoute, target: &DatumRoute) -> DatumRefEdge {
+    DatumRefEdge {
+        origin: origin.clone(),
+        path: "/link".to_owned(),
+        target: target.clone(),
+        ref_heads: vec![ChangeHash([7; 32])],
+    }
+}
+
+/// Put rows in the shared edge table directly: the removal and backfill paths must react to
+/// edges a previous projection wrote, however they got there.
+async fn seed_edges(sql: &Database, edges: &[DatumRefEdge]) {
+    for edge in edges {
+        Sql::new(
+            r#"INSERT INTO big_cabinet_datum_ref_edges (
+                   origin_doc
+                 , origin_datum
+                 , origin_path
+                 , target_doc
+                 , target_datum
+                 , ref_heads
+               ) VALUES "#,
+        )
+        .bind_list([
+            edge.origin.doc_id.to_string().into_value(),
+            edge.origin.datum_key.to_string().into_value(),
+            edge.path.clone().into_value(),
+            edge.target.doc_id.to_string().into_value(),
+            edge.target.datum_key.to_string().into_value(),
+            serde_json::to_vec(&edge.ref_heads).unwrap().into_value(),
+        ])
+        .execute(sql)
+        .await
+        .unwrap();
+    }
 }
 
 fn heads_clock(doc: &Automerge, heads: &[automerge::ChangeHash]) -> u64 {
@@ -61,6 +170,7 @@ fn project(doc: &Automerge, previous: Option<&DocState>, cursor: u64) -> Prepare
         previous: previous.cloned(),
         slots,
         replace_all,
+        ref_edges: BTreeMap::new(),
     }
 }
 
@@ -255,7 +365,7 @@ async fn key_query_returns_records_with_signature_clocks() {
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = DatumSetStore::new(sql).await.unwrap();
+    let store = DatumSetStore::new(sql, schemas()).await.unwrap();
     let (mut doc, _, first, _) = fixture();
     let initial = state(&doc, 1);
     store.settle(project(&doc, None, 1)).await.unwrap();
@@ -293,7 +403,7 @@ async fn selectors_and_document_batches_preserve_routes_and_filter_intersections
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = DatumSetStore::new(sql).await.unwrap();
+    let store = DatumSetStore::new(sql, schemas()).await.unwrap();
     let (doc, _, _, _) = fixture();
     let tag = DatumTag::new("org.example.note").unwrap();
     let first_id = DocId::new([1; 32]);
@@ -437,7 +547,7 @@ async fn settlements_are_atomic_idempotent_and_removals_preserve_tombstone_heads
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = DatumSetStore::new(sql.clone()).await.unwrap();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
     let (mut doc, datums, _, _) = fixture();
     let initial = state(&doc, 1);
     sql.execute_batch("CREATE TRIGGER reject_datum_set BEFORE INSERT ON big_cabinet_datum_set_docs BEGIN SELECT RAISE(ABORT, 'injected'); END")
@@ -485,7 +595,7 @@ async fn settlements_are_atomic_idempotent_and_removals_preserve_tombstone_heads
             })
         }]
     );
-    let reopened = DatumSetStore::new(sql).await.unwrap();
+    let reopened = DatumSetStore::new(sql, schemas()).await.unwrap();
     assert_eq!(
         reopened
             .query(DatumSetQuery::Doc(DocId::new([1; 32])))
@@ -505,6 +615,7 @@ async fn replacement_and_physical_removal_remove_all_old_routes_without_regressi
         sqlite_rs::SqliteRuntime::new(Default::default())
             .ephemeral(&[])
             .unwrap(),
+        schemas(),
     )
     .await
     .unwrap();
@@ -544,7 +655,7 @@ async fn projection_does_not_acquire_sync_demand() {
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = DatumSetStore::new(sql.clone()).await.unwrap();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
     let prepared = store
         .prepare(
             &repo,
@@ -718,6 +829,7 @@ async fn a_parked_doc_does_not_block_other_docs_and_newer_work_supersedes_it() {
         sqlite_rs::SqliteRuntime::new(Default::default())
             .ephemeral(&[])
             .unwrap(),
+        schemas(),
     )
     .await
     .unwrap();
@@ -814,7 +926,7 @@ async fn cooperative_stop_preserves_parked_work_and_replays_without_duplicate_ou
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = DatumSetStore::new(sql.clone()).await.unwrap();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let (worker_stop, worker_tasks) = start_script(
         store.clone(),
@@ -846,7 +958,7 @@ async fn cooperative_stop_preserves_parked_work_and_replays_without_duplicate_ou
     drop(sender);
     drop(store);
 
-    let store = DatumSetStore::new(sql).await.unwrap();
+    let store = DatumSetStore::new(sql, schemas()).await.unwrap();
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     sender.send(changed(&delayed_id, &delayed, 1)).unwrap();
     let delayed = repo
@@ -910,7 +1022,7 @@ async fn cooperative_stop_drains_an_inflight_preparation_before_acknowledging_it
     let sql = sqlite_rs::SqliteRuntime::new(config)
         .ephemeral(&[])
         .unwrap();
-    let store = DatumSetStore::new(sql.clone()).await.unwrap();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
     let doc_id = repo.allocate_id().await.unwrap();
     let (doc, _, _, _) = fixture();
     let event = changed(&doc_id, &doc, 1);
@@ -965,6 +1077,7 @@ async fn live_afw_projection_needs_no_docs_service_and_replays_without_duplicate
         sqlite_rs::SqliteRuntime::new(Default::default())
             .ephemeral(&[])
             .unwrap(),
+        schemas(),
     )
     .await
     .unwrap();
@@ -1037,4 +1150,742 @@ async fn live_afw_projection_needs_no_docs_service_and_replays_without_duplicate
     drop(handle);
     drop(repo);
     stop.stop().await.unwrap();
+}
+
+#[test]
+fn a_value_the_gate_does_not_accept_publishes_no_edges() {
+    let (mut doc, datums, _, _) = fixture();
+    // Give the unsigned datum a well-formed reference value: extraction is gated on the
+    // signatures covering the value, not on its shape.
+    let mut tx = doc.transaction();
+    let unsigned = tx
+        .put_object(&datums, key("b").to_string(), ObjType::Map)
+        .unwrap();
+    tx.put(&unsigned, "value", "text").unwrap();
+    tx.put(
+        &unsigned,
+        "link",
+        format!("db+datum:/{}/{NOTE}/main", DocId::new([2; 32])),
+    )
+    .unwrap();
+    tx.commit();
+    let repo = ref_schemas();
+    let schema = repo.resolve_for_read(NOTE).unwrap();
+    let heads = doc.get_heads();
+    let edges = edges_from(&mut doc, &route(1, "b"), &heads, schema.compiled()).unwrap();
+    assert!(edges.is_empty(), "{edges:?}");
+}
+
+#[tokio::test]
+async fn settle_replaces_the_edges_of_the_routes_it_scanned_and_keeps_the_rest() {
+    let sql = ephemeral();
+    let store = DatumSetStore::new(sql.clone(), ref_schemas())
+        .await
+        .unwrap();
+    let refs = DatumRefStore::new(sql.clone()).await.unwrap();
+    let (mut doc, _, first, _) = fixture();
+    let initial = state(&doc, 1);
+    let (a, b) = (route(1, "a"), route(1, "b"));
+    let target = route(2, "main");
+    let mut prepared = project(&doc, None, 1);
+    prepared.ref_edges = BTreeMap::from([
+        (a.clone(), vec![edge(&a, &target)]),
+        (b.clone(), vec![edge(&b, &target)]),
+    ]);
+    store.settle(prepared).await.unwrap();
+    assert_eq!(
+        refs.query(DatumRefQuery::Origin(a.clone())).await.unwrap(),
+        vec![edge(&a, &target)]
+    );
+    assert_eq!(
+        refs.query(DatumRefQuery::Origin(b.clone())).await.unwrap(),
+        vec![edge(&b, &target)]
+    );
+    // A later projection that only re-read `a` publishes its edges as empty and says nothing
+    // about `b`, whose stored edges must survive the settle.
+    let mut tx = doc.transaction();
+    tx.put(&first, "value", "changed").unwrap();
+    tx.commit();
+    let mut next = project(&doc, Some(&initial), 2);
+    next.ref_edges = BTreeMap::from([(a.clone(), Vec::new())]);
+    store.settle(next).await.unwrap();
+    assert!(
+        refs.query(DatumRefQuery::Origin(a))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let kept = vec![edge(&b, &target)];
+    assert_eq!(refs.query(DatumRefQuery::Origin(b)).await.unwrap(), kept);
+}
+
+#[tokio::test]
+async fn a_removed_datum_clears_its_edges_only_when_its_tag_declares_references() {
+    let (a, target) = (route(1, "a"), route(2, "main"));
+    for declares_references in [true, false] {
+        let sql = ephemeral();
+        let schemas = if declares_references {
+            ref_schemas()
+        } else {
+            schemas()
+        };
+        let store = DatumSetStore::new(sql.clone(), schemas).await.unwrap();
+        seed_edges(&sql, &[edge(&a, &target)]).await;
+        let (mut doc, datums, _, _) = fixture();
+        let initial = state(&doc, 1);
+        store.settle(project(&doc, None, 1)).await.unwrap();
+        let mut tx = doc.transaction();
+        tx.delete(&datums, key("a").to_string()).unwrap();
+        tx.commit();
+        store
+            .settle(project(&doc, Some(&initial), 2))
+            .await
+            .unwrap();
+        let refs = DatumRefStore::new(sql.clone()).await.unwrap();
+        let remaining = refs.query(DatumRefQuery::Origin(a.clone())).await.unwrap();
+        assert_eq!(
+            remaining.is_empty(),
+            declares_references,
+            "declares_references={declares_references}: {remaining:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn backfill_records_a_tag_only_once_every_stored_document_was_readable() {
+    let (document, _, _, _) = fixture();
+    let prepared = project(&document, None, 1);
+    let (_directory, repo, stop, doc_id) =
+        crate::index::test_support::reopen_document(document).await;
+    let sql = ephemeral();
+    let store = DatumSetStore::new(sql.clone(), ref_schemas())
+        .await
+        .unwrap();
+    store
+        .settle(Prepared {
+            work: Work {
+                doc_id: doc_id.clone(),
+                ..prepared.work
+            },
+            ..prepared
+        })
+        .await
+        .unwrap();
+    store
+        .backfill_reference_tags(&repo, NonZeroUsize::new(2).unwrap())
+        .await
+        .unwrap();
+    // The repo also always knows the core `BranchPath` datum, whose `from` position declares a
+    // reference: it has no stored entries here, so it is trivially complete and seen too.
+    let mut expected = [NOTE.to_owned(), BranchPath::ID.to_owned()];
+    expected.sort();
+    let mut seen = queries::ref_tags(&sql).await.unwrap();
+    seen.sort();
+    assert_eq!(seen, expected);
+    // A second pass finds the tags seen and does no work.
+    store
+        .backfill_reference_tags(&repo, NonZeroUsize::new(2).unwrap())
+        .await
+        .unwrap();
+    let mut seen = queries::ref_tags(&sql).await.unwrap();
+    seen.sort();
+    assert_eq!(seen, expected);
+    stop.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn backfill_leaves_a_tag_unseen_while_a_stored_document_is_not_local() {
+    let sql = ephemeral();
+    let store = DatumSetStore::new(sql.clone(), ref_schemas())
+        .await
+        .unwrap();
+    let (document, _, _, _) = fixture();
+    // Settled under DocId([1; 32]), which no repo below ever holds.
+    store.settle(project(&document, None, 1)).await.unwrap();
+    let (elsewhere, _, _, _) = fixture();
+    let (_directory, repo, stop, _doc_id) =
+        crate::index::test_support::reopen_document(elsewhere).await;
+    store
+        .backfill_reference_tags(&repo, NonZeroUsize::new(2).unwrap())
+        .await
+        .unwrap();
+    assert!(queries::ref_tags(&sql).await.unwrap().is_empty());
+    stop.stop().await.unwrap();
+}
+
+fn doc(byte: u8) -> DocId {
+    DocId::new([byte; 32])
+}
+
+fn key_in(tag: &str, slot: &str) -> DatumKey {
+    DatumKey::from_text(tag, slot).unwrap()
+}
+
+fn tag(name: &str) -> DatumTag {
+    DatumTag::new(name).unwrap()
+}
+
+/// Insert one live entry directly: predicate selection only reads the route columns, so the heads
+/// and clock do not matter to it.
+async fn seed_entry(sql: &Database, route: &DatumRoute) {
+    Sql::new(
+        r#"INSERT INTO big_cabinet_datum_set_entries (
+               doc_id
+             , datum_key
+             , datum_tag
+             , doc_heads
+             , datum_heads
+             , clock
+           ) VALUES "#,
+    )
+    .bind_list([
+        route.doc_id.to_string().into_value(),
+        route.datum_key.to_string().into_value(),
+        route.datum_key.tag().to_string().into_value(),
+        b"[]".to_vec().into_value(),
+        b"[]".to_vec().into_value(),
+        0i64.into_value(),
+    ])
+    .execute(sql)
+    .await
+    .unwrap();
+}
+
+async fn seed_drawers(sql: &Database) {
+    sql.execute_batch(include_str!(
+        "../../drawer/sqlite/migrations/001_drawers.sql"
+    ))
+    .await
+    .unwrap();
+}
+
+async fn seed_drawer(sql: &Database, drawer: &DocId, layout: &str) {
+    Sql::new("INSERT INTO big_cabinet_drawers (drawer_id, descriptor_json) VALUES ")
+        .bind_list([
+            drawer.to_string().into_value(),
+            serde_json::json!({ "layout": { "$type": layout } })
+                .to_string()
+                .into_value(),
+        ])
+        .execute(sql)
+        .await
+        .unwrap();
+}
+
+async fn seed_drawer_doc(sql: &Database, drawer: &DocId, doc: &DocId, access: &str) {
+    Sql::new("INSERT INTO big_cabinet_drawer_docs (drawer_id, doc_id, access) VALUES ")
+        .bind_list([
+            drawer.to_string().into_value(),
+            doc.to_string().into_value(),
+            access.to_owned().into_value(),
+        ])
+        .execute(sql)
+        .await
+        .unwrap();
+}
+
+async fn seed_drawer_child(sql: &Database, parent: &DocId, child: &DocId, access: &str) {
+    Sql::new("INSERT INTO big_cabinet_drawer_children (parent_id, child_id, access) VALUES ")
+        .bind_list([
+            parent.to_string().into_value(),
+            child.to_string().into_value(),
+            access.to_owned().into_value(),
+        ])
+        .execute(sql)
+        .await
+        .unwrap();
+}
+
+fn routes(records: Vec<DatumRecord>) -> Vec<(DocId, DatumKey)> {
+    records
+        .into_iter()
+        .map(|record| (record.route.doc_id, record.route.datum_key))
+        .collect()
+}
+
+#[tokio::test]
+async fn predicate_clauses_select_documents_and_return_every_live_route_of_them() {
+    let sql = ephemeral();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
+    let first = doc(1);
+    let second = doc(2);
+    let third = doc(3);
+    let blob = tag("org.example.blob");
+    for route in [
+        DatumRoute {
+            doc_id: first.clone(),
+            datum_key: key("a"),
+        },
+        DatumRoute {
+            doc_id: first.clone(),
+            datum_key: key("b"),
+        },
+        DatumRoute {
+            doc_id: second.clone(),
+            datum_key: key("a"),
+        },
+        DatumRoute {
+            doc_id: third.clone(),
+            datum_key: key_in(blob.as_str(), "main"),
+        },
+    ] {
+        seed_entry(&sql, &route).await;
+    }
+    assert_eq!(
+        routes(
+            store
+                .query_predicate(&Predicate::HasTag { tag: tag(NOTE) })
+                .await
+                .unwrap()
+        ),
+        vec![
+            (first.clone(), key("a")),
+            (first.clone(), key("b")),
+            (second.clone(), key("a")),
+        ]
+    );
+    assert_eq!(
+        routes(
+            store
+                .query_predicate(&Predicate::HasKey { key: key("a") })
+                .await
+                .unwrap()
+        ),
+        vec![
+            (first.clone(), key("a")),
+            (first.clone(), key("b")),
+            (second.clone(), key("a")),
+        ]
+    );
+    assert_eq!(
+        routes(
+            store
+                .query_predicate(&Predicate::IsDoc {
+                    doc_id: third.clone(),
+                })
+                .await
+                .unwrap()
+        ),
+        vec![(third.clone(), key_in(blob.as_str(), "main"))]
+    );
+    assert_eq!(
+        routes(
+            store
+                .query_predicate(&Predicate::And {
+                    clauses: vec![
+                        Predicate::HasTag { tag: tag(NOTE) },
+                        Predicate::HasKey { key: key("b") },
+                    ],
+                })
+                .await
+                .unwrap()
+        ),
+        vec![(first.clone(), key("a")), (first.clone(), key("b"))]
+    );
+    assert_eq!(
+        routes(
+            store
+                .query_predicate(&Predicate::Or {
+                    clauses: vec![
+                        Predicate::IsDoc {
+                            doc_id: third.clone(),
+                        },
+                        Predicate::HasKey { key: key("a") },
+                    ],
+                })
+                .await
+                .unwrap()
+        ),
+        vec![
+            (first.clone(), key("a")),
+            (first.clone(), key("b")),
+            (second.clone(), key("a")),
+            (third.clone(), key_in(blob.as_str(), "main")),
+        ]
+    );
+    assert_eq!(
+        routes(
+            store
+                .query_predicate(&Predicate::Not {
+                    inner: Box::new(Predicate::HasTag { tag: tag(NOTE) }),
+                })
+                .await
+                .unwrap()
+        ),
+        vec![(third.clone(), key_in(blob.as_str(), "main"))]
+    );
+    assert_eq!(
+        routes(
+            store
+                .query_predicate(&Predicate::And {
+                    clauses: Vec::new()
+                })
+                .await
+                .unwrap()
+        )
+        .len(),
+        4
+    );
+    assert!(
+        store
+            .query_predicate(&Predicate::Or {
+                clauses: Vec::new()
+            })
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn matching_docs_bounds_the_predicate_to_its_candidates_without_needing_entries() {
+    let sql = ephemeral();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
+    let first = doc(1);
+    let second = doc(2);
+    let third = doc(3);
+    let blob_doc = doc(4);
+    let absent = doc(9);
+    let blob = tag("org.example.blob");
+    for route in [
+        DatumRoute {
+            doc_id: first.clone(),
+            datum_key: key("a"),
+        },
+        DatumRoute {
+            doc_id: first.clone(),
+            datum_key: key("b"),
+        },
+        DatumRoute {
+            doc_id: second.clone(),
+            datum_key: key("a"),
+        },
+        DatumRoute {
+            doc_id: blob_doc.clone(),
+            datum_key: key_in(blob.as_str(), "main"),
+        },
+    ] {
+        seed_entry(&sql, &route).await;
+    }
+    let candidates = BTreeSet::from([
+        first.clone(),
+        second.clone(),
+        third.clone(),
+        blob_doc.clone(),
+        absent,
+    ]);
+    assert_eq!(
+        store
+            .matching_docs(&Predicate::HasTag { tag: tag(NOTE) }, &candidates)
+            .await
+            .unwrap(),
+        BTreeSet::from([first.clone(), second.clone()])
+    );
+    assert_eq!(
+        store
+            .matching_docs(&Predicate::IsDoc { doc_id: doc(9) }, &candidates)
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(9)])
+    );
+    assert!(
+        store
+            .matching_docs(&Predicate::IsDoc { doc_id: doc(7) }, &candidates)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::Not {
+                    inner: Box::new(Predicate::HasTag { tag: tag(NOTE) }),
+                },
+                &candidates,
+            )
+            .await
+            .unwrap(),
+        BTreeSet::from([third, blob_doc, doc(9)])
+    );
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::And {
+                    clauses: vec![
+                        Predicate::HasTag { tag: tag(NOTE) },
+                        Predicate::HasKey { key: key("b") },
+                    ],
+                },
+                &candidates,
+            )
+            .await
+            .unwrap(),
+        BTreeSet::from([first])
+    );
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::And {
+                    clauses: Vec::new()
+                },
+                &candidates
+            )
+            .await
+            .unwrap(),
+        candidates
+    );
+    assert!(
+        store
+            .matching_docs(
+                &Predicate::Or {
+                    clauses: Vec::new()
+                },
+                &candidates
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .matching_docs(&Predicate::HasTag { tag: tag(NOTE) }, &BTreeSet::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn in_drawer_follows_the_reach_cte_with_and_without_transitivity() {
+    let sql = ephemeral();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
+    seed_drawers(&sql).await;
+    let root = doc(10);
+    let child = doc(11);
+    let self_doc = doc(12);
+    seed_drawer(&sql, &root, "org.example.daybook.drawer.singleGroup").await;
+    seed_drawer(&sql, &child, "org.example.daybook.drawer.singleGroup").await;
+    seed_drawer(&sql, &self_doc, "org.example.daybook.drawer.selfDoc").await;
+    seed_drawer_child(&sql, &root, &child, "Write").await;
+    for (doc_id, access) in [
+        (doc(1), "Read"),
+        (doc(2), "Write"),
+        (doc(3), "Relay"),
+        (doc(4), "Write"),
+        (doc(5), "Read"),
+    ] {
+        seed_drawer_doc(
+            &sql,
+            if doc_id == doc(4) || doc_id == doc(5) {
+                &child
+            } else {
+                &root
+            },
+            &doc_id,
+            access,
+        )
+        .await;
+    }
+    for doc_id in [doc(1), doc(4)] {
+        seed_entry(
+            &sql,
+            &DatumRoute {
+                doc_id,
+                datum_key: key("a"),
+            },
+        )
+        .await;
+    }
+    let candidates = BTreeSet::from([doc(1), doc(2), doc(3), doc(4), doc(5), doc(12), doc(99)]);
+    let in_drawer = |drawer_id: DocId, transitive: bool, at_least| Predicate::InDrawer {
+        drawer_id,
+        transitive,
+        at_least,
+    };
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::InDrawer {
+                    drawer_id: root.clone(),
+                    transitive: true,
+                    at_least: DrawerAccess::Read,
+                },
+                &candidates,
+            )
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(1), doc(2), doc(4), doc(5)])
+    );
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::InDrawer {
+                    drawer_id: root.clone(),
+                    transitive: false,
+                    at_least: DrawerAccess::Read,
+                },
+                &candidates,
+            )
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(1), doc(2)])
+    );
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::InDrawer {
+                    drawer_id: root.clone(),
+                    transitive: true,
+                    at_least: DrawerAccess::Write,
+                },
+                &candidates,
+            )
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(2), doc(4)])
+    );
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::InDrawer {
+                    drawer_id: child.clone(),
+                    transitive: false,
+                    at_least: DrawerAccess::Read,
+                },
+                &candidates,
+            )
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(4), doc(5)])
+    );
+    // A `selfDoc` drawer reaches its own document, which need not carry an entry.
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::InDrawer {
+                    drawer_id: self_doc.clone(),
+                    transitive: false,
+                    at_least: DrawerAccess::Read,
+                },
+                &candidates,
+            )
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(12)])
+    );
+    // The blob-worker shape: intersect the drawer anchor with a tag.
+    assert_eq!(
+        routes(
+            store
+                .query_predicate(&Predicate::And {
+                    clauses: vec![
+                        in_drawer(root.clone(), true, DrawerAccess::Read),
+                        Predicate::HasTag { tag: tag(NOTE) },
+                    ],
+                })
+                .await
+                .unwrap()
+        ),
+        vec![(doc(1), key("a")), (doc(4), key("a"))]
+    );
+    assert_eq!(
+        store
+            .matching_docs(
+                &Predicate::And {
+                    clauses: vec![
+                        Predicate::InDrawer {
+                            drawer_id: root,
+                            transitive: false,
+                            at_least: DrawerAccess::Read,
+                        },
+                        Predicate::Not {
+                            inner: Box::new(Predicate::HasKey { key: key("a") }),
+                        },
+                    ],
+                },
+                &candidates,
+            )
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(2)])
+    );
+}
+
+#[tokio::test]
+async fn has_reference_to_joins_the_edge_table_to_the_targets_entry_row() {
+    let sql = ephemeral();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
+    let note = tag(NOTE);
+    let cipher = tag("org.example.cipherBlob");
+    let origin = DatumRoute {
+        doc_id: doc(1),
+        datum_key: key("a"),
+    };
+    let target = DatumRoute {
+        doc_id: doc(2),
+        datum_key: key_in(cipher.as_str(), "main"),
+    };
+    let other_target = DatumRoute {
+        doc_id: doc(3),
+        datum_key: key_in(cipher.as_str(), "other"),
+    };
+    seed_entry(&sql, &origin).await;
+    seed_entry(&sql, &target).await;
+    seed_entry(&sql, &other_target).await;
+    seed_edges(
+        &sql,
+        &[edge(&origin, &target), edge(&origin, &other_target)],
+    )
+    .await;
+    let candidates = BTreeSet::from([doc(1), doc(2), doc(3)]);
+    let reference_to = |target_doc| Predicate::HasReferenceTo {
+        target_tag: cipher.clone(),
+        target_doc,
+    };
+    assert_eq!(
+        store
+            .matching_docs(&reference_to(None), &candidates)
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(1)])
+    );
+    assert_eq!(
+        store
+            .matching_docs(&reference_to(Some(doc(2))), &candidates)
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(1)])
+    );
+    assert_eq!(
+        store
+            .matching_docs(&reference_to(Some(doc(3))), &candidates)
+            .await
+            .unwrap(),
+        BTreeSet::from([doc(1)])
+    );
+    assert!(
+        store
+            .matching_docs(&reference_to(Some(doc(9))), &candidates)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The target's entry row supplies the tag; without one matching `note`, no origin matches.
+    assert!(
+        store
+            .matching_docs(
+                &Predicate::HasReferenceTo {
+                    target_tag: note,
+                    target_doc: None,
+                },
+                &candidates,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        routes(store.query_predicate(&reference_to(None)).await.unwrap()),
+        vec![(doc(1), key("a"))]
+    );
 }

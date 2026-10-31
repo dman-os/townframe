@@ -1,0 +1,49 @@
+[package]
+name = "big_blobs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+big_blobs_core = { path = "../big_blobs_core" }
+big_cabinet = { path = "../big_cabinet" }
+big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+big_repo.workspace = true
+big_sync.workspace = true
+big_sync_core.workspace = true
+service_utils_rs.workspace = true
+sqlite_rs.workspace = true
+utils_rs = { workspace = true, features = ["hash"] }
+async-trait.workspace = true
+automerge.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+rand.workspace = true
+bytes.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
+tokio-util.workspace = true
+tracing.workspace = true
+iroh.workspace = true
+iroh-blobs.workspace = true
+bao-tree.workspace = true
+aes-gcm.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+data-encoding.workspace = true
+irpc.workspace = true
+surelock.workspace = true
+fs4.workspace = true
+url.workspace = true
+ed25519-dalek.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
