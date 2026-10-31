@@ -193,77 +193,101 @@ pub struct Declaration {
 /// edge crosses it because address spaces are separate — but the micro owns *which* declared rows
 /// it accepts, which is how a toolbar can list buttons without the host knowing what a toolbar is
 /// (ADR 014 §Composition and lifecycle).
+///
+/// Every operation is checked against the incarnation that received this handle: once that
+/// incarnation closes, a retained clone (a UI hook, a spawned task) gets `Revoked` instead of
+/// reading or writing on behalf of a successor.
 #[derive(Clone)]
 pub struct CompositionBroker {
-    instance: String,
+    host: Host,
+    instance: Instance,
+    name: String,
     providers: Rc<RefCell<BTreeMap<MicroId, Rc<dyn MicroProvider>>>>,
-    instances: Rc<RefCell<BTreeMap<String, MicroId>>>,
+    desired: Rc<RefCell<BTreeMap<String, ConfiguredMicro>>>,
     policy: Rc<RefCell<self::composition::CompositionPolicy>>,
     changes: tokio::sync::watch::Sender<()>,
 }
 
 impl CompositionBroker {
-    /// Every declared contribution to `contract`, in configured-instance order. Payloads are the
-    /// contributor's semantic data; nothing here activates the contributor.
-    pub fn declarations(&self, contract: &str) -> Vec<Declaration> {
+    /// Every declared contribution to `contract` addressed to this instance — the contributor's
+    /// configured binding for that contract names it — in configured-instance order. Payloads are
+    /// the contributor's semantic data; nothing here activates the contributor.
+    pub fn declarations(&self, contract: &str) -> Result<Vec<Declaration>, AccessError> {
+        self.host.check(&self.instance)?;
         let providers = self.providers.borrow();
-        self.instances
+        let registry: BTreeMap<_, _> = providers
+            .iter()
+            .map(|(id, provider)| (id.clone(), provider.contributions()))
+            .collect();
+        Ok(self
+            .desired
             .borrow()
             .iter()
-            .filter_map(|(instance, provider)| {
-                let payloads = providers.get(provider)?.contributions();
-                payloads
-                    .into_iter()
+            .filter(|(_, entry)| {
+                composition::contributes_to(&registry, entry, contract, &self.name)
+            })
+            .filter_map(|(instance, entry)| {
+                registry[&entry.provider]
+                    .iter()
                     .find(|contribution| contribution.provision == contract)
                     .map(|contribution| Declaration {
                         instance: instance.clone(),
                         contract: contract.to_owned(),
-                        payload: contribution.payload,
+                        payload: contribution.payload.clone(),
                     })
             })
-            .collect()
+            .collect())
     }
 
     /// The rows this instance currently accepts: contributor instance -> contract.
-    pub fn accepted(&self) -> BTreeMap<String, String> {
-        self.policy
+    pub fn accepted(&self) -> Result<BTreeMap<String, String>, AccessError> {
+        self.host.check(&self.instance)?;
+        Ok(self
+            .policy
             .borrow()
             .demand
-            .get(&self.instance)
+            .get(&self.name)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     /// Replace this instance's accepted rows. Accepting a declared row keeps its contributor
-    /// live; withdrawing the last one evicts it. Rows for undeclared contributions are rejected
-    /// by the next reconciliation as a configuration error rather than silently ignored.
-    pub fn accept(&self, rows: BTreeMap<String, String>) {
+    /// live; withdrawing the last one evicts it. Rows for undeclared or unaddressed contributions
+    /// are rejected by the next reconciliation as a configuration error rather than ignored.
+    pub fn accept(&self, rows: BTreeMap<String, String>) -> Result<(), AccessError> {
+        self.host.check(&self.instance)?;
         {
             let mut policy = self.policy.borrow_mut();
             if rows.is_empty() {
-                policy.demand.remove(&self.instance);
+                policy.demand.remove(&self.name);
             } else {
-                policy.demand.insert(self.instance.clone(), rows);
+                policy.demand.insert(self.name.clone(), rows);
             }
         }
-        // Same wake the shell's `set_policy` uses: the driver re-evaluates liveness.
+        // Same wake the shell's root edits use: the driver re-evaluates liveness.
         self.changes.send_replace(());
+        Ok(())
     }
 
-    /// Accept every declared contribution to `contracts` from now on, including rows declared
-    /// after this call. A standing rule, so a shell micro lists a growing registry without being
-    /// re-activated for each new contributor.
-    pub fn accept_all(&self, contracts: impl IntoIterator<Item = String>) {
+    /// Accept every declared contribution to `contracts` addressed to this instance from now on,
+    /// including rows declared after this call. A standing rule, so a shell micro lists a growing
+    /// registry without being re-activated for each new contributor.
+    pub fn accept_all(
+        &self,
+        contracts: impl IntoIterator<Item = String>,
+    ) -> Result<(), AccessError> {
+        self.host.check(&self.instance)?;
         let contracts: std::collections::BTreeSet<String> = contracts.into_iter().collect();
         {
             let mut policy = self.policy.borrow_mut();
             if contracts.is_empty() {
-                policy.accept_all.remove(&self.instance);
+                policy.accept_all.remove(&self.name);
             } else {
-                policy.accept_all.insert(self.instance.clone(), contracts);
+                policy.accept_all.insert(self.name.clone(), contracts);
             }
         }
         self.changes.send_replace(());
+        Ok(())
     }
 }
 
@@ -527,7 +551,7 @@ impl From<ActivationError> for MicroRegistryError {
 /// discover arbitrary interfaces: activation names bindings for the provider's declared requirements.
 pub struct MicroRegistry {
     providers: Rc<RefCell<BTreeMap<MicroId, Rc<dyn MicroProvider>>>>,
-    instances: Rc<RefCell<BTreeMap<String, MicroId>>>,
+    desired: Rc<RefCell<BTreeMap<String, ConfiguredMicro>>>,
     policy: Rc<RefCell<self::composition::CompositionPolicy>>,
     live: provisions::Provisions,
     changes: watch::Sender<()>,
@@ -548,7 +572,7 @@ impl MicroRegistry {
         let (owned_futures, incoming) = tokio::sync::mpsc::unbounded_channel();
         Self {
             providers: Rc::default(),
-            instances: Rc::default(),
+            desired: Rc::default(),
             policy: Rc::default(),
             live: provisions::Provisions::default(),
             changes: watch::channel(()).0,
@@ -567,7 +591,7 @@ impl Clone for MicroRegistry {
     fn clone(&self) -> Self {
         Self {
             providers: self.providers.clone(),
-            instances: self.instances.clone(),
+            desired: self.desired.clone(),
             policy: self.policy.clone(),
             live: self.live.clone(),
             changes: self.changes.clone(),
@@ -689,19 +713,25 @@ impl MicroRegistry {
         Ok(())
     }
 
-    /// Shared liveness authority. The application writes it; activations read and change only
-    /// their own accepted rows through [`CompositionBroker`].
+    /// Shared liveness authority. The application sets roots; activations read and change only
+    /// their own accepted rows through [`CompositionBroker`]; the reconciler drops rows whose
+    /// incarnation ended.
     pub(crate) fn policy(&self) -> Rc<RefCell<self::composition::CompositionPolicy>> {
         self.policy.clone()
     }
 
-    /// Project the desired configuration onto instance -> provider so activations can resolve a
-    /// declaration to the configured instance that offers it.
-    pub(crate) fn project_instances(&self, desired: &BTreeMap<String, ConfiguredMicro>) {
-        *self.instances.borrow_mut() = desired
-            .iter()
-            .map(|(name, configuration)| (name.clone(), configuration.provider.clone()))
-            .collect();
+    /// Drop every acceptance whose consumer has no incarnation. Called by the reconciler once per
+    /// pass with the set of instances that are active or activating.
+    pub(crate) fn retain_acceptance(&self, has_incarnation: impl Fn(&str) -> bool) {
+        let mut policy = self.policy.borrow_mut();
+        policy.demand.retain(|name, _| has_incarnation(name));
+        policy.accept_all.retain(|name, _| has_incarnation(name));
+    }
+
+    /// Publish the desired configuration so activations can resolve a declaration to the
+    /// configured instance that offers it and to the consumer it is bound to.
+    pub(crate) fn project_desired(&self, desired: &BTreeMap<String, ConfiguredMicro>) {
+        *self.desired.borrow_mut() = desired.clone();
     }
 
     /// Static declaration registry, keyed by provider id. No activation required.
@@ -816,9 +846,11 @@ impl MicroRegistry {
             documents: self.documents.clone(),
             owned_futures: self.owned_futures.clone(),
             broker: CompositionBroker {
-                instance: instance_name,
+                host: host.clone(),
+                instance: instance.clone(),
+                name: instance_name,
                 providers: self.providers.clone(),
-                instances: self.instances.clone(),
+                desired: self.desired.clone(),
                 policy: self.policy.clone(),
                 changes: self.changes.clone(),
             },

@@ -16,6 +16,7 @@ use crate::micros::composition::ConfigurationSnapshot;
 use crate::micros::composition::ConfigurationSource;
 use crate::micros::composition::ConfigurationWatch;
 use crate::micros::composition::ConfiguredMicro;
+use crate::micros::composition::EagerRoots;
 use crate::micros::composition::Enablement;
 use crate::micros::composition::InstanceState;
 use clay_host::CollectionReader;
@@ -90,7 +91,6 @@ pub struct ApplicationRuntime<R: RendererRegistry> {
     providers: MicroRegistry,
     documents: clay_docs::DocumentService,
     composition: Rc<RefCell<Option<Composition>>>,
-    policy_explicit: Rc<Cell<bool>>,
     configuration: Rc<RefCell<Configuration>>,
     events: tokio::sync::watch::Sender<()>,
     reports: tokio::sync::watch::Sender<Report>,
@@ -119,7 +119,6 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
             providers: MicroRegistry::new(documents.clone()),
             documents,
             composition: Rc::new(RefCell::new(Some(Composition::default()))),
-            policy_explicit: Rc::default(),
             configuration: Rc::default(),
             events: tokio::sync::watch::channel(()).0,
             reports: tokio::sync::watch::channel(Ok(BTreeMap::new())).0,
@@ -291,28 +290,15 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
                 }
             }
         }
-        Composition::validate(&self.providers, desired, &self.effective_policy(desired))
+        Composition::validate(&self.providers, desired)
     }
 
-    /// Liveness authority, separate from installation configuration. Eager roots are the only
-    /// explicit start; demand rows are accepted static contributions. Changing either wakes the
-    /// driver, which activates newly live instances and evicts newly idle ones.
-    /// Until a composition root sets a policy, every enabled entry is an eager root. That keeps
-    /// locked-down/static compositions behaving as before; malleable shells opt into demand.
-    fn effective_policy(&self, desired: &BTreeMap<String, ConfiguredMicro>) -> CompositionPolicy {
-        if self.policy_explicit.get() {
-            return self.providers.policy().borrow().clone();
-        }
-        CompositionPolicy {
-            eager: desired.keys().cloned().collect(),
-            demand: BTreeMap::new(),
-            accept_all: BTreeMap::new(),
-        }
-    }
-
-    pub fn set_policy(&self, policy: CompositionPolicy) {
-        self.policy_explicit.set(true);
-        *self.providers.policy().borrow_mut() = policy;
+    /// Which instances start without a binding. The default, `EagerRoots::AllEnabled`, is
+    /// availability-driven start; a shell that wants demand activation names its roots. Accepted
+    /// contributions are not set here: they belong to the consumer micro's own incarnation
+    /// (`CompositionBroker`), which is why a root cannot pre-accept on a micro's behalf.
+    pub fn set_eager_roots(&self, roots: EagerRoots) {
+        self.providers.policy().borrow_mut().eager = roots;
         let mut configuration = self.configuration.borrow_mut();
         configuration.revision += 1;
         configuration.settled = None;
@@ -330,24 +316,6 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
 
     pub fn policy(&self) -> CompositionPolicy {
         self.providers.policy().borrow().clone()
-    }
-
-    pub fn set_eager_roots(&self, roots: BTreeSet<String>) {
-        let mut policy = self.policy();
-        policy.eager = roots;
-        self.set_policy(policy);
-    }
-
-    /// Accept or withdraw a static contribution on behalf of a consumer micro. Withdrawing the
-    /// last reason to run evicts the contributor; its declaration remains in the registry.
-    pub fn set_demand(&self, consumer: &str, rows: BTreeMap<String, String>) {
-        let mut policy = self.policy();
-        if rows.is_empty() {
-            policy.demand.remove(consumer);
-        } else {
-            policy.demand.insert(consumer.to_owned(), rows);
-        }
-        self.set_policy(policy);
     }
 
     fn accept_snapshot(
@@ -402,7 +370,7 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
         }
         let projected = configuration.desired.clone();
         drop(configuration);
-        self.providers.project_instances(&projected);
+        self.providers.project_desired(&projected);
         self.events.send_replace(());
     }
 
@@ -433,7 +401,7 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
             configuration.revision
         };
         let projected = self.configuration.borrow().desired.clone();
-        self.providers.project_instances(&projected);
+        self.providers.project_desired(&projected);
         self.events.send_replace(());
         self.wait_revision(revision).await
     }
@@ -617,7 +585,6 @@ impl<R: RendererRegistry> Driver<'_, R> {
                 &self.application.host,
                 &self.application.providers,
                 &desired,
-                &self.application.effective_policy(&desired),
             );
             let report = match error {
                 Some(error) => Err(error),

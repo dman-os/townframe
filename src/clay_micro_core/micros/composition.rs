@@ -42,15 +42,39 @@ pub struct ConfiguredMicro {
 /// this decides whether an instance exists. Eager roots are the only explicit start. `demand`
 /// maps consumer instance -> accepted registry rows (contributor instance -> contract); it is the
 /// host-visible form of a shell micro's "which of my declared contributions do I show" decision.
+///
+/// `demand` and `accept_all` are owned by the consumer incarnation that wrote them (through its
+/// [`super::CompositionBroker`]) and are dropped by the reconciler when that incarnation ends for
+/// any reason, so a failed activation or a faulted consumer never keeps contributors alive.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompositionPolicy {
-    pub eager: BTreeSet<String>,
+    pub eager: EagerRoots,
     pub demand: BTreeMap<String, BTreeMap<String, String>>,
     /// Contracts a consumer accepts in full, keyed by consumer instance. Unlike `demand`, which
     /// names individual contributors, this is a standing rule: every currently or later declared
     /// contribution to that contract is accepted. A toolbar that lists every registered button
     /// says it once here; a toolbar that hides and reorders some uses `demand`.
     pub accept_all: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Which configured instances start without anything binding them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum EagerRoots {
+    /// Every enabled instance is a root: availability-driven start, the mode a locked-down or
+    /// static composition wants and the default until a shell opts into demand.
+    #[default]
+    AllEnabled,
+    /// Only the named instances; everything else runs because a live binding reaches it.
+    Named(BTreeSet<String>),
+}
+
+impl EagerRoots {
+    fn contains(&self, name: &str) -> bool {
+        match self {
+            Self::AllEnabled => true,
+            Self::Named(roots) => roots.contains(name),
+        }
+    }
 }
 
 /// Observable result of a reconciliation, not a promise that a declaration is a live provision.
@@ -486,7 +510,6 @@ impl Composition {
     pub fn validate(
         registry: &MicroRegistry,
         desired: &BTreeMap<String, ConfiguredMicro>,
-        policy: &CompositionPolicy,
     ) -> Result<(), ConfigurationError> {
         let definitions = registry
             .descriptors()
@@ -496,7 +519,7 @@ impl Composition {
         live_instances(
             &definitions,
             desired,
-            policy,
+            &registry.policy().borrow(),
             &registry.contribution_registry(),
         )?;
         Ok(())
@@ -536,24 +559,35 @@ impl Composition {
         self.pending.is_empty() && self.closing.is_empty()
     }
 
-    pub fn update(
-        &mut self,
-        host: &Host,
-        registry: &MicroRegistry,
-        desired: &BTreeMap<String, ConfiguredMicro>,
-        policy: &CompositionPolicy,
-    ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
-        let definitions: BTreeMap<_, _> = registry
-            .descriptors()
-            .map(|descriptor| (descriptor.id.clone(), descriptor))
-            .collect();
-        let order = activation_order(&definitions, desired)?;
-        let live = live_instances(
-            &definitions,
-            desired,
-            policy,
-            &registry.contribution_registry(),
-        )?;
+    /// Incarnation bookkeeping that does not depend on liveness: fold closings that finished,
+    /// drop actives/pendings whose instance ended (a `Requested` close while still desired is a
+    /// fault), and end incarnations whose configuration changed. Runs before liveness is computed
+    /// so that nothing a dead incarnation wrote can influence this pass.
+    fn fold_ended_incarnations(&mut self, desired: &BTreeMap<String, ConfiguredMicro>) {
+        self.closing.retain(|name, closing| {
+            let reason = *closing.ended.borrow();
+            if reason == Some(CloseReason::Requested)
+                && let Some(configuration) = &closing.fault_if_unchanged
+                && desired.get(name) == Some(configuration)
+            {
+                self.faulted.insert(name.clone(), configuration.clone());
+            }
+            reason.is_none()
+        });
+        let mut retain = |name: &String,
+                          configuration: &ConfiguredMicro,
+                          ended: &watch::Receiver<Option<CloseReason>>| {
+            let reason = *ended.borrow();
+            if reason == Some(CloseReason::Requested) && desired.get(name) == Some(configuration) {
+                self.faulted.insert(name.clone(), configuration.clone());
+            }
+            reason.is_none()
+        };
+        self.active
+            .retain(|name, active| retain(name, &active.configuration, &active.ended));
+        self.pending.retain(|name, pending| {
+            retain(name, &pending.configuration, &pending.activation.ended)
+        });
         let retiring = self
             .active
             .extract_if(.., |name, active| {
@@ -582,30 +616,51 @@ impl Composition {
             self.retire(name, None, pending.activation.ended.clone());
             drop(pending);
         }
-        self.closing.retain(|name, closing| {
-            let reason = *closing.ended.borrow();
-            if reason == Some(CloseReason::Requested)
-                && let Some(configuration) = &closing.fault_if_unchanged
-                && desired.get(name) == Some(configuration)
-            {
-                self.faulted.insert(name.clone(), configuration.clone());
-            }
-            reason.is_none()
+    }
+
+    pub fn update(
+        &mut self,
+        host: &Host,
+        registry: &MicroRegistry,
+        desired: &BTreeMap<String, ConfiguredMicro>,
+    ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
+        let definitions: BTreeMap<_, _> = registry
+            .descriptors()
+            .map(|descriptor| (descriptor.id.clone(), descriptor))
+            .collect();
+        let order = activation_order(&definitions, desired)?;
+        self.fold_ended_incarnations(desired);
+        // Acceptance belongs to an incarnation. Anything written by an instance that no longer
+        // has one (failed, faulted, closing, disabled, evicted) is dropped here, before liveness
+        // is computed: this is the rollback for a failed activation and the release of a dead
+        // consumer's contributors.
+        registry.retain_acceptance(|name| {
+            self.active.contains_key(name) || self.pending.contains_key(name)
         });
-        let mut retain = |name: &String,
-                          configuration: &ConfiguredMicro,
-                          ended: &watch::Receiver<Option<CloseReason>>| {
-            let reason = *ended.borrow();
-            if reason == Some(CloseReason::Requested) && desired.get(name) == Some(configuration) {
-                self.faulted.insert(name.clone(), configuration.clone());
-            }
-            reason.is_none()
-        };
-        self.active
-            .retain(|name, active| retain(name, &active.configuration, &active.ended));
-        self.pending.retain(|name, pending| {
-            retain(name, &pending.configuration, &pending.activation.ended)
-        });
+        let live = live_instances(
+            &definitions,
+            desired,
+            &registry.policy().borrow(),
+            &registry.contribution_registry(),
+        )?;
+        // Eviction: a running incarnation nothing reaches any more is closed. Its configuration
+        // stays; a later binding activates a fresh incarnation.
+        let evicted = self
+            .active
+            .extract_if(.., |name, _| !live.contains(name))
+            .collect::<Vec<_>>();
+        for (name, active) in evicted {
+            self.retire(name, None, active.ended);
+            active.host.close_instance(&active.instance).unwrap();
+        }
+        let abandoned = self
+            .pending
+            .extract_if(.., |name, _| !live.contains(name))
+            .collect::<Vec<_>>();
+        for (name, pending) in abandoned {
+            self.retire(name, None, pending.activation.ended.clone());
+            drop(pending);
+        }
         self.faulted
             .retain(|name, configuration| desired.get(name) == Some(configuration));
         self.failed
@@ -834,6 +889,22 @@ impl Composition {
     }
 }
 
+/// Whether `entry` declares a contribution to `contract` addressed to `consumer`: the provider
+/// declares the row and the configured binding for that contract names the consumer.
+pub(super) fn contributes_to(
+    registry: &BTreeMap<MicroId, Vec<super::MicroContribution>>,
+    entry: &ConfiguredMicro,
+    contract: &str,
+    consumer: &str,
+) -> bool {
+    entry.bindings.get(contract).map(String::as_str) == Some(consumer)
+        && registry.get(&entry.provider).is_some_and(|contributions| {
+            contributions
+                .iter()
+                .any(|contribution| contribution.provision == contract)
+        })
+}
+
 /// Transitive liveness: eager roots plus everything reachable through demand bindings.
 /// Declared requirement bindings pull a supplier live; accepted registry rows pull their
 /// contributor live. Disabled entries are never roots, so an idle cycle cannot keep itself alive.
@@ -852,11 +923,10 @@ fn live_instances(
             let Some(entry) = desired.get(contributor) else {
                 return Err(ConfigurationError::UnknownInstance(contributor.clone()));
             };
-            let declared = registry.get(&entry.provider).is_some_and(|contributions| {
-                contributions
-                    .iter()
-                    .any(|contribution| &contribution.provision == contract)
-            });
+            // A declaration is addressed: the contributor's configured binding for that contract
+            // names the consumer. Two consumers providing the same contract each see only the
+            // contributors bound to them.
+            let declared = contributes_to(registry, entry, contract, consumer);
             if !declared {
                 return Err(ConfigurationError::UndeclaredContribution {
                     consumer: consumer.clone(),
@@ -888,7 +958,7 @@ fn live_instances(
     let mut live: BTreeSet<String> = desired
         .iter()
         .filter(|(name, configuration)| {
-            configuration.enablement == Enablement::Enabled && policy.eager.contains(*name)
+            configuration.enablement == Enablement::Enabled && policy.eager.contains(name)
         })
         .map(|(name, _)| name.clone())
         .collect();
@@ -910,11 +980,9 @@ fn live_instances(
                         .iter()
                         .filter(|(contributor, entry)| {
                             *contributor != name
-                                && registry.get(&entry.provider).is_some_and(|contributions| {
-                                    contributions.iter().any(|contribution| {
-                                        contracts.contains(&contribution.provision)
-                                    })
-                                })
+                                && contracts
+                                    .iter()
+                                    .any(|contract| contributes_to(registry, entry, contract, name))
                         })
                         .map(|(contributor, _)| contributor.clone()),
                 );
