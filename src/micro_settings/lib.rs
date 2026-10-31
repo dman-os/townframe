@@ -51,7 +51,7 @@ pub fn activate<R: RendererRegistry<Render = Element>>(
     // Settings is its own broker: it accepts every declared `settings.sections` contribution
     // without the host or the composition root naming any contributor. The host only sees a
     // standing acceptance of one contract (ADR 014 §Composition and lifecycle).
-    context.accept_all(&[contract::SettingsSections::ID]);
+    context.accept_all(&[contract::SettingsSections::ID])?;
     context.publish_contributable(SettingsSections::new(sections));
     context.publish(micro);
     Ok(())

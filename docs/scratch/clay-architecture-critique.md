@@ -690,6 +690,23 @@ Open within W4 (not blocking): what happens to a visible surface whose micro is 
 `SurfaceTree` (OLE presentation cache) until interaction. Default is (a) until the cost probe
 says otherwise.
 
+**Hardened (2026-10-30):** found and fixed a real hole from the first W4 pass — withdrawal of the
+last binding was *reported* as `Idle` but the incarnation was never closed (`update` only retired
+on configuration change). Eviction now closes and revokes. Also: `EagerRoots::{AllEnabled,Named}`
+replaces the hidden "explicit policy" flag; the registry owns the single policy cell;
+`retain_acceptance` drops every acceptance without an incarnation before liveness is computed
+(failed-activation rollback, dead-consumer release, transitive within the reconcile loop);
+declarations/`demand`/`accept_all` are addressed through the contributor's configured binding
+(`contributes_to`), so two consumers of one contract never see each other's rows; broker handles
+check `host.check(&instance)` and return `Revoked` after close. `ApplicationRuntime::set_demand`
+and `set_policy` are gone: a root cannot pre-accept for a micro. Pinned by
+`composition::tests::{accepted_static_contributions_activate_and_withdrawal_closes_the_incarnation,
+a_demand_row_must_name_a_declared_contribution_addressed_to_the_consumer,
+consumers_of_the_same_contract_each_own_only_their_bound_contributors,
+a_consumers_acceptance_dies_with_its_incarnation, evicting_a_consumer_releases_what_it_accepted}`
+and `application::tests::{a_broker_handle_is_revoked_with_its_incarnation,
+a_failed_activation_rolls_back_its_acceptance}`.
+
 **Built (broker pass):** `CompositionBroker` on every activation (`MicroActivation::broker`,
 `Context::{declarations,accepted,accept,accept_all}`); the registry owns the shared policy cell and
 the desired-projection, and a micro's acceptance wakes the driver like a shell edit. `accept_all`
