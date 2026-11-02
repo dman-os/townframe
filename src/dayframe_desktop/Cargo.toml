@@ -15,7 +15,7 @@ clay_micro_core = { workspace = true }
 clay_docs = { workspace = true }
 clay_dioxus = { workspace = true }
 clay_host = { workspace = true }
-clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime"] }
+clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
 micro_settings = { workspace = true }
 micro_settings_manifest = { workspace = true }
 micro_sample = { workspace = true }

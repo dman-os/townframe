@@ -171,6 +171,7 @@ fn configuration() -> BTreeMap<String, ConfiguredMicro> {
             ConfiguredMicro {
                 provider: ComposeMicroId::new("test.shelf"),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::new(),
             },
         ),
@@ -179,6 +180,7 @@ fn configuration() -> BTreeMap<String, ConfiguredMicro> {
             ConfiguredMicro {
                 provider: ComposeMicroId::new("test.contributor"),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::from([(Shelf::ID.into(), "shelf".into())]),
             },
         ),
@@ -319,6 +321,7 @@ async fn require_returns_the_published_value_for_a_declared_requirement() {
                 ConfiguredMicro {
                     provider: ComposeMicroId::new("test.shelf"),
                     enablement: Enablement::Enabled,
+                    eager: true,
                     bindings: BTreeMap::new(),
                 },
             ),
@@ -327,6 +330,7 @@ async fn require_returns_the_published_value_for_a_declared_requirement() {
                 ConfiguredMicro {
                     provider: ComposeMicroId::new("test.consumer"),
                     enablement: Enablement::Enabled,
+                    eager: true,
                     bindings: BTreeMap::from([(Shelf::ID.into(), "shelf".into())]),
                 },
             ),

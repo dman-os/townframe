@@ -10,8 +10,8 @@ use micro_sample::SampleMicro;
 use micro_settings::SettingsMicro;
 use std::collections::BTreeSet;
 
-// ── desktop guest linkage: the shell's guest_providers must register the Wasmtime
-//    counter beside the shared composition's native providers, or the id sets drift ──
+// ── desktop package linkage: the package directory must register the Wasmtime
+//    counter beside the shell's native built-ins, or the id sets drift ──
 
 #[test]
 fn desktop_runtime_links_wasmtime_counter_with_shared_native_providers() {
@@ -66,7 +66,7 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 #[test]
 fn sample_edit_receipt_reports_locally_applied_then_accepted_or_rolled_back() {
     let runtime = started();
-    let sample = output::<SampleMicro, _>(&runtime.application, "sample").unwrap();
+    let sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
 
     let accepted = SampleConfig {
         enabled: false,
@@ -118,12 +118,15 @@ fn provider_registration_drives_native_and_wasm_settings_and_locked_boot_entries
     let mut runtime = started();
     assert_eq!(runtime.application.provider_descriptors().len(), 3);
     assert_eq!(runtime.application.roots().snapshot().unwrap().len(), 1);
-    assert_eq!(
+    assert!(matches!(
         runtime.set_enablement("settings", Enablement::Disabled),
-        Err(ConfigurationError::LockedInstance("settings".into()))
-    );
-    let sample = output::<SampleMicro, _>(&runtime.application, "sample").unwrap();
-    let counter = runtime.application.output::<WasmMicro>("counter").unwrap();
+        Err(ConfigurationError::LockedInstance(name)) if name == "settings"
+    ));
+    let sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
+    let counter = runtime
+        .application
+        .output::<WasmMicro>("dayframe.counter")
+        .unwrap();
     assert!(runtime.application.host().check(&counter.instance).is_ok());
     let sections = output::<SettingsMicro, _>(&runtime.application, "settings")
         .unwrap()
@@ -147,8 +150,11 @@ fn provider_registration_drives_native_and_wasm_settings_and_locked_boot_entries
 #[test]
 fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_restarts_wasm() {
     let mut runtime = started();
-    let first_sample = output::<SampleMicro, _>(&runtime.application, "sample").unwrap();
-    let first_counter = runtime.application.output::<WasmMicro>("counter").unwrap();
+    let first_sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
+    let first_counter = runtime
+        .application
+        .output::<WasmMicro>("dayframe.counter")
+        .unwrap();
     let changed = SampleConfig {
         enabled: false,
         greeting: "Edited".into(),
@@ -164,16 +170,16 @@ fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_resta
     );
     first_sample.edit(changed.clone()).unwrap();
     runtime.application.mock_documents().settle(true);
-    set_now(&mut runtime, "sample", Enablement::Disabled);
-    set_now(&mut runtime, "counter", Enablement::Disabled);
-    assert_eq!(runtime.states["sample"], InstanceState::Disabled);
-    assert_eq!(runtime.states["counter"], InstanceState::Disabled);
+    set_now(&mut runtime, "dayframe.sample", Enablement::Disabled);
+    set_now(&mut runtime, "dayframe.counter", Enablement::Disabled);
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Disabled);
+    assert_eq!(runtime.states["dayframe.counter"], InstanceState::Disabled);
     assert!(matches!(
-        output::<SampleMicro, _>(&runtime.application, "sample"),
+        output::<SampleMicro, _>(&runtime.application, "dayframe.sample"),
         Err(AccessError::Revoked)
     ));
     assert!(matches!(
-        runtime.application.output::<WasmMicro>("counter"),
+        runtime.application.output::<WasmMicro>("dayframe.counter"),
         Err(AccessError::Revoked)
     ));
     assert!(
@@ -188,10 +194,13 @@ fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_resta
         first_sample.watch().current().unwrap_err(),
         AccessError::Revoked
     );
-    set_now(&mut runtime, "sample", Enablement::Enabled);
-    set_now(&mut runtime, "counter", Enablement::Enabled);
-    let second_sample = output::<SampleMicro, _>(&runtime.application, "sample").unwrap();
-    let second_counter = runtime.application.output::<WasmMicro>("counter").unwrap();
+    set_now(&mut runtime, "dayframe.sample", Enablement::Enabled);
+    set_now(&mut runtime, "dayframe.counter", Enablement::Enabled);
+    let second_sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
+    let second_counter = runtime
+        .application
+        .output::<WasmMicro>("dayframe.counter")
+        .unwrap();
     assert!(first_sample.instance != second_sample.instance);
     assert!(first_counter.instance != second_counter.instance);
     assert_eq!(
@@ -213,8 +222,11 @@ fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_resta
 #[test]
 fn provider_withdrawal_closes_dependents_before_their_collection() {
     let runtime = started();
-    let sample = output::<SampleMicro, _>(&runtime.application, "sample").unwrap();
-    let counter = runtime.application.output::<WasmMicro>("counter").unwrap();
+    let sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
+    let counter = runtime
+        .application
+        .output::<WasmMicro>("dayframe.counter")
+        .unwrap();
     let mut updates = sample.watch().subscribe().unwrap();
     let settings_instance = output::<SettingsMicro, _>(&runtime.application, "settings")
         .unwrap()

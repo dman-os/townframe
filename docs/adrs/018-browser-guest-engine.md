@@ -34,10 +34,13 @@ engine. The investigation established:
   thread-safe.
 - **`wcmp` fits our WIT.** It runs components on the browser's own engine with a
   Wasmtime-shaped API; `wcmp::bindgen!` accepts the options we use (`with:`,
-  `trappable`, `HasSelf`, `add_to_linker`). Our WIT has no async functions,
-  streams, or futures, so its suspension machinery is unused: per its source, a
-  call that never suspends has finished when `WebAssembly.promising` returns. If
-  that holds end to end, synchronous dispatch and `prevent_default` survive.
+  `trappable`, `HasSelf`, `add_to_linker`). At the time of the investigation our WIT
+  had no async functions, streams, or futures, so its suspension machinery was
+  unused: per its source, a call that never suspends has finished when
+  `WebAssembly.promising` returns. If that holds end to end, synchronous dispatch and
+  `prevent_default` survive. §3 now makes activation and data exports `func async`,
+  so the suspension machinery becomes load-bearing for those calls while presentation
+  stays sync; the Open questions record what remains unverified.
 - **`wcmp` differs from Wasmtime in four ways that touch our interfaces:**
   1. everything is async: compile, instantiate, every guest call, and a fallible
      `Store::new`;
@@ -84,14 +87,17 @@ second engine is the agreed trigger to split it rather than copy it:
   `clay_rt_wasmtime` and `clay_rt_wcmp`. Engine types never enter the shared
   crate (ADR 015 boundary correction).
 
-### 3. Activation is async; presentation calls stay synchronous
+### 3. Activation and data exports are async; presentation stays synchronous
 
-*Status: decided, built, pinned (rewritten 2026-10-30; supersedes the earlier
-"panic on pending / our WIT has no suspension point" wording).*
+*Status: decided, built, pinned for the presentation rule (rewritten 2026-10-30; supersedes the
+earlier "panic on pending / our WIT has no suspension point" wording). The async-typed
+`activate`/data-export signatures are **decided, not built** (rewritten 2026-10-31).*
 
 - Compiling and instantiating move into activation, which is already async on
   both engines. `WasmPackage::from_bytes` and `clay_mdk::wasm::provider` change
   signature accordingly; no compatibility shim.
+- **Guest initialization becomes `func async`.** It acquires initial arguments and capabilities, may establish projection/writer leases and publications, and returns an instance-root resource. Calling a synchronous export from an async host would not grant suspension rights: sync lift sets may-not-suspend, so this is a WIT signature change rather than host-side ceremony. Package fetch and dependency resolution still occur before guest initialization and are not reasons for the guest export itself to suspend.
+- **Data-side host capabilities are async where they may suspend:** projection acquisition/reads, mutations, command outcomes, and document operations. These are imports consumed by an ordinary guest; only a guest that actually provides a collection source exports async source operations. A host-owned long poll must not hold an instance-wide guest entry gate while waiting, because synchronous presentation must remain callable.
 - `mount`, `dispatch`, and `unmount` stay **sync-typed WIT functions with sync
   lift** (ADR 015 R5 as amended). The host drives each with one poll of the
   guest call future.
@@ -128,14 +134,7 @@ second engine is the agreed trigger to split it rather than copy it:
    (the same sleeping guest on both engines), plus
    `first_poll_maps_pending_to_suspended_and_ready_to_output` for the mapping itself.
 
-- **Entry gate (what "something else comes in" means).** Per component
-  *instance* (all exports of one micro share one record): async-typed tasks
-  queue at the instance's entry gate and wait while another task holds
-  exclusivity (a sync task holds it until return; a callback task between
-  events). Sync-typed tasks ignore the gate — they run to completion and legally
-  cannot block. Future data/collection exports should be **async-typed** so the
-  gate serializes them against presentation calls; our one-event-at-a-time
-  delivery policy per incarnation stays as the stricter house rule.
+- **Entry gate.** Calls that actually enter one guest component instance obey component-model exclusivity. Synchronous presentation runs to completion and may not suspend. Async guest initialization or guest-provided source exports hold the gate only while executing according to the component model. Host-side collection long polls are capabilities implemented outside the guest and must remain pending without occupying the guest entry gate; otherwise one idle read would freeze presentation.
 - Web-Worker guests remain rejected for the reason ADR 015 §1 records.
 
 ### 4. Publish the instance, not the runtime
@@ -250,7 +249,8 @@ between `activate` and `mount`.
 ## Consequences
 
 - The browser becomes a link target plus one engine crate, as ADR 015 intended;
-  no micro changes.
+  presentation micro code needs no changes. A micro whose activation or data path awaits needs
+  the async `activate`/data-export signature; that break is deliberate.
 - Two engines keep the engine-neutral crate honest: anything engine-specific
   that leaks into it fails to build for one of them.
 - Web guests are weaker-isolated than desktop guests until instruction bounds
@@ -261,6 +261,10 @@ between `activate` and `mount`.
 
 ## Open questions
 
+- Can `wcmp` resume a genuinely suspended async export and then honor the instance entry gate?
+  The sync-presentation rule only needs first-poll completion for sync-typed exports, which is
+  observed; async data exports need real resumption plus gate re-acquisition. This is separate
+  from the `WebAssembly.promising` first-poll question below and is untested.
 - Does `wcmp` expose any memory-growth cap? If not, is a per-guest memory
   ceiling enforced by instantiation-time import limits acceptable, or must it be
   upstreamed?

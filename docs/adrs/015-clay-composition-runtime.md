@@ -8,8 +8,8 @@ critique, `micro_settings_manifest` imports `clay_mdk::native::{AccessError, Col
 a guest cannot implement or consume its typed provisions (finding F6). The manifest *pattern* is
 decided; portable contents are not built.
 **Amended by:** ADR 017 (collection substrate: §4 optimistic visibility, §6 contribution
-collections), ADR 018 (browser engine: §3 rewrites R5's sync/async failure semantics;
-§1 Shape W, §8, §Deferred remain Proposed).
+collections), ADR 018 (browser engine: §3 rewrites R5's sync/async failure semantics; amends
+§1 Shape W, §8, and §Deferred).
 **Amends:** ADR 014 (crate layout and seam placement; its data-runtime and micro-amendment
 semantics are retained and quoted, not replaced). Builds on the settled rules in
 `docs/scratch/dayframe-micros.md` (D1–D13) and the original design transcript
@@ -58,14 +58,18 @@ invocations are long-running async tasks).
 
 **Shape N — native application process.** One UI thread owns the host Dioxus `VirtualDom` and
 all native micros (one address space, one heap). Each wasm guest incarnation is a separate
-Wasmtime store with its own linear memory and handle tables; all guest calls are synchronous
-exports bounded by per-call fuel (D12). Document delivery and watch pumps are polled by the
-composition driver (D13), never by a detached task per watch.
+Wasmtime store with its own linear memory and handle tables. Presentation exports (`mount`,
+`dispatch`, `unmount`) are sync-typed and bounded by per-call fuel (D12). Data exports
+(activation, collection reads, commands, document delivery) are async-typed and driven on the
+composition driver's future pump (D13), never by a detached task per watch; the instance entry
+gate serializes them against presentation.
 
 **Shape W — browser.** The host (VDOM, composition, native micros) is itself one wasm32 module
 in the JS realm. A guest is a component instantiated in the *same realm* (through the `wcmp`
 component-model polyfill, ADR 018; jco transpilation was the original candidate), with its own
-linear memory, called synchronously. Native micros are simply linked into the host module; nothing about their API changes. The data layer's node seam is a network
+linear memory. Presentation exports are called synchronously; data exports are async-typed and
+driven through the browser event loop. Native micros are simply linked into the host module;
+nothing about their API changes. The data layer's node seam is a network
 client behind the same `DocumentService` boundary; `outcome_unknown` is normal there, not an
 edge case.
 
@@ -109,7 +113,8 @@ below is derived from them.
   `dayframe-micros.md:50-51`; amended by ADR 018 §3 as rewritten 2026-10-30).
   Rendering and event dispatch are sync; watches, mutations, receipts,
   configuration are async with explicit receipts. *Status: decided, built, pinned*
-  — except the MDK's guest-side spawn rule below, which is decided, not built.
+  — except the MDK's guest-side spawn rule below and the async initialization export and collection capability imports,
+  which are decided, not built (today's guest `activate` export is synchronous).
 
   The sync side is precise about *what* is synchronous:
 
@@ -157,10 +162,7 @@ below is derived from them.
      the sleeper fixture is that engine's net, and it is the only one.
   - **Native micros are unaffected**: they run as plain Rust inside the listener
     closure and are synchronous by construction.
-  - Data-side operations (watches, mutations, receipts, configuration, and any
-    future collection/query exports) stay **async-typed** where they may suspend;
-    the entry gate serializes them against presentation calls on the same
-    instance.
+  - Data-side host capabilities (projection acquisition/reads, mutations, command outcomes, receipts, and configuration) are async where they may suspend. Guest-served collection operations are async exports only when a guest actually provides a source. Synchronous presentation must remain callable while a host-owned long poll waits; a pending host capability must not hold an instance-wide entry gate. Initialization is async-typed rather than a synchronous export merely called from an async host.
 - **R6 — Engine-neutral resources are opaque ids plus host side maps.** Engine handle tables
   (Wasmtime's `ResourceTable` or the browser engine's equivalent) store only `Send` data;
   non-`Send` renderer state lives in host-owned side maps keyed by those ids (D10's discovered
@@ -178,7 +180,8 @@ below is derived from them.
   micro-facing contract — the MDK authoring API, the guest WIT worlds, manifests, and payloads
   carried by the collection waist (ADR 017) — is designed for additive evolution. Payloads that
   cross to micros as domain data are self-describing (JSON today; CBOR acceptable), not
-  host-version-specific binary layouts; `DemandToken` and contribution payloads already are.
+  host-version-specific binary layouts; collection selectors and contribution payloads already
+  are.
   How an old guest keeps running against a newer host is open between two shapes: the host
   serves several versions of its WIT and adapts the old ones, or a versioned, fully typed
   adapter component lives in guest space between the micro and the host (a libc-style shim
@@ -193,9 +196,9 @@ the shipped composition; the framework is **clay**.
 
 ```text
 src/
-  clay_collection/   the shared collection substrate (ADR 017): Replica, Ledger, View, the
-                     Batch waist, demand and coverage. No host, document, engine, or Dioxus
-                     concepts.
+  clay_collection/   the shared collection substrate (ADR 017): projection replicas,
+                     transactional pages, leases, selector contracts, and optional writer
+                     layers. No host, document, engine, or Dioxus concepts.
   clay_guest_session/  engine-neutral document host sessions: admission, resource lifetimes,
                      cancellation and neutral deliveries. Owns the WIT sources; consumers
                      generate their own bindings. No Wasmtime or Dioxus dependency. Grows into
@@ -247,69 +250,36 @@ micro (D3).
 
 ### 4. The data layer (clay_docs), per the original discussion
 
-The transcript settled this design (`transcript:322`, `transcript:328`). clay_docs is where it
-lives, in three layers with different runtime shapes; its replica and optimistic ledger are the
-shared `clay_collection` substrate (ADR 017 §9):
+The transcript settled the document service responsibilities (`transcript:322`, `transcript:328`). ADR 017 now supplies the common read waist while document causality and optimism remain in `clay_docs`:
 
 ```text
 DocumentService (host, one per application)
-    node adapter / shared sparse cache / refresh dedup / retention+eviction /
-    optimistic transactions / permissioned mirror delivery
+    node selector planner / shared sparse source acquisition / retention+eviction /
+    document command submission / heads-based optimism / permissioned projections
 DocumentMirror (one per granted context)
-    authorized facet projections / local reactive updates / pending mutation state
+    authorized partial replicas / local queries / projection leases
 Facet authoring API (clay_mdk)
-    typed decoding / observable values / mutation intents / UI-framework adapters
+    typed selectors and decoding / observable values / document mutation intents
 ```
 
-Semantics that are **requirements**, quoted or paraphrased from the transcript:
+Requirements:
 
-- A mirror contains only the projections its context requested and retained; it is not a copy
-  of the drawer. Two contexts may observe the same facet through separate mirrors while the
-  host shares one fetch/cache entry (`transcript:328` §1).
-- A **watch** is a resource: it delivers the current authorized state and retains a targeted
-  refresh/live projection until released; dropping it ends delivery and reduces retention
-  (`transcript:328` §2, §7). The initial snapshot and subsequent updates form one subscription —
-  no read-then-subscribe gap; `mirror-revision` orders delivery to that mirror and is not a
-  source cursor (ADR 014:89-95).
-- Watching an authorized key that does **not yet exist** must be expressible; a lagged
-  subscriber receives an explicit lag/reset signal and must reread (D6's `SubscriptionLagged`).
-- Facet states distinguish **not-loaded / known-absent / present / refreshing-stale /
-  denied-or-revoked** so an uncached facet is never mistaken for a nonexistent one
-  (`transcript:322`). Availability/freshness is evidence for rendering; a refresh being pending
-  never hides an existing local value (ADR 014 §4).
-- Optimistic writes are host-owned: authorize → apply to the retained projection → publish to
-  all authorized mirrors of that projection → submit → durable acceptance resolves the receipt
-  without waiting for an event watermark; rejection or transport failure rolls the overlay back.
-  Receipts distinguish `LocallyApplied`, `Accepted`,
-  `RolledBack(Rejected | Transport { outcome_unknown })` (ADR 014 §5, D6, D11). Closing a
-  mirror or ticket never undoes a submitted write (`transcript:328` §5). *Amended by ADR 017
-  §4:* the accepted overlay stays visible until the base reaches the version the write landed
-  at, so the row never flashes back to its pre-write value; it is not committed locally.
-- Filtering happens **before data enters the mirror**: document/branch eligibility, facet tag
-  and key id, read vs mutate rights, revocation. No unauthorized values, keys, or pending-write
-  details arrive and get filtered later (`transcript:328` §6).
-- Reads and subscriptions are **targeted**: no whole-map clone on a single-facet read and no
-  full-collection broadcast to a watcher of one route (`transcript:322`, "the existing
-  collection is not ready to be the whole document cache"). Watch-scoped snapshots (today's
-  `DocumentSnapshot` per selection) satisfy this while selections stay small; the API must not
-  grow an operation that clones the host's whole cache.
-- Pending mutations and actively watched projections are never evicted (`transcript:322`).
-- Blob bytes are not facet values; blob facets and the bytes they reference have separate
-  retention and access treatment (`transcript:322`). Out of scope for this slice; recorded so
-  the API does not preclude it.
+- A mirror contains only projections its context acquired and retained; it is not a copy of the drawer. Two contexts may observe the same datum through separate guest projections while the host shares one upstream acquisition.
+- A projection lease captures an immutable datum selector, bootstraps current matching state, then long-polls host-ordered transactions. Dropping it ends interest and releases upstream retention. Its opaque cursor is collection ordering, never Automerge causality.
+- Inline row transactions, not whole-selection `DocumentSnapshot` clones, are the delivery unit. `bootstrap_complete` marks the lease's opening boundary and never claims global node synchronization. Clear-and-reload handles an expired cursor.
+- Watching an authorized key that does not yet exist must be expressible. Not-loaded, known-absent, present, refreshing-stale, and denied-or-revoked remain distinguishable in the typed document API.
+- Optimistic document writes are host-owned. A mutation names its base heads; the host publishes the predicted visible row to every authorized projection, submits the command, and retires the intent only when authoritative observation contains the returned heads. Rejection or transport-unknown follows document policy. Closing a mirror or receipt handle never cancels a submitted command.
+- Filtering happens before data enters a guest replica: document/branch eligibility, datum tag and key, read versus mutate rights, revocation, pending evidence, and capability attachments.
+- Reads are targeted: no whole-map clone for one datum and no full-collection broadcast to a one-route selector.
+- Pending mutations and actively acquired source projections are never evicted.
+- Blob bytes are not datum values; referenced bytes have separate retention, authorization, and transport.
 
-**Contribution collections are a separate mechanism that stays separate.** Settings sections,
-toolbar entries, root mounts are host-owned *transient registration* collections: owned entries
-and separately owned overrides, disposal on owner closure, deterministic ordering, no
-optimistic persistence and no source cursors (ADR 014:398-403; `transcript:36`, `transcript:58-60`;
-Cordis §3.4.2's commutativity boundary — owned registrations commute, arbitrary shared mutation
-does not). They share the reactive-read shape and, since ADR 017, the replication substrate
-(`clay_collection`) with data mirrors — never the ownership or persistence semantics.
+Contribution collections share the ADR 017 read waist but retain distinct writer semantics. Settings sections, toolbar entries, and root mounts may be owner-scoped registrations or causally combined contributor branches. Disposal removes the owner's branch; a collection-defined materializer recomputes the consumer projection. Durable document commands never inherit that ownership behavior.
 They live in **clay_host** (they are host bookkeeping, `transcript:225-226`), parameterized by
-plain-data entry types (R4), with lease handles (§6). Configuration is not a third store: micro
-configuration lives in document facets reusing plug-manifest declarations (settled rule,
-`dayframe-micros.md:46-47`); *composition* configuration is a `ConfigurationSource` trait with
-static/mock/facet backends and nothing below the trait mentions facets (D2).
+portable contract values and ADR 023 capability attachments, with writer and projection leases; the host stamps owner identity on every contribution. Configuration is not a third
+store: micro configuration lives in document facets reusing plug-manifest declarations (settled
+rule, `dayframe-micros.md:46-47`); *composition* configuration is a `ConfigurationSource` trait
+with static/mock/facet backends and nothing below the trait mentions facets (D2).
 
 ### 5. The Micro Development Kit (clay_mdk)
 
@@ -321,8 +291,8 @@ authority"). Sketch of the surface:
 // in a micro's activate:
 let config = ctx.config_document();                 // already-authorized binding
 let count = config.watch_facet::<u64>(CONFIG_TAG, "count")?;
-let current = count.current();                      // decoded snapshot, availability evidence
-let op = count.write(next)?;                        // optimistic; receipt is an Operation
+let current = count.current();                      // decoded mirror value, readiness evidence
+let op = count.update(next)?;                       // optimistic overlay; receipt is an Operation
 let entry = ctx.sections()?.insert(SettingsSection { title, detail })?;  // owned entry lease
 let view = GuestDom::new_with_props(App, props);    // dioxus feature: guest VDOM adapter
 ```
@@ -341,6 +311,8 @@ another micro) are **invocable handles**: serializing an action id must not manu
 permission to invoke it (`transcript:153`). `GuestDom`/`WireMutations` move here unchanged in
 semantics (D5).
 
+The MDK authoring surface stays synchronous against the guest's local partial replica: `current()` and local queries never perform a remote read. Projection acquisition/long polling, mutations, and command outcomes are asynchronous host capabilities driven outside synchronous presentation. The MDK hides cursors and transactional page application; another language may build an entirely different local API over the same waist.
+
 ### 6. clay_host shape: tokens, leases, collections
 
 - **`Instance` names an incarnation; it does not own or operate one.** It carries plain host and
@@ -354,14 +326,7 @@ semantics (D5).
   once-only operation; `Drop` does not promise completed asynchronous cleanup. A lease that
   outlives its owner is inert, never a stale-cleanup hazard: cleanup compares runtime
   incarnation identities so stale cleanup cannot withdraw a replacement (ADR 014:456-458).
-- **Contribution collections** are host-owned stores of plain-data entries tagged by owner
-  incarnation. Writers touch only their own entries; readers hold a read-only
-  `clay_collection` view fed by per-subscription delta batches (ADR 017 §6–§8), not whole-map
-  snapshots. Overrides are separately owned records, kept in a sibling collection and merged by
-  the provider into the effective presentation;
-  disabling an override owner reveals the current base entry — no stale snapshot is restored
-  (`transcript:59-60`). Root windows and root mounts are built-in collections of this kind;
-  layout micros consume them and may expose further mount collections (`transcript:225-226`).
+- **Contribution collections** are host-materialized projections over owner-scoped registrations or causal contributor branches (ADR 017). Writer capabilities imply host-stamped owner identity; no guest supplies a trusted scope. Closing a writer removes its branch and recomputes the combined projection. Root windows, toolbar entries, and Settings sections use this layer. Values that carry actions or surface mounts attach ADR 023 capability references rather than serializing engine handles.
 - **Lifecycle recovery** drops the `Condvar`/`ThreadId` gate (R7): dependent-close ordering is
   synchronous on the calling thread (the close cascade already is); the gate only served
   multi-threaded close callers, which the wasm32 shape forbids anyway.
@@ -378,6 +343,7 @@ semantics (D5).
 - Incarnation-owned futures are polled with `futures::stream::FuturesUnordered`-style
   combinators, each wrapped in a select-on-owner-close — no hand-rolled poll loop
   (`micros.rs:59`), still no `tokio::spawn` (R7: no executor assumption).
+- Guest startup becomes one async initialization export. It acquires initial arguments/capabilities, projection and writer leases, publications, and mounts, then returns an instance root whose lifetime owns the incarnation. A separate `get-args` import may remain an ABI convenience, not a second lifecycle phase. `mount`/`dispatch`/`unmount` remain sync-typed. Pending host-side collection reads must not block those presentation calls.
 - Composition reconciliation, configuration sources, and `InstanceState` vocabulary are
   unchanged in semantics (ADR 014 amendment §"Initial micro provider seam"); they move crates
   unchanged in this stage.
@@ -393,31 +359,26 @@ semantics (D5).
   anything else fails at instantiation. A micro's manifest (§9) declares its facet access and
   contracts; undeclared access is a link/grant error, mirroring wasmCloud's
   manifest-as-allowlist.
+- Presentation calls are polled once and bounded by per-call fuel (`mount`, `dispatch`,
+  `unmount`); their first poll must be `Ready` or the call is trap-equivalent (R5). Data exports
+  are async-typed and driven by the composition driver's future pump, so they can await without
+  the presentation poll rule applying. The instance entry gate serializes the two.
 - Traps close the incarnation and withdraw its contributions; siblings are unaffected;
   `exhaust_fuel` remains the test hook (D12).
 - The generic wasm provider (`clay_mdk::wasm`, feature `wasmtime`) takes a manifest + package
   and performs the ceremony dayframe_counter used to perform: grant the declared facets,
   activate the component, route declared contributions. A wasm micro needs no bespoke native crate.
-- The browser engine is `clay_rt_wcmp` (ADR 018, Proposed), a future crate against the same
+- The browser engine is `clay_rt_wcmp` (ADR 018) against the same
   clay_guest_session/clay_surface contracts (D10); nothing in this ADR builds the abstraction
   early, but R1/R6/R7 are what make it possible.
 
 ### 9. Micro manifests
 
-Following the plug pattern (`micros/settings_contract:2` FIXME): each micro family gets a
-`micro_<name>_manifest` crate holding the descriptor data — id, version, declared requirements
-and provisions, facet access declarations (tag, key id, rights), and shared contract types —
-written in Rust so compatibility is type-checked at build time. The runtime consumes manifests;
-it never enumerates the world (settled ground rule). A `cargo x` packaging step (build-oci
-equivalent) is future work; manifests today are compile-time data.
+ADR 024 replaces the current flat `MicroManifest` target. A manifest remains inspectable, portable data available without running the guest, but now separates entrypoints, provided and required contracts with stable local binding names, configuration requests, collection contracts, contribution declarations, and default activation-registration templates. It describes possibilities and requested authority, never configured suppliers, granted principals, enablement/eager state, live resources, or target acceptance policy.
 
-The contract crate is required when another crate names the micro's contract types, or when a
-binary needs the manifest without the micro's code (the Wasm case: a composition root links
-`micro_counter_manifest`, never `micro_counter`). A purely native, self-contained micro may keep
-`manifest()` inline (`micro_sample`). The provider registry is keyed by `MicroId`, and the
-composition root registers providers in one appendable `linked_providers` list. A manifest's
-`version` must change whenever its wire shape changes incompatibly; the enforcement of that
-discipline is open (R9).
+Each micro family keeps its portable contract vocabulary beside the manifest (`micro_<name>_manifest` where another crate consumes it). Package discovery reads the embedded manifest without instantiating the component. Installation resolves default activation templates against configured bindings and authorized registration grants; runtime initialization publishes the actual provisions, contributions, capability attachments, and collection sources. Manifest declarations are not live authority.
+
+The schema follows the repository's open Lexicon discipline and carries unknown members. Package version, manifest-schema version, and individual contract versions are distinct. ADR 024 contains the conceptual manifest and WIT shapes; implementing it is an intentional breaking replacement of today's `requirements` / `provisions` / single `config` / `contributions` struct, not a compatibility shim.
 
 ### 10. Presentation slots (the mount primitive)
 
@@ -464,13 +425,15 @@ obtain `NativeComponents` through Dioxus context instead of threading props
 | Lease | A once-only release handle for one owned effect (entry, watch, mount). |
 | Provision | A live published implementation of a declared contract, owned by an incarnation. |
 | Contribution | An owned entry (or override) in a host-owned transient collection. |
-| Mirror | A context's authorized, sparse, reactive projection of document facets. |
-| Hop | One `clay_collection::View`: replica, overlay ledger, local query, upstream link (ADR 017). |
-| Overlay | A segregated whole-row pending write, retired by outcome, base version, or scope disposal. |
-| Demand | An opaque narrowing token sent upstream; it retains a subscription, never rows. |
-| Coverage | The upstream's evidence that a demand is complete, so absence is distinguishable from not-loaded. |
-| Watch | A retention + delivery resource over a mirror selection. |
-| Operation | A submitted mutation intent with a stable id and an explicit receipt. |
+| Partial replica | Guest-local current state for one acquired projection. |
+| Source | Host adapter that plans selectors and emits materialized current-state transactions. |
+| Projection lease | Active interest in one immutable selector: bootstrap, then guest-driven long polling. |
+| Selector | Collection-specific typed query IR encoded opaquely through the waist. |
+| Bootstrap complete | Evidence that all matching state at the lease's opening boundary was represented. |
+| Cursor | Opaque host projection position committed only after a guest applies a page. |
+| Pending prediction | Host-owned domain mutation intent included in the visible projection until authoritative settlement. |
+| Capability reference | Recipient-local ADR 023 resource redeemed into a typed proxy. |
+| Operation | A submitted domain command with source-defined settlement evidence. |
 | Engine | The component runtime (wasmtime today); instantiates and bounds guests. |
 | MDK | The micro authoring API; ergonomic surface over the wire or in-process backends. |
 | Manifest | A micro's compile-time declaration of identity, contracts, and data access. |
@@ -535,19 +498,10 @@ API sketches above:
   (`clay_rt_wcmp`, ADR 018) owns the WIT sources. Engine-specific generated bindings and
   resource tables stay in the engine adapters; putting Wasmtime types in their common dependency
   would reverse the separation.
-- Node → Clay → guest uses query-driven partial replication. A query both requests hydration
-  and retains a stream of authorized changes. Consumer reads use their local reactive replica,
-  never an implicit synchronous remote read. Not-yet-loaded, known-absent, present, and revoked
-  remain distinguishable even when the convenient value accessor returns no value.
-- Snapshot and continuation belong to one subscription. Changes are filtered before delivery;
-  overlapping queries must not duplicate effects or withdraw data still retained by another
-  query. Releasing a query ends its upstream demand; it does not evict replicated rows —
-  retention is the replica's own policy (ADR 017 §5 supersedes the earlier "ends its delivery
-  and retention" wording). Late updates from a replaced query cannot repopulate its successor.
-- Transient contributions and durable documents may share replication mechanics, not ownership
-  or persistence semantics. Optimistic operations have explicit acceptance/rollback outcomes;
-  closing a replica does not cancel a submitted durable write. IDs-only/host-backed value views
-  are deferred optimizations, not the initial contract.
+- Node → Clay → guest uses leased partial replication. A collection-specific selector drives host acquisition and guest-local querying; consumers read their partial replicas, never an implicit synchronous remote value. Not-yet-loaded, known-empty, present, stale, pending, and revoked evidence remain distinguishable in typed APIs.
+- A projection lease captures one immutable selector, bootstraps inline transactional rows, and then long-polls. `bootstrap_complete` marks its opening boundary. Overlapping leases use independent result sets initially; a later IVM/CVR may safely share membership and bodies. An expired cursor clears and reloads that projection.
+- Transient registration, causal contribution, and durable document commands share the read waist but not write semantics. Host-owned document predictions settle by returned/observed heads; closing a guest replica does not cancel a submitted durable write.
+- Capability-bearing values use ADR 023 attachments and recipient-local resource references, never serialized invocation authority.
 - A boundary is evaluated through actual Settings/Sample consumption and native/WIT parity
   tests. Compiling host code for wasm32 alone proves neither guest portability nor browser
   support. Each increment must state which consumers and engines it actually exercised.
@@ -557,8 +511,8 @@ API sketches above:
 - Cross-process guests and wRPC-style transports.
 - Web-Worker guests and declarative prevent-default are **rejected**, not deferred: §1 Shape W
   records the rejection and R5 records why the second engine did not reopen it.
-- The browser engine (ADR 018); hot-patch/reload of guests; OCI packaging of micro manifests.
-- Collection WIT transport and cross-guest id namespacing (ADR 017 §Not yet implemented).
+- Hot-patch/reload of guests; OCI packaging of micro manifests.
+- Collection WIT transport and cross-guest id namespacing (ADR 017 §Deferred).
 - One micro source compiled to both backends (today native and guest micros share the entry
   shape and vocabulary, not a source file).
 - Old-guest compatibility mechanism under R9 (multi-version host WIT or guest-space adapter).

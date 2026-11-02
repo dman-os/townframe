@@ -73,7 +73,13 @@ pub fn manifest() -> MicroManifest {
                 ..Default::default()
             }],
         }),
-        contributions: vec![],
+        contributions: vec![clay_mdk::Contribution {
+            provision: SettingsSections::ID.into(),
+            payload: serde_json::to_value(micro_settings_manifest::DeclaredSection {
+                title: "Sample micro".into(),
+            })
+            .unwrap(),
+        }],
     }
 }
 
@@ -93,6 +99,7 @@ pub fn activate<R: RendererRegistry<Render = Element>>(
         dioxus::prelude::rsx! { view::SampleDetail { config: content.clone() } }
     })?;
     settings.insert(SettingsSection {
+        contributor: instance.name.clone(),
         title: "Sample micro".into(),
         detail,
     })?;
@@ -126,14 +133,11 @@ impl SampleMicro {
     }
 }
 
-/// Bind and seed the mock configuration document for `sample` on the composition root's mock
-/// document service. A composition-time helper; the runtime authoring surface is [`activate`].
-pub fn bind_mock_defaults(documents: &DocumentService) {
-    documents.mock_documents().bind_config(
-        CONFIG_NAME.into(),
-        "sample-config".into(),
-        "main".into(),
-    );
+/// Seed the demo configuration value for `sample` on a composition whose catalog
+/// installation already bound the micro's config document (the composition root binds
+/// `<name>-config` per manifest grant). A launcher's demo seed; the runtime authoring
+/// surface is [`activate`].
+pub fn seed_mock_defaults(documents: &DocumentService) {
     documents.mock_documents().seed(
         clay_mdk::native::FacetRoute {
             document: "sample-config".into(),

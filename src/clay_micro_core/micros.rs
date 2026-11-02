@@ -208,7 +208,39 @@ pub struct CompositionBroker {
     changes: tokio::sync::watch::Sender<()>,
 }
 
+pub struct DeclarationWatch {
+    broker: CompositionBroker,
+    contract: String,
+    changes: watch::Receiver<()>,
+}
+
+impl DeclarationWatch {
+    pub fn current(&mut self) -> Result<Vec<Declaration>, AccessError> {
+        self.changes.borrow_and_update();
+        self.broker.declarations(&self.contract)
+    }
+
+    pub async fn next(&mut self) -> Result<Vec<Declaration>, AccessError> {
+        tokio::select! {
+            biased;
+            _ = self.broker.host.await_close(&self.broker.instance) => Err(AccessError::Revoked),
+            result = self.changes.changed() => {
+                result.map_err(|_| AccessError::Revoked)?;
+                self.current()
+            }
+        }
+    }
+}
+
 impl CompositionBroker {
+    pub fn watch(&self, contract: &str) -> Result<DeclarationWatch, AccessError> {
+        self.host.check(&self.instance)?;
+        Ok(DeclarationWatch {
+            broker: self.clone(),
+            contract: contract.to_owned(),
+            changes: self.changes.subscribe(),
+        })
+    }
     /// Every declared contribution to `contract` addressed to this instance — the contributor's
     /// configured binding for that contract names it — in configured-instance order. Payloads are
     /// the contributor's semantic data; nothing here activates the contributor.
@@ -253,11 +285,28 @@ impl CompositionBroker {
 
     /// Replace this instance's accepted rows. Accepting a declared row keeps its contributor
     /// live; withdrawing the last one evicts it. Rows for undeclared or unaddressed contributions
-    /// are rejected by the next reconciliation as a configuration error rather than ignored.
+    /// are denied immediately; stale accepted rows cease to demand removed or rebound contributors.
     pub fn accept(&self, rows: BTreeMap<String, String>) -> Result<(), AccessError> {
         self.host.check(&self.instance)?;
+        let registry = self
+            .providers
+            .borrow()
+            .iter()
+            .map(|(id, provider)| (id.clone(), provider.contributions()))
+            .collect();
+        let desired = self.desired.borrow();
+        if rows.iter().any(|(contributor, contract)| {
+            desired.get(contributor).is_none_or(|entry| {
+                !composition::contributes_to(&registry, entry, contract, &self.name)
+            })
+        }) {
+            return Err(AccessError::Denied);
+        }
         {
             let mut policy = self.policy.borrow_mut();
+            if policy.demand.get(&self.name).cloned().unwrap_or_default() == rows {
+                return Ok(());
+            }
             if rows.is_empty() {
                 policy.demand.remove(&self.name);
             } else {
@@ -280,6 +329,15 @@ impl CompositionBroker {
         let contracts: std::collections::BTreeSet<String> = contracts.into_iter().collect();
         {
             let mut policy = self.policy.borrow_mut();
+            if policy
+                .accept_all
+                .get(&self.name)
+                .cloned()
+                .unwrap_or_default()
+                == contracts
+            {
+                return Ok(());
+            }
             if contracts.is_empty() {
                 policy.accept_all.remove(&self.name);
             } else {
@@ -731,7 +789,10 @@ impl MicroRegistry {
     /// Publish the desired configuration so activations can resolve a declaration to the
     /// configured instance that offers it and to the consumer it is bound to.
     pub(crate) fn project_desired(&self, desired: &BTreeMap<String, ConfiguredMicro>) {
-        *self.desired.borrow_mut() = desired.clone();
+        if *self.desired.borrow() != *desired {
+            *self.desired.borrow_mut() = desired.clone();
+            self.changes.send_replace(());
+        }
     }
 
     /// Static declaration registry, keyed by provider id. No activation required.
