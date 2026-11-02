@@ -258,7 +258,8 @@ impl SettingsFixture {
         .await;
         let settings =
             clay_mdk::native::output::<SettingsMicro, _>(&application, "settings").unwrap();
-        let sample = clay_mdk::native::output::<SampleMicro, _>(&application, "dayframe.sample").unwrap();
+        let sample =
+            clay_mdk::native::output::<SampleMicro, _>(&application, "dayframe.sample").unwrap();
         let first_counter = application.output::<WasmMicro>("dayframe.counter").unwrap();
         Self {
             application,
@@ -311,7 +312,8 @@ async fn settings_preferences_drive_navigation_demand_and_startup_controls() {
     ui.wait_until("hidden sample evicted", |ui| {
         ui.find(SAMPLE).is_none()
             && ui.attribute(show, "aria-pressed").as_deref() == Some("false")
-            && reports.borrow().as_ref().unwrap().get("dayframe.sample") == Some(&InstanceState::Idle)
+            && reports.borrow().as_ref().unwrap().get("dayframe.sample")
+                == Some(&InstanceState::Idle)
     })
     .await;
     assert_eq!(
@@ -326,7 +328,8 @@ async fn settings_preferences_drive_navigation_demand_and_startup_controls() {
                 == Some("Open Sample micro settings")
     })
     .await;
-    let replacement = clay_mdk::native::output::<SampleMicro, _>(&application, "dayframe.sample").unwrap();
+    let replacement =
+        clay_mdk::native::output::<SampleMicro, _>(&application, "dayframe.sample").unwrap();
     assert_ne!(replacement.instance, sample.instance);
     ui.click(eager);
     ui.wait_until("eager startup selected", |ui| {
@@ -337,7 +340,8 @@ async fn settings_preferences_drive_navigation_demand_and_startup_controls() {
     ui.wait_until("hidden eager sample remains active", |ui| {
         ui.find(SAMPLE).is_none()
             && ui.attribute(show, "aria-pressed").as_deref() == Some("false")
-            && reports.borrow().as_ref().unwrap().get("dayframe.sample") == Some(&InstanceState::Active)
+            && reports.borrow().as_ref().unwrap().get("dayframe.sample")
+                == Some(&InstanceState::Active)
     })
     .await;
     assert_eq!(application.host().check(&replacement.instance), Ok(()));
@@ -345,14 +349,16 @@ async fn settings_preferences_drive_navigation_demand_and_startup_controls() {
     ui.click(eager);
     ui.wait_until("on-demand startup evicts the hidden sample", |ui| {
         ui.attribute(eager, "aria-pressed").as_deref() == Some("false")
-            && reports.borrow().as_ref().unwrap().get("dayframe.sample") == Some(&InstanceState::Idle)
+            && reports.borrow().as_ref().unwrap().get("dayframe.sample")
+                == Some(&InstanceState::Idle)
     })
     .await;
     mock.settle(true);
     ui.click(show);
     ui.wait_until("shown sample starts again on demand", |ui| {
         ui.find(SAMPLE).is_some()
-            && reports.borrow().as_ref().unwrap().get("dayframe.sample") == Some(&InstanceState::Active)
+            && reports.borrow().as_ref().unwrap().get("dayframe.sample")
+                == Some(&InstanceState::Active)
     })
     .await;
     assert_eq!(application.host().check(&settings.instance), Ok(()));
@@ -579,7 +585,8 @@ async fn composed_settings_wasm_lifecycle_flow() {
     ui.click("button[aria-label=\"Enable dayframe.counter micro\"]");
     ui.wait_until("reenabled counter republished its contribution", |ui| {
         ui.find(COUNTER).is_some()
-            && reports.borrow().as_ref().unwrap().get("dayframe.counter") == Some(&InstanceState::Active)
+            && reports.borrow().as_ref().unwrap().get("dayframe.counter")
+                == Some(&InstanceState::Active)
     })
     .await;
     let second_counter = application.output::<WasmMicro>("dayframe.counter").unwrap();
@@ -601,7 +608,8 @@ async fn composed_settings_wasm_lifecycle_flow() {
     ui.wait_until("guest trap withdrew only the failed contribution", |ui| {
         ui.find(COUNTER).is_none()
             && ui.find(COUNTER_VALUE).is_none()
-            && reports.borrow().as_ref().unwrap().get("dayframe.counter") == Some(&InstanceState::Faulted)
+            && reports.borrow().as_ref().unwrap().get("dayframe.counter")
+                == Some(&InstanceState::Faulted)
     })
     .await;
     assert_eq!(

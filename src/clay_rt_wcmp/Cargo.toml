@@ -14,10 +14,12 @@ path = "lib.rs"
 test-utils = []
 
 [dependencies]
+clay_collection = { workspace = true }
 clay_docs = { workspace = true }
 clay_guest_session = { workspace = true }
 clay_host = { workspace = true }
 clay_surface = { workspace = true }
+futures.workspace = true
 wcmp.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

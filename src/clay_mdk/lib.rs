@@ -14,10 +14,6 @@
     all(target_os = "wasi", target_env = "p3"),
     feature(asm_experimental_arch)
 )]
-pub use clay_collection::Batch;
-pub use clay_collection::Query;
-pub use clay_collection::RowChange;
-pub use clay_collection::View;
 pub use clay_collection::{self as collection};
 
 /// wasi-libc v34's `__wasilibc_task_hook` calls `__pthread_tsd_run_dtors` on every
@@ -160,7 +156,7 @@ mod task_hook {
     ///   allocate);
     /// * FINISH → `NULL` (task done; the component model drives the next Start,
     ///   and wasmtime restores SP around its own lifting trampolines);
-    /// * `ASYNC_BLOCK` → the preserved task context; `ASYNC_RESUME` → fresh stack.
+    /// * `ASYNC_BLOCK` → a null task context; `ASYNC_RESUME` → fresh stack.
     ///
     /// TLS is installed once on the first Start and never touched again — shared
     /// for the whole program (wasi-libc #884). TSD destructors are never run
@@ -178,13 +174,12 @@ mod task_hook {
                 0
             }
             ASYNC_BLOCK => {
-                // Free the stack; preserve whatever task context the caller was
-                // carrying in `prev_context_0` (post-#884 uses context slot 0
-                // for this across a block). Our guest is fully synchronous, so
-                // this path is only here to avoid trapping if wit-component ever
-                // emits it.
+                // The stack pointer in context slot 0 is no longer needed once
+                // its task blocks. This wasi-libc predates task-context slots,
+                // so preserve null rather than leaking the stack pointer into
+                // the blocked task's context.
                 task_stack_free(prev_context_0);
-                prev_context_0
+                0
             }
             ASYNC_RESUME => {
                 install_tls_once();
@@ -258,6 +253,7 @@ pub mod bindings {
         path: "../clay_guest_session/wit",
         world: "micro-client",
         pub_export_macro: true,
+        async: ["export:townframe:dayframe/micro-lifecycle@0.1.0#activate"],
     });
 }
 
@@ -267,6 +263,8 @@ pub use bindings::exports::townframe::dayframe::document_events;
 pub use bindings::exports::townframe::dayframe::micro_lifecycle;
 #[cfg(feature = "wit")]
 pub use bindings::exports::townframe::dayframe::presentation_events;
+#[cfg(feature = "wit")]
+pub use bindings::townframe::dayframe::collections;
 #[cfg(feature = "wit")]
 pub use bindings::townframe::dayframe::documents;
 #[cfg(feature = "wit")]

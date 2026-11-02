@@ -5,6 +5,7 @@
 //! `dispatch`, the adapter immediately withdraws the surface and closes the micro's [`Instance`],
 //! which revokes its [`clay_host::ComponentRef`] and any host collections bound to that instance.
 
+mod collections;
 mod documents;
 
 use clay_docs::DocumentRef;
@@ -43,6 +44,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::task::Wake;
 use std::task::Waker;
 use tokio::sync::mpsc;
 use wasmtime_wasi::WasiCtx;
@@ -74,8 +76,8 @@ static SUSPENDED: AtomicU64 = AtomicU64::new(0);
 /// with the spec's `CannotBlock` cause on the first poll (`Ready(Err)`); a guest that actually
 /// suspends returns `Pending` and is treated as [`Suspended`], i.e. as a trap. Either way the
 /// caller withdraws the surface and closes the instance — never a host panic.
-pub(crate) fn first_poll<F: Future>(call: F) -> Result<F::Output, Suspended> {
-    match std::pin::pin!(call).poll(&mut Context::from_waker(Waker::noop())) {
+pub(crate) fn first_poll<F: Future>(call: F, waker: &Waker) -> Result<F::Output, Suspended> {
+    match std::pin::pin!(call).poll(&mut Context::from_waker(waker)) {
         Poll::Ready(output) => Ok(output),
         Poll::Pending => {
             #[cfg(test)]
@@ -85,7 +87,76 @@ pub(crate) fn first_poll<F: Future>(call: F) -> Result<F::Output, Suspended> {
     }
 }
 
-/// Wasmtime reaches this crate only through wash-runtime's re-export, so the
+struct IncarnationWake {
+    notified: AtomicBool,
+    driver: futures::task::AtomicWaker,
+}
+
+struct IncarnationCallWake {
+    call: Waker,
+    incarnation: Arc<IncarnationWake>,
+}
+
+impl Wake for IncarnationCallWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.call.wake_by_ref();
+        self.incarnation.wake_by_ref();
+    }
+}
+
+impl IncarnationWake {
+    fn new() -> Self {
+        Self {
+            notified: AtomicBool::new(true),
+            driver: futures::task::AtomicWaker::new(),
+        }
+    }
+
+    async fn wait(&self) {
+        std::future::poll_fn(|context| {
+            self.driver.register(context.waker());
+            if self.notified.swap(false, Ordering::AcqRel) {
+                self.driver.register(context.waker());
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    async fn drive<F: Future>(self: &Arc<Self>, call: F) -> F::Output {
+        let mut call = std::pin::pin!(call);
+        std::future::poll_fn(|context| {
+            let waker = Waker::from(Arc::new(IncarnationCallWake {
+                call: context.waker().clone(),
+                incarnation: Arc::clone(self),
+            }));
+            let result = call.as_mut().poll(&mut Context::from_waker(&waker));
+            if result.is_ready() {
+                self.wake_by_ref();
+            }
+            result
+        })
+        .await
+    }
+}
+
+impl Wake for IncarnationWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notified.store(true, Ordering::Release);
+        self.driver.wake();
+    }
+}
+
 /// host and the runtime can never resolve to two wasmtime copies. The
 /// `wasmtime_crate` option below points the generated bindings at the same
 /// path instead of a bare `wasmtime::` dependency.
@@ -118,6 +189,8 @@ mod bindings {
             "townframe:dayframe/documents.document-access": super::documents::WasmDocumentAccess,
             "townframe:dayframe/documents.document-watch": super::documents::WasmDocumentWatch,
             "townframe:dayframe/documents.operation": super::documents::WasmOperation,
+            "townframe:dayframe/collections.collection-reader": clay_guest_session::collections::CollectionReader,
+            "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
         },
     });
 }
@@ -132,6 +205,8 @@ struct WasmStoreState {
     wasi: WasiCtx,
     table: ResourceTable,
     documents: DocumentSession,
+    collections: clay_guest_session::collections::CollectionSession,
+    collection_wake: Option<Arc<IncarnationWake>>,
     presentation: PresentationHost,
     limits: StoreLimits,
 }
@@ -168,7 +243,12 @@ impl WasmStoreState {
         limits: DocumentLimits,
     ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
         let (documents, incoming) = DocumentSession::new(host.clone(), instance.clone(), limits)?;
-        let presentation = PresentationHost::new(host, instance);
+        let presentation = PresentationHost::new(host.clone(), instance.clone());
+        let collections = clay_guest_session::collections::CollectionSession::new(
+            host,
+            instance,
+            clay_guest_session::collections::CollectionLimits::default(),
+        );
         let mut wasi = WasiCtx::builder();
         wasi.inherit_stderr();
         Ok((
@@ -176,6 +256,8 @@ impl WasmStoreState {
                 wasi: wasi.build(),
                 table: ResourceTable::new(),
                 documents,
+                collections,
+                collection_wake: None,
                 presentation,
                 limits: StoreLimitsBuilder::new()
                     .memory_size(64 * 1024 * 1024)
@@ -478,8 +560,11 @@ impl WasmPackage {
         host: &Host,
         instance: Instance,
     ) -> Result<(WasmIncarnation, mpsc::Receiver<Work>), ActivationError> {
-        let (state, incoming) =
+        let (mut state, incoming) =
             WasmStoreState::new(host.clone(), instance, DocumentLimits::default())?;
+        let wake = Arc::new(IncarnationWake::new());
+        let waker = Waker::from(Arc::clone(&wake));
+        state.collection_wake = Some(Arc::clone(&wake));
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
         let fuel_per_call = Arc::new(AtomicU64::new(WasmIncarnation::FUEL_PER_CALL));
@@ -496,6 +581,8 @@ impl WasmPackage {
                 store,
                 client,
                 fuel_per_call,
+                wake,
+                waker,
             },
             incoming,
         ))
@@ -506,6 +593,8 @@ struct WasmIncarnation {
     store: Store<WasmStoreState>,
     client: MicroClient,
     fuel_per_call: Arc<AtomicU64>,
+    wake: Arc<IncarnationWake>,
+    waker: Waker,
 }
 
 impl WasmIncarnation {
@@ -518,6 +607,11 @@ impl WasmIncarnation {
         self.store
             .set_fuel(self.fuel_per_call.load(Ordering::Relaxed))
             .unwrap();
+    }
+
+    async fn tick(&mut self) -> wasmtime::Result<()> {
+        self.refuel();
+        self.store.drive_until_stalled().await
     }
 }
 
@@ -536,20 +630,64 @@ impl WasmRuntime {
         instance: Instance,
         package: &WasmPackage,
         configs: BTreeMap<String, DocumentRef>,
+        collections: BTreeMap<String, clay_guest_session::collections::BytesProjection>,
     ) -> Result<(Self, impl std::future::Future<Output = ()> + 'static), ActivationError> {
         let (mut active, incoming) = package.instantiate(host, instance.clone()).await?;
-        documents::activate(&mut active, configs).await?;
+        documents::activate(&mut active, configs, collections).await?;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let fuel = active.fuel_per_call.clone();
         let incarnation = Arc::new(Mutex::new(Some(active)));
         let driver_incarnation = incarnation.clone();
-        let driver = clay_guest_session::drive(
+        let pump_incarnation = incarnation.clone();
+        let pump_host = host.clone();
+        let pump_instance = instance.clone();
+        let documents = clay_guest_session::drive(
             host.clone(),
             instance.clone(),
             incoming,
             pending_limit,
             move |work, delivery| documents::deliver(&driver_incarnation, work, delivery),
         );
+        // Stall-driving must retain exclusive store access across its await so synchronous
+        // mount/dispatch entry cannot borrow the same incarnation while the engine is active.
+        #[expect(
+            clippy::await_holding_lock,
+            reason = "store access is serialized across stall-driving"
+        )]
+        let driver = async move {
+            tokio::pin!(documents);
+            loop {
+                let wake = {
+                    let guard = pump_incarnation.lock().unwrap();
+                    let Some(active) = guard.as_ref() else {
+                        return;
+                    };
+                    active.wake.clone()
+                };
+                tokio::select! {
+                    () = &mut documents => return,
+                    () = wake.wait() => {
+                        let trapped = {
+                            let mut guard = pump_incarnation.lock().unwrap();
+                            let Some(active) = guard.as_mut() else {
+                                return;
+                            };
+                            let trapped = active.tick().await.is_err();
+                            if trapped {
+                                guard.take();
+                            }
+                            trapped
+                        };
+                        if trapped {
+                            if pump_host.check(&pump_instance).is_ok() {
+                                pump_host.close_instance(&pump_instance).unwrap();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        };
         let revoked = Arc::new(AtomicBool::new(false));
         let cleanup_revoked = revoked.clone();
         host.own(
@@ -629,6 +767,7 @@ impl WasmRuntime {
                                 Resource::new_borrow(surface_rep),
                                 &wit_event,
                             ),
+                        &active.waker,
                     ) {
                         Ok(outcome) => {
                             if outcome.is_err() {
@@ -666,6 +805,7 @@ impl WasmRuntime {
                                 .client
                                 .townframe_dayframe_presentation_events()
                                 .call_unmount(&mut active.store, Resource::new_borrow(surface_rep)),
+                            &active.waker,
                         ) {
                             Ok(outcome) => outcome,
                             Err(Suspended) => Err(wasmtime::Error::msg(
@@ -731,6 +871,7 @@ impl WasmRuntime {
                     Resource::new_borrow(placement_rep),
                     &components,
                 ),
+            &active.waker,
         ) {
             Ok(outcome) => outcome,
             Err(Suspended) => Err(wasmtime::Error::msg(

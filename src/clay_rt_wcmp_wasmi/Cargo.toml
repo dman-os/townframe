@@ -13,6 +13,8 @@ wcmp.workspace = true
 wcmp-wasm-core-wasmi.workspace = true
 
 [dev-dependencies]
+ciborium.workspace = true
+clay_collection.workspace = true
 clay_docs.workspace = true
 clay_guest_session.workspace = true
 clay_host.workspace = true
