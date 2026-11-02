@@ -8,6 +8,7 @@ rust-version.workspace = true
 path = "lib.rs"
 
 [dependencies]
+clay_collection = { workspace = true }
 clay_docs = { workspace = true }
 clay_guest_session = { workspace = true }
 clay_host = { workspace = true }
@@ -23,9 +24,10 @@ wasmtime-wasi.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
+ciborium.workspace = true
 daybook_types.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

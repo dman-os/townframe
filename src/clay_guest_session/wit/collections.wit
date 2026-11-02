@@ -1,0 +1,78 @@
+package townframe:dayframe@0.1.0;
+
+interface collections {
+    record encoded-value {
+        body: list<u8>,
+    }
+
+    record version {
+        incarnation: u64,
+        sequence: u64,
+    }
+
+    enum row-evidence {
+        authoritative,
+        pending,
+    }
+
+    record upsert {
+        key: encoded-value,
+        row-version: version,
+        value: encoded-value,
+        evidence: row-evidence,
+        write-context: option<list<u8>>,
+    }
+
+    record removal {
+        key: encoded-value,
+        row-version: version,
+    }
+
+    variant change {
+        upsert(upsert),
+        remove(removal),
+    }
+
+    record transaction {
+        changes: list<change>,
+    }
+
+    record page {
+        transactions: list<transaction>,
+        through: list<u8>,
+        bootstrap-complete: bool,
+    }
+
+    record read-limits {
+        max-transactions: option<u32>,
+        max-changes: option<u32>,
+        poll-timeout-ms: u32,
+    }
+
+    variant acquire-error {
+        reset-required,
+        source-unavailable,
+        revoked,
+        invalid-selector,
+        unauthorized-selector,
+    }
+
+    variant read-error {
+        reset-required,
+        source-unavailable,
+        revoked,
+    }
+
+    resource projection-lease {
+        read: async func(committed: option<list<u8>>, limits: read-limits) -> result<page, read-error>;
+    }
+
+    resource collection-reader {
+        acquire: async func(selector: list<u8>, resume: option<list<u8>>) -> result<projection-lease, acquire-error>;
+    }
+
+    record collection-binding {
+        name: string,
+        reader: collection-reader,
+    }
+}

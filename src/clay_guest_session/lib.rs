@@ -20,6 +20,7 @@ use tokio::sync::watch;
 #[cfg(test)]
 mod tests;
 
+pub mod collections;
 pub mod presentation;
 pub use presentation::Placement;
 pub use presentation::PresentationHost;

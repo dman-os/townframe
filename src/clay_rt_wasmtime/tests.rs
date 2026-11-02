@@ -2,6 +2,58 @@ use super::*;
 use clay_surface::SurfaceTree;
 use wasmtime::component::Resource;
 
+struct RecordingSink {
+    tree: Mutex<Option<SurfaceTree<ComponentRef>>>,
+    changed: tokio::sync::Notify,
+}
+
+impl RecordingSink {
+    fn new() -> Self {
+        Self {
+            tree: Mutex::new(Some(SurfaceTree::new())),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn tree<R>(&self, read: impl FnOnce(&SurfaceTree<ComponentRef>) -> R) -> R {
+        read(self.tree.lock().unwrap().as_ref().expect("surface is live"))
+    }
+
+    async fn wait_for(&self, predicate: impl Fn(&str) -> bool) -> String {
+        loop {
+            let changed = self.changed.notified();
+            let text = self.tree(SurfaceTree::text_content);
+            if predicate(&text) {
+                return text;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl SurfaceSink<ComponentRef> for RecordingSink {
+    fn is_live(&self) -> bool {
+        self.tree.lock().unwrap().is_some()
+    }
+
+    fn apply(&self, edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+        let result = self
+            .tree
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or(PresentationError::Revoked)?
+            .apply(edits);
+        self.changed.notify_waiters();
+        result
+    }
+
+    fn withdraw(&self) {
+        self.tree.lock().unwrap().take();
+        self.changed.notify_waiters();
+    }
+}
+
 async fn counter_package() -> WasmPackage {
     WasmPackage::from_env("counter")
         .await
@@ -216,6 +268,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
         owner.clone(),
         &counter_package().await,
         BTreeMap::new(),
+        BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -262,9 +315,15 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
     let package = WasmPackage::from_env("sleeper")
         .await
         .expect("prepared sleeper component is valid");
-    let (runtime, driver) = WasmRuntime::activate(&host, owner.clone(), &package, BTreeMap::new())
-        .await
-        .unwrap();
+    let (runtime, driver) = WasmRuntime::activate(
+        &host,
+        owner.clone(),
+        &package,
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
     let writer = Arc::new(LiveSink(AtomicBool::new(false)));
     let session = runtime
         .mount(Arc::clone(&writer) as _, &[])
@@ -320,8 +379,14 @@ fn first_poll_maps_pending_to_suspended_and_ready_to_output() {
         }
     }
 
-    assert!(matches!(first_poll(AlwaysPending), Err(Suspended)));
-    assert!(matches!(first_poll(std::future::ready(())), Ok(())));
+    assert!(matches!(
+        first_poll(AlwaysPending, Waker::noop()),
+        Err(Suspended)
+    ));
+    assert!(matches!(
+        first_poll(std::future::ready(()), Waker::noop()),
+        Ok(())
+    ));
 }
 
 #[tokio::test]
@@ -332,27 +397,6 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     use std::future::Future;
     use std::task::Context;
     use std::task::Waker;
-
-    struct RecordingSink(Mutex<Option<SurfaceTree<ComponentRef>>>);
-
-    impl SurfaceSink<ComponentRef> for RecordingSink {
-        fn is_live(&self) -> bool {
-            self.0.lock().unwrap().is_some()
-        }
-
-        fn apply(&self, edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
-            self.0
-                .lock()
-                .unwrap()
-                .as_mut()
-                .ok_or(PresentationError::Revoked)?
-                .apply(edits)
-        }
-
-        fn withdraw(&self) {
-            self.0.lock().unwrap().take();
-        }
-    }
 
     let host = Host::new();
     let owner = host.start("counter");
@@ -391,13 +435,14 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
         owner.clone(),
         &counter_package().await,
         [("counter".into(), document)].into(),
+        BTreeMap::new(),
     )
     .await
     .unwrap();
-    let writer = Arc::new(RecordingSink(Mutex::new(Some(SurfaceTree::new()))));
+    let writer = Arc::new(RecordingSink::new());
     let surface = runtime.mount(writer.clone(), &[]).unwrap();
     assert_eq!(
-        writer.0.lock().unwrap().as_ref().unwrap().text_content(),
+        writer.tree(SurfaceTree::text_content),
         "3Pending counter writes: 0Refresh counter"
     );
     let mut driver = std::pin::pin!(driver);
@@ -415,7 +460,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
             .is_pending()
     );
     assert_eq!(
-        writer.0.lock().unwrap().as_ref().unwrap().text_content(),
+        writer.tree(SurfaceTree::text_content),
         "7Pending counter writes: 0Refresh counter"
     );
     runtime.exhaust_fuel();
@@ -431,6 +476,117 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     assert!(!writer.is_live());
     drop(surface);
     host.close();
+}
+
+#[tokio::test]
+async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() {
+    use clay_collection::Change;
+    use clay_collection::RowEvidence;
+    use clay_collection::Version;
+    use clay_guest_session::collections::BytesProjection;
+    use clay_guest_session::collections::BytesSource;
+    use std::num::NonZeroUsize;
+
+    fn cbor(value: &str) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(value, &mut encoded).unwrap();
+        encoded
+    }
+
+    fn upsert(key: &str, value: &str, sequence: u64) -> Change<Vec<u8>, Vec<u8>> {
+        Change::Upsert {
+            key: cbor(key),
+            row_version: Version::new(1, sequence),
+            value: cbor(value),
+            evidence: RowEvidence::Authoritative,
+            write_context: None,
+        }
+    }
+
+    let host = Host::new();
+    let owner = host.start("collection-probe");
+    let package = WasmPackage::from_env("collection-probe")
+        .await
+        .expect("prepared collection probe is valid");
+    let projection =
+        BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [11, 12]);
+    projection.publish(vec![upsert("alpha", "one", 1), upsert("beta", "two", 2)]);
+    let (runtime, driver) = WasmRuntime::activate(
+        &host,
+        owner.clone(),
+        &package,
+        BTreeMap::new(),
+        [("rows".into(), projection.clone())].into(),
+    )
+    .await
+    .unwrap();
+    let scenario = async move {
+        let writer = Arc::new(RecordingSink::new());
+        let session = runtime.mount(writer.clone(), &[]).unwrap();
+        let text = writer
+            .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
+            .await;
+        assert!(text.contains("alpha=one"), "{text}");
+
+        writer
+            .wait_for(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("empty-reads="))
+                    .is_some_and(|count| count.parse::<u64>().unwrap() >= 1)
+            })
+            .await;
+        projection.publish(vec![upsert("gamma", "three", 3)]);
+        writer.wait_for(|text| text.contains("gamma=three")).await;
+
+        let command = |element: u32| {
+            let revision = writer.tree(|tree| tree.revision());
+            session.handler()(Event {
+                revision,
+                element: clay_surface::NodeId::try_from(element).unwrap(),
+                name: "click".into(),
+                bubbles: true,
+                data_json: "{}".into(),
+            });
+        };
+
+        command(2);
+        projection.publish(vec![upsert("delta", "four", 4)]);
+        let text = writer
+            .wait_for(|text| text.contains("replays=1") && text.contains("delta=four"))
+            .await;
+        assert!(text.contains("gamma=three"), "{text}");
+
+        command(3);
+        writer.wait_for(|text| text.contains("resumes=1")).await;
+        command(4);
+        writer
+            .wait_for(|text| text.contains("status=stopped"))
+            .await;
+        projection.publish(vec![upsert("epsilon", "five", 5)]);
+        command(3);
+        writer
+            .wait_for(|text| text.contains("resumes=2") && text.contains("epsilon=five"))
+            .await;
+
+        projection.reset();
+        projection.publish(vec![upsert("fresh", "six", 6)]);
+        let text = writer
+            .wait_for(|text| {
+                text.contains("resets=1")
+                    && text.contains("status=live")
+                    && text.contains("fresh=six")
+            })
+            .await;
+        assert!(!text.contains("alpha=one"), "{text}");
+
+        projection.revoke();
+        writer
+            .wait_for(|text| text.contains("status=revoked"))
+            .await;
+        drop(session);
+        host.close();
+    };
+    tokio::join!(driver, scenario);
 }
 
 #[derive(Default)]

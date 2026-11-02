@@ -206,6 +206,7 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
         child.clone(),
         &counter_package().await,
         BTreeMap::new(),
+        BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -217,10 +218,15 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
     let package = super::component_package("slots")
         .await
         .expect("prepared slots component is valid");
-    let (runtime, _layout_driver) =
-        WasmRuntime::activate(&host, layout.clone(), &package, BTreeMap::new())
-            .await
-            .unwrap();
+    let (runtime, _layout_driver) = WasmRuntime::activate(
+        &host,
+        layout.clone(),
+        &package,
+        BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
     let foreign = Host::new();
     let foreign_owner = foreign.start("foreign");
     let foreign_reference = foreign.publish_component(&foreign_owner).unwrap();

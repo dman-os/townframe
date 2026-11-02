@@ -9,13 +9,13 @@
 //! Source cursors and cache policy remain host-owned. Native wrappers use these data values
 //! and handles; the WIT resources in `clay_guest_session` map the same watch/selection/mutation
 //! protocol without transporting callbacks or renderer state.
-use clay_collection::BaseDelta;
+use clay_collection::Change;
 use clay_collection::Ledger;
 use clay_collection::OperationId;
 use clay_collection::Overlay;
-use clay_collection::OverlayPolicy;
 use clay_collection::OverlayWait;
 use clay_collection::Replica;
+use clay_collection::RowEvidence;
 use clay_collection::Version;
 use clay_collection::WriteOutcome;
 use clay_host::AccessError;
@@ -251,7 +251,7 @@ impl DocumentService {
                 config_owners: BTreeMap::new(),
                 cache: BTreeMap::new(),
                 replica: Replica::new(1),
-                ledger: Ledger::new(OverlayPolicy::Replicated),
+                ledger: Ledger::new(),
                 watches: BTreeMap::new(),
                 pending: BTreeMap::new(),
                 reads: Vec::new(),
@@ -968,17 +968,19 @@ impl State {
         self.clock += 1;
         let version = Version::new(self.replica.incarnation(), self.clock);
         let delta = match value {
-            Some(value) => BaseDelta::Upsert {
+            Some(value) => Change::Upsert {
                 key: route.clone(),
-                version,
+                row_version: version,
                 value,
+                evidence: RowEvidence::Authoritative,
+                write_context: None,
             },
-            None => BaseDelta::Remove {
+            None => Change::Remove {
                 key: route.clone(),
-                version,
+                row_version: version,
             },
         };
-        self.replica.apply(version.incarnation, &[delta]);
+        self.replica.apply(&[delta]);
         version
     }
 

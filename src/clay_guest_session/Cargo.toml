@@ -11,6 +11,7 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+clay_collection = { workspace = true }
 clay_docs = { workspace = true }
 clay_host = { workspace = true }
 clay_surface = { workspace = true }

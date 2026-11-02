@@ -14,6 +14,7 @@ await useDotenvTargetDir();
 // CONTRIBUTING.md on `resolver.feature-unification`.
 const isolated = ["--config", 'resolver.feature-unification="selected"'];
 await $`cargo build --locked ${isolated} -p micro_counter --target wasm32-wasip3`;
+await $`cargo build --locked ${isolated} -p micro_collection_probe --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example slots --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --target wasm32-wasip3`;
 const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
@@ -25,6 +26,10 @@ await Deno.mkdir(directory.toString(), { recursive: true });
 // Prepared guest components, keyed by the guest name `component_package`/env vars use.
 const components: Record<string, [string, string]> = {
   counter: ["wasm32-wasip3/debug/micro_counter.wasm", "counter"],
+  collectionProbe: [
+    "wasm32-wasip3/debug/micro_collection_probe.wasm",
+    "collection-probe",
+  ],
   slots: ["wasm32-wasip3/debug/examples/slots.wasm", "slots"],
   sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
 };

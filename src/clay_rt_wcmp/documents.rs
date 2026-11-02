@@ -19,6 +19,7 @@ use clay_guest_session::DeliveryOutcome;
 pub use clay_guest_session::Operation as WasmOperation;
 pub use clay_guest_session::Watch as WasmDocumentWatch;
 use clay_guest_session::Work;
+use clay_guest_session::collections::BytesProjection;
 use clay_host::AccessError;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -39,13 +40,17 @@ pub(super) fn deliver(
     };
     let events = active.client.townframe_dayframe_document_events();
     let outcome = match delivery {
-        Delivery::Changed { id, snapshot } => {
-            first_poll(events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot)))
+        Delivery::Changed { id, snapshot } => first_poll(
+            events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot)),
+            &active.waker,
+        ),
+        Delivery::Lagged(id) => {
+            first_poll(events.call_lagged(&mut active.store, id), &active.waker)
         }
-        Delivery::Lagged(id) => first_poll(events.call_lagged(&mut active.store, id)),
-        Delivery::Completed(receipt) => {
-            first_poll(events.call_completed(&mut active.store, &receipt_to_wire(receipt)))
-        }
+        Delivery::Completed(receipt) => first_poll(
+            events.call_completed(&mut active.store, &receipt_to_wire(receipt)),
+            &active.waker,
+        ),
     };
     // A suspension (Suspended) or a guest trap both withdraw the incarnation: document
     // callbacks are the same class of contract violation as a presentation call that fails.
@@ -63,6 +68,7 @@ pub(super) fn deliver(
 pub(super) async fn activate(
     active: &mut WcmpIncarnation,
     configs: BTreeMap<String, DocumentRef>,
+    collections: BTreeMap<String, BytesProjection>,
 ) -> Result<(), ActivationError> {
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {
@@ -82,11 +88,31 @@ pub(super) async fn activate(
             access,
         });
     }
+    let mut collection_bindings = Vec::with_capacity(collections.len());
+    for (name, projection) in collections {
+        let reader = active.store.data().collections.grant(projection)?;
+        let reader = active
+            .store
+            .data_mut()
+            .table
+            .push(reader)
+            .map_err(|error| {
+                ActivationError::Initialization(format!("granting {name}: {error}"))
+            })?;
+        collection_bindings.push(super::collections::wit::CollectionBinding { name, reader });
+    }
+    let lifecycle = active.client.townframe_dayframe_micro_lifecycle();
     active
-        .client
-        .townframe_dayframe_micro_lifecycle()
-        .call_activate(&mut active.store, bindings)
+        .store
+        .run_concurrent(async |accessor| {
+            lifecycle
+                .call_activate(accessor, bindings, collection_bindings)
+                .await
+        })
         .await
+        .map_err(|trap| {
+            ActivationError::Initialization(format!("guest trapped during activation: {trap}"))
+        })?
         .map_err(|trap| {
             ActivationError::Initialization(format!("guest trapped during activation: {trap}"))
         })?
