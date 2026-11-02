@@ -41,6 +41,17 @@ for (const name in components) {
   console.log(`${variable}=${artifact}`);
 }
 
+// The counter is also a self-describing package: the desktop shell scans a package
+// directory (and reads each manifest statically from the component bytes), so prepare
+// that directory beside the raw fixtures.
+const packagesDirectory = directory.join("packages");
+await Deno.mkdir(packagesDirectory.toString(), { recursive: true });
+await $`cp ${directory.join("counter.component.wasm")} ${
+  packagesDirectory.join("counter.component.wasm")
+}`;
+componentEnv["DAYFRAME_PACKAGE_DIR"] = packagesDirectory.toString();
+console.log(`DAYFRAME_PACKAGE_DIR=${packagesDirectory}`);
+
 if (!prepareOnly) {
   // Every clay_*/micro_*/dayframe_* workspace crate is gated; a new micro crate joins by name,
   // no allowlist edit.

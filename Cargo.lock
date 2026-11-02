@@ -2575,7 +2575,6 @@ name = "clay_collection"
 version = "0.1.0"
 dependencies = [
  "proptest",
- "serde_json",
 ]
 
 [[package]]
@@ -2650,8 +2649,10 @@ dependencies = [
  "insta",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "wash-runtime",
+ "wasmparser 0.262.0",
  "wasmtime-wasi",
  "wit-bindgen 0.62.0",
 ]
@@ -4077,6 +4078,7 @@ dependencies = [
  "clay_mdk",
  "clay_micro_core",
  "clay_surface",
+ "daybook_types",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
@@ -4158,6 +4160,7 @@ name = "dayframe_web"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus",
+ "clay_docs",
  "clay_mdk",
  "clay_micro_core",
  "clay_rt_wcmp",
@@ -4167,6 +4170,11 @@ dependencies = [
  "dioxus",
  "js-sys",
  "micro_counter_manifest",
+ "micro_sample",
+ "micro_settings",
+ "micro_settings_manifest",
+ "serde",
+ "serde_json",
  "ui",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -9236,6 +9244,9 @@ dependencies = [
  "clay_mdk",
  "dioxus",
  "micro_settings_manifest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -17417,8 +17428,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "974d643b125b272607e2fff8012ea14a8328acd7621e4bafa7afb32500052b1b"
 dependencies = [
  "bitflags 2.13.2",
+ "hashbrown 0.17.1",
  "indexmap 2.14.2",
  "semver",
+ "serde",
 ]
 
 [[package]]

@@ -4,13 +4,14 @@
 *Section status corrections (2026-10-30, see `docs/scratch/clay-architecture-critique.md` §5):*
 §1 (`dayframe_app` crate), §7 (feature modules as vertical slices), and §8 (gates controlling
 release) have **no implementation** — there is no `dayframe_app` crate and feature gates do not
-control anything. The amendment §"Initial micro provider seam" ("not a hand-written list of
-concrete micros") is **contradicted by as-built code**: `dayframe_composition` hard-codes
-`micro_settings` / `micro_sample` / `micro_counter` imports and installs `MockConfiguration`
-(finding F5). These sections are *decided, not built*.
+control anything. The shared composition no longer names concrete micros: launchers pass an
+installed catalog (native built-ins linked by the shell plus discovered component packages). Its
+configuration uses `FacetConfiguration` over the in-memory document backend, not durable storage.
+Per-instance configuration ownership and the shared application crate remain *decided, not built*
+(finding F5).
 **Supersedes:** ADR 016, `dayframe_dx Architecture — Pieces, Faces, and the Composition Root`.
 **Amended by:** ADR 015 (crate layout and seam placement), ADR 017 (collection substrate and
-optimistic-write visibility), ADR 018 (browser guest engine, Proposed).
+optimistic-write visibility), ADR 018 (browser guest engine).
 
 ## Context
 
@@ -148,30 +149,38 @@ Transaction
 
 The exact implementation may use feature-specific indexes or acceleration structures. The shared runtime MUST NOT force all features into one universal query language. A feature that needs a sorted index, graph projection, or specialized cache may implement that projection behind the common live-query and transaction contract.
 
+Optimistic state is a **shared host plane, not a row property or a per-collection flag**. The host
+publishes a pending intent to every mirror authorized to read that row, so two views of one row
+cannot disagree, and retirement is a host decision driven by source-defined authoritative settlement evidence (ADR 017).
+A feature does not choose an optimistic-visibility policy; it either has write authority or it
+does not.
+
 ### 4. Make local data immediately readable and refresh in the background
 
-Mounting a live query has two independent effects:
+Mounting a live query acquires an immutable selector as a projection lease (ADR 017). It has two independent effects:
 
-1. Read the current local collection immediately.
-2. Ensure a refresh/subscription request is sent to the application backend.
+1. Reveal whatever the guest's partial replica already holds immediately.
+2. Keep the host and its upstream source interested while the guest drains bootstrap pages and later long-polls for changes.
 
-A refresh being pending MUST NOT make an existing local value disappear or force a feature into a generic loading state. A preloaded query should make the first draw useful when the route requires data immediately, but every mounted query still ensures that the latest backend data is requested.
+A refresh being pending MUST NOT make an existing local value disappear or force a feature into a generic loading state. Preloading means acquiring the lease before the first render that needs it; it does not mean blocking that render on the source. Every mounted query still retains its lease.
 
-A query result therefore describes the current local view and its evidence, rather than being only `Loading | Ready | Error`:
+A query result describes the current local view and its evidence, rather than being only `Loading | Ready | Error`:
 
 ```text
 LiveQuery<T> {
-  current: T or an explicitly known empty result,
-  availability: unknown | partial | complete,
+  current: T or an empty result,
+  availability: bootstrapping | complete, // this projection's opening boundary
   freshness: local | refreshing | current | stale,
-  pending_transactions: transaction identifiers,
-  error: optional refresh or source-update error,
+  pending_commands: command identifiers,
+  error: optional projection or source-update error,
 }
 ```
 
-The application should normally render the best available `current` value. A feature may show a structural first-use placeholder when no useful local value exists, but a network-like spinner MUST NOT be the default consequence of an asynchronous refresh.
+`availability` is selector readiness, never a claim that the source is globally synchronized. `complete` means the projection has represented every matching row at its captured opening boundary. An empty result while bootstrapping is "not loaded"; an empty result after completion is "known empty for this projection". Later changes continue through the same lease and do not make bootstrap incomplete again.
 
-Preloads are retained according to a query policy chosen by the feature. Small, stable data such as settings may be eager. Large document or catalog data should be on-demand or progressive. The application should preload the next likely route or pane rather than preload the entire repository.
+Rows are delivered inline in the first protocol and applied transactionally to the guest's partial replica. A render path never performs a synchronous remote read. The application should normally render the best available `current` value; a feature may show a structural first-use placeholder when no useful local value exists, but a network-like spinner MUST NOT be the default consequence of asynchronous refresh.
+
+Projection leases are retained according to a policy chosen by the feature. Small, stable data such as settings may be eager. Large document or catalog data should be on-demand or progressive. The application should preload the next likely route or pane rather than preload the entire repository.
 
 ### 5. Define optimistic mutation semantics explicitly
 
@@ -179,42 +188,53 @@ A feature mutation follows this lifecycle:
 
 ```text
 intent
-  -> optimistic transaction applied to local collections
-  -> command sent to application backend with its stable command ID
-  -> successful mutation response commits the optimistic changes locally
-  -> later source snapshots/events keep the projection current and may correct transformations
-     or remote changes
-  -> backend rejection or transport failure rolls the optimistic transaction back
+  -> optimistic overlay published to every authorized mirror
+  -> command submitted to the application backend with its stable command ID
+  -> a successful response records acceptance (the durable boundary) but does not commit or
+     retire the optimistic row
+  -> the authoritative base reaches the accepted stamp and retires the overlay
+  -> later source updates keep the projection current and may correct transformations or apply
+     remote changes
+  -> explicit rejection or a transport failure removes the overlay
 ```
 
 The runtime MUST distinguish these milestones:
 
-- **locally applied**: the optimistic state is visible in local collections;
-- **accepted**: the responsible service returned a successful mutation response, which is the
-  durable acceptance boundary for this application transaction;
-- **rejected**: the backend explicitly rejected the command and the optimistic state was rolled
-  back;
-- **rolled back**: the optimistic state was removed because of rejection or a transport/backend
-  failure.
+- **locally applied**: the optimistic overlay is visible in the mirrors;
+- **accepted**: the responsible service returned a successful response, which is the durable
+  acceptance boundary for this command; the overlay is still visible;
+- **rejected**: the service explicitly refused the command and the overlay was removed;
+- **rolled back**: the overlay was removed because of rejection or a transport/backend failure;
+- **transport-unknown**: the submitter cannot tell whether the command landed; the overlay is
+  removed for visibility (replication restores the row if it landed) but the caller is not told
+  it was rejected.
 
-There is no separate optimistic-write settlement phase that waits for a later collection event.
-A successful command response MUST commit the optimistic changes into the collection's local
-base without requiring an event watermark. Later source events and snapshots remain authoritative
-for keeping the projection current and may apply server-side transformations or remote changes.
+**Acceptance does not commit the predicted value.** The prediction is never promoted into the authoritative base. It remains in the host's visible materialization until authoritative observation contains the source-defined settlement evidence; for documents this is inclusion of the returned heads. The host then retires the intent and publishes the recomputed visible row. Receipt-first, observation-first, concurrent remote edits, and rejection must converge to the same visible state (ADR 017 §12).
+
+The optimistic plane is shared by every authorized mirror, not private to the submitting feature
+and not a per-collection flag. The host publishes one overlay to all mirrors that may read the
+row, so two views of one row cannot disagree, and the host owns overlay identity and retirement.
+A feature without write authority cannot create an overlay at all.
+
 Command IDs are idempotency identities and MUST be preserved across retries. Transport/backend
 errors and explicit command rejection SHOULD remain distinguishable to feature error handling.
 
-A collection source owns any Automerge heads, global event cursors, per-item versions,
-deduplication, and ordering needed to apply those later source events. The generic collection
-runtime does not infer source ordering from these values.
+A collection source owns any Automerge heads, global event cursors, per-row stamps,
+deduplication, and ordering needed to apply later source updates. The generic runtime does not
+infer source ordering from these values.
 
-Simple CRUD mutations may use collection-level operations. Multi-collection or intent-heavy operations MUST use named feature actions. Examples include creating a document and its initial facets, changing a selected tab while updating related state, or provisioning ML tooling and observing its progress task.
+Simple CRUD mutations may use collection-level commands. Multi-collection or intent-heavy
+operations MUST use named feature actions. Examples include creating a document and its initial
+facets, changing a selected tab while updating related state, or provisioning ML tooling and
+observing its progress task.
 
 The runtime should follow TanStack DB's useful defaults:
 
-- optimistic state is layered separately from synchronized state until acceptance;
-- successful persistence commits the optimistic changes into synchronized local state;
-- failures remove the relevant optimistic transaction;
+- optimistic state is layered separately from synchronized state until the authoritative stamp
+  arrives;
+- a successful response records acceptance but does not commit the prediction into synchronized
+  state;
+- failures remove the relevant overlay;
 - multiple edits may be merged when the feature's intent semantics permit it;
 - operations that are unsafe to guess optimistically may opt out and wait for authoritative data.
 
@@ -438,62 +458,15 @@ Configured enablement, dependency availability, implementation activation, and p
 are different facts. The design MUST permit enabled functionality to remain unloaded/inactive until
 needed.
 
-**Amendment (2026-10-30, binding-derived liveness; core mechanism implemented):** micros are
-singletons, not processes: there is no spawn/close API and disablement is the only intentional
-stop. An instance is live iff it is reachable from an **eager root** through live bindings. Eager
-roots, named by the shell's composition policy, are the only explicit start. Declared requirement
-bindings pull their supplier live; accepted contribution rows pull their contributor live.
-Enablement alone yields `InstanceState::Idle`, with no instance. Withdrawing the last reason to
-run closes the incarnation; its configuration and declarations remain. Cycles cannot keep
-themselves alive because reachability starts at roots.
+**Amendment (ADR 024; core reachability mechanism implemented, resource graph proposed):** the lifecycle unit is one configured micro identity with at most one live incarnation. Micros are supervised singleton services rather than process-tree children: there is no general spawn/close API, and disablement is the only intentional stop. An enabled instance is live exactly while reachable from an eager configured root through strong host resources. Weak resources may become inert and owned effects close with their owner. Reachability, rather than incoming-reference counts, prevents disconnected cycles from keeping themselves alive.
 
-Manifest contributions are a **static declaration registry**, readable without activation
-(`MicroRegistry::contribution_registry`, and `Context::declarations` during an activation). A shell
-renders labels/icons and other semantic payloads from declarations, and accepts rows into its
-demand set; acceptance is what activates the contributor. A micro is its own broker: it may
-`accept` individual rows (hide/reorder) or `accept_all` a contract it provides, which is a standing
-rule that also covers contributors installed later, so a growing registry does not require
-re-activating the shell micro. The composition root therefore names only eager roots, never the
-contributors a micro hosts. Rows naming an unknown, disabled, or undeclared contribution are configuration
-errors, not silent no-ops. This resolves the former "exact demand triggers unresolved": the
-consumer micro decides from its own configuration; the host knows only roots, bindings, and
-accepted rows. Eviction is always correct as a cold start from documents; freezing/snapshotting
-is a later optimization, never a correctness requirement. Host-side liveness tracking of mounts,
-subscriptions, and in-flight invokes is not yet automatic: those edges currently enter through
-the composition policy's demand set.
+Configured requirements resolve to strong provider bindings. Reverse dependencies pass through four distinct facts: an inspectable package declaration, an authorized persistent installation registration, a live target's acceptance policy, and the resulting concrete strong binding. Only that binding pulls the contributor live; the live contribution row appears after successful initialization. The current broker implements static declarations plus incarnation-owned `accept` / `accept_all`; persistent registrations, durable acceptance configuration, and resource-backed edges remain proposed.
 
-Boot configuration selects root instances. Downstream creation occurs through an explicitly granted
-instantiation capability and MUST name an owning lifetime. Instantiating a child is an owned effect;
-removing its owner disposes the child. Multiple windows may instead be mounts within one instance.
-Persistence is a separate operation through granted configuration facilities, not an automatic
-consequence of instantiation. Persisted entries retain identity independent of placement.
+A micro initializes once per incarnation through the async lifecycle entrypoint. Inward dependencies are usable during initialization, while outward provisions, contributions, capability publications, mounts, and guest-served collection sources remain staged until success. Failure drops the pending scope. When an incarnation becomes unreachable it enters `Closing`, retains existing strong dependencies during cleanup, and drops its scope afterward; this yields dependent-before-provider shutdown through RAII.
 
-Explicitly granted ambient scopes may own longer-lived transient instances that clean themselves up.
-They remain bounded by application shutdown; they are not unowned tasks, implicit persistence, or
-substitutes for durable node work. Boot ownership and downstream owned creation settle the lifecycle
-structure. Multiple instances are permitted; launching once is not a singleton enforcement policy.
+Every host-mediated transient effect has an attributable owner and disposal path. Resource contracts, not callers, determine `NoMicroRetention`, `Weak`, `Strong`, or `OwnedEffect`. Host-materialized projection leases retain no micro; guest-served projections and required provisions are strong; surface/capability proxies are weak by default. Persistent configuration and activation registrations are not transient effects.
 
-A broad micro MUST be composable from smaller units without requiring one trait implementation per
-contribution role. Shared authoring helpers may implement conditions and integrations in micro-owned
-code on top of simpler trusted registration/dependency primitives. The host owns enforcement of
-ownership and authority, not every authoring policy. Optional integrations must be able to appear and
-disappear without restarting unrelated parts of their parent micro.
-
-Every host-mediated transient effect MUST have an attributable owner and a disposal path. Removal
-withdraws that owner's effects without erasing unrelated contributions. A contribution created for a
-trigger occurrence must be bounded by both the contributing integration and the occurrence lifetime.
-Activation/disposal races, partial activation, and provider replacement must not leak registrations.
-Dependents must finish required cleanup before their bound provider is destroyed, retaining access to
-that dependency for cleanup. Persistent workspace/configuration records are not transient effects.
-
-Stable configuration identities and live registration identities MUST be distinguished so stale
-cleanup cannot withdraw a replacement registration. Configuration must retain enough identity to
-refer to providers across disablement or unavailability; placeholder/restoration policy is open.
-
-Declarations, desired configuration, and live provisions MUST NOT be conflated. A declaration that a
-provider supports a contract does not satisfy a consumer dependency; an actual live provision does.
-Absent requirements must be inspectable. Mandatory versus conditional provision declarations and the
-response to a missing promised provision remain to be decided.
+Stable configured identities, runtime incarnation identities, declarations, registrations, resolved bindings, and live provisions are never conflated. Stale cleanup cannot withdraw a replacement incarnation. A provider declaration is not authority and does not satisfy a requirement; only a compatible live provision behind a resolved binding does. ADR 024 defines the lifecycle states, reverse-registration path, WIT shape, manifest contract, implementation status, and acceptance tests.
 
 ### Authority, portability, and verification
 
@@ -544,9 +517,11 @@ Native activation adapters construct their micro's typed context from host facil
 
 Publication is staged until activation succeeds and all declared mandatory provisions are fulfilled. Failure closes owned effects without exposing partial outputs. Committed provisions belong to the runtime incarnation; owner closure withdraws them, and stale cleanup cannot remove a replacement. The initial native adapter permits one output per contract per instance; foreign adapters and multiple named outputs remain future extensions, not simulated transport values.
 
-Micros live under `dayframe_app::micros`, using the `settings.rs` plus `settings/` convention. Consumers import public contracts, not provider controllers. Settings and Sample use the same registration and activation boundary. The application runtime contains neither implementation; desktop selects instance bindings and retains mock/demo controls, but does not assemble their feature contexts. Portable tiles remain below this boundary.
+Micros live in their own crates (`micro_settings`, `micro_sample`, `micro_counter`) with a `micro_<name>_manifest` contract crate, each authored against `clay_mdk` only. Consumers import public contracts, not provider controllers. Settings and Sample use the same registration and activation boundary. The shared composition (`dayframe_composition`) contains neither implementation; launchers select instance bindings and retain mock/demo controls, but do not assemble their feature contexts. Portable tiles remain below this boundary.
 
-Boot reconciliation consumes a projection of configured instances: stable identity, provider identity, enablement, and explicit requirement-to-supplier bindings. It does not introduce another configuration store. Dependency order is derived from declarations and bindings; unchanged live incarnations are retained. Disabled, removed, or reconfigured instances are closed, and host dependency ownership withdraws affected consumers without restarting unrelated instances. Enabled consumers remain blocked when suppliers are unavailable, and a later reconciliation restores fresh incarnations when their requirements become available.
+Boot reconciliation consumes a projection of configured instances: stable identity, provider identity, enablement, eager startup, and explicit requirement-to-supplier bindings. Missing `eager` defaults to false. Eager changes recompute liveness without replacing an otherwise demanded incarnation. It does not introduce another configuration store. The shipped composition reads a document facet through `FacetConfiguration`, with Settings locked as an eager boot entry. Settings owns a separate document facet containing hidden contributor identities and their order; its incarnation-owned declaration/configuration watcher accepts the selected rows without restarting Settings. Loading preferences accept none, absent preferences use defaults, and rejected writes restore the previous projection through observable operation receipts. Both facets currently use the in-memory mock backend and do not survive an application restart. Dependency order is derived from declarations and bindings; unchanged live incarnations are retained. Disabled, removed, or rebound instances are closed, and host dependency ownership withdraws affected consumers without restarting unrelated instances. Enabled consumers remain blocked when suppliers are unavailable, and a later reconciliation restores fresh incarnations when their requirements become available.
+
+Package discovery is catalog-driven, not a hand-written list in the composition crate. A package is one self-describing component file: the guest's build script embeds its manifest crate's `manifest()` as JSON in a `dayframe.manifest` custom section, and package identity is the SHA-256 of the exact bytes. `clay_mdk::package` reads the manifest statically from those bytes (descending into nested modules) without running the guest. Launchers hand `CompositionRuntime::new` an `InstalledMicro` catalog — native built-ins linked by the shell plus one entry per discovered package — and the locked instances; the runtime binds one mock config document per manifest config grant, registers every provider, and seeds one enabled on-demand instance per installed micro the locked set does not pin. Desktop scans `DAYFRAME_PACKAGE_DIR` (else `$XDG_DATA_HOME/dayframe/packages`); web reads `packages/index.json` written by `x/dayframe-web.ts`, fetches a package only when an instance activates, and verifies digest and manifest before the browser engine compiles it. Unreadable or manifest-less entries are per-entry installation errors shown in the lifecycle panel, never fatal. OCI transport for packages remains future work.
 
 Malformed binding edits and dependency cycles are rejected before changing the live graph. Reconciliation reports disabled, idle, faulted, unavailable-provider, blocked, active, and failed states separately. Activation failures are retained until configuration or dependency incarnations change; unrelated edits do not repeatedly invoke a failing provider. `ApplicationRuntime::configure` applies a desired projection; one application-owned local `observe` future reconciles host closure and provider-registration changes and publishes current reports. Subscription precedes the initial snapshot, and host closure notifications follow the complete dependent recovery. An incarnation that ends while still desired (guest trap, runtime fault, self-close) is faulted and stays so until its configuration or policy changes, rather than being restarted automatically; there is no explicit stop other than disablement. Dependency withdrawal blocks consumers until the supplier can return. Shells treat `Failed` and `Faulted` as ordinary states to display, never as reasons to abort; a package factory that cannot fetch or compile its guest produces `Failed`, not a shell panic. Host shutdown ends observation after cleanup. Newly available incompatible declarations publish a configuration error without disturbing the previous live graph. This remains an event-driven mechanism, not a timer retry loop; the desktop's desired projection is still in-memory, not a durable storage adapter.
 

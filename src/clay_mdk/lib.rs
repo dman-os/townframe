@@ -283,6 +283,9 @@ pub use mirror::MirrorSnapshot;
 #[cfg(feature = "wit")]
 pub use mirror::MirrorWatch;
 
+#[cfg(feature = "package")]
+pub mod package;
+
 #[cfg(feature = "in_process")]
 pub mod native;
 

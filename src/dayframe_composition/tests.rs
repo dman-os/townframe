@@ -2,16 +2,205 @@ use super::*;
 use micro_settings_manifest::DeclaredSection;
 use std::collections::BTreeSet;
 
-/// Composition with a registration-only counter stub: enough for coherence (id sets,
-/// bindings, contribution shapes) without an engine. Never activated.
+fn settings(runtime: &CompositionRuntime) -> micro_settings::SettingsMicro {
+    clay_mdk::native::output(&runtime.application, "settings").unwrap()
+}
+
+fn settings_route() -> clay_docs::FacetRoute {
+    clay_docs::FacetRoute {
+        document: "settings-config".into(),
+        branch: "main".into(),
+        tag: micro_settings_manifest::CONFIG_TAG.into(),
+        key_id: micro_settings_manifest::CONFIG_KEY.into(),
+    }
+}
+
+#[test]
+fn document_preferences_control_demand_startup_and_rollback() {
+    use clay_docs::OperationError;
+    use clay_docs::OperationStatus;
+    let mut runtime = stub_runtime();
+    let mock = runtime.application.mock_documents();
+    mock.seed(
+        settings_route(),
+        serde_json::json!({"hidden": ["dayframe.sample"], "order": ["dayframe.sample", "dayframe.counter"]}),
+    );
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Idle);
+    let controller = settings(&runtime);
+    assert_eq!(controller.declarations.borrow().len(), 2);
+    assert!(!runtime.desired()["dayframe.sample"].eager);
+    assert!(matches!(
+        runtime.set_eager("settings", false),
+        Err(ConfigurationError::LockedInstance(_))
+    ));
+
+    let startup = runtime.set_eager("dayframe.sample", true).unwrap();
+    assert_eq!(startup.current().status, OperationStatus::LocallyApplied);
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Active);
+    mock.settle(false);
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Idle);
+    assert!(matches!(
+        startup.current().status,
+        OperationStatus::RolledBack(OperationError::Rejected { .. })
+    ));
+
+    let show = controller
+        .edit(|config| {
+            config.hidden.remove("dayframe.sample");
+        })
+        .unwrap();
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Active);
+    let sample = clay_mdk::native::output::<micro_sample::SampleMicro, _>(
+        &runtime.application,
+        "dayframe.sample",
+    )
+    .unwrap();
+    mock.settle(true);
+    assert_eq!(show.current().status, OperationStatus::Accepted);
+    runtime.set_eager("dayframe.sample", true).unwrap();
+    runtime.apply_now().unwrap();
+    runtime.set_eager("dayframe.sample", false).unwrap();
+    runtime.apply_now().unwrap();
+    assert_eq!(
+        sample.instance,
+        clay_mdk::native::output::<micro_sample::SampleMicro, _>(
+            &runtime.application,
+            "dayframe.sample"
+        )
+        .unwrap()
+        .instance
+    );
+    mock.settle(true);
+
+    let hide = controller
+        .edit(|config| {
+            config.hidden.insert("dayframe.sample".into());
+        })
+        .unwrap();
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Idle);
+    assert!(runtime.application.host().check(&sample.instance).is_err());
+    mock.settle(false);
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Active);
+    assert!(matches!(
+        hide.current().status,
+        OperationStatus::RolledBack(_)
+    ));
+    assert_eq!(settings(&runtime).instance, controller.instance);
+    assert_ne!(
+        sample.instance,
+        clay_mdk::native::output::<micro_sample::SampleMicro, _>(
+            &runtime.application,
+            "dayframe.sample"
+        )
+        .unwrap()
+        .instance
+    );
+    runtime.application.host().close();
+}
+
+#[test]
+fn settings_loading_and_external_preferences_are_observed_without_restart() {
+    let mut runtime = stub_runtime();
+    let mock = runtime.application.mock_documents();
+    mock.hold_refreshes(true);
+    runtime.apply_now().unwrap();
+    let controller = settings(&runtime);
+    assert!(
+        controller
+            .preferences(&controller.config.watch.current().unwrap())
+            .is_none()
+    );
+    assert!(matches!(
+        controller.edit(|_| {}),
+        Err(clay_host::AccessError::Denied)
+    ));
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Idle);
+    mock.complete_refreshes();
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Active);
+    assert_eq!(
+        controller.preferences(&controller.config.watch.current().unwrap()),
+        Some(micro_settings::SettingsConfig::default())
+    );
+    mock.external_change(
+        settings_route(),
+        Some(serde_json::json!({"hidden": ["dayframe.sample"], "order": ["dayframe.sample", "dayframe.counter"]})),
+    );
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Idle);
+    let preferences = controller
+        .preferences(&controller.config.watch.current().unwrap())
+        .unwrap();
+    assert!(preferences.rank("dayframe.sample") < preferences.rank("dayframe.counter"));
+    assert_eq!(preferences.rank("unknown"), usize::MAX);
+    assert_eq!(settings(&runtime).instance, controller.instance);
+    mock.external_change(settings_route(), None);
+    runtime.apply_now().unwrap();
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Active);
+    runtime.application.host().close();
+    assert!(matches!(
+        controller.edit(|_| {}),
+        Err(clay_host::AccessError::Revoked)
+    ));
+}
+
+fn locked_settings() -> BTreeMap<String, ConfiguredMicro> {
+    BTreeMap::from([(
+        "settings".into(),
+        ConfiguredMicro {
+            provider: MicroId::new(micro_settings_manifest::ID),
+            enablement: Enablement::Enabled,
+            eager: true,
+            bindings: BTreeMap::new(),
+        },
+    )])
+}
+
+fn runtime_with_counter(
+    counter: impl Fn(&clay_mdk::native::Context<NativeComponents>) -> Result<(), clay_host::AccessError>
+    + 'static,
+) -> CompositionRuntime {
+    let installed = vec![
+        InstalledMicro::new(micro_settings_manifest::manifest(), |application| {
+            clay_mdk::native::provider(
+                application,
+                micro_settings_manifest::manifest(),
+                micro_settings::activate,
+            )
+        }),
+        InstalledMicro::new(micro_sample::manifest(), |application| {
+            clay_mdk::native::provider(
+                application,
+                micro_sample::manifest(),
+                micro_sample::activate,
+            )
+        }),
+        InstalledMicro::new(micro_counter_manifest::manifest(), move |application| {
+            clay_mdk::native::provider(application, micro_counter_manifest::manifest(), counter)
+        }),
+    ];
+    let runtime = CompositionRuntime::new(installed, locked_settings());
+    micro_sample::seed_mock_defaults(&runtime.application.documents());
+    runtime.application.mock_documents().seed(
+        clay_docs::FacetRoute {
+            document: "counter-config".into(),
+            branch: "main".into(),
+            tag: micro_counter_manifest::CONFIG_TAG.into(),
+            key_id: micro_counter_manifest::CONFIG_KEY.into(),
+        },
+        serde_json::json!(0),
+    );
+    runtime
+}
+
 fn stub_runtime() -> CompositionRuntime {
-    CompositionRuntime::new(|application| {
-        vec![clay_mdk::native::provider(
-            application,
-            micro_counter_manifest::manifest(),
-            |_| Ok(()),
-        )]
-    })
+    runtime_with_counter(|_| Ok(()))
 }
 
 // ── linkage coherence: the provider table, the configuration map, and the
@@ -113,10 +302,10 @@ fn linked_provider_manifests_configuration_and_contributions_are_coherent() {
 #[test]
 fn locked_settings_instance_cannot_flip_enablement() {
     let mut runtime = stub_runtime();
-    assert_eq!(
+    assert!(matches!(
         runtime.set_enablement("settings", Enablement::Disabled),
-        Err(ConfigurationError::LockedInstance("settings".into()))
-    );
+        Err(ConfigurationError::LockedInstance(name)) if name == "settings"
+    ));
     runtime.application.host().close();
 }
 
@@ -127,40 +316,34 @@ fn locked_settings_instance_cannot_flip_enablement() {
 /// instance; every other micro keeps running; a configuration revision is the retry.
 #[test]
 fn unfetchable_guest_fails_its_own_instance_and_leaves_the_rest_running() {
-    let mut runtime = CompositionRuntime::new(|application| {
-        vec![clay_mdk::native::provider(
-            application,
-            micro_counter_manifest::manifest(),
-            |_| Err(clay_host::AccessError::Denied),
-        )]
-    });
+    let mut runtime = runtime_with_counter(|_| Err(clay_host::AccessError::Denied));
     runtime.apply_now().unwrap();
     assert_eq!(runtime.states["settings"], InstanceState::Active);
-    assert_eq!(runtime.states["sample"], InstanceState::Active);
+    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Active);
     assert!(
-        matches!(runtime.states["counter"], InstanceState::Failed(_)),
+        matches!(runtime.states["dayframe.counter"], InstanceState::Failed(_)),
         "{:?}",
-        runtime.states["counter"]
+        runtime.states["dayframe.counter"]
     );
     // Retained, not retried, by an unrelated reconcile.
     runtime.apply_now().unwrap();
     assert!(matches!(
-        runtime.states["counter"],
+        runtime.states["dayframe.counter"],
         InstanceState::Failed(_)
     ));
     // Disable then re-enable is the retry; the provider still fails, so it fails again rather
     // than silently going idle.
     runtime
-        .set_enablement("counter", Enablement::Disabled)
+        .set_enablement("dayframe.counter", Enablement::Disabled)
         .unwrap();
     runtime.apply_now().unwrap();
-    assert_eq!(runtime.states["counter"], InstanceState::Disabled);
+    assert_eq!(runtime.states["dayframe.counter"], InstanceState::Disabled);
     runtime
-        .set_enablement("counter", Enablement::Enabled)
+        .set_enablement("dayframe.counter", Enablement::Enabled)
         .unwrap();
     runtime.apply_now().unwrap();
     assert!(matches!(
-        runtime.states["counter"],
+        runtime.states["dayframe.counter"],
         InstanceState::Failed(_)
     ));
     runtime.application.host().close();

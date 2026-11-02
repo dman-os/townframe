@@ -35,11 +35,12 @@ pub enum Enablement {
 pub struct ConfiguredMicro {
     pub provider: MicroId,
     pub enablement: Enablement,
+    #[serde(default)]
+    pub eager: bool,
     pub bindings: BTreeMap<String, String>,
 }
 
-/// Liveness inputs, kept separate from installation configuration: enablement installs a micro,
-/// this decides whether an instance exists. Eager roots are the only explicit start. `demand`
+/// Consumer-owned demand, separate from configured enablement and eager startup. `demand`
 /// maps consumer instance -> accepted registry rows (contributor instance -> contract); it is the
 /// host-visible form of a shell micro's "which of my declared contributions do I show" decision.
 ///
@@ -48,7 +49,6 @@ pub struct ConfiguredMicro {
 /// any reason, so a failed activation or a faulted consumer never keeps contributors alive.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompositionPolicy {
-    pub eager: EagerRoots,
     pub demand: BTreeMap<String, BTreeMap<String, String>>,
     /// Contracts a consumer accepts in full, keyed by consumer instance. Unlike `demand`, which
     /// names individual contributors, this is a standing rule: every currently or later declared
@@ -57,23 +57,11 @@ pub struct CompositionPolicy {
     pub accept_all: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// Which configured instances start without anything binding them.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub enum EagerRoots {
-    /// Every enabled instance is a root: availability-driven start, the mode a locked-down or
-    /// static composition wants and the default until a shell opts into demand.
-    #[default]
-    AllEnabled,
-    /// Only the named instances; everything else runs because a live binding reaches it.
-    Named(BTreeSet<String>),
-}
-
-impl EagerRoots {
-    fn contains(&self, name: &str) -> bool {
-        match self {
-            Self::AllEnabled => true,
-            Self::Named(roots) => roots.contains(name),
-        }
+impl ConfiguredMicro {
+    fn same_incarnation(&self, other: &Self) -> bool {
+        self.provider == other.provider
+            && self.enablement == other.enablement
+            && self.bindings == other.bindings
     }
 }
 
@@ -118,12 +106,6 @@ pub enum ConfigurationError {
     UndeclaredAcceptance {
         consumer: String,
         contracts: Vec<String>,
-    },
-    #[error("{consumer} accepts {contract} from {contributor}, which does not declare it")]
-    UndeclaredContribution {
-        consumer: String,
-        contributor: String,
-        contract: String,
     },
     #[error("configuration request was superseded")]
     Superseded,
@@ -406,6 +388,23 @@ impl FacetConfiguration {
         Ok(self.facet.write(next)?)
     }
 
+    pub fn set_eager(&self, instance: &str, eager: bool) -> Result<Operation, ConfigurationError> {
+        if self.locked.contains_key(instance) {
+            return Err(ConfigurationError::LockedInstance(instance.to_owned()));
+        }
+        let ConfigurationSnapshot::Ready(mut next) = self.current()? else {
+            return Err(ConfigurationError::Loading);
+        };
+        let entry = next
+            .get_mut(instance)
+            .ok_or_else(|| ConfigurationError::UnknownInstance(instance.to_owned()))?;
+        entry.eager = eager;
+        for locked_key in self.locked.keys() {
+            next.remove(locked_key);
+        }
+        Ok(self.facet.write(next)?)
+    }
+
     pub fn rebind(
         &self,
         instance: &str,
@@ -516,12 +515,6 @@ impl Composition {
             .map(|descriptor| (descriptor.id.clone(), descriptor))
             .collect();
         activation_order(&definitions, desired)?;
-        live_instances(
-            &definitions,
-            desired,
-            &registry.policy().borrow(),
-            &registry.contribution_registry(),
-        )?;
         Ok(())
     }
 
@@ -591,12 +584,16 @@ impl Composition {
         let retiring = self
             .active
             .extract_if(.., |name, active| {
-                desired.get(name) != Some(&active.configuration)
+                desired
+                    .get(name)
+                    .is_none_or(|next| !next.same_incarnation(&active.configuration))
                     || active.host.check(&active.instance).is_err()
             })
             .collect::<Vec<_>>();
         for (name, active) in retiring {
-            let changed = desired.get(&name) != Some(&active.configuration);
+            let changed = desired
+                .get(&name)
+                .is_none_or(|next| !next.same_incarnation(&active.configuration));
             self.retire(
                 name,
                 (!changed).then_some(active.configuration),
@@ -609,12 +606,20 @@ impl Composition {
         let cancelled = self
             .pending
             .extract_if(.., |name, pending| {
-                desired.get(name) != Some(&pending.configuration)
+                desired
+                    .get(name)
+                    .is_none_or(|next| !next.same_incarnation(&pending.configuration))
             })
             .collect::<Vec<_>>();
         for (name, pending) in cancelled {
             self.retire(name, None, pending.activation.ended.clone());
             drop(pending);
+        }
+        for (name, active) in &mut self.active {
+            active.configuration = desired[name].clone();
+        }
+        for (name, pending) in &mut self.pending {
+            pending.configuration = desired[name].clone();
         }
     }
 
@@ -802,7 +807,10 @@ impl Composition {
         }
         let mut pending = self.pending.remove(&name).unwrap();
         let result = pending.result.take().unwrap();
-        if desired.get(&name) != Some(&pending.configuration) {
+        if desired
+            .get(&name)
+            .is_none_or(|next| !next.same_incarnation(&pending.configuration))
+        {
             self.retire(name, None, pending.activation.ended.clone());
             return;
         }
@@ -908,34 +916,13 @@ pub(super) fn contributes_to(
 /// Transitive liveness: eager roots plus everything reachable through demand bindings.
 /// Declared requirement bindings pull a supplier live; accepted registry rows pull their
 /// contributor live. Disabled entries are never roots, so an idle cycle cannot keep itself alive.
-/// Rows naming an unknown, disabled, or undeclared contribution are rejected, not ignored.
+/// Stale accepted rows cannot keep removed, disabled, or rebound contributors alive.
 fn live_instances(
     definitions: &BTreeMap<MicroId, MicroDescriptor>,
     desired: &BTreeMap<String, ConfiguredMicro>,
     policy: &CompositionPolicy,
     registry: &BTreeMap<MicroId, Vec<super::MicroContribution>>,
 ) -> Result<BTreeSet<String>, ConfigurationError> {
-    for (consumer, rows) in &policy.demand {
-        if !desired.contains_key(consumer) {
-            return Err(ConfigurationError::UnknownInstance(consumer.clone()));
-        }
-        for (contributor, contract) in rows {
-            let Some(entry) = desired.get(contributor) else {
-                return Err(ConfigurationError::UnknownInstance(contributor.clone()));
-            };
-            // A declaration is addressed: the contributor's configured binding for that contract
-            // names the consumer. Two consumers providing the same contract each see only the
-            // contributors bound to them.
-            let declared = contributes_to(registry, entry, contract, consumer);
-            if !declared {
-                return Err(ConfigurationError::UndeclaredContribution {
-                    consumer: consumer.clone(),
-                    contributor: contributor.clone(),
-                    contract: contract.clone(),
-                });
-            }
-        }
-    }
     for (consumer, contracts) in &policy.accept_all {
         let Some(entry) = desired.get(consumer) else {
             return Err(ConfigurationError::UnknownInstance(consumer.clone()));
@@ -957,8 +944,8 @@ fn live_instances(
     }
     let mut live: BTreeSet<String> = desired
         .iter()
-        .filter(|(name, configuration)| {
-            configuration.enablement == Enablement::Enabled && policy.eager.contains(name)
+        .filter(|(_, configuration)| {
+            configuration.enablement == Enablement::Enabled && configuration.eager
         })
         .map(|(name, _)| name.clone())
         .collect();
@@ -972,7 +959,12 @@ fn live_instances(
                 live.insert(supplier.clone());
             }
             if let Some(rows) = policy.demand.get(name) {
-                live.extend(rows.keys().cloned());
+                live.extend(rows.iter().filter_map(|(contributor, contract)| {
+                    desired
+                        .get(contributor)
+                        .filter(|entry| contributes_to(registry, entry, contract, name))
+                        .map(|_| contributor.clone())
+                }));
             }
             if let Some(contracts) = policy.accept_all.get(name) {
                 live.extend(

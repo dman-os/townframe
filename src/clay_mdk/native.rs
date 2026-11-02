@@ -31,6 +31,7 @@ pub use clay_host::CollectionWriter;
 pub use clay_host::Entry;
 pub use clay_host::Instance;
 pub use clay_host::RendererRegistry;
+pub use clay_micro_core::micros::Declaration;
 
 use crate::ComponentRef;
 use crate::manifest::FacetAccess;
@@ -183,6 +184,10 @@ impl<R: RendererRegistry> Context<R> {
         self.broker.declarations(contract)
     }
 
+    pub fn broker(&self) -> clay_micro_core::micros::CompositionBroker {
+        self.broker.clone()
+    }
+
     /// The rows this activation currently accepts: contributor instance -> contract.
     pub fn accepted(&self) -> Result<BTreeMap<String, String>, AccessError> {
         self.broker.accepted()
@@ -190,7 +195,7 @@ impl<R: RendererRegistry> Context<R> {
 
     /// Replace the rows this activation accepts. Accepting a declared row keeps its contributor
     /// live; withdrawing the last reason to run evicts it. The host validates each row's contract
-    /// against the contributor's manifest on the next reconciliation.
+    /// against the contributor's manifest and configured binding before accepting it.
     pub fn accept(&self, rows: BTreeMap<String, String>) -> Result<(), AccessError> {
         self.broker.accept(rows)
     }

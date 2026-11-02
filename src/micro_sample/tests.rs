@@ -43,6 +43,11 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
     application.register_provider(sample_provider).unwrap();
     let host = application.host();
     let documents = application.documents();
+    documents.mock_documents().bind_config(
+        micro_settings_manifest::CONFIG_NAME.into(),
+        "settings-config".into(),
+        "main".into(),
+    );
     documents
         .mock_documents()
         .bind_config("sample".into(), "configuration".into(), "main".into());
@@ -65,6 +70,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
             ConfiguredMicro {
                 provider: MicroId::new(micro_settings_manifest::ID),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::new(),
             },
         ),
@@ -73,6 +79,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
             ConfiguredMicro {
                 provider: MicroId::new(micro_settings_manifest::ID),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::new(),
             },
         ),
@@ -81,6 +88,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
             ConfiguredMicro {
                 provider: MicroId::new(ID),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::from([("settings.sections".into(), "second".into())]),
             },
         ),
@@ -189,6 +197,11 @@ fn sample_micro_distinguishes_loading_absent_present_and_refreshing() {
     application.register_provider(sample_provider).unwrap();
 
     let documents = application.documents();
+    documents.mock_documents().bind_config(
+        micro_settings_manifest::CONFIG_NAME.into(),
+        "settings-config".into(),
+        "main".into(),
+    );
     documents
         .mock_documents()
         .bind_config("sample".into(), "configuration".into(), "main".into());
@@ -200,6 +213,7 @@ fn sample_micro_distinguishes_loading_absent_present_and_refreshing() {
             ConfiguredMicro {
                 provider: MicroId::new(micro_settings_manifest::ID),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::new(),
             },
         ),
@@ -208,6 +222,7 @@ fn sample_micro_distinguishes_loading_absent_present_and_refreshing() {
             ConfiguredMicro {
                 provider: MicroId::new(ID),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::from([("settings.sections".into(), "settings".into())]),
             },
         ),

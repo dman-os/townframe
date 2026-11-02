@@ -2,7 +2,6 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use crate::micros::MicroDescriptor;
@@ -16,7 +15,6 @@ use crate::micros::composition::ConfigurationSnapshot;
 use crate::micros::composition::ConfigurationSource;
 use crate::micros::composition::ConfigurationWatch;
 use crate::micros::composition::ConfiguredMicro;
-use crate::micros::composition::EagerRoots;
 use crate::micros::composition::Enablement;
 use crate::micros::composition::InstanceState;
 use clay_host::CollectionReader;
@@ -293,19 +291,6 @@ impl<R: RendererRegistry> ApplicationRuntime<R> {
         Composition::validate(&self.providers, desired)
     }
 
-    /// Which instances start without a binding. The default, `EagerRoots::AllEnabled`, is
-    /// availability-driven start; a shell that wants demand activation names its roots. Accepted
-    /// contributions are not set here: they belong to the consumer micro's own incarnation
-    /// (`CompositionBroker`), which is why a root cannot pre-accept on a micro's behalf.
-    pub fn set_eager_roots(&self, roots: EagerRoots) {
-        self.providers.policy().borrow_mut().eager = roots;
-        let mut configuration = self.configuration.borrow_mut();
-        configuration.revision += 1;
-        configuration.settled = None;
-        drop(configuration);
-        self.events.send_replace(());
-    }
-
     /// Static declarations from every registered provider, including idle ones. Shells render
     /// labels, icons and other semantic payloads without activating their contributors.
     pub fn contribution_registry(
@@ -538,7 +523,14 @@ impl<R: RendererRegistry> Driver<'_, R> {
         loop {
             events.borrow_and_update();
             self.source_updates();
+            if *host_changes.borrow() == HostStatus::Running
+                && let Some(name) = completion.take()
+            {
+                let desired = self.application.configuration.borrow().desired.clone();
+                self.composition.complete(name, &desired);
+            }
             futures.reap();
+            assert!(futures::FutureExt::now_or_never(futures.run()).is_none());
             let (revision, desired, error, loading) = {
                 let configuration = self.application.configuration.borrow();
                 (
@@ -577,9 +569,6 @@ impl<R: RendererRegistry> Driver<'_, R> {
                     continue;
                 }
                 HostStatus::Running => {}
-            }
-            if let Some(name) = completion.take() {
-                self.composition.complete(name, &desired);
             }
             let states = self.composition.update(
                 &self.application.host,

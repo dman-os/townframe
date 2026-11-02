@@ -1,117 +1,131 @@
-//! Shared Dayframe composition: explicit provider linkage, configuration source, lifecycle
-//! controls, and the `Application` shell UI. Engine-specific guest providers (Wasmtime on
-//! desktop, `wcmp` on the web) are injected by the launch shells; this crate owns only the
-//! engine-neutral half of the composition root (ADR 018 §7).
-use clay_dioxus::use_component_recovery;
+//! Shared Dayframe composition: a catalog-driven composition root, its configuration source,
+//! lifecycle controls, and the `Application` shell UI. The root names no micro: launchers
+//! (desktop, web) hand it every installed micro as an [`InstalledMicro`] — a manifest plus
+//! the engine-specific provider factory for it — together with the locked boot entries.
+//! Engine-specific guest providers (Wasmtime on desktop, `wcmp` on the web) and native
+//! built-ins are both just catalog entries (ADR 018 §7). A fresh composition facet is seeded
+//! with one enabled, on-demand instance per installed micro, named by its full provider id,
+//! each requirement bound to the unique installed provider of that contract (left unbound,
+//! and reported by the reconciler, when there is not exactly one).
 use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
+use clay_dioxus::use_component_recovery;
+use clay_docs::Operation;
+use clay_docs::OperationReceipt;
 use clay_micro_core::application::ApplicationRuntime;
+use clay_micro_core::micros::MicroFactory;
+use clay_micro_core::micros::MicroId;
 use clay_micro_core::micros::composition::ConfigurationError;
 use clay_micro_core::micros::composition::ConfigurationSnapshot;
 use clay_micro_core::micros::composition::ConfigurationSource;
 use clay_micro_core::micros::composition::ConfiguredMicro;
-use clay_micro_core::micros::composition::EagerRoots;
 use clay_micro_core::micros::composition::Enablement;
+use clay_micro_core::micros::composition::FacetConfiguration;
 use clay_micro_core::micros::composition::InstanceState;
-use clay_micro_core::micros::composition::MockConfiguration;
-use clay_micro_core::micros::MicroFactory;
-use clay_micro_core::micros::MicroId;
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
 pub type CompositionApplication = ApplicationRuntime<NativeComponents>;
 
+/// One installed micro in the launcher-supplied catalog: its self-describing manifest and
+/// the factory that turns the composition application into its provider. Packaging (a
+/// component file a desktop scan read, an index entry a web shell fetched, a native
+/// built-in the launcher links) stays in the launcher; this crate sees only the catalog.
+pub struct InstalledMicro {
+    pub manifest: clay_mdk::MicroManifest,
+    pub provider: Box<dyn FnOnce(&CompositionApplication) -> MicroFactory>,
+}
+
+impl InstalledMicro {
+    pub fn new(
+        manifest: clay_mdk::MicroManifest,
+        provider: impl FnOnce(&CompositionApplication) -> MicroFactory + 'static,
+    ) -> Self {
+        Self {
+            manifest,
+            provider: Box::new(provider),
+        }
+    }
+}
+
 /// Runtime for one composition: the application with its registered providers, the in-memory
-/// configuration source, and the reconciled instance states. Shells construct it with their
-/// engine's guest providers; the native micros (settings, sample) and the configuration maps are
-/// engine-neutral and always linked here.
+/// configuration source, and the reconciled instance states.
 #[derive(Clone)]
 pub struct CompositionRuntime {
     pub application: CompositionApplication,
-    configuration: MockConfiguration,
+    configuration: FacetConfiguration,
     pub states: BTreeMap<String, InstanceState>,
+    /// Installation defects the launcher found while assembling the catalog (unreadable or
+    /// manifest-less package files, a failed package-index fetch). Shown in the lifecycle
+    /// panel; never fatal, because one bad package must not take the shell down.
+    pub installation_errors: Vec<String>,
 }
 
 impl CompositionRuntime {
-    /// Build the composition with engine-neutral native providers linked and `guest_providers`
-    /// registered beside them (the counter and any other wasm micro).
-    pub fn new(guest_providers: impl FnOnce(&CompositionApplication) -> Vec<MicroFactory>) -> Self {
+    /// Build the composition from the launcher's catalog: register every installed
+    /// provider, bind one mock configuration document per manifest config grant
+    /// (`<name>-config`), and seed the composition facet — only when absent — with one
+    /// enabled on-demand instance per installed micro that `locked` does not already pin.
+    pub fn new(installed: Vec<InstalledMicro>, locked: BTreeMap<String, ConfiguredMicro>) -> Self {
         let mut application = CompositionApplication::new();
-        micro_sample::bind_mock_defaults(&application.documents());
         let documents = application.mock_documents();
-        documents.bind_config(
-            micro_counter_manifest::CONFIG_NAME.into(),
-            "counter-config".into(),
-            "main".into(),
-        );
-        documents.seed(
-            clay_docs::FacetRoute {
-                document: "counter-config".into(),
-                branch: "main".into(),
-                tag: micro_counter_manifest::CONFIG_TAG.into(),
-                key_id: micro_counter_manifest::CONFIG_KEY.into(),
-            },
-            serde_json::json!(0),
-        );
-
-        let mut providers = vec![
-            clay_mdk::native::provider(
-                &application,
-                micro_settings_manifest::manifest(),
-                micro_settings::activate,
-            ),
-            clay_mdk::native::provider(
-                &application,
-                micro_sample::manifest(),
-                micro_sample::activate,
-            ),
-        ];
-        providers.extend(guest_providers(&application));
-        for provider in providers {
+        let manifests: Vec<clay_mdk::MicroManifest> = installed
+            .iter()
+            .map(|micro| micro.manifest.clone())
+            .collect();
+        for manifest in &manifests {
+            if let Some(config) = &manifest.config {
+                documents.bind_config(
+                    config.name.clone(),
+                    format!("{}-config", config.name),
+                    "main".into(),
+                );
+            }
+        }
+        for micro in installed {
+            let provider = (micro.provider)(&application);
             application.register_provider(provider).unwrap();
         }
 
-        let locked = BTreeMap::from([(
-            "settings".into(),
-            ConfiguredMicro {
-                provider: MicroId::new("dayframe.settings"),
-                enablement: Enablement::Enabled,
-                bindings: BTreeMap::new(),
-            },
-        )]);
-        let dynamic = BTreeMap::from([
-            (
-                "sample".into(),
-                ConfiguredMicro {
-                    provider: MicroId::new("dayframe.sample"),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::from([("settings.sections".into(), "settings".into())]),
-                },
-            ),
-            (
-                "counter".into(),
-                ConfiguredMicro {
-                    provider: MicroId::new(micro_counter_manifest::ID),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::from([("settings.sections".into(), "settings".into())]),
-                },
-            ),
-        ]);
-        let configuration = MockConfiguration::with_locked(locked, dynamic);
+        let seeded = seeded_instances(&manifests, &locked);
+        let route = clay_docs::FacetRoute {
+            document: "composition-config".into(),
+            branch: "main".into(),
+            tag: "org.dayframe.composition.config".into(),
+            key_id: "main".into(),
+        };
+        documents.seed(route.clone(), serde_json::to_value(seeded).unwrap());
+        let access = application
+            .documents()
+            .grant_documents(
+                &application.host(),
+                &application.root(),
+                vec![clay_docs::DocumentGrant {
+                    document: route.document.clone(),
+                    branch: route.branch.clone(),
+                    facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                        tag: route.tag.clone().into(),
+                        key_id: Some(route.key_id.clone()),
+                        read: true,
+                        write: true,
+                        ..Default::default()
+                    }],
+                }],
+            )
+            .unwrap();
+        let facet = access
+            .document(route.document, route.branch)
+            .unwrap()
+            .facet(route.tag, route.key_id)
+            .unwrap();
+        let configuration = FacetConfiguration::new(facet, locked);
         application.install_configuration_source(configuration.clone());
-        // Eager roots are the only explicit start (ADR 014 §Composition and lifecycle):
-        // `settings` is the shell's first panel, and `sample` mounts the sample panel. `counter`
-        // is installed but idle until the settings micro activates and accepts its declared
-        // `settings.sections` contribution — the composition root never names it.
-        application.set_eager_roots(EagerRoots::Named(std::collections::BTreeSet::from([
-            "settings".into(),
-            "sample".into(),
-        ])));
 
         Self {
             application,
             configuration,
             states: BTreeMap::new(),
+            installation_errors: Vec::new(),
         }
     }
 
@@ -156,9 +170,75 @@ impl CompositionRuntime {
         &mut self,
         instance: &str,
         enablement: Enablement,
-    ) -> Result<(), ConfigurationError> {
+    ) -> Result<Operation, ConfigurationError> {
         self.configuration.set_enablement(instance, enablement)
     }
+
+    pub fn set_eager(&self, instance: &str, eager: bool) -> Result<Operation, ConfigurationError> {
+        self.configuration.set_eager(instance, eager)
+    }
+}
+
+/// The fresh-composition seed: one enabled, on-demand instance per installed micro that
+/// `locked` does not already pin a provider for, named by the full provider id. A
+/// requirement binds to the unique configured instance (locked or seeded) whose provider
+/// declares that contract; with zero or several candidates it stays unbound and the
+/// reconciler reports the instance blocked rather than guessing.
+fn seeded_instances(
+    manifests: &[clay_mdk::MicroManifest],
+    locked: &BTreeMap<String, ConfiguredMicro>,
+) -> BTreeMap<String, ConfiguredMicro> {
+    let by_id: BTreeMap<&str, &clay_mdk::MicroManifest> = manifests
+        .iter()
+        .map(|manifest| (manifest.id.as_str(), manifest))
+        .collect();
+    let locked_providers: std::collections::BTreeSet<&str> = locked
+        .values()
+        .map(|configured| configured.provider.as_str())
+        .collect();
+    let mut instances: Vec<(String, &clay_mdk::MicroManifest)> = locked
+        .iter()
+        .filter_map(|(name, configured)| {
+            by_id
+                .get(configured.provider.as_str())
+                .map(|manifest| (name.clone(), *manifest))
+        })
+        .collect();
+    for manifest in manifests {
+        if !locked_providers.contains(manifest.id.as_str()) {
+            instances.push((manifest.id.as_str().to_owned(), manifest));
+        }
+    }
+    instances
+        .iter()
+        .filter(|(name, _)| !locked.contains_key(name))
+        .map(|(name, manifest)| {
+            let mut bindings = BTreeMap::new();
+            for requirement in &manifest.requirements {
+                let mut candidates = instances
+                    .iter()
+                    .filter(|(_, provider)| {
+                        provider
+                            .provisions
+                            .iter()
+                            .any(|provision| provision.id == requirement.id)
+                    })
+                    .map(|(candidate, _)| candidate);
+                if let (Some(only), None) = (candidates.next(), candidates.next()) {
+                    bindings.insert(requirement.id.clone(), only.clone());
+                }
+            }
+            (
+                name.clone(),
+                ConfiguredMicro {
+                    provider: MicroId::new(manifest.id.as_str()),
+                    enablement: Enablement::Enabled,
+                    eager: false,
+                    bindings,
+                },
+            )
+        })
+        .collect()
 }
 
 #[component]
@@ -189,6 +269,24 @@ pub fn Application(mut runtime: Signal<CompositionRuntime>) -> Element {
         }
     });
 
+    let mut receipt = use_signal(|| None::<OperationReceipt>);
+    let mut track = move |operation: Operation| {
+        let initial = operation.current();
+        receipt.set(Some(initial.clone()));
+        spawn(async move {
+            match operation.next(initial.revision).await.unwrap() {
+                Some(completed)
+                    if receipt
+                        .peek()
+                        .as_ref()
+                        .is_some_and(|current| current.id == completed.id) =>
+                {
+                    receipt.set(Some(completed));
+                }
+                _ => {}
+            }
+        });
+    };
     let mut settings_open = use_signal(|| true);
     let roots = clay_mdk::view::use_collection(&runtime.read().application.roots());
 
@@ -220,6 +318,13 @@ pub fn Application(mut runtime: Signal<CompositionRuntime>) -> Element {
             }
             details { class: "rounded-md border border-border p-4",
                 summary { "Mock node and micro lifecycle controls" }
+                p { "Configuration uses document facets backed by the in-memory mock node; it is not saved across restarts." }
+                for error in runtime.read().installation_errors.clone() {
+                    p { key: "install-{error}", role: "status", "Package installation failed: {error}" }
+                }
+                if let Some(receipt) = receipt() {
+                    p { role: "status", "Composition operation {receipt.id}: {receipt.status:?}" }
+                }
                 for name in &configured_names {
                     p {
                         key: "status-{name}",
@@ -240,6 +345,8 @@ pub fn Application(mut runtime: Signal<CompositionRuntime>) -> Element {
                         if !runtime.read().is_locked(&name) {
                             {
                                 let target = name.clone();
+                                let startup_target = name.clone();
+                                let eager = runtime.read().desired()[&name].eager;
                                 let enabled = runtime.read().is_enabled(&name);
                                 let label = if enabled {
                                     format!("Disable {name} micro")
@@ -257,9 +364,19 @@ pub fn Application(mut runtime: Signal<CompositionRuntime>) -> Element {
                                             } else {
                                                 Enablement::Enabled
                                             };
-                                            runtime.write().set_enablement(&target, next).unwrap();
+                                            track(runtime.write().set_enablement(&target, next).unwrap());
                                         },
                                         "{label}"
+                                    }
+                                    button {
+                                        class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
+                                        "aria-label": "Start {name} eagerly",
+                                        "aria-pressed": eager,
+                                        onclick: move |_| {
+                                            let next = !runtime.read().desired()[&startup_target].eager;
+                                            track(runtime.read().set_eager(&startup_target, next).unwrap());
+                                        },
+                                        if eager { "{name}: eager startup" } else { "{name}: start on demand" }
                                     }
                                 }
                             }

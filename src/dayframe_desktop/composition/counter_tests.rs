@@ -49,7 +49,7 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
     runtime.apply_now().unwrap();
     let app = runtime.application.clone();
     let settings = output::<SettingsMicro, _>(&app, "settings").unwrap();
-    let first = app.output::<WasmMicro>("counter").unwrap();
+    let first = app.output::<WasmMicro>("dayframe.counter").unwrap();
     let sections = settings.sections.snapshot().unwrap();
     assert_eq!(sections.len(), 2);
     let section = sections
@@ -92,18 +92,18 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
         vec!["Sample micro"]
     );
     runtime.apply_now().unwrap();
-    assert_eq!(runtime.states["counter"], InstanceState::Faulted);
+    assert_eq!(runtime.states["dayframe.counter"], InstanceState::Faulted);
     runtime
-        .set_enablement("counter", Enablement::Disabled)
+        .set_enablement("dayframe.counter", Enablement::Disabled)
         .unwrap();
     runtime.apply_now().unwrap();
-    assert_eq!(runtime.states["counter"], InstanceState::Disabled);
+    assert_eq!(runtime.states["dayframe.counter"], InstanceState::Disabled);
     runtime
-        .set_enablement("counter", Enablement::Enabled)
+        .set_enablement("dayframe.counter", Enablement::Enabled)
         .unwrap();
     runtime.apply_now().unwrap();
-    assert_eq!(runtime.states["counter"], InstanceState::Active);
-    let second = app.output::<WasmMicro>("counter").unwrap();
+    assert_eq!(runtime.states["dayframe.counter"], InstanceState::Active);
+    let second = app.output::<WasmMicro>("dayframe.counter").unwrap();
     assert!(first.instance != second.instance);
     let sections = settings.sections.snapshot().unwrap();
     assert_eq!(sections.len(), 2);

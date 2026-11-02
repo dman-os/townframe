@@ -1,10 +1,10 @@
 # Dayframe micros — living design log
 
 Status: Living design log — D1–D13 settled; amendments recorded in ADR 015, ADR 017 (collection
-substrate), and ADR 018 (browser engine, Proposed)
+substrate), and ADR 018 (browser engine)
 Owner: operator + dayframe track
 Scope: Micro-composition design for `dayframe_dx` (pieces, faces, composition root).
-Updated: 2026-10-22
+Updated: 2026-10-31
 
 Scratch log for the `src/dayframe_dx` micro-composition PR. It exists so that work can be handed
 between agents and turns without re-deriving intent.

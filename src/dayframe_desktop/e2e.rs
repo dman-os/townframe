@@ -258,8 +258,8 @@ impl SettingsFixture {
         .await;
         let settings =
             clay_mdk::native::output::<SettingsMicro, _>(&application, "settings").unwrap();
-        let sample = clay_mdk::native::output::<SampleMicro, _>(&application, "sample").unwrap();
-        let first_counter = application.output::<WasmMicro>("counter").unwrap();
+        let sample = clay_mdk::native::output::<SampleMicro, _>(&application, "dayframe.sample").unwrap();
+        let first_counter = application.output::<WasmMicro>("dayframe.counter").unwrap();
         Self {
             application,
             ui,
@@ -271,6 +271,98 @@ impl SettingsFixture {
             first_counter,
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn settings_preferences_drive_navigation_demand_and_startup_controls() {
+    let SettingsFixture {
+        application,
+        mut ui,
+        mock,
+        settings,
+        sample,
+        ..
+    } = SettingsFixture::start().await;
+    let reports = application.reports();
+    let show = "button[aria-label=\"Show Sample micro section\"]";
+    let eager = "button[aria-label=\"Start dayframe.sample eagerly\"]";
+    let status = "section[aria-label=\"Settings\"] details p[role=\"status\"]";
+    let first_section = "nav[aria-label=\"Settings sections\"] button:first-child";
+    ui.click(SAMPLE);
+    ui.wait_until("sample selected", |ui| {
+        ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
+    })
+    .await;
+    ui.click("button[aria-label=\"Move Sample micro first\"]");
+    ui.wait_until(
+        "preference reordered navigation without changing selection",
+        |ui| {
+            ui.attribute(first_section, "aria-label").as_deref()
+                == Some("Open Sample micro settings")
+                && ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
+                && ui.text(status).contains("LocallyApplied")
+        },
+    )
+    .await;
+    mock.settle(true);
+    ui.wait_until("order accepted", |ui| ui.text(status).contains("Accepted"))
+        .await;
+    ui.click(show);
+    ui.wait_until("hidden sample evicted", |ui| {
+        ui.find(SAMPLE).is_none()
+            && ui.attribute(show, "aria-pressed").as_deref() == Some("false")
+            && reports.borrow().as_ref().unwrap().get("dayframe.sample") == Some(&InstanceState::Idle)
+    })
+    .await;
+    assert_eq!(
+        application.host().check(&sample.instance),
+        Err(AccessError::Revoked)
+    );
+    mock.settle(false);
+    ui.wait_until("rejected hide restored the section and order", |ui| {
+        ui.find(SAMPLE).is_some()
+            && ui.text(status).contains("RolledBack")
+            && ui.attribute(first_section, "aria-label").as_deref()
+                == Some("Open Sample micro settings")
+    })
+    .await;
+    let replacement = clay_mdk::native::output::<SampleMicro, _>(&application, "dayframe.sample").unwrap();
+    assert_ne!(replacement.instance, sample.instance);
+    ui.click(eager);
+    ui.wait_until("eager startup selected", |ui| {
+        ui.attribute(eager, "aria-pressed").as_deref() == Some("true")
+    })
+    .await;
+    ui.click(show);
+    ui.wait_until("hidden eager sample remains active", |ui| {
+        ui.find(SAMPLE).is_none()
+            && ui.attribute(show, "aria-pressed").as_deref() == Some("false")
+            && reports.borrow().as_ref().unwrap().get("dayframe.sample") == Some(&InstanceState::Active)
+    })
+    .await;
+    assert_eq!(application.host().check(&replacement.instance), Ok(()));
+    mock.settle(true);
+    ui.click(eager);
+    ui.wait_until("on-demand startup evicts the hidden sample", |ui| {
+        ui.attribute(eager, "aria-pressed").as_deref() == Some("false")
+            && reports.borrow().as_ref().unwrap().get("dayframe.sample") == Some(&InstanceState::Idle)
+    })
+    .await;
+    mock.settle(true);
+    ui.click(show);
+    ui.wait_until("shown sample starts again on demand", |ui| {
+        ui.find(SAMPLE).is_some()
+            && reports.borrow().as_ref().unwrap().get("dayframe.sample") == Some(&InstanceState::Active)
+    })
+    .await;
+    assert_eq!(application.host().check(&settings.instance), Ok(()));
+    assert_eq!(
+        settings
+            .preferences(&settings.config.watch.current().unwrap())
+            .unwrap()
+            .order,
+        vec!["dayframe.sample"]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -462,13 +554,13 @@ async fn composed_settings_wasm_lifecycle_flow() {
         Some(persisted_count)
     );
 
-    ui.click("button[aria-label=\"Disable counter micro\"]");
+    ui.click("button[aria-label=\"Disable dayframe.counter micro\"]");
     ui.wait_until(
         "disabled counter withdrew its rendered contribution",
         |ui| {
             ui.find(COUNTER).is_none()
                 && ui.find(COUNTER_VALUE).is_none()
-                && reports.borrow().as_ref().unwrap().get("counter")
+                && reports.borrow().as_ref().unwrap().get("dayframe.counter")
                     == Some(&InstanceState::Disabled)
         },
     )
@@ -484,13 +576,13 @@ async fn composed_settings_wasm_lifecycle_flow() {
         Some("true")
     );
 
-    ui.click("button[aria-label=\"Enable counter micro\"]");
+    ui.click("button[aria-label=\"Enable dayframe.counter micro\"]");
     ui.wait_until("reenabled counter republished its contribution", |ui| {
         ui.find(COUNTER).is_some()
-            && reports.borrow().as_ref().unwrap().get("counter") == Some(&InstanceState::Active)
+            && reports.borrow().as_ref().unwrap().get("dayframe.counter") == Some(&InstanceState::Active)
     })
     .await;
-    let second_counter = application.output::<WasmMicro>("counter").unwrap();
+    let second_counter = application.output::<WasmMicro>("dayframe.counter").unwrap();
     assert!(second_counter.instance != first_counter.instance);
     ui.click(COUNTER);
     ui.wait_until("new Wasm incarnation mounted", |ui| {
@@ -509,7 +601,7 @@ async fn composed_settings_wasm_lifecycle_flow() {
     ui.wait_until("guest trap withdrew only the failed contribution", |ui| {
         ui.find(COUNTER).is_none()
             && ui.find(COUNTER_VALUE).is_none()
-            && reports.borrow().as_ref().unwrap().get("counter") == Some(&InstanceState::Faulted)
+            && reports.borrow().as_ref().unwrap().get("dayframe.counter") == Some(&InstanceState::Faulted)
     })
     .await;
     assert_eq!(

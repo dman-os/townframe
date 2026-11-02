@@ -1,10 +1,13 @@
 # Clay / Dayframe architecture critique — tracking doc
 
+
+> [!IMPORTANT]
+> ADRs 017, 023, and 024 supersede this document where they conflict. In particular, the current collection design uses projection leases with transactional inline row pages and `bootstrap_complete`, not listing/hydration, `Subscription`, or `ReplayComplete`; ADR 024 supersedes the open lifecycle/configuration questions below. This file remains an audit trail and workstream index, not an implementation specification. The presentation targets are Dioxus Native and the browser DOM; React Native is not a target. A direct DOM backend is a later measured optimization, not a prerequisite for the collection/lifecycle work.
 Status: findings reviewed with the operator; W2 (sync/async boundary) landed as code + ADR 015 R5 /
-ADR 018 §3 rewrites, with its four follow-up gaps closed (§3.1); §5 status corrections applied.
-Remaining workstreams not yet redesigned.
+ADR 018 §3 rewrites, with its four follow-up gaps closed (§3.1); W1 (collection waist) redesigned in
+ADR 017, code not built; §5 status corrections applied. Remaining workstreams not yet redesigned.
 Owner: operator + dayframe track
-Updated: 2026-10-30
+Updated: 2026-10-31
 Scope: ADRs 014, 015, 017, 018 and the `clay_*`, `micro_*`, `dayframe_*` crates. Findings are a
 read-only audit verified against the source; W2 (§3.1/§3.2) landed as code + ADR rewrites
 2026-10-30. Every finding below has a file reference. The §4 workstreams are the agreed next
@@ -28,7 +31,7 @@ Severity: **S1** breaks a stated guarantee or is a correctness/safety hole; **S2
 defect that blocks the stated goal; **S3** is scaffolding/limitation that is honestly deferred but
 mis-labelled or under-controlled.
 
-### F1 (S1) Demand does not control delivery; everything is eager broadcast
+### F1 (S1) Demand does not control delivery; everything is eager broadcast — addressed by the ADR 017 rewrite
 
 - `View::attach` registers the relay immediately and every later batch is forwarded to every relay
   regardless of demand: `src/clay_collection/view.rs:883-896`, `:734-739`.
@@ -44,14 +47,19 @@ mis-labelled or under-controlled.
   `src/clay_collection/view.rs:482-495`.
 
 Consequence: "demand" today means "ask for a coverage receipt", not "establish selective upstream
-delivery/retention". ADR 017 §5 ("demand is a narrowing token") and §1 ("each hop answers from its
-own replica and forwards what it cannot cover") are not implemented. ADR 017 acknowledges the scan
-(§Not yet implemented, "Query planning") but not the unconditional broadcast.
+delivery/retention". The old ADR 017 §5 ("demand is a narrowing token") and §1 ("each hop answers
+from its own replica and forwards what it cannot cover") are not implemented.
+
+**Addressed 2026-10-31:** ADR 017 was rewritten. The relay waist (`attach`/`demand`/`release`,
+eager `Batch` broadcast, `DemandToken`, `Coverage`) is withdrawn; the replacement is a reader
+resource (`open` → subscription, bounded pages, `ReplayComplete`, hydration by reference) plus a
+separate writer and a shared overlay plane. The finding remains a true description of the code
+until that waist is built; it is no longer the decided design.
 
 Operator: confirmed serious; the scan "seems very bad". See §2.1 for how the node side now shapes
 what a mounted doc query must resolve to.
 
-### F2 (S2) "One collection waist" is shared containers, not one protocol
+### F2 (S2) "One collection waist" is shared containers, not one protocol — addressed by the ADR 017 rewrite
 
 Shared: `Replica`, `Ledger`. Not shared — three live data paths:
 
@@ -65,6 +73,11 @@ Shared: `Replica`, `Ledger`. Not shared — three live data paths:
   `docs/adrs/017-clay-collection-substrate.md:241-248`.
 
 ADR 017 §1 "no second mechanism exists for guest-provided collections" is false as built.
+
+**Addressed 2026-10-31:** ADR 017 now defines one reader interface (subscriptions over a selector)
+for documents, contribution collections, host stores, and computed guest collections, with the
+writer and shared overlay plane as separate capabilities. The WIT resources are specified; the
+in-process code still exposes the old shapes until the waist is implemented.
 
 Operator: the waist must be designed properly, expressed in WIT and in Rust, and must be able to
 carry docs, cross-micro collections, and host-side collection services uniformly.
@@ -116,20 +129,28 @@ Dioxus); everything that may wait — data, collections, queries — is **async-
 the component model's entry gate. "Async by default" applies to the data boundary, not the
 presentation boundary.
 
-### F5 (S1) The composition root is a hardcoded demo and names the micros
+### F5 (S1) The composition root still ships demo controls and lacks per-instance configuration
 
-- `dayframe_composition` imports `micro_settings`, `micro_sample`, `micro_counter_manifest`,
-  `micro_settings_manifest`, seeds mock documents, builds `ConfiguredMicro` maps by hand, and
-  installs `MockConfiguration`: `src/dayframe_composition/lib.rs:37-100`.
+- `dayframe_composition` no longer imports concrete micros: launchers pass an
+  `InstalledMicro` catalog (manifest + provider closure) plus locked instances to
+  `CompositionRuntime::new`, which binds one mock config document per manifest config
+  grant, registers every provider, and seeds one enabled on-demand instance per
+  installed micro the locked set does not pin. Desktop scans a package directory
+  (`DAYFRAME_PACKAGE_DIR`, else `$XDG_DATA_HOME/dayframe/packages`); web reads
+  `packages/index.json`. Package identity is the SHA-256 of the exact component bytes
+  and the manifest is read statically from the `dayframe.manifest` custom section
+  (`clay_mdk::package`), never by running the guest. Unreadable/manifest-less entries
+  land in `installation_errors` in the lifecycle panel, never fatal.
 - Mock lifecycle and settle buttons are in the product shell: `src/dayframe_composition/lib.rs:215-274`.
-- Contradicts ADR 014 amendment §"Initial micro provider seam" ("not a hand-written list of
-  concrete micros", `docs/adrs/014-…:508-518`) and ADR 015 §3 D3 ("no crate above a micro may
-  name a concrete micro", `docs/adrs/015-clay-composition-runtime.md:181-184`).
+- The remaining violation is configuration ownership, not the micro list: the shared crate's
+  concrete-micro dependencies are dev-only, and launchers linking native built-ins is what
+  ADR 014's amendment permits (`docs/adrs/014-…:583-585`).
 - `FeatureRegistry`/`FeatureContext` exist only in `src/clay_micro_core/flags.rs` and its tests;
   nothing gates on them.
-- `ConfiguredMicro` is `{provider, enablement, bindings}` only — no activation condition, no
-  demand trigger; enabled micros activate eagerly:
-  `src/clay_micro_core/micros/composition.rs:30-37`, `:565-640`.
+- `ConfiguredMicro` now includes `eager` (default false); enabled instances only activate when
+  eager or reachable through demand. Settings owns its hidden/order preferences in a facet.
+  This supplies document-backed startup/selection, not persistent storage. Package
+  discovery is now catalog-driven (above); OCI transport remains future work.
 - No per-instance document configuration: `grant_config` resolves a *global* named config owner
   (`src/clay_docs/lib.rs:264-305`), so two configured instances of one provider share config.
 - `dayframe_mobile` is a themed `h1`: `src/dayframe_mobile/main.rs:16-25`.
@@ -162,10 +183,11 @@ be isomorphic; platform-specific micros do their own imports. **Settings must be
 
 ### F7 (S2) Browser package delivery: no cache, no artifact identity, redundant hops
 
-- Every re-activation refetches and recompiles `counter.component.wasm`; URL is hardcoded:
-  `src/dayframe_web/shell.rs:12-48`.
-- Native has a package cache (`src/clay_mdk/wasm.rs:27-45`); web has none, no content digest,
-  no immutable artifact identity. Disable/enable can run different bytes under one configured
+- Every re-activation refetches and recompiles the package; web still has no compiled-package
+  cache. Artifact identity now exists: `x/dayframe-web.ts` writes `packages/index.json`
+  (location, SHA-256 digest, statically-read manifest), the shell fetches a package only on
+  activation, and verifies digest + manifest before `wcmp` compiles it — so disable/enable
+  can no longer run different bytes under one configured name without an activation failure.
   provider/version.
 - `clay_mdk::wasm` and `clay_mdk::wcmp` duplicate provider/controller logic
   (`src/clay_mdk/wasm.rs`, `src/clay_mdk/wcmp.rs`); `clay_rt_wasmtime` and `clay_rt_wcmp`
@@ -207,7 +229,7 @@ packages keyed by content digest with a precompiled-artifact cache. Folds into W
 **Addressed 2026-10-30 (`b67d5e68`+):** `clay_rt_wasmtime::engine()` is one process-wide engine
 (one `Config`, one compatibility hash) and `linker()` one process-wide linker; `WasmPackage` holds
 only the compiled component plus clones of both. Linear-memory reservation is set to the 64 MiB
-store limit with a one-page guard, so per-instance address space is 64 MiB rather than 4 GiB.
+store limit with a 64 KiB guard, so per-instance address space is about 64 MiB rather than 4 GiB.
 `compile_component` caches precompiled artifacts under `$DAYFRAME_COMPONENT_CACHE` (default
 `$XDG_CACHE_HOME/dayframe/components`), keyed by blake3(wasm bytes + `precompile_compatibility_hash`),
 written via temp-file + rename and repaired by recompiling when loading fails. Tests pin shared
@@ -242,7 +264,7 @@ never re-checked. Evidence is in `docs/scratch/dayframe-micros.md` (DM) and
 | F4 `first_poll` | "Sync presentation" was a ground rule from the start (DM:56, ADR 015 R5), justified only by `preventDefault`. ADR 015 §1 deferred the alternatives "until a second real engine forces the question". The second engine arrived (ADR 018) and the question was not reopened; `first_poll` encoded the rule. A day later guests moved to `wasm32-wasip3` (CM:740-754), whose WASI imports are async — this silently invalidated "our WIT has no suspension point" (`src/clay_rt_wcmp/lib.rs:118-120`), and nobody re-read ADR 018 §3. | A deferral clause with a trigger that nobody checks is not a decision. A test of a guest that sleeps inside `dispatch`. |
 | F5 composition names micros | DM D1 is legitimate: the *end app* hard-codes linked micros and supplies startup config. ADR 018 §7 then moved desktop's "engine-agnostic" half — including `linked_providers` and the config maps — into a shared *library* so parallel micro PRs would not edit two copies (CM:583-588). Launcher-only linkage became library-level. DM D2's datum-backed config source was never built, so `MockConfiguration` was the only implementation and got shipped as the product's. CM §3 item 9 already flagged "the composition root names micro symbols"; the fix only removed contribution types (CM:556-558), not providers or config. | No `dayframe_app` to own config; a dependency rule in `guardrails.toml` forbidding `micro_*` deps outside launcher bins. |
 | F1 demand ≠ delivery | The substrate was built test-first from overlay semantics (DM turn 31, 18 tests) with no consumer that needed narrowing: the only live collections are tiny settings-section lists where broadcast is harmless. Filters are closures, so no token can be derived from a query (DM:1067-1070) and demand became a separate opaque JSON side-channel that `HostUpstream` covers unconditionally. Demand-on-mount was deferred "until a UI renders pending state" (DM:1071-1074); the node adapter was deferred. The design log states "host streams deliberately overfetch" (DM:1207) but ADR 017 kept the narrowing language as decided-and-implemented. | Building against the node doc service (now `big_cabinet_core::doc`). A test that `release` stops delivery and that an unrelated row is not sent. |
-| F2 not one waist | Docs predate the substrate; slice 3 swapped their containers onto `Replica`/`Ledger` (DM:1017-1020) but not their protocol, because a protocol migration needed collection WIT, which was deferred. ADR 017 §9 ("documents are one bespoke layering") contradicts its own §1. | Reading the ADR for internal consistency. |
+| F2 not one waist | Docs predate the substrate; slice 3 swapped their containers onto `Replica`/`Ledger` (DM:1017-1020) but not their protocol, because a protocol migration needed collection WIT, which was deferred. The old ADR 017 §9 ("documents are one bespoke layering") contradicted its own §1; the 2026-10-31 rewrite makes documents one reader source. | Reading the ADR for internal consistency. |
 | F3 failure panics | The `assert!` comment says "do not conceal one behind an empty panel" — the AGENTS.md crash-on-invariant rule applied to something that is *not* an invariant (activation of a fetched/configured micro is external input). No UI existed for `Failed` and adding one needed the design-language skill, so a panic was the path of least resistance. | The ADR 014 amendment requirement, turned into a test that a failing provider renders a failed slot. |
 | F6 native types in manifest | Operator asked for the `micro_xxx_manifest` pattern; the crate was renamed but its contents were not moved (DM:497 records it as "partial"). Typed provisions only exist as the native `Contributable` trait, so there was nowhere portable to put them. | A `check-matrix` contract that manifest crates build for `wasm32-wasip3` with no `clay_mdk::native`. |
 | F7 web fetch/recompile | The browser shell was promoted from the deleted `clay_wcmp_spike` (CM:758-770) with one guest; cache and identity never had a second consumer to motivate them. | — |
@@ -301,8 +323,8 @@ node to a known surface. Relevant properties the waist must be able to carry or 
 - **Read verdicts**: `DatumRead::{Accepted, Absent, Pending, Rejected, Undecodable}` (`doc.rs:98-120`).
   `FacetValue::{Loading, Absent, Present}` is too narrow; the row payload needs to carry the
   verdict, or the waist needs a verdict-aware row type.
-- `ReplayComplete` is explicitly **not** coverage (ADR 017 §5) — a coverage definition for the node
-  adapter is still owed.
+- `ReplayComplete` is explicitly **not** global source completeness (ADR 017 §3) — a replay-boundary
+  definition for the node adapter is still owed.
 
 ### 2.2 Other fixed points
 
@@ -313,16 +335,17 @@ node to a known surface. Relevant properties the waist must be able to carry or 
 
 ## 3. Open design questions (to be answered in the ADR work, not here)
 
-- **Q1 Waist shape.** One WIT package expressing: demand (narrowing token typed per source),
-  cursored delivery, versions, verdict-carrying rows, segregated overlays, settlement, coverage,
-  scope disposal, id namespacing. Must serve: node docs, host contribution collections,
-  guest-provided computed collections, host-side collection services. Rust and WIT are two
-  renderings of one spec, not two designs.
-- **Q2 Demand semantics.** Does demand establish a *subscription* (delivery stops on release) or
-  only a *retention lease*? ADR 017 says the former in §1 and the latter in §5; pick one and make
-  `release` mean it.
-- **Q3 Listing vs values.** Adopt the node's listing+hydrate split in the waist (cheap
-  presence/version stream, targeted value fetch), or hide it inside the node adapter?
+- **Q1 Waist shape.** Answered by the ADR 017 rewrite (2026-10-31): one reader interface —
+  `open(selector) → Subscription` with bounded pages and `ReplayComplete`, listing plus targeted
+  `hydrate`, a separate writer with source-defined commands and outcomes, and a shared optimistic
+  overlay plane. It serves node docs, host contribution collections, guest-provided computed
+  collections, and host-side collection services; Rust and WIT are two renderings of one spec.
+- **Q2 Demand semantics.** Answered in ADR 017 §2: dropping a subscription stops delivery and
+  cancels a pending `next`; retention is the mirror's policy, so a subscription releases only its
+  own retention claim and never evicts rows another live subscription retains.
+- **Q3 Listing vs values.** Answered in ADR 017 §2: the waist adopts the node's listing+hydrate
+  split — a page carries row presence and stamp, and bodies are fetched by `RowRef` without
+  substituting a newer value.
 - **Q4 Async boundary.** Answered in §3.1 (2026-10-30 investigation) and §3.2 (Component Model
   alignment); the reduced wasmtime spike is **done** — see §3.2 "Reduced spike — done". Remaining
   open: whether the pinned `wcmp` fork's *web* backend can resume a guest export that suspends on
@@ -651,6 +674,31 @@ Reading:
   caching levers apply even more strongly.
 - An extra Engine + Linker per package (F10) measured at ~40 µs and no visible RSS.
 
+### Native test compilation under contention (2026-10-31)
+
+The release measurements above do not describe the unoptimized host test binaries under shared
+CPU load. With prepared guests, a fresh `DAYFRAME_COMPONENT_CACHE`, and normal nextest
+concurrency, the `clay_mdk` / `dayframe_desktop` suite reproduced nine 120-second timeouts
+(51 passed). An external `strace -f -tt -T -e trace=openat,rename` run showed first cache
+publication taking roughly 79–96 seconds. A separate untraced reproduction measured about
+80% CPU `some` pressure in both the build scope and the host, no CPU quota throttling, and
+zero memory-limit or OOM events; scope memory usage was about 918 MiB against a 6 GiB high
+watermark. Limiting compiler workers with `RAYON_NUM_THREADS=1` alone did not eliminate the
+timeouts.
+
+There is also a concrete redundant compile in `src/clay_rt_wasmtime/lib.rs:374-412`: on a cache
+miss, `compile_component` calls `Engine::precompile_component`, publishes its output, then calls
+`Component::new` on the original bytes rather than loading the compiled output. Some direct
+MDK tests compile independently of this cache. These observations identify cold compilation
+and CPU contention as investigation targets; they do not prove that the redundant compile alone
+accounts for every timeout. Removing it remains package-cache work (F10), not a lifecycle fix.
+
+For bounded verification, the same 60 tests passed with a fresh cache and
+`cargo nextest run --all-features --no-fail-fast --test-threads 2 -p clay_mdk -p dayframe_desktop`
+in 70.191 seconds (selected feature resolution, prepared guest paths, no compiler-worker override).
+A prior serial run passed all 60 in 29.750 seconds with a warm cache. No tests were skipped and
+no timeout limits were increased; unrestricted concurrent cold-cache execution remains unresolved.
+
 ### 3.4 W4 design: binding-derived liveness (core mechanism implemented 2026-10-30)
 
 Operator decisions, superseding the eager-start / Cordis-availability reading of ADR 014's
@@ -717,23 +765,29 @@ and trap through that path. Pinned by
 `application::tests::a_consumer_micro_activates_declared_contributors_without_the_root_naming_them`,
 `composition::tests::accept_all_*`.
 
-**Built in this pass:** `CompositionPolicy { eager, demand }` separate from installation
-configuration; `InstanceState::Idle`; transitive root-reachability in
-`clay_micro_core/micros/composition.rs`; `MicroProvider::contributions` +
-`MicroFactory::with_contributions` + `MicroRegistry::contribution_registry` (no MDK dependency in
-the lifecycle crate); `ApplicationRuntime::{set_policy,set_eager_roots,set_demand,contribution_registry}`;
-`dayframe_composition` now names only `settings` as an eager root. Pinning tests cover: enabled
-but unbound never activates; eager consumer pulls supplier but not unrelated micros; demand
-activates and withdrawal evicts; undeclared rows are errors; disabled contributors never start.
-Legacy compositions default to all-enabled-eager until a root sets a policy. **Not built:**
-automatic demand edges from host mounts/subscriptions/invokes (a micro accepts explicitly today),
-idle grace, guest-side (wasm) access to the broker, freezing.
+**Current configuration pass (2026-10-31):** startup is `ConfiguredMicro::eager`, defaulting to
+false; `EagerRoots` and the root startup setter are removed. Settings is the locked eager boot
+entry, while sample and counter start through accepted declarations. `dayframe_composition`
+uses `FacetConfiguration` over a granted document facet. Settings owns hidden/order preferences
+in another facet and follows config plus `DeclarationWatch` updates in an incarnation-owned
+future. Hide/show and startup edits expose optimistic operation receipts and rollback. Unknown
+or unaddressed new acceptance is denied immediately; previously accepted rows removed or rebound
+by configuration no longer obstruct reconciliation. Eager changes retain an otherwise demanded
+incarnation. The document backend is still in-memory: none of this adds restart persistence.
+Provider linkage for native built-ins is still explicit in the launchers; this pass does not
+finish F5, and per-instance configuration ownership is unchanged (the config owner is still
+global).
+
+`CompositionPolicy` now contains only incarnation-owned `demand` and `accept_all`; root
+reachability and `InstanceState::Idle` remain the lifecycle mechanism. **Not built:** automatic
+demand edges from host mounts/subscriptions/invokes (a micro accepts explicitly today), idle
+grace, guest-side (wasm) access to the broker, freezing.
 
 ## 4. Workstreams (agreed direction; each becomes an ADR or amendment before code)
 
 | # | Workstream | Resolves | Depends on |
 |---|---|---|---|
-| W1 | Collection waist redesign: spec, WIT package, Rust rendering; demand = subscription; listing+hydrate; verdict rows; scope disposal; id namespacing; node adapter coverage definition | F1, F2, F8 | Q1–Q3 |
+| W1 | Collection waist redesign: spec, WIT package, Rust rendering; subscription = reader resource; listing+hydrate; command/outcome; scope disposal; id namespacing; node adapter replay-boundary definition — **ADR 017 rewritten 2026-10-31**, code not built | F1, F2, F8 | Q1–Q3 (answered) |
 | W2 | Sync presentation exports stay; suspension is trap-equivalent (not host panic); entry-gate alignment; guest-internal async under Dioxus once-then-spawn | F4 | Q4 — **done 2026-10-30**, except A2's MDK half (decided, not built) |
 | W3 | Micro configuration + boot composition model (datum-backed, persistence abstracted); composition root names no micro | F5 | Q5 |
 | W4 | Micro lifecycle = binding-derived liveness; static contribution registry; micro-owned acceptance (`accept`/`accept_all`); eager roots; eviction; failure states honoured by shells — §3.4, done except host-edge auto-edges and idle grace | F3, F5 | Q6 |
@@ -754,7 +808,10 @@ Independent of the redesign, these labels were misleading to readers; the status
 the corrections:
 
 - ADR 017 "Accepted. Implemented in …": §1 (demand-scoped answering), §5 (narrowing demand),
-  §1 ("no second mechanism") are not implemented. Status line now marks them *decided, not built*.
+  §1 ("no second mechanism") are not implemented. **Rewritten 2026-10-31:** those sections and
+  the relay `Batch` waist are withdrawn, replaced by reader subscriptions, source-defined
+  commands, and a shared overlay plane; the status line says the rewrite is the target, not
+  evidence the waist exists.
 - ADR 018 §3: the "no suspension point" premise was wrong while async WASI imports are linked.
   §3 rewritten (W2): trap-equivalent handling, `CannotBlock`, entry-gate alignment, pinning tests.
 - ADR 014 "Accepted": §1 (`dayframe_app`), §7 (feature modules), §8 (gates controlling anything)

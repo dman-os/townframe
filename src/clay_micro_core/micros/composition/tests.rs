@@ -89,8 +89,9 @@ impl Fixture {
         &mut self,
         roots: [&str; N],
     ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
-        self.registry.policy().borrow_mut().eager =
-            EagerRoots::Named(roots.iter().map(|name| (*name).to_owned()).collect());
+        for (name, entry) in &mut self.desired {
+            entry.eager = roots.contains(&name.as_str());
+        }
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -176,8 +177,25 @@ fn configuration(provider: &str, bindings: BTreeMap<String, String>) -> Configur
     ConfiguredMicro {
         provider: MicroId::new(provider),
         enablement: Enablement::Enabled,
+        eager: true,
         bindings,
     }
+}
+
+#[test]
+fn missing_startup_preference_is_idle() {
+    let entry: ConfiguredMicro = serde_json::from_value(serde_json::json!({
+        "provider": "source", "enablement": "Enabled", "bindings": {}
+    }))
+    .unwrap();
+    assert!(!entry.eager);
+    let mut fixture = Fixture::new();
+    fixture.desired = BTreeMap::from([("source".into(), entry)]);
+    assert_eq!(
+        fixture.reconcile(),
+        BTreeMap::from([("source".into(), InstanceState::Idle)])
+    );
+    assert!(fixture.activations.lock().unwrap().is_empty());
 }
 
 fn active_states() -> BTreeMap<String, InstanceState> {
@@ -940,6 +958,7 @@ fn build_desired(entries: &[EntryGen]) -> BTreeMap<String, ConfiguredMicro> {
             NAMES[index].to_owned(),
             ConfiguredMicro {
                 provider: MicroId::new(provider),
+                eager: true,
                 enablement: if entry.enabled {
                     Enablement::Enabled
                 } else {
@@ -1122,6 +1141,7 @@ fn apply_edit(desired: &mut BTreeMap<String, ConfiguredMicro>, edit: &EditGen) {
                 name.to_owned(),
                 ConfiguredMicro {
                     provider: MicroId::new(provider),
+                    eager: true,
                     enablement: if enabled {
                         Enablement::Enabled
                     } else {
@@ -1204,6 +1224,7 @@ fn configured_micro_gen() -> impl proptest::strategy::Strategy<Value = Configure
         .prop_map(
             |(provider, enabled, bindings): (&str, bool, BTreeMap<&str, &str>)| ConfiguredMicro {
                 provider: MicroId::new(provider),
+                eager: true,
                 enablement: if enabled {
                     Enablement::Enabled
                 } else {
@@ -1248,6 +1269,7 @@ fn persisted_composition_shape_is_pinned() {
             ConfiguredMicro {
                 provider: MicroId::new("dependent"),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::from([("test.facility".to_owned(), "supplier".to_owned())]),
             },
         ),
@@ -1256,6 +1278,7 @@ fn persisted_composition_shape_is_pinned() {
             ConfiguredMicro {
                 provider: MicroId::new("source"),
                 enablement: Enablement::Disabled,
+                eager: false,
                 bindings: BTreeMap::new(),
             },
         ),
@@ -1375,35 +1398,32 @@ fn accepted_static_contributions_activate_and_withdrawal_closes_the_incarnation(
 }
 
 #[test]
-fn a_demand_row_must_name_a_declared_contribution_addressed_to_the_consumer() {
+fn obsolete_acceptance_does_not_prevent_removal_or_rebinding() {
     let mut fixture = Fixture::new();
+    fixture.install_button("button", "z-source");
     fixture.reconcile_roots(["z-source"]);
-    // `unrelated` declares nothing.
-    fixture.accept(
-        "z-source",
-        BTreeMap::from([("unrelated".into(), Facility::ID.into())]),
-    );
-    assert_eq!(
-        fixture.try_reconcile_roots(["z-source"]).unwrap_err(),
-        ConfigurationError::UndeclaredContribution {
-            consumer: "z-source".into(),
-            contributor: "unrelated".into(),
-            contract: Facility::ID.into(),
-        }
-    );
-    // `button` declares the row, but its binding addresses `unrelated`, not `z-source`.
-    fixture.install_button("button", "unrelated");
     fixture.accept(
         "z-source",
         BTreeMap::from([("button".into(), Facility::ID.into())]),
     );
     assert_eq!(
-        fixture.try_reconcile_roots(["z-source"]).unwrap_err(),
-        ConfigurationError::UndeclaredContribution {
-            consumer: "z-source".into(),
-            contributor: "button".into(),
-            contract: Facility::ID.into(),
-        }
+        fixture.reconcile_roots(["z-source"])["button"],
+        InstanceState::Active
+    );
+    fixture
+        .desired
+        .get_mut("button")
+        .unwrap()
+        .bindings
+        .insert(Facility::ID.into(), "unrelated".into());
+    assert_eq!(
+        fixture.reconcile_roots(["z-source"])["button"],
+        InstanceState::Idle
+    );
+    fixture.desired.remove("button");
+    assert_eq!(
+        fixture.reconcile_roots(["z-source"])["z-source"],
+        InstanceState::Active
     );
 }
 

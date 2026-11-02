@@ -17,11 +17,11 @@ allow_external_api_types = false
 # Both engines compose through this crate: Wasmtime is native-only (cfg-gated dep); `wcmp`
 # links on wasm32 for the browser shell. Features ≤8 so the matrix needs no powerset.
 [builds.native]
-features = ["in_process", "view", "wasmtime", "wcmp"]
+features = ["in_process", "view", "wasmtime", "wcmp", "package"]
 required_features = ["dioxus", "wit"]
 
 [builds.wasm32-unknown-unknown]
-features = ["in_process", "view", "wcmp"]
+features = ["in_process", "view", "wcmp", "package"]
 required_features = ["dioxus", "wit"]
 
 # Guest-side authoring (wit + Dioxus guest adapter) as a wasip3 component.

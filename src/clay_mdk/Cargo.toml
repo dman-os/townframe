@@ -33,6 +33,8 @@ clay_micro_core = { workspace = true, optional = true }
 clay_dioxus = { workspace = true, optional = true }
 clay_rt_wcmp = { workspace = true, optional = true }
 daybook_types = { workspace = true, default-features = false, features = ["manifest"], optional = true }
+wasmparser = { version = "0.262", optional = true }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clay_rt_wasmtime = { workspace = true, optional = true }
@@ -71,5 +73,7 @@ wasmtime = ["view", "dep:clay_rt_wasmtime"]
 # `wcmp` provider assembly for composition roots that link the browser (or Wasmi) engine.
 # Same provision id as `wasmtime`, different engine; no instruction-fuel control (ADR 018 §5).
 wcmp = ["view", "dep:clay_rt_wcmp"]
+# Static package reading: manifest extraction and digest from component bytes, no engine.
+package = ["dep:wasmparser", "dep:sha2"]
 # The Dioxus guest VirtualDom adapter (GuestDom, WireMutations).
 dioxus = ["wit", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html"]
