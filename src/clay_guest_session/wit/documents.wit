@@ -114,13 +114,15 @@ interface document-events {
 
 interface micro-lifecycle {
     use documents.{document-binding};
+    use collections.{collection-binding};
 
-    activate: func(configs: list<document-binding>) -> result<_, string>;
+    activate: async func(configs: list<document-binding>, collections: list<collection-binding>) -> result<_, string>;
 }
 
 world micro-client {
     include presentation-client;
     import documents;
+    import collections;
     export document-events;
     export micro-lifecycle;
 }

@@ -227,7 +227,7 @@ jobs:
           # DAYFRAME_<NAME>_COMPONENT paths printed by the prepare step.
           nix develop .#ci-desktop --command deno run --allow-all x/check-dayframe.ts --prepare-only > /tmp/dayframe-components.env
           source /tmp/dayframe-components.env
-          export DAYFRAME_COUNTER_COMPONENT DAYFRAME_SLOTS_COMPONENT
+          export DAYFRAME_COUNTER_COMPONENT DAYFRAME_SLOTS_COMPONENT DAYFRAME_COLLECTION_PROBE_COMPONENT
           #
           # `--no-report` accumulates llvm profile data across the nextest and doctest runs (it
           # implies `--no-clean`, so the earlier run's data survives) and the final `report`

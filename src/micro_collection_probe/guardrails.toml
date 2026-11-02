@@ -1,0 +1,10 @@
+version = 1
+role = "plugin"
+dependency_reason = "standalone collection read-waist probe above the engine-neutral collection and guest contracts"
+allowed_dependencies = [
+    "clay_collection",
+    "clay_mdk",
+]
+allow_external_api_types = false
+
+[builds.wasm32-wasip3]

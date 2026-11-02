@@ -7,6 +7,7 @@
 //! `clay_guest_session`, so engines cannot diverge. Presentation calls poll the guest
 //! once and treat a suspension as a trap (ADR 018 §3 as amended); activation is async.
 
+mod collections;
 mod documents;
 mod wasi;
 
@@ -14,6 +15,9 @@ use clay_docs::DocumentRef;
 use clay_guest_session::DocumentSession;
 use clay_guest_session::Limits as DocumentLimits;
 use clay_guest_session::Work;
+use clay_guest_session::collections::BytesProjection;
+use clay_guest_session::collections::CollectionLimits;
+use clay_guest_session::collections::CollectionSession;
 use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
 use clay_host::ComponentRef;
@@ -35,6 +39,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::task::Wake;
 use std::task::Waker;
 use tokio::sync::mpsc;
 use wcmp::Component;
@@ -65,6 +70,8 @@ mod bindings {
             "townframe:dayframe/documents.document-access": super::documents::WasmDocumentAccess,
             "townframe:dayframe/documents.document-watch": super::documents::WasmDocumentWatch,
             "townframe:dayframe/documents.operation": super::documents::WasmOperation,
+            "townframe:dayframe/collections.collection-reader": clay_guest_session::collections::CollectionReader,
+            "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
         },
     });
 }
@@ -81,6 +88,9 @@ pub use clay_guest_session::Surface as WcmpSurface;
 pub struct WcmpStoreState {
     pub table: ResourceTable,
     pub documents: DocumentSession,
+    pub collections: CollectionSession,
+    collection_limits: CollectionLimits,
+    collection_wake: Option<Arc<IncarnationWake>>,
     pub presentation: clay_guest_session::PresentationHost,
 }
 
@@ -91,10 +101,15 @@ impl WcmpStoreState {
         limits: DocumentLimits,
     ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
         let (documents, incoming) = DocumentSession::new(host.clone(), instance.clone(), limits)?;
+        let collection_limits = CollectionLimits::default();
+        let collections = CollectionSession::new(host.clone(), instance.clone(), collection_limits);
         Ok((
             Self {
                 table: ResourceTable::new(),
                 documents,
+                collections,
+                collection_limits,
+                collection_wake: None,
                 presentation: clay_guest_session::PresentationHost::new(host, instance),
             },
             incoming,
@@ -131,10 +146,80 @@ pub struct Suspended;
 /// call fails with the spec's `CannotBlock` cause (`Ready(Err)`), and a guest that suspends returns
 /// `Pending`, mapped to [`Suspended`]. Either way the caller withdraws the surface and closes the
 /// instance — never a host panic.
-pub fn first_poll<F: Future>(call: F) -> Result<F::Output, Suspended> {
-    match std::pin::pin!(call).poll(&mut Context::from_waker(Waker::noop())) {
+pub fn first_poll<F: Future>(call: F, waker: &Waker) -> Result<F::Output, Suspended> {
+    match std::pin::pin!(call).poll(&mut Context::from_waker(waker)) {
         Poll::Ready(output) => Ok(output),
         Poll::Pending => Err(Suspended),
+    }
+}
+
+struct IncarnationWake {
+    notified: AtomicBool,
+    driver: futures::task::AtomicWaker,
+}
+
+struct IncarnationCallWake {
+    call: Waker,
+    incarnation: Arc<IncarnationWake>,
+}
+
+impl Wake for IncarnationCallWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.call.wake_by_ref();
+        self.incarnation.wake_by_ref();
+    }
+}
+
+impl IncarnationWake {
+    fn new() -> Self {
+        Self {
+            notified: AtomicBool::new(true),
+            driver: futures::task::AtomicWaker::new(),
+        }
+    }
+
+    async fn wait(&self) {
+        std::future::poll_fn(|context| {
+            self.driver.register(context.waker());
+            if self.notified.swap(false, Ordering::AcqRel) {
+                self.driver.register(context.waker());
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    async fn drive<F: Future>(self: &Arc<Self>, call: F) -> F::Output {
+        let mut call = std::pin::pin!(call);
+        std::future::poll_fn(|context| {
+            let waker = Waker::from(Arc::new(IncarnationCallWake {
+                call: context.waker().clone(),
+                incarnation: Arc::clone(self),
+            }));
+            let result = call.as_mut().poll(&mut Context::from_waker(&waker));
+            if result.is_ready() {
+                self.wake_by_ref();
+            }
+            result
+        })
+        .await
+    }
+}
+
+impl Wake for IncarnationWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notified.store(true, Ordering::Release);
+        self.driver.wake();
     }
 }
 
@@ -306,6 +391,14 @@ impl WcmpPackage {
 struct WcmpIncarnation {
     store: Store<WcmpStoreState>,
     client: MicroClient,
+    wake: Arc<IncarnationWake>,
+    waker: Waker,
+}
+
+impl WcmpIncarnation {
+    async fn tick(&mut self) -> wcmp::Result<()> {
+        self.store.run_until_stalled()
+    }
 }
 
 /// One activated incarnation. It is `!Send`: the `wcmp` store is not thread-safe, so it lives
@@ -325,8 +418,12 @@ impl WcmpRuntime {
         instance: Instance,
         package: &WcmpPackage,
         configs: BTreeMap<String, DocumentRef>,
+        collections: BTreeMap<String, BytesProjection>,
     ) -> Result<(Self, impl Future<Output = ()> + 'static), ActivationError> {
-        let (state, incoming) = package.instantiate_with_incoming(host, instance.clone())?;
+        let (mut state, incoming) = package.instantiate_with_incoming(host, instance.clone())?;
+        let wake = Arc::new(IncarnationWake::new());
+        let waker = Waker::from(Arc::clone(&wake));
+        state.collection_wake = Some(Arc::clone(&wake));
         let mut store = Store::new(&package.engine, state).map_err(|error| {
             ActivationError::Initialization(format!("creating Wcmp store: {error}"))
         })?;
@@ -338,22 +435,65 @@ impl WcmpRuntime {
                         "instantiating Wcmp component: {error}"
                     ))
                 })?;
-        let mut active = WcmpIncarnation { store, client };
-        documents::activate(&mut active, configs).await?;
+        let mut active = WcmpIncarnation {
+            store,
+            client,
+            wake,
+            waker,
+        };
+        documents::activate(&mut active, configs, collections).await?;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let incarnation = Rc::new(RefCell::new(Some(active)));
         let driver_incarnation = Rc::clone(&incarnation);
-        let driver_host = host.clone();
-        let driver_instance = instance.clone();
+        let pump_incarnation = Rc::clone(&incarnation);
+        let pump_host = host.clone();
+        let pump_instance = instance.clone();
+        let documents = clay_guest_session::drive(
+            host.clone(),
+            instance.clone(),
+            incoming,
+            pending_limit,
+            move |work, delivery| documents::deliver(&driver_incarnation, work, delivery),
+        );
+        // Stall-driving must retain exclusive store access across its await so synchronous
+        // mount/dispatch entry cannot borrow the same incarnation while the engine is active.
+        #[expect(
+            clippy::await_holding_refcell_ref,
+            reason = "store access is serialized across stall-driving"
+        )]
         let driver = async move {
-            clay_guest_session::drive(
-                driver_host,
-                driver_instance,
-                incoming,
-                pending_limit,
-                move |work, delivery| documents::deliver(&driver_incarnation, work, delivery),
-            )
-            .await
+            tokio::pin!(documents);
+            loop {
+                let wake = {
+                    let guard = pump_incarnation.borrow();
+                    let Some(active) = guard.as_ref() else {
+                        return;
+                    };
+                    Arc::clone(&active.wake)
+                };
+                tokio::select! {
+                    () = &mut documents => return,
+                    () = wake.wait() => {
+                        let trapped = {
+                            let mut guard = pump_incarnation.borrow_mut();
+                            let Some(active) = guard.as_mut() else {
+                                return;
+                            };
+                            let trapped = active.tick().await.is_err();
+                            if trapped {
+                                guard.take();
+                            }
+                            trapped
+                        };
+                        if trapped {
+                            if pump_host.check(&pump_instance).is_ok() {
+                                pump_host.close_instance(&pump_instance).unwrap();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
         };
         let revoked = Arc::new(AtomicBool::new(false));
         let cleanup_revoked = Arc::clone(&revoked);
@@ -431,6 +571,7 @@ impl WcmpRuntime {
                     Resource::new_borrow(placement_rep),
                     components,
                 ),
+            &active.waker,
         ) {
             Ok(outcome) => outcome,
             Err(Suspended) => Err(wcmp::Error::Internal {
@@ -511,6 +652,7 @@ impl WcmpRuntime {
                         data_json: event.data_json,
                     },
                 ),
+            &active.waker,
         ) {
             Ok(outcome) => outcome,
             Err(Suspended) => Err(wcmp::Error::Internal {
@@ -540,6 +682,7 @@ impl WcmpRuntime {
                         .client
                         .townframe_dayframe_presentation_events()
                         .call_unmount(&mut active.store, Resource::new_borrow(surface)),
+                    &active.waker,
                 ) {
                     Ok(outcome) => outcome,
                     Err(Suspended) => Err(wcmp::Error::Internal {

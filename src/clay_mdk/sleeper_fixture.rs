@@ -7,6 +7,7 @@
 //! and the host must treat it as a trap (withdraw surface, close instance).
 
 use clay_mdk::bindings;
+use clay_mdk::collections;
 use clay_mdk::document_events;
 use clay_mdk::documents;
 use clay_mdk::micro_lifecycle;
@@ -21,8 +22,12 @@ use dioxus_core::WriteMutations;
 struct Sleeper;
 
 impl micro_lifecycle::Guest for Sleeper {
-    fn activate(configs: Vec<documents::DocumentBinding>) -> Result<(), String> {
+    async fn activate(
+        configs: Vec<documents::DocumentBinding>,
+        collections: Vec<collections::CollectionBinding>,
+    ) -> Result<(), String> {
         assert!(configs.is_empty());
+        assert!(collections.is_empty());
         Ok(())
     }
 }
