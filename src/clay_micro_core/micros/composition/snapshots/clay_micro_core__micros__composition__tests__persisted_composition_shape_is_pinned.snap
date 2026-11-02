@@ -5,9 +5,11 @@ expression: "serde_json::to_value(&desired).unwrap()"
 consumer:
   bindings:
     test.facility: supplier
+  eager: true
   enablement: Enabled
   provider: dependent
 supplier:
   bindings: {}
+  eager: false
   enablement: Disabled
   provider: source

@@ -53,6 +53,7 @@ fn configured(provider: &str) -> ConfiguredMicro {
     ConfiguredMicro {
         provider: MicroId::new(provider),
         enablement: Enablement::Enabled,
+        eager: true,
         bindings: BTreeMap::new(),
     }
 }
@@ -129,7 +130,7 @@ async fn owned_local_watch_is_event_driven_without_a_surface_and_survives_driver
         .configure(&BTreeMap::from([("watch".into(), configured("watch"))]))
         .await
         .unwrap();
-    assert_eq!(counts.get(), (0, 0));
+    assert_eq!(counts.get(), (1, 0));
     let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
     let waker = Waker::from(wakes.clone());
     let mut context = Context::from_waker(&waker);
@@ -1080,6 +1081,7 @@ impl Fixture {
                 ConfiguredMicro {
                     provider: MicroId::new("consumer"),
                     enablement: Enablement::Enabled,
+                    eager: true,
                     bindings: BTreeMap::from([(Facility::ID.into(), "supplier".into())]),
                 },
             ),
@@ -1088,6 +1090,7 @@ impl Fixture {
                 ConfiguredMicro {
                     provider: MicroId::new("supplier"),
                     enablement: Enablement::Enabled,
+                    eager: true,
                     bindings: BTreeMap::new(),
                 },
             ),
@@ -1264,6 +1267,7 @@ async fn report_stream_over_a_full_lifecycle_matches_the_snapshot() {
             ConfiguredMicro {
                 provider: MicroId::new("supplier"),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::new(),
             },
         )
@@ -1274,6 +1278,7 @@ async fn report_stream_over_a_full_lifecycle_matches_the_snapshot() {
             ConfiguredMicro {
                 provider: MicroId::new("consumer"),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::from([(Facility::ID.to_owned(), "supplier".to_owned())]),
             },
         )
@@ -1303,6 +1308,7 @@ async fn report_stream_over_a_full_lifecycle_matches_the_snapshot() {
         ConfiguredMicro {
             provider: MicroId::new("supplier"),
             enablement: Enablement::Enabled,
+            eager: true,
             bindings: BTreeMap::new(),
         },
     );
@@ -1508,6 +1514,7 @@ async fn facet_and_static_configuration_sources_enforce_locked_entries_and_drive
                 ConfiguredMicro {
                     provider: MicroId::new("supplier"),
                     enablement: Enablement::Enabled,
+                    eager: true,
                     bindings: BTreeMap::new(),
                 },
             )]);
@@ -1516,6 +1523,7 @@ async fn facet_and_static_configuration_sources_enforce_locked_entries_and_drive
                 ConfiguredMicro {
                     provider: MicroId::new("consumer"),
                     enablement: Enablement::Enabled,
+                    eager: true,
                     bindings: BTreeMap::from([(Facility::ID.into(), "supplier".into())]),
                 },
             )]);
@@ -1629,6 +1637,7 @@ async fn facet_and_static_configuration_sources_enforce_locked_entries_and_drive
                 ConfiguredMicro {
                     provider: MicroId::new("supplier"),
                     enablement: Enablement::Disabled,
+                    eager: false,
                     bindings: BTreeMap::new(),
                 },
             );
@@ -1712,6 +1721,7 @@ fn bound<const N: usize>(provider: &str, bindings: [(&str, &str); N]) -> Configu
     ConfiguredMicro {
         provider: MicroId::new(provider),
         enablement: Enablement::Enabled,
+        eager: false,
         bindings: bindings
             .iter()
             .map(|(contract, supplier)| ((*contract).to_owned(), (*supplier).to_owned()))
@@ -1719,20 +1729,18 @@ fn bound<const N: usize>(provider: &str, bindings: [(&str, &str); N]) -> Configu
     }
 }
 
+#[derive(Default)]
+struct BrokerFixture {
+    seen: RefCell<Vec<(String, serde_json::Value)>>,
+    escaped: RefCell<Option<crate::micros::CompositionBroker>>,
+}
+
 /// `shelf` provides `Facility`, reads its declarations, hands its broker out (as a UI hook
 /// would) and accepts the contract; `button` requires `Facility` from `shelf` and declares a
 /// contribution to it. `fail_shelf` makes the shelf activation fail after accepting.
-fn broker_fixture(
-    application: &mut ApplicationRuntime,
-    fail_shelf: bool,
-) -> (
-    Arc<Mutex<Vec<(String, serde_json::Value)>>>,
-    Arc<Mutex<Option<crate::micros::CompositionBroker>>>,
-) {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let escaped = Arc::new(Mutex::new(None));
-    let declaration_log = seen.clone();
-    let escape = escaped.clone();
+fn broker_fixture(application: &mut ApplicationRuntime, fail_shelf: bool) -> Rc<BrokerFixture> {
+    let fixture = Rc::new(BrokerFixture::default());
+    let captured = fixture.clone();
     application
         .providers
         .register(MicroFactory::new(
@@ -1747,12 +1755,12 @@ fn broker_fixture(
             },
             move |activation| {
                 let declarations = activation.broker().declarations(Facility::ID)?;
-                *declaration_log.lock().unwrap() = declarations
+                *captured.seen.borrow_mut() = declarations
                     .iter()
                     .map(|declaration| (declaration.instance.clone(), declaration.payload.clone()))
                     .collect();
                 activation.broker().accept_all([Facility::ID.to_owned()])?;
-                *escape.lock().unwrap() = Some(activation.broker().clone());
+                *captured.escaped.borrow_mut() = Some(activation.broker().clone());
                 if fail_shelf {
                     return Err(AccessError::Denied);
                 }
@@ -1782,8 +1790,45 @@ fn broker_fixture(
             }]),
         )
         .unwrap();
-    application.set_eager_roots(EagerRoots::Named(BTreeSet::from(["shelf".into()])));
-    (seen, escaped)
+    fixture
+}
+
+#[tokio::test]
+async fn declaration_watch_tracks_configuration_and_revokes_with_its_owner() {
+    let mut application = ApplicationRuntime::new();
+    let fixture = broker_fixture(&mut application, false);
+    let mut desired = broker_desired();
+    application.configure(&desired).await.unwrap();
+    let broker = fixture.escaped.borrow().clone().unwrap();
+    broker.accept_all([]).unwrap();
+    let mut watch = broker.watch(Facility::ID).unwrap();
+    assert_eq!(watch.current().unwrap().len(), 1);
+    assert_eq!(
+        broker.accept(BTreeMap::from([("missing".into(), Facility::ID.into())])),
+        Err(AccessError::Denied)
+    );
+    assert_eq!(
+        broker.accept(BTreeMap::from([("shelf".into(), Facility::ID.into())])),
+        Err(AccessError::Denied)
+    );
+    assert!(broker.accepted().unwrap().is_empty());
+    broker
+        .accept(BTreeMap::from([("button".into(), Facility::ID.into())]))
+        .unwrap();
+    watch.current().unwrap();
+    broker.accept(broker.accepted().unwrap()).unwrap();
+    assert!(futures::FutureExt::now_or_never(watch.next()).is_none());
+    desired.remove("button");
+    application.configure(&desired).await.unwrap();
+    assert!(watch.next().await.unwrap().is_empty());
+    desired.insert("button".into(), bound("button", [(Facility::ID, "shelf")]));
+    application.configure(&desired).await.unwrap();
+    assert_eq!(watch.next().await.unwrap().len(), 1);
+    desired.get_mut("shelf").unwrap().enablement = Enablement::Disabled;
+    application.configure(&desired).await.unwrap();
+    assert_eq!(watch.next().await, Err(AccessError::Revoked));
+    assert_eq!(watch.current(), Err(AccessError::Revoked));
+    application.host().close();
 }
 
 fn broker_desired() -> BTreeMap<String, ConfiguredMicro> {
@@ -1799,13 +1844,13 @@ fn broker_desired() -> BTreeMap<String, ConfiguredMicro> {
 #[tokio::test]
 async fn a_consumer_micro_activates_declared_contributors_without_the_root_naming_them() {
     let mut application = ApplicationRuntime::new();
-    let (seen, _) = broker_fixture(&mut application, false);
+    let fixture = broker_fixture(&mut application, false);
     let states = application.configure(&broker_desired()).await.unwrap();
     assert_eq!(states["shelf"], InstanceState::Active);
     assert_eq!(states["button"], InstanceState::Active);
     // Readable without an instance, which is what makes a toolbar possible at all.
     assert_eq!(
-        *seen.lock().unwrap(),
+        *fixture.seen.borrow(),
         vec![("button".to_owned(), serde_json::json!({"label": "Open"}))]
     );
     assert!(application.policy().accept_all.contains_key("shelf"));
@@ -1817,10 +1862,10 @@ async fn a_consumer_micro_activates_declared_contributors_without_the_root_namin
 #[tokio::test]
 async fn a_broker_handle_is_revoked_with_its_incarnation() {
     let mut application = ApplicationRuntime::new();
-    let (_, escaped) = broker_fixture(&mut application, false);
+    let fixture = broker_fixture(&mut application, false);
     let mut desired = broker_desired();
     application.configure(&desired).await.unwrap();
-    let stale = escaped.lock().unwrap().clone().unwrap();
+    let stale = fixture.escaped.borrow().clone().unwrap();
     assert_eq!(stale.accepted(), Ok(BTreeMap::new()));
     assert_eq!(
         stale.declarations(Facility::ID).map(|rows| rows.len()),

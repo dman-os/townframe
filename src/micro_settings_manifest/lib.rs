@@ -25,9 +25,13 @@ use serde::Deserialize;
 use serde::Serialize;
 
 pub const ID: &str = "dayframe.settings";
+pub const CONFIG_NAME: &str = "settings";
+pub const CONFIG_TAG: &str = "org.dayframe.settings.config";
+pub const CONFIG_KEY: &str = "main";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsSection {
+    pub contributor: String,
     pub title: String,
     pub detail: ComponentRef,
 }
@@ -66,6 +70,7 @@ impl Contributable for SettingsSections {
             return Err(AccessError::Denied);
         };
         self.bind(contributor)?.insert(SettingsSection {
+            contributor: contributor.name.clone(),
             title,
             detail: surface,
         })?;
@@ -111,7 +116,16 @@ pub fn manifest() -> MicroManifest {
                 version: 1,
             },
         ],
-        config: None,
+        config: Some(clay_mdk::ConfigGrant {
+            name: CONFIG_NAME.into(),
+            facets: vec![clay_mdk::FacetAccess {
+                tag: CONFIG_TAG.into(),
+                key_id: Some(CONFIG_KEY.into()),
+                read: true,
+                write: true,
+                ..Default::default()
+            }],
+        }),
         contributions: vec![],
     }
 }
@@ -218,6 +232,7 @@ mod tests {
         let detail = ComponentRef::from_host(host.publish_component(&first).unwrap());
         let first_entry = first_grant
             .insert(SettingsSection {
+                contributor: first.name.clone(),
                 title: "First".into(),
                 detail,
             })
@@ -225,6 +240,7 @@ mod tests {
         let second_detail = ComponentRef::from_host(host.publish_component(&second).unwrap());
         let second_entry = second_grant
             .insert(SettingsSection {
+                contributor: second.name.clone(),
                 title: "Second".into(),
                 detail: second_detail,
             })
@@ -235,18 +251,21 @@ mod tests {
         assert_eq!(
             reader.snapshot().unwrap().into_values().collect::<Vec<_>>(),
             vec![SettingsSection {
+                contributor: second.name.clone(),
                 title: "Second".into(),
                 detail: second_detail
             }]
         );
         second_entry
             .update(SettingsSection {
+                contributor: second.name.clone(),
                 title: "Updated".into(),
                 detail: second_detail,
             })
             .unwrap();
         assert_eq!(
             first_entry.update(SettingsSection {
+                contributor: first.name.clone(),
                 title: "Stale".into(),
                 detail
             }),
@@ -255,6 +274,7 @@ mod tests {
         host.close_instance(&provider).unwrap();
         assert!(matches!(
             second_grant.insert(SettingsSection {
+                contributor: first.name.clone(),
                 title: "Stale".into(),
                 detail
             }),

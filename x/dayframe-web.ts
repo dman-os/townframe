@@ -1,8 +1,10 @@
 #!/usr/bin/env -S deno run --allow-all
 
 // Build and serve the `dayframe_web` shell (ADR 018 migration steps 6–7): the shared
-// composition with the counter guest fetched as an asset, compiled by the browser's
-// `WebAssembly` engine through `wcmp`.
+// composition plus every package in `packages/index.json`. Each entry's manifest is read
+// statically from the component's `dayframe.manifest` custom section (never by running
+// the guest) and pinned with the SHA-256 of the exact bytes; the shell fetches a package
+// only when an instance activates and verifies the digest before `wcmp` compiles it.
 //
 //   deno run --allow-all x/dayframe-web.ts            build, then serve on HOST:PORT
 //   deno run --allow-all x/dayframe-web.ts --build    build only
@@ -43,6 +45,59 @@ if (!counter) {
   );
 }
 
+function readUleb(buf: Uint8Array, offset: number): [number, number] {
+  let value = 0;
+  let shift = 0;
+  let at = offset;
+  for (;;) {
+    const byte = buf[at++];
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return [value, at];
+    shift += 7;
+  }
+}
+
+// Statically read the `dayframe.manifest` custom section, descending into nested
+// modules/components (a component embeds its core module as a section payload).
+function extractManifest(buf: Uint8Array): Uint8Array {
+  const name = new TextEncoder().encode("dayframe.manifest");
+  let offset = 8; // magic + version
+  while (offset < buf.length) {
+    const id = buf[offset++];
+    const [size, payloadStart] = readUleb(buf, offset);
+    const payload = buf.subarray(payloadStart, payloadStart + size);
+    if (id === 0) {
+      const [nameLen, nameStart] = readUleb(payload, 0);
+      if (
+        nameLen === name.length &&
+        payload.subarray(nameStart, nameStart + nameLen).every((b, i) =>
+          b === name[i]
+        )
+      ) {
+        return payload.subarray(nameStart + nameLen);
+      }
+    }
+    if (
+      payload.length > 8 && payload[0] === 0x00 && payload[1] === 0x61 &&
+      payload[2] === 0x73 && payload[3] === 0x6d
+    ) {
+      try {
+        return extractManifest(payload);
+      } catch {
+        // Not the nested module carrying the manifest; keep scanning siblings.
+      }
+    }
+    offset = payloadStart + size;
+  }
+  throw new Error("no dayframe.manifest custom section found");
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 // `wasm-release`, as `cargo x guardrails check-matrix` builds it: a debug build also links
 // Dioxus devtools, whose hot-reload socket finds no `dx serve` here and logs an error per retry.
 await $`cargo build --locked ${isolated} -p dayframe_web --bin dayframe_web --target wasm32-unknown-unknown --profile wasm-release`;
@@ -65,7 +120,23 @@ await Deno.mkdir(site.toString(), { recursive: true });
 await $`wasm-bindgen --target web --no-typescript --out-dir ${site} --out-name dayframe_web ${
   target.join("wasm32-unknown-unknown/wasm-release/dayframe_web.wasm")
 }`;
-await Deno.copyFile(counter, site.join("counter.component.wasm").toString());
+await Deno.mkdir(site.join("packages").toString(), { recursive: true });
+{
+  const counterBytes = await Deno.readFile(counter);
+  const manifest = JSON.parse(
+    new TextDecoder().decode(extractManifest(counterBytes)),
+  );
+  const index = [{
+    location: "packages/counter.component.wasm",
+    digest: await sha256Hex(counterBytes),
+    manifest,
+  }];
+  await Deno.writeFile(
+    site.join("packages/counter.component.wasm").toString(),
+    counterBytes,
+  );
+  await site.join("packages/index.json").writeText(JSON.stringify(index));
+}
 // `ui::ThemeRoot` loads `asset!("/assets/tailwind.css")`. Without `dx` the manganis
 // `bundled_path` stays `BundledAsset::PLACEHOLDER_HASH`, so `Asset::resolve()` asks for
 // `/assets/This should be replaced by dx…` (404 + console error → e2e fail). Rewrite the

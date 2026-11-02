@@ -124,6 +124,7 @@ fn configuration() -> BTreeMap<String, ConfiguredMicro> {
             ConfiguredMicro {
                 provider: ComposeMicroId::new("test.shelf"),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::new(),
             },
         ),
@@ -132,6 +133,7 @@ fn configuration() -> BTreeMap<String, ConfiguredMicro> {
             ConfiguredMicro {
                 provider: ComposeMicroId::new("test.wasm"),
                 enablement: Enablement::Enabled,
+                eager: true,
                 bindings: BTreeMap::from([(Shelf::ID.into(), "shelf".into())]),
             },
         ),

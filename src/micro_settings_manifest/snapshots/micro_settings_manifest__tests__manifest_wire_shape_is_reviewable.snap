@@ -10,5 +10,14 @@ provisions:
     version: 1
   - id: settings.controller
     version: 1
-config: ~
+config:
+  name: settings
+  facets:
+    - owner_plug_id: ~
+      tag: org.dayframe.settings.config
+      key_id: main
+      read: true
+      write: true
+      create: false
+      delete: false
 contributions: []

@@ -28,6 +28,8 @@ fn activate(context: &Context) -> Result<(), DocumentError> {
 
 clay_mdk::export_micro!(activate);
 
+include!(concat!(env!("OUT_DIR"), "/dayframe_manifest.rs"));
+
 /// The counter's model and view in one root-scope render: its hooks are shared by every surface
 /// the host mounts this incarnation into (see `Context::publish_component`).
 fn counter(count: Option<Facet<u64>>) -> Element {
