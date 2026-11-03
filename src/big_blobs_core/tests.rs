@@ -243,13 +243,14 @@ fn cipher_value() -> Value {
         "contentEncoding": "aes128gcm",
         "keyRef": "db+facet:/zKeyDocument/org.example.daybook.jwk/relay",
         "keyRefHeads": ["a".repeat(64), "b".repeat(64)],
-        "encodingParameters": {"recordSize": 65536, "padding": "record"}
+        "encodingParameters": {"recordSize": 65536, "padding": "padme"}
     })
 }
 
 #[test]
 fn cipher_blob_preserves_uri_heads_and_future_codec_without_interpreting_them() {
-    for padding in ["record", "minimal"] {
+    {
+        let padding = "padme";
         let mut value = cipher_value();
         value["encodingParameters"]["padding"] = json!(padding);
         codec_round_trip::<CipherBlob>(value);
@@ -271,10 +272,10 @@ fn cipher_blob_preserves_uri_heads_and_future_codec_without_interpreting_them() 
 fn encoding_parameters_are_typed_open_and_require_no_persisted_salt() {
     let value = json!({
         "recordSize": 65536,
-        "padding": "record",
+        "padding": "padme",
         "futureField": {"entries": [1, null, true, "1.25"]}
     });
-    for padding in ["record", "minimal", "future-padding"] {
+    for padding in ["padme", "future-padding"] {
         let mut value = value.clone();
         value["padding"] = json!(padding);
         let parameters: Rfc8188EncodingParameters = serde_json::from_value(value.clone()).unwrap();
@@ -302,10 +303,10 @@ fn malformed_encoding_parameters() -> [Value; 11] {
         json!("opaque"),
         json!({}),
         json!({"recordSize": 65536}),
-        json!({"padding": "record"}),
-        json!({"recordSize": "65536", "padding": "record"}),
-        json!({"recordSize": -1, "padding": "record"}),
-        json!({"recordSize": 65536.5, "padding": "record"}),
+        json!({"padding": "legacy"}),
+        json!({"recordSize": "65536", "padding": "legacy"}),
+        json!({"recordSize": -1, "padding": "legacy"}),
+        json!({"recordSize": 65536.5, "padding": "legacy"}),
         json!({"recordSize": 65536, "padding": false}),
         json!({"recordSize": 65536, "padding": null}),
     ]

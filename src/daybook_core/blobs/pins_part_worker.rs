@@ -1205,7 +1205,7 @@ mod tests {
                                 key_ref_heads: key_heads,
                                 encoding_parameters: serde_json::json!({
                                     "recordSize": 65_536,
-                                    "padding": "record",
+                                    "padding": "padme",
                                 }),
                             },
                         )),

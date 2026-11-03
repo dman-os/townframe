@@ -42,11 +42,11 @@ use super::codec::HEADER_LEN;
 use super::codec::RECORD_OVERHEAD;
 use super::codec::ciphertext_len;
 use super::codec::header;
-use super::codec::n_records_for;
+use super::codec::encoded_record_count;
 use super::codec::payload_size;
 use super::keys::MasterKey;
 use super::params::EncodingParams;
-use super::params::Padding;
+
 use super::store::PROVIDER_NAME;
 use super::store::PreparedCiphertext;
 use super::store::prepare_virtual_encrypted;
@@ -95,6 +95,7 @@ struct PlainPair {
     encoding: EncodingParams,
     payload_max: u64,
     n_records: u64,
+    target_final_payload: u64,
     total_c_len: u64,
     /// Most recently encrypted record, as `(index, ciphertext)`. See
     /// [`PlainPair::record`] for why one entry is the whole win.
@@ -111,6 +112,10 @@ impl PlainPair {
         let salt = key.salt_for(&p_hash, &encoding);
         let payload_max = payload_size(encoding.record_size);
         let p_len = reader.len();
+        let total_c_len = ciphertext_len(p_len, encoding);
+        let n_records = encoded_record_count(total_c_len, encoding.record_size);
+        let base = HEADER_LEN as u64 + (n_records - 1) * encoding.record_size;
+        let target_final_payload = total_c_len - base - RECORD_OVERHEAD as u64;
         Self {
             cipher: key.cipher_for(&p_hash, &encoding),
             header: header(&salt, encoding.record_size),
@@ -119,7 +124,8 @@ impl PlainPair {
             p_len,
             encoding,
             payload_max,
-            n_records: n_records_for(p_len, payload_max),
+            n_records,
+            target_final_payload,
             total_c_len: ciphertext_len(p_len, encoding),
             cache: Mutex::new(None),
             #[cfg(test)]
@@ -158,46 +164,32 @@ impl PlainPair {
 
     /// Encrypt a single record straight from the stored plaintext.
     fn encrypt_record(&self, idx: u64) -> io::Result<Vec<u8>> {
+        let last = idx == self.n_records - 1;
+        let capacity = if last {
+            self.target_final_payload
+        } else {
+            self.payload_max
+        };
         let pt_start = idx * self.payload_max;
         let pt_end = (pt_start + self.payload_max).min(self.p_len);
-        let want = (pt_end - pt_start) as usize;
-        // Read exactly the record's plaintext: only the records overlapping
-        // the requested window are ever touched, so this is bounded by the
-        // window, not by the size of `P`.
-        let plain = self.reader.read_bytes_at(pt_start, want)?;
-        // A short read means the plaintext is no longer fully readable
-        // (collected, truncated, or swapped out from under us). Encrypting a
-        // short record would produce ciphertext that cannot verify against the
-        // outboard the virtual entry was installed with, so fail instead.
-        if plain.len() != want {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!(
-                    "plaintext {} unreadable at {pt_start}: {} of {want} octets",
-                    self.p_hash,
-                    plain.len()
-                ),
-            ));
-        }
-        let last = idx == self.n_records - 1;
-        let pad_zeros = if last {
-            match self.encoding.padding {
-                Padding::Minimal => 0,
-                Padding::Record => (self.payload_max - plain.len() as u64) as usize,
-            }
+        let want = pt_end.saturating_sub(pt_start) as usize;
+        let mut plain = if want == 0 {
+            Vec::new()
         } else {
-            0
+            let plain = self.reader.read_bytes_at(pt_start, want)?;
+            if plain.len() != want {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("plaintext {} unreadable at {pt_start}: {} of {want} octets", self.p_hash, plain.len()),
+                ));
+            }
+            plain.to_vec()
         };
-        // The frame is content + delimiter + pad + tag, written once. This runs per
-        // 64 KiB record for every read that lands in it (four of five bao leaves), so
-        // the buffer is reserved to its exact length rather than grown through
-        // reallocations, and the reader's bytes are copied straight into it instead of
-        // through an intermediate Vec.
-        let mut frame = Vec::with_capacity(plain.len() + RECORD_OVERHEAD + pad_zeros);
-        frame.extend_from_slice(&plain);
+        let pad_zeros = capacity as usize - plain.len();
+
         self.cipher
-            .encrypt_record_in_place(idx, last, &mut frame, pad_zeros);
-        Ok(frame)
+            .encrypt_record_in_place(idx, last, &mut plain, pad_zeros);
+        Ok(plain)
     }
 }
 
@@ -528,8 +520,8 @@ impl CipherSource {
             return Ok(out.into());
         }
 
-        // Under `Padding::Record` every record is a full `rs` frame; under
-        // `Padding::Minimal` the final frame ends after its delimiter.
+        // Under `Padding::Padme` observer-visible lengths are rounded; under
+        // Padmé keeps the final frame representable for RFC 8188 framing.
         let wire = pair.encoding.record_size;
         let n_records = pair.n_records;
         let end = end.min(pair.total_c_len);
@@ -587,6 +579,7 @@ mod tests {
     use super::super::RECORD_SIZE;
     use super::super::encrypt_with_rs;
 
+    use super::super::Padding;
     #[tokio::test(flavor = "multi_thread")]
     async fn provenance_failure_never_registers_or_roots_a_virtual_pair() -> Res<()> {
         for rejected_table in ["big_blobs_virtual_pairs", "blob_pair_root"] {
@@ -612,9 +605,9 @@ mod tests {
                 .await?;
             let key = MasterKey::random();
             let expected =
-                encrypt_with_rs(&key, b"local durable provenance", 4096, Padding::Minimal);
+                encrypt_with_rs(&key, b"local durable provenance", 4096, Padding::Padme);
             let cipher = Hash::new(&expected);
-            let encoding = EncodingParams::new(4096, Padding::Minimal)?;
+            let encoding = EncodingParams::new(4096, Padding::Padme)?;
             for path in ["accepted", "local", "local-document"] {
                 let result = match path {
                     "accepted" => {
@@ -683,7 +676,7 @@ mod tests {
         let plain = b"accepted digest mismatch";
         let tag = store.blobs().add_bytes(plain.as_slice()).temp_tag().await?;
         let key = MasterKey::random();
-        let encoding = EncodingParams::new(4096, Padding::Minimal)?;
+        let encoding = EncodingParams::new(4096, Padding::Padme)?;
         let actual = Hash::new(encrypt_with_rs(
             &key,
             plain,
@@ -742,7 +735,7 @@ mod tests {
             .expect("the stored plaintext has a reader");
         let encryptions = |p: &PlainPair| p.encryptions.load(Ordering::Relaxed);
 
-        for padding in [Padding::Record, Padding::Minimal] {
+        for padding in [Padding::Padme] {
             let expected = encrypt_with_rs(&key, &plain, RECORD_SIZE, padding);
             let rec_len = RECORD_SIZE as usize;
             let start = HEADER_LEN + rec_len;

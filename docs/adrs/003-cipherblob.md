@@ -101,7 +101,7 @@ A cipherBlob facet describes exactly one encrypted physical representation:
 
     "encodingParameters": {
       "recordSize": 65536,
-      "padding": "record"
+      "padding": "padme"
     }
   }
 }
@@ -345,7 +345,7 @@ The equivalence's inputs are also load-bearing for nonce safety, not just reprod
 * the raw 32-octet JWK secret;
 * the raw 32-octet BLAKE3 digest of the plaintext - the multihash payload of `representation.digest`, not its multihash-framed spelling;
 * `rs` as a 4-octet big-endian value, the exact width the RFC 8188 header field carries (a value that does not fit is rejected at `encodingParameters` parse time, §3), so no framing can be derived that the header could not name;
-* one octet identifying the padding policy (`Minimal = 1`, `Record = 2`; the values are frozen, and a future policy takes a fresh value rather than reshuffling existing ones, so derivations under pre-existing policies keep reproducing).
+* one octet identifying the padding policy (`Padme = 1`; the value is frozen, and a future policy takes a fresh value rather than reshuffling it, so derivations keep reproducing).
 
 The context string's `.v1` is the version pin, and it is deliberately *not* a bump: no earlier form of this derivation ever shipped, so there is nothing to migrate from — the concept and the derivation arrive together with this ADR, and `.v1` is frozen from the first release onward. A future change to the input list above moves the context to `.v2`; nothing else does. Deliberately absent from that list: the record sequence number, which participates per-record through RFC 8188's own nonce derivation; and the key-id header octets, which this implementation always encodes at length zero and skips when foreign — if key ids ever become load-bearing they must join the list, and the context moves accordingly.
 
@@ -689,21 +689,19 @@ RFC 8188 padding is used as the first mitigation.
 
 RFC 8188 divides the plaintext into fixed-size **records** of `recordSize` (`rs`) octets of *ciphertext*; each record is an independent AES-128-GCM invocation with its own 16-octet authentication tag and a nonce derived from its sequence number. The plaintext fed to each record is `content ‖ delimiter ‖ zero-padding`, where the delimiter is `0x01` for non-final records and `0x02` for the final record; the final record may be shorter than `rs`. Records are what give the encoding its streaming, seek/range, and truncation-detection properties (see §8). The RFC mandates the delimiter and tag but leaves the *amount* of trailing zero padding to the application; Daybook parameterizes this as the `padding` field of `encodingParameters`.
 
-Initial policies:
+Initial policy:
 
 ```text
-minimal
-    final record contains only the 0x02 delimiter and no extra zero octets;
-    ciphertext length is the minimum the format permits, leaking plaintext
-    length to the relay down to record granularity.
-
-record
-    final record is zero-padded so the whole encoded body rounds up to an
-    exact multiple of rs; the relay observes only a whole number of records
-    and cannot see the precise tail length. Costs at most one record of overhead.
+padme
+    apply the Padmé representability function to the minimum RFC 8188
+    ciphertext length, then advance to the next length that can be expressed
+    by complete records with a valid final delimiter. The final record carries
+    `content ‖ 0x02 ‖ zero-padding`; the plaintext length remains authoritative
+    metadata and all authenticated bytes after it must be zero.
 ```
 
-The v1 default is `record`.
+The v1 default is `padme`. Padmé reduces static length leakage without claiming
+to hide timing, access patterns, or the fact that a transfer occurred.
 
 More aggressive schemes, such as powers-of-two or fixed-size storage buckets, are deferred because their storage and transfer overhead can be substantial for arbitrary blobs.
 
@@ -1017,7 +1015,7 @@ inline.
 
 Records are keyed by sequence number and authenticated independently, so plaintext is addressable rather than sequential: reading a plaintext range decrypts only the records that range overlaps, and memory is bounded by the range instead of by the file.
 
-Framing for such a read comes from the ciphertext's own authenticated header, not from the facet - `rs` is on the wire, so a reader never has to be told it. The plaintext length is the one thing the wire cannot supply: RFC 8188 does not encode it, and under `Padding::Record` the padded tail deliberately hides it (§17). A reader therefore takes the length from its own metadata (the Blob facet's `lengthOctets`) and checks it against the ciphertext in both directions - the body bounds it from below, and the final record's real extent bounds it from above, so a length that is too small fails rather than silently truncating what is read.
+Framing for such a read comes from the ciphertext's own authenticated header, not from the facet - `rs` is on the wire, so a reader never has to be told it. The plaintext length is the one thing the wire cannot supply: RFC 8188 does not encode it, and under `Padding::Padme` the padded tail deliberately rounds it (§17). A reader therefore takes the length from its own metadata (the Blob facet's `lengthOctets`) and checks it against the ciphertext in both directions - the body bounds it from below, and the final record's real extent bounds it from above, so a length that is too small fails rather than silently truncating what is read.
 
 This is what makes a large encrypted video playable from a byte range on a device that has the ciphertext: start playing without decrypting, downloading, or buffering the whole file. It is also the exact mirror of §12 - the same framing facts serve ciphertext derived from plaintext and plaintext derived from ciphertext.
 

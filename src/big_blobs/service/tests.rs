@@ -244,7 +244,7 @@ async fn complete_virtual_outboard_is_unavailable_after_final_owner_release() ->
 #[tokio::test(flavor = "multi_thread")]
 async fn filesystem_provenance_restores_identical_ciphertext_until_last_owner_releases() -> Res<()>
 {
-    for padding in [Padding::Minimal, Padding::Record] {
+    for padding in [Padding::Padme] {
         filesystem_provenance_restart_case(padding, false).await?;
     }
     Ok(())
@@ -252,7 +252,7 @@ async fn filesystem_provenance_restores_identical_ciphertext_until_last_owner_re
 
 #[tokio::test(flavor = "multi_thread")]
 async fn filesystem_restart_installs_committed_provenance_before_final_release() -> Res<()> {
-    for padding in [Padding::Minimal, Padding::Record] {
+    for padding in [Padding::Padme] {
         filesystem_provenance_restart_case(padding, true).await?;
     }
     Ok(())

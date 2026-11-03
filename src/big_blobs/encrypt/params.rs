@@ -54,43 +54,31 @@ pub(crate) fn validate_record_size(record_size: u64) -> Res<()> {
 /// Default record size for new ciphertexts (RFC 8188's recommended 64 KiB).
 pub const RECORD_SIZE: u64 = 64 * 1024;
 
-/// Padding policy for new ciphertexts: what the *final* record does with the
-/// leftover space. Only the final record is affected; non-final records are
-/// always exactly `rs` wire bytes.
+/// Padmé length-hiding policy for newly authored ciphertexts.
 ///
-/// The serde spelling of a variant is its `encodingParameters.padding` token,
-/// so a facet and a codec cannot disagree about the policy in flight.
+/// The visible encoded length is rounded into the Padmé representability
+/// buckets from Nikitin et al. §4.4. RFC 8188 record framing remains the
+/// authenticated wire format; this policy controls the authenticated zero
+/// content after the original plaintext.
 ///
-/// (The policy exists because ciphertext length is metadata a relay sees; see
-/// ADR 003 §17 for the threat model behind the default.)
+/// The serde spelling is the `encodingParameters.padding` token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Padding {
-    /// Final record carries only the delimiter: minimal wire length, so the
-    /// body reveals the precise tail length.
-    Minimal,
-    /// Final record is zero-padded to full record size: the body length
-    /// reveals only the record count, never the tail (v1 default — avoids
-    /// byte-length correlation across files by relays).
     #[default]
-    Record,
+    Padme,
 }
 impl Padding {
-    /// The canonical one-octet identity of this padding policy in the salt
-    /// derivation. Values are frozen forever (`Minimal = 1`, `Record = 2`),
-    /// and a future policy takes a fresh value — never a reshuffle — so
-    /// derivations under variants that existed before it keep reproducing
-    /// byte-identically (see [`MasterKey::salt_for`]).
-    pub(crate) fn domain_byte(&self) -> u8 {
+    /// The frozen domain byte included in deterministic salt derivation.
+    pub(crate) const fn domain_byte(&self) -> u8 {
         match self {
-            Padding::Minimal => 1,
-            Padding::Record => 2,
+            Padding::Padme => 1,
         }
     }
 }
 
 /// Padding policy used by the store flows and new representations.
-pub const DEFAULT_PADDING: Padding = Padding::Record;
+pub const DEFAULT_PADDING: Padding = Padding::Padme;
 
 /// How a ciphertext is framed: the RFC 8188 record size `rs` and the padding
 /// policy.

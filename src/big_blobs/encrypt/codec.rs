@@ -188,31 +188,36 @@ pub(crate) fn encrypt_raw_ikm(
     plaintext: &[u8],
 ) -> Vec<u8> {
     let rc = cipher_from_ikm(ikm, salt);
-    let payload_max = (rs as usize - RECORD_OVERHEAD).max(1);
-    let mut out = Vec::with_capacity(HEADER_LEN + plaintext.len() / payload_max * (rs as usize));
+    let payload_max = payload_size(rs) as usize;
+    let encoding = EncodingParams { record_size: rs, padding };
+    let target = ciphertext_len(plaintext.len() as u64, encoding) as usize;
+    let record_count = encoded_record_count(target as u64, rs);
+    let final_wire = target - HEADER_LEN - (record_count as usize - 1) * rs as usize;
+    let final_payload = final_wire - RECORD_OVERHEAD;
+    let capacity = (record_count as usize - 1) * payload_max + final_payload;
+    assert!(capacity >= plaintext.len());
+    let mut out = Vec::with_capacity(target);
     out.extend_from_slice(&header(salt, rs));
-    let n_records = if plaintext.is_empty() {
-        1
-    } else {
-        plaintext.len().div_ceil(payload_max)
-    };
-    // Non-final records always carry a full payload chunk and no padding;
-    // their delimiter fills the frame to exactly `rs` wire bytes.
-    let full = n_records - 1;
-    for rec_index in 0..full {
-        let start = rec_index * payload_max;
-        let chunk = plaintext[start..start + payload_max].to_vec();
-        out.extend_from_slice(&rc.encrypt_record(rec_index as u64, false, chunk, 0));
+    let mut pos = 0usize;
+    for idx in 0..record_count as usize {
+        let capacity = if idx + 1 == record_count as usize {
+            final_payload
+        } else {
+            payload_max
+        };
+        let take = capacity.min(plaintext.len().saturating_sub(pos));
+        let content = plaintext[pos..pos + take].to_vec();
+
+        pos += take;
+        let last = idx + 1 == record_count as usize;
+        out.extend_from_slice(&rc.encrypt_record(
+            idx as u64,
+            last,
+            content,
+            capacity - take,
+        ));
     }
-    // The final record carries the tail (possibly empty) plus the policy's
-    // padding: a full frame under [`Padding::Record`], delimiter-only under
-    // [`Padding::Minimal`].
-    let final_content = &plaintext[full * payload_max..];
-    let pad_zeros = match padding {
-        Padding::Minimal => 0,
-        Padding::Record => payload_max - final_content.len(),
-    };
-    out.extend_from_slice(&rc.encrypt_record(full as u64, true, final_content.to_vec(), pad_zeros));
+    debug_assert_eq!(out.len(), target);
     out
 }
 
@@ -460,13 +465,18 @@ pub(crate) struct RecordEncryptor {
     pending: Vec<u8>,
     seq: u64,
     payload_max: usize,
+    target_records: u64,
+    target_final_payload: usize,
     emitted_final: bool,
 }
 
 impl RecordEncryptor {
-    pub(crate) fn new(key: &MasterKey, p_hash: &Hash, encoding: EncodingParams) -> Self {
+    pub(crate) fn new(key: &MasterKey, p_hash: &Hash, p_len: u64, encoding: EncodingParams) -> Self {
         let salt = key.salt_for(p_hash, &encoding);
         let cipher = key.cipher_with_salt(&salt);
+        let target = ciphertext_len(p_len, encoding);
+        let target_records = encoded_record_count(target, encoding.record_size);
+        let base = HEADER_LEN as u64 + (target_records - 1) * encoding.record_size;
         Self {
             salt,
             cipher,
@@ -474,6 +484,8 @@ impl RecordEncryptor {
             pending: Vec::new(),
             seq: 0,
             payload_max: payload_size(encoding.record_size) as usize,
+            target_records,
+            target_final_payload: (target - base - RECORD_OVERHEAD as u64) as usize,
             emitted_final: false,
         }
     }
@@ -482,39 +494,44 @@ impl RecordEncryptor {
         header(&self.salt, self.encoding.record_size).to_vec()
     }
 
-    /// Absorb plaintext bytes; returns ciphertext wire bytes (never partial
-    /// records - each emitted block is whole records or nothing, except the
-    /// header which goes out first.
-    ///
-    /// A chunk that exactly fills a record is held back unencrypted until
-    /// more data arrives or the stream ends - the final record is decided
-    /// only at end of plaintext.
     pub(crate) fn feed(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         assert!(!self.emitted_final, "feeding after final record");
         self.pending.extend_from_slice(bytes);
         let mut out = Vec::new();
         while self.pending.len() > self.payload_max {
             let chunk: Vec<u8> = self.pending.drain(..self.payload_max).collect();
-            // non-final records are full content + delimiter: exactly a full
-            // `rs` frame with no zero padding
             out.push(self.cipher.encrypt_record(self.seq, false, chunk, 0));
             self.seq += 1;
         }
         out
     }
 
-    /// End of plaintext: emit the final record. It carries whatever is still
-    /// pending - a full chunk (exact-multiple length), a short remainder, or
-    /// nothing at all (empty plaintext) - padded per the policy.
     pub(crate) fn finish(&mut self) -> Vec<Vec<u8>> {
         assert!(!self.emitted_final, "finish called twice");
         self.emitted_final = true;
-        let chunk = std::mem::take(&mut self.pending);
-        let pad_zeros = match self.encoding.padding {
-            Padding::Minimal => 0,
-            Padding::Record => self.payload_max - chunk.len(),
-        };
-        vec![self.cipher.encrypt_record(self.seq, true, chunk, pad_zeros)]
+        let plaintext_tail = std::mem::take(&mut self.pending);
+        let mut out = Vec::new();
+        let remaining = self.target_records - self.seq;
+        let mut pos = 0usize;
+        for idx in 0..remaining {
+            let last = idx + 1 == remaining;
+            let capacity = if last { self.target_final_payload } else { self.payload_max };
+            let take = capacity.min(plaintext_tail.len() - pos);
+            let content = plaintext_tail[pos..pos + take].to_vec();
+
+            pos += take;
+            out.push(self.cipher.encrypt_record(
+                self.seq,
+                last,
+                content,
+                capacity - take,
+            ));
+            self.seq += 1;
+        }
+        assert_eq!(pos, plaintext_tail.len(), "Padmé target cannot carry plaintext");
+
+
+        out
     }
 }
 
@@ -528,18 +545,46 @@ pub(crate) fn n_records_for(p_len: u64, payload_max: u64) -> u64 {
     }
 }
 
-/// Total encoded body length (header + records) for `p_len` plaintext octets
-/// under `encoding`.
+/// Round a length upward to the Padmé representability set.
+pub(crate) fn padme_length(length: u64) -> u64 {
+    if length <= 1 {
+        return length;
+    }
+    let exponent = u64::BITS - 1 - length.leading_zeros();
+    let exponent_bits = u32::BITS - exponent.leading_zeros();
+    let shift = exponent.saturating_sub(exponent_bits);
+    if shift == 0 {
+        length
+    } else {
+        let quantum = 1u64 << shift;
+        length.saturating_add(quantum - 1) / quantum * quantum
+    }
+}
+
+/// Number of records in an encoded ciphertext of total length `length`.
+pub(crate) fn encoded_record_count(length: u64, rs: u64) -> u64 {
+    ((length - HEADER_LEN as u64).div_ceil(rs)).max(1)
+}
+
+/// Round a Padmé target to a valid RFC 8188 body length. A final record must
+/// contain at least the delimiter and authentication tag. The target stays
+/// within the minimum record count so plaintext offsets remain random-accessible.
+pub(crate) fn representable_length(minimum: u64, rs: u64) -> u64 {
+    let records = ((minimum - HEADER_LEN as u64).div_ceil(rs)).max(1);
+    let base = HEADER_LEN as u64 + (records - 1) * rs;
+    let maximum = base + rs;
+    padme_length(minimum).min(maximum)
+}
+
+
+/// Total encoded length, including the 26-byte RFC header, for a plaintext.
 pub(crate) fn ciphertext_len(p_len: u64, encoding: EncodingParams) -> u64 {
     let payload_max = payload_size(encoding.record_size);
-    let record_count = n_records_for(p_len, payload_max);
-    let final_content = p_len - (record_count - 1) * payload_max;
-    let final_wire = match encoding.padding {
-        // Minimal: content + delimiter + tag (a full-content final record is
-        // exactly `rs` wire bytes - content + delimiter = rs - 16).
-        Padding::Minimal => final_content + RECORD_OVERHEAD as u64,
-        // Record: the final frame is padded up to full record size.
-        Padding::Record => encoding.record_size,
-    };
-    HEADER_LEN as u64 + (record_count - 1) * encoding.record_size + final_wire
+    let minimum_records = n_records_for(p_len, payload_max);
+    let final_content = p_len - (minimum_records - 1) * payload_max;
+    let minimum = HEADER_LEN as u64
+        + (minimum_records - 1) * encoding.record_size
+        + final_content
+        + RECORD_OVERHEAD as u64;
+    representable_length(minimum, encoding.record_size)
 }

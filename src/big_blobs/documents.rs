@@ -532,8 +532,7 @@ impl DocumentBlobs {
             encoding_parameters: Rfc8188EncodingParameters {
                 record_size: encoding.record_size,
                 padding: match encoding.padding {
-                    Padding::Minimal => "minimal",
-                    Padding::Record => "record",
+                    Padding::Padme => "padme",
                 }
                 .into(),
                 extra: Default::default(),
@@ -661,8 +660,8 @@ impl DocumentBlobs {
         }
         let cipher: CipherBlob = serde_json::from_value(value.clone())?;
         let padding = match cipher.encoding_parameters.padding.as_str() {
-            "minimal" => Padding::Minimal,
-            "record" => Padding::Record,
+            "padme" => Padding::Padme,
+
             _ => {
                 return Ok(Err(DeferralReason::UnsupportedEncoding {
                     content_encoding,

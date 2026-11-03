@@ -207,9 +207,8 @@ impl FsDownloadLedger {
         buf.extend_from_slice(&facts.salt);
         buf.extend_from_slice(&facts.rs.to_be_bytes());
         buf.push(facts.idlen);
-        buf.push(match padding {
-            Padding::Minimal => 0,
-            Padding::Record => 1,
+buf.push(match padding {
+            Padding::Padme => 1,
         });
         eyre::ensure!(buf.len() == LEDGER_META_LEN, "meta layout drifted");
         let path = self.meta_path(ct_hash);
@@ -241,8 +240,8 @@ impl FsDownloadLedger {
         crate::encrypt::params::validate_record_size(u64::from(rs))?;
         let idlen = bytes[25];
         let padding = match bytes[26] {
-            0 => Padding::Minimal,
-            1 => Padding::Record,
+            1 => Padding::Padme,
+
             other => eyre::bail!("unknown padding tag {other}"),
         };
         Ok(Some((HeaderFacts { salt, rs, idlen }, padding)))
@@ -331,7 +330,7 @@ pub async fn download_encrypted(
                 .unwrap_or(0);
             // A crash can leave a torn final record: resume from whole
             // records only. A complete short final record under
-            // `Padding::Minimal` hits the same path - it is re-fetched
+            // A short final Padmé record hits the same path - it is re-fetched
             // and re-spilled.
             let payload = facts.payload_max();
             let seq = len / payload;

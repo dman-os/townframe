@@ -263,7 +263,7 @@ pub(super) async fn prepare_virtual_encrypted(
     // only drop when this function returns - after the join - so the spawned
     // blocking consumer would wait for an EOF that never comes while the
     // install runs: create/rotate/reuse and resume installs deadlock.
-    let enc = RecordEncryptor::new(key, &p_hash, encoding);
+    let enc = RecordEncryptor::new(key, &p_hash, p_len, encoding);
     let (mut c_tx, c_rx) = tokio::io::duplex(64 * 1024);
     let (rebuilt_tx, rebuilt_rx) = tokio::sync::oneshot::channel::<blake3::Hash>();
     let producer = async move {
@@ -376,7 +376,7 @@ mod tests {
         let plain = vec![0x3C; 3 * 4096 + 123];
         let tag = source.blobs().add_bytes(plain.clone()).temp_tag().await?;
         let key = MasterKey::random();
-        let encoding = EncodingParams::new(4096, super::super::Padding::Record)?;
+        let encoding = EncodingParams::new(4096, super::super::Padding::Padme)?;
         let expected =
             super::super::encrypt_with_rs(&key, &plain, encoding.record_size, encoding.padding);
         let prepared = prepare_virtual_encrypted(&source, &key, tag.hash(), encoding).await?;

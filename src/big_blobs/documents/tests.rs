@@ -784,7 +784,7 @@ async fn unknown_encoding_is_preserved_without_fallback_representation_or_key_re
 async fn typed_encoding_parameters_preserve_extensions_and_reconstruct_both_padding_policies()
 -> Res<()> {
     let plain = b"typed framing with future metadata";
-    for padding in [Padding::Minimal, Padding::Record] {
+    for padding in [Padding::Padme] {
         let encoding = EncodingParams::new(4096, padding)?;
         let (harness, ciphertext, legacy_cipher_key, _) = existing(plain, encoding).await?;
         let _tag = harness.put(plain).await?;
@@ -814,8 +814,8 @@ async fn typed_encoding_parameters_preserve_extensions_and_reconstruct_both_padd
         assert_eq!(
             typed.encoding_parameters.padding,
             match padding {
-                Padding::Minimal => "minimal",
-                Padding::Record => "record",
+                Padding::Padme => "padme",
+
             }
         );
         assert_eq!(serde_json::to_value(typed)?, cipher);
@@ -924,7 +924,7 @@ async fn unknown_padding_defers_without_key_reads_or_rewrites_but_keeps_the_sign
 #[tokio::test(flavor = "multi_thread")]
 async fn ciphertext_first_decrypts_in_bounded_windows_and_checks_plaintext_identity() -> Res<()> {
     let plain = vec![0x81; 6 * 65536 + 115];
-    let encoding = EncodingParams::new(4096, Padding::Minimal)?;
+    let encoding = EncodingParams::new(4096, Padding::Padme)?;
     let (harness, ciphertext, cipher_key, _) = existing(&plain, encoding).await?;
     let _cipher_tag = harness.put(&ciphertext).await?;
     assert!(!harness.store.blobs().has(Hash::new(&plain)).await?);

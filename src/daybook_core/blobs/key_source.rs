@@ -394,7 +394,7 @@ mod tests {
             BranchPathBuf::from("main"),
         );
 
-        let small = EncodingParams::new(1024, Padding::Record)?;
+        let small = EncodingParams::new(1024, Padding::Padme)?;
         let plain_a = b"key source round trip at a non-default record size".to_vec();
         let (c_a, _) = add_encrypted(
             &store,
@@ -430,22 +430,22 @@ mod tests {
             "the facet's recordSize drives reconstruction, not the codec's constant"
         );
 
-        // Minimal padding, under the plain id spelling of the same 32 octets.
-        let minimal = EncodingParams::new(EncodingParams::DEFAULT.record_size, Padding::Minimal)?;
+        // Padmé padding, under the plain id spelling of the same 32 octets.
+        let padme = EncodingParams::new(EncodingParams::DEFAULT.record_size, Padding::Padme)?;
         let plain_b = b"a short payload, so the final record is the short one".to_vec();
         let (c_b, _) = add_encrypted(
             &store,
             &provider,
             &test_pair_roots().await?,
             &key,
-            minimal,
+            padme,
             &plain_b,
         )
         .await?;
         stage_cipherblob(
             &drawer,
             &doc_id,
-            "relay-minimal",
+            "relay-padme",
             CipherBlob {
                 representation: Representation {
                     digest: plain_digest(c_b),
@@ -454,7 +454,7 @@ mod tests {
                 content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
                 key_ref: key_ref.parse()?,
                 key_ref_heads: key_heads,
-                encoding_parameters: minimal.to_encoding_parameters(),
+                encoding_parameters: padme.to_encoding_parameters(),
             },
         )
         .await?;
@@ -462,7 +462,7 @@ mod tests {
         assert_eq!(get_decrypted(&store, &source, c_b).await?, plain_b);
         assert_eq!(
             source.encoding_for(&c_b).await?,
-            minimal,
+            padme,
             "the facet's padding drives reconstruction, not the codec's constant"
         );
 
@@ -674,7 +674,7 @@ mod tests {
                 content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
                 key_ref: key_ref.parse()?,
                 key_ref_heads: key_heads.clone(),
-                encoding_parameters: serde_json::json!({ "recordSize": 8, "padding": "record" }),
+                encoding_parameters: serde_json::json!({ "recordSize": 8, "padding": "legacy" }),
             },
         )
         .await?;

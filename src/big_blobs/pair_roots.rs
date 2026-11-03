@@ -101,7 +101,7 @@ impl PairRoots {
                             , plaintext_hash TEXT NOT NULL
                             , master_key BLOB NOT NULL CHECK (length(master_key) = 32)
                             , record_size INTEGER NOT NULL
-                            , padding TEXT NOT NULL CHECK (padding IN ('minimal', 'record'))
+                            , padding TEXT NOT NULL CHECK (padding = 'padme')
                             , source TEXT NOT NULL
                           ) STRICT;",
                 },
@@ -168,8 +168,8 @@ impl PairRoots {
                     pair.key.0.as_slice(),
                     i64::try_from(pair.encoding.record_size)?,
                     match pair.encoding.padding {
-                        Padding::Minimal => "minimal",
-                        Padding::Record => "record",
+                        Padding::Padme => "padme",
+
                     },
                     pair.source.as_str(),
                 ),
@@ -263,8 +263,8 @@ impl PairRoots {
                         .try_into()
                         .map_err(|_| eyre::eyre!("invalid local virtual pair key length"))?;
                     let padding = match padding.as_str() {
-                        "minimal" => Padding::Minimal,
-                        "record" => Padding::Record,
+                        "padme" => Padding::Padme,
+
                         _ => eyre::bail!("invalid local virtual pair padding"),
                     };
                     Ok((
@@ -420,7 +420,7 @@ mod tests {
             cipher: Hash::new(b"accepted cipher"),
             plaintext: Hash::new(b"accepted plaintext"),
             key: MasterKey::random(),
-            encoding: EncodingParams::new(4096, Padding::Minimal)?,
+            encoding: EncodingParams::new(4096, Padding::Padme)?,
             source: "local".into(),
             claimed_by: Some(("document".into(), "main".into())),
         };

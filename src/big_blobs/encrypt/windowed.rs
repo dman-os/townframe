@@ -29,9 +29,13 @@ use super::codec::HEADER_LEN;
 use super::codec::RECORD_OVERHEAD;
 use super::codec::SALT_LEN;
 use super::codec::cipher_from_ikm;
+use super::codec::ciphertext_len;
 use super::codec::n_records_for;
+use super::codec::encoded_record_count;
 use super::codec::payload_size;
 use super::keys::CipherKeySource;
+use super::params::EncodingParams;
+use super::params::Padding;
 use super::params::validate_record_size;
 /// Random-access *plaintext* reads over a stored ciphertext: the inverse of
 /// [`CipherSource`], which serves a ciphertext derived from plaintext.
@@ -45,7 +49,7 @@ use super::params::validate_record_size;
 /// Framing comes from the ciphertext's own header - `rs` is authenticated
 /// there - so this never needs the facet's `encodingParameters`. The plaintext
 /// length is the exception: RFC 8188 does not encode it, and under
-/// `Padding::Record` the padded tail deliberately hides it (ADR 003 §17), so
+/// `Padding::Padme` the padded tail deliberately rounds it (ADR 003 §17), so
 /// the caller supplies it from its own metadata (`Blob.lengthOctets`). What
 /// comes off the wire is checked against that metadata in both directions,
 /// because a wrong length would otherwise show up as a silently truncated file.
@@ -100,15 +104,18 @@ impl CipherReader {
         );
 
         let payload_max = payload_size(rs);
-        let n_records = n_records_for(p_len, payload_max);
+        let encoding = EncodingParams::new(rs, Padding::Padme)?;
+        let total_len = ciphertext_len(p_len, encoding);
+        let n_records = encoded_record_count(total_len, rs);
+        let minimum_records = n_records_for(p_len, payload_max);
         // The shortest body that could hold `p_len` octets: every non-final
         // record is exactly `rs` wire octets, and the final one carries at least
         // its payload and delimiter. Padding only makes a body longer, so this
         // is a true lower bound, and it is checked against the *wire* rather
         // than against the metadata that produced it.
         let shortest = records_start
-            + (n_records - 1) * rs
-            + (p_len - (n_records - 1) * payload_max)
+            + (minimum_records - 1) * rs
+            + (p_len - (minimum_records - 1) * payload_max)
             + RECORD_OVERHEAD as u64;
         eyre::ensure!(
             reader.len() >= shortest,
@@ -146,7 +153,7 @@ impl CipherReader {
             let pt_start = seq * self.payload_max;
             let ct_start = self.records_start + seq * self.rs;
             // Non-final records are exactly `rs` wire octets; the final one may
-            // be shorter under `Padding::Minimal`, so take what is there and let
+            // be shorter under Padmé, so take what is there and let
             // the AEAD reject a record that was truncated by a bad `p_len`.
             let take = self.rs.min(self.reader.len() - ct_start) as usize;
             let ct = self.reader.read_bytes_at(ct_start, take)?;
@@ -162,7 +169,7 @@ impl CipherReader {
                 // it against the caller's metadata is the only check that
                 // catches a length that is too small - `open` can only bound it
                 // from the other side.
-                let expected = self.p_len - (self.n_records - 1) * self.payload_max;
+                let expected = self.p_len.saturating_sub((self.n_records - 1) * self.payload_max);
                 eyre::ensure!(
                     payload.len() as u64 == expected,
                     "final record of {} holds {} plaintext octets, metadata claims {expected}",
