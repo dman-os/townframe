@@ -21,30 +21,41 @@ use clay_host::Lifecycle;
 use clay_host::MicroId;
 use clay_host::MicroState;
 use futures::future::BoxFuture;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+/// A publication's contract (ADR 025 §5). Owned because contracts arrive from manifests at
+/// runtime; for a Call it names the request and response Lexicons. Every Presentation
+/// publication has the one [`ContractIdentity::presentation_component`] contract, and a Call
+/// can never have it, so a contract alone tells a redeemer which kind to expect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractIdentity {
-    pub namespace: &'static str,
-    pub name: &'static str,
+    pub namespace: String,
+    pub name: String,
     pub version: (u32, u32, u32),
 }
 
-pub const PRESENTATION_COMPONENT_CONTRACT: ContractIdentity = ContractIdentity {
-    namespace: "townframe:dayframe",
-    name: "presentation-component",
-    version: (0, 3, 0),
-};
+impl ContractIdentity {
+    pub fn new(
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        version: (u32, u32, u32),
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            name: name.into(),
+            version,
+        }
+    }
 
-pub const CALL_CONTRACT: ContractIdentity = ContractIdentity {
-    namespace: "townframe:dayframe",
-    name: "call",
-    version: (0, 3, 0),
-};
+    pub fn presentation_component() -> Self {
+        Self::new("townframe:dayframe", "presentation-component", (0, 4, 0))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityFailure {
@@ -86,10 +97,58 @@ pub enum PublicationKind {
 }
 
 /// Runs a Call publication's handler inside the provider incarnation. The engine supplies
-/// one that reaches the guest's exported `call`; it must be `Send` because it lives in the
-/// publication record that recipients' engine state holds.
+/// one that reaches the guest's exported `call` through the provider's own driver (a caller
+/// must never touch the provider's store directly); it must be `Send` because it lives in the
+/// publication record that recipients' engine state holds. It answers
+/// [`CapabilityFailure::Revoked`] when the incarnation ended before the handler could run, and
+/// [`CallError::Provider`] with the handler's own rejection.
 pub trait CallTarget: Send + Sync {
-    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, String>>;
+    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>>;
+}
+
+/// A publication the manifest declares: what an incarnation's returned publication of that
+/// name must be (ADR 025 §8).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeclaredPublication {
+    pub kind: PublicationKind,
+    pub contract: ContractIdentity,
+}
+
+/// Check what an incarnation's `initialize` returned against what its manifest declares, and
+/// key it by name. A returned publication that is undeclared, duplicated, or has a different
+/// kind or contract is an initialization failure; a declared publication that is not returned
+/// is simply not served by this incarnation. On failure every lease is dropped, revoking them.
+pub fn admit_publications(
+    declared: &BTreeMap<String, DeclaredPublication>,
+    returned: impl IntoIterator<Item = (String, PublishedCapability)>,
+) -> Result<BTreeMap<String, PublishedCapability>, String> {
+    let mut admitted = BTreeMap::new();
+    for (name, lease) in returned {
+        let Some(declaration) = declared.get(&name) else {
+            return Err(format!(
+                "guest published {name:?}, which its manifest does not declare"
+            ));
+        };
+        let publication = lease.publication();
+        if publication.kind() != declaration.kind {
+            return Err(format!(
+                "guest published {name:?} as {:?}, but its manifest declares {:?}",
+                publication.kind(),
+                declaration.kind
+            ));
+        }
+        if *publication.contract() != declaration.contract {
+            return Err(format!(
+                "guest published {name:?} under {:?}, but its manifest declares {:?}",
+                publication.contract(),
+                declaration.contract
+            ));
+        }
+        if admitted.insert(name.clone(), lease).is_some() {
+            return Err(format!("guest published {name:?} twice"));
+        }
+    }
+    Ok(admitted)
 }
 
 /// A weak, name-only reference to a micro's publication (ADR 025 §6), as read from a durable
@@ -265,10 +324,10 @@ impl SessionState {
         }
         counts.references += 1;
         drop(counts);
-        Ok(CapabilityRef {
+        Ok(CapabilityRef(Arc::new(RefState {
             target,
             recipient: Arc::clone(self),
-        })
+        })))
     }
 
     /// Count one retained proxy against the recipient's limit.
@@ -335,18 +394,23 @@ impl CapabilitySession {
     ) -> Result<PublishedCapability, CapabilityFailure> {
         self.publish(
             name,
-            PRESENTATION_COMPONENT_CONTRACT,
+            ContractIdentity::presentation_component(),
             Behavior::Presentation(component),
         )
     }
 
-    /// Publish a call named `name` that `target` serves inside this incarnation.
+    /// Publish a call named `name` under `contract` that `target` serves inside this
+    /// incarnation. The presentation contract is reserved for presentations.
     pub fn publish_call(
         &self,
         name: &str,
+        contract: ContractIdentity,
         target: Arc<dyn CallTarget>,
     ) -> Result<PublishedCapability, CapabilityFailure> {
-        self.publish(name, CALL_CONTRACT, Behavior::Call(target))
+        if contract == ContractIdentity::presentation_component() {
+            return Err(CapabilityFailure::ContractMismatch);
+        }
+        self.publish(name, contract, Behavior::Call(target))
     }
 
     fn publish(
@@ -418,7 +482,7 @@ impl CapabilitySession {
     }
 
     pub fn same_recipient(&self, reference: &CapabilityRef) -> bool {
-        Arc::ptr_eq(&self.state, &reference.recipient)
+        Arc::ptr_eq(&self.state, &reference.0.recipient)
     }
 }
 
@@ -429,20 +493,31 @@ enum Target {
 
 /// Recipient-local, unforgeable reference. Guests hold this only as a
 /// WIT resource; copying collection CBOR cannot fabricate one.
-pub struct CapabilityRef {
+///
+/// The reference is shared state behind an `Arc` so a host import can [`Self::share`] it
+/// across an `.await` while the guest may drop its own handle meanwhile; the recipient's
+/// reference count is released when the last share drops.
+pub struct CapabilityRef(Arc<RefState>);
+
+struct RefState {
     target: Target,
     recipient: Arc<SessionState>,
 }
 
 impl CapabilityRef {
+    /// A second handle to the same reference. Conveys no new authority and counts once.
+    pub fn share(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+
     pub fn recipient_scope(&self) -> u64 {
-        self.recipient.instance.scope_id().0
+        self.0.recipient.instance.scope_id().0
     }
 
     /// The live publication this reference is bound to. A lazy reference has none: only a
     /// bound reference can be attached to a collection value.
     pub fn publication(&self) -> Option<CapabilityPublication> {
-        match &self.target {
+        match &self.0.target {
             Target::Bound(publication) => Some(publication.clone()),
             Target::Lazy(_) => None,
         }
@@ -450,10 +525,10 @@ impl CapabilityRef {
 
     /// What the reference can report without activating anything.
     pub fn status(&self) -> RefStatus {
-        if self.recipient.check().is_err() {
+        if self.0.recipient.check().is_err() {
             return RefStatus::Revoked;
         }
-        match &self.target {
+        match &self.0.target {
             Target::Bound(publication) if publication.is_revoked() => RefStatus::Revoked,
             Target::Bound(_) => RefStatus::Live,
             Target::Lazy(endpoint) => match endpoint.activator.status(&endpoint.micro) {
@@ -470,49 +545,54 @@ impl CapabilityRef {
 
     /// One call. A lazy reference holds its lease only until the response arrives.
     pub async fn call(&self, request: Vec<u8>) -> Result<Vec<u8>, CallError> {
-        let (publication, _lease) = self.resolve(&CALL_CONTRACT).await?;
-        publication.invoke(&self.recipient.instance, request).await
+        let (publication, _lease) = self.resolve(PublicationKind::Call).await?;
+        publication
+            .invoke(&self.0.recipient.instance, request)
+            .await
     }
 
     /// A retained call binding: strong while held, inert once its publication closes.
     pub async fn retain_call(&self) -> Result<CallBinding, CapabilityFailure> {
-        let (publication, lease) = self.resolve(&CALL_CONTRACT).await?;
-        publication.inner.live(&self.recipient.instance)?;
-        self.recipient.take_proxy()?;
-        Ok(CallBinding {
+        let (publication, lease) = self.resolve(PublicationKind::Call).await?;
+        publication.inner.live(&self.0.recipient.instance)?;
+        self.0.recipient.take_proxy()?;
+        Ok(CallBinding(Arc::new(BindingState {
             publication,
-            recipient: Arc::clone(&self.recipient),
+            recipient: Arc::clone(&self.0.recipient),
             _lease: lease,
-        })
+        })))
     }
 
     /// A retained presentation proxy: strong while held, inert once its publication closes.
     pub async fn redeem_presentation(&self) -> Result<PresentationComponent, CapabilityFailure> {
-        let (publication, lease) = self.resolve(&PRESENTATION_COMPONENT_CONTRACT).await?;
-        publication.inner.live(&self.recipient.instance)?;
-        self.recipient.take_proxy()?;
+        let (publication, lease) = self.resolve(PublicationKind::Presentation).await?;
+        publication.inner.live(&self.0.recipient.instance)?;
+        self.0.recipient.take_proxy()?;
         Ok(PresentationComponent {
             publication,
-            recipient: Arc::clone(&self.recipient),
+            recipient: Arc::clone(&self.0.recipient),
             _lease: lease,
         })
     }
 
     /// The publication this use targets, with the lease that keeps a lazy one's provider
-    /// live. The contract is checked before any activation, then again against what the
-    /// provider actually published.
+    /// live. A lazy endpoint's promised contract is checked against the kind being redeemed
+    /// before anything is activated, and again against what the provider actually published.
     async fn resolve(
         &self,
-        contract: &ContractIdentity,
+        kind: PublicationKind,
     ) -> Result<(CapabilityPublication, Option<Lease<CapabilityPublication>>), CapabilityFailure>
     {
-        self.recipient.check()?;
-        match &self.target {
-            Target::Bound(publication) if publication.contract() != contract => {
+        self.0.recipient.check()?;
+        match &self.0.target {
+            Target::Bound(publication) if publication.kind() != kind => {
                 Err(CapabilityFailure::ContractMismatch)
             }
             Target::Bound(publication) => Ok((publication.clone(), None)),
-            Target::Lazy(endpoint) if endpoint.contract != *contract => {
+            Target::Lazy(endpoint)
+                if (endpoint.contract == ContractIdentity::presentation_component())
+                    != (kind == PublicationKind::Presentation) =>
+            {
                 Err(CapabilityFailure::ContractMismatch)
             }
             Target::Lazy(endpoint) => {
@@ -522,8 +602,8 @@ impl CapabilityRef {
                     .await
                     .map_err(|_| CapabilityFailure::Unavailable)?;
                 // The recipient may have closed while its provider was starting.
-                self.recipient.check()?;
-                if lease.contract() != contract {
+                self.0.recipient.check()?;
+                if lease.kind() != kind || *lease.contract() != endpoint.contract {
                     return Err(CapabilityFailure::ContractMismatch);
                 }
                 Ok(((*lease).clone(), Some(lease)))
@@ -537,11 +617,11 @@ impl CapabilityPublication {
         let Behavior::Call(target) = self.inner.live(recipient)? else {
             return Err(CapabilityFailure::ContractMismatch.into());
         };
-        target.call(request).await.map_err(CallError::Provider)
+        target.call(request).await
     }
 }
 
-impl Drop for CapabilityRef {
+impl Drop for RefState {
     fn drop(&mut self) {
         let mut counts = self.recipient.counts.lock().unwrap();
         counts.references = counts.references.checked_sub(1).unwrap();
@@ -550,25 +630,36 @@ impl Drop for CapabilityRef {
 
 /// A retained call proxy. The consumer owns it and drops it normally; provider closure
 /// makes it inert (`call` reports `Revoked`) without removing it from its owner.
-pub struct CallBinding {
+///
+/// Like [`CapabilityRef`] it is shared state behind an `Arc` so a host import can
+/// [`Self::share`] it across a call; the lease and the proxy count are released with the last
+/// share.
+pub struct CallBinding(Arc<BindingState>);
+
+struct BindingState {
     publication: CapabilityPublication,
     recipient: Arc<SessionState>,
     _lease: Option<Lease<CapabilityPublication>>,
 }
 
 impl CallBinding {
+    /// A second handle to the same binding. Counts once and retains the provider once.
+    pub fn share(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
     pub async fn call(&self, request: Vec<u8>) -> Result<Vec<u8>, CallError> {
-        self.recipient.check()?;
-        self.publication
-            .invoke(&self.recipient.instance, request)
+        self.0.recipient.check()?;
+        self.0
+            .publication
+            .invoke(&self.0.recipient.instance, request)
             .await
     }
     pub fn is_revoked(&self) -> bool {
-        self.publication.is_revoked()
+        self.0.publication.is_revoked()
     }
 }
 
-impl Drop for CallBinding {
+impl Drop for BindingState {
     fn drop(&mut self) {
         let mut counts = self.recipient.counts.lock().unwrap();
         counts.proxies = counts.proxies.checked_sub(1).unwrap();

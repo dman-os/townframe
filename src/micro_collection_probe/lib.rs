@@ -142,13 +142,18 @@ impl micro_lifecycle::Guest for CollectionProbe {
         wit_bindgen::spawn_local(read_loop(state));
         Ok(micro_lifecycle::Initialized {
             root: micro_lifecycle::InstanceRoot::new(clay_mdk::StatelessRoot),
-            provisions: Vec::new(),
+            publications: Vec::new(),
         })
+    }
+
+    async fn call(publication: String, _request: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err(format!("collection probe serves no call {publication:?}"))
     }
 }
 
 impl presentation_events::Guest for CollectionProbe {
     fn mount(
+        _publication: String,
         placement: &presentation::MountPoint,
         components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {
@@ -298,7 +303,7 @@ impl presentation_events::Guest for CollectionProbe {
             wit_bindgen::spawn_local(cap_close_scenario(state.clone()));
         }
         if redeem {
-            cap_redeem(&state, surface);
+            wit_bindgen::spawn_local(cap_redeem(state.clone(), surface.identity()));
         }
         if restart {
             state.borrow_mut().running = true;
@@ -376,6 +381,7 @@ fn cap_failure(error: capability_bank::CapabilityError) -> &'static str {
         capability_bank::CapabilityError::ContractMismatch => "contract-mismatch",
         capability_bank::CapabilityError::Revoked => "revoked",
         capability_bank::CapabilityError::LimitExceeded => "limit-exceeded",
+        capability_bank::CapabilityError::Unavailable => "unavailable",
     }
 }
 
@@ -516,7 +522,7 @@ async fn cap_write_scenario(state: Rc<RefCell<State>>) {
         state.log.push(line);
         render(&mut state);
     };
-    let published = match capability_bank::publish_presentation_component() {
+    let published = match capability_bank::publish_presentation("cap") {
         Ok(published) => published,
         Err(error) => {
             log(format!("cap-publish={}", cap_failure(error)));
@@ -572,7 +578,7 @@ async fn cap_write_scenario(state: Rc<RefCell<State>>) {
     render(&mut state);
 }
 
-fn cap_redeem(state: &Rc<RefCell<State>>, surface: &presentation::Surface) {
+async fn cap_redeem(state: Rc<RefCell<State>>, identity: u64) {
     let value = {
         let state = state.borrow();
         state
@@ -591,7 +597,7 @@ fn cap_redeem(state: &Rc<RefCell<State>>, surface: &presentation::Surface) {
         log("cap-redeem=absent".into());
         return;
     };
-    let proxy = match value.capabilities[0].as_presentation_component() {
+    let proxy = match value.capabilities[0].redeem_presentation().await {
         Ok(proxy) => proxy,
         Err(error) => {
             log(format!("cap-redeem={}", cap_failure(error)));
@@ -605,17 +611,25 @@ fn cap_redeem(state: &Rc<RefCell<State>>, surface: &presentation::Surface) {
             return;
         }
     };
-    state.borrow_mut().cap_proxy = Some(proxy);
     let mut edits = WireMutations::default();
     edits.push_id(ElementId::from_raw(1));
     edits.mount_component(&component);
     edits.append_children(1);
     edits.pop();
-    let outcome = match surface.apply(&edits.take()) {
-        Ok(_) => "mounted",
-        Err(presentation::PresentationError::Revoked) => "revoked",
-        Err(presentation::PresentationError::Unsupported(_)) => "unsupported",
-        Err(presentation::PresentationError::InvalidBatch(_)) => "invalid-batch",
+    let outcome = {
+        let mut state = state.borrow_mut();
+        let outcome = match state.surfaces.get(&identity) {
+            // The surface was unmounted while redemption was in flight.
+            None => "unmounted",
+            Some(surface) => match surface.apply(&edits.take()) {
+                Ok(_) => "mounted",
+                Err(presentation::PresentationError::Revoked) => "revoked",
+                Err(presentation::PresentationError::Unsupported(_)) => "unsupported",
+                Err(presentation::PresentationError::InvalidBatch(_)) => "invalid-batch",
+            },
+        };
+        state.cap_proxy = Some(proxy);
+        outcome
     };
     log(format!("cap-redeem={outcome}"));
 }

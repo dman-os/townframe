@@ -2,13 +2,15 @@
 //! ADR 024 lifecycle fixture: one package that plays a provider/consumer activation graph, its
 //! role picked by the configuration-supplied CBOR text in `initial-context.arguments`.
 //!
-//! * `provider` publishes a presentation component and provides it as the
-//!   `dayframe.lifecycle.presentation` contract.
-//! * `failing-provider` publishes the same capability and then rejects initialization, so the
-//!   host must discard a publication that was never visible.
+//! * `provider` returns two named publications from `initialize`: the `presentation`
+//!   presentation and the `echo` call, whose exported handler answers `echo:` plus the request.
+//! * `failing-provider` publishes the same two and then rejects initialization, so the host
+//!   must discard publications that were never visible.
 //! * `consumer` redeems its `presentation` requirement during initialization and keeps the
-//!   proxy in its root. Its `close` redeems the proxy again: it fails unless the provider is
-//!   still live while the consumer closes, which is the close-order guarantee under test.
+//!   proxy in its root. If it also has a `service` requirement, it calls the provider's `echo`
+//!   through it, which crosses from this incarnation's store into the provider's. Its `close`
+//!   redeems the proxy again: it fails unless the provider is still live while the consumer
+//!   closes, which is the close-order guarantee under test.
 //!
 //! The package embeds `lifecycle_fixture.manifest.json` as its `dayframe.manifest` section.
 
@@ -35,7 +37,8 @@ const MANIFEST: &[u8] = include_bytes!("lifecycle_fixture.manifest.json");
 #[unsafe(link_section = "dayframe.manifest")]
 static DAYFRAME_MANIFEST: [u8; MANIFEST.len()] = *include_bytes!("lifecycle_fixture.manifest.json");
 
-const PRESENTATION_CONTRACT: &str = "dayframe.lifecycle.presentation";
+const PRESENTATION: &str = "presentation";
+const ECHO: &str = "echo";
 
 thread_local! {
     static ROLE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -74,42 +77,49 @@ impl micro_lifecycle::Guest for Lifecycle {
         let initialized = match role.as_str() {
             "provider" => micro_lifecycle::Initialized {
                 root: micro_lifecycle::InstanceRoot::new(Root::Provider),
-                provisions: vec![micro_lifecycle::Provision {
-                    contract: PRESENTATION_CONTRACT.into(),
-                    capability: publish()?,
-                }],
+                publications: publish_all()?,
             },
             "failing-provider" => {
-                let _staged = publish()?;
+                let _staged = publish_all()?;
                 return Err(InitializationError::Rejected(
                     "failing provider rejects its initialization".into(),
                 ));
             }
             "consumer" => {
-                let requirement = context
-                    .requirements
-                    .into_iter()
-                    .find(|requirement| requirement.name == "presentation")
-                    .ok_or_else(|| {
-                        InitializationError::Unavailable("presentation requirement unbound".into())
-                    })?;
-                let proxy =
-                    requirement
-                        .capability
-                        .as_presentation_component()
-                        .map_err(|error| {
-                            InitializationError::Unavailable(format!(
-                                "presentation requirement unredeemable: {error:?}"
-                            ))
-                        })?;
+                let mut requirements = context.requirements;
+                let mut take = |name: &str| {
+                    requirements
+                        .iter()
+                        .position(|requirement| requirement.name == name)
+                        .map(|index| requirements.swap_remove(index).capability)
+                };
+                let presentation = take(PRESENTATION).ok_or_else(|| {
+                    InitializationError::Unavailable("presentation requirement unbound".into())
+                })?;
+                let service = take("service");
+                let proxy = presentation.redeem_presentation().await.map_err(|error| {
+                    InitializationError::Unavailable(format!(
+                        "presentation requirement unredeemable: {error:?}"
+                    ))
+                })?;
                 proxy.component().map_err(|error| {
                     InitializationError::Unavailable(format!(
                         "presentation requirement withdrawn: {error:?}"
                     ))
                 })?;
+                if let Some(service) = service {
+                    let response = service.call(b"ping".to_vec()).await.map_err(|error| {
+                        InitializationError::Unavailable(format!("service call failed: {error:?}"))
+                    })?;
+                    if response != b"echo:ping" {
+                        return Err(InitializationError::Rejected(format!(
+                            "service answered {response:?}"
+                        )));
+                    }
+                }
                 micro_lifecycle::Initialized {
                     root: micro_lifecycle::InstanceRoot::new(Root::Consumer(proxy)),
-                    provisions: Vec::new(),
+                    publications: Vec::new(),
                 }
             }
             "registrations" | "failing-registrations" => {
@@ -121,7 +131,7 @@ impl micro_lifecycle::Guest for Lifecycle {
                 }
                 micro_lifecycle::Initialized {
                     root: micro_lifecycle::InstanceRoot::new(Root::Provider),
-                    provisions: Vec::new(),
+                    publications: Vec::new(),
                 }
             }
             other => {
@@ -132,6 +142,13 @@ impl micro_lifecycle::Guest for Lifecycle {
         };
         ROLE.with_borrow_mut(|slot| assert!(slot.replace(role).is_none()));
         Ok(initialized)
+    }
+
+    async fn call(publication: String, request: Vec<u8>) -> Result<Vec<u8>, String> {
+        match publication.as_str() {
+            ECHO => Ok([b"echo:".as_slice(), &request].concat()),
+            other => Err(format!("lifecycle fixture serves no call {other:?}")),
+        }
     }
 }
 
@@ -194,14 +211,34 @@ async fn register(bindings: Vec<collection_registration::RegistrationBinding>) {
     drop((first, second));
 }
 
-fn publish() -> Result<capability_bank::PublishedCapability, InitializationError> {
-    capability_bank::publish_presentation_component().map_err(|error| {
-        InitializationError::Unavailable(format!("publishing presentation failed: {error:?}"))
-    })
+fn publish_all() -> Result<Vec<micro_lifecycle::NamedPublication>, InitializationError> {
+    let unavailable = |what: &str, error: capability_bank::CapabilityError| {
+        InitializationError::Unavailable(format!("publishing {what} failed: {error:?}"))
+    };
+    Ok(vec![
+        micro_lifecycle::NamedPublication {
+            name: PRESENTATION.into(),
+            capability: capability_bank::publish_presentation(PRESENTATION)
+                .map_err(|error| unavailable(PRESENTATION, error))?,
+        },
+        micro_lifecycle::NamedPublication {
+            name: ECHO.into(),
+            capability: capability_bank::publish_call(
+                ECHO,
+                &capability_bank::Contract {
+                    namespace: "dayframe.lifecycle".into(),
+                    name: ECHO.into(),
+                    version: (1, 0, 0),
+                },
+            )
+            .map_err(|error| unavailable(ECHO, error))?,
+        },
+    ])
 }
 
 impl presentation_events::Guest for Lifecycle {
     fn mount(
+        _publication: String,
         placement: &presentation::MountPoint,
         _components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {

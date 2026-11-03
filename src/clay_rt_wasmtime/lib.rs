@@ -16,6 +16,9 @@ use clay_guest_session::Placement;
 use clay_guest_session::PresentationHost;
 use clay_guest_session::Surface;
 use clay_guest_session::Work;
+use clay_guest_session::capabilities::CallError;
+use clay_guest_session::capabilities::CallTarget;
+use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::ingress_budget;
@@ -30,6 +33,9 @@ use clay_surface::Mutation;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
+use tokio::sync::oneshot;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ActivationError {
@@ -200,6 +206,7 @@ mod bindings {
             "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
             "townframe:dayframe/collection-registration.registration-writer": clay_guest_session::collections::RegistrationWriter,
             "townframe:dayframe/capability-bank.capability-ref": clay_guest_session::capabilities::CapabilityRef,
+            "townframe:dayframe/capability-bank.call-binding": clay_guest_session::capabilities::CallBinding,
             "townframe:dayframe/capability-bank.published-capability": clay_guest_session::capabilities::PublishedCapability,
             "townframe:dayframe/capability-bank.presentation-component": clay_guest_session::capabilities::PresentationComponent,
         },
@@ -212,6 +219,44 @@ use bindings::townframe::dayframe::presentation::{self as wit_presentation};
 
 pub struct WasmComponentRef(ComponentRef);
 
+/// A request to run one call publication's exported `call` inside its provider's own store.
+/// Only the provider incarnation's driver ever touches that store: a foreign import (another
+/// incarnation's store, or any bank user) queues one of these and awaits the reply.
+struct GuestCall {
+    publication: String,
+    request: Vec<u8>,
+    reply: oneshot::Sender<Result<Vec<u8>, CallError>>,
+}
+
+/// The [`CallTarget`] of one call publication of one Wasmtime incarnation: it queues a
+/// [`GuestCall`] into the incarnation's driver. A closed queue or a reply dropped unanswered
+/// means the incarnation ended before the handler ran, which is exactly `Revoked`: a call can
+/// race the provider's close after the liveness check, and the answer is never a hang.
+struct GuestCallTarget {
+    publication: String,
+    calls: mpsc::UnboundedSender<GuestCall>,
+}
+
+impl CallTarget for GuestCallTarget {
+    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
+        let (reply, response) = oneshot::channel();
+        let queued = self.calls.send(GuestCall {
+            publication: self.publication.clone(),
+            request,
+            reply,
+        });
+        async move {
+            if queued.is_err() {
+                return Err(CapabilityFailure::Revoked.into());
+            }
+            response
+                .await
+                .unwrap_or_else(|_ended| Err(CapabilityFailure::Revoked.into()))
+        }
+        .boxed()
+    }
+}
+
 struct WasmStoreState {
     wasi: WasiCtx,
     table: ResourceTable,
@@ -219,8 +264,23 @@ struct WasmStoreState {
     collections: clay_guest_session::collections::CollectionSession,
     capabilities: clay_guest_session::capabilities::CapabilitySession,
     collection_wake: Option<Arc<IncarnationWake>>,
+    /// Where this incarnation's call publications queue their requests (see [`GuestCall`]).
+    calls: mpsc::UnboundedSender<GuestCall>,
     presentation: PresentationHost,
     limits: StoreLimits,
+}
+
+#[cfg(test)]
+impl WasmStoreState {
+    /// A store state for tests that drive host imports directly, with nothing to serve its
+    /// call publications: the call queue's receiving end is dropped.
+    fn detached(
+        host: Host,
+        instance: Instance,
+        limits: DocumentLimits,
+    ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
+        Self::new(host, instance, limits, mpsc::unbounded_channel().0)
+    }
 }
 
 impl WasiView for WasmStoreState {
@@ -253,6 +313,7 @@ impl WasmStoreState {
         host: Host,
         instance: Instance,
         limits: DocumentLimits,
+        calls: mpsc::UnboundedSender<GuestCall>,
     ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
         let (documents, incoming) = DocumentSession::new(host.clone(), instance.clone(), limits)?;
         let presentation = PresentationHost::new(host.clone(), instance.clone());
@@ -276,6 +337,7 @@ impl WasmStoreState {
                 collections,
                 capabilities,
                 collection_wake: None,
+                calls,
                 presentation,
                 limits: StoreLimitsBuilder::new()
                     .memory_size(64 * 1024 * 1024)
@@ -581,9 +643,17 @@ impl WasmPackage {
         &self,
         host: &Host,
         instance: Instance,
-    ) -> Result<(WasmIncarnation, mpsc::Receiver<Work>), ActivationError> {
+    ) -> Result<
+        (
+            WasmIncarnation,
+            mpsc::Receiver<Work>,
+            mpsc::UnboundedReceiver<GuestCall>,
+        ),
+        ActivationError,
+    > {
+        let (calls, incoming_calls) = mpsc::unbounded_channel();
         let (mut state, incoming) =
-            WasmStoreState::new(host.clone(), instance, DocumentLimits::default())?;
+            WasmStoreState::new(host.clone(), instance, DocumentLimits::default(), calls)?;
         let wake = Arc::new(IncarnationWake::new());
         let waker = Waker::from(Arc::clone(&wake));
         state.collection_wake = Some(Arc::clone(&wake));
@@ -606,9 +676,10 @@ impl WasmPackage {
                 wake,
                 waker,
                 root: None,
-                provisions: BTreeMap::new(),
+                publications: BTreeMap::new(),
             },
             incoming,
+            incoming_calls,
         ))
     }
 }
@@ -621,9 +692,9 @@ struct WasmIncarnation {
     waker: Waker,
     /// The guest's `instance-root`, held from a successful `initialize` until [`Self::close`].
     root: Option<ResourceAny>,
-    /// Publication leases of the incarnation's provisions, by contract. Dropping one revokes
-    /// the publication and every consumer proxy derived from it.
-    provisions: BTreeMap<String, PublishedCapability>,
+    /// Publication leases of the publications `initialize` returned, by name. Dropping one
+    /// revokes the publication and every consumer proxy derived from it.
+    publications: BTreeMap<String, PublishedCapability>,
 }
 
 impl WasmIncarnation {
@@ -643,9 +714,26 @@ impl WasmIncarnation {
         self.store.drive_until_stalled().await
     }
 
+    /// Run the guest's exported `call` for `publication`. The outer error is a trap; the inner
+    /// one is the handler's own rejection.
+    async fn call(
+        &mut self,
+        publication: String,
+        request: Vec<u8>,
+    ) -> wasmtime::Result<Result<Vec<u8>, String>> {
+        self.refuel();
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle();
+        self.store
+            .run_concurrent(async |accessor| {
+                lifecycle.call_call(accessor, publication, request).await
+            })
+            .await
+            .and_then(|trapped| trapped)
+    }
+
     /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
     /// incarnation's host authority and dependencies are still live, then drop the root (its
-    /// guest destructor releases whatever the root held) and only then revoke the provisions.
+    /// guest destructor releases whatever the root held) and only then revoke the publications.
     /// The store itself stays up so a caller can audit what the guest still holds.
     async fn close(&mut self) -> Result<(), String> {
         let root = self
@@ -667,7 +755,7 @@ impl WasmIncarnation {
             .resource_drop_async(&mut self.store)
             .await
             .map_err(|trap| format!("guest trapped dropping its instance root: {trap:#}"));
-        self.provisions.clear();
+        self.publications.clear();
         closed??;
         dropped
     }
@@ -678,9 +766,9 @@ pub struct WasmRuntime {
     host: Host,
     instance: Instance,
     incarnation: Arc<Mutex<Option<WasmIncarnation>>>,
-    /// What each provision publishes, by contract. The leases themselves live in the
+    /// What each returned publication publishes, by name. The leases themselves live in the
     /// incarnation, so a close revokes them.
-    provisions: Arc<BTreeMap<String, CapabilityPublication>>,
+    publications: Arc<BTreeMap<String, CapabilityPublication>>,
     revoked: Arc<AtomicBool>,
     fuel: Arc<AtomicU64>,
 }
@@ -695,14 +783,14 @@ impl WasmRuntime {
         package: &WasmPackage,
         context: InitialContext,
     ) -> Result<(Self, impl std::future::Future<Output = ()> + 'static), ActivationError> {
-        let (mut active, incoming) = package.instantiate(host, instance.clone()).await?;
-        let (root, provisions) = documents::initialize(&mut active, context).await?;
+        let (mut active, incoming, mut calls) = package.instantiate(host, instance.clone()).await?;
+        let (root, leases) = documents::initialize(&mut active, context).await?;
         active.root = Some(root);
-        let publications = provisions
+        let publications = leases
             .iter()
-            .map(|(contract, lease)| (contract.clone(), lease.publication()))
+            .map(|(name, lease)| (name.clone(), lease.publication()))
             .collect();
-        active.provisions = provisions;
+        active.publications = leases;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let fuel = active.fuel_per_call.clone();
         let incarnation = Arc::new(Mutex::new(Some(active)));
@@ -735,6 +823,32 @@ impl WasmRuntime {
                 };
                 tokio::select! {
                     () = &mut documents => return,
+                    Some(GuestCall { publication, request, reply }) = calls.recv() => {
+                        // The guest handler runs here, in the provider's own driver, with the
+                        // store held for the whole call, exactly like a stall-driving tick. A
+                        // requester that gave up meanwhile just loses its reply.
+                        let (outcome, trapped) = {
+                            let mut guard = pump_incarnation.lock().unwrap();
+                            let Some(active) = guard.as_mut() else {
+                                drop(reply.send(Err(CapabilityFailure::Revoked.into())));
+                                return;
+                            };
+                            match active.call(publication, request).await {
+                                Ok(handled) => (handled.map_err(CallError::Provider), false),
+                                Err(trap) => {
+                                    guard.take();
+                                    (Err(CallError::Provider(format!("guest trapped during call: {trap:#}"))), true)
+                                }
+                            }
+                        };
+                        if trapped && pump_host.check(&pump_instance).is_ok() {
+                            pump_host.close_instance(&pump_instance).unwrap();
+                        }
+                        drop(reply.send(outcome));
+                        if trapped {
+                            return;
+                        }
+                    }
                     () = wake.wait() => {
                         let trapped = {
                             let mut guard = pump_incarnation.lock().unwrap();
@@ -770,7 +884,7 @@ impl WasmRuntime {
                 host: host.clone(),
                 instance,
                 incarnation,
-                provisions: Arc::new(publications),
+                publications: Arc::new(publications),
                 revoked,
                 fuel,
             },
@@ -778,14 +892,15 @@ impl WasmRuntime {
         ))
     }
 
-    /// The publication this incarnation provides for `contract`, if it provides it.
-    pub fn provision(&self, contract: &str) -> Option<CapabilityPublication> {
-        self.provisions.get(contract).cloned()
+    /// The publications this incarnation's `initialize` returned, by name. They become
+    /// reachable to other micros only once the host commits the initialization.
+    pub fn publications(&self) -> BTreeMap<String, CapabilityPublication> {
+        (*self.publications).clone()
     }
 
     /// Close the incarnation's guest half (ADR 024 §6 step 2). The incarnation stops taking
     /// presentation and document calls, its `instance-root.close` runs to completion, the
-    /// root and the provision leases are released, and the store is dropped. The caller has
+    /// root and the publication leases are released, and the store is dropped. The caller has
     /// already withdrawn outward visibility and tears the host incarnation down afterwards.
     pub async fn close(&self) -> Result<(), String> {
         let mut active = self
@@ -797,8 +912,10 @@ impl WasmRuntime {
         active.close().await
     }
 
+    /// Mount the presentation this incarnation published as `publication`.
     pub fn mount(
         &self,
+        publication: &str,
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
         components: &[ComponentRef],
     ) -> Result<SurfaceSession, PresentationError> {
@@ -815,6 +932,7 @@ impl WasmRuntime {
         let instance_for_surface = self.instance.clone();
         let incarnation_for_surface = self.incarnation.clone();
         let surface_rep = self.mount_guest_surface(
+            publication,
             &writer,
             components,
             &instance_for_surface,
@@ -929,6 +1047,7 @@ impl WasmRuntime {
 
     fn mount_guest_surface(
         &self,
+        publication: &str,
         writer: &Arc<dyn SurfaceSink<ComponentRef>>,
         components: &[ComponentRef],
         instance: &Instance,
@@ -957,6 +1076,7 @@ impl WasmRuntime {
                 .townframe_dayframe_presentation_events()
                 .call_mount(
                     &mut active.store,
+                    publication,
                     Resource::new_borrow(placement_rep),
                     &components,
                 ),

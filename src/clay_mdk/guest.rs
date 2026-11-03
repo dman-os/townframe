@@ -4,7 +4,7 @@
 //! running `activate` inside `micro-lifecycle.initialize` (ADR 024 §5).
 //! Initialization receives already-granted configuration bindings and publishes one component —
 //! the surface the host mounts — exactly as a native activation receives a [`crate::native::Context`].
-//! What the guest cannot yet do (require provisions, write collections, mount roots, provide
+//! What the guest cannot yet do (require publications, write collections, mount roots, provide
 //! contracts) is absent here rather than stubbed; such bindings fail initialization as an
 //! invalid configuration.
 //!
@@ -107,6 +107,13 @@ macro_rules! export_micro {
             > {
                 $crate::guest::Runtime::initialize($activate, context)
             }
+
+            async fn call(
+                publication: ::std::string::String,
+                _request: ::std::vec::Vec<u8>,
+            ) -> ::std::result::Result<::std::vec::Vec<u8>, ::std::string::String> {
+                $crate::guest::Runtime::call(&publication)
+            }
         }
 
         impl $crate::document_events::Guest for ClayMdkExportedMicro {
@@ -125,13 +132,14 @@ macro_rules! export_micro {
 
         impl $crate::presentation_events::Guest for ClayMdkExportedMicro {
             fn mount(
+                publication: ::std::string::String,
                 placement: &$crate::presentation::MountPoint,
                 components: ::std::vec::Vec<$crate::presentation::ComponentRef>,
             ) -> ::std::result::Result<
                 $crate::presentation::Surface,
                 $crate::presentation::PresentationError,
             > {
-                $crate::guest::Runtime::mount(placement, components)
+                $crate::guest::Runtime::mount(&publication, placement, components)
             }
 
             fn unmount(surface: &$crate::presentation::Surface) {
@@ -166,7 +174,7 @@ thread_local! {
 
 impl Runtime {
     /// The MDK's `initialize`: bind the granted configuration documents, run `activate`, and
-    /// answer with a [`crate::StatelessRoot`] and no provisions. Bindings the authoring surface
+    /// answer with a [`crate::StatelessRoot`] and no named publications. Bindings the authoring surface
     /// cannot express yet (collections, registrations, requirements) are a configuration the
     /// micro cannot run under, not a guest fault. `arguments` are unused: no MDK micro takes
     /// any yet.
@@ -221,7 +229,7 @@ impl Runtime {
             .map_err(|error| micro_lifecycle::InitializationError::Rejected(error.to_string()))?;
         Ok(micro_lifecycle::Initialized {
             root: micro_lifecycle::InstanceRoot::new(crate::StatelessRoot),
-            provisions: Vec::new(),
+            publications: Vec::new(),
         })
     }
 
@@ -284,7 +292,15 @@ impl Runtime {
         });
     }
 
+    /// The MDK authoring surface publishes no calls yet, so every publication name is refused.
+    pub fn call(publication: &str) -> Result<Vec<u8>, String> {
+        Err(format!("this guest micro serves no call {publication:?}"))
+    }
+
+    /// A guest micro has exactly one presentation until the authoring API grows named
+    /// publications, so `publication` is not consulted.
     pub fn mount(
+        _publication: &str,
         placement: &presentation::MountPoint,
         components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {

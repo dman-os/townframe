@@ -27,13 +27,18 @@ impl micro_lifecycle::Guest for Slots {
         assert!(context.requirements.is_empty());
         Ok(micro_lifecycle::Initialized {
             root: micro_lifecycle::InstanceRoot::new(clay_mdk::StatelessRoot),
-            provisions: Vec::new(),
+            publications: Vec::new(),
         })
+    }
+
+    async fn call(publication: String, _request: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err(format!("slot fixture serves no call {publication:?}"))
     }
 }
 
 impl presentation_events::Guest for Slots {
     fn mount(
+        _publication: String,
         placement: &presentation::MountPoint,
         components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {

@@ -50,6 +50,9 @@ pub struct InitialContext {
     pub collections: BTreeMap<String, collections::BytesProjection>,
     pub registrations: BTreeMap<String, collections::BytesRegistrations>,
     pub requirements: BTreeMap<String, capabilities::CapabilityPublication>,
+    /// The publications the package's manifest declares, by name. What `initialize` returns is
+    /// admitted against this (see [`capabilities::admit_publications`]).
+    pub publications: BTreeMap<String, capabilities::DeclaredPublication>,
 }
 
 /// A guest's own refusal to initialize, as opposed to a trap.
