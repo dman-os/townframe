@@ -19,6 +19,7 @@ use super::durable::row_key;
 use super::durable::scope_prefix;
 use super::durable::split_row_key;
 use super::*;
+use crate::types::Change;
 use crate::types::Page;
 use crate::types::ReadLimits;
 
