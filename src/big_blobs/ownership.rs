@@ -1,5 +1,6 @@
 use crate::encrypt::CipherBlobProvider;
-mod sqlite;
+use crate::pair_roots::PairRoots;
+pub(crate) mod sqlite;
 use crate::service::ImportedBlob;
 use big_blobs_core::BlobId;
 use futures::future::BoxFuture;
@@ -28,12 +29,14 @@ struct State {
     sql: Database,
     store: Store,
     provider: Arc<CipherBlobProvider>,
+    roots: PairRoots,
     tags: Vec<TempTag>,
 }
 
 pub(crate) struct OwnershipTransaction {
     tx: Tx,
     store: Store,
+
     tags: Vec<TempTag>,
 }
 
@@ -187,13 +190,12 @@ impl ByteOwnership {
                 if active {
                     tx.claim(&owner, &[id]).await?;
                 } else {
-                    let removed = tx
-                        .sql()
-                        .execute(
-                            "DELETE FROM big_blobs_byte_owners WHERE owner = ? AND digest = ?",
-                            (owner.as_str(), id.to_string()),
-                        )
-                        .await?;
+                    let removed = sqlite::queries::delete_owner_digest(
+                        tx.sql(),
+                        owner.clone(),
+                        id.to_string(),
+                    )
+                    .await?;
                     if removed.rows_affected != 0 {
                         tx.dirty(&id).await?;
                     }
@@ -209,12 +211,13 @@ impl ByteOwnership {
             Box::pin(async move {
                 tx.tags.push(tag);
                 let owner = imported.owner();
-                tx.sql()
-                    .execute(
-                        "INSERT INTO big_blobs_upload_receipts (owner, digest) VALUES (?, ?)",
-                        (owner.as_str(), imported.info.blob_id.to_string()),
-                    )
-                    .await?;
+                sqlite::queries::insert_upload_receipt(
+                    tx.sql(),
+                    owner.clone(),
+                    imported.info.blob_id.to_string(),
+                )
+                .await?;
+
                 tx.claim(&owner, &[imported.info.blob_id]).await
             })
         })
@@ -231,17 +234,12 @@ impl ByteOwnership {
                     document_owner.starts_with("document:"),
                     "staging adoption requires a document owner"
                 );
-                let retained = tx
-                    .sql()
-                    .query(
-                        "SELECT 1
-                       FROM big_blobs_upload_receipts AS staging
-                       JOIN big_blobs_byte_owners AS document ON document.digest = staging.digest
-                      WHERE staging.owner = ? AND document.owner = ?",
-                        (staging_owner.as_str(), document_owner.as_str()),
-                    )
-                    .await?
-                    .all::<i64>()?;
+                let retained = sqlite::queries::has_staged_document(
+                    tx.sql(),
+                    staging_owner.clone(),
+                    document_owner.clone(),
+                )
+                .await?;
                 eyre::ensure!(
                     !retained.is_empty(),
                     "document ownership must be committed before staging adoption"
@@ -276,12 +274,11 @@ impl ByteOwnership {
             Box::pin(async move {
                 tx.dependency(&id).await?;
                 tx.dirty(&id).await?;
-                tx.sql()
-                    .execute(
-                        "DELETE FROM blob_pair_root WHERE cipher_hash = ?",
-                        (Hash::from(id.to_bytes32()).to_hex().to_string(),),
-                    )
-                    .await?;
+                crate::pair_roots::sqlite::queries::delete_root(
+                    tx.sql(),
+                    Hash::from(id.to_bytes32()).to_hex().to_string(),
+                )
+                .await?;
                 Ok(())
             })
         })
@@ -296,11 +293,13 @@ impl State {
             sqlite::queries::MIGRATIONS,
         )
         .await?;
+        let roots = PairRoots::boot(sql.clone()).await?;
         let mut ownership = Self {
             sql,
             store,
             provider,
             tags: Vec::new(),
+            roots,
         };
         ownership.recover().await?;
         Ok(ownership)
@@ -311,6 +310,7 @@ impl State {
             tx: self.sql.begin_write().await?,
             store: self.store.clone(),
             tags: Vec::new(),
+
         })
     }
 
@@ -329,36 +329,16 @@ impl State {
     }
 
     async fn contains(&self, id: &BlobId) -> Res<bool> {
-        Ok(!self
-            .sql
-            .query(
-                "SELECT 1 FROM big_blobs_byte_owners WHERE digest = ?1
-             UNION ALL
-             SELECT 1
-               FROM big_blobs_byte_dependencies AS dependency
-               JOIN big_blobs_byte_owners AS owner ON owner.digest = dependency.digest
-              WHERE dependency.plaintext = ?1
-             LIMIT 1",
-                (id.to_string(),),
-            )
+        Ok(!sqlite::queries::contains(&self.sql, id.to_string())
             .await?
-            .all::<i64>()?
             .is_empty())
     }
 
     async fn recover(&mut self) -> Res<()> {
         self.transaction(|tx| {
             Box::pin(async move {
-                tx.sql()
-                    .execute(
-                        "INSERT OR IGNORE INTO big_blobs_byte_effects (digest)
-             SELECT digest FROM big_blobs_byte_owners
-              UNION SELECT digest FROM big_blobs_byte_dependencies
-              UNION SELECT plaintext FROM big_blobs_byte_dependencies
-              UNION SELECT digest FROM big_blobs_byte_pin_roots",
-                        (),
-                    )
-                    .await?;
+                sqlite::queries::mark_effects(tx.sql()).await?;
+
                 Ok(())
             })
         })
@@ -366,43 +346,16 @@ impl State {
     }
 
     async fn apply_pending(&self) -> Res<()> {
-        let pending = self
-            .sql
-            .query(
-                "SELECT digest FROM big_blobs_byte_effects ORDER BY digest",
-                (),
-            )
-            .await?
-            .all::<String>()?;
+
+        let pending = sqlite::queries::pending_effects(&self.sql).await?;
         let mut effects = Vec::with_capacity(pending.len());
         for digest in pending {
             let id: BlobId = digest.parse()?;
-            let retained = !self
-                .sql
-                .query(
-                    "SELECT 1 FROM big_blobs_byte_owners WHERE digest = ?1
-                 UNION ALL
-                 SELECT 1
-                   FROM big_blobs_byte_dependencies AS dependency
-                   JOIN big_blobs_byte_owners AS owner ON owner.digest = dependency.digest
-                  WHERE dependency.plaintext = ?1
-                 LIMIT 1",
-                    (digest.as_str(),),
-                )
+            let retained = !sqlite::queries::retained(&self.sql, digest.clone())
                 .await?
-                .all::<i64>()?
                 .is_empty();
-            let pinned = !self
-                .sql
-                .query(
-                    "SELECT 1 FROM big_blobs_byte_owners
-                  WHERE digest = ?
-                    AND (owner GLOB 'document:retention:*' OR owner GLOB 'writer:retention:*')
-                  LIMIT 1",
-                    (digest.as_str(),),
-                )
+            let pinned = !sqlite::queries::pinned(&self.sql, digest.clone())
                 .await?
-                .all::<i64>()?
                 .is_empty();
             let hash = Hash::from(id.to_bytes32());
             if retained {
@@ -417,14 +370,8 @@ impl State {
                     .set(format!("pin:{hash}"), HashAndFormat::raw(hash))
                     .await?;
             }
-            let managed_pin = !self
-                .sql
-                .query(
-                    "SELECT 1 FROM big_blobs_byte_pin_roots WHERE digest = ?",
-                    (digest.as_str(),),
-                )
+            let managed_pin = !sqlite::queries::managed_pin(&self.sql, digest.clone())
                 .await?
-                .all::<i64>()?
                 .is_empty();
             effects.push((digest, hash, retained, pinned, managed_pin));
         }
@@ -438,21 +385,8 @@ impl State {
         }
         for (digest, hash, retained, pinned, _) in effects {
             let tx = self.sql.begin_write().await?;
-            let dependencies = tx
-                .query(
-                    "SELECT plaintext FROM big_blobs_byte_dependencies WHERE digest = ?",
-                    (digest.as_str(),),
-                )
-                .await?
-                .all::<String>()?;
-            let preclaim = !tx
-                .query(
-                    "SELECT 1 FROM blob_pair_root WHERE cipher_hash = ?",
-                    (hash.to_hex().to_string(),),
-                )
-                .await?
-                .all::<i64>()?
-                .is_empty();
+            let dependencies = sqlite::queries::dependencies(&tx, digest.clone()).await?;
+            let preclaim = self.roots.is_claimed(hash).await?;
             let pin = self
                 .store
                 .tags()
@@ -464,24 +398,13 @@ impl State {
                 self.provider.remove(&hash);
             }
             if !retained && !preclaim && !pin {
-                tx.execute(
-                    "DELETE FROM big_blobs_byte_dependencies WHERE digest = ?",
-                    (digest.as_str(),),
-                )
-                .await?;
+                sqlite::queries::delete_dependency(&tx, digest.clone()).await?;
+
             }
             if !pinned {
-                tx.execute(
-                    "DELETE FROM big_blobs_byte_pin_roots WHERE digest = ?",
-                    (digest.as_str(),),
-                )
-                .await?;
+                sqlite::queries::delete_pin_root(&tx, digest.clone()).await?;
             }
-            tx.execute(
-                "DELETE FROM big_blobs_byte_effects WHERE digest = ?",
-                (digest,),
-            )
-            .await?;
+            sqlite::queries::delete_effect(&tx, digest.clone()).await?;
             tx.commit().await?;
         }
         Ok(())
@@ -514,20 +437,8 @@ impl OwnershipTransaction {
     }
 
     pub(crate) async fn contains(&self, id: &BlobId) -> Res<bool> {
-        Ok(!self
-            .tx
-            .query(
-                "SELECT 1 FROM big_blobs_byte_owners WHERE digest = ?1
-             UNION ALL
-             SELECT 1
-               FROM big_blobs_byte_dependencies AS dependency
-               JOIN big_blobs_byte_owners AS owner ON owner.digest = dependency.digest
-              WHERE dependency.plaintext = ?1
-             LIMIT 1",
-                (id.to_string(),),
-            )
+        Ok(!sqlite::queries::contains(&self.tx, id.to_string())
             .await?
-            .all::<i64>()?
             .is_empty())
     }
 
@@ -539,40 +450,20 @@ impl OwnershipTransaction {
                 "non-raw plaintext dependency"
             );
             let plaintext = BlobId::new(*plain.hash.as_bytes()).to_string();
-            let previous = self
-                .tx
-                .query(
-                    "SELECT plaintext FROM big_blobs_byte_dependencies WHERE digest = ?",
-                    (id.to_string(),),
-                )
-                .await?
-                .all::<String>()?;
+            let previous = sqlite::queries::dependencies(&self.tx, id.to_string()).await?;
             eyre::ensure!(
                 previous.first().is_none_or(|value| value == &plaintext),
                 "virtual plaintext dependency changed"
             );
-            self.tx.execute(
-                "INSERT OR IGNORE INTO big_blobs_byte_dependencies (digest, plaintext) VALUES (?, ?)",
-                (id.to_string(), plaintext),
-            ).await?;
+            sqlite::queries::insert_dependency(&self.tx, id.to_string(), plaintext).await?;
         }
         Ok(())
     }
 
     async fn dirty(&self, id: &BlobId) -> Res<()> {
-        self.tx
-            .execute(
-                "INSERT OR IGNORE INTO big_blobs_byte_effects (digest) VALUES (?)",
-                (id.to_string(),),
-            )
-            .await?;
-        self.tx
-            .execute(
-                "INSERT OR IGNORE INTO big_blobs_byte_effects (digest)
-             SELECT plaintext FROM big_blobs_byte_dependencies WHERE digest = ?",
-                (id.to_string(),),
-            )
-            .await?;
+        sqlite::queries::insert_effect(&self.tx, id.to_string()).await?;
+        sqlite::queries::insert_effect_plaintext(&self.tx, id.to_string()).await?;
+
         Ok(())
     }
 
@@ -583,14 +474,8 @@ impl OwnershipTransaction {
             self.tags
                 .push(self.store.tags().temp_tag(HashAndFormat::raw(hash)).await?);
             self.dependency(id).await?;
-            let dependencies = self
-                .tx
-                .query(
-                    "SELECT plaintext FROM big_blobs_byte_dependencies WHERE digest = ?",
-                    (id.to_string(),),
-                )
-                .await?
-                .all::<String>()?;
+            let dependencies = sqlite::queries::dependencies(&self.tx, id.to_string()).await?;
+
             if let Some(plaintext) = dependencies.first() {
                 let plain: BlobId = plaintext.parse()?;
                 let hash = Hash::from(plain.to_bytes32());
@@ -615,19 +500,11 @@ impl OwnershipTransaction {
                     "byte claim requires complete stored bytes"
                 );
             }
-            self.tx
-                .execute(
-                    "INSERT OR IGNORE INTO big_blobs_byte_owners (owner, digest) VALUES (?, ?)",
-                    (owner, id.to_string()),
-                )
-                .await?;
+            sqlite::queries::insert_owner(&self.tx, owner.to_owned(), id.to_string()).await?;
+
             if owner.starts_with("document:retention:") || owner.starts_with("writer:retention:") {
-                self.tx
-                    .execute(
-                        "INSERT OR IGNORE INTO big_blobs_byte_pin_roots (digest) VALUES (?)",
-                        (id.to_string(),),
-                    )
-                    .await?;
+
+                    sqlite::queries::insert_pin_root(&self.tx, id.to_string()).await?;
             }
             self.dirty(id).await?;
         }
@@ -635,15 +512,7 @@ impl OwnershipTransaction {
     }
 
     async fn release_staging(&self, owner: &str) -> Res<()> {
-        let released = self
-            .tx
-            .execute(
-                "UPDATE big_blobs_upload_receipts
-                SET released = 1
-              WHERE owner = ? AND released = 0",
-                (owner,),
-            )
-            .await?;
+        let released = sqlite::queries::release_staging(&self.tx, owner.to_owned()).await?;
         if released.rows_affected != 0 {
             self.release(owner).await?;
         }
@@ -652,23 +521,12 @@ impl OwnershipTransaction {
 
     pub(crate) async fn release(&self, owner: &str) -> Res<()> {
         Self::validate(owner)?;
-        let previous = self
-            .tx
-            .query(
-                "SELECT digest FROM big_blobs_byte_owners WHERE owner = ?",
-                (owner,),
-            )
-            .await?
-            .all::<String>()?;
+        let previous = sqlite::queries::owner_digests(&self.tx, owner.to_owned()).await?;
         for id in previous {
             self.dirty(&id.parse()?).await?;
         }
-        self.tx
-            .execute(
-                "DELETE FROM big_blobs_byte_owners WHERE owner = ?",
-                (owner,),
-            )
-            .await?;
+        sqlite::queries::delete_owner(&self.tx, owner.to_owned()).await?;
+
         Ok(())
     }
 
@@ -676,23 +534,16 @@ impl OwnershipTransaction {
     pub(crate) async fn replace(&mut self, owner: &str, ids: &[BlobId]) -> Res<()> {
         self.claim(owner, ids).await?;
         let retained: std::collections::BTreeSet<_> = ids.iter().copied().collect();
-        let previous = self
-            .tx
-            .query(
-                "SELECT digest FROM big_blobs_byte_owners WHERE owner = ?",
-                (owner,),
-            )
-            .await?
-            .all::<String>()?;
+        let previous = sqlite::queries::owner_digests(&self.tx, owner.to_owned()).await?;
         for digest in previous {
             let id: BlobId = digest.parse()?;
             if !retained.contains(&id) {
-                self.tx
-                    .execute(
-                        "DELETE FROM big_blobs_byte_owners WHERE owner = ? AND digest = ?",
-                        (owner, digest),
-                    )
-                    .await?;
+                sqlite::queries::delete_owner_digest(
+                    &self.tx,
+                    owner.to_owned(),
+                    digest.clone(),
+                )
+                .await?;
                 self.dirty(&id).await?;
             }
         }
@@ -710,15 +561,13 @@ impl OwnershipTransaction {
             prefix.ends_with(':'),
             "reconciliation prefix must end at an owner boundary"
         );
-        let existing = self
-            .tx
-            .query(
-                "SELECT owner FROM big_blobs_byte_owners
-              WHERE digest = ? AND substr(owner, 1, length(?2)) = ?2",
-                (id.to_string(), prefix),
-            )
-            .await?
-            .all::<String>()?;
+
+        let existing = sqlite::queries::reconcile_owners(
+            &self.tx,
+            id.to_string(),
+            prefix.to_owned(),
+        )
+        .await?;
         for owner in owners {
             eyre::ensure!(
                 owner.starts_with(prefix),
@@ -728,12 +577,13 @@ impl OwnershipTransaction {
         }
         for owner in existing {
             if !owners.contains(&owner) {
-                self.tx
-                    .execute(
-                        "DELETE FROM big_blobs_byte_owners WHERE owner = ? AND digest = ?",
-                        (owner, id.to_string()),
-                    )
-                    .await?;
+                sqlite::queries::delete_owner_digest(
+                    &self.tx,
+                    owner.clone(),
+                    id.to_string(),
+                )
+                .await?;
+
                 self.dirty(id).await?;
             }
         }

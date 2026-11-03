@@ -29,6 +29,8 @@
 //! Releasing never deletes bytes: dropping the two tags hands the pair back to
 //! the store's own GC, which reclaims exactly what nothing else roots.
 
+
+pub(crate) mod sqlite;
 use crate::encrypt::EncodingParams;
 use crate::encrypt::MasterKey;
 use crate::encrypt::Padding;
@@ -81,33 +83,11 @@ impl PairRoots {
 
     async fn init_schema(sql: &Database) -> Res<()> {
         sql.apply_migrations(
-            "big_blobs_pair_roots_migrations",
-            &[
-                sqlite_rs::Migration {
-                    version: 1,
-                    name: "blob_pair_root",
-                    sql: "CREATE TABLE IF NOT EXISTS blob_pair_root (
-                          cipher_hash TEXT NOT NULL PRIMARY KEY
-                        , doc_id TEXT
-                        , branch_path TEXT
-                      ) STRICT;",
-                },
-                sqlite_rs::Migration {
-                    version: 2,
-                    name: "local_virtual_pairs",
-                    sql: "CREATE TABLE big_blobs_virtual_pairs (
-                              cipher_hash TEXT PRIMARY KEY NOT NULL
-                            , digest TEXT UNIQUE NOT NULL
-                            , plaintext_hash TEXT NOT NULL
-                            , master_key BLOB NOT NULL CHECK (length(master_key) = 32)
-                            , record_size INTEGER NOT NULL
-                            , padding TEXT NOT NULL CHECK (padding = 'padme')
-                            , source TEXT NOT NULL
-                          ) STRICT;",
-                },
-            ],
+            sqlite::queries::MIGRATION_TABLE,
+            sqlite::queries::MIGRATIONS,
         )
         .await?;
+
         Ok(())
     }
 
@@ -151,46 +131,30 @@ impl PairRoots {
         self.bind_ownership().await?;
         let tx = self.sql.begin_write().await?;
         let cipher = pair.cipher.to_hex().to_string();
-        let changed = tx
-            .execute(
-                "INSERT INTO big_blobs_virtual_pairs
-                 (cipher_hash, digest, plaintext_hash, master_key, record_size, padding, source)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (cipher_hash) DO UPDATE SET source = excluded.source
-             WHERE plaintext_hash = excluded.plaintext_hash
-               AND master_key = excluded.master_key
-               AND record_size = excluded.record_size
-               AND padding = excluded.padding",
-                (
-                    cipher.as_str(),
-                    BlobId::new(*pair.cipher.as_bytes()).to_string(),
-                    pair.plaintext.to_hex().to_string(),
-                    pair.key.0.as_slice(),
-                    i64::try_from(pair.encoding.record_size)?,
-                    match pair.encoding.padding {
-                        Padding::Padme => "padme",
-
-                    },
-                    pair.source.as_str(),
-                ),
-            )
-            .await?;
+        let changed = sqlite::queries::record_virtual(
+            &tx,
+            cipher.clone(),
+            BlobId::new(*pair.cipher.as_bytes()).to_string(),
+            pair.plaintext.to_hex().to_string(),
+            pair.key.0.to_vec(),
+            i64::try_from(pair.encoding.record_size)?,
+            match pair.encoding.padding {
+                Padding::Padme => "padme".to_owned(),
+            },
+            pair.source.clone(),
+        )
+        .await?;
         eyre::ensure!(
             changed.rows_affected == 1,
             "virtual ciphertext binding changed"
         );
-        tx.execute(
-            "INSERT OR IGNORE INTO blob_pair_root (cipher_hash) VALUES (?)",
-            (cipher.as_str(),),
-        )
-        .await?;
+        sqlite::queries::insert_root(&tx, cipher.clone()).await?;
         if let Some((document, branch)) = &pair.claimed_by {
-            tx.execute(
-                "UPDATE blob_pair_root
-                    SET doc_id = ?
-                      , branch_path = ?
-                  WHERE cipher_hash = ?",
-                (document.as_str(), branch.as_str(), cipher.as_str()),
+            sqlite::queries::update_provenance(
+                &tx,
+                document.clone(),
+                branch.clone(),
+                cipher.clone(),
             )
             .await?;
         }
@@ -199,99 +163,49 @@ impl PairRoots {
     }
 
     pub(crate) async fn virtual_pairs(&self) -> Res<Vec<(VirtualPair, bool, bool, bool)>> {
-        let bound = self.bind_ownership().await?;
-        let owned = if bound {
-            "EXISTS (SELECT 1 FROM big_blobs_byte_owners WHERE digest = pair.digest)"
-        } else {
-            "0"
-        };
-        let managed_pin = if bound {
-            "EXISTS (SELECT 1 FROM big_blobs_byte_pin_roots WHERE digest = pair.digest)"
-        } else {
-            "0"
-        };
-        let rows = self
-            .sql
-            .query(
-                &format!(
-                    "SELECT pair.cipher_hash
-                      , pair.plaintext_hash
-                      , pair.master_key
-                      , pair.record_size
-                      , pair.padding
-                      , pair.source
-                      , root.doc_id
-                      , root.branch_path
-                      , root.cipher_hash IS NOT NULL
-                      , {owned}
-                      , {managed_pin}
-                   FROM big_blobs_virtual_pairs AS pair
-                   LEFT JOIN blob_pair_root AS root ON root.cipher_hash = pair.cipher_hash"
-                ),
-                (),
+        self.bind_ownership().await?;
+        let rows = sqlite::queries::virtual_pairs(&self.sql).await?;
+        let mut pairs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let owned = !crate::ownership::sqlite::queries::owned_direct(
+                &self.sql,
+                row.digest.clone(),
             )
             .await?
-            .all::<(
-                String,
-                String,
-                Vec<u8>,
-                u64,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                bool,
-                bool,
-                bool,
-            )>()?;
-        rows.into_iter()
-            .map(
-                |(
-                    cipher,
-                    plaintext,
-                    key,
-                    rs,
-                    padding,
-                    source,
-                    doc,
-                    branch,
-                    preclaim,
-                    owned,
-                    managed_pin,
-                )| {
-                    let key = key
-                        .try_into()
-                        .map_err(|_| eyre::eyre!("invalid local virtual pair key length"))?;
-                    let padding = match padding.as_str() {
-                        "padme" => Padding::Padme,
-
-                        _ => eyre::bail!("invalid local virtual pair padding"),
-                    };
-                    Ok((
-                        VirtualPair {
-                            cipher: cipher.parse()?,
-                            plaintext: plaintext.parse()?,
-                            key: MasterKey(key),
-                            encoding: EncodingParams::new(rs, padding)?,
-                            source,
-                            claimed_by: doc.zip(branch),
-                        },
-                        preclaim,
-                        owned,
-                        managed_pin,
-                    ))
-                },
+            .is_empty();
+            let managed_pin = !crate::ownership::sqlite::queries::managed_pin(
+                &self.sql,
+                row.digest.clone(),
             )
-            .collect()
+            .await?
+            .is_empty();
+            let key = row
+                .master_key
+                .try_into()
+                .map_err(|_| eyre::eyre!("invalid local virtual pair key length"))?;
+            let padding = match row.padding.as_str() {
+                "padme" => Padding::Padme,
+                _ => eyre::bail!("invalid local virtual pair padding"),
+            };
+            pairs.push((
+                VirtualPair {
+                    cipher: row.cipher_hash.parse()?,
+                    plaintext: row.plaintext_hash.parse()?,
+                    key: MasterKey(key),
+                    encoding: EncodingParams::new(u64::try_from(row.record_size)?, padding)?,
+                    source: row.source,
+                    claimed_by: row.doc_id.zip(row.branch_path),
+                },
+                row.preclaim,
+                owned,
+                managed_pin,
+            ));
+        }
+        Ok(pairs)
     }
 
     pub(crate) async fn forget_virtual(&self, cipher: Hash) -> Res<()> {
-        self.sql
-            .execute(
-                "DELETE FROM big_blobs_virtual_pairs WHERE cipher_hash = ?",
-                (cipher.to_hex().to_string(),),
-            )
-            .await?;
+        sqlite::queries::delete_virtual(&self.sql, cipher.to_hex().to_string()).await?;
         Ok(())
     }
 
@@ -306,12 +220,7 @@ impl PairRoots {
     /// replays this on the next attempt, and the row it already has is the one
     /// that says the pair is still unresolved.
     pub async fn record_before_root(&self, c_hash: Hash) -> Res<()> {
-        self.sql
-            .execute(
-                "INSERT OR IGNORE INTO blob_pair_root (cipher_hash) VALUES (?)",
-                (c_hash.to_hex().to_string(),),
-            )
-            .await?;
+        sqlite::queries::insert_root(&self.sql, c_hash.to_hex().to_string()).await?;
         Ok(())
     }
 
@@ -329,17 +238,12 @@ impl PairRoots {
     ) -> Res<()> {
         let tx = self.sql.begin_write().await?;
         let cipher_hash = c_hash.to_hex().to_string();
-        tx.execute(
-            "INSERT OR IGNORE INTO blob_pair_root (cipher_hash) VALUES (?)",
-            (cipher_hash.as_str(),),
-        )
-        .await?;
-        tx.execute(
-            "UPDATE blob_pair_root
-                SET doc_id = ?
-                  , branch_path = ?
-              WHERE cipher_hash = ?",
-            (doc_id, branch_path, cipher_hash),
+        sqlite::queries::insert_root(&tx, cipher_hash.clone()).await?;
+        sqlite::queries::update_provenance(
+            &tx,
+            doc_id.to_owned(),
+            branch_path.to_owned(),
+            cipher_hash,
         )
         .await?;
         tx.commit().await?;
@@ -354,20 +258,18 @@ impl PairRoots {
     pub async fn clear(&self, c_hash: Hash) -> Res<()> {
         let bound = self.bind_ownership().await?;
         let tx = self.sql.begin_write().await?;
-        tx.execute(
-            "DELETE FROM blob_pair_root WHERE cipher_hash = ?",
-            (c_hash.to_hex().to_string(),),
-        )
-        .await?;
+        sqlite::queries::delete_root(&tx, c_hash.to_hex().to_string()).await?;
         if !bound {
-            tx.execute(
-                "DELETE FROM big_blobs_virtual_pairs WHERE cipher_hash = ?",
-                (c_hash.to_hex().to_string(),),
-            )
-            .await?;
+            sqlite::queries::delete_virtual(&tx, c_hash.to_hex().to_string()).await?;
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    pub(crate) async fn is_claimed(&self, c_hash: Hash) -> Res<bool> {
+        Ok(!sqlite::queries::preclaim(&self.sql, c_hash.to_hex().to_string())
+            .await?
+            .is_empty())
     }
 
     /// Every row a previous run left unresolved, with whatever the rooting path
@@ -376,18 +278,12 @@ impl PairRoots {
     /// The drain resolves rows independently and in any order, so no ordering is
     /// asked of the database here.
     pub async fn unresolved(&self) -> Res<Vec<UnresolvedPair>> {
-        self.sql
-            .query(
-                "SELECT cipher_hash
-                      , doc_id
-                      , branch_path
-                   FROM blob_pair_root",
-                (),
-            )
-            .await?
-            .all::<(String, Option<String>, Option<String>)>()?
-            .into_iter()
-            .map(|(hex, doc_id, branch_path)| {
+        let rows = sqlite::queries::unresolved(&self.sql).await?;
+        rows.into_iter()
+            .map(|row| {
+                let hex = row.cipher_hash;
+                let doc_id = row.doc_id;
+                let branch_path = row.branch_path;
                 let cipher_hash = hex.parse::<Hash>().map_err(|err| {
                     // Only this module writes rows, and it writes canonical hex:
                     // a row we cannot parse means the table was tampered with,
