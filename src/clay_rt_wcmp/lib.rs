@@ -808,6 +808,7 @@ pub mod test_utils {
     pub use crate::convert_mutation;
     pub use crate::documents::receipt_to_wire;
     pub use crate::documents::wit;
+    pub use crate::wasi::define as define_wasi;
     pub use crate::wit_presentation;
 
     /// [`crate::WcmpRuntime::close`], inspecting the store once the guest released its root

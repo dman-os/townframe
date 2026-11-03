@@ -46,6 +46,7 @@ members = [
   "./src/clay_rt_wasmtime",
   "./src/clay_rt_wcmp",
   "./src/clay_rt_wcmp_wasmi",
+  "./src/clay_inbox_spike",
   "./src/clay_guest_session",
   "./src/micro_settings_manifest",
   "./src/micro_settings",
