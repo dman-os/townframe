@@ -165,7 +165,8 @@ async fn register(bindings: Vec<collection_registration::RegistrationBinding>) {
     assert!(matches!(
         second.put(b"x".to_vec(), Some(first_x), value("stolen")).await,
         Err(collection_registration::MutationError::Conflict(Some(current)))
-            if current == second_x
+            if (current.incarnation, current.sequence)
+                == (second_x.incarnation, second_x.sequence)
     ));
     assert!(matches!(
         second.remove(b"y".to_vec(), Some(first_y)).await,

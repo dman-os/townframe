@@ -74,8 +74,8 @@ fn assert_reentrant_wake(
     let collection = Arc::new(RegistrationCollection::new([1, 2]));
     let scope = collection.create_scope();
     let writer = scope.writer().unwrap();
-    let version = writer.put(1, None, 10).unwrap();
-    writer.put(2, None, 20).unwrap();
+    let version = writer.put(1, None, 10).unwrap().dispatch();
+    writer.put(2, None, 20).unwrap().dispatch();
     let mut writer = Some(writer);
     let mut lease = collection.projection().acquire((), None).unwrap();
     let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
@@ -141,10 +141,23 @@ fn deferred_mutations_commit_before_dispatch() {
                     .is_pending()
             );
             let (version, notifications) = match value {
-                Some(value) => writer.put_deferred(1, current, value).unwrap(),
+                Some(value) => {
+                    let notifications = writer.put(1, current, value).unwrap();
+                    (
+                        *notifications.output(),
+                        Box::new(|| {
+                            notifications.dispatch();
+                        }) as Box<dyn FnOnce()>,
+                    )
+                }
                 None => {
-                    let (version, notifications) = writer.remove_deferred(1, current).unwrap();
-                    (version.unwrap(), notifications)
+                    let notifications = writer.remove(1, current).unwrap();
+                    (
+                        notifications.output().unwrap(),
+                        Box::new(|| {
+                            notifications.dispatch();
+                        }) as Box<dyn FnOnce()>,
+                    )
                 }
             };
             assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
@@ -184,7 +197,7 @@ fn deferred_mutations_commit_before_dispatch() {
             );
             assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
             if dispatch {
-                notifications.dispatch();
+                notifications();
             } else {
                 drop(notifications);
             }
@@ -200,7 +213,7 @@ fn deferred_noops_and_conflicts_leave_state_and_parked_reads_unchanged() {
     let collection = Arc::new(RegistrationCollection::new([1, 2]));
     let scope = collection.create_scope();
     let writer = scope.writer().unwrap();
-    let version = writer.put(1, None, 10).unwrap();
+    let version = writer.put(1, None, 10).unwrap().dispatch();
     let initial = collection.lock().scopes[&scope.id()].rows.clone();
     let mut lease = collection.projection().acquire((), None).unwrap();
     let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
@@ -220,24 +233,23 @@ fn deferred_noops_and_conflicts_leave_state_and_parked_reads_unchanged() {
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
-    let (absent, notifications) = writer.remove_deferred(2, None).unwrap();
+    let absent = writer.remove(2, None).unwrap().dispatch();
     assert_eq!(absent, None);
-    notifications.dispatch();
     crate::PendingNotifications::default().dispatch();
     assert_eq!(
-        writer.put_deferred(1, None, 20).unwrap_err(),
+        writer.put(1, None, 20).unwrap_err(),
         MutationError::Conflict {
             current: Some(version)
         }
     );
     assert_eq!(
-        writer.remove_deferred(1, None).unwrap_err(),
+        writer.remove(1, None).unwrap_err(),
         MutationError::Conflict {
             current: Some(version)
         }
     );
     assert_eq!(
-        writer.remove_deferred(2, Some(version)).unwrap_err(),
+        writer.remove(2, Some(version)).unwrap_err(),
         MutationError::Conflict { current: None }
     );
     assert_eq!(collection.lock().scopes[&scope.id()].rows, initial);
@@ -248,7 +260,7 @@ fn deferred_noops_and_conflicts_leave_state_and_parked_reads_unchanged() {
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
-    writer.remove(1, Some(version)).unwrap();
+    writer.remove(1, Some(version)).unwrap().dispatch();
     assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -256,7 +268,12 @@ fn deferred_noops_and_conflicts_leave_state_and_parked_reads_unchanged() {
 fn put_wakes_after_unlocking_registration() {
     assert_reentrant_wake(
         |_, writer, version| {
-            writer.as_mut().unwrap().put(1, Some(version), 11).unwrap();
+            writer
+                .as_mut()
+                .unwrap()
+                .put(1, Some(version), 11)
+                .unwrap()
+                .dispatch();
         },
         vec![(1, 11), (2, 20)],
         Some(1),
@@ -267,7 +284,12 @@ fn put_wakes_after_unlocking_registration() {
 fn remove_wakes_after_unlocking_registration() {
     assert_reentrant_wake(
         |_, writer, version| {
-            writer.as_mut().unwrap().remove(1, Some(version)).unwrap();
+            writer
+                .as_mut()
+                .unwrap()
+                .remove(1, Some(version))
+                .unwrap()
+                .dispatch();
         },
         vec![(2, 20)],
         Some(1),
@@ -276,13 +298,13 @@ fn remove_wakes_after_unlocking_registration() {
 
 #[test]
 fn scope_close_wakes_after_unlocking_registration() {
-    assert_reentrant_wake(|scope, _, _| scope.close(), Vec::new(), Some(2));
+    assert_reentrant_wake(|scope, _, _| scope.close().dispatch(), Vec::new(), Some(2));
 }
 
 #[test]
 fn clear_wakes_after_unlocking_registration() {
     assert_reentrant_wake(
-        |_, writer, _| writer.as_ref().unwrap().clear().unwrap(),
+        |_, writer, _| writer.as_ref().unwrap().clear().unwrap().dispatch(),
         Vec::new(),
         Some(2),
     );
@@ -290,7 +312,11 @@ fn clear_wakes_after_unlocking_registration() {
 
 #[test]
 fn reset_wakes_after_unlocking_registration() {
-    assert_reentrant_wake(|scope, _, _| scope.collection.reset(), Vec::new(), None);
+    assert_reentrant_wake(
+        |scope, _, _| scope.collection.reset().dispatch(),
+        Vec::new(),
+        None,
+    );
 }
 
 struct MutateOnWake {
@@ -333,7 +359,12 @@ impl Wake for MutateOnWake {
                 .poll(&mut Context::from_waker(&waker))
                 .is_pending()
         );
-        self.writer.lock().unwrap().put(2, None, 20).unwrap();
+        self.writer
+            .lock()
+            .unwrap()
+            .put(2, None, 20)
+            .unwrap()
+            .dispatch();
         assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
         let Poll::Ready(Ok(page)) = Pin::new(&mut pending).poll(&mut Context::from_waker(&waker))
         else {
@@ -357,7 +388,7 @@ fn notification_reentrant_mutation_preserves_publication_order_and_wakes() {
     let collection = Arc::new(RegistrationCollection::new([1, 2]));
     let scope = collection.create_scope();
     let writer = scope.writer().unwrap();
-    let version = writer.put(1, None, 10).unwrap();
+    let version = writer.put(1, None, 10).unwrap().dispatch();
     let observer = Arc::new(MutateOnWake {
         collection: Arc::clone(&collection),
         writer: Mutex::new(scope.writer().unwrap()),
@@ -376,7 +407,7 @@ fn notification_reentrant_mutation_preserves_publication_order_and_wakes() {
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
-    writer.put(1, Some(version), 11).unwrap();
+    writer.put(1, Some(version), 11).unwrap().dispatch();
     assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
     let Poll::Ready(Ok(page)) =
         Pin::new(&mut pending).poll(&mut Context::from_waker(Waker::noop()))
@@ -407,8 +438,8 @@ fn deferred_batch_commit_and_close_wake_only_after_dispatch() {
     let collection = Arc::new(RegistrationCollection::new([1, 2]));
     let a = collection.create_staged_scope();
     let b = collection.create_staged_scope();
-    a.writer().unwrap().put(1, None, 10).unwrap();
-    b.writer().unwrap().put(2, None, 20).unwrap();
+    a.writer().unwrap().put(1, None, 10).unwrap().dispatch();
+    b.writer().unwrap().put(2, None, 20).unwrap().dispatch();
     for commit in [true, false] {
         let mut lease = collection.projection().acquire((), None).unwrap();
         let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
@@ -439,9 +470,9 @@ fn deferred_batch_commit_and_close_wake_only_after_dispatch() {
                 .is_pending()
         );
         let dispatch = if commit {
-            collection.commit_scopes_deferred(&[&a, &b])
+            collection.commit_scopes(&[&a, &b])
         } else {
-            collection.close_scopes_deferred(&[&a, &b])
+            collection.close_scopes(&[&a, &b])
         };
         assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
         let Poll::Ready(Ok(page)) =
@@ -501,25 +532,39 @@ fn retired_values_reenter_after_authority_projection_and_host_unlock() {
                 if authority_unlocked && projection_unlocked && host_unlocked {
                     let scope = collection.create_scope();
                     assert_eq!(scope.writer().unwrap().row_count(), 0);
-                    scope.close();
+                    scope.close().dispatch();
                 }
             }
         }));
-        writer.put(1, None, probe.clone()).unwrap();
+        writer.put(1, None, probe.clone()).unwrap().dispatch();
         for operation in 0..5 {
             let guard = host_lock.lock().unwrap();
             let before = events.lock().unwrap().len();
             let dispatch = match operation {
                 0 => {
-                    writer
-                        .put_deferred(1, writer.version(&1), probe.clone())
-                        .unwrap()
-                        .1
+                    let dispatch = writer.put(1, writer.version(&1), probe.clone()).unwrap();
+                    Box::new(move || {
+                        dispatch.dispatch();
+                    }) as Box<dyn FnOnce()>
                 }
-                1 => writer.remove_deferred(1, writer.version(&1)).unwrap().1,
-                2 => writer.clear_deferred().unwrap(),
-                3 => scope.close_deferred(),
-                4 => collection.reset_deferred(),
+                1 => {
+                    let dispatch = writer.remove(1, writer.version(&1)).unwrap();
+                    Box::new(move || {
+                        dispatch.dispatch();
+                    })
+                }
+                2 => {
+                    let dispatch = writer.clear().unwrap();
+                    Box::new(move || dispatch.dispatch())
+                }
+                3 => {
+                    let dispatch = scope.close();
+                    Box::new(move || dispatch.dispatch())
+                }
+                4 => {
+                    let dispatch = collection.reset();
+                    Box::new(move || dispatch.dispatch())
+                }
                 _ => unreachable!(),
             };
             assert_eq!(
@@ -528,12 +573,12 @@ fn retired_values_reenter_after_authority_projection_and_host_unlock() {
                 "destructor ran before dispatch: {operation}"
             );
             drop(guard);
-            dispatch.dispatch();
+            dispatch();
             if operation != 4 || !staged {
                 assert!(events.lock().unwrap().len() > before);
             }
             if (1..=2).contains(&operation) {
-                writer.put(1, None, probe.clone()).unwrap();
+                writer.put(1, None, probe.clone()).unwrap().dispatch();
             }
         }
         drop(probe);
@@ -569,7 +614,7 @@ fn scope_drop_and_projection_bootstrap_retirement_run_destructors_unlocked() {
         }
     }));
     let writer = scope.writer().unwrap();
-    writer.put(1, None, value).unwrap();
+    writer.put(1, None, value).unwrap().dispatch();
     let mut lease = collection.projection().acquire((), None).unwrap();
     let Poll::Ready(Ok(page)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
         .poll(&mut Context::from_waker(Waker::noop()))
@@ -582,7 +627,7 @@ fn scope_drop_and_projection_bootstrap_retirement_run_destructors_unlocked() {
         .unwrap();
     drop(page);
     drop(scope);
-    collection.reset();
+    collection.reset().dispatch();
     assert!(!events.lock().unwrap().is_empty());
     assert!(
         events

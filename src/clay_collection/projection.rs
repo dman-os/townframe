@@ -606,7 +606,7 @@ impl<K: Clone, V: Clone, S: Source<K, V>> Future for ProjectionRead<'_, K, V, S>
         let result = {
             let shared = Arc::clone(&this.lease.state);
             let mut state = shared.lock().expect("projection state poisoned");
-            match this.read_page(&mut state) {
+            match this.read_page(&mut state, &mut retired) {
                 Ok(None) => {
                     retired_waker = match state.waiters.get_mut(&this.lease.scope) {
                         Some(waker) if waker.will_wake(cx.waker()) => None,
@@ -631,6 +631,7 @@ impl<K: Clone, V: Clone, S: Source<K, V>> Future for ProjectionRead<'_, K, V, S>
             this.invalidate(result);
         }
         drop(retired_waker);
+        drop(retired);
         drop(candidate);
         result
     }

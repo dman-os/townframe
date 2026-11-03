@@ -32,15 +32,15 @@ fn session(limits: CollectionLimits) -> (CollectionSession, Host, Instance) {
 #[test]
 fn physical_keys_are_deterministic_cbor_writer_and_byte_string_pairs() {
     assert_eq!(
-        physical_key(WriterId(1), &b"x".to_vec()),
+        encode_physical_key(1, &b"x".to_vec()),
         [0x82, 0x01, 0x41, b'x']
     );
     let local = vec![7; 24];
     let mut expected = vec![0x82, 0x19, 0x01, 0x2c, 0x58, 24];
     expected.extend(&local);
-    assert_eq!(physical_key(WriterId(300), &local), expected);
+    assert_eq!(encode_physical_key(300, &local), expected);
     assert_eq!(
-        physical_key(WriterId(u64::MAX), &Vec::new()),
+        encode_physical_key(u64::MAX, &Vec::new()),
         [
             0x82, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x40
         ]
@@ -100,7 +100,7 @@ async fn admitted_rows_fit_an_atomic_withdrawal_page() {
         rows_per_writer: usize::MAX,
         ..CollectionLimits::default()
     };
-    let (session, _, _) = session(limits);
+    let (session, host, instance) = session(limits);
     let registrations = registrations();
     let writer = session.grant_writer(&registrations).unwrap();
     let capacity = (limits.page_bytes - limits.cursor_bytes)
@@ -112,7 +112,13 @@ async fn admitted_rows_fit_an_atomic_withdrawal_page() {
         writer.put(vec![capacity as u8; 64], None, vec![1]),
         Err(WriteFailure::RowLimit)
     );
-    let reader = session.grant(registrations.projection()).unwrap();
+    // The reader lives on another incarnation: its own instance is about to close.
+    let observer = CollectionSession::new(
+        host.clone(),
+        host.start("observer"),
+        CollectionLimits::default(),
+    );
+    let reader = observer.grant(registrations.projection()).unwrap();
     let lease = reader.acquire(Vec::new(), None).unwrap();
     let read_limits = ReadLimits {
         max_transactions: Some(1),
@@ -129,6 +135,8 @@ async fn admitted_rows_fit_an_atomic_withdrawal_page() {
             break;
         }
     }
+    // Closing the incarnation, not dropping the writer handle, withdraws the scope's rows.
+    host.close_instance(&instance).unwrap();
     drop(writer);
     let withdrawn = lease
         .read(committed, read_limits, std::future::pending())
@@ -176,10 +184,6 @@ async fn put_notification_can_close_the_writers_instance_synchronously() {
     let observed = Arc::clone(&writer);
     let waker = Waker::from(Arc::new(OnceOnWake(Mutex::new(Some(Box::new(
         move || {
-            assert!(
-                observed.slot.try_lock().is_ok(),
-                "writer slot held during notification"
-            );
             host.close_instance(&instance).unwrap();
             assert_eq!(
                 observed.put(vec![2], None, vec![2]),
@@ -227,10 +231,6 @@ async fn remove_notification_can_mutate_the_same_writer_synchronously() {
     let observed = Arc::clone(&writer);
     let waker = Waker::from(Arc::new(OnceOnWake(Mutex::new(Some(Box::new(
         move || {
-            assert!(
-                observed.slot.try_lock().is_ok(),
-                "writer slot held during notification"
-            );
             observed.put(vec![1], None, vec![2]).unwrap();
         },
     ))))));
@@ -283,7 +283,8 @@ fn writer_budget_admits_up_to_the_limit_and_drops_release_it() {
     first.put(vec![1], None, vec![1]).unwrap();
     drop(first);
     assert_eq!(session.writer_count(), 1);
-    assert!(registrations.snapshot().is_empty());
+    // Dropping a writer releases authority only; its rows belong to the incarnation's scope.
+    assert_eq!(registrations.snapshot().len(), 1);
     let _third = session.grant_writer(&registrations).unwrap();
     assert_eq!(session.writer_count(), 2);
 }

@@ -8,9 +8,11 @@ use clay_collection::ProjectionLease;
 use clay_collection::ReadError;
 use clay_collection::ReadLimits;
 use clay_collection::RegistrationCollection;
+use clay_collection::RegistrationDispatch;
+use clay_collection::RegistrationScope;
+use clay_collection::RegistrationScopeId;
 use clay_collection::Source;
 use clay_collection::Version;
-use clay_collection::WriterId;
 use clay_host::AccessError;
 use clay_host::Host;
 use clay_host::Instance;
@@ -19,7 +21,6 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::Weak;
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -191,6 +192,10 @@ pub fn attachment_indices(body: &[u8]) -> Option<Vec<usize>> {
 
 pub type BytesProjection = Projection<Bytes, CollectionValue, BytesSource>;
 pub type BytesPage = Page<Bytes, CollectionValue>;
+pub type BytesScope = RegistrationScope<Bytes, CollectionValue, Bytes, BytesSource>;
+
+type BytesDispatch = RegistrationDispatch<Bytes, CollectionValue, Bytes, BytesSource>;
+
 pub type BytesRegistrations = RegistrationCollection<Bytes, CollectionValue, Bytes, BytesSource>;
 
 #[derive(Clone, Debug)]
@@ -216,7 +221,13 @@ pub fn bytes_registrations(
     RegistrationCollection::with_source(BytesSource, replay_capacity, runtime_epoch, physical_key)
 }
 
-fn physical_key(writer: WriterId, local_key: &Bytes) -> Bytes {
+fn physical_key(scope: RegistrationScopeId, local_key: &Bytes) -> Bytes {
+    encode_physical_key(scope.get(), local_key)
+}
+
+/// `[scope, local_key]` as deterministic CBOR: a two-element array of an unsigned integer and a
+/// byte string.
+fn encode_physical_key(scope: u64, local_key: &Bytes) -> Bytes {
     fn head(out: &mut Bytes, major: u8, value: u64) {
         let major = major << 5;
         match value {
@@ -238,7 +249,7 @@ fn physical_key(writer: WriterId, local_key: &Bytes) -> Bytes {
     }
     let mut key = Vec::with_capacity(local_key.len() + 19);
     head(&mut key, 4, 2);
-    head(&mut key, 0, writer.0);
+    head(&mut key, 0, scope);
     head(&mut key, 2, local_key.len() as u64);
     key.extend_from_slice(local_key);
     key
@@ -285,9 +296,80 @@ struct State {
     limits: CollectionLimits,
     readers: Mutex<usize>,
     writers: Mutex<usize>,
-    /// Writers granted before the incarnation committed initialization. Their rows are in the
-    /// authoritative replica but not the projection until the commit publishes them.
-    staged: Mutex<Vec<(BytesRegistrations, WriterId)>>,
+    /// One scope per writer grant (ADR 025 §4). The incarnation owns them: a scope lives until
+    /// the incarnation closes or fails initialization, however long its writer handle lives.
+    /// Scopes start staged, so their rows are in the authoritative replica but not the
+    /// projection until initialization commits.
+    scopes: Arc<IncarnationScopes>,
+}
+
+/// The scope owners of one incarnation. The host's teardown effect and outward hook hold this
+/// directly, not through [`State`]: the scopes must outlive the session handle (a guest store
+/// dropping its [`CollectionSession`] does not close them) and end only at teardown.
+#[derive(Default)]
+struct IncarnationScopes(Mutex<Vec<OwnedScope>>);
+
+struct OwnedScope {
+    registrations: BytesRegistrations,
+    scope: BytesScope,
+}
+
+impl IncarnationScopes {
+    /// Initialization committed: publish every staged scope, one transaction per collection.
+    /// Each collection commits atomically on its own; there is no cross-collection atomicity
+    /// (ADR 017 §6). Wakes are held until every collection has committed, then fired with no
+    /// host lock held. Scopes that already committed are skipped, so a late call is a no-op.
+    fn commit(&self) {
+        let owned = self.0.lock().unwrap();
+        let dispatches = Self::per_collection(&owned, |registrations, scopes| {
+            registrations.commit_scopes(scopes)
+        });
+        drop(owned);
+        dispatches
+            .into_iter()
+            .for_each(RegistrationDispatch::dispatch);
+    }
+
+    /// The incarnation was torn down (closed after cleanup, or failed initialization): withdraw
+    /// every scope's rows, one transaction per collection, firing the held wakes only after all collections closed.
+    /// Scopes are drained, so only the first call does work.
+    fn close(&self) {
+        let owned = std::mem::take(&mut *self.0.lock().unwrap());
+        let dispatches = Self::per_collection(&owned, |registrations, scopes| {
+            registrations.close_scopes(scopes)
+        });
+        // Dropping an owner closes it again, which finds nothing left to withdraw.
+        drop(owned);
+        dispatches
+            .into_iter()
+            .for_each(RegistrationDispatch::dispatch);
+    }
+
+    /// Run `operation` once per distinct collection over that collection's scopes, in grant
+    /// order.
+    fn per_collection(
+        owned: &[OwnedScope],
+        operation: impl Fn(&BytesRegistrations, &[&BytesScope]) -> BytesDispatch,
+    ) -> Vec<BytesDispatch> {
+        let mut groups: Vec<(&BytesRegistrations, Vec<&BytesScope>)> = Vec::new();
+        for OwnedScope {
+            registrations,
+            scope,
+        } in owned
+        {
+            match groups
+                .iter_mut()
+                .find(|(collection, _)| *collection == registrations)
+            {
+                Some((_, scopes)) => scopes.push(scope),
+                None => groups.push((registrations, vec![scope])),
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(registrations, scopes)| operation(registrations, &scopes))
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -306,21 +388,6 @@ impl State {
         }
         *count += 1;
         Ok(Permit(Arc::clone(self), budget))
-    }
-
-    /// Initialization committed: publish every staged writer's rows, one transaction per
-    /// collection. Runs inside the host's commit, so it completes before the incarnation is
-    /// reported `Active` to whoever committed it.
-    fn publish_staged(&self) {
-        let mut staged = std::mem::take(&mut *self.staged.lock().unwrap());
-        while let Some((registrations, _)) = staged.first() {
-            let registrations = registrations.clone();
-            let (batch, rest): (Vec<_>, Vec<_>) = staged
-                .into_iter()
-                .partition(|(collection, _)| *collection == registrations);
-            registrations.commit_staged(batch.into_iter().map(|(_, writer)| writer));
-            staged = rest;
-        }
     }
 
     fn budget(&self, budget: Budget) -> (&Mutex<usize>, usize) {
@@ -354,7 +421,7 @@ impl CollectionSession {
                 limits,
                 readers: Mutex::new(0),
                 writers: Mutex::new(0),
-                staged: Mutex::new(Vec::new()),
+                scopes: Arc::default(),
             }),
         }
     }
@@ -376,53 +443,38 @@ impl CollectionSession {
         registrations: &BytesRegistrations,
     ) -> Result<RegistrationWriter, AccessError> {
         let permit = self.state.admit(Budget::Writers)?;
-        // Every writer starts staged (ADR 024 §5): rows written while the incarnation is still
-        // initializing must not reach readers unless initialization commits.
-        let writer = registrations.staged_writer();
-        let id = writer.id();
-        let slot = Arc::new(Mutex::new(Some(writer)));
-        let revoked = Arc::downgrade(&slot);
-        self.state.host.own(
-            &self.state.instance,
-            Box::new(move || {
-                if let Some(slot) = revoked.upgrade() {
-                    let writer = slot.lock().unwrap().take();
-                    drop(writer);
-                }
-            }),
-        )?;
+        // Every grant mints a staged scope (ADR 024 §5): rows written while the incarnation is
+        // still initializing must not reach readers unless initialization commits.
+        let scope = registrations.create_staged_scope();
+        let writer = scope.writer().expect("a freshly minted scope is open");
+        // Teardown covers an incarnation that is closed without ever committing (failed
+        // initialization) as well as one that closed after cleanup. It owns the scopes, so a
+        // dropped session or writer never withdraws rows.
+        let teardown = Arc::clone(&self.state.scopes);
         self.state
-            .staged
-            .lock()
-            .unwrap()
-            .push((registrations.clone(), id));
-        // The hook holds the session weakly: the host owns its hooks and the session holds the
-        // host, so a strong reference would be a cycle. `Closing` withdraws the rows before any
-        // owned effect of the closing incarnation is torn down.
-        let state: Weak<State> = Arc::downgrade(&self.state);
-        let withdrawn = Arc::downgrade(&slot);
+            .host
+            .own(&self.state.instance, Box::new(move || teardown.close()))?;
+        self.state.scopes.0.lock().unwrap().push(OwnedScope {
+            registrations: registrations.clone(),
+            scope,
+        });
+        let outward = Arc::clone(&self.state.scopes);
         let lifecycle = self
             .state
             .host
             .on_outward(&self.state.instance, move |lifecycle| match lifecycle {
-                Lifecycle::Active => {
-                    if let Some(state) = state.upgrade() {
-                        state.publish_staged();
-                    }
-                }
-                Lifecycle::Closing => {
-                    if let Some(slot) = withdrawn.upgrade() {
-                        let writer = slot.lock().unwrap().take();
-                        drop(writer);
-                    }
-                }
+                Lifecycle::Active => outward.commit(),
+                // Closing withdraws outward visibility of new publications only. The scopes keep
+                // their rows while `instance-root.close()` runs (ADR 024 §6) and are closed by
+                // the teardown effect above, after that cleanup.
+                Lifecycle::Closing => {}
                 other => unreachable!("outward hooks are never told {other:?}"),
             })?;
         if lifecycle == Lifecycle::Active {
-            self.state.publish_staged();
+            self.state.scopes.commit();
         }
         Ok(RegistrationWriter {
-            slot,
+            writer,
             _permit: permit,
         })
     }
@@ -435,8 +487,10 @@ impl CollectionSession {
 type SubstrateWriter =
     clay_collection::RegistrationWriter<Bytes, CollectionValue, Bytes, BytesSource>;
 
+/// Mutation authority over one scope. Dropping it releases the authority only; the scope, and
+/// its rows, belong to the incarnation and are withdrawn when it closes.
 pub struct RegistrationWriter {
-    slot: Arc<Mutex<Option<SubstrateWriter>>>,
+    writer: SubstrateWriter,
     _permit: Permit,
 }
 
@@ -455,6 +509,7 @@ impl From<MutationError> for WriteFailure {
     fn from(error: MutationError) -> Self {
         match error {
             MutationError::Conflict { current } => Self::Conflict { current },
+            MutationError::Closed => Self::Revoked,
         }
     }
 }
@@ -498,25 +553,19 @@ impl RegistrationWriter {
         {
             return Err(WriteFailure::ValueTooLarge);
         }
-        let (version, notifications) = {
-            let mut slot = self.slot.lock().unwrap();
-            let writer = slot.as_mut().ok_or(WriteFailure::Revoked)?;
-            if based_on.is_none()
-                && writer.version(&key).is_none()
-                && writer.row_count()
-                    >= limits.rows_per_writer.min(
-                        limits.page_bytes.saturating_sub(limits.cursor_bytes)
-                            / limits
-                                .key_bytes
-                                .saturating_add(Self::MAX_PHYSICAL_KEY_OVERHEAD),
-                    )
-            {
-                return Err(WriteFailure::RowLimit);
-            }
-            writer.put_deferred(key, based_on, value)?
-        };
-        notifications.dispatch();
-        Ok(version)
+        if based_on.is_none()
+            && self.writer.version(&key).is_none()
+            && self.writer.row_count()
+                >= limits.rows_per_writer.min(
+                    limits.page_bytes.saturating_sub(limits.cursor_bytes)
+                        / limits
+                            .key_bytes
+                            .saturating_add(Self::MAX_PHYSICAL_KEY_OVERHEAD),
+                )
+        {
+            return Err(WriteFailure::RowLimit);
+        }
+        Ok(self.writer.put(key, based_on, value)?.dispatch())
     }
 
     pub fn remove(
@@ -525,13 +574,18 @@ impl RegistrationWriter {
         based_on: Option<Version>,
     ) -> Result<Option<Version>, WriteFailure> {
         self.admit(&key)?;
-        let (version, notifications) = {
-            let mut slot = self.slot.lock().unwrap();
-            let writer = slot.as_mut().ok_or(WriteFailure::Revoked)?;
-            writer.remove_deferred(key, based_on)?
-        };
-        notifications.dispatch();
-        Ok(version)
+        Ok(self.writer.remove(key, based_on)?.dispatch())
+    }
+
+    /// Withdraw every row this writer's scope holds, in one projection transaction.
+    pub fn clear(&self) -> Result<(), WriteFailure> {
+        let state = &self._permit.0;
+        state
+            .host
+            .check(&state.instance)
+            .map_err(|_| WriteFailure::Revoked)?;
+        self.writer.clear()?.dispatch();
+        Ok(())
     }
 
     fn admit(&self, key: &Bytes) -> Result<CollectionLimits, WriteFailure> {
@@ -544,13 +598,6 @@ impl RegistrationWriter {
             return Err(WriteFailure::KeyTooLarge);
         }
         Ok(state.limits)
-    }
-}
-
-impl Drop for RegistrationWriter {
-    fn drop(&mut self) {
-        let writer = self.slot.lock().unwrap().take();
-        drop(writer);
     }
 }
 
