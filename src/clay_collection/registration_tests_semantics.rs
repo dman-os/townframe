@@ -4,7 +4,6 @@ use std::task::Poll;
 use std::task::Waker;
 
 use super::*;
-use crate::types::Change;
 use crate::types::ReadLimits;
 
 fn ready<T>(future: impl Future<Output = T>) -> T {

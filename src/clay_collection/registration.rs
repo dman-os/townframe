@@ -10,12 +10,9 @@
 //! but remain invisible until [`RegistrationCollection::commit_scopes`] publishes the
 //! named scopes together. Closing a staged scope discards its rows unseen.
 //!
-//! Reads use the collection's [`Projection`], whose rows are the collection's explicit
-//! [`Materializer`] applied to the scopes' contributions. Under
-//! [`Materializer::Union`] the key is the `(RegistrationScopeId, K)` pair (a byte-keyed
-//! waist supplies an injective encoding of it); every other policy keys by `K`.
-//! Every mutation, scope close and (re)installation recomputes the affected materialized
-//! keys inside its own single projection transaction.
+//! Reads use the collection's [`Projection`]. The default physical key is the
+//! `(RegistrationScopeId, K)` tuple; a byte-keyed waist supplies an injective encoding
+//! of that pair instead.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -27,27 +24,21 @@ use crate::projection::Projection;
 use crate::projection::ProjectionDispatch;
 use crate::replica::Entry;
 use crate::source::Source;
+use crate::types::Change;
 use crate::types::MutationError;
 use crate::types::RegistrationScopeId;
 use crate::types::RowEvidence;
 use crate::types::Version;
-use clay_store::StoreError;
 use durable::Durable;
 
 struct ScopeState<K, V> {
     rows: BTreeMap<K, Entry<V>>,
     staged: bool,
-    /// Precedence under [`Materializer::Priority`]; `None` under every other policy.
-    rank: Option<ScopeRank>,
-    /// The stable installation key of an installation scope; `None` for incarnation
-    /// scopes. Orders [`Materializer::Group`] contributions independently of the
-    /// in-process scope id, which is not stable across restarts.
-    install_key: Option<Vec<u8>>,
 }
 
 struct Inner<K, V, P, S: Source<P, V>> {
     projection: Projection<P, V, S>,
-    materializer: Materializer<K, V, P>,
+    physical: fn(RegistrationScopeId, &K) -> P,
     next_scope: u64,
     version: Version,
     /// Local rows per live scope; removing the scope also revokes its writers.
@@ -108,7 +99,6 @@ impl<K, V, P, S: Source<P, V>> PartialEq for RegistrationCollection<K, V, P, S> 
 impl<K, V, P, S: Source<P, V>> Eq for RegistrationCollection<K, V, P, S> {}
 
 impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
-    /// A [`Materializer::Union`] collection with the tuple physical key.
     pub fn new(runtime_epoch: [u64; 2]) -> Self {
         Self::with_source(
             (),
@@ -119,51 +109,17 @@ impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
     }
 }
 
-/// Why [`RegistrationCollection::install`] refused: the store failed, or the rows would
-/// break a [`Materializer::RejectCollision`] collection. Neither leaves a visible change.
-#[derive(Debug)]
-pub enum InstallError {
-    Store(StoreError),
-    /// A row's key is already held by `holder`.
-    Collision {
-        holder: RegistrationScopeId,
-    },
-}
-
-impl From<StoreError> for InstallError {
-    fn from(error: StoreError) -> Self {
-        Self::Store(error)
-    }
-}
-
 impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationCollection<K, V, P, S> {
-    /// A [`Materializer::Union`] collection: every scope's rows side by side under the
-    /// injective `physical` key. Use [`Self::with_materializer`] for any other policy.
     pub fn with_source(
         source: S,
         replay_capacity: NonZeroUsize,
         runtime_epoch: [u64; 2],
         physical: fn(RegistrationScopeId, &K) -> P,
     ) -> Self {
-        Self::with_materializer(
-            source,
-            replay_capacity,
-            runtime_epoch,
-            Materializer::Union { key: physical },
-        )
-    }
-
-    /// A collection whose projection is `materializer` applied to its scopes.
-    pub fn with_materializer(
-        source: S,
-        replay_capacity: NonZeroUsize,
-        runtime_epoch: [u64; 2],
-        materializer: Materializer<K, V, P>,
-    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 projection: Projection::with_source(source, replay_capacity, runtime_epoch),
-                materializer,
+                physical,
                 next_scope: 0,
                 version: Version::new(1, 0),
                 scopes: BTreeMap::new(),
@@ -175,28 +131,14 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
 
     /// Mint a scope owner. Dropping it withdraws all its rows in one transaction;
     /// writers minted from it convey mutation authority without retaining the owner.
-    /// Panics under [`Materializer::Priority`], which needs [`Self::create_ranked_scope`].
     pub fn create_scope(&self) -> RegistrationScope<K, V, P, S> {
-        self.mint(false, None)
+        self.mint(false)
     }
 
     /// Mint a scope whose rows stay out of the projection until
     /// [`Self::commit_scopes`] names it. Closing it first discards its rows unseen.
-    /// Panics under [`Materializer::Priority`], which needs
-    /// [`Self::create_ranked_staged_scope`].
     pub fn create_staged_scope(&self) -> RegistrationScope<K, V, P, S> {
-        self.mint(true, None)
-    }
-
-    /// [`Self::create_scope`] for a [`Materializer::Priority`] collection. Panics if
-    /// another live scope holds `rank`, or under any other policy.
-    pub fn create_ranked_scope(&self, rank: ScopeRank) -> RegistrationScope<K, V, P, S> {
-        self.mint(false, Some(rank))
-    }
-
-    /// [`Self::create_staged_scope`] for a [`Materializer::Priority`] collection.
-    pub fn create_ranked_staged_scope(&self, rank: ScopeRank) -> RegistrationScope<K, V, P, S> {
-        self.mint(true, Some(rank))
+        self.mint(true)
     }
 
     /// Publish all rows in the named staged scopes as one projection transaction.
@@ -210,22 +152,33 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
     ) -> RegistrationDispatch<K, V, P, S> {
         self.validate_scopes(scopes);
         let mut inner = self.lock();
-        let keys: BTreeSet<K> = scopes
-            .iter()
-            .filter_map(|scope| inner.scopes.get(&scope.id))
-            .filter(|state| state.staged)
-            .flat_map(|state| state.rows.keys().cloned())
-            .collect();
-        let ((), projection) = inner.commit(&keys, None, |inner| {
-            for scope in scopes {
-                if let Some(state) = inner.scopes.get_mut(&scope.id) {
-                    state.staged = false;
-                }
+        let physical = inner.physical;
+        let mut changes = Vec::new();
+        for scope in scopes {
+            let Some(state) = inner.scopes.get_mut(&scope.id) else {
+                continue;
+            };
+            if !state.staged {
+                continue;
             }
-        });
+            state.staged = false;
+            for (key, entry) in &state.rows {
+                changes.push(Change::Upsert {
+                    key: physical(scope.id, key),
+                    row_version: entry.version,
+                    value: entry.value.clone(),
+                    evidence: entry.evidence,
+                    write_context: entry.write_context.clone(),
+                });
+            }
+        }
         let dispatch = RegistrationDispatch {
             output: (),
-            projection,
+            projection: if changes.is_empty() {
+                Vec::new()
+            } else {
+                vec![inner.projection.publish_deferred(changes)]
+            },
             rows: Vec::new(),
             entries: Vec::new(),
             keys: Vec::new(),
@@ -242,26 +195,26 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
     ) -> RegistrationDispatch<K, V, P, S> {
         self.validate_scopes(scopes);
         let mut inner = self.lock();
-        let keys: BTreeSet<K> = scopes
-            .iter()
-            .filter_map(|scope| inner.scopes.get(&scope.id))
-            .filter(|state| !state.staged)
-            .flat_map(|state| state.rows.keys().cloned())
-            .collect();
-        let (rows, projection) = inner.commit(&keys, None, |inner| {
-            scopes
-                .iter()
-                .filter_map(|scope| inner.scopes.remove(&scope.id))
-                .map(|state| state.rows)
-                .collect::<Vec<_>>()
-        });
-        let dispatch = RegistrationDispatch {
-            output: (),
-            projection,
-            rows,
-            entries: Vec::new(),
-            keys: Vec::new(),
-        };
+        let mut dispatch = RegistrationDispatch::default();
+        let mut changes = Vec::new();
+        for scope in scopes {
+            if let Some(state) = inner.scopes.remove(&scope.id) {
+                if !state.staged {
+                    for key in state.rows.keys() {
+                        changes.push(Change::Remove {
+                            key: (inner.physical)(scope.id, key),
+                            row_version: inner.next_version(),
+                        });
+                    }
+                }
+                dispatch.rows.push(state.rows);
+            }
+        }
+        if !changes.is_empty() {
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(changes));
+        }
         drop(inner);
         dispatch
     }
@@ -273,9 +226,8 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         );
     }
 
-    fn mint(&self, staged: bool, rank: Option<ScopeRank>) -> RegistrationScope<K, V, P, S> {
+    fn mint(&self, staged: bool) -> RegistrationScope<K, V, P, S> {
         let mut inner = self.lock();
-        let rank = inner.checked_rank(rank, None);
         let id = inner.next_scope_id();
         assert!(
             inner
@@ -284,9 +236,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
                     id,
                     ScopeState {
                         rows: BTreeMap::new(),
-                        staged,
-                        rank,
-                        install_key: None,
+                        staged
                     }
                 )
                 .is_none()
@@ -297,17 +247,26 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         }
     }
 
-    /// The read waist over this collection's materialized rows.
+    /// The read waist over this collection's rows, keyed by physical key.
     pub fn projection(&self) -> Projection<P, V, S> {
         self.lock().projection.clone()
     }
 
-    /// Host-local snapshot of the materialized rows of published scopes. Staged scope
-    /// rows are excluded; consumers use projection leases rather than this authority
-    /// convenience. Under [`Materializer::Union`] a row's version is its own; under
-    /// other policies it is the newest contributing version.
+    /// Host-local snapshot of published rows. Staged scope rows are excluded;
+    /// consumers use projection leases rather than this authority convenience.
     pub fn snapshot(&self) -> BTreeMap<P, Entry<V>> {
-        self.lock().materialized()
+        let inner = self.lock();
+        inner
+            .scopes
+            .iter()
+            .filter(|(_, state)| !state.staged)
+            .flat_map(|(id, state)| {
+                state
+                    .rows
+                    .iter()
+                    .map(|(key, entry)| ((inner.physical)(*id, key), entry.clone()))
+            })
+            .collect()
     }
 
     /// Withdraw every scope and begin a new projection generation: outstanding
@@ -337,14 +296,21 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
                 rows.push(state.rows);
             }
         }
-        for state in retained.values_mut() {
-            for entry in state.rows.values_mut() {
+        let mut projection = vec![inner.projection.reset_deferred()];
+        let mut republished = Vec::new();
+        for (id, state) in &mut retained {
+            for (key, entry) in &mut state.rows {
                 entry.version = inner.next_version();
+                republished.push(Change::Upsert {
+                    key: (inner.physical)(*id, key),
+                    row_version: entry.version,
+                    value: entry.value.clone(),
+                    evidence: entry.evidence,
+                    write_context: entry.write_context.clone(),
+                });
             }
         }
         inner.scopes = retained;
-        let mut projection = vec![inner.projection.reset_deferred()];
-        let republished = inner.full_changes();
         if !republished.is_empty() {
             projection.push(inner.projection.publish_deferred(republished));
         }
@@ -451,10 +417,8 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
             .map_or(0, |state| state.rows.len())
     }
 
-    /// Register or replace `key`, returning the new row version. Under
-    /// [`Materializer::RejectCollision`] a key another live scope holds is refused with
-    /// [`MutationError::Collision`]. Wakes are returned, not fired; the caller must
-    /// dispatch after releasing host locks.
+    /// Register or replace `key`, returning the new row version. Wakes are returned,
+    /// not fired; the caller must dispatch after releasing host locks.
     pub fn put(
         &self,
         key: K,
@@ -467,32 +431,41 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
         if current != based_on {
             return Err(MutationError::Conflict { current });
         }
-        if inner.rejects_collisions()
-            && let Some(holder) = inner.holder(&key, Some(self.id))
-        {
-            return Err(MutationError::Collision { holder });
-        }
+        let staged = state.staged;
         let version = inner.next_version();
-        let touched = BTreeSet::from([key.clone()]);
-        let (previous, projection) = inner.commit(&touched, None, |inner| {
-            let rows = &mut inner.scopes.get_mut(&self.id).unwrap().rows;
-            let previous = rows.remove_entry(&key);
+        let change = if staged {
+            None
+        } else {
+            Some(Change::Upsert {
+                key: (inner.physical)(self.id, &key),
+                row_version: version,
+                value: value.clone(),
+                evidence: RowEvidence::Authoritative,
+                write_context: None,
+            })
+        };
+        let rows = &mut inner.scopes.get_mut(&self.id).unwrap().rows;
+        let mut dispatch = RegistrationDispatch::default();
+        if let Some(previous) = rows.remove_entry(&key) {
+            dispatch.entries.push(previous);
+        }
+        assert!(
             rows.insert(
                 key,
                 Entry {
                     version,
                     value,
                     evidence: RowEvidence::Authoritative,
-                    write_context: None,
-                },
-            );
-            previous
-        });
-        let dispatch = RegistrationDispatch {
-            projection,
-            entries: previous.into_iter().collect(),
-            ..RegistrationDispatch::default()
-        };
+                    write_context: None
+                }
+            )
+            .is_none()
+        );
+        if let Some(change) = change {
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(vec![change]));
+        }
         drop(inner);
         Ok(dispatch.with_output(version))
     }
@@ -507,37 +480,32 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
         based_on: Option<Version>,
     ) -> Result<RegistrationDispatch<K, V, P, S, Option<Version>>, MutationError> {
         let mut inner = self.collection.lock();
-        let state = inner.scopes.get(&self.id).ok_or(MutationError::Closed)?;
+        let state = inner
+            .scopes
+            .get_mut(&self.id)
+            .ok_or(MutationError::Closed)?;
         let current = state.rows.get(&key).map(|entry| entry.version);
         if current != based_on {
             return Err(MutationError::Conflict { current });
         }
-        if current.is_none() {
+        let mut dispatch = RegistrationDispatch::default();
+        let Some(previous) = state.rows.remove_entry(&key) else {
+            dispatch.keys.push(key);
             drop(inner);
-            return Ok(RegistrationDispatch {
-                keys: vec![key],
-                ..RegistrationDispatch::default()
-            }
-            .with_output(None));
-        }
-        let version = inner.next_version();
-        let touched = BTreeSet::from([key]);
-        let (previous, projection) = inner.commit(&touched, Some(version), |inner| {
-            let key = touched.first().unwrap();
-            inner
-                .scopes
-                .get_mut(&self.id)
-                .unwrap()
-                .rows
-                .remove_entry(key)
-                .unwrap()
-        });
-        let dispatch = RegistrationDispatch {
-            projection,
-            entries: vec![previous],
-            keys: touched.into_iter().collect(),
-            ..RegistrationDispatch::default()
+            return Ok(dispatch.with_output(None));
         };
+        let staged = state.staged;
+        dispatch.entries.push(previous);
+        let version = inner.next_version();
+        if !staged {
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(vec![Change::Remove {
+                    key: (inner.physical)(self.id, &key),
+                    row_version: version,
+                }]));
+        }
+        dispatch.keys.push(key);
         drop(inner);
         Ok(dispatch.with_output(Some(version)))
     }
@@ -546,16 +514,26 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
     /// must dispatch after releasing host locks.
     pub fn clear(&self) -> Result<RegistrationDispatch<K, V, P, S>, MutationError> {
         let mut inner = self.collection.lock();
-        let state = inner.scopes.get(&self.id).ok_or(MutationError::Closed)?;
-        let touched: BTreeSet<K> = state.rows.keys().cloned().collect();
-        let (rows, projection) = inner.commit(&touched, None, |inner| {
-            std::mem::take(&mut inner.scopes.get_mut(&self.id).unwrap().rows)
-        });
-        let dispatch = RegistrationDispatch {
-            projection,
-            rows: vec![rows],
-            ..RegistrationDispatch::default()
-        };
+        let state = inner
+            .scopes
+            .get_mut(&self.id)
+            .ok_or(MutationError::Closed)?;
+        let rows = std::mem::take(&mut state.rows);
+        let staged = state.staged;
+        let mut dispatch = RegistrationDispatch::default();
+        if !staged && !rows.is_empty() {
+            let changes = rows
+                .keys()
+                .map(|key| Change::Remove {
+                    key: (inner.physical)(self.id, key),
+                    row_version: inner.next_version(),
+                })
+                .collect();
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(changes));
+        }
+        dispatch.rows.push(rows);
         drop(inner);
         Ok(dispatch)
     }
@@ -626,12 +604,6 @@ impl<K, V, P, S: Source<P, V>, T> RegistrationDispatch<K, V, P, S, T> {
 mod durable;
 pub use durable::DurableCodec;
 
-#[path = "registration_materialize.rs"]
-mod materialize;
-pub use materialize::Contribution;
-pub use materialize::Materializer;
-pub use materialize::ScopeRank;
-
 #[cfg(test)]
 #[path = "registration_tests_notifications.rs"]
 mod tests;
@@ -643,7 +615,3 @@ mod semantics_tests;
 #[cfg(test)]
 #[path = "registration_tests_durable.rs"]
 mod durable_tests;
-
-#[cfg(test)]
-#[path = "registration_tests_materialize.rs"]
-mod materialize_tests;

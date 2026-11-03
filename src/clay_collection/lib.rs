@@ -14,10 +14,7 @@
 //!
 //! [`RegistrationCollection`] is the owner-scoped contribution primitive: rows keyed by
 //! registration scope, shared compare-and-set mutations, and atomic withdrawal when the
-//! scope owner closes. Writer handles do not own row lifetime. Its explicit
-//! [`Materializer`] (union, group, priority, host-ordered LWW, or collision rejection)
-//! turns contributions into the consumer-facing projection, recomputed in the same
-//! transaction as every mutation or scope close.
+//! scope owner closes. Writer handles do not own row lifetime.
 
 mod ledger;
 mod mirror;
@@ -39,15 +36,11 @@ pub use projection::PendingNotifications;
 pub use projection::Projection;
 pub use projection::ProjectionLease;
 pub use projection::ProjectionRead;
-pub use registration::Contribution;
 pub use registration::DurableCodec;
-pub use registration::InstallError;
-pub use registration::Materializer;
 pub use registration::RegistrationCollection;
 pub use registration::RegistrationDispatch;
 pub use registration::RegistrationScope;
 pub use registration::RegistrationWriter;
-pub use registration::ScopeRank;
 pub use replica::Entry;
 pub use replica::Replica;
 pub use source::Source;
