@@ -317,6 +317,19 @@ async fn assert_model(admission: &Admission, model: &AdmissionModel) {
     }
 }
 
+async fn apply_authorize(
+    admission: &Admission,
+    model: &mut AdmissionModel,
+    inventory: usize,
+    readable: bool,
+) {
+    model.authorize(inventory, readable);
+    admission
+        .authorize(&inventory_id(inventory), readable)
+        .await
+        .expect("authorize inventory");
+}
+
 async fn run_script(script: Vec<Command>) {
     let sql = database();
     let (mut admission, mut stop) = Admission::boot(sql.clone()).await.expect("boot admission");
@@ -342,15 +355,9 @@ async fn run_script(script: Vec<Command>) {
                     .await
                     .expect("select inventory");
             }
-            Command::Authorize {
-                inventory,
-                readable,
-            } => {
-                model.authorize(inventory, readable);
-                admission
-                    .authorize(&inventory_id(inventory), readable)
-                    .await
-                    .expect("authorize inventory");
+
+            Command::Authorize { inventory, readable } => {
+                apply_authorize(&admission, &mut model, inventory, readable).await;
             }
             Command::Pins {
                 inventory,

@@ -275,7 +275,7 @@ mod tests {
             .sync_obj(
                 PeerKey::new([2; 32]),
                 obj_id.clone(),
-                test_parts().into_iter().map(|part| (part, 1)).collect(),
+                test_parts(),
                 Some(serde_json::json!({ "lengthOctets": 1 })),
             )
             .await
@@ -688,7 +688,7 @@ mod tests {
             .sync_obj(
                 PeerKey::new([2; 32]),
                 obj_id,
-                test_parts().into_iter().map(|part| (part, 1)).collect(),
+                test_parts(),
                 Some(serde_json::json!({"mime": "application/octet-stream"})),
             )
             .await?;
