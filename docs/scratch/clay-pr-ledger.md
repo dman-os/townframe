@@ -294,3 +294,20 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
     PDD023.
   - Unproven: a real wit-bindgen + MDK-hook guest (the test was hand-written WAT emulating the protocol), the
     guest-side TASK_CANCELLED path, stackful/JSPI-blocking guests, non-Chromium browsers.
+- Wasmtime result: no blocker forces a custom loop. Per-call async exports work with real Dioxus (out-of-order
+  overlap, sync dispatch interleaved), background work after return (`spawn_local`), reentrancy, 2000
+  overlapping calls, and concurrent close.
+  1. (high, must configure) Guest wit-bindgen `default-features=false`, features `async, macros, realloc,
+     async-spawn, inter-task-wakeup`. Without `inter-task-wakeup`, a cross-task wake panics the instance. Needs
+     a guardrail that `std` stays off and that the versioned task-context symbols match.
+  2. (medium) No host-initiated cancel of a call in this Wasmtime pin (#11833 open) or in WCMP. Guest-to-guest
+     `subtask.cancel` works and does not leak (5001 cycles). Host-side cancel needs a guest-visible token.
+  3. (medium) A guest trap poisons the instance; suspended calls never resolve. The host must fail
+     outstanding calls itself.
+  4. (low-med) Dropping a queued (unstarted) call future traps the store, and backpressure also blocks sync
+     exports. Admission control belongs in the host.
+  5. (low) A host import must not re-enter the same instance on its first poll; yield or spawn first.
+  - Author rules: no RefCell/signal/Dioxus guards across `.await`; Dioxus global APIs after resume need
+    `dom.in_runtime`; panics kill the instance.
+  - Cooperative threads exist in Wasmtime behind a Config flag, but wit-bindgen 0.62 doesn't wrap
+    thread.new/switch.
