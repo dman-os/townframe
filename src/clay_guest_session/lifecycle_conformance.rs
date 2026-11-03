@@ -89,7 +89,10 @@ pub trait Incarnations: 'static {
     /// Instantiate the fixture for `instance` and run its `initialize` with `context`,
     /// returning the runtime and the driver future the caller must poll until the
     /// incarnation ends. A failure is the engine's [`std::fmt::Display`] of it.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the nested Result of (runtime, driver) is the trait's whole contract; an alias would only rename it"
+    )]
     fn initialize(
         self: Rc<Self>,
         host: Host,
