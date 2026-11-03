@@ -382,6 +382,7 @@ fn cap_failure(error: capability_bank::CapabilityError) -> &'static str {
         capability_bank::CapabilityError::Revoked => "revoked",
         capability_bank::CapabilityError::LimitExceeded => "limit-exceeded",
         capability_bank::CapabilityError::Unavailable => "unavailable",
+        capability_bank::CapabilityError::CallCycle => "call-cycle",
     }
 }
 

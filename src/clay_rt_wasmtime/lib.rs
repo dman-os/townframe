@@ -9,6 +9,7 @@ mod collections;
 mod documents;
 
 use clay_guest_session::DocumentSession;
+use clay_guest_session::GuestClose;
 pub use clay_guest_session::InitialContext;
 pub use clay_guest_session::InitializationFailure;
 use clay_guest_session::Limits as DocumentLimits;
@@ -254,6 +255,49 @@ impl CallTarget for GuestCallTarget {
                 .unwrap_or_else(|_ended| Err(CapabilityFailure::Revoked.into()))
         }
         .boxed()
+    }
+}
+
+/// The store task of one [`GuestCall`], see [`WasmIncarnation::start_call`].
+struct GuestCallTask {
+    lifecycle: bindings::exports::townframe::dayframe::micro_lifecycle::Guest,
+    publication: String,
+    request: Vec<u8>,
+    reply: oneshot::Sender<Result<Vec<u8>, CallError>>,
+    /// Cleared when the task ends, so the driver starts the next queued call.
+    in_flight: Arc<AtomicBool>,
+    wake: Arc<IncarnationWake>,
+}
+
+impl wasmtime::component::AccessorTask<WasmStoreState> for GuestCallTask {
+    async fn run(
+        self,
+        accessor: &wasmtime::component::Accessor<WasmStoreState>,
+    ) -> wasmtime::Result<()> {
+        let Self {
+            lifecycle,
+            publication,
+            request,
+            reply,
+            in_flight,
+            wake,
+        } = self;
+        let outcome = lifecycle.call_call(accessor, publication, request).await;
+        in_flight.store(false, Ordering::Release);
+        wake.wake_by_ref();
+        match outcome {
+            Ok(handled) => {
+                // A requester that gave up meanwhile just loses its reply.
+                drop(reply.send(handled.map_err(CallError::Provider)));
+                Ok(())
+            }
+            Err(trap) => {
+                drop(reply.send(Err(CallError::Provider(format!(
+                    "guest trapped during call: {trap:#}"
+                )))));
+                Err(trap)
+            }
+        }
     }
 }
 
@@ -677,6 +721,7 @@ impl WasmPackage {
                 waker,
                 root: None,
                 publications: BTreeMap::new(),
+                call_in_flight: Arc::new(AtomicBool::new(false)),
             },
             incoming,
             incoming_calls,
@@ -695,6 +740,12 @@ struct WasmIncarnation {
     /// Publication leases of the publications `initialize` returned, by name. Dropping one
     /// revokes the publication and every consumer proxy derived from it.
     publications: BTreeMap<String, PublishedCapability>,
+    /// Whether a [`GuestCallTask`] is in the store. The guest runtime keeps one async export
+    /// task's state per instance (wit-bindgen's `task_state` is a plain thread-local on
+    /// wasm32-wasip3, not CM context-local storage), so a second async export entered while one
+    /// is suspended trips its `start_task` assertion. The driver therefore starts the next
+    /// queued call only once this clears.
+    call_in_flight: Arc<AtomicBool>,
 }
 
 impl WasmIncarnation {
@@ -714,28 +765,45 @@ impl WasmIncarnation {
         self.store.drive_until_stalled().await
     }
 
-    /// Run the guest's exported `call` for `publication`. The outer error is a trap; the inner
-    /// one is the handler's own rejection.
-    async fn call(
-        &mut self,
-        publication: String,
-        request: Vec<u8>,
-    ) -> wasmtime::Result<Result<Vec<u8>, String>> {
-        self.refuel();
-        let lifecycle = self.client.townframe_dayframe_micro_lifecycle();
-        self.store
-            .run_concurrent(async |accessor| {
-                lifecycle.call_call(accessor, publication, request).await
-            })
-            .await
-            .and_then(|trapped| trapped)
+    /// Start the guest's exported `call` for one queued request as a task in this incarnation's
+    /// store and return without waiting for it. The task makes progress only while the store's
+    /// event loop is driven, which [`Self::tick`] does in bounded bursts exactly as for any
+    /// other pending async work, so a call suspended on something external (a nested lazy call
+    /// into another micro) never keeps the incarnation lock. The reply is sent from the task
+    /// when the handler returns; dropping the store before that drops the task and with it the
+    /// reply, which the caller reads as `Revoked`. Calls into one incarnation are serialized, and
+    /// the next call is started only after this one ends (see `call_in_flight`).
+    fn start_call(&mut self, call: GuestCall) -> wasmtime::Result<()> {
+        let GuestCall {
+            publication,
+            request,
+            reply,
+        } = call;
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle().clone();
+        self.call_in_flight.store(true, Ordering::Release);
+        self.store.spawn(GuestCallTask {
+            lifecycle,
+            publication,
+            request,
+            reply,
+            in_flight: Arc::clone(&self.call_in_flight),
+            wake: Arc::clone(&self.wake),
+        })?;
+        Ok(())
     }
 
     /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
     /// incarnation's host authority and dependencies are still live, then drop the root (its
     /// guest destructor releases whatever the root held) and only then revoke the publications.
     /// The store itself stays up so a caller can audit what the guest still holds.
-    async fn close(&mut self) -> Result<(), String> {
+    async fn close(&mut self) -> Result<GuestClose, String> {
+        if self.call_in_flight.load(Ordering::Acquire) {
+            // The guest cannot start `close` beside its suspended call. Revoke the
+            // publications; dropping the store then cancels the call and its reply.
+            self.publications.clear();
+            self.wake.wake_by_ref();
+            return Ok(GuestClose::Skipped);
+        }
         let root = self
             .root
             .take()
@@ -757,7 +825,7 @@ impl WasmIncarnation {
             .map_err(|trap| format!("guest trapped dropping its instance root: {trap:#}"));
         self.publications.clear();
         closed??;
-        dropped
+        dropped.map(|()| GuestClose::Completed)
     }
 }
 
@@ -793,6 +861,7 @@ impl WasmRuntime {
         active.publications = leases;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let fuel = active.fuel_per_call.clone();
+        let call_in_flight = active.call_in_flight.clone();
         let incarnation = Arc::new(Mutex::new(Some(active)));
         let driver_incarnation = incarnation.clone();
         let pump_incarnation = incarnation.clone();
@@ -823,31 +892,23 @@ impl WasmRuntime {
                 };
                 tokio::select! {
                     () = &mut documents => return,
-                    Some(GuestCall { publication, request, reply }) = calls.recv() => {
-                        // The guest handler runs here, in the provider's own driver, with the
-                        // store held for the whole call, exactly like a stall-driving tick. A
-                        // requester that gave up meanwhile just loses its reply.
-                        let (outcome, trapped) = {
-                            let mut guard = pump_incarnation.lock().unwrap();
-                            let Some(active) = guard.as_mut() else {
-                                drop(reply.send(Err(CapabilityFailure::Revoked.into())));
-                                return;
-                            };
-                            match active.call(publication, request).await {
-                                Ok(handled) => (handled.map_err(CallError::Provider), false),
-                                Err(trap) => {
-                                    guard.take();
-                                    (Err(CallError::Provider(format!("guest trapped during call: {trap:#}"))), true)
-                                }
-                            }
-                        };
-                        if trapped && pump_host.check(&pump_instance).is_ok() {
-                            pump_host.close_instance(&pump_instance).unwrap();
-                        }
-                        drop(reply.send(outcome));
-                        if trapped {
+                    Some(call) = calls.recv(), if !call_in_flight.load(Ordering::Acquire) => {
+                        // Only reached while no call is in flight: the rest queue in `calls`,
+                        // FIFO, until the running one ends. Start the handler as a task in the provider's own store and go
+                        // back to the loop: the wake arm drives it in bounded bursts, so
+                        // this incarnation's sync entries and other calls are never held
+                        // up behind a handler that is suspended on something external.
+                        let mut guard = pump_incarnation.lock().unwrap();
+                        let Some(active) = guard.as_mut() else {
+                            drop(call.reply.send(Err(CapabilityFailure::Revoked.into())));
                             return;
-                        }
+                        };
+                        // Spawning only fails when the store lacks concurrency support,
+                        // which the engine configuration rules out.
+                        active
+                            .start_call(call)
+                            .expect("store spawns the call task");
+                        active.wake.wake_by_ref();
                     }
                     () = wake.wait() => {
                         let trapped = {
@@ -902,7 +963,7 @@ impl WasmRuntime {
     /// presentation and document calls, its `instance-root.close` runs to completion, the
     /// root and the publication leases are released, and the store is dropped. The caller has
     /// already withdrawn outward visibility and tears the host incarnation down afterwards.
-    pub async fn close(&self) -> Result<(), String> {
+    pub async fn close(&self) -> Result<GuestClose, String> {
         let mut active = self
             .incarnation
             .lock()

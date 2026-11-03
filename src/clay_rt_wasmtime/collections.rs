@@ -296,6 +296,7 @@ fn capability_error(failure: CapabilityFailure) -> cap_wit::CapabilityError {
         CapabilityFailure::Revoked => cap_wit::CapabilityError::Revoked,
         CapabilityFailure::LimitExceeded => cap_wit::CapabilityError::LimitExceeded,
         CapabilityFailure::Unavailable => cap_wit::CapabilityError::Unavailable,
+        CapabilityFailure::CallCycle => cap_wit::CapabilityError::CallCycle,
     }
 }
 

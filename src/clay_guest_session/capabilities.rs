@@ -64,6 +64,9 @@ pub enum CapabilityFailure {
     LimitExceeded,
     /// A lazy reference's provider could not be activated, or does not publish the name.
     Unavailable,
+    /// The call would wait on an incarnation that already waits on the caller (a call cycle
+    /// through the providers' one-task-at-a-time queues), so it is refused instead of queued.
+    CallCycle,
 }
 
 /// Why a call failed: the reference was unusable, or the provider's handler rejected it.
@@ -617,6 +620,13 @@ impl CapabilityPublication {
         let Behavior::Call(target) = self.inner.live(recipient)? else {
             return Err(CapabilityFailure::ContractMismatch.into());
         };
+        // Registered before the target queues the call and held until it completes or is
+        // dropped, so a cycle of waiting incarnations is refused at the call that closes it.
+        let _waiting = self
+            .inner
+            .host
+            .enter_call(recipient, &self.inner.owner)
+            .map_err(|_cycle| CapabilityFailure::CallCycle)?;
         target.call(request).await
     }
 }
