@@ -57,7 +57,8 @@ pub enum BatchOp {
 pub struct StoreError(String);
 
 impl StoreError {
-    pub(crate) fn backend(message: impl std::fmt::Display) -> Self {
+    /// For `OrderedStore` implementations outside this crate (and test doubles).
+    pub fn backend(message: impl std::fmt::Display) -> Self {
         Self(message.to_string())
     }
 }

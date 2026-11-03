@@ -15,6 +15,7 @@
 //! of that pair instead.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,6 +29,7 @@ use crate::types::MutationError;
 use crate::types::RegistrationScopeId;
 use crate::types::RowEvidence;
 use crate::types::Version;
+use durable::Durable;
 
 struct ScopeState<K, V> {
     rows: BTreeMap<K, Entry<V>>,
@@ -41,9 +43,22 @@ struct Inner<K, V, P, S: Source<P, V>> {
     version: Version,
     /// Local rows per live scope; removing the scope also revokes its writers.
     scopes: BTreeMap<RegistrationScopeId, ScopeState<K, V>>,
+    /// Set by the durable constructor; `None` for volatile collections.
+    durable: Option<Durable<K, V>>,
+    /// Installation scope key to the in-process id of its entry in `scopes`.
+    /// These scopes have no owner handle: only `install`/`uninstall` change them.
+    installations: BTreeMap<Vec<u8>, RegistrationScopeId>,
 }
 
 impl<K, V, P, S: Source<P, V>> Inner<K, V, P, S> {
+    fn next_scope_id(&mut self) -> RegistrationScopeId {
+        self.next_scope = self
+            .next_scope
+            .checked_add(1)
+            .expect("registration scope identity exhausted");
+        RegistrationScopeId(self.next_scope)
+    }
+
     fn next_version(&mut self) -> Version {
         self.version.seq = self
             .version
@@ -108,6 +123,8 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
                 next_scope: 0,
                 version: Version::new(1, 0),
                 scopes: BTreeMap::new(),
+                durable: None,
+                installations: BTreeMap::new(),
             })),
         }
     }
@@ -158,9 +175,9 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         let dispatch = RegistrationDispatch {
             output: (),
             projection: if changes.is_empty() {
-                None
+                Vec::new()
             } else {
-                Some(inner.projection.publish_deferred(changes))
+                vec![inner.projection.publish_deferred(changes)]
             },
             rows: Vec::new(),
             entries: Vec::new(),
@@ -194,7 +211,9 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
             }
         }
         if !changes.is_empty() {
-            dispatch.projection = Some(inner.projection.publish_deferred(changes));
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(changes));
         }
         drop(inner);
         dispatch
@@ -209,11 +228,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
 
     fn mint(&self, staged: bool) -> RegistrationScope<K, V, P, S> {
         let mut inner = self.lock();
-        inner.next_scope = inner
-            .next_scope
-            .checked_add(1)
-            .expect("registration scope identity exhausted");
-        let id = RegistrationScopeId(inner.next_scope);
+        let id = inner.next_scope_id();
         assert!(
             inner
                 .scopes
@@ -268,13 +283,40 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
                 .expect("registration generation exhausted"),
             0,
         );
-        let rows = std::mem::take(&mut inner.scopes)
-            .into_values()
-            .map(|state| state.rows)
-            .collect();
+        // Installation scopes are durable: they survive the generation change and
+        // are republished into it. Everything else is withdrawn.
+        let installed: BTreeSet<RegistrationScopeId> =
+            inner.installations.values().copied().collect();
+        let mut rows = Vec::new();
+        let mut retained = BTreeMap::new();
+        for (id, state) in std::mem::take(&mut inner.scopes) {
+            if installed.contains(&id) {
+                retained.insert(id, state);
+            } else {
+                rows.push(state.rows);
+            }
+        }
+        let mut projection = vec![inner.projection.reset_deferred()];
+        let mut republished = Vec::new();
+        for (id, state) in &mut retained {
+            for (key, entry) in &mut state.rows {
+                entry.version = inner.next_version();
+                republished.push(Change::Upsert {
+                    key: (inner.physical)(*id, key),
+                    row_version: entry.version,
+                    value: entry.value.clone(),
+                    evidence: entry.evidence,
+                    write_context: entry.write_context.clone(),
+                });
+            }
+        }
+        inner.scopes = retained;
+        if !republished.is_empty() {
+            projection.push(inner.projection.publish_deferred(republished));
+        }
         let dispatch = RegistrationDispatch {
             output: (),
-            projection: Some(inner.projection.reset_deferred()),
+            projection,
             rows,
             entries: Vec::new(),
             keys: Vec::new(),
@@ -420,7 +462,9 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
             .is_none()
         );
         if let Some(change) = change {
-            dispatch.projection = Some(inner.projection.publish_deferred(vec![change]));
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(vec![change]));
         }
         drop(inner);
         Ok(dispatch.with_output(version))
@@ -454,10 +498,12 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
         dispatch.entries.push(previous);
         let version = inner.next_version();
         if !staged {
-            dispatch.projection = Some(inner.projection.publish_deferred(vec![Change::Remove {
-                key: (inner.physical)(self.id, &key),
-                row_version: version,
-            }]));
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(vec![Change::Remove {
+                    key: (inner.physical)(self.id, &key),
+                    row_version: version,
+                }]));
         }
         dispatch.keys.push(key);
         drop(inner);
@@ -483,7 +529,9 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
                     row_version: inner.next_version(),
                 })
                 .collect();
-            dispatch.projection = Some(inner.projection.publish_deferred(changes));
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(changes));
         }
         dispatch.rows.push(rows);
         drop(inner);
@@ -497,7 +545,9 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
 #[must_use = "dispatch after releasing host authority locks"]
 pub struct RegistrationDispatch<K, V, P = (RegistrationScopeId, K), S: Source<P, V> = (), T = ()> {
     output: T,
-    projection: Option<ProjectionDispatch<P, V, S::Selector>>,
+    /// Usually one transaction; a reset of a durable collection also republishes
+    /// its installation rows into the new generation.
+    projection: Vec<ProjectionDispatch<P, V, S::Selector>>,
     rows: Vec<BTreeMap<K, Entry<V>>>,
     entries: Vec<(K, Entry<V>)>,
     keys: Vec<K>,
@@ -507,7 +557,7 @@ impl<K, V, P, S: Source<P, V>> Default for RegistrationDispatch<K, V, P, S> {
     fn default() -> Self {
         Self {
             output: (),
-            projection: None,
+            projection: Vec::new(),
             rows: Vec::new(),
             entries: Vec::new(),
             keys: Vec::new(),
@@ -543,12 +593,16 @@ impl<K, V, P, S: Source<P, V>, T> RegistrationDispatch<K, V, P, S, T> {
     /// Fire the wakes and drop the withdrawn rows, then return the mutation's output.
     /// Call after releasing host locks.
     pub fn dispatch(self) -> T {
-        if let Some(projection) = self.projection {
+        for projection in self.projection {
             projection.dispatch();
         }
         self.output
     }
 }
+
+#[path = "registration_durable.rs"]
+mod durable;
+pub use durable::DurableCodec;
 
 #[cfg(test)]
 #[path = "registration_tests_notifications.rs"]
@@ -557,3 +611,7 @@ mod tests;
 #[cfg(test)]
 #[path = "registration_tests_semantics.rs"]
 mod semantics_tests;
+
+#[cfg(test)]
+#[path = "registration_tests_durable.rs"]
+mod durable_tests;
