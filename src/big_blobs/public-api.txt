@@ -10,7 +10,6 @@ impl RevisionedStore for big_blobs::projection::BlobProjection
 impl SqliteFrontierCodec for big_blobs::projection::BlobCodec
 impl SqliteFrontierCodec for big_blobs::service::AvailabilityCodec
 impl SyncBackend for big_blobs::sync::BlobSyncBackend
-impl big_sync :: receive :: ReplayReceiver for big_blobs::sync::BlobSyncBackend
 impl std :: fmt :: Debug for big_blobs::service::ImportedBlob
 pub big_blobs::schema::fn registration () -> SchemaRegistrationGroup < 'static >
 pub big_blobs::service::async fn boot (config : Config) -> Res < (Blobs , StopToken) >
