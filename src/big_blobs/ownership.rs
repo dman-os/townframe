@@ -294,7 +294,6 @@ impl State {
             sqlite::queries::MIGRATIONS,
         )
         .await?;
-        let roots = PairRoots::boot(sql.clone()).await?;
         let mut ownership = Self {
             sql,
             store,

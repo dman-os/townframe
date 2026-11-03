@@ -126,8 +126,7 @@ impl PairRoots {
     }
 
     pub(crate) async fn virtual_pairs(&self) -> Res<Vec<(VirtualPair, bool, bool, bool)>> {
-<<<<<<< HEAD
-        let bound = self.bind_ownership().await?;
+        self.bind_ownership().await?;
         let rows = sqlite::queries::virtual_pairs(&self.sql).await?;
         let mut pairs = Vec::with_capacity(rows.len());
         for row in rows {
@@ -223,9 +222,7 @@ impl PairRoots {
 
         let tx = self.sql.begin_write().await?;
         sqlite::queries::delete_root(&tx, c_hash.to_hex().to_string()).await?;
-        if !bound {
-            sqlite::queries::delete_virtual(&tx, c_hash.to_hex().to_string()).await?;
-        }
+        sqlite::queries::delete_virtual(&tx, c_hash.to_hex().to_string()).await?;
         tx.commit().await?;
         Ok(())
     }
