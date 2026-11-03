@@ -8,6 +8,47 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_inventory_pair_admission.sql", sql: include_str!("migrations/001_inventory_pair_admission.sql") },
 ];
 
+pub const BEGIN_ATTEMPT_SQL: &str = include_str!("queries/begin_attempt.sql");
+pub async fn begin_attempt(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(BEGIN_ATTEMPT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await
+}
+
+pub const CLAIM_EXISTS_SQL: &str = include_str!("queries/claim_exists.sql");
+pub async fn claim_exists(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String, owner: String) -> SqlResult<Vec<i64>> {
+    let set = db.query(CLAIM_EXISTS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(owner)]).await?;
+    set.all()
+}
+
+pub const CLEAR_PIN_SQL: &str = include_str!("queries/clear_pin.sql");
+pub async fn clear_pin(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_PIN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await
+}
+
+pub const COMPLETE_FAILURE_SQL: &str = include_str!("queries/complete_failure.sql");
+pub async fn complete_failure(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, attempt: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(COMPLETE_FAILURE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(attempt)]).await
+}
+
+pub const COMPLETE_SUCCESS_SQL: &str = include_str!("queries/complete_success.sql");
+pub async fn complete_success(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, attempt: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(COMPLETE_SUCCESS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(attempt)]).await
+}
+
+pub const DELETE_CLAIM_SQL: &str = include_str!("queries/delete_claim.sql");
+pub async fn delete_claim(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, owner: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_CLAIM_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(owner)]).await
+}
+
+pub const DELETE_PRODUCER_CLAIM_SQL: &str = include_str!("queries/delete_producer_claim.sql");
+pub async fn delete_producer_claim(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, owner: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_PRODUCER_CLAIM_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(owner)]).await
+}
+
+pub const DELETE_PRODUCER_INVENTORY_SQL: &str = include_str!("queries/delete_producer_inventory.sql");
+pub async fn delete_producer_inventory(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_PRODUCER_INVENTORY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DirtyRow {
     pub inventory_id: String,
@@ -25,6 +66,31 @@ pub const DIRTY_SQL: &str = include_str!("queries/dirty.sql");
 pub async fn dirty(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<DirtyRow>> {
     let set = db.query(DIRTY_SQL, &[]).await?;
     set.all()
+}
+
+pub const FAIL_ATTEMPT_SQL: &str = include_str!("queries/fail_attempt.sql");
+pub async fn fail_attempt(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, generation: i64, attempt: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(FAIL_ATTEMPT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(generation), crate::sqlite_rs_alias::IntoValue::into_value(attempt)]).await
+}
+
+pub const INSERT_CLAIM_SQL: &str = include_str!("queries/insert_claim.sql");
+pub async fn insert_claim(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, owner: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(INSERT_CLAIM_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(owner)]).await
+}
+
+pub const INSERT_PRODUCER_CLAIM_SQL: &str = include_str!("queries/insert_producer_claim.sql");
+pub async fn insert_producer_claim(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, owner: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(INSERT_PRODUCER_CLAIM_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(owner)]).await
+}
+
+pub const INSERT_PRODUCER_INVENTORY_SQL: &str = include_str!("queries/insert_producer_inventory.sql");
+pub async fn insert_producer_inventory(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(INSERT_PRODUCER_INVENTORY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await
+}
+
+pub const INVALIDATE_PUBLISH_SQL: &str = include_str!("queries/invalidate_publish.sql");
+pub async fn invalidate_publish(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, generation: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(INVALIDATE_PUBLISH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(generation)]).await
 }
 
 pub const INVENTORIES_SQL: &str = include_str!("queries/inventories.sql");
@@ -45,9 +111,115 @@ pub async fn length(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_i
     set.optional()
 }
 
+pub const MARK_BYTES_SQL: &str = include_str!("queries/mark_bytes.sql");
+pub async fn mark_bytes(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(MARK_BYTES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObservationRow {
+    pub present: bool,
+    pub payload: Option<String>,
+}
+impl crate::sqlite_rs_alias::FromRow for ObservationRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(ObservationRow { present: row.get::<bool>("present")?, payload: row.get::<Option<String>>("payload")? })
+    }
+}
+
+pub const OBSERVATION_SQL: &str = include_str!("queries/observation.sql");
+pub async fn observation(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String, digest: String, peer_id: Vec<u8>) -> SqlResult<Option<ObservationRow>> {
+    let set = db.query(OBSERVATION_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(peer_id)]).await?;
+    set.optional()
+}
+
+pub const PINNED_DIGESTS_SQL: &str = include_str!("queries/pinned_digests.sql");
+pub async fn pinned_digests(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String) -> SqlResult<Vec<String>> {
+    let set = db.query(PINNED_DIGESTS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await?;
+    set.all()
+}
+
+pub const PRODUCER_CHANGES_SQL: &str = include_str!("queries/producer_changes.sql");
+pub async fn producer_changes(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String) -> SqlResult<Vec<String>> {
+    let set = db.query(PRODUCER_CHANGES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await?;
+    set.all()
+}
+
+pub const PRODUCER_CLAIM_EXISTS_SQL: &str = include_str!("queries/producer_claim_exists.sql");
+pub async fn producer_claim_exists(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String, digest: String, owner: String) -> SqlResult<Vec<i64>> {
+    let set = db.query(PRODUCER_CLAIM_EXISTS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(owner)]).await?;
+    set.all()
+}
+
+pub const READ_AUTHORIZATION_SQL: &str = include_str!("queries/read_authorization.sql");
+pub async fn read_authorization(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String) -> SqlResult<Vec<bool>> {
+    let set = db.query(READ_AUTHORIZATION_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await?;
+    set.all()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadPinStateRow {
+    pub pin_revision: i64,
+    pub pins_complete: bool,
+}
+impl crate::sqlite_rs_alias::FromRow for ReadPinStateRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(ReadPinStateRow { pin_revision: row.get::<i64>("pin_revision")?, pins_complete: row.get::<bool>("pins_complete")? })
+    }
+}
+
+pub const READ_PIN_STATE_SQL: &str = include_str!("queries/read_pin_state.sql");
+pub async fn read_pin_state(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String) -> SqlResult<Vec<ReadPinStateRow>> {
+    let set = db.query(READ_PIN_STATE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await?;
+    set.all()
+}
+
+pub const REARM_INVENTORY_SQL: &str = include_str!("queries/rearm_inventory.sql");
+pub async fn rearm_inventory(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(REARM_INVENTORY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await
+}
+
+pub const REARM_PAIRS_SQL: &str = include_str!("queries/rearm_pairs.sql");
+pub async fn rearm_pairs(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(REARM_PAIRS_SQL, &[]).await
+}
+
+pub const RECOVER_INVENTORIES_SQL: &str = include_str!("queries/recover_inventories.sql");
+pub async fn recover_inventories(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(RECOVER_INVENTORIES_SQL, &[]).await
+}
+
+pub const RECOVER_PAIRS_SQL: &str = include_str!("queries/recover_pairs.sql");
+pub async fn recover_pairs(db: &impl crate::sqlite_rs_alias::Executor) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(RECOVER_PAIRS_SQL, &[]).await
+}
+
 pub const REGISTER_INVENTORY_SQL: &str = include_str!("queries/register_inventory.sql");
 pub async fn register_inventory(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, part_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(REGISTER_INVENTORY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(part_id)]).await
+}
+
+pub const SET_AVAILABLE_SQL: &str = include_str!("queries/set_available.sql");
+pub async fn set_available(db: &impl crate::sqlite_rs_alias::Executor, bytes: bool, inventory_id: String, digest: String, expected_bytes: bool) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(SET_AVAILABLE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(bytes), crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(expected_bytes)]).await
+}
+
+pub const SETTLE_SQL: &str = include_str!("queries/settle.sql");
+pub async fn settle(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, generation: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(SETTLE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(generation)]).await
+}
+
+pub const SETTLE_PUBLISH_SQL: &str = include_str!("queries/settle_publish.sql");
+pub async fn settle_publish(db: &impl crate::sqlite_rs_alias::Executor, bytes: bool, inventory_id: String, digest: String, generation: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(SETTLE_PUBLISH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(bytes), crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(generation)]).await
+}
+
+pub const SOURCE_PEERS_SQL: &str = include_str!("queries/source_peers.sql");
+pub async fn source_peers(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String, digest: String) -> SqlResult<Vec<Vec<u8>>> {
+    let set = db.query(SOURCE_PEERS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await?;
+    set.all()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,4 +245,29 @@ pub const STATE_SQL: &str = include_str!("queries/state.sql");
 pub async fn state(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_id: String, digest: String) -> SqlResult<Option<StateRow>> {
     let set = db.query(STATE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await?;
     set.optional()
+}
+
+pub const TOUCH_PAIR_SQL: &str = include_str!("queries/touch_pair.sql");
+pub async fn touch_pair(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(TOUCH_PAIR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await
+}
+
+pub const UPDATE_AUTHORIZATION_SQL: &str = include_str!("queries/update_authorization.sql");
+pub async fn update_authorization(db: &impl crate::sqlite_rs_alias::Executor, readable: bool, inventory_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPDATE_AUTHORIZATION_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(readable), crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await
+}
+
+pub const UPDATE_PIN_STATE_SQL: &str = include_str!("queries/update_pin_state.sql");
+pub async fn update_pin_state(db: &impl crate::sqlite_rs_alias::Executor, pin_revision: i64, pins_complete: bool, inventory_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPDATE_PIN_STATE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(pin_revision), crate::sqlite_rs_alias::IntoValue::into_value(pins_complete), crate::sqlite_rs_alias::IntoValue::into_value(inventory_id)]).await
+}
+
+pub const UPSERT_OBSERVATION_SQL: &str = include_str!("queries/upsert_observation.sql");
+pub async fn upsert_observation(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, peer_id: Vec<u8>, present: bool, payload: Option<String>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_OBSERVATION_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(peer_id), crate::sqlite_rs_alias::IntoValue::into_value(present), crate::sqlite_rs_alias::IntoValue::into_value(payload)]).await
+}
+
+pub const UPSERT_PIN_SQL: &str = include_str!("queries/upsert_pin.sql");
+pub async fn upsert_pin(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, length_octets: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_PIN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(length_octets)]).await
 }

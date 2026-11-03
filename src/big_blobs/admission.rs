@@ -120,8 +120,8 @@ impl State {
 
     pub async fn recover(&self) -> Res<()> {
         let tx = self.sql.begin_write().await?;
-        let inventories = tx.execute("UPDATE big_blobs_inventory_registry SET readable = 0, authorization = authorization + 1", ()).await?.rows_affected;
-        let pairs = tx.execute("UPDATE big_blobs_admission_pairs SET generation = generation + 1, attempt = NULL, dirty = 1", ()).await?.rows_affected;
+        let inventories = sqlite::queries::recover_inventories(&tx).await?.rows_affected;
+        let pairs = sqlite::queries::recover_pairs(&tx).await?.rows_affected;
         tx.commit().await?;
         if inventories > 0 || pairs > 0 {
             self.changes.send_modify(|revision| *revision += 1);
@@ -133,32 +133,19 @@ impl State {
     pub async fn select(&self, inventory: &DocId, owner: &str, selected: bool) -> Res<()> {
         self.register(inventory).await?;
         let tx = self.sql.begin_write().await?;
-        let exists = !tx
-            .query(
-                "SELECT 1 FROM big_blobs_mirror_claims WHERE inventory_id = ? AND owner = ?",
-                (inventory.to_string(), owner),
-            )
+        let exists = !sqlite::queries::claim_exists(&tx, inventory.to_string(), owner.to_owned())
             .await?
-            .all::<i64>()?
             .is_empty();
         if exists == selected {
             tx.rollback().await?;
             return Ok(());
         }
         if selected {
-            tx.execute(
-                "INSERT INTO big_blobs_mirror_claims (inventory_id, owner) VALUES (?, ?)",
-                (inventory.to_string(), owner),
-            )
-            .await?;
+            sqlite::queries::insert_claim(&tx, inventory.to_string(), owner.to_owned()).await?;
         } else {
-            tx.execute(
-                "DELETE FROM big_blobs_mirror_claims WHERE inventory_id = ? AND owner = ?",
-                (inventory.to_string(), owner),
-            )
-            .await?;
+            sqlite::queries::delete_claim(&tx, inventory.to_string(), owner.to_owned()).await?;
         }
-        tx.execute("UPDATE big_blobs_admission_pairs SET generation = generation + 1, attempt = NULL, dirty = 1 WHERE inventory_id = ?", (inventory.to_string(),)).await?;
+        sqlite::queries::rearm_inventory(&tx, inventory.to_string()).await?;
         tx.commit().await?;
         self.changes.send_modify(|revision| *revision += 1);
         self.changed.notify_one();
@@ -168,19 +155,18 @@ impl State {
     pub async fn authorize(&self, inventory: &DocId, readable: bool) -> Res<()> {
         self.register(inventory).await?;
         let tx = self.sql.begin_write().await?;
-        let previous = tx
-            .query(
-                "SELECT readable FROM big_blobs_inventory_registry WHERE inventory_id = ?",
-                (inventory.to_string(),),
-            )
+        let previous = sqlite::queries::read_authorization(&tx, inventory.to_string())
             .await?
-            .all::<bool>()?[0];
+            .into_iter()
+            .next()
+            .expect("registered inventory has authorization state");
+
         if previous == readable {
             tx.rollback().await?;
             return Ok(());
         }
-        tx.execute("UPDATE big_blobs_inventory_registry SET readable = ?, authorization = authorization + 1 WHERE inventory_id = ?", (readable, inventory.to_string())).await?;
-        tx.execute("UPDATE big_blobs_admission_pairs SET generation = generation + 1, attempt = NULL, dirty = 1 WHERE inventory_id = ?", (inventory.to_string(),)).await?;
+        sqlite::queries::update_authorization(&tx, readable, inventory.to_string()).await?;
+        sqlite::queries::rearm_inventory(&tx, inventory.to_string()).await?;
         tx.commit().await?;
         self.changes.send_modify(|revision| *revision += 1);
         self.changed.notify_one();
@@ -196,31 +182,35 @@ impl State {
     ) -> Res<()> {
         self.register(inventory).await?;
         let tx = self.sql.begin_write().await?;
-        let (previous, previously_complete) = tx
-            .query(
-                "SELECT pin_revision\n                      , pins_complete\n                   FROM big_blobs_inventory_registry\n                  WHERE inventory_id = ?",
-                (inventory.to_string(),),
-            )
+        let previous = sqlite::queries::read_pin_state(&tx, inventory.to_string())
             .await?
-            .all::<(u64, bool)>()?[0];
+            .into_iter()
+            .next()
+            .expect("registered inventory has pin state");
+        let previously_complete = previous.pins_complete;
+        let previous = u64::try_from(previous.pin_revision)?;
         if revision < previous || (revision == previous && (previously_complete || !complete)) {
             tx.rollback().await?;
             return Ok(());
         }
         if complete {
-            let previous = tx.query("SELECT digest FROM big_blobs_admission_pairs WHERE inventory_id = ? AND length_octets IS NOT NULL", (inventory.to_string(),)).await?.all::<String>()?;
+            let previous = sqlite::queries::pinned_digests(&tx, inventory.to_string()).await?;
             for digest in previous {
                 if !pins.contains_key(&digest.parse()?) {
-                    tx.execute("UPDATE big_blobs_admission_pairs SET length_octets = NULL, generation = generation + 1, attempt = NULL, dirty = 1 WHERE inventory_id = ? AND digest = ?", (inventory.to_string(), digest)).await?;
+                    sqlite::queries::clear_pin(&tx, inventory.to_string(), digest).await?;
                 }
             }
         }
         for (digest, length) in pins {
-            tx.execute("INSERT INTO big_blobs_admission_pairs (inventory_id, digest, length_octets) VALUES (?, ?, ?)
-                        ON CONFLICT (inventory_id, digest) DO UPDATE SET length_octets = excluded.length_octets, generation = generation + 1, attempt = NULL, dirty = 1
-                        WHERE length_octets IS NOT excluded.length_octets", (inventory.to_string(), digest.to_string(), i64::try_from(*length)?)).await?;
+            sqlite::queries::upsert_pin(
+                &tx,
+                inventory.to_string(),
+                digest.to_string(),
+                i64::try_from(*length)?,
+            )
+            .await?;
         }
-        tx.execute("UPDATE big_blobs_inventory_registry SET pin_revision = ?, pins_complete = ? WHERE inventory_id = ?", (i64::try_from(revision)?, complete, inventory.to_string())).await?;
+        sqlite::queries::update_pin_state(&tx, i64::try_from(revision)?, complete, inventory.to_string()).await?;
         tx.commit().await?;
         self.changes.send_modify(|revision| *revision += 1);
         self.changed.notify_one();
@@ -239,45 +229,33 @@ impl State {
         self.register(inventory).await?;
         let tx = self.sql.begin_write().await?;
         let payload = payload.map(serde_json::to_string).transpose()?;
-        let previous = tx
-            .query(
-                "SELECT present, payload
-                   FROM big_blobs_source_observations
-                  WHERE inventory_id = ?
-                    AND digest = ?
-                    AND peer_id = ?",
-                (
-                    inventory.to_string(),
-                    digest.to_string(),
-                    peer.as_bytes().to_vec(),
-                ),
-            )
-            .await?
-            .all::<(bool, Option<String>)>()?;
-        let changed = previous
-            .first()
-            .is_none_or(|(previous_present, previous_payload)| {
-                *previous_present != present
-                    || payload
-                        .as_ref()
-                        .is_some_and(|payload| previous_payload.as_ref() != Some(payload))
-            });
+        let previous = sqlite::queries::observation(
+            &tx,
+            inventory.to_string(),
+            digest.to_string(),
+            peer.as_bytes().to_vec(),
+        )
+        .await?;
+        let changed = previous.as_ref().is_none_or(|previous| {
+            previous.present != present
+                || payload
+                    .as_ref()
+                    .is_some_and(|payload| previous.payload.as_ref() != Some(payload))
+        });
         if !changed {
             tx.rollback().await?;
             return Ok(());
         }
-        tx.execute(
-            "INSERT INTO big_blobs_source_observations (inventory_id, digest, peer_id, revision, present, payload) VALUES (?, ?, ?, 0, ?, ?)
-             ON CONFLICT (inventory_id, digest, peer_id) DO UPDATE SET present = excluded.present, payload = COALESCE(excluded.payload, payload)",
-            (
-                inventory.to_string(),
-                digest.to_string(),
-                peer.as_bytes().to_vec(),
-                present,
-                payload,
-            ),
+        sqlite::queries::upsert_observation(
+            &tx,
+            inventory.to_string(),
+            digest.to_string(),
+            peer.as_bytes().to_vec(),
+            present,
+            payload,
         )
         .await?;
+
         Self::touch(&tx, inventory, digest).await?;
         tx.commit().await?;
         self.changes.send_modify(|revision| *revision += 1);
@@ -286,8 +264,7 @@ impl State {
     }
 
     async fn touch(tx: &Tx, inventory: &DocId, digest: BlobId) -> Res<()> {
-        tx.execute("INSERT INTO big_blobs_admission_pairs (inventory_id, digest) VALUES (?, ?)
-                    ON CONFLICT (inventory_id, digest) DO UPDATE SET generation = generation + 1, attempt = NULL, dirty = 1", (inventory.to_string(), digest.to_string())).await?;
+        sqlite::queries::touch_pair(tx, inventory.to_string(), digest.to_string()).await?;
         Ok(())
     }
 
@@ -301,22 +278,26 @@ impl State {
     ) -> Res<()> {
         self.register(inventory).await?;
         let tx = self.sql.begin_write().await?;
-        let exists = !tx.query(
-            "SELECT 1 FROM big_blobs_producer_claims WHERE inventory_id = ? AND digest = ? AND owner = ?",
-            (inventory.to_string(), digest.to_string(), owner),
-        ).await?.all::<i64>()?.is_empty();
+        let exists = !sqlite::queries::producer_claim_exists(
+            &tx,
+            inventory.to_string(),
+            digest.to_string(),
+            owner.to_owned(),
+        )
+        .await?
+        .is_empty();
         if exists == active {
             tx.rollback().await?;
             return Ok(());
         }
         if active {
-            tx.execute("INSERT OR IGNORE INTO big_blobs_producer_claims (inventory_id, digest, owner) VALUES (?, ?, ?)", (inventory.to_string(), digest.to_string(), owner)).await?;
+            sqlite::queries::insert_producer_claim(&tx, inventory.to_string(), digest.to_string(), owner.to_owned()).await?;
         } else {
-            tx.execute("DELETE FROM big_blobs_producer_claims WHERE inventory_id = ? AND digest = ? AND owner = ?", (inventory.to_string(), digest.to_string(), owner)).await?;
+            sqlite::queries::delete_producer_claim(&tx, inventory.to_string(), digest.to_string(), owner.to_owned()).await?;
         }
         Self::touch(&tx, inventory, digest).await?;
         if active {
-            tx.execute("UPDATE big_blobs_admission_pairs SET bytes = 1 WHERE inventory_id = ? AND digest = ?", (inventory.to_string(), digest.to_string())).await?;
+            sqlite::queries::mark_bytes(&tx, inventory.to_string(), digest.to_string()).await?;
         }
         tx.commit().await?;
         self.changes.send_modify(|revision| *revision += 1);
@@ -351,7 +332,7 @@ impl State {
     }
 
     pub async fn available(&self, inventory: &DocId, digest: BlobId, available: bool) -> Res<()> {
-        let changed = self.sql.execute("UPDATE big_blobs_admission_pairs SET bytes = ?, dirty = 1 WHERE inventory_id = ? AND digest = ? AND bytes != ?", (available, inventory.to_string(), digest.to_string(), available)).await?.rows_affected;
+        let changed = sqlite::queries::set_available(&self.sql, available, inventory.to_string(), digest.to_string(), available).await?.rows_affected;
         if changed > 0 {
             self.changes.send_modify(|revision| *revision += 1);
             self.changed.notify_one();
@@ -392,7 +373,7 @@ impl State {
 
     #[cfg(test)]
     pub async fn settle(&self, inventory: &DocId, digest: BlobId, generation: u64) -> Res<()> {
-        let changed = self.sql.execute("UPDATE big_blobs_admission_pairs SET dirty = 0 WHERE inventory_id = ? AND digest = ? AND generation = ? AND dirty = 1", (inventory.to_string(), digest.to_string(), i64::try_from(generation)?)).await?.rows_affected;
+        let changed = sqlite::queries::settle(&self.sql, inventory.to_string(), digest.to_string(), i64::try_from(generation)?).await?.rows_affected;
         if changed > 0 {
             self.changes.send_modify(|revision| *revision += 1);
         }
@@ -410,49 +391,35 @@ impl State {
         };
         let generation = i64::try_from(pair.generation)?;
         let length = self.length(inventory, digest).await?;
-        let invalidated = self
-            .sql
-            .execute(
-                "UPDATE big_blobs_admission_pairs SET dirty = 1
-              WHERE inventory_id = ? AND digest = ? AND generation = ? AND dirty = 0",
-                (inventory.to_string(), digest.to_string(), generation),
-            )
-            .await?
-            .rows_affected;
+        let invalidated = sqlite::queries::invalidate_publish(
+            &self.sql,
+            inventory.to_string(),
+            digest.to_string(),
+            generation,
+        )
+        .await?
+        .rows_affected;
         if invalidated > 0 {
             self.changes.send_modify(|revision| *revision += 1);
         }
         let available = effect(pair, length).await?;
-        let settled = self
-            .sql
-            .execute(
-                "UPDATE big_blobs_admission_pairs
-                SET bytes = ?
-                  , dirty = 0
-              WHERE inventory_id = ? AND digest = ? AND generation = ? AND dirty = 1",
-                (
-                    available,
-                    inventory.to_string(),
-                    digest.to_string(),
-                    generation,
-                ),
-            )
-            .await?
-            .rows_affected;
+        let settled = sqlite::queries::settle_publish(
+            &self.sql,
+            available,
+            inventory.to_string(),
+            digest.to_string(),
+            generation,
+        )
+        .await?
+        .rows_affected;
         assert_eq!(settled, 1, "publication is serialized with pair mutations");
         self.changes.send_modify(|revision| *revision += 1);
         Ok(())
     }
 
     pub async fn rearm(&self) -> Res<()> {
-        let changed = self
-            .sql
-            .execute(
-                "UPDATE big_blobs_admission_pairs SET dirty = 1 WHERE dirty = 0",
-                (),
-            )
-            .await?
-            .rows_affected;
+        let changed = sqlite::queries::rearm_pairs(&self.sql).await?.rows_affected;
+
         if changed > 0 {
             self.changes.send_modify(|revision| *revision += 1);
             self.changed.notify_one();
@@ -461,7 +428,7 @@ impl State {
     }
 
     pub async fn fail(&self, attempt: &Attempt) -> Res<()> {
-        let changed = self.sql.execute("UPDATE big_blobs_admission_pairs SET generation = generation + 1, attempt = NULL WHERE inventory_id = ? AND digest = ? AND generation = ? AND attempt = ?", (attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?, i64::try_from(attempt.generation)?)).await?.rows_affected;
+        let changed = sqlite::queries::fail_attempt(&self.sql, attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?, i64::try_from(attempt.generation)?).await?.rows_affected;
         if changed > 0 {
             self.changes.send_modify(|revision| *revision += 1);
         }
@@ -488,7 +455,7 @@ impl State {
             tx.rollback().await?;
             return Ok(None);
         }
-        let sources = tx.query("SELECT peer_id FROM big_blobs_source_observations WHERE inventory_id = ? AND digest = ? AND present = 1 ORDER BY peer_id", (inventory.to_string(), digest.to_string())).await?.all::<Vec<u8>>()?;
+        let sources = sqlite::queries::source_peers(&tx, inventory.to_string(), digest.to_string()).await?;
         let Some(peer) = sources
             .into_iter()
             .map(PeerKey::new)
@@ -497,7 +464,7 @@ impl State {
             tx.rollback().await?;
             return Ok(None);
         };
-        tx.execute("UPDATE big_blobs_admission_pairs SET attempt = generation WHERE inventory_id = ? AND digest = ?", (inventory.to_string(), digest.to_string())).await?;
+        sqlite::queries::begin_attempt(&tx, inventory.to_string(), digest.to_string()).await?;
         tx.commit().await?;
         Ok(Some(Attempt {
             inventory: inventory.clone(),
@@ -519,9 +486,9 @@ impl State {
                 && state.authorization == attempt.authorization
         });
         let changed = if current {
-            tx.execute("UPDATE big_blobs_admission_pairs SET bytes = 1, attempt = NULL, dirty = 1 WHERE inventory_id = ? AND digest = ? AND attempt = ?", (attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?)).await?.rows_affected
+            sqlite::queries::complete_success(&tx, attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?).await?.rows_affected
         } else {
-            tx.execute("UPDATE big_blobs_admission_pairs SET generation = generation + 1, attempt = NULL, dirty = 1 WHERE inventory_id = ? AND digest = ? AND attempt = ?", (attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?)).await?.rows_affected
+            sqlite::queries::complete_failure(&tx, attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?).await?.rows_affected
         };
         tx.commit().await?;
         if changed > 0 {
