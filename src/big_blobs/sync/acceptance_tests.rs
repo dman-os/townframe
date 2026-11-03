@@ -102,13 +102,20 @@ async fn source_node(
     })
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() -> Res<()> {
+async fn transfer_inventory_bytes(owner: &str, revoke: bool, restart: bool) -> Res<()> {
+    let seed = match (owner, revoke, restart) {
+        ("ciphertext", false, false) => 101,
+        ("plaintext", false, false) => 111,
+        ("ciphertext", true, false) => 121,
+        ("ciphertext", false, true) => 131,
+        _ => unreachable!("unsupported acceptance fixture variant"),
+    };
     let bytes = vec![61; 200_000];
     let digest = BlobId::new(*Hash::new(&bytes).as_bytes());
-    let middle = Harness::new_network_with_seed(101).await?;
+    let middle = Harness::new_network_with_seed(seed).await?;
     let inventory = middle.inventory().await?;
-    let receiver = Harness::new_network_with_seed(102).await?;
+    let receiver = Harness::new_network_with_seed(seed + 1).await?;
+    let unrelated_inventory = receiver.inventory().await?;
     let (middle_router, mut middle_accepted) = repo_router(&middle);
     let (receiver_router, _receiver_accepted) = repo_router(&receiver);
 
@@ -140,7 +147,7 @@ async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() 
         .mirrors
         .projection
         .repo
-        .grant_doc_access(inventory.clone(), receiver_agent, Access::Read)
+        .grant_doc_access(inventory.clone(), receiver_agent.clone(), Access::Read)
         .await?;
     middle_connection.sync_keyhive_with_peer().await?;
     receiver_connection.sync_keyhive_with_peer().await?;
@@ -167,15 +174,18 @@ async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() 
 
     middle
         .mirrors
-        .select_inventory(inventory.clone(), "ciphertext".into())
+        .select_inventory(inventory.clone(), owner.to_owned())
         .await?;
     receiver.mirrors.admission.register(&inventory).await?;
     receiver
         .mirrors
-        .select_inventory(inventory.clone(), "ciphertext".into())
+        .select_inventory(inventory.clone(), owner.to_owned())
         .await?;
     middle.pin(&inventory, digest, bytes.len() as u64).await?;
     receiver.pin(&inventory, digest, bytes.len() as u64).await?;
+    receiver
+        .pin(&unrelated_inventory, digest, bytes.len() as u64)
+        .await?;
     middle
         .backend
         .register_peer_addr(source_peer.clone(), source.router.endpoint().addr());
@@ -241,7 +251,7 @@ async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() 
         middle.endpoint.addr(),
     );
     let receiver_rpc = middle_rpc.in_memory_client(receiver_peer.clone());
-    let (receiver_worker, receiver_stop) = big_sync::spawn_big_sync_worker(
+    let (receiver_worker, mut receiver_stop) = big_sync::spawn_big_sync_worker(
         Arc::clone(&receiver.mirrors.projection.parts),
         HashMap::from([(
             Arc::from("blob-inventory"),
@@ -271,6 +281,76 @@ async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() 
             .as_ref(),
         bytes.as_slice()
     );
+    assert!(
+        !receiver
+            .mirrors
+            .projection
+            .parts
+            .obj_parts(digest.into())
+            .await?
+            .contains(&crate::workers::inventory_part(&unrelated_inventory))
+    );
+
+    if restart {
+        receiver_stop.stop().await?;
+        let (receiver_worker, new_receiver_stop) = big_sync::spawn_big_sync_worker(
+            Arc::clone(&receiver.mirrors.projection.parts),
+            HashMap::from([(
+                Arc::from("blob-inventory"),
+                Arc::new(receiver.backend.clone()) as Arc<dyn SyncBackend>,
+            )]),
+            "acceptance-receiver-restart",
+            Arc::from("inventory-transfers"),
+        )?;
+        receiver_worker
+            .set_peer(
+                big_sync_core::PeerKey::new(*middle.endpoint.id().as_bytes()),
+                Arc::new(middle_rpc.in_memory_client(receiver_peer.clone())),
+                HashMap::from([(
+                    crate::workers::inventory_part(&inventory),
+                    Arc::from("blob-inventory"),
+                )]),
+                HashMap::new(),
+            )
+            .await?;
+        receiver_stop = new_receiver_stop;
+        assert_eq!(
+            receiver
+                .mirrors
+                .projection
+                .service
+                .store()
+                .blobs()
+                .get_bytes(Hash::from(digest.to_bytes32()))
+                .await?
+                .as_ref(),
+            bytes.as_slice()
+        );
+    }
+
+    if revoke {
+        middle
+            .mirrors
+            .projection
+            .repo
+            .revoke_doc_access(inventory.clone(), receiver_agent)
+            .await?;
+        middle_connection.sync_keyhive_with_peer().await?;
+        receiver_connection.sync_keyhive_with_peer().await?;
+        middle
+            .mirrors
+            .projection
+            .repo
+            .wait_for_keyhive_reconciliation()
+            .await?;
+        receiver
+            .mirrors
+            .projection
+            .repo
+            .wait_for_keyhive_reconciliation()
+            .await?;
+        assert!(!receiver.mirrors.projection.readable(&inventory).await?);
+    }
 
     receiver_stop.stop().await?;
     middle_stop.stop().await?;
@@ -285,4 +365,24 @@ async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() 
     middle_router.shutdown().await?;
     middle_blob_router.shutdown().await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() -> Res<()> {
+    transfer_inventory_bytes("ciphertext", false, false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_nodes_transfer_plaintext_inventory_bytes_after_read_plus_grant() -> Res<()> {
+    transfer_inventory_bytes("plaintext", false, false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_nodes_revoke_inventory_access_after_byte_transfer() -> Res<()> {
+    transfer_inventory_bytes("ciphertext", true, false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_nodes_restart_receiver_preserves_transferred_bytes() -> Res<()> {
+    transfer_inventory_bytes("ciphertext", false, true).await
 }

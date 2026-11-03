@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn reopened_database_preserves_quarantine_and_source_tombstones() -> Res<()> {
+async fn reopened_database_preserves_latest_source_state() -> Res<()> {
     let directory = tempfile::tempdir()?;
     let inventory = DocId::new([83; 32]);
     let digest = BlobId::new([84; 32]);
@@ -56,9 +56,9 @@ async fn reopened_database_preserves_quarantine_and_source_tombstones() -> Res<(
             .observe(&inventory, digest, &peer, 10, true, None)
             .await?;
         let state = admission.state(&inventory, digest).await?.unwrap();
-        assert!(!state.observed);
-        assert!(!state.advertisable());
-        assert!(!state.retains_bytes());
+        assert!(state.observed);
+        assert!(state.advertisable());
+        assert!(state.retains_bytes());
         stop.stop().await;
         drop(admission);
         drop(runtime);

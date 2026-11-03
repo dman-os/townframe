@@ -183,7 +183,7 @@ impl Harness {
 
 #[tokio::test]
 async fn observations_are_durable_candidates_not_hash_only_admission() -> Res<()> {
-    let harness = Harness::new().await?;
+    let harness = Harness::new_network_with_seed(101).await?;
     let first = harness.inventory().await?;
     let second = harness.inventory().await?;
     let bytes = b"a source observation cannot unlock a different inventory";
@@ -264,11 +264,7 @@ async fn unknown_parts_and_non_digest_objects_are_rejected_without_side_effects(
         assert!(
             harness
                 .backend
-                .remove_obj_from_parts(
-                    PeerKey::new([103; 32]),
-                    object.clone(),
-                    vec![part.clone()]
-                )
+                .remove_obj_from_parts(PeerKey::new([103; 32]), object.clone(), vec![part.clone()])
                 .await
                 .is_err()
         );

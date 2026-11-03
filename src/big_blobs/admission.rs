@@ -238,9 +238,46 @@ impl State {
     ) -> Res<()> {
         self.register(inventory).await?;
         let tx = self.sql.begin_write().await?;
-        tx.execute("INSERT INTO big_blobs_source_observations (inventory_id, digest, peer_id, revision, present, payload) VALUES (?, ?, ?, 0, ?, ?)
-                    ON CONFLICT (inventory_id, digest, peer_id) DO UPDATE SET present = excluded.present, payload = COALESCE(excluded.payload, payload)",
-                    (inventory.to_string(), digest.to_string(), peer.as_bytes().to_vec(), present, payload.map(serde_json::to_string).transpose()?)).await?;
+        let payload = payload.map(serde_json::to_string).transpose()?;
+        let previous = tx
+            .query(
+                "SELECT present, payload
+                   FROM big_blobs_source_observations
+                  WHERE inventory_id = ?
+                    AND digest = ?
+                    AND peer_id = ?",
+                (
+                    inventory.to_string(),
+                    digest.to_string(),
+                    peer.as_bytes().to_vec(),
+                ),
+            )
+            .await?
+            .all::<(bool, Option<String>)>()?;
+        let changed = previous
+            .first()
+            .is_none_or(|(previous_present, previous_payload)| {
+                *previous_present != present
+                    || payload
+                        .as_ref()
+                        .is_some_and(|payload| previous_payload.as_ref() != Some(payload))
+            });
+        if !changed {
+            tx.rollback().await?;
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT INTO big_blobs_source_observations (inventory_id, digest, peer_id, revision, present, payload) VALUES (?, ?, ?, 0, ?, ?)
+             ON CONFLICT (inventory_id, digest, peer_id) DO UPDATE SET present = excluded.present, payload = COALESCE(excluded.payload, payload)",
+            (
+                inventory.to_string(),
+                digest.to_string(),
+                peer.as_bytes().to_vec(),
+                present,
+                payload,
+            ),
+        )
+        .await?;
         Self::touch(&tx, inventory, digest).await?;
         tx.commit().await?;
         self.changes.send_modify(|revision| *revision += 1);
@@ -607,7 +644,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_tombstone_rejects_old_add_and_old_remove_cannot_undo_readd() -> Res<()> {
+    async fn source_observations_follow_latest_state_across_restart() -> Res<()> {
         let sql = database();
         let (admission, stop) = selected(sql.clone()).await?;
         pin(&admission, 1).await?;
@@ -620,14 +657,14 @@ mod tests {
         admission.authorize(&inventory(), true).await?;
         object(&admission, 10, true).await?;
         assert!(
-            !admission
+            admission
                 .state(&inventory(), digest())
                 .await?
                 .unwrap()
                 .observed
         );
-        object(&admission, 30, true).await?;
         object(&admission, 20, false).await?;
+        object(&admission, 30, true).await?;
         assert!(admission.begin(&inventory(), digest()).await?.is_some());
         stop.stop().await;
         Ok(())

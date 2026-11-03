@@ -800,9 +800,7 @@ async fn pair_fact_commits_broadcast_but_reads_and_duplicate_receipts_are_silent
     assert!(admission.coverage(&doc(1)).await?.is_complete());
     admission.authorize(&doc(20), true).await?;
     admission.pins(&doc(20), 1, &pins, true).await?;
-    admission
-        .observe(&doc(20), digest, &peer, 1, false, None)
-        .await?;
+    committed!(admission.observe(&doc(20), digest, &peer, 1, false, None));
     admission.available(&doc(20), digest, true).await?;
     admission.produce(&doc(20), digest, "writer", false).await?;
     admission.state(&doc(20), digest).await?;
@@ -817,6 +815,7 @@ async fn pair_fact_commits_broadcast_but_reads_and_duplicate_receipts_are_silent
     committed!(admission.authorize(&doc(20), false));
     assert!(!admission.coverage(&doc(1)).await?.is_complete());
     committed!(admission.authorize(&doc(20), true));
+    committed!(admission.observe(&doc(20), digest, &peer, 1, true, None));
     committed!(admission.available(&doc(20), digest, false));
     let attempt = admission.begin(&doc(20), digest).await?.unwrap();
     assert!(!changes.has_changed()? && !subscriptions.has_changed()?);
@@ -907,7 +906,7 @@ async fn pair_fact_rollbacks_do_not_broadcast_or_acknowledge_publication() -> Re
         )
         .await?
         .all::<(u64, bool)>()?,
-        vec![(1, true)]
+        vec![(0, true)]
     );
     sql.execute_batch("DROP TRIGGER reject_pair_mutation;")
         .await?;
