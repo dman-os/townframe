@@ -9,5 +9,9 @@ allow_external_api_types = false
 
 [builds.wasm32-unknown-unknown]
 
+# clay_collection builds for wasip3 and depends on this crate; only `MemoryStore` and the
+# trait exist there (SQLite and IndexedDB are cfg'd out).
+[builds.wasm32-wasip3]
+
 [migrations]
 "src/clay_store/sqlite/migrations/001_entries.sql" = "7567a0f5e2b4f43794c827c47d2b3823204ba90fff2639c98df120b99820c5be"
