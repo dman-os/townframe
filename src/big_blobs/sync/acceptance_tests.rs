@@ -56,6 +56,7 @@ struct SourceNode {
     _tag: TempTag,
     rpc: big_sync::rpc::BigSyncRpcHandle,
     rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
+
 }
 
 async fn source_node(
@@ -81,7 +82,7 @@ async fn source_node(
     let store = Store::from(store);
     let tag = store.blobs().add_bytes(bytes.to_vec()).temp_tag().await?;
     let (source_rpc, rpc_stop) =
-        spawn_big_sync_rpc(HashMap::from([(Arc::from("inventory-transfers"), parts)])).await?;
+        spawn_big_sync_rpc(HashMap::from([(Arc::from("inventory-transfers"), Arc::clone(&parts))])).await?;
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
         .relay_mode(iroh::RelayMode::Disabled)
@@ -99,7 +100,9 @@ async fn source_node(
         _tag: tag,
         rpc: source_rpc,
         rpc_stop,
+
     })
+
 }
 
 async fn transfer_inventory_bytes(owner: &str, revoke: bool, restart: bool) -> Res<()> {
@@ -202,7 +205,7 @@ async fn transfer_inventory_bytes(owner: &str, revoke: bool, restart: bool) -> R
     )?;
     middle_worker
         .set_peer(
-            source_peer,
+            source_peer.clone(),
             Arc::new(source_rpc),
             HashMap::from([(part.clone(), Arc::from("blob-inventory"))]),
             HashMap::new(),
@@ -264,7 +267,7 @@ async fn transfer_inventory_bytes(owner: &str, revoke: bool, restart: bool) -> R
         .set_peer(
             big_sync_core::PeerKey::new(*middle.endpoint.id().as_bytes()),
             Arc::new(receiver_rpc),
-            HashMap::from([(part, Arc::from("blob-inventory"))]),
+            HashMap::from([(part.clone(), Arc::from("blob-inventory"))]),
             HashMap::new(),
         )
         .await?;
@@ -350,6 +353,65 @@ async fn transfer_inventory_bytes(owner: &str, revoke: bool, restart: bool) -> R
             .wait_for_keyhive_reconciliation()
             .await?;
         assert!(!receiver.mirrors.projection.readable(&inventory).await?);
+        let retained = receiver
+            .mirrors
+            .projection
+            .service
+            .store()
+            .blobs()
+            .get_bytes(Hash::from(digest.to_bytes32()))
+            .await?;
+        assert_eq!(retained.as_ref(), bytes.as_slice());
+
+        let later_bytes = vec![73; 180_000];
+        let later_digest = BlobId::new(*Hash::new(&later_bytes).as_bytes());
+        receiver
+            .pin(&inventory, later_digest, later_bytes.len() as u64)
+            .await?;
+
+        let later_source_parts: big_repo::SharedPartStore =
+            Arc::new(big_sync::MemoryPartStore::new());
+        let later_source =
+            source_node(
+                &later_bytes,
+                Arc::clone(&later_source_parts),
+                part.clone(),
+                middle_peer.clone(),
+            )
+            .await?;
+
+        let later_source_peer =
+            big_sync_core::PeerKey::new(*later_source.router.endpoint().id().as_bytes());
+        middle
+            .backend
+            .register_peer_addr(later_source_peer.clone(), later_source.router.endpoint().addr());
+        middle_worker
+            .set_peer(
+                later_source_peer,
+                Arc::new(later_source.rpc.in_memory_client(middle_peer.clone())),
+                HashMap::from([(part.clone(), Arc::from("blob-inventory"))]),
+                HashMap::new(),
+            )
+            .await?;
+
+        assert!(!receiver
+            .mirrors
+            .projection
+            .parts
+            .obj_parts(later_digest.into())
+            .await?
+            .contains(&crate::workers::inventory_part(&inventory)));
+        assert!(receiver
+            .mirrors
+            .projection
+            .service
+            .store()
+            .blobs()
+            .get_bytes(Hash::from(later_digest.to_bytes32()))
+            .await
+            .is_err());
+        later_source.rpc_stop.stop().await?;
+        later_source.router.shutdown().await?;
     }
 
     receiver_stop.stop().await?;

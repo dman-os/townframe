@@ -9,6 +9,13 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 filter = 'test(/long_af_test/)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
+[test-groups.sync_network]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(/sync::/)'
+test-group = 'sync_network'
+
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }
