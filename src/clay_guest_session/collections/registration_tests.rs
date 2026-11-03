@@ -85,7 +85,7 @@ fn key_value_and_row_limits_refuse_before_the_collection_changes() {
         registrations
             .snapshot()
             .into_values()
-            .map(|entry| (entry.version, entry.value))
+            .map(|entry| (entry.version, entry.value.body))
             .collect::<Vec<_>>(),
         [(replaced, vec![3])]
     );
@@ -254,13 +254,13 @@ async fn remove_notification_can_mutate_the_same_writer_synchronously() {
         matches!(&page.transactions[0].changes[..], [Change::Remove { row_version, .. }] if *row_version == removed)
     );
     assert!(
-        matches!(&page.transactions[1].changes[..], [Change::Upsert { value, .. }] if *value == vec![2])
+        matches!(&page.transactions[1].changes[..], [Change::Upsert { value, .. }] if value.body == vec![2])
     );
     assert_eq!(
         registrations
             .snapshot()
             .into_values()
-            .map(|row| row.value)
+            .map(|row| row.value.body)
             .collect::<Vec<_>>(),
         [vec![2]]
     );
@@ -338,7 +338,7 @@ async fn instance_close_withdraws_its_writers_rows_in_one_transaction_and_wakes_
         registrations
             .snapshot()
             .into_values()
-            .map(|entry| entry.value)
+            .map(|entry| entry.value.body)
             .collect::<Vec<_>>(),
         [vec![9]]
     );

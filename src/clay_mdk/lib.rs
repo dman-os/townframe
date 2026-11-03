@@ -253,7 +253,7 @@ pub mod bindings {
         path: "../clay_guest_session/wit",
         world: "micro-client",
         pub_export_macro: true,
-        async: ["export:townframe:dayframe/micro-lifecycle@0.2.0#activate"],
+        async: ["export:townframe:dayframe/micro-lifecycle@0.3.0#activate"],
     });
 }
 
@@ -263,6 +263,8 @@ pub use bindings::exports::townframe::dayframe::document_events;
 pub use bindings::exports::townframe::dayframe::micro_lifecycle;
 #[cfg(feature = "wit")]
 pub use bindings::exports::townframe::dayframe::presentation_events;
+#[cfg(feature = "wit")]
+pub use bindings::townframe::dayframe::capability_bank;
 #[cfg(feature = "wit")]
 pub use bindings::townframe::dayframe::collection_registration;
 #[cfg(feature = "wit")]

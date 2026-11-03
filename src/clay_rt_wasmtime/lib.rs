@@ -192,6 +192,9 @@ mod bindings {
             "townframe:dayframe/collections.collection-reader": clay_guest_session::collections::CollectionReader,
             "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
             "townframe:dayframe/collection-registration.registration-writer": clay_guest_session::collections::RegistrationWriter,
+            "townframe:dayframe/capability-bank.capability-ref": clay_guest_session::capabilities::CapabilityRef,
+            "townframe:dayframe/capability-bank.published-capability": clay_guest_session::capabilities::PublishedCapability,
+            "townframe:dayframe/capability-bank.presentation-component": clay_guest_session::capabilities::PresentationComponent,
         },
     });
 }
@@ -207,6 +210,7 @@ struct WasmStoreState {
     table: ResourceTable,
     documents: DocumentSession,
     collections: clay_guest_session::collections::CollectionSession,
+    capabilities: clay_guest_session::capabilities::CapabilitySession,
     collection_wake: Option<Arc<IncarnationWake>>,
     presentation: PresentationHost,
     limits: StoreLimits,
@@ -246,9 +250,14 @@ impl WasmStoreState {
         let (documents, incoming) = DocumentSession::new(host.clone(), instance.clone(), limits)?;
         let presentation = PresentationHost::new(host.clone(), instance.clone());
         let collections = clay_guest_session::collections::CollectionSession::new(
+            host.clone(),
+            instance.clone(),
+            clay_guest_session::collections::CollectionLimits::default(),
+        );
+        let capabilities = clay_guest_session::capabilities::CapabilitySession::new(
             host,
             instance,
-            clay_guest_session::collections::CollectionLimits::default(),
+            clay_guest_session::capabilities::CapabilityLimits::default(),
         );
         let mut wasi = WasiCtx::builder();
         wasi.inherit_stderr();
@@ -258,6 +267,7 @@ impl WasmStoreState {
                 table: ResourceTable::new(),
                 documents,
                 collections,
+                capabilities,
                 collection_wake: None,
                 presentation,
                 limits: StoreLimitsBuilder::new()

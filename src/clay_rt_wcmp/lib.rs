@@ -74,6 +74,9 @@ mod bindings {
             "townframe:dayframe/collections.collection-reader": clay_guest_session::collections::CollectionReader,
             "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
             "townframe:dayframe/collection-registration.registration-writer": clay_guest_session::collections::RegistrationWriter,
+            "townframe:dayframe/capability-bank.capability-ref": clay_guest_session::capabilities::CapabilityRef,
+            "townframe:dayframe/capability-bank.published-capability": clay_guest_session::capabilities::PublishedCapability,
+            "townframe:dayframe/capability-bank.presentation-component": clay_guest_session::capabilities::PresentationComponent,
         },
     });
 }
@@ -91,6 +94,7 @@ pub struct WcmpStoreState {
     pub table: ResourceTable,
     pub documents: DocumentSession,
     pub collections: CollectionSession,
+    pub capabilities: clay_guest_session::capabilities::CapabilitySession,
     collection_limits: CollectionLimits,
     collection_wake: Option<Arc<IncarnationWake>>,
     pub presentation: clay_guest_session::PresentationHost,
@@ -105,11 +109,17 @@ impl WcmpStoreState {
         let (documents, incoming) = DocumentSession::new(host.clone(), instance.clone(), limits)?;
         let collection_limits = CollectionLimits::default();
         let collections = CollectionSession::new(host.clone(), instance.clone(), collection_limits);
+        let capabilities = clay_guest_session::capabilities::CapabilitySession::new(
+            host.clone(),
+            instance.clone(),
+            clay_guest_session::capabilities::CapabilityLimits::default(),
+        );
         Ok((
             Self {
                 table: ResourceTable::new(),
                 documents,
                 collections,
+                capabilities,
                 collection_limits,
                 collection_wake: None,
                 presentation: clay_guest_session::PresentationHost::new(host, instance),

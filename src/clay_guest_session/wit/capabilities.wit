@@ -1,0 +1,26 @@
+package townframe:dayframe@0.3.0;
+
+@since(version = 0.3.0)
+interface capability-bank {
+    use presentation.{component-ref};
+
+    variant capability-error {
+        contract-mismatch,
+        revoked,
+        limit-exceeded,
+    }
+
+    resource capability-ref {
+        as-presentation-component: func() -> result<presentation-component, capability-error>;
+    }
+
+    resource presentation-component {
+        component: func() -> result<component-ref, capability-error>;
+    }
+
+    resource published-capability {
+        reference: func() -> result<capability-ref, capability-error>;
+    }
+
+    publish-presentation-component: func() -> result<published-capability, capability-error>;
+}

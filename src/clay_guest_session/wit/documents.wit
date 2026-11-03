@@ -1,4 +1,4 @@
-package townframe:dayframe@0.2.0;
+package townframe:dayframe@0.3.0;
 
 interface documents {
     type doc-id = string;
@@ -125,6 +125,7 @@ world micro-client {
     import documents;
     import collections;
     import collection-registration;
+    import capability-bank;
     export document-events;
     export micro-lifecycle;
 }

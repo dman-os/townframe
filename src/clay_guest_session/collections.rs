@@ -22,14 +22,179 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 pub type Bytes = Vec<u8>;
-pub type BytesProjection = Projection<Bytes, Bytes, BytesSource>;
-pub type BytesPage = Page<Bytes, Bytes>;
-pub type BytesRegistrations = RegistrationCollection<Bytes, Bytes, Bytes, BytesSource>;
+
+/// One stored collection value: portable CBOR body plus host-retained
+/// capability attachments (ADR 023 §6). The body names attachments by
+/// index under [`CAPABILITY_ATTACHMENT_TAG`]; the body alone conveys no
+/// authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionValue {
+    pub body: Bytes,
+    pub capabilities: Vec<crate::capabilities::CapabilityPublication>,
+}
+
+impl CollectionValue {
+    pub fn plain(body: Bytes) -> Self {
+        Self {
+            body,
+            capabilities: Vec::new(),
+        }
+    }
+    pub fn byte_len(&self) -> usize {
+        self.body.len().saturating_add(
+            self.capabilities
+                .len()
+                .saturating_mul(CAPABILITY_PAGE_BYTES),
+        )
+    }
+}
+
+/// Page-accounting charge per capability attachment.
+pub const CAPABILITY_PAGE_BYTES: usize = 32;
+/// Reserved CBOR tag whose unsigned-integer content is an index into the
+/// value's capability attachment list.
+pub const CAPABILITY_ATTACHMENT_TAG: u64 = 43000;
+
+/// Attachment indices named by `body`, or `None` when the body is not
+/// well-formed CBOR (opaque bodies name no attachments).
+pub fn attachment_indices(body: &[u8]) -> Option<Vec<usize>> {
+    struct Scanner<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+        indices: Vec<usize>,
+    }
+    impl Scanner<'_> {
+        fn head(&mut self) -> Option<(u8, u64, bool)> {
+            let byte = *self.bytes.get(self.pos)?;
+            self.pos += 1;
+            let (major, info) = (byte >> 5, byte & 31);
+            let (value, indefinite) = match info {
+                0..=23 => (u64::from(info), false),
+                24 => (u64::from(*self.bytes.get(self.pos)?), false),
+                25 if major == 7 => (0, false),
+                25 => {
+                    let raw = self.bytes.get(self.pos..self.pos + 2)?;
+                    self.pos += 2;
+                    (
+                        u64::from(u16::from_be_bytes(raw.try_into().unwrap())),
+                        false,
+                    )
+                }
+                26 if major == 7 => (0, false),
+                26 => {
+                    let raw = self.bytes.get(self.pos..self.pos + 4)?;
+                    self.pos += 4;
+                    (
+                        u64::from(u32::from_be_bytes(raw.try_into().unwrap())),
+                        false,
+                    )
+                }
+                27 if major == 7 => (0, false),
+                27 => {
+                    let raw = self.bytes.get(self.pos..self.pos + 8)?;
+                    self.pos += 8;
+                    (u64::from_be_bytes(raw.try_into().unwrap()), false)
+                }
+                31 => (0, true),
+                _ => return None,
+            };
+            // Float payloads (major 7) carry bytes the head match skipped counting.
+            if major == 7 && matches!(info, 25..=27) {
+                self.pos += match info {
+                    25 => 2,
+                    26 => 4,
+                    _ => 8,
+                };
+                if self.pos > self.bytes.len() {
+                    return None;
+                }
+            }
+            Some((major, value, indefinite))
+        }
+        fn item(&mut self, depth: usize) -> Option<()> {
+            if depth > 64 {
+                return None;
+            }
+            let (major, value, indefinite) = self.head()?;
+            match major {
+                0 | 1 | 7 => Some(()),
+                2 | 3 => {
+                    if indefinite {
+                        loop {
+                            if self.bytes.get(self.pos) == Some(&0xff) {
+                                self.pos += 1;
+                                return Some(());
+                            }
+                            self.item(depth + 1)?;
+                        }
+                    } else {
+                        let len = usize::try_from(value).ok()?;
+                        self.pos = self.pos.checked_add(len)?;
+                        if self.pos > self.bytes.len() {
+                            return None;
+                        }
+                        Some(())
+                    }
+                }
+                4 => self.items(depth, value, indefinite, 1),
+                5 => self.items(depth, value, indefinite, 2),
+                6 => {
+                    if value == CAPABILITY_ATTACHMENT_TAG {
+                        // Peek the operand: an unsigned int is an attachment index.
+                        let saved = self.pos;
+                        match self.head() {
+                            Some((0, index, false)) => {
+                                self.indices.push(usize::try_from(index).ok()?);
+                                Some(())
+                            }
+                            _ => {
+                                self.pos = saved;
+                                self.item(depth + 1)
+                            }
+                        }
+                    } else {
+                        self.item(depth + 1)
+                    }
+                }
+                _ => None,
+            }
+        }
+        fn items(&mut self, depth: usize, count: u64, indefinite: bool, each: u64) -> Option<()> {
+            if indefinite {
+                loop {
+                    if self.bytes.get(self.pos) == Some(&0xff) {
+                        self.pos += 1;
+                        return Some(());
+                    }
+                    self.item(depth + 1)?;
+                }
+            }
+            for _ in 0..count.checked_mul(each)? {
+                self.item(depth + 1)?;
+            }
+            Some(())
+        }
+    }
+    let mut scanner = Scanner {
+        bytes: body,
+        pos: 0,
+        indices: Vec::new(),
+    };
+    scanner.item(0)?;
+    if scanner.pos != body.len() {
+        return None;
+    }
+    Some(scanner.indices)
+}
+
+pub type BytesProjection = Projection<Bytes, CollectionValue, BytesSource>;
+pub type BytesPage = Page<Bytes, CollectionValue>;
+pub type BytesRegistrations = RegistrationCollection<Bytes, CollectionValue, Bytes, BytesSource>;
 
 #[derive(Clone, Debug)]
 pub struct BytesSource;
 
-impl Source<Bytes, Bytes> for BytesSource {
+impl Source<Bytes, CollectionValue> for BytesSource {
     type Selector = Bytes;
     type Interest = ();
 
@@ -37,7 +202,7 @@ impl Source<Bytes, Bytes> for BytesSource {
         Ok((selector, ()))
     }
 
-    fn matches(&self, _selector: &Bytes, _key: &Bytes, _value: &Bytes) -> bool {
+    fn matches(&self, _selector: &Bytes, _key: &Bytes, _value: &CollectionValue) -> bool {
         true
     }
 }
@@ -83,6 +248,7 @@ pub struct CollectionLimits {
     pub writers: usize,
     pub key_bytes: usize,
     pub value_bytes: usize,
+    pub capabilities_per_value: usize,
     pub rows_per_writer: usize,
     pub selector_bytes: usize,
     pub cursor_bytes: usize,
@@ -99,6 +265,7 @@ impl Default for CollectionLimits {
             writers: 64,
             key_bytes: 1024,
             value_bytes: 64 * 1024,
+            capabilities_per_value: 32,
             rows_per_writer: 1024,
             selector_bytes: 64 * 1024,
             cursor_bytes: 56,
@@ -210,7 +377,8 @@ impl CollectionSession {
     }
 }
 
-type SubstrateWriter = clay_collection::RegistrationWriter<Bytes, Bytes, Bytes, BytesSource>;
+type SubstrateWriter =
+    clay_collection::RegistrationWriter<Bytes, CollectionValue, Bytes, BytesSource>;
 
 pub struct RegistrationWriter {
     slot: Arc<Mutex<Option<SubstrateWriter>>>,
@@ -224,6 +392,8 @@ pub enum WriteFailure {
     KeyTooLarge,
     ValueTooLarge,
     RowLimit,
+    InvalidAttachment,
+    CapabilityLimit,
 }
 
 impl From<MutationError> for WriteFailure {
@@ -243,12 +413,32 @@ impl RegistrationWriter {
         based_on: Option<Version>,
         value: Bytes,
     ) -> Result<Version, WriteFailure> {
+        self.put_value(key, based_on, CollectionValue::plain(value))
+    }
+
+    pub fn put_value(
+        &self,
+        key: Bytes,
+        based_on: Option<Version>,
+        value: CollectionValue,
+    ) -> Result<Version, WriteFailure> {
         let limits = self.admit(&key)?;
-        if value.len() > limits.value_bytes
+        if value.capabilities.len() > limits.capabilities_per_value {
+            return Err(WriteFailure::CapabilityLimit);
+        }
+        // The attachment list is authoritative; the body may only name indices into it.
+        if let Some(indices) = attachment_indices(&value.body)
+            && indices
+                .iter()
+                .any(|index| *index >= value.capabilities.len())
+        {
+            return Err(WriteFailure::InvalidAttachment);
+        }
+        if value.body.len() > limits.value_bytes
             || key
                 .len()
                 .saturating_add(Self::MAX_PHYSICAL_KEY_OVERHEAD)
-                .saturating_add(value.len())
+                .saturating_add(value.byte_len())
                 > limits.page_bytes.saturating_sub(limits.cursor_bytes)
         {
             return Err(WriteFailure::ValueTooLarge);
@@ -362,7 +552,7 @@ pub struct ProjectionReader {
 }
 
 struct LeaseState {
-    lease: Mutex<Option<ProjectionLease<Bytes, Bytes, BytesSource>>>,
+    lease: Mutex<Option<ProjectionLease<Bytes, CollectionValue, BytesSource>>>,
     cancelled: watch::Receiver<bool>,
     cancel: Mutex<Option<watch::Sender<bool>>>,
     _permit: Permit,
@@ -479,7 +669,7 @@ fn page_bytes(page: &BytesPage) -> usize {
                     value,
                     write_context,
                     ..
-                } => key.len() + value.len() + write_context.as_ref().map_or(0, Vec::len),
+                } => key.len() + value.byte_len() + write_context.as_ref().map_or(0, Vec::len),
                 Change::Remove { key, .. } => key.len(),
             })
             .sum::<usize>()
@@ -487,6 +677,9 @@ fn page_bytes(page: &BytesPage) -> usize {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod capability_tests;
 
 #[cfg(test)]
 mod registration_tests;

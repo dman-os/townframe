@@ -1,8 +1,11 @@
-package townframe:dayframe@0.2.0;
+package townframe:dayframe@0.3.0;
 
 interface collections {
+    use capability-bank.{capability-ref};
+
     record encoded-value {
         body: list<u8>,
+        capabilities: list<capability-ref>,
     }
 
     record version {
@@ -91,6 +94,8 @@ interface collection-registration {
         key-too-large,
         value-too-large,
         row-limit,
+        invalid-attachment,
+        capability-limit,
     }
 
     resource registration-writer {
