@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::WriteDatums;

@@ -28,13 +28,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-#[path = "blob_discovery_tests.rs"]
 mod blob_discovery;
-#[path = "blob_discovery_net.rs"]
-mod blob_discovery_net;
-#[path = "blob_metadata_tests.rs"]
-mod blob_metadata;
-#[path = "blob_tests.rs"]
 mod blobs;
 
 const NOTE: &str = "org.example.note";

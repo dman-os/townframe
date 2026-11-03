@@ -1,4 +1,5 @@
-use super::blob_discovery_net::Network;
+mod network;
+use self::network::Network;
 use super::*;
 use big_blobs::Coverage;
 use big_blobs::InventorySelection;
