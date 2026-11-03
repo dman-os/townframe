@@ -374,11 +374,11 @@ The MDK authoring surface stays synchronous against the guest's local partial re
 
 ### 9. Micro manifests
 
-ADR 024 replaces the current flat `MicroManifest` target. A manifest remains inspectable, portable data available without running the guest, but now separates entrypoints, provided and required contracts with stable local binding names, configuration requests, collection contracts, contribution declarations, and default activation-registration templates. It describes possibilities and requested authority, never configured suppliers, granted principals, enablement/eager state, live resources, or target acceptance policy.
+ADRs 024/025 replace the current flat `MicroManifest` target. The plug envelope carries opaque Clay micro descriptions, schema references, entrypoints, provided and required contracts, configuration requests, collection definitions, and durable contribution declarations. It describes possibilities and requested authority, never concrete suppliers, grants, local enablement, live resources, or runtime faults.
 
-Each micro family keeps its portable contract vocabulary beside the manifest (`micro_<name>_manifest` where another crate consumes it). Package discovery reads the embedded manifest without instantiating the component. Installation resolves default activation templates against configured bindings and authorized registration grants; runtime initialization publishes the actual provisions, contributions, capability attachments, and collection sources. Manifest declarations are not live authority.
+The immutable, content-addressed OCI plug envelope is the inspection boundary; a Wasm component does not need to embed a second normative manifest. Clay admits each micro contribution without instantiating its artifact, resolves collection and requirement bindings through runtime-owned desired state, and applies static contributions as installation-owned durable collection scopes. Runtime initialization fulfills named live publication slots rather than re-declaring installed metadata.
 
-The schema follows the repository's open Lexicon discipline and carries unknown members. Package version, manifest-schema version, and individual contract versions are distinct. ADR 024 contains the conceptual manifest and WIT shapes; implementing it is an intentional breaking replacement of today's `requirements` / `provisions` / single `config` / `contributions` struct, not a compatibility shim.
+Schemas follow the repository's open Lexicon discipline and carry unknown members. Package version, envelope revision, description-schema version, and individual contract versions are distinct. Implementing this is an intentional breaking replacement of today's `requirements` / `provisions` / single `config` / `contributions` struct and custom-section packaging, not a compatibility shim.
 
 ### 10. Presentation slots (the mount primitive)
 

@@ -11,12 +11,13 @@ mod collections;
 mod documents;
 mod wasi;
 
-use clay_docs::DocumentRef;
 use clay_guest_session::DocumentSession;
+pub use clay_guest_session::InitialContext;
+pub use clay_guest_session::InitializationFailure;
 use clay_guest_session::Limits as DocumentLimits;
 use clay_guest_session::Work;
-use clay_guest_session::collections::BytesProjection;
-use clay_guest_session::collections::BytesRegistrations;
+use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
 use clay_guest_session::ingress_budget;
@@ -48,6 +49,7 @@ use wcmp::Engine;
 use wcmp::HasSelf;
 use wcmp::Linker;
 use wcmp::Resource;
+use wcmp::ResourceAny;
 use wcmp::ResourceTable;
 use wcmp::Store;
 
@@ -57,6 +59,9 @@ pub enum ActivationError {
     Access(#[from] clay_host::AccessError),
     #[error("Wasm initialization failed: {0}")]
     Initialization(String),
+    /// The guest declined to initialize under this configuration (no trap).
+    #[error("guest refused initialization: {0}")]
+    Refused(#[from] InitializationFailure),
 }
 
 mod bindings {
@@ -405,11 +410,42 @@ struct WcmpIncarnation {
     client: MicroClient,
     wake: Arc<IncarnationWake>,
     waker: Waker,
+    /// The guest's `instance-root`, held from a successful `initialize` until [`Self::close`].
+    root: Option<ResourceAny>,
+    /// Publication leases of the incarnation's provisions, by contract. Dropping one revokes
+    /// the publication and every consumer proxy derived from it.
+    provisions: BTreeMap<String, PublishedCapability>,
 }
 
 impl WcmpIncarnation {
     async fn tick(&mut self) -> wcmp::Result<()> {
         self.store.run_until_stalled()
+    }
+
+    /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
+    /// incarnation's host authority and dependencies are still live, then drop the root (its
+    /// guest destructor releases whatever the root held) and only then revoke the provisions.
+    /// The store itself stays up so a caller can audit what the guest still holds.
+    async fn close(&mut self) -> Result<(), String> {
+        let root = self
+            .root
+            .take()
+            .expect("only an initialized incarnation is closed");
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle();
+        let closed = self
+            .store
+            .run_concurrent(async |accessor| {
+                lifecycle.instance_root().call_close(accessor, root).await
+            })
+            .await
+            .and_then(|trapped| trapped)
+            .map_err(|trap| format!("guest trapped while closing: {trap}"));
+        let dropped = root
+            .resource_drop(&mut self.store.as_context_mut())
+            .map_err(|trap| format!("guest trapped dropping its instance root: {trap}"));
+        self.provisions.clear();
+        closed??;
+        dropped
     }
 }
 
@@ -421,17 +457,21 @@ pub struct WcmpRuntime {
     host: Host,
     instance: Instance,
     incarnation: Rc<RefCell<Option<WcmpIncarnation>>>,
+    /// What each provision publishes, by contract. The leases themselves live in the
+    /// incarnation, so a close revokes them.
+    provisions: Rc<BTreeMap<String, CapabilityPublication>>,
     revoked: Arc<AtomicBool>,
 }
 
 impl WcmpRuntime {
-    pub async fn activate(
+    /// Instantiate `package` for `instance` and run its `micro-lifecycle.initialize` with
+    /// `context`. The returned driver future delivers document events and drives the guest's
+    /// background tasks until the incarnation ends; the caller owns it.
+    pub async fn initialize(
         host: &Host,
         instance: Instance,
         package: &WcmpPackage,
-        configs: BTreeMap<String, DocumentRef>,
-        collections: BTreeMap<String, BytesProjection>,
-        registrations: BTreeMap<String, BytesRegistrations>,
+        context: InitialContext,
     ) -> Result<(Self, impl Future<Output = ()> + 'static), ActivationError> {
         let (mut state, incoming) = package.instantiate_with_incoming(host, instance.clone())?;
         let wake = Arc::new(IncarnationWake::new());
@@ -453,8 +493,16 @@ impl WcmpRuntime {
             client,
             wake,
             waker,
+            root: None,
+            provisions: BTreeMap::new(),
         };
-        documents::activate(&mut active, configs, collections, registrations).await?;
+        let (root, provisions) = documents::initialize(&mut active, context).await?;
+        active.root = Some(root);
+        let publications = provisions
+            .iter()
+            .map(|(contract, lease)| (contract.clone(), lease.publication()))
+            .collect();
+        active.provisions = provisions;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let incarnation = Rc::new(RefCell::new(Some(active)));
         let driver_incarnation = Rc::clone(&incarnation);
@@ -521,10 +569,26 @@ impl WcmpRuntime {
                 host: host.clone(),
                 instance,
                 incarnation,
+                provisions: Rc::new(publications),
                 revoked,
             },
             driver,
         ))
+    }
+
+    /// The publication this incarnation provides for `contract`, if it provides it.
+    pub fn provision(&self, contract: &str) -> Option<CapabilityPublication> {
+        self.provisions.get(contract).cloned()
+    }
+
+    /// Close the incarnation's guest half (ADR 024 §6 step 2). The incarnation stops taking
+    /// presentation and document calls, its `instance-root.close` runs to completion, the
+    /// root and the provision leases are released, and the store is dropped. The caller has
+    /// already withdrawn outward visibility and tears the host incarnation down afterwards.
+    pub async fn close(&self) -> Result<(), String> {
+        let taken = self.incarnation.borrow_mut().take();
+        let mut active = taken.ok_or_else(|| "the incarnation already ended".to_owned())?;
+        active.close().await
     }
 
     pub fn mount(
@@ -739,6 +803,19 @@ pub mod test_utils {
     pub use crate::documents::receipt_to_wire;
     pub use crate::documents::wit;
     pub use crate::wit_presentation;
+
+    /// [`crate::WcmpRuntime::close`], inspecting the store once the guest released its root
+    /// and provisions and before the store drops: whatever `inspect` still finds there is what
+    /// the close path leaked.
+    pub async fn close_inspecting<R>(
+        runtime: &crate::WcmpRuntime,
+        inspect: impl FnOnce(&WcmpStoreState) -> R,
+    ) -> (Result<(), String>, R) {
+        let taken = runtime.incarnation.borrow_mut().take();
+        let mut active = taken.expect("only a live incarnation is closed");
+        let closed = active.close().await;
+        (closed, inspect(active.store.data()))
+    }
 
     pub fn resolve_component(
         table: &wcmp::ResourceTable,

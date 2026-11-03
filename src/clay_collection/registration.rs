@@ -6,6 +6,13 @@
 //! the same local key, `put`/`remove` are compare-and-set against the row version the
 //! writer last saw, and dropping a writer withdraws all of its rows in one transaction.
 //!
+//! A writer minted with [`RegistrationCollection::staged_writer`] belongs to an incarnation that
+//! is still initializing (ADR 024 §5): its mutations are applied to the authoritative replica,
+//! so versions and compare-and-set behave exactly as for a live writer, but nothing reaches the
+//! projection. [`RegistrationCollection::commit_staged`] later publishes every row such writers
+//! hold as one transaction; dropping a staged writer discards its rows without readers ever
+//! having seen them.
+//!
 //! Reads go through the collection's [`Projection`]: it is the same leased waist every
 //! other collection uses. The physical key type `P` is whatever that projection is keyed
 //! by; the default is the `(WriterId, K)` tuple, and a byte-keyed waist supplies an
@@ -34,6 +41,8 @@ struct Inner<K, V, P, S: Source<P, V>> {
     next_writer: u64,
     /// Local keys per writer, so closure withdraws exactly that writer's rows.
     rows: BTreeMap<WriterId, BTreeSet<K>>,
+    /// Writers whose rows are in the replica but not yet in the projection.
+    staged: BTreeSet<WriterId>,
 }
 
 /// The authority side of an owner-scoped contribution collection.
@@ -55,6 +64,15 @@ impl<K, V, P, S: Source<P, V>> Clone for RegistrationCollection<K, V, P, S> {
         }
     }
 }
+
+/// Identity equality: two handles are equal when they name the same collection.
+impl<K, V, P, S: Source<P, V>> PartialEq for RegistrationCollection<K, V, P, S> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl<K, V, P, S: Source<P, V>> Eq for RegistrationCollection<K, V, P, S> {}
 
 impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
     pub fn new(runtime_epoch: [u64; 2]) -> Self {
@@ -81,6 +99,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
                 physical,
                 next_writer: 0,
                 rows: BTreeMap::new(),
+                staged: BTreeSet::new(),
             })),
         }
     }
@@ -88,13 +107,63 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
     /// Mint a writer. The returned handle owns its rows: dropping it withdraws them in
     /// one transaction.
     pub fn writer(&self) -> RegistrationWriter<K, V, P, S> {
+        self.mint(false)
+    }
+
+    /// Mint a writer whose rows stay out of the projection until
+    /// [`Self::commit_staged`] names it. Dropping it first discards its rows unseen.
+    pub fn staged_writer(&self) -> RegistrationWriter<K, V, P, S> {
+        self.mint(true)
+    }
+
+    /// Publish every row the named staged writers currently hold as one projection
+    /// transaction, and make those writers publish directly from now on. Writers already
+    /// dropped (or already committed) are skipped: their rows are either gone or visible.
+    pub fn commit_staged(&self, writers: impl IntoIterator<Item = WriterId>) {
+        let notifications;
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let mut changes = Vec::new();
+        for writer in writers {
+            assert!(writer.0 <= inner.next_writer, "unknown writer {writer:?}");
+            if !inner.staged.remove(&writer) {
+                continue;
+            }
+            for key in inner.rows.get(&writer).into_iter().flatten() {
+                let physical = (inner.physical)(writer, key);
+                let entry = inner
+                    .replica
+                    .get(&physical)
+                    .expect("staged writer row missing from the replica");
+                changes.push(Change::Upsert {
+                    key: physical,
+                    row_version: entry.version,
+                    value: entry.value.clone(),
+                    evidence: entry.evidence,
+                    write_context: entry.write_context.clone(),
+                });
+            }
+        }
+        if changes.is_empty() {
+            return;
+        }
+        notifications = inner.projection.publish_deferred(changes);
+        drop(guard);
+        notifications.dispatch();
+    }
+
+    fn mint(&self, staged: bool) -> RegistrationWriter<K, V, P, S> {
         let mut inner = self.lock();
         inner.next_writer = inner
             .next_writer
             .checked_add(1)
             .expect("writer identity exhausted");
+        let id = WriterId(inner.next_writer);
+        if staged {
+            inner.staged.insert(id);
+        }
         RegistrationWriter {
-            id: WriterId(inner.next_writer),
+            id,
             inner: Arc::clone(&self.inner),
         }
     }
@@ -104,12 +173,27 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         self.lock().projection.clone()
     }
 
-    /// Host-local authoritative snapshot. Reading through a lease is the contract for
-    /// consumers; this is the convenience the authority itself (and its tests) uses.
+    /// Host-local snapshot of the published rows. Reading through a lease is the contract
+    /// for consumers; this is the convenience the authority itself (and its tests) uses.
+    /// Rows of staged writers are not published, so they are not part of it.
     pub fn snapshot(&self) -> BTreeMap<P, Entry<V>> {
-        self.lock()
+        let inner = self.lock();
+        let staged = inner
+            .staged
+            .iter()
+            .flat_map(|writer| {
+                inner
+                    .rows
+                    .get(writer)
+                    .into_iter()
+                    .flatten()
+                    .map(|key| (inner.physical)(*writer, key))
+            })
+            .collect::<BTreeSet<_>>();
+        inner
             .replica
             .rows()
+            .filter(|(key, _)| !staged.contains(*key))
             .map(|(key, entry)| (key.clone(), entry.clone()))
             .collect()
     }
@@ -122,6 +206,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         let next = inner.replica.incarnation() + 1;
         inner.replica.reset(next);
         inner.rows.clear();
+        inner.staged.clear();
         notifications = inner.projection.reset_deferred();
         drop(inner);
         notifications.dispatch();
@@ -201,7 +286,11 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
         let version = change.row_version();
         inner.replica.apply(std::slice::from_ref(&change));
         inner.rows.entry(self.id).or_default().insert(key);
-        let notifications = inner.projection.publish_deferred(vec![change]);
+        let notifications = if inner.staged.contains(&self.id) {
+            PendingNotifications::default()
+        } else {
+            inner.projection.publish_deferred(vec![change])
+        };
         drop(inner);
         Ok((version, notifications))
     }
@@ -242,7 +331,11 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
         if let Some(keys) = inner.rows.get_mut(&self.id) {
             keys.remove(&key);
         }
-        let notifications = inner.projection.publish_deferred(vec![change]);
+        let notifications = if inner.staged.contains(&self.id) {
+            PendingNotifications::default()
+        } else {
+            inner.projection.publish_deferred(vec![change])
+        };
         drop(inner);
         Ok((Some(version), notifications))
     }
@@ -256,10 +349,12 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> Drop
     for RegistrationWriter<K, V, P, S>
 {
     /// Writer closure withdraws every row it still holds, as one transaction: the
-    /// collection cannot outlive a registrant's interest by accident.
+    /// collection cannot outlive a registrant's interest by accident. A staged writer's
+    /// rows were never published, so they leave the replica without a projection change.
     fn drop(&mut self) {
         let notifications;
         let mut inner = self.lock();
+        let staged = inner.staged.remove(&self.id);
         let Some(keys) = inner.rows.remove(&self.id) else {
             return;
         };
@@ -276,6 +371,9 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> Drop
             inner
                 .replica
                 .retire_authoritative_removal(change.key(), change.row_version());
+        }
+        if staged {
+            return;
         }
         notifications = inner.projection.publish_deferred(changes);
         drop(inner);

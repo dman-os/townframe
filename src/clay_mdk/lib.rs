@@ -8,7 +8,7 @@
 //! root, and `wcmp` (feature `wcmp`) is the browser-engine twin of the same provider shape
 //! (ADR 018); `guest` (feature `dioxus`) is the guest backend — the same `activate(&Context)` shape
 //! over the WIT imports, plus the Dioxus VirtualDom adapter and the `export_micro!` entry
-//! point. The MDK adds ergonomics, never authority: capabilities are still the host-issued
+//! point that adapts it to `micro-lifecycle.initialize` (ADR 024). The MDK adds ergonomics, never authority: capabilities are still the host-issued
 //! resources.
 #![cfg_attr(
     all(target_os = "wasi", target_env = "p3"),
@@ -236,13 +236,25 @@ pub extern "C" fn __wasilibc_task_hook(hook: i32, prev_context_0: i32, hook_stac
 }
 
 mod manifest;
-pub use manifest::ConfigGrant;
-pub use manifest::Contribution;
+pub use manifest::ActivationRegistrationTemplate;
+pub use manifest::CapabilitySlotDeclaration;
+pub use manifest::CollectionCapability;
+pub use manifest::CollectionContract;
+pub use manifest::ConfigurationRequest;
+pub use manifest::ContractRef;
+pub use manifest::ContributionDeclaration;
+pub use manifest::Entrypoints;
 pub use manifest::FacetAccess;
+pub use manifest::InterfaceRef;
+pub use manifest::MANIFEST_SCHEMA;
 pub use manifest::MicroId;
 pub use manifest::MicroManifest;
+pub use manifest::Necessity;
+pub use manifest::ProvidedContract;
 pub use manifest::Provision;
-pub use manifest::ProvisionRef;
+pub use manifest::RequiredContract;
+pub use manifest::Retention;
+pub use manifest::Trigger;
 
 mod component;
 pub use component::ComponentRef;
@@ -253,8 +265,19 @@ pub mod bindings {
         path: "../clay_guest_session/wit",
         world: "micro-client",
         pub_export_macro: true,
-        async: ["export:townframe:dayframe/micro-lifecycle@0.3.0#activate"],
     });
+}
+
+/// The `instance-root` of a guest whose incarnation needs no orderly close work: its state
+/// is released when the host drops the store.
+#[cfg(feature = "wit")]
+pub struct StatelessRoot;
+
+#[cfg(feature = "wit")]
+impl micro_lifecycle::GuestInstanceRoot for StatelessRoot {
+    async fn close(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(feature = "wit")]

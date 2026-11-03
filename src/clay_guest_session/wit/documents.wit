@@ -112,12 +112,57 @@ interface document-events {
     completed: func(receipt: operation-receipt);
 }
 
+/// One initialization entry point per incarnation (ADR 024 §5). Everything the guest publishes
+/// while `initialize` runs (registration rows, capability publications) stays invisible to
+/// other micros until it returns `ok`; an error, trap, or cancellation drops it unseen.
 interface micro-lifecycle {
     use documents.{document-binding};
     use collections.{collection-binding};
     use collection-registration.{registration-binding};
+    use capability-bank.{capability-ref, published-capability};
 
-    activate: async func(configs: list<document-binding>, collections: list<collection-binding>, registrations: list<registration-binding>) -> result<_, string>;
+    /// A resolved requirement: the local binding name the manifest declares and the provider's
+    /// capability, minted for this incarnation.
+    record requirement-binding {
+        name: string,
+        capability: capability-ref,
+    }
+
+    /// One-shot initialization input. `arguments` is opaque, configuration-supplied CBOR.
+    record initial-context {
+        arguments: list<u8>,
+        configs: list<document-binding>,
+        collections: list<collection-binding>,
+        registrations: list<registration-binding>,
+        requirements: list<requirement-binding>,
+    }
+
+    variant initialization-error {
+        invalid-configuration(string),
+        unavailable(string),
+        rejected(string),
+    }
+
+    /// Proof of successful initialization, held by the host for the incarnation. The host calls
+    /// `close` exactly once, while the incarnation's dependencies are still live, and drops the
+    /// root afterwards. It is not a stop capability: the guest never receives it back.
+    resource instance-root {
+        close: async func() -> result<_, string>;
+    }
+
+    /// A contract this incarnation provides to micros whose requirements resolve to it. The host
+    /// owns the publication lease for the rest of the incarnation.
+    record provision {
+        contract: string,
+        capability: published-capability,
+    }
+
+    record initialized {
+        root: instance-root,
+        provisions: list<provision>,
+    }
+
+    initialize: async func(context: initial-context) -> result<initialized, initialization-error>;
 }
 
 world micro-client {
