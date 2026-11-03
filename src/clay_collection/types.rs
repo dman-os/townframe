@@ -141,10 +141,13 @@ pub enum AcquireError {
 
 /// Why a registration mutation was refused. `current` is the row version the collection
 /// actually holds, so the writer can rebase and retry; `None` means the row is absent.
+/// `Collision` is [`crate::Materializer::RejectCollision`] refusing a key that another
+/// live scope, `holder`, already holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MutationError {
     Conflict { current: Option<Version> },
     Closed,
+    Collision { holder: RegistrationScopeId },
 }
 
 #[derive(Clone, Debug, PartialEq)]
