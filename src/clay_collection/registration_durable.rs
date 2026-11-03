@@ -31,6 +31,7 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 use clay_store::BatchOp;
 use clay_store::OrderedStore;
@@ -42,9 +43,11 @@ use super::RegistrationCollection;
 use super::RegistrationDispatch;
 use super::Retention;
 use crate::source::Source;
+use crate::types::MutationError;
 use crate::types::RegistrationScopeId;
 use crate::types::Stamp;
 use crate::types::Stamped;
+use crate::types::WriteBasis;
 use crate::types::WriterId;
 
 /// How a durable collection turns its keys and values into store bytes. A key or value
@@ -286,16 +289,19 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<
             .expect("install/uninstall on a volatile collection")
     }
 
-    /// Replace installed scope `scope_key` with exactly `rows` (`None` is a tombstone),
-    /// stamped lamport `1` by `writer`: one atomic store `apply` (`DeletePrefix` of the
-    /// scope plus a `Put` per row), then one projection transaction covering the keys
-    /// whose winner changed. Reinstalling an unchanged row reproduces its stamp. A
-    /// `StoreError` returns before any visible change. Wakes are returned, not fired.
+    /// Replace installed scope `scope_key` with exactly `rows` (`None` is a tombstone)
+    /// written by `writer`: one atomic store `apply` (`DeletePrefix` of the scope plus a
+    /// `Put` per row), then one projection transaction covering the keys whose winner
+    /// changed. A row the scope already holds with an identical value keeps its stamp, a
+    /// changed value or tombstone gets the scope's previous lamport plus one, and a new
+    /// row is created concurrently at lamport 1. Rows the scope holds that `rows` omits,
+    /// runtime writes included, are removed. A `StoreError` returns before any visible
+    /// change. Wakes are returned, not fired.
     ///
     /// A scope's `retention` and `writer` are fixed by its first install; passing
     /// different ones later panics. Not safe against a concurrent `install`/`uninstall`
-    /// of the same scope across an await: the supervisor serializes installation on its
-    /// single-threaded executor.
+    /// of the same scope, or an [`InstalledWriter`] write to it, across an await: the
+    /// supervisor serializes installation on its single-threaded executor.
     pub async fn install(
         &self,
         scope_key: &[u8],
@@ -312,21 +318,54 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<
         let prefix = scope_prefix(&durable.collection_id, scope_key);
         let mut batch = Vec::with_capacity(rows.len() + 1);
         batch.push(BatchOp::DeletePrefix(prefix.clone()));
-        let stamp = Stamp { lamport: 1, writer };
-        let rows: Vec<_> = rows
-            .into_iter()
-            .map(|(key, slot)| {
-                let candidate = Candidate {
-                    stamp: stamp.clone(),
-                    slot,
-                };
-                batch.push(BatchOp::Put(
-                    row_key(&prefix, &(codec.encode_key)(&key)),
-                    encode_row(codec, retention, &candidate),
-                ));
-                (key, candidate)
-            })
-            .collect();
+        // A row the scope already holds with identical bytes keeps its stamp; a changed
+        // value or tombstone moves one above the scope's previous lamport, so an
+        // updated row is never outranked by a write that observed the old one; a new
+        // row is a concurrent creation at lamport 1.
+        let rows: Vec<_> = {
+            let inner = self.lock();
+            rows.into_iter()
+                .map(|(key, slot)| {
+                    let previous = inner
+                        .candidates
+                        .get(&key)
+                        .and_then(|holders| holders.get(&id));
+                    let lamport = match previous {
+                        None => 1,
+                        Some(previous) => {
+                            let unchanged = match (&previous.slot, &slot) {
+                                (None, None) => true,
+                                (Some(old), Some(new)) => {
+                                    (codec.encode_value)(old) == (codec.encode_value)(new)
+                                }
+                                _ => false,
+                            };
+                            if unchanged {
+                                previous.stamp.lamport
+                            } else {
+                                previous
+                                    .stamp
+                                    .lamport
+                                    .checked_add(1)
+                                    .expect("lamport exhausted")
+                            }
+                        }
+                    };
+                    let candidate = Candidate {
+                        stamp: Stamp {
+                            lamport,
+                            writer: writer.clone(),
+                        },
+                        slot,
+                    };
+                    batch.push(BatchOp::Put(
+                        row_key(&prefix, &(codec.encode_key)(&key)),
+                        encode_row(codec, retention, &candidate),
+                    ));
+                    (key, candidate)
+                })
+                .collect()
+        };
         durable.store.apply(batch).await?;
 
         let mut inner = self.lock();
@@ -384,5 +423,188 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<
         let dispatch = inner.mutate(touched, |inner, retired| inner.remove_scope(id, retired));
         drop(inner);
         Ok(dispatch)
+    }
+}
+
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<K, V, S> {
+    /// A writer for installed scope `scope_key`, the runtime counterpart of
+    /// [`Self::install`]: its writes persist, survive a reload, and are retracted with
+    /// the scope by `uninstall`. `Closed` if the scope is not installed.
+    pub fn installed_writer(
+        &self,
+        scope_key: &[u8],
+    ) -> Result<InstalledWriter<K, V, S>, MutationError> {
+        let id = *self
+            .lock()
+            .installations
+            .get(scope_key)
+            .ok_or(MutationError::Closed)?;
+        Ok(InstalledWriter {
+            id,
+            scope_key: scope_key.to_vec(),
+            collection: self.clone(),
+        })
+    }
+}
+
+/// Why an [`InstalledWriter`] write failed: the same refusals as an incarnation writer,
+/// or the store. A failed write leaves no visible change.
+#[derive(Debug)]
+pub enum InstalledWriteError {
+    Mutation(MutationError),
+    Store(StoreError),
+}
+
+impl From<StoreError> for InstalledWriteError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// Mutation handle of an installation or permanent scope. Like
+/// [`crate::RegistrationWriter`] it stamps from a [`WriteBasis`], but a write persists
+/// before it becomes visible, so it is async and can fail with a [`StoreError`].
+pub struct InstalledWriter<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>> = ()> {
+    id: RegistrationScopeId,
+    scope_key: Vec<u8>,
+    collection: RegistrationCollection<K, V, S>,
+}
+
+/// Exclusive right to write one key durably, held from stamping until publication.
+struct KeySlot<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> {
+    collection: RegistrationCollection<K, V, S>,
+    key: K,
+}
+
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> KeySlot<K, V, S> {
+    async fn acquire(collection: &RegistrationCollection<K, V, S>, key: &K) -> Self {
+        std::future::poll_fn(|cx| {
+            let mut inner = collection.lock();
+            match inner.inflight.get_mut(key) {
+                Some(waiters) => {
+                    waiters.push(cx.waker().clone());
+                    Poll::Pending
+                }
+                None => {
+                    inner.inflight.insert(key.clone(), Vec::new());
+                    Poll::Ready(())
+                }
+            }
+        })
+        .await;
+        Self {
+            collection: collection.clone(),
+            key: key.clone(),
+        }
+    }
+}
+
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Drop for KeySlot<K, V, S> {
+    fn drop(&mut self) {
+        let waiters = self.collection.lock().inflight.remove(&self.key);
+        for waker in waiters.into_iter().flatten() {
+            waker.wake();
+        }
+    }
+}
+
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> InstalledWriter<K, V, S> {
+    /// Set this scope's candidate for `key` to `value` and persist it. Wakes are
+    /// returned, not fired; the caller must dispatch after releasing host locks.
+    pub async fn put(
+        &self,
+        key: K,
+        basis: WriteBasis,
+        value: V,
+    ) -> Result<RegistrationDispatch<K, V, S, Stamp>, InstalledWriteError> {
+        self.write(key, basis, Some(value)).await
+    }
+
+    /// Set this scope's candidate for `key` to a persisted tombstone.
+    pub async fn delete(
+        &self,
+        key: K,
+        basis: WriteBasis,
+    ) -> Result<RegistrationDispatch<K, V, S, Stamp>, InstalledWriteError> {
+        self.write(key, basis, None).await
+    }
+
+    /// Stamp and check under the lock, persist with the lock released, then publish.
+    ///
+    /// The store write is an await point, so two writers could otherwise both pass a
+    /// compare-and-set against the same winner, or both mint the same lamport. A
+    /// per-key [`KeySlot`] makes durable writers of one key take turns across that
+    /// await, whichever scope they belong to; the second stamps against what the first
+    /// published. Incarnation writers do not take the slot (they cannot wait), so after
+    /// the store write the stamping check runs again and, if an incarnation write
+    /// slipped in and failed it, the store row is restored and the write reports the
+    /// conflict. The same check covers the scope being uninstalled meanwhile, so no
+    /// orphan row outlives it.
+    async fn write(
+        &self,
+        key: K,
+        basis: WriteBasis,
+        slot: Option<V>,
+    ) -> Result<RegistrationDispatch<K, V, S, Stamp>, InstalledWriteError> {
+        let durable = self.collection.durable_handle();
+        let codec = durable.codec;
+        let _slot = KeySlot::acquire(&self.collection, &key).await;
+        let store_key = row_key(
+            &scope_prefix(&durable.collection_id, &self.scope_key),
+            &(codec.encode_key)(&key),
+        );
+        let (stamp, retention, restore) = {
+            let inner = self.collection.lock();
+            let stamp = inner
+                .plan_write(self.id, &key, &basis)
+                .map_err(InstalledWriteError::Mutation)?;
+            let retention = inner.scopes[&self.id]
+                .retention
+                .expect("installed writer over an incarnation scope");
+            // Only a compare-and-set can need the previous row back.
+            let restore = matches!(basis, WriteBasis::CompareAndSet(_)).then(|| {
+                inner
+                    .candidates
+                    .get(&key)
+                    .and_then(|holders| holders.get(&self.id))
+                    .map(|previous| encode_row(codec, retention, previous))
+            });
+            (stamp, retention, restore)
+        };
+        let candidate = Candidate {
+            stamp: stamp.clone(),
+            slot,
+        };
+        durable
+            .store
+            .apply(vec![BatchOp::Put(
+                store_key.clone(),
+                encode_row(codec, retention, &candidate),
+            )])
+            .await?;
+
+        // Check and publish under one lock hold, so nothing slips in between.
+        let published = {
+            let mut inner = self.collection.lock();
+            inner.plan_write(self.id, &key, &basis).map(|_| {
+                let id = self.id;
+                inner.mutate(BTreeSet::from([key.clone()]), |inner, retired| {
+                    inner.set_candidate(id, key, candidate, retired);
+                })
+            })
+        };
+        match published {
+            Ok(dispatch) => Ok(dispatch.with_output(stamp)),
+            Err(refusal) => {
+                let undo = match (&refusal, restore.flatten()) {
+                    (MutationError::Conflict { .. }, Some(previous)) => {
+                        BatchOp::Put(store_key, previous)
+                    }
+                    _ => BatchOp::Delete(store_key),
+                };
+                durable.store.apply(vec![undo]).await?;
+                Err(InstalledWriteError::Mutation(refusal))
+            }
+        }
     }
 }

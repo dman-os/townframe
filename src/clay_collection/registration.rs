@@ -33,6 +33,7 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::Waker;
 
 use crate::projection::Projection;
 use crate::projection::ProjectionDispatch;
@@ -86,6 +87,9 @@ struct Inner<K, V, S: Source<K, Stamped<V>>> {
     /// Installation scope key to the in-process id of its entry in `scopes`.
     /// These scopes have no owner handle: only `install`/`uninstall` change them.
     installations: BTreeMap<Vec<u8>, RegistrationScopeId>,
+    /// Keys with a durable write between its stamp and its publication, and the tasks
+    /// waiting to write them next; see `InstalledWriter`.
+    inflight: BTreeMap<K, Vec<Waker>>,
 }
 
 impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
@@ -156,6 +160,54 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
         Some(Stamped {
             stamp: candidate.stamp.clone(),
             value: candidate.slot.clone()?,
+        })
+    }
+
+    /// Stamp a write by scope `id` to `key`, or refuse a failed compare-and-set. Pure:
+    /// nothing changes until the caller sets the candidate.
+    fn plan_write(
+        &self,
+        id: RegistrationScopeId,
+        key: &K,
+        basis: &WriteBasis,
+    ) -> Result<Stamp, MutationError> {
+        let writer = self
+            .scopes
+            .get(&id)
+            .ok_or(MutationError::Closed)?
+            .writer
+            .clone();
+        // The scope sees its own staged candidates on top of the published ones.
+        let winner = self
+            .winner(key, Some(id))
+            .map(|(_, candidate)| (candidate.stamp.clone(), candidate.slot.is_some()));
+        let observed = match basis {
+            WriteBasis::Concurrent => 0,
+            WriteBasis::Observed(stamp) => stamp.lamport,
+            WriteBasis::CompareAndSet(expected) => {
+                // A winning tombstone reads as absent: readers never see its stamp.
+                let current = winner
+                    .as_ref()
+                    .filter(|(_, live)| *live)
+                    .map(|(stamp, _)| stamp);
+                if current != expected.as_ref() {
+                    return Err(MutationError::Conflict {
+                        current: current.cloned(),
+                    });
+                }
+                // Supersede the tombstone too when the comparison was against absence.
+                winner.as_ref().map_or(0, |(stamp, _)| stamp.lamport)
+            }
+        };
+        // A scope's lamport on a key only grows, so its stamps never repeat.
+        let own = self
+            .candidates
+            .get(key)
+            .and_then(|holders| holders.get(&id))
+            .map_or(0, |candidate| candidate.stamp.lamport);
+        Ok(Stamp {
+            lamport: observed.max(own).checked_add(1).expect("lamport exhausted"),
+            writer,
         })
     }
 
@@ -286,6 +338,7 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<
                 candidates: BTreeMap::new(),
                 durable: None,
                 installations: BTreeMap::new(),
+                inflight: BTreeMap::new(),
             })),
         }
     }
@@ -528,44 +581,7 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationWriter<K, V
         slot: Option<V>,
     ) -> Result<RegistrationDispatch<K, V, S, Stamp>, MutationError> {
         let mut inner = self.collection.lock();
-        let writer = inner
-            .scopes
-            .get(&self.id)
-            .ok_or(MutationError::Closed)?
-            .writer
-            .clone();
-        // The scope sees its own staged candidates on top of the published ones.
-        let winner = inner
-            .winner(&key, Some(self.id))
-            .map(|(_, candidate)| (candidate.stamp.clone(), candidate.slot.is_some()));
-        let observed = match &basis {
-            WriteBasis::Concurrent => 0,
-            WriteBasis::Observed(stamp) => stamp.lamport,
-            WriteBasis::CompareAndSet(expected) => {
-                // A winning tombstone reads as absent: readers never see its stamp.
-                let current = winner
-                    .as_ref()
-                    .filter(|(_, live)| *live)
-                    .map(|(stamp, _)| stamp);
-                if current != expected.as_ref() {
-                    return Err(MutationError::Conflict {
-                        current: current.cloned(),
-                    });
-                }
-                // Supersede the tombstone too when the comparison was against absence.
-                winner.as_ref().map_or(0, |(stamp, _)| stamp.lamport)
-            }
-        };
-        // A scope's lamport on a key only grows, so its stamps never repeat.
-        let own = inner
-            .candidates
-            .get(&key)
-            .and_then(|holders| holders.get(&self.id))
-            .map_or(0, |candidate| candidate.stamp.lamport);
-        let stamp = Stamp {
-            lamport: observed.max(own).checked_add(1).expect("lamport exhausted"),
-            writer,
-        };
+        let stamp = inner.plan_write(self.id, &key, &basis)?;
         let id = self.id;
         let candidate = Candidate {
             stamp: stamp.clone(),
@@ -630,6 +646,8 @@ impl<K, V, S: Source<K, Stamped<V>>, T> RegistrationDispatch<K, V, S, T> {
 #[path = "registration_durable.rs"]
 mod durable;
 pub use durable::DurableCodec;
+pub use durable::InstalledWriteError;
+pub use durable::InstalledWriter;
 
 #[cfg(test)]
 #[path = "registration_tests_notifications.rs"]
