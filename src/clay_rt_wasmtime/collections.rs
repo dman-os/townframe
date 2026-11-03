@@ -1,4 +1,3 @@
-use super::GuestCallTarget;
 use super::IncarnationWake;
 use super::WasmComponentRef;
 use super::WasmStoreState;
@@ -18,6 +17,7 @@ use clay_guest_session::capabilities::CallError;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityRef;
 use clay_guest_session::capabilities::ContractIdentity;
+use clay_guest_session::capabilities::GuestCallTarget;
 use clay_guest_session::capabilities::PresentationComponent;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::capabilities::RefStatus;
@@ -333,10 +333,7 @@ impl cap_wit::Host for WasmStoreState {
         name: String,
         contract: cap_wit::Contract,
     ) -> wasmtime::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
-        let target = Arc::new(GuestCallTarget {
-            publication: name.clone(),
-            calls: self.calls.clone(),
-        });
+        let target = Arc::new(GuestCallTarget::new(name.clone(), self.calls.clone()));
         let contract = ContractIdentity::new(contract.namespace, contract.name, contract.version);
         match self.capabilities.publish_call(&name, contract, target) {
             Ok(lease) => Ok(Ok(self.table.push(lease)?)),

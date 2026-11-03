@@ -7,7 +7,6 @@ use clay_host::LocalFuture;
 use clay_host::Root;
 use clay_host::StartError;
 use clay_host::Supervisor;
-use futures::FutureExt as _;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
