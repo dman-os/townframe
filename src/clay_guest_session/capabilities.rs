@@ -20,13 +20,17 @@ use clay_host::Lease;
 use clay_host::Lifecycle;
 use clay_host::MicroId;
 use clay_host::MicroState;
+use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 /// A publication's contract (ADR 025 §5). Owned because contracts arrive from manifests at
 /// runtime; for a Call it names the request and response Lexicons. Every Presentation
@@ -104,6 +108,76 @@ pub enum PublicationKind {
 /// [`CallError::Provider`] with the handler's own rejection.
 pub trait CallTarget: Send + Sync {
     fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>>;
+}
+
+/// A request to run one call publication's exported `call` inside its provider's own store.
+/// Only the provider incarnation's driver ever touches that store: a foreign import (another
+/// incarnation's store, or any bank user) queues one of these and awaits the reply. Shared by
+/// every engine, each of which serves the queue with its own driver.
+pub struct GuestCall {
+    pub publication: String,
+    pub request: Vec<u8>,
+    pub reply: oneshot::Sender<Result<Vec<u8>, CallError>>,
+}
+
+/// The [`CallTarget`] of one call publication of one engine incarnation: it queues a
+/// [`GuestCall`] into the incarnation's driver. A closed queue or a reply dropped unanswered
+/// means the incarnation ended before the handler answered (a close, a forced close, or a trap
+/// that dropped the store with the handler's task in it), which is exactly `Revoked`: a call
+/// can race the provider's close after the liveness check, and the answer is never a hang.
+pub struct GuestCallTarget {
+    publication: String,
+    calls: mpsc::UnboundedSender<GuestCall>,
+}
+
+impl GuestCallTarget {
+    pub fn new(publication: String, calls: mpsc::UnboundedSender<GuestCall>) -> Self {
+        Self { publication, calls }
+    }
+}
+
+impl CallTarget for GuestCallTarget {
+    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
+        let calls = self.calls.clone();
+        let publication = self.publication.clone();
+        async move {
+            // Queued on the first poll, never at construction: a call future that is dropped
+            // before it is polled must not run a guest handler. Queueing never enters the
+            // guest, so a guest import that calls its own incarnation's publication (or is
+            // reached through a cycle) is only served after the importing task suspends.
+            let (reply, response) = oneshot::channel();
+            let queued = calls.send(GuestCall {
+                publication,
+                request,
+                reply,
+            });
+            if queued.is_err() {
+                return Err(CapabilityFailure::Revoked.into());
+            }
+            response
+                .await
+                .unwrap_or_else(|_ended| Err(CapabilityFailure::Revoked.into()))
+        }
+        .boxed()
+    }
+}
+
+/// One live call handler in an incarnation's store, counted in the incarnation's in-flight
+/// counter until the handler's task ends or the store drops it (including when its caller gave
+/// up long before). Engines hold one in each call task.
+pub struct InFlightCall(Arc<AtomicUsize>);
+
+impl InFlightCall {
+    pub fn start(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for InFlightCall {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// A publication the manifest declares: what an incarnation's returned publication of that

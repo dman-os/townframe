@@ -17,9 +17,10 @@ use clay_guest_session::PresentationHost;
 use clay_guest_session::Surface;
 use clay_guest_session::Work;
 use clay_guest_session::capabilities::CallError;
-use clay_guest_session::capabilities::CallTarget;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::capabilities::GuestCall;
+use clay_guest_session::capabilities::InFlightCall;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
@@ -33,8 +34,6 @@ use clay_surface::Mutation;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
-use futures::FutureExt as _;
-use futures::future::BoxFuture;
 use tokio::sync::oneshot;
 
 #[derive(Debug, thiserror::Error)]
@@ -242,51 +241,6 @@ use bindings::townframe::dayframe::presentation::{self as wit_presentation};
 
 pub struct WasmComponentRef(ComponentRef);
 
-/// A request to run one call publication's exported `call` inside its provider's own store.
-/// Only the provider incarnation's driver ever touches that store: a foreign import (another
-/// incarnation's store, or any bank user) queues one of these and awaits the reply.
-struct GuestCall {
-    publication: String,
-    request: Vec<u8>,
-    reply: oneshot::Sender<Result<Vec<u8>, CallError>>,
-}
-
-/// The [`CallTarget`] of one call publication of one Wasmtime incarnation: it queues a
-/// [`GuestCall`] into the incarnation's driver. A closed queue or a reply dropped unanswered
-/// means the incarnation ended before the handler answered (a close, a forced close, or a trap
-/// that dropped the store with the handler's task in it), which is exactly `Revoked`: a call
-/// can race the provider's close after the liveness check, and the answer is never a hang.
-struct GuestCallTarget {
-    publication: String,
-    calls: mpsc::UnboundedSender<GuestCall>,
-}
-
-impl CallTarget for GuestCallTarget {
-    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
-        let calls = self.calls.clone();
-        let publication = self.publication.clone();
-        async move {
-            // Queued on the first poll, never at construction: a call future that is dropped
-            // before it is polled must not run a guest handler. Queueing never enters the
-            // guest, so a guest import that calls its own incarnation's publication (or is
-            // reached through a cycle) is only served after the importing task suspends.
-            let (reply, response) = oneshot::channel();
-            let queued = calls.send(GuestCall {
-                publication,
-                request,
-                reply,
-            });
-            if queued.is_err() {
-                return Err(CapabilityFailure::Revoked.into());
-            }
-            response
-                .await
-                .unwrap_or_else(|_ended| Err(CapabilityFailure::Revoked.into()))
-        }
-        .boxed()
-    }
-}
-
 /// The store task of one [`GuestCall`], see [`WasmIncarnation::start_call`].
 struct GuestCallTask {
     lifecycle: bindings::exports::townframe::dayframe::micro_lifecycle::Guest,
@@ -294,23 +248,7 @@ struct GuestCallTask {
     request: Vec<u8>,
     reply: oneshot::Sender<Result<Vec<u8>, CallError>>,
     /// Counts the task as in flight until it ends or the store drops it.
-    _in_flight: InFlight,
-}
-
-/// One live [`GuestCallTask`] in [`WasmIncarnation::calls_in_flight`].
-struct InFlight(Arc<AtomicUsize>);
-
-impl InFlight {
-    fn start(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::AcqRel);
-        Self(Arc::clone(counter))
-    }
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
+    _in_flight: InFlightCall,
 }
 
 impl wasmtime::component::AccessorTask<WasmStoreState> for GuestCallTask {
@@ -827,7 +765,7 @@ impl WasmIncarnation {
             publication,
             request,
             reply,
-            _in_flight: InFlight::start(&self.calls_in_flight),
+            _in_flight: InFlightCall::start(&self.calls_in_flight),
         })?;
         Ok(())
     }
