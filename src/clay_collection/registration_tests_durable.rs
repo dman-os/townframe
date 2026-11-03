@@ -69,7 +69,7 @@ fn winners(collection: &Collection) -> Vec<(u32, String)> {
     collection
         .snapshot()
         .into_iter()
-        .map(|(key, row)| (key, row.value))
+        .filter_map(|(key, row)| Some((key, row.value?)))
         .collect()
 }
 
@@ -160,7 +160,7 @@ where
     assert_eq!(
         tx.iter()
             .map(|change| match change {
-                Change::Upsert { key, value, .. } => (*key, Some(value.value.clone())),
+                Change::Upsert { key, value, .. } => (*key, value.value.clone()),
                 Change::Remove { key, .. } => (*key, None),
             })
             .collect::<Vec<_>>(),
@@ -235,7 +235,7 @@ fn reinstall_replaces_the_scope_in_one_transaction_and_keeps_unchanged_stamps() 
     assert_eq!(
         tx.iter()
             .map(|change| match change {
-                Change::Upsert { key, value, .. } => (*key, Some(value.value.clone())),
+                Change::Upsert { key, value, .. } => (*key, value.value.clone()),
                 Change::Remove { key, .. } => (*key, None),
             })
             .collect::<Vec<_>>(),
@@ -693,7 +693,10 @@ async fn compare_and_set_beaten_by_an_incarnation_write_restores_the_stored_row(
         panic!("expected conflict")
     };
     assert_eq!(current, Some(collection.get(&1).unwrap().stamp));
-    assert_eq!(collection.get(&1).unwrap().value, "runtime");
+    assert_eq!(
+        collection.get(&1).unwrap().value.as_deref(),
+        Some("runtime")
+    );
     // The store still holds the installed row, not the refused write.
     scope.close().dispatch();
     let reloaded = open(&store).await;
@@ -744,7 +747,7 @@ fn reinstall_keeps_unchanged_stamps_and_advances_changed_ones() {
         .put(2, WriteBasis::Observed(observed), "stale".into())
         .unwrap()
         .dispatch();
-    assert_eq!(collection.get(&2).unwrap().value, "y2");
+    assert_eq!(collection.get(&2).unwrap().value.as_deref(), Some("y2"));
     // The stored rows reload with the same stamps.
     assert_eq!(ready(open(&store)).snapshot(), collection.snapshot());
 }

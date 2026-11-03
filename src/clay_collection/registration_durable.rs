@@ -187,7 +187,7 @@ pub(super) fn decode_row<K, V>(
     (retention, Candidate { stamp, slot })
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> Inner<K, V, S> {
     /// The scope for an installation key, created empty if new. A scope's retention and
     /// writer are fixed at creation; disagreeing later is a caller bug, reported as the
     /// error so the caller can panic after releasing the collection lock.
@@ -233,7 +233,7 @@ impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
     }
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> RegistrationCollection<K, V, S> {
     /// Build a durable collection: scan the collection's key range, rebuild its
     /// installed scopes with their stored stamps, publish the resulting winners as one
     /// transaction, and only then return, so a reader's first bootstrap page already
@@ -426,7 +426,7 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<
     }
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> RegistrationCollection<K, V, S> {
     /// A writer for installed scope `scope_key`, the runtime counterpart of
     /// [`Self::install`]: its writes persist, survive a reload, and are retracted with
     /// the scope by `uninstall`. `Closed` if the scope is not installed.
@@ -464,19 +464,19 @@ impl From<StoreError> for InstalledWriteError {
 /// Mutation handle of an installation or permanent scope. Like
 /// [`crate::RegistrationWriter`] it stamps from a [`WriteBasis`], but a write persists
 /// before it becomes visible, so it is async and can fail with a [`StoreError`].
-pub struct InstalledWriter<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>> = ()> {
+pub struct InstalledWriter<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>> = ()> {
     id: RegistrationScopeId,
     scope_key: Vec<u8>,
     collection: RegistrationCollection<K, V, S>,
 }
 
 /// Exclusive right to write one key durably, held from stamping until publication.
-struct KeySlot<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> {
+struct KeySlot<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> {
     collection: RegistrationCollection<K, V, S>,
     key: K,
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> KeySlot<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> KeySlot<K, V, S> {
     async fn acquire(collection: &RegistrationCollection<K, V, S>, key: &K) -> Self {
         std::future::poll_fn(|cx| {
             let mut inner = collection.lock();
@@ -499,7 +499,7 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> KeySlot<K, V, S> {
     }
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Drop for KeySlot<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> Drop for KeySlot<K, V, S> {
     fn drop(&mut self) {
         let waiters = self.collection.lock().inflight.remove(&self.key);
         for waker in waiters.into_iter().flatten() {
@@ -508,7 +508,7 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Drop for KeySlot<K, V, 
     }
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> InstalledWriter<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> InstalledWriter<K, V, S> {
     /// Set this scope's candidate for `key` to `value` and persist it. Wakes are
     /// returned, not fired; the caller must dispatch after releasing host locks.
     pub async fn put(
