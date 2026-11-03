@@ -27,6 +27,18 @@ pub mod collections;
 #[cfg(feature = "test-utils")]
 pub mod lifecycle_conformance;
 pub mod presentation;
+/// What an engine's guest-half close did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuestClose {
+    /// The guest's `instance-root.close` ran to completion.
+    Completed,
+    /// A call was still in flight. The guest runtime keeps one async export task per instance
+    /// and cannot start `instance-root.close` beside a suspended one, so the guest close was
+    /// skipped: the in-flight call is cancelled and every queued call revoked, and host RAII
+    /// (publications, then scopes) carries the teardown (ADR 024 §6).
+    Skipped,
+}
+
 pub use presentation::Placement;
 pub use presentation::PresentationHost;
 pub use presentation::Surface;

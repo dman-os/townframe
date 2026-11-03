@@ -14,6 +14,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use crate::collections::BytesRegistrations;
 use crate::collections::CollectionSession;
@@ -34,8 +36,10 @@ use clay_host::Root;
 use clay_host::StartError;
 use clay_host::Supervisor;
 
+use crate::GuestClose;
 use crate::InitialContext;
 use crate::capabilities::CallError;
+use crate::capabilities::CallTarget;
 use crate::capabilities::CapabilityFailure;
 use crate::capabilities::CapabilityLimits;
 use crate::capabilities::CapabilityPublication;
@@ -45,15 +49,21 @@ use crate::capabilities::ContractIdentity;
 use crate::capabilities::DeclaredPublication;
 use crate::capabilities::LazyEndpoint;
 use crate::capabilities::PublicationKind;
+use crate::capabilities::PublishedCapability;
 use crate::capabilities::RefStatus;
 
 /// The manifest's names (`provides[].id`) for the fixture's two publications: a presentation
 /// and an `echo` call whose handler answers `echo:` plus the request.
 const PUBLICATION: &str = "presentation";
 const ECHO: &str = "echo";
+const RELAY: &str = "relay";
 
 fn echo_contract() -> ContractIdentity {
     ContractIdentity::new("dayframe.lifecycle", ECHO, (1, 0, 0))
+}
+
+fn relay_contract() -> ContractIdentity {
+    ContractIdentity::new("dayframe.lifecycle", RELAY, (1, 0, 0))
 }
 
 /// What the fixture's manifest declares it publishes (the manifest vocabulary has no kind yet,
@@ -72,6 +82,13 @@ fn declared_publications() -> BTreeMap<String, DeclaredPublication> {
             DeclaredPublication {
                 kind: PublicationKind::Call,
                 contract: echo_contract(),
+            },
+        ),
+        (
+            RELAY.to_owned(),
+            DeclaredPublication {
+                kind: PublicationKind::Call,
+                contract: relay_contract(),
             },
         ),
     ])
@@ -144,7 +161,12 @@ pub trait Incarnations: 'static {
     fn inspect(runtime: &Self::Runtime) -> GuestResidue;
 
     /// Close the guest half and report what the store still held afterwards, before it drops.
-    fn close(runtime: Self::Runtime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)>;
+    /// With a call in flight the engine must skip the guest's `close` (it cannot run beside a
+    /// suspended call), cancel the call and revoke every queued one, and say so with
+    /// [`GuestClose::Skipped`]; the residue is then meaningless.
+    fn close(
+        runtime: Self::Runtime,
+    ) -> LocalFuture<'static, (Result<GuestClose, String>, GuestResidue)>;
 }
 
 /// The consumer requires `provider`'s presentation and redeems it while initializing and again
@@ -323,6 +345,361 @@ pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine
     }
     drop((echo, view));
     harness.finish(supervisor).await;
+}
+
+/// A call the scenario controls, standing in for "something external" a guest handler awaits:
+/// each call announces itself on `entered` and then waits for a permit on `release`.
+struct Gate {
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+impl CallTarget for Gate {
+    fn call(
+        &self,
+        request: Vec<u8>,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<u8>, CallError>> {
+        let (entered, release) = (Arc::clone(&self.entered), Arc::clone(&self.release));
+        Box::pin(async move {
+            entered.add_permits(1);
+            release.acquire().await.unwrap().forget();
+            Ok([b"held:".as_slice(), &request].concat())
+        })
+    }
+}
+
+/// A call that forwards to a publication that only exists after the caller's own graph does,
+/// which is how a scenario closes a cycle between incarnations. It is owned by a node of its own
+/// (`from`'s incarnation), so its edges are distinct from the test's. With a `gate` it first
+/// announces itself and waits to be released, holding the chain that reached it in flight.
+struct Loopback {
+    from: CapabilitySession,
+    to: Arc<OnceLock<CapabilityPublication>>,
+    gate: Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+}
+
+impl CallTarget for Loopback {
+    fn call(
+        &self,
+        request: Vec<u8>,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<u8>, CallError>> {
+        let (from, to, gate) = (self.from.clone(), Arc::clone(&self.to), self.gate.clone());
+        Box::pin(async move {
+            if let Some((entered, release)) = gate {
+                entered.add_permits(1);
+                release.acquire().await.unwrap().forget();
+            }
+            let target = from
+                .mint(to.get().expect("the cycle is closed before any call"))
+                .unwrap();
+            target.call(request).await
+        })
+    }
+}
+
+/// One incarnation of the fixture started outside a supervisor.
+struct Started<E: Incarnations> {
+    instance: Instance,
+    runtime: E::Runtime,
+    publications: BTreeMap<String, CapabilityPublication>,
+}
+
+/// Incarnations of the fixture's `provider` role wired by hand, so a scenario can bind each one's
+/// `service` requirement to a call it controls and drive concurrent calls from outside.
+struct Rig<E> {
+    engine: Rc<E>,
+    host: Host,
+    observer: CapabilitySession,
+    observer_instance: Instance,
+    drivers: RefCell<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl<E: Incarnations> Rig<E> {
+    fn new(engine: E) -> Self {
+        let host = Host::new();
+        let observer_instance = host.start("observer");
+        let observer = CapabilitySession::new(
+            host.clone(),
+            observer_instance.clone(),
+            CapabilityLimits::default(),
+        );
+        Self {
+            engine: Rc::new(engine),
+            host,
+            observer,
+            observer_instance,
+            drivers: RefCell::default(),
+        }
+    }
+
+    /// A host-side incarnation of its own, publishing `loopback` forwarding to `to` (optionally
+    /// after a `gate`), so a scenario's cycle passes through a node that is nobody else.
+    fn loopback(
+        &self,
+        name: &str,
+        to: &Arc<OnceLock<CapabilityPublication>>,
+        gate: Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
+    ) -> PublishedCapability {
+        let instance = self.host.start(name);
+        let session =
+            CapabilitySession::new(self.host.clone(), instance, CapabilityLimits::default());
+        session
+            .publish_call(
+                name,
+                echo_contract(),
+                Arc::new(Loopback {
+                    from: session.clone(),
+                    to: Arc::clone(to),
+                    gate,
+                }),
+            )
+            .unwrap()
+    }
+
+    /// A gate bound as a `service`: the lease keeps it published, the semaphores let the
+    /// scenario count calls that entered it and let them out.
+    fn gate(
+        &self,
+    ) -> (
+        PublishedCapability,
+        Arc<tokio::sync::Semaphore>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        let (entered, release) = (
+            Arc::new(tokio::sync::Semaphore::new(0)),
+            Arc::new(tokio::sync::Semaphore::new(0)),
+        );
+        // Published by a node of its own: were the observer both the caller of the provider
+        // and the owner of its service, the provider's call would look like a cycle.
+        let owner = self.host.start("gate");
+        let owner = CapabilitySession::new(self.host.clone(), owner, CapabilityLimits::default());
+        let lease = owner
+            .publish_call(
+                "gate",
+                echo_contract(),
+                Arc::new(Gate {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                }),
+            )
+            .unwrap();
+        (lease, entered, release)
+    }
+
+    /// Start a committed `provider` incarnation, publishing `relay` when `service` is bound.
+    async fn provider(&self, name: &str, service: Option<CapabilityPublication>) -> Started<E> {
+        let instance = self.host.create(name).unwrap();
+        self.host.begin_initialization(&instance).unwrap();
+        let mut arguments = Vec::new();
+        ciborium::into_writer("provider", &mut arguments).unwrap();
+        let (runtime, driver) = Rc::clone(&self.engine)
+            .initialize(
+                self.host.clone(),
+                instance.clone(),
+                InitialContext {
+                    arguments,
+                    requirements: service
+                        .into_iter()
+                        .map(|publication| ("service".to_owned(), publication))
+                        .collect(),
+                    publications: declared_publications(),
+                    ..InitialContext::default()
+                },
+            )
+            .await
+            .unwrap();
+        self.drivers
+            .borrow_mut()
+            .push(tokio::task::spawn_local(driver));
+        let publications = E::publications(&runtime);
+        self.host.commit_initialization(&instance).unwrap();
+        Started {
+            instance,
+            runtime,
+            publications,
+        }
+    }
+
+    /// Call `publication` of `provider` from outside it, on a task of its own.
+    fn call(
+        &self,
+        provider: &Started<E>,
+        publication: &str,
+        request: &[u8],
+    ) -> tokio::task::JoinHandle<Result<Vec<u8>, CallError>> {
+        let reference = self
+            .observer
+            .mint(&provider.publications[publication])
+            .unwrap();
+        let request = request.to_vec();
+        tokio::task::spawn_local(async move { reference.call(request).await })
+    }
+
+    /// Close what is still live, the host, and join every driver.
+    async fn finish(self, live: Vec<Started<E>>) {
+        for Started {
+            instance, runtime, ..
+        } in live
+        {
+            let (closed, residue) = E::close(runtime).await;
+            assert_eq!(closed.unwrap(), GuestClose::Completed);
+            assert_eq!(residue, GuestResidue::NONE);
+            self.host.close_instance(&instance).unwrap();
+        }
+        self.host.close_instance(&self.observer_instance).unwrap();
+        self.host.close();
+        for driver in self.drivers.take() {
+            driver.await.unwrap();
+        }
+    }
+}
+
+/// A provider call that is suspended on something external does not hold its incarnation: a
+/// sync `mount` and its unmount enter the same guest meanwhile, and the call still completes
+/// once what it awaited is released.
+pub async fn suspended_call_does_not_block_sync_entry<E: Incarnations>(engine: E) {
+    let rig = Rig::new(engine);
+    let (gate, entered, release) = rig.gate();
+    let provider = rig.provider("provider", Some(gate.publication())).await;
+    let call = rig.call(&provider, RELAY, b"one");
+    entered.acquire().await.unwrap().forget();
+    let mounted = E::mount(&provider.runtime, PUBLICATION)
+        .expect("a presentation mounts while a call is suspended in the same guest");
+    assert!(!call.is_finished(), "the call is still waiting on its gate");
+    drop(mounted);
+    release.add_permits(1);
+    assert_eq!(call.await.unwrap(), Ok(b"held:one".to_vec()));
+    drop(gate);
+    rig.finish(vec![provider]).await;
+}
+
+/// Calls into one provider are serialized, because a guest instance holds one suspended async
+/// task at a time: while the first is suspended the second waits in the provider's queue, and
+/// each completes with its own answer, in order.
+pub async fn calls_into_one_micro_are_serialized<E: Incarnations>(engine: E) {
+    let rig = Rig::new(engine);
+    let (gate, entered, release) = rig.gate();
+    let provider = rig.provider("provider", Some(gate.publication())).await;
+    let first = rig.call(&provider, RELAY, b"first");
+    entered.acquire().await.unwrap().forget();
+    let second = rig.call(&provider, RELAY, b"second");
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        entered.available_permits(),
+        0,
+        "the second call does not start while the first is suspended"
+    );
+    assert!(!first.is_finished() && !second.is_finished());
+    release.add_permits(1);
+    assert_eq!(first.await.unwrap(), Ok(b"held:first".to_vec()));
+    entered.acquire().await.unwrap().forget();
+    assert!(
+        !second.is_finished(),
+        "the second call runs once the first ended"
+    );
+    release.add_permits(1);
+    assert_eq!(second.await.unwrap(), Ok(b"held:second".to_vec()));
+    drop(gate);
+    rig.finish(vec![provider]).await;
+}
+
+/// The message a relay carries back when the call it forwarded was refused as a cycle.
+fn is_cycle_refusal(outcome: &Result<Vec<u8>, CallError>) -> bool {
+    matches!(outcome, Err(CallError::Provider(message)) if message.contains("CallCycle"))
+}
+
+/// `a` relays to `b`, whose service reaches back into `a` while `a`'s relay is still waiting on
+/// `b`. `a` serves one call at a time, so the call that would close the cycle is refused
+/// promptly with `call-cycle` to the innermost caller, and the relays carry that refusal out.
+pub async fn reentrant_call_chain_never_hangs<E: Incarnations>(engine: E) {
+    let rig = Rig::new(engine);
+    let back_into_a = Arc::new(OnceLock::new());
+    let loopback = rig.loopback("loopback", &back_into_a, None);
+    let b = rig.provider("b", Some(loopback.publication())).await;
+    let a = rig.provider("a", Some(b.publications[RELAY].clone())).await;
+    back_into_a.set(a.publications[ECHO].clone()).unwrap();
+    let outcome = rig.call(&a, RELAY, b"ping").await.unwrap();
+    assert!(is_cycle_refusal(&outcome), "{outcome:?}");
+    // Nothing is left waiting, and the same providers serve once the cycle is gone.
+    assert_eq!(
+        rig.call(&a, ECHO, b"again").await.unwrap(),
+        Ok(b"echo:again".to_vec())
+    );
+    drop(loopback);
+    rig.finish(vec![a, b]).await;
+}
+
+/// A cycle through a *queued* call. `b` is busy with a call that waits on `a`, and `c`'s call
+/// into `b` queues behind it. `a`'s handler then calls `c` through a node of its own: `c` waits
+/// on `b` (queued), `b` on `a`, `a` on that node, so the node's call into `c` closes a cycle
+/// even though no call along it is running yet. It is refused, and so is the queued call when
+/// it later runs into the same shape.
+pub async fn cycle_through_queued_call_is_refused<E: Incarnations>(engine: E) {
+    let rig = Rig::new(engine);
+    let into_c = Arc::new(OnceLock::new());
+    let (entered, release) = (
+        Arc::new(tokio::sync::Semaphore::new(0)),
+        Arc::new(tokio::sync::Semaphore::new(0)),
+    );
+    let late = rig.loopback(
+        "late",
+        &into_c,
+        Some((Arc::clone(&entered), Arc::clone(&release))),
+    );
+    let a = rig.provider("a", Some(late.publication())).await;
+    let b = rig.provider("b", Some(a.publications[RELAY].clone())).await;
+    let c = rig.provider("c", Some(b.publications[RELAY].clone())).await;
+    into_c.set(c.publications[RELAY].clone()).unwrap();
+    // b's call is running and has reached `late`, held at its gate.
+    let running = rig.call(&b, RELAY, b"running");
+    entered.acquire().await.unwrap().forget();
+    // c's call runs, and its call into b queues behind b's.
+    let queued = rig.call(&c, RELAY, b"queued");
+    while !rig.host.waits_on(&c.instance, &b.instance) {
+        tokio::task::yield_now().await;
+    }
+    // Releasing `late` makes it call c; both outer calls end in the refusal.
+    release.add_permits(2);
+    let running = running.await.unwrap();
+    assert!(is_cycle_refusal(&running), "{running:?}");
+    let queued = queued.await.unwrap();
+    assert!(is_cycle_refusal(&queued), "{queued:?}");
+    drop(late);
+    rig.finish(vec![a, b, c]).await;
+}
+
+/// Closing a provider while a call is in flight and another is queued revokes both callers.
+/// The guest's own `close` cannot run beside its suspended call, so the engine skips it and the
+/// host teardown that follows does not depend on it (ADR 024 §6).
+pub async fn close_revokes_calls_in_flight<E: Incarnations>(engine: E) {
+    let rig = Rig::new(engine);
+    let (gate, entered, _release) = rig.gate();
+    let provider = rig.provider("provider", Some(gate.publication())).await;
+    let running = rig.call(&provider, RELAY, b"running");
+    entered.acquire().await.unwrap().forget();
+    let queued = rig.call(&provider, RELAY, b"queued");
+    let Started {
+        instance, runtime, ..
+    } = provider;
+    let (closed, _residue) = E::close(runtime).await;
+    assert_eq!(closed.unwrap(), GuestClose::Skipped);
+    rig.host.close_instance(&instance).unwrap();
+    assert_eq!(rig.host.lifecycle(&instance), Lifecycle::Closed);
+    for call in [running, queued] {
+        assert_eq!(
+            call.await.unwrap(),
+            Err(CallError::Capability(CapabilityFailure::Revoked))
+        );
+    }
+    assert_eq!(
+        entered.available_permits(),
+        0,
+        "the queued call never started"
+    );
+    drop(gate);
+    rig.finish(Vec::new()).await;
 }
 
 /// A guest that returns a publication its manifest does not declare, or declares as another
@@ -545,7 +922,7 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
             .unwrap();
         assert!(closing.transactions.is_empty());
         let (closed, residue) = E::close(runtime).await;
-        closed.unwrap();
+        assert_eq!(closed.unwrap(), GuestClose::Completed);
         assert_eq!(residue, GuestResidue::NONE);
         drop(driver);
         assert_eq!(registrations.snapshot().len(), 6);
@@ -849,7 +1226,12 @@ impl<E: Incarnations> Root for FixtureRoot<E> {
                 "{identity} still held guest resources after its close"
             );
             shared.log.borrow_mut().push(format!("close {identity}"));
-            closed
+            assert_eq!(
+                closed?,
+                GuestClose::Completed,
+                "{identity} had no call in flight"
+            );
+            Ok(())
         })
     }
 }
