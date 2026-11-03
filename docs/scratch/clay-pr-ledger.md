@@ -351,3 +351,13 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   fork's own nix lint/test lanes not yet run on 7604dc8; the guest cancel path is unexercised by host
   tests (no engine can cancel a guest task from the host).
 - C9b (consumer migration, WIT stamps/basis, prefix grants, MDK default) running on `c9a-causal-map`.
+
+## Tombstones replicate as rows (decided 2026-11-04)
+
+- Operator: tombstones carry their stamp like any row. The registration projection value is
+  `Stamped<Option<V>>`; a winning tombstone publishes an Upsert of `None`, so snapshots and pages carry
+  it. `Remove` only when a key has no candidates left. The MDK replica keeps tombstone stamps (hidden
+  from app reads) and defaults `based_on` to them, so re-creating after an observed delete wins.
+- Kept per-key Lamport stamps. The operator notes a per-collection counter or the feed-position basis
+  (option b) resembles big_sync core's keyed frontiers; expect these abstractions to collapse into one
+  implementation later. Tombstone GC deferred (scope death retracts; permanent tombstones accumulate).
