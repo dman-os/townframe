@@ -40,11 +40,9 @@ decided, what is running, what is open. Update it whenever a checkpoint lands or
 | C3b | WIT reshape + Wasmtime adapter + lifecycle fixture (call + presentation publications, lazy consumer); owned `ContractIdentity` + per-call contract; drain queued activations when `drive` drops | committed `27a07a83` (123/123; 6 wcmp_wasmi tests stubbed until C3c) |
 | C3d | Calls as store tasks (lock per burst); serialized per incarnation; waits-for graph refuses cycles (`call-cycle`); forced close mid-call skips guest close | committed `9e87066b` (129/129, 20x loop clean). Fallback baseline; superseded by C3e if the stream spike passes |
 | C3e-spike | Prove `serve(inbox: stream<request{publication,payload,responder}>)` on Wasmtime + WCMP: concurrency, sync entry, nested await, drain-on-close | committed `44bbacd2`: all 5 points pass on Wasmtime + WCMP(wasmi), no fork changes |
-| C3e | Replace per-call `call` export + `instance-root.close()` with the serve inbox; MDK owns the loop; drop serialization (keep waits-for graph only if still needed) | agent running (fresh), Wasmtime only; ADR 024 §7a committed `329eb271` |
-| C3f | WCMP fork: store-task `spawn` (Wasmtime-like JoinHandle), branch `store-spawn` on dman-os | agent running in `../wasm-component-model-polyfill` (operator authorized fork changes 2026-11-04) |
-| C3c | Repin WCMP to `store-spawn` + port onto the C3e model | after C3e and C3f |
-| C8 | ADR 017 §9 host materializer: explicit merge policy over registration scopes, recomputed in the same transaction when a scope closes | committed (123/123 incl. 5-policy proptest model check) |
-| C8b | Follow-up: one Materializer-taking constructor (drop `with_source` shorthand), `create_scope(Option<ScopeRank>)` instead of `create_ranked_*`, persist host write order so durable LWW survives restart, rank/collision checks before taking the lock (no poisoning); update clay_guest_session call sites; byte-waist Group merge encoder (CBOR array of [scope, value] + attachments) | after C3e |
+| C3e | Replace per-call `call` export + `instance-root.close()` with the serve inbox; MDK owns the loop; drop serialization (keep waits-for graph only if still needed) | committed `e1044a06` (243/243 host+session+wasmtime+collection; call/close conformance 20x clean) |
+| C3f | WCMP fork: store-task `spawn` (Wasmtime-like JoinHandle), branch `store-spawn` on dman-os | pushed `dman-os/store-spawn` @ `2a3de028` (7 new fork tests; fork Nix lanes broken by pre-existing wasm-bindgen 0.2.127 hash gap) |
+| C3c | Repin WCMP to `store-spawn` + port onto the C3e model; check WCMP host-task starvation under guest `thread.yield` | agent running (fresh) |
 | C4a | `clay_store`: `OrderedStore` trait (get / scan_prefix / atomic `apply(Vec<BatchOp>)`), `MemoryStore`, `SqliteStore` (sqlite_rs, one `clay_store_entry` table), `IndexedDbStore` (compile-only) | committed `bc52dd23` (17/17, clippy native+wasm clean) |
 | C4b | Durable backing in `clay_collection`: scope id = Incarnation(counter) or Installation(durable key); async durable constructor loads before existing; privileged whole-scope `install`/`uninstall` (persist first, then project); incarnation scopes never persisted | committed `d67ff053` (128/128 clay_collection+clay_store; verified by me, agent report lost) |
 | C4c | IndexedDB exercised in a browser (dayframe_web e2e: install, reload, rows present) | after C2b (needs a building web shell) |
@@ -223,3 +221,24 @@ wit-bindgen-spawned work is scoped to its export task, so GUI and background wor
 task anyway. Per-call exports may be added back once the wasip3 TLS gap is fixed upstream. The MDK
 hides the loop (authors write `async fn` handlers). Costs we own: per-request cancellation signal,
 backpressure, and per-call attribution. Risk to retire first: `stream<T>` support on the WCMP polyfill.
+
+## 2026-11-04: materializer reverted; collection model under discussion
+- C8 (merge policies inside `RegistrationCollection`) was reverted in `e9817a3b`. Collections are plain maps;
+  union/priority/group are N collections or reader-side queries. See memory `collections-are-plain-maps`.
+- Proposed model (operator discussing): a retractable LWW map. Each live scope holds its latest write per
+  key; readers see the highest host-sequence write among live scopes; scope close reveals the next. The host's
+  global order supplies the causal order (observed context = one sequence number). Values are written whole,
+  and structure goes in keys.
+- Operator: no per-key "withdraw contribution" for guests yet, so `remove` asserts absence.
+- Open: two retention classes ("survives the writer" and "goes with the writer"), orthogonal to durability.
+  Does the collection owner or the consumer decide?
+
+## C3e provisional decisions (operator has not ruled)
+In-flight limit 256 per incarnation (overridable via `InitialContext`); a cancelled handler's future is dropped
+(no cancel token); orderly close waits for handlers without bound; a forced close with requests in flight
+abandons `serve`; a guest trap during `serve` means callers see `Revoked`.
+
+## TLS hook finding (2026-11-04, under investigation)
+`clay_mdk/lib.rs` overrides `__wasilibc_task_hook` so every CM task shares one TLS block. This may be the
+real cause of the "one suspended async export" abort that ADR 024 §7a attributes to wasi-libc. An agent is
+verifying with a hook-free guest. Do not rely on the §7a TLS rationale until it reports.
