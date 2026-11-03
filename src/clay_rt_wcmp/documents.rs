@@ -28,7 +28,6 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use wcmp::Resource;
-use wcmp::ResourceAny;
 
 pub(super) fn deliver(
     incarnation: &Rc<RefCell<Option<WcmpIncarnation>>>,
@@ -70,12 +69,11 @@ pub(super) fn deliver(
 }
 
 /// Grant `context` into the guest's resource table, run `micro-lifecycle.initialize`, and take
-/// over what it answered: the guest's `instance-root` and the publication lease of every
-/// returned publication, keyed by name and admitted against what the manifest declares.
+/// over what it answered: the publication lease of every returned publication, keyed by name and admitted against what the manifest declares.
 pub(super) async fn initialize(
     active: &mut WcmpIncarnation,
     context: InitialContext,
-) -> Result<(ResourceAny, BTreeMap<String, PublishedCapability>), ActivationError> {
+) -> Result<BTreeMap<String, PublishedCapability>, ActivationError> {
     let InitialContext {
         arguments,
         configs,
@@ -83,6 +81,7 @@ pub(super) async fn initialize(
         registrations,
         requirements,
         publications: declared,
+        in_flight_requests: _,
     } = context;
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {
@@ -197,7 +196,7 @@ pub(super) async fn initialize(
         .collect::<Vec<_>>();
     let publications =
         admit_publications(&declared, returned).map_err(ActivationError::Initialization)?;
-    Ok((initialized.root, publications))
+    Ok(publications)
 }
 
 fn access_error(error: AccessError) -> wit::DocumentError {
