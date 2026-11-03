@@ -62,8 +62,6 @@ thread_local! {
 struct CollectionProbe;
 
 impl micro_lifecycle::Guest for CollectionProbe {
-    type InstanceRoot = clay_mdk::StatelessRoot;
-
     async fn initialize(
         context: micro_lifecycle::InitialContext,
     ) -> Result<micro_lifecycle::Initialized, micro_lifecycle::InitializationError> {
@@ -139,15 +137,20 @@ impl micro_lifecycle::Guest for CollectionProbe {
         STATE.with_borrow_mut(|slot| {
             assert!(slot.replace(state.clone()).is_none());
         });
-        wit_bindgen::spawn_local(read_loop(state));
         Ok(micro_lifecycle::Initialized {
-            root: micro_lifecycle::InstanceRoot::new(clay_mdk::StatelessRoot),
             publications: Vec::new(),
         })
     }
 
-    async fn call(publication: String, _request: Vec<u8>) -> Result<Vec<u8>, String> {
-        Err(format!("collection probe serves no call {publication:?}"))
+    /// The probe's long-lived background work, its collection read loop, runs inside the
+    /// incarnation's one `serve` task (ADR 024 §7a), beside the (empty) request loop.
+    async fn serve(inbox: clay_mdk::serve::Inbox) {
+        let state = with_state(|state| Rc::clone(state));
+        let requests = clay_mdk::serve::run(inbox, |publication, _payload| {
+            let message = format!("collection probe serves no call {publication:?}");
+            Box::pin(async move { Err(message) })
+        });
+        futures::future::join(requests, read_loop(state)).await;
     }
 }
 
@@ -382,7 +385,6 @@ fn cap_failure(error: capability_bank::CapabilityError) -> &'static str {
         capability_bank::CapabilityError::Revoked => "revoked",
         capability_bank::CapabilityError::LimitExceeded => "limit-exceeded",
         capability_bank::CapabilityError::Unavailable => "unavailable",
-        capability_bank::CapabilityError::CallCycle => "call-cycle",
     }
 }
 

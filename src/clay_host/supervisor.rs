@@ -86,10 +86,22 @@ pub struct Initialized<P> {
     pub publications: BTreeMap<String, P>,
 }
 
+/// Why an incarnation is closing, which decides whether its guest may be made to wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseMode {
+    /// The incarnation lost its last retention. Nothing external waits on it, so the guest is
+    /// given the time to drain its in-flight handlers and finish its cleanup (ADR 024 §6).
+    Orderly,
+    /// A disable or shutdown. Callers still waiting on the incarnation must not keep the host
+    /// waiting, so an engine abandons the guest's main loop rather than drain a handler that
+    /// has callers; host teardown does not depend on the guest finishing.
+    Forced,
+}
+
 /// Proof of a successful initialization, held by the supervisor for the incarnation.
 pub trait Root {
     /// Called exactly once, before teardown, while the incarnation's dependencies are live.
-    fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>>;
+    fn close(self: Box<Self>, mode: CloseMode) -> LocalFuture<'static, Result<(), String>>;
 }
 
 pub struct ConfiguredMicro<P> {
@@ -383,7 +395,7 @@ impl<P: Clone + 'static> Supervisor<P> {
 
     async fn close_if_idle(&self, micro: MicroId) {
         let idle = self.inner.borrow().nodes[&micro].is_idle(&self.host);
-        if idle && let Err(CloseError(_)) = self.close(micro).await {
+        if idle && let Err(CloseError(_)) = self.close(micro, CloseMode::Orderly).await {
             // `close` already recorded each failure as `Faulted` on the micro it concerns,
             // which is where it is observed; nothing is lost by carrying on.
         }
@@ -542,7 +554,7 @@ impl<P: Clone + 'static> Supervisor<P> {
     /// Close `identity` and keep it closed until [`Self::enable`]. Dependents close first; the
     /// providers it alone held are released afterwards.
     pub async fn disable(&self, identity: &MicroId) -> Result<(), CloseError> {
-        let result = self.close(identity.clone()).await;
+        let result = self.close(identity.clone(), CloseMode::Forced).await;
         if !matches!(self.state(identity), MicroState::Faulted(_)) {
             self.set(identity, NodeState::Disabled);
         }
@@ -579,7 +591,7 @@ impl<P: Clone + 'static> Supervisor<P> {
             .collect::<Vec<_>>();
         let mut failures = CloseError::default();
         for identity in live {
-            if let Err(error) = self.close(identity).await {
+            if let Err(error) = self.close(identity, CloseMode::Forced).await {
                 failures.0.extend(error.0);
             }
         }
@@ -653,7 +665,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         })
     }
 
-    fn close(&self, identity: MicroId) -> LocalFuture<'_, Result<(), CloseError>> {
+    fn close(&self, identity: MicroId, mode: CloseMode) -> LocalFuture<'_, Result<(), CloseError>> {
         Box::pin(async move {
             let state = {
                 let mut inner = self.inner.borrow_mut();
@@ -706,12 +718,12 @@ impl<P: Clone + 'static> Supervisor<P> {
                 .map(|(dependent, _)| dependent.clone())
                 .collect::<Vec<_>>();
             for dependent in dependents {
-                if let Err(error) = self.close(dependent).await {
+                if let Err(error) = self.close(dependent, mode).await {
                     failures.0.extend(error.0);
                 }
             }
             let closed = if self.host.begin_close(&instance).unwrap() {
-                root.close().await
+                root.close(mode).await
             } else {
                 drop(root);
                 Ok(())
@@ -740,7 +752,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         let mut failures = CloseError::default();
         for provider in providers {
             let unneeded = self.inner.borrow().nodes[&provider].is_idle(&self.host);
-            if unneeded && let Err(error) = self.close(provider).await {
+            if unneeded && let Err(error) = self.close(provider, CloseMode::Orderly).await {
                 failures.0.extend(error.0);
             }
         }

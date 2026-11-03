@@ -27,17 +27,24 @@ pub mod collections;
 #[cfg(feature = "test-utils")]
 pub mod lifecycle_conformance;
 pub mod presentation;
-/// What an engine's guest-half close did.
+/// Which path an engine's guest-half close took (ADR 024 §6).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuestClose {
-    /// The guest's `instance-root.close` ran to completion.
-    Completed,
-    /// A call was still in flight. The guest runtime keeps one async export task per instance
-    /// and cannot start `instance-root.close` beside a suspended one, so the guest close was
-    /// skipped: the in-flight call is cancelled and every queued call revoked, and host RAII
-    /// (publications, then scopes) carries the teardown (ADR 024 §6).
-    Skipped,
+    /// The inbox was closed and the guest's `serve` returned: every in-flight handler finished
+    /// (or was cancelled by the guest) and the guest's own cleanup ran.
+    Drained,
+    /// [`clay_host::CloseMode::Forced`] with requests still in flight: `serve` was abandoned
+    /// without waiting. Every caller still waiting, in flight or queued, is answered
+    /// `Revoked`; host RAII (publications, then scopes) carries the teardown and the guest's
+    /// own cleanup did not run.
+    Abandoned,
 }
+
+/// How many requests one incarnation serves at once unless its [`InitialContext`] says
+/// otherwise. A request is in flight from the moment its caller is admitted until its handler
+/// answers or drops its responder; a call that would exceed the bound is refused with
+/// `limit-exceeded` instead of queueing without limit.
+pub const DEFAULT_IN_FLIGHT_REQUESTS: usize = 256;
 
 pub use presentation::Placement;
 pub use presentation::PresentationHost;
@@ -65,6 +72,9 @@ pub struct InitialContext {
     /// The publications the package's manifest declares, by name. What `initialize` returns is
     /// admitted against this (see [`capabilities::admit_publications`]).
     pub publications: BTreeMap<String, capabilities::DeclaredPublication>,
+    /// The bound on requests in flight in this incarnation; `None` is
+    /// [`DEFAULT_IN_FLIGHT_REQUESTS`].
+    pub in_flight_requests: Option<usize>,
 }
 
 /// A guest's own refusal to initialize, as opposed to a trap.

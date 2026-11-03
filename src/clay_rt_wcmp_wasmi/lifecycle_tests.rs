@@ -6,6 +6,8 @@ use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
+use clay_guest_session::lifecycle_conformance::Mounted;
+use clay_host::CloseMode;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_host::LocalFuture;
@@ -52,16 +54,15 @@ impl Incarnations for Wasmi {
         runtime.publications()
     }
 
-    fn mount(runtime: &WcmpRuntime, publication: &str) -> Result<Box<dyn std::any::Any>, String> {
+    fn mount(runtime: &WcmpRuntime, publication: &str) -> Result<Mounted, String> {
         let sink = Arc::new(RecordingSink::new());
         let session = runtime
             .mount(publication, Arc::clone(&sink) as _, &[])
             .map_err(|error| format!("{error:?}"))?;
-        let rendered = sink.tree(SurfaceTree::text_content);
-        if rendered != "lifecycle provider" {
-            return Err(format!("the guest rendered {rendered:?}"));
-        }
-        Ok(Box::new(session))
+        Ok(Mounted {
+            session: Box::new(session),
+            rendered: sink.tree(SurfaceTree::text_content),
+        })
     }
 
     fn inspect(runtime: &WcmpRuntime) -> GuestResidue {
@@ -76,18 +77,18 @@ impl Incarnations for Wasmi {
 
     fn close(
         runtime: WcmpRuntime,
+        mode: CloseMode,
     ) -> LocalFuture<'static, (Result<GuestClose, String>, GuestResidue)> {
         Box::pin(async move {
-            // The WCMP engine does not serialize or skip yet (C3c): its close always runs.
-            let (closed, residue) = close_inspecting(&runtime, |state| {
+            // C3c: the WCMP engine cannot close yet (no `serve`), so this reaches its `todo!`.
+            close_inspecting(&runtime, mode, |state| {
                 GuestResidue::of(
                     state.table.is_empty(),
                     &state.capabilities,
                     &state.collections,
                 )
             })
-            .await;
-            (closed.map(|()| GuestClose::Completed), residue)
+            .await
         })
     }
 }

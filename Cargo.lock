@@ -2636,20 +2636,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clay_inbox_spike"
-version = "0.1.0"
-dependencies = [
- "clay_rt_wcmp",
- "futures",
- "tokio",
- "wash-runtime",
- "wasmtime-wasi",
- "wcmp 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94)",
- "wcmp-wasm-core-wasmi",
- "wit-bindgen 0.62.0",
-]
-
-[[package]]
 name = "clay_mdk"
 version = "0.1.0"
 dependencies = [
@@ -2668,6 +2654,7 @@ dependencies = [
  "dioxus-core",
  "dioxus-html",
  "dioxus-native-dom",
+ "futures",
  "insta",
  "serde",
  "serde_json",
@@ -9240,6 +9227,7 @@ dependencies = [
  "clay_collection",
  "clay_mdk",
  "dioxus-core",
+ "futures",
  "serde",
  "wit-bindgen 0.62.0",
 ]

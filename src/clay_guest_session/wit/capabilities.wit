@@ -15,9 +15,6 @@ interface capability-bank {
         limit-exceeded,
         /// A lazy reference's provider could not be activated or does not publish the name.
         unavailable,
-        /// A call would wait on an incarnation that already waits on the caller. An
-        /// incarnation serves one call at a time, so such a call can never be answered.
-        call-cycle,
     }
 
     /// Why a call failed: the reference was unusable, or the provider's handler rejected it.
@@ -70,7 +67,7 @@ interface capability-bank {
     /// Publish a presentation named `name`; the host serves it through `mount`.
     publish-presentation: func(name: string) -> result<published-capability, capability-error>;
 
-    /// Publish a call named `name` under `contract`; the host serves it through the exported
-    /// `micro-lifecycle.call`.
+    /// Publish a call named `name` under `contract`; the host routes its requests into the
+    /// incarnation's `micro-lifecycle.serve` inbox with `request.publication` set to `name`.
     publish-call: func(name: string, contract: contract) -> result<published-capability, capability-error>;
 }

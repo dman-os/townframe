@@ -46,6 +46,8 @@ struct Script {
     withhold: BTreeSet<String>,
     gates: BTreeMap<String, Rc<Notify>>,
     close_gates: BTreeMap<String, Rc<Notify>>,
+    /// The mode each micro was closed with, in close order.
+    modes: Vec<(String, CloseMode)>,
 }
 
 struct Fake {
@@ -86,6 +88,10 @@ impl Controls {
             .close_gates
             .insert(name.to_owned(), Rc::clone(&gate));
         gate
+    }
+
+    fn modes(&self) -> Vec<(String, CloseMode)> {
+        self.0.borrow().modes.clone()
     }
 
     fn drops(&self) -> Vec<String> {
@@ -159,8 +165,13 @@ impl Factory<Provision> for Fake {
 }
 
 impl Root for FakeRoot {
-    fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
+    fn close(self: Box<Self>, mode: CloseMode) -> LocalFuture<'static, Result<(), String>> {
         Box::pin(async move {
+            self.controls
+                .0
+                .borrow_mut()
+                .modes
+                .push((self.name.clone(), mode));
             assert_eq!(self.host.lifecycle(&self.instance), Lifecycle::Closing);
             let gate = self
                 .controls
@@ -287,6 +298,38 @@ async fn dropping_the_last_lease_closes_the_micro_exactly_once() {
     assert_eq!(controls.log(), ["init solo", "close solo"]);
     assert_eq!(controls.drops(), ["drop solo while Closing"]);
     assert_quiescent(&host);
+}
+
+/// Losing the last retention closes a micro `Orderly`: nothing waits on it. A disable closes it
+/// `Forced`, and the dependents it closes first inherit that mode.
+#[tokio::test]
+async fn close_mode_follows_why_the_micro_closes() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("idle"),
+            controls.micro("provider"),
+            requires(controls.micro("consumer"), "presentation", "provider"),
+        ],
+    );
+    let (idle, provider, consumer) = (id("idle"), id("provider"), id("consumer"));
+    driven(&supervisor, async {
+        drop(supervisor.acquire(&idle, PRESENTATION).await.unwrap());
+        settle(|| supervisor.state(&idle) == MicroState::Idle).await;
+        supervisor.start(&consumer).await.unwrap();
+        supervisor.disable(&provider).await.unwrap();
+    })
+    .await;
+    assert_eq!(
+        controls.modes(),
+        [
+            ("idle".to_owned(), CloseMode::Orderly),
+            ("consumer".to_owned(), CloseMode::Forced),
+            ("provider".to_owned(), CloseMode::Forced),
+        ]
+    );
 }
 
 #[tokio::test]

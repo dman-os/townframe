@@ -32,7 +32,7 @@ pub enum Lifecycle {
     Initializing,
     Active,
     /// Outward visibility has been withdrawn; the incarnation's own authority and its
-    /// dependencies stay usable so cleanup (`instance-root.close()`) can run.
+    /// dependencies stay usable so cleanup (the guest draining its `serve` inbox) can run.
     Closing,
     Closed,
 }
@@ -54,8 +54,6 @@ pub struct RootMount {
 #[derive(Clone)]
 pub struct Host {
     pub(crate) inner: Arc<Mutex<State>>,
-    /// The waits-for graph of in-flight calls between this host's incarnations.
-    pub(crate) calls: Arc<crate::call_graph::CallGraph>,
     identity: u64,
 }
 
@@ -183,7 +181,6 @@ impl Host {
     pub fn new() -> Self {
         Self {
             identity: NEXT_HOST.fetch_add(1, Ordering::Relaxed),
-            calls: Arc::default(),
             inner: Arc::new(Mutex::new(State {
                 next: 0,
                 instances: BTreeMap::new(),
