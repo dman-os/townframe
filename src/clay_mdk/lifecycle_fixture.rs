@@ -14,6 +14,8 @@
 
 use clay_mdk::bindings;
 use clay_mdk::capability_bank;
+use clay_mdk::collection_registration;
+use clay_mdk::collections;
 use clay_mdk::document_events;
 use clay_mdk::documents;
 use clay_mdk::micro_lifecycle;
@@ -110,6 +112,18 @@ impl micro_lifecycle::Guest for Lifecycle {
                     provisions: Vec::new(),
                 }
             }
+            "registrations" | "failing-registrations" => {
+                register(context.registrations).await;
+                if role == "failing-registrations" {
+                    return Err(InitializationError::Rejected(
+                        "registration fixture rejects its initialization".into(),
+                    ));
+                }
+                micro_lifecycle::Initialized {
+                    root: micro_lifecycle::InstanceRoot::new(Root::Provider),
+                    provisions: Vec::new(),
+                }
+            }
             other => {
                 return Err(InitializationError::InvalidConfiguration(format!(
                     "unknown lifecycle fixture role {other:?}"
@@ -119,6 +133,64 @@ impl micro_lifecycle::Guest for Lifecycle {
         ROLE.with_borrow_mut(|slot| assert!(slot.replace(role).is_none()));
         Ok(initialized)
     }
+}
+
+async fn register(bindings: Vec<collection_registration::RegistrationBinding>) {
+    let [first, second]: [_; 2] = bindings.try_into().unwrap();
+    assert_eq!((&*first.name, &*second.name), ("a", "b"));
+    let (first, second) = (first.writer, second.writer);
+    let value = |text: &str| {
+        let mut body = Vec::new();
+        ciborium::into_writer(text, &mut body).unwrap();
+        collections::EncodedValue {
+            body,
+            capabilities: Vec::new(),
+        }
+    };
+    let first_x = first
+        .put(b"x".to_vec(), None, value("a-x"))
+        .await
+        .unwrap()
+        .row_version;
+    let first_y = first
+        .put(b"y".to_vec(), None, value("a-y"))
+        .await
+        .unwrap()
+        .row_version;
+    let second_x = second
+        .put(b"x".to_vec(), None, value("b-x"))
+        .await
+        .unwrap()
+        .row_version;
+    assert!(matches!(
+        second.put(b"x".to_vec(), Some(first_x), value("stolen")).await,
+        Err(collection_registration::MutationError::Conflict(Some(current)))
+            if current == second_x
+    ));
+    assert!(matches!(
+        second.remove(b"y".to_vec(), Some(first_y)).await,
+        Err(collection_registration::MutationError::Conflict(None))
+    ));
+    assert!(second.remove(b"y".to_vec(), None).await.unwrap().is_none());
+    assert!(
+        first
+            .remove(b"y".to_vec(), Some(first_y))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    first.put(b"y".to_vec(), None, value("a-y")).await.unwrap();
+    first.clear().await.unwrap();
+    first.clear().await.unwrap();
+    assert!(matches!(
+        first
+            .put(b"x".to_vec(), Some(first_x), value("stale"))
+            .await,
+        Err(collection_registration::MutationError::Conflict(None))
+    ));
+    first.put(b"x".to_vec(), None, value("a-x")).await.unwrap();
+    first.put(b"y".to_vec(), None, value("a-y")).await.unwrap();
+    drop((first, second));
 }
 
 fn publish() -> Result<capability_bank::PublishedCapability, InitializationError> {

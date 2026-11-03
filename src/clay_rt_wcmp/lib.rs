@@ -817,6 +817,20 @@ pub mod test_utils {
         (closed, inspect(active.store.data()))
     }
 
+    pub fn inspect<R>(
+        runtime: &crate::WcmpRuntime,
+        inspect: impl FnOnce(&WcmpStoreState) -> R,
+    ) -> R {
+        let active = runtime.incarnation.borrow();
+        inspect(
+            active
+                .as_ref()
+                .expect("only a live incarnation is inspected")
+                .store
+                .data(),
+        )
+    }
+
     pub fn resolve_component(
         table: &wcmp::ResourceTable,
         reference: &wcmp::Resource<crate::WcmpComponentRef>,

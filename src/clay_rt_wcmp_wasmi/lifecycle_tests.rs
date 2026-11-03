@@ -47,14 +47,46 @@ impl Incarnations for Wasmi {
         runtime.provision(contract)
     }
 
+    fn inspect(runtime: &WcmpRuntime) -> GuestResidue {
+        clay_rt_wcmp::test_utils::inspect(runtime, |state| {
+            GuestResidue::of(
+                state.table.is_empty(),
+                &state.capabilities,
+                &state.collections,
+            )
+        })
+    }
+
     fn close(runtime: WcmpRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
         Box::pin(async move {
             close_inspecting(&runtime, |state| {
-                GuestResidue::of(state.table.is_empty(), &state.capabilities)
+                GuestResidue::of(
+                    state.table.is_empty(),
+                    &state.capabilities,
+                    &state.collections,
+                )
             })
             .await
         })
     }
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_registration_scope_ownership() {
+    let engine = Wasmi::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::registration_scope_ownership(engine))
+        .await;
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_failed_registration_initialization() {
+    let engine = Wasmi::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(
+            lifecycle_conformance::failed_registration_initialization_publishes_nothing(engine),
+        )
+        .await;
 }
 
 #[tokio::test]
