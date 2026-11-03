@@ -261,3 +261,22 @@ verifying with a hook-free guest. Do not rely on the §7a TLS rationale until it
 - Untested: WCMP / browser JSPI keeping slot 0 per task; cancelled parked tasks leaking TaskState.
   The symbol names embed the wit-bindgen version, so add a guardrail that `std` stays off on guest targets.
 - C3c partial work (repin + inbox port) is uncommitted in the tree; the inbox part is now moot.
+
+## Collection write semantics: operator correction (2026-11-04)
+- Not CAS. Every write carries what it was based on (its Lamport timestamp) and is **always accepted**.
+  Per key, the winning write has the highest Lamport timestamp: a write that observed another wins over it
+  regardless of arrival order. Equal timestamps (concurrent writes) use a deterministic tie-break. CAS may be
+  offered as an opt-in on top.
+- Retraction: a dead scope's writes leave the candidate set, and the winner is recomputed by (timestamp,
+  tie-break) over the rest.
+- "Plain map" was an over-simplification: a collection has one fixed causal merge semantics, with no
+  pluggable policies.
+- Open: what timestamp a write with no `based_on` gets. Proposed: the MDK fills it from the writer's
+  replica of that key.
+
+## Blocker hunt (2026-11-04, running)
+Two isolated investigations, both in scratch crates outside the repo:
+1. Wasmtime: real Dioxus under overlapping async exports, cancellation, background work after return and
+   cooperative threads, reentrancy, close with calls in flight, backpressure.
+2. WCMP wasmi + browser JSPI: context slot 0 per task, overlap, starvation, cancellation.
+Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
