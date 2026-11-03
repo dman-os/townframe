@@ -510,7 +510,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "wasm-bindgen-futures",
- "wcmp 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94)",
+ "wcmp",
  "web-sys",
 ]
 
@@ -519,7 +519,7 @@ name = "clay_rt_wcmp_web"
 version = "0.1.0"
 dependencies = [
  "clay_rt_wcmp",
- "wcmp 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60)",
+ "wcmp",
  "wcmp-wasm-core-web",
 ]
 
@@ -4380,7 +4380,7 @@ dependencies = [
 [[package]]
 name = "wcmp"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60#687e486c3bbf4c265f7edb5bc13e6c9c91ccee60"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=2a3de0287bc7464882d8f77007161b0e1cd04b0e#2a3de0287bc7464882d8f77007161b0e1cd04b0e"
 dependencies = [
  "anyhow",
  "js-sys",
@@ -4391,47 +4391,15 @@ dependencies = [
  "wasm-bindgen",
  "wasm-encoder 0.261.0",
  "wasmtime-environ",
- "wcmp-bindgen 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60)",
- "wcmp-macros 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60)",
- "wcmp-wasm-core 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60)",
-]
-
-[[package]]
-name = "wcmp"
-version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94#868eaa0645aae5fdda1dba17f6d0eabba4b3de94"
-dependencies = [
- "anyhow",
- "js-sys",
- "semver",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "wasm-bindgen",
- "wasm-encoder 0.261.0",
- "wasmtime-environ",
- "wcmp-bindgen 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94)",
- "wcmp-macros 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94)",
- "wcmp-wasm-core 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94)",
+ "wcmp-bindgen",
+ "wcmp-macros",
+ "wcmp-wasm-core",
 ]
 
 [[package]]
 name = "wcmp-bindgen"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60#687e486c3bbf4c265f7edb5bc13e6c9c91ccee60"
-dependencies = [
- "anyhow",
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "wit-parser 0.261.0",
-]
-
-[[package]]
-name = "wcmp-bindgen"
-version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94#868eaa0645aae5fdda1dba17f6d0eabba4b3de94"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=2a3de0287bc7464882d8f77007161b0e1cd04b0e#2a3de0287bc7464882d8f77007161b0e1cd04b0e"
 dependencies = [
  "anyhow",
  "heck",
@@ -4444,18 +4412,7 @@ dependencies = [
 [[package]]
 name = "wcmp-macros"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60#687e486c3bbf4c265f7edb5bc13e6c9c91ccee60"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "wat",
-]
-
-[[package]]
-name = "wcmp-macros"
-version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94#868eaa0645aae5fdda1dba17f6d0eabba4b3de94"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=2a3de0287bc7464882d8f77007161b0e1cd04b0e#2a3de0287bc7464882d8f77007161b0e1cd04b0e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4466,18 +4423,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60#687e486c3bbf4c265f7edb5bc13e6c9c91ccee60"
-dependencies = [
- "anyhow",
- "thiserror 2.0.20",
- "tracing",
- "wasmparser 0.261.0",
-]
-
-[[package]]
-name = "wcmp-wasm-core"
-version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=868eaa0645aae5fdda1dba17f6d0eabba4b3de94#868eaa0645aae5fdda1dba17f6d0eabba4b3de94"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=2a3de0287bc7464882d8f77007161b0e1cd04b0e#2a3de0287bc7464882d8f77007161b0e1cd04b0e"
 dependencies = [
  "anyhow",
  "thiserror 2.0.20",
@@ -4488,7 +4434,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core-web"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60#687e486c3bbf4c265f7edb5bc13e6c9c91ccee60"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=2a3de0287bc7464882d8f77007161b0e1cd04b0e#2a3de0287bc7464882d8f77007161b0e1cd04b0e"
 dependencies = [
  "anyhow",
  "js-sys",
@@ -4496,8 +4442,8 @@ dependencies = [
  "wasm-bindgen",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
- "wcmp-macros 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60)",
- "wcmp-wasm-core 0.1.1 (git+https://github.com/dman-os/wasm-component-model-polyfill?rev=687e486c3bbf4c265f7edb5bc13e6c9c91ccee60)",
+ "wcmp-macros",
+ "wcmp-wasm-core",
 ]
 
 [[package]]
