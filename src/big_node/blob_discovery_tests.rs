@@ -401,8 +401,26 @@ async fn invite(owner: &BigNode, reader: &BigNode, root: &DocId, access: Access)
         .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselection() {
+
+struct SelectionFixture {
+    owner: BigNode,
+    owner_stop: StopToken,
+    reader: BigNode,
+    reader_stop: StopToken,
+    reader_secrets: SecretStore,
+    runtime: Arc<SqliteRuntime>,
+    dir: tempfile::TempDir,
+    owner_net: Network,
+    reader_net: Network,
+    connection: big_repo::BigRepoConnection,
+    accepted: big_repo::BigRepoConnection,
+    a: DocId,
+    b: DocId,
+    c: DocId,
+    expected: Vec<(DocId, BlobId)>,
+}
+
+async fn selection_fixture() -> SelectionFixture {
     utils_rs::testing::setup_tracing_once();
     let owner_secrets = secrets().await;
     let reader_secrets = secrets().await;
@@ -421,34 +439,26 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
         &[],
         "_sqlite_rs_migrations",
     );
-    let reader_config = || {
-        let mut cfg = config(
-            &reader_secrets,
-            &runtime,
-            reader_sql.clone(),
-            StorageConfig::Disk {
-                path: dir.path().join("repo"),
-            },
-        );
-        cfg.repo.node_identity_seed = [142; 32];
-        cfg.blob_storage = big_blobs::Storage::Filesystem(dir.path().join("blobs"));
-        cfg
-    };
-    let (reader, reader_stop) = BigNode::boot(reader_config()).await.unwrap();
+    let mut reader_cfg = config(
+        &reader_secrets,
+        &runtime,
+        reader_sql,
+        StorageConfig::Disk {
+            path: dir.path().join("repo"),
+        },
+    );
+    reader_cfg.repo.node_identity_seed = [142; 32];
+    reader_cfg.blob_storage = big_blobs::Storage::Filesystem(dir.path().join("blobs"));
+    let (reader, reader_stop) = BigNode::boot(reader_cfg).await.unwrap();
     let a = collection(&owner, "A").await;
     let b = collection(&owner, "B").await;
     let c = collection(&owner, "C").await;
-    let unrelated = collection(&owner, "unrelated").await;
     child(&owner, &a, &b).await;
     child(&owner, &b, &c).await;
     let mut expected = Vec::new();
     for drawer in [&a, &b, &c] {
         expected.push(populated(&owner, drawer, "ciphertext", MetaRoot::Public).await);
     }
-    let self_digest = self_doc(&owner, &a, &expected[0].0).await;
-    expected.push((expected[0].0.clone(), self_digest));
-    let unused = blobs::inventory(&owner, &b, MetaRoot::Public, "not-selected").await;
-    let hidden = populated(&owner, &unrelated, "ciphertext", MetaRoot::Public).await;
     let owner_net = Network::boot(&owner, 141).await;
     let mut reader_net = Network::boot(&reader, 142).await;
     let (connection, accepted) =
@@ -473,8 +483,111 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
     for (inventory, digest) in &expected {
         verified(&reader, inventory, *digest).await;
     }
+    SelectionFixture {
+        owner,
+        owner_stop,
+        reader,
+        reader_stop,
+        reader_secrets,
+        runtime,
+        dir,
+        owner_net,
+        reader_net,
+        connection,
+        accepted,
+        a,
+        b,
+        c,
+        expected,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselection() {
+    let mut fixture = selection_fixture().await;
+    let d = collection(&fixture.owner, "D").await;
+    let deep = populated(&fixture.owner, &d, "ciphertext", MetaRoot::Public).await;
+    child(&fixture.owner, &fixture.c, &d).await;
+    fixture.connection.sync_keyhive_with_peer().await.unwrap();
+    fixture.accepted.sync_keyhive_with_peer().await.unwrap();
+    wait_bytes(&fixture.reader, &deep.0, deep.1).await;
+    fixture.expected.push(deep);
+    complete(&fixture.reader, &fixture.a).await;
+    for (inventory, digest) in &fixture.expected {
+        verified(&fixture.reader, inventory, *digest).await;
+    }
+
+    let SelectionFixture {
+        owner,
+        owner_stop,
+        reader,
+        reader_stop,
+        reader_secrets,
+        runtime,
+        dir,
+        owner_net,
+        reader_net,
+        connection,
+        accepted,
+        a,
+        expected,
+        ..
+    } = fixture;
+    connection.stop().await.unwrap();
+    accepted.stop().await.unwrap();
+    reader_net.stop().await;
+    shutdown(reader, reader_stop).await;
+    let reader_sql = runtime.database(
+        dir.path().join("reader.sqlite"),
+        &[],
+        "_sqlite_rs_migrations",
+    );
+    let mut reader_cfg = config(
+        &reader_secrets,
+        &runtime,
+        reader_sql,
+        StorageConfig::Disk {
+            path: dir.path().join("repo"),
+        },
+    );
+    reader_cfg.repo.node_identity_seed = [142; 32];
+    reader_cfg.blob_storage = big_blobs::Storage::Filesystem(dir.path().join("blobs"));
+    let (reader, reader_stop) = BigNode::boot(reader_cfg).await.unwrap();
+    let mut reader_net = Network::boot(&reader, 142).await;
+    let (connection, accepted) =
+        Network::link((&owner, &owner_net), (&reader, &mut reader_net)).await;
+    connection.sync_keyhive_with_peer().await.unwrap();
+    accepted.sync_keyhive_with_peer().await.unwrap();
+    complete(&reader, &a).await;
+    for (inventory, digest) in &expected {
+        verified(&reader, inventory, *digest).await;
+    }
+    connection.stop().await.unwrap();
+    accepted.stop().await.unwrap();
+    reader_net.stop().await;
+    owner_net.stop().await;
+    shutdown(reader, reader_stop).await;
+    shutdown(owner, owner_stop).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_inventory_replacement_excludes_unrelated_and_self_doc() {
+    let mut fixture = selection_fixture().await;
+    let unrelated = collection(&fixture.owner, "unrelated").await;
+    let unused = blobs::inventory(&fixture.owner, &fixture.b, MetaRoot::Public, "not-selected").await;
+    let hidden = populated(&fixture.owner, &unrelated, "ciphertext", MetaRoot::Public).await;
+    let self_digest = self_doc(&fixture.owner, &fixture.a, &fixture.expected[0].0).await;
+    fixture.expected.push((fixture.expected[0].0.clone(), self_digest));
+    fixture.connection.sync_keyhive_with_peer().await.unwrap();
+    fixture.accepted.sync_keyhive_with_peer().await.unwrap();
+    wait_bytes(&fixture.reader, &fixture.expected[3].0, self_digest).await;
+    complete(&fixture.reader, &fixture.a).await;
+    for (inventory, digest) in &fixture.expected {
+        verified(&fixture.reader, inventory, *digest).await;
+    }
     assert!(
-        reader
+        fixture
+            .reader
             .blobs
             .service
             .stat(&hidden.1)
@@ -482,19 +595,9 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
             .unwrap()
             .is_none()
     );
-    let d = collection(&owner, "D").await;
-    expected.push(populated(&owner, &d, "ciphertext", MetaRoot::Public).await);
-    child(&owner, &c, &d).await;
-    connection.sync_keyhive_with_peer().await.unwrap();
-    accepted.sync_keyhive_with_peer().await.unwrap();
-    let (inventory, digest) = expected.last().unwrap();
-    wait_bytes(&reader, inventory, *digest).await;
-    complete(&reader, &a).await;
-    for (inventory, digest) in &expected {
-        verified(&reader, inventory, *digest).await;
-    }
     assert_eq!(
-        reader
+        fixture
+            .reader
             .blob_workers
             .parts
             .member_count(big_blobs::workers::inventory_part(&unused))
@@ -502,15 +605,27 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
             .unwrap(),
         0
     );
-    let replacement = populated(&owner, &c, "replacement", MetaRoot::Public).await;
-    replace_slot(&owner, &c, &replacement.0).await;
-    connection.sync_keyhive_with_peer().await.unwrap();
-    accepted.sync_keyhive_with_peer().await.unwrap();
-    wait_bytes(&reader, &replacement.0, replacement.1).await;
-    let old = std::mem::replace(&mut expected[2], replacement);
-    complete(&reader, &a).await;
-    let mut changes = reader.blob_workers.mirrors.subscribe_changes();
-    while reader
+    fixture.connection.stop().await.unwrap();
+    fixture.accepted.stop().await.unwrap();
+    fixture.reader_net.stop().await;
+    fixture.owner_net.stop().await;
+    shutdown(fixture.reader, fixture.reader_stop).await;
+    shutdown(fixture.owner, fixture.owner_stop).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_inventory_replacement_removes_old_inventory() {
+    let mut fixture = selection_fixture().await;
+    let replacement = populated(&fixture.owner, &fixture.c, "replacement", MetaRoot::Public).await;
+    replace_slot(&fixture.owner, &fixture.c, &replacement.0).await;
+    fixture.connection.sync_keyhive_with_peer().await.unwrap();
+    fixture.accepted.sync_keyhive_with_peer().await.unwrap();
+    wait_bytes(&fixture.reader, &replacement.0, replacement.1).await;
+    let old = std::mem::replace(&mut fixture.expected[2], replacement);
+    complete(&fixture.reader, &fixture.a).await;
+    let mut changes = fixture.reader.blob_workers.mirrors.subscribe_changes();
+    while fixture
+        .reader
         .blob_workers
         .parts
         .member_count(big_blobs::workers::inventory_part(&old.0))
@@ -521,35 +636,15 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
         changes.changed().await.unwrap();
     }
     drop(changes);
-    connection.stop().await.unwrap();
-    accepted.stop().await.unwrap();
-    reader_net.stop().await;
-    shutdown(reader, reader_stop).await;
-    let (reader, reader_stop) = BigNode::boot(reader_config()).await.unwrap();
-    let mut reader_net = Network::boot(&reader, 142).await;
-    let (connection, accepted) =
-        Network::link((&owner, &owner_net), (&reader, &mut reader_net)).await;
-    connection.sync_keyhive_with_peer().await.unwrap();
-    accepted.sync_keyhive_with_peer().await.unwrap();
-    complete(&reader, &a).await;
-    for (inventory, digest) in &expected {
-        verified(&reader, inventory, *digest).await;
+    for (inventory, digest) in &fixture.expected {
+        verified(&fixture.reader, inventory, *digest).await;
     }
-    assert!(
-        reader
-            .blobs
-            .service
-            .stat(&hidden.1)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    connection.stop().await.unwrap();
-    accepted.stop().await.unwrap();
-    reader_net.stop().await;
-    owner_net.stop().await;
-    shutdown(reader, reader_stop).await;
-    shutdown(owner, owner_stop).await;
+    fixture.connection.stop().await.unwrap();
+    fixture.accepted.stop().await.unwrap();
+    fixture.reader_net.stop().await;
+    fixture.owner_net.stop().await;
+    shutdown(fixture.reader, fixture.reader_stop).await;
+    shutdown(fixture.owner, fixture.owner_stop).await;
 }
 
 async fn transitive_matrix(access: Access, root: MetaRoot, name: &str) {
