@@ -39,12 +39,12 @@ decided, what is running, what is open. Update it whenever a checkpoint lands or
 | C3a | Host side, no WIT: `Send` activation bridge in `clay_host`; bank refs Bound/Lazy; Call + Presentation publication kinds; in-process tests | committed `a7df27a1` (92/92 host side; 7 engine tests stubbed until C3b/C3c) |
 | C3b | WIT reshape + Wasmtime adapter + lifecycle fixture (call + presentation publications, lazy consumer); owned `ContractIdentity` + per-call contract; drain queued activations when `drive` drops | committed `27a07a83` (123/123; 6 wcmp_wasmi tests stubbed until C3c) |
 | C3d | Calls as store tasks (lock per burst); serialized per incarnation; waits-for graph refuses cycles (`call-cycle`); forced close mid-call skips guest close | committed `9e87066b` (129/129, 20x loop clean). Fallback baseline; superseded by C3e if the stream spike passes |
-| C3e-spike | Prove `serve(inbox: stream<request{publication,payload,responder}>)` on Wasmtime + WCMP: concurrency, sync entry, nested await, drain-on-close | agent running (C3d agent reused) |
-| C3e | Replace per-call `call` export + `instance-root.close()` with the serve inbox; MDK owns the loop; drop serialization (keep waits-for graph only if still needed) | after spike |
-| C3c | WCMP port onto the C3e model | after C3e |
-| C8 | ADR 017 §9 host materializer: explicit merge policy over registration scopes, recomputed in the same transaction when a scope closes | operator agreed 2026-11-04 |
+| C3e-spike | Prove `serve(inbox: stream<request{publication,payload,responder}>)` on Wasmtime + WCMP: concurrency, sync entry, nested await, drain-on-close | committed `44bbacd2`: all 5 points pass on Wasmtime + WCMP(wasmi), no fork changes |
+| C3e | Replace per-call `call` export + `instance-root.close()` with the serve inbox; MDK owns the loop; drop serialization (keep waits-for graph only if still needed) | agent running (fresh), Wasmtime only; ADR 024 §7a committed `329eb271` |
+| C3c | WCMP port onto the C3e model | **blocked on operator**: add `Store::spawn` to dman-os WCMP fork (push + pin bump)? Spike leaked a polled future instead |
+| C8 | ADR 017 §9 host materializer: explicit merge policy over registration scopes, recomputed in the same transaction when a scope closes | agent running (fresh) |
 | C4a | `clay_store`: `OrderedStore` trait (get / scan_prefix / atomic `apply(Vec<BatchOp>)`), `MemoryStore`, `SqliteStore` (sqlite_rs, one `clay_store_entry` table), `IndexedDbStore` (compile-only) | committed `bc52dd23` (17/17, clippy native+wasm clean) |
-| C4b | Durable backing in `clay_collection`: scope id = Incarnation(counter) or Installation(durable key); async durable constructor loads before existing; privileged whole-scope `install`/`uninstall` (persist first, then project); incarnation scopes never persisted | agent running (store agent reused) |
+| C4b | Durable backing in `clay_collection`: scope id = Incarnation(counter) or Installation(durable key); async durable constructor loads before existing; privileged whole-scope `install`/`uninstall` (persist first, then project); incarnation scopes never persisted | committed `d67ff053` (128/128 clay_collection+clay_store; verified by me, agent report lost) |
 | C4c | IndexedDB exercised in a browser (dayframe_web e2e: install, reload, rows present) | after C2b (needs a building web shell) |
 
 **App crates are red** since `3e55cbee` ("narrow collections waist", before this session): it
