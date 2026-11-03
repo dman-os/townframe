@@ -63,6 +63,8 @@ Materialized   host adapter projects node, index, or other service state
 
 The current Rust `Source` trait is only selector admission, row matching, and lease-scoped upstream interest. It is not a storage interface. Implementations will separate selection/interest policy from backing commit and materialization rather than stretching that trait into a persistence abstraction.
 
+Durable backing needs only an ordered key-value store, not SQL. It needs two operations: a prefix scan, to load a collection's rows (or one scope's rows) at bootstrap, and an atomic multi-key batch, to commit or remove a whole registration scope in one transaction. Native hosts implement it over SQLite. The browser host implements it over IndexedDB, whose transactions and key ranges provide the same two operations. Keys order as `(collection, scope, local_key)`, so both a whole collection and a single scope are contiguous ranges. Row values are stored with their schema identity and provenance. The projection assigns fresh row versions on load, so persisted rows carry no cursor or projection state.
+
 ### 3. Shared collection contracts are schema-bound
 
 A collection contract names Lexicons for keys, values, and selectors. A schema may also be used by datums, service requests, service responses, or guest-local query IRs; those roles do not require different schema languages.
@@ -107,59 +109,98 @@ A runtime durable writer is stronger authority because its effects survive that 
 
 This supersedes ADR 017's earlier rule that dropping the `registration-writer` resource itself retracts rows.
 
-### 5. Durable declarations contain logical endpoints, not live resources
+### 5. Publications are the only behavior a row can refer to
 
-A durable row may refer to behavior through a host-authenticated logical endpoint:
+Micros are singletons: a micro id names its package, its configured instance, and the at-most-one live incarnation. Every behavior one micro offers another is a **named publication** of that micro. A publication has exactly one of two kinds. The set is finite and grows additively, like ADR 023's typed bank methods:
+
+```text
+Publication {
+    name,                 // stable within the micro, declared in its manifest
+    kind: Call | Presentation,
+    contract,             // namespace/name/version; for Call, request and response Lexicons
+}
+```
+
+- **Call**: one request/response operation. The contract names the request and response Lexicons. A toolbar button's action is a call whose response is the empty record. A completion query, an event handler, and a "save" command are also calls. The provider serves it through its exported call handler, keyed by publication name. The host never routes calls by contract vocabulary.
+- **Presentation**: a mountable component. The consumer mounts it inside its own surface through `mount-component`. The provider serves it through its exported `mount`, which receives the publication name. One micro may publish any number of presentations; there is no per-micro singleton component.
+
+A "lazy action" is therefore a lazy reference to a call publication, and a "lazy component" is a lazy reference to a presentation publication. There is no third lazy kind. A long-lived service relationship, such as a live completion session, is a retained call binding, not a new kind. A new kind is added only when an operation cannot be expressed as a call or a mount.
+
+Requirements (ADR 024 §12) resolve to publications as well. A required binding and a lazy endpoint differ only in retention: a requirement is strong for the requiring incarnation's lifetime, while a lazy endpoint is weak until used.
+
+### 6. A capability reference is either bound or lazy
+
+ADR 023's `capability-ref` is the only attachment type. What it designates is a host fact:
+
+```text
+Bound(publication lease of one incarnation)
+    revoked when that publication or incarnation closes
+
+Lazy(micro_id, publication_name, contract)
+    outlives incarnations; redemption activates or joins the micro
+```
+
+A runtime micro that publishes into an incarnation-scoped row produces bound references. A durable row declared by a manifest produces lazy references. Consumers use both through the same methods and need not distinguish them. `status()` exposes the difference without activating anything:
+
+```text
+Live          a compatible incarnation is active
+Dormant       enabled, not running; use will activate
+Disabled      not enabled; use fails
+Faulted       last activation failed; use fails until retry generation changes
+Unavailable   provider not installed or publication undeclared
+Revoked       the reference itself is withdrawn
+```
+
+Because redemption may activate a provider, every redemption and invocation method is async:
+
+```text
+capability-ref.call(request) -> response          // strong for the call only
+capability-ref.retain-call() -> call-binding      // strong while held
+capability-ref.redeem-presentation() -> presentation-component   // strong while held
+```
+
+Presentation `mount`, `dispatch`, and `unmount` stay synchronous and may not suspend. A consumer redeems first, asynchronously, and then mounts the live `presentation-component` synchronously. A surface that renders before redemption completes shows a placeholder for that slot.
+
+Calling a bound reference never activates anything; once its incarnation has closed it returns `revoked`. A lazy reference whose provider is `Closing` waits for a fresh incarnation and never enters the closing one. Concurrent use of lazy references joins one activation.
+
+### 7. Durable rows persist endpoints, never references
+
+A durable row stores the lazy target as data:
 
 ```text
 LazyEndpoint {
-    provider_plug_revision,
-    micro_entrypoint,
+    micro_id,
     publication_name,
     contract,
 }
 ```
 
-The persisted representation is data plus provenance. It is not a serialized WIT handle or recipient-local capability reference.
+The endpoint names neither a package revision nor an entrypoint. The installed revision of `micro_id` is resolved at activation. Upgrading a package rewrites its installation scope transactionally, and an endpoint whose publication disappears reports `Unavailable`. Generation and enablement identities may exist inside the service. They are not part of the endpoint or the configuration surface.
 
-When projecting the row to an authorized consumer, Clay mints a recipient-local lazy capability attachment. Copying the CBOR body conveys no authority. Uninstalling the owning package removes its durable scope and revokes its endpoints.
+When projecting the row to an authorized reader, Clay mints a recipient-local lazy `capability-ref` for each endpoint and places it in the row's attachment table. Copying the CBOR body conveys no authority. Uninstalling the owning package removes its durable scope, which removes the rows and revokes the references minted from them.
 
-### 6. Lazy references are weak; redeemed live resources are strong
+### 8. Initialization returns publications; there are no slots to poll
 
-A lazy reference:
-
-- is usable while its provider is inactive;
-- does not retain or start the provider merely by existing in a collection row;
-- starts or joins provider activation when redeemed or invoked;
-- is host-owned and can report unavailable, disabled, failed, or revoked state.
-
-A successfully redeemed live proxy or in-flight invocation creates a strong runtime binding to the provider incarnation. Holding that resource keeps the provider active. Dropping the last external strong binding makes the provider eligible for idle shutdown.
-
-Concurrent redemptions join one `Starting` operation. They do not launch duplicate incarnations or poll a secondary collection for publication.
-
-### 7. Named publication slots close the activation race
-
-A logical endpoint resolves to a declared publication slot. During staged startup, the context supplies the provider with the slots demanded by activation:
+The manifest declares a micro's publications. `initialize` returns the publication leases it serves, by name, together with its `instance-root`:
 
 ```text
-context.publications.require(contract, publication_name)
-slot.fulfill(resource)
+initialize(context) -> { root, publications: [(name, published-capability)] }
 ```
 
-Successful `start` atomically commits fulfilled publications. A demanded required slot left unfulfilled makes startup fail. Callers awaiting the lazy endpoint receive that activation result directly.
+This is ADR 024 §5's staged visibility: nothing is reachable through the publications until `initialize` returns successfully, and the host exposes all of them atomically. A demand that started the activation for publication `p` succeeds if `p` is among the returned publications with the declared kind and contract. Otherwise that demand fails with `Unavailable`, and the incarnation stays up for other users. Callers awaiting the lazy reference receive the activation result directly. No secondary collection is polled.
 
-If the provider is already active with a compatible publication, redemption binds to it. If it is closing, new demand waits for a fresh incarnation rather than entering the closing one.
+A returned publication that the manifest does not declare, or that has a different kind or contract, is an initialization failure. A manifest publication that is not returned is simply not served by this incarnation.
 
-### 8. Idle shutdown follows strong resource ownership
+### 9. Idle shutdown follows strong resource ownership
 
 The lifecycle controller distinguishes:
 
 ```text
-lazy endpoint / durable row     weak; no retention
-redeemed live proxy             strong
-in-flight service invocation    strong for the invocation
-mounted presentation            strong while mounted/retained
-incarnation writer/publication  owned effect; cleaned with owner
+lazy capability-ref / durable row   weak; no retention
+retained call-binding               strong while held
+in-flight call                      strong for the call
+redeemed presentation-component     strong while held or mounted
+incarnation writer/publication      owned effect; cleaned with owner
 ```
 
 When the last external strong edge disappears, policy may close immediately or after a bounded grace period. Closing:
@@ -173,13 +214,13 @@ When the last external strong edge disappears, policy may close immediately or a
 
 Abrupt engine loss skips guest cleanup but not host-owned scope and capability cleanup.
 
-### 9. Durable discovery normally replaces a second ephemeral coordination collection
+### 10. Durable discovery normally replaces a second ephemeral coordination collection
 
 Static contributions use one durable row containing metadata plus a lazy endpoint. The target renders or indexes metadata without starting the provider and redeems behavior only when needed.
 
 An ephemeral collection remains appropriate when the set itself is runtime-derived, such as open conversations, connected devices, active media sessions, or panels created from live documents. Targets may also explicitly retain all endpoints when eager behavior is desired; this is policy over the same resources, not another lifecycle mechanism.
 
-### 10. Collection existence, permission, and runtime handles are separate
+### 11. Collection existence, permission, and runtime handles are separate
 
 Knowing a collection definition or contract id conveys no authority. At configuration/enablement time, Clay resolves manifest requirements into grants. At activation, the context contains only those resolved handles.
 
@@ -187,7 +228,7 @@ Reader grants constrain collection identity, selector authority, limits, row vis
 
 Future dynamic consent, delegation, and debugger/catalog capabilities issue the same resources after policy evaluation. They extend grant issuance rather than introducing ambient global lookup.
 
-### 11. Plug catalog and Clay enablement remain separate
+### 12. Plug catalog and Clay enablement remain separate
 
 The immutable plug envelope owns identity, version, content-addressed artifacts, schemas, and opaque Clay contributions. It does not own local enablement, concrete grants, configured bindings, readiness, or runtime faults.
 
@@ -210,7 +251,7 @@ The service admits package descriptions, validates schemas and artifact referenc
 
 The first implementation has no executable install or enable hook. Static manifest contributions are validated and applied transactionally by the service.
 
-### 12. Examples
+### 13. Examples
 
 #### Toolbar
 
@@ -221,16 +262,20 @@ key: increment
 value:
     label: "Increment"
     icon: "plus"
-    action: lazy-command(counter/main, "increment")
+    action: attachment 0
+endpoints:
+    0: LazyEndpoint(counter, "increment", toolbar.action@1)   // Call, empty request/response
 ```
 
-The toolbar reads and renders the button while the counter is stopped. Pressing it invokes the lazy action, activates or joins the counter incarnation, holds a strong invocation edge until completion, and then permits idle shutdown. No ephemeral toolbar collection or provider polling is required.
+The toolbar reads and renders the button while the counter is stopped. Pressing it calls attachment 0, which activates or joins the counter incarnation, holds a strong edge for the call, and then permits idle shutdown. No ephemeral toolbar collection or provider polling is required.
 
-A custom toolbar widget uses a lazy presentation endpoint. Mounting the redeemed presentation retains its provider; unmounting releases it.
+Durable rows are static. A button whose enabled, checked, or badge state changes at runtime takes that state from a separate volatile collection that the live provider writes under its incarnation scope, keyed by the same registration id. While the provider is dormant, the toolbar uses the durable row's defaults.
+
+A custom toolbar widget references a Presentation publication. The toolbar redeems it asynchronously, mounts it synchronously, and the redeemed `presentation-component` retains its provider until it is dropped.
 
 #### Completion providers
 
-The editor provides a durable completion-source collection. Rows carry trigger/language metadata and a lazy service endpoint. The editor filters metadata locally and invokes only matching providers. Request data or a narrowly scoped document capability supplies context; providers do not receive ambient editor authority.
+The editor provides a durable completion-source collection. Rows carry trigger/language metadata and a lazy reference to a Call publication whose contract takes a completion request and returns candidates. The editor filters metadata locally and calls only matching providers. A provider that wants to keep state between keystrokes is kept live by a `retain-call` binding held while the editor is focused. Request data or a narrowly scoped document capability supplies context; providers do not receive ambient editor authority.
 
 #### Layout
 
@@ -286,8 +331,9 @@ This ADR becomes Accepted after tests demonstrate:
 3. writer-handle drop preserves rows while incarnation closure removes an incarnation scope atomically;
 4. durable rows survive host restart and inactive providers, and uninstall removes only the owning installation scope;
 5. schema-invalid selectors, keys, values, and attachments are rejected before state changes;
-6. reading a lazy endpoint does not activate its provider;
-7. concurrent redemption performs one staged activation and returns the named publication;
-8. retaining a redeemed presentation keeps the provider live, and dropping the final strong binding causes orderly shutdown;
-9. a toolbar contribution renders from durable metadata, activates on press or mount, and needs no secondary coordination collection; and
-10. native, Wasmtime, and WCMP paths obey the same ownership and lifecycle contract.
+6. reading a lazy reference, including its `status()`, does not activate its provider;
+7. concurrent calls and redemptions of lazy references perform one staged activation and receive the named publication returned by `initialize`;
+8. retaining a redeemed presentation or call binding keeps the provider live, an in-flight call keeps it live until completion, and dropping the final strong binding causes orderly shutdown;
+9. a bound reference whose incarnation closed reports `revoked` and never activates a new incarnation;
+10. a toolbar contribution renders from durable metadata, activates on press or mount, and needs no secondary coordination collection; and
+11. native, Wasmtime, and WCMP paths obey the same ownership and lifecycle contract.

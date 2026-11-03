@@ -9,8 +9,8 @@ ADR 017's projection leases and ADR 023's cross-guest capability bank.
 ## Context
 
 Dayframe micros are configured singleton services, not process-tree children. At most
-one incarnation of one configured micro identity is live at a time, while several
-configured identities may select the same provider package. Dependencies form a graph:
+one incarnation of a micro is live at a time, and the micro id is at once its package,
+configured, and runtime identity. Dependencies form a graph:
 requirements, accepted contributions, collection projections, invocations, and
 capability references can connect otherwise unrelated micros.
 
@@ -33,15 +33,19 @@ expose the complete lifecycle through WIT.
 
 ## Decision
 
-### 1. Lifecycle nodes are configured instances
+### 1. Lifecycle nodes are micros
 
-The graph node is a stable configured instance identity, not a provider/package id and
-not a runtime incarnation. Configuration names:
+The graph node is the micro id, not a runtime incarnation. Micros are singletons, so the
+micro id names the installed package, its configuration, and its at-most-one live
+incarnation. The configuration surface exposes no separate instance, generation, or
+enablement identity. The service may keep generations internally, for example to reject
+stale cleanup, but they never appear in endpoints, rows, or configuration. Running one
+package as several configured instances is out of scope until a concrete need appears.
+Configuration names:
 
 ```text
 ConfiguredMicro {
-    identity,
-    provider,
+    micro_id,
     enabled,
     eager,
     requirement_bindings,
@@ -52,8 +56,8 @@ ConfiguredMicro {
 
 A fresh runtime incarnation is created for each successful initialization attempt.
 Changing only `eager` recomputes reachability without replacing an incarnation that
-remains wanted. Changing provider, grants, or requirement bindings creates a new
-incarnation when the instance is next live.
+remains wanted. Upgrading the package, or changing grants or requirement bindings,
+creates a new incarnation when the micro is next live.
 
 Observable states are:
 
@@ -148,7 +152,7 @@ Outward effects remain staged until initialization succeeds:
 - guest-served collection sources.
 
 
-A demanded lazy endpoint names a declared publication slot. Initialization fulfills that slot directly; callers await the activation result rather than polling an ephemeral collection. A demanded required slot left unfulfilled makes initialization fail. Concurrent demand joins the same pending incarnation.
+A demanded lazy endpoint names a declared publication. `initialize` returns the publications it serves by name (ADR 025 §8); callers await the activation result rather than polling an ephemeral collection. A demand whose publication is not returned fails as `Unavailable`. Concurrent demand joins the same pending incarnation.
 On successful return, the host atomically exposes staged publications. On error,
 trap, cancellation, or dropped initialization, the pending incarnation scope is
 dropped and all acquired/staged resources unwind through RAII. This is transactional
@@ -212,8 +216,21 @@ interface lifecycle-guest {
         rejected(string),
     }
 
+    record named-publication {
+        name: string,                  // declared in the manifest's publications
+        capability: published-capability,
+    }
+
+    record initialized {
+        root: instance-root,
+        publications: list<named-publication>,
+    }
+
     initialize: async func(context: lifecycle-host.initial-context)
-        -> result<instance-root, initialization-error>;
+        -> result<initialized, initialization-error>;
+
+    // Publications are served through exports keyed by publication name.
+    call: async func(publication: string, request: list<u8>) -> result<list<u8>, call-error>;
 }
 
 world micro-client {
@@ -334,22 +351,28 @@ being forced through either generic writer.
 
 ```wit
 interface capability-bank {
-    resource capability-ref;
+    variant ref-status { live, dormant, disabled, faulted, unavailable, revoked }
+
+    resource capability-ref {
+        status: func() -> ref-status;      // never activates
+        call: async func(request: list<u8>) -> result<list<u8>, capability-error>;
+        retain-call: async func() -> result<call-binding, capability-error>;
+        redeem-presentation: async func() -> result<presentation-component, capability-error>;
+    }
+    resource call-binding {
+        call: async func(request: list<u8>) -> result<list<u8>, capability-error>;
+    }
+    resource presentation-component;    // mounted synchronously via component-ref
     resource published-capability;
 
-    publish-surface-mount: func(surface-mount)
-        -> result<published-capability, capability-error>;
-    publish-action: func(action)
-        -> result<published-capability, capability-error>;
-
-    surface-mount: func(borrow<capability-ref>)
-        -> result<surface-mount, capability-error>;
-    action: func(borrow<capability-ref>)
-        -> result<action, capability-error>;
+    publish-call: func(name: string) -> result<published-capability, capability-error>;
+    publish-presentation: func(name: string) -> result<published-capability, capability-error>;
 }
 ```
 
-Typed publication/redemption methods are finite and additive. Collection CBOR contains
+The two publication kinds, Call and Presentation, are defined in ADR 025 §5. A
+`capability-ref` is bound or lazy (ADR 025 §6); every use is async because a lazy
+reference may activate its provider. Typed publication/redemption methods are finite and additive. Collection CBOR contains
 attachment-slot indices; `encoded-value.capabilities` carries recipient-local authority.
 A retained typed proxy is owned by the consumer but becomes inert when its publication
 or provider closes.

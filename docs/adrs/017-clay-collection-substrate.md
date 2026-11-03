@@ -221,6 +221,8 @@ or is no longer authorized, the projection emits `Remove`. The generic guest nee
 not learn which reason applied. Outstanding reads wake when revocation changes the
 projection.
 
+Each collection is an independent consistency domain. A projection transaction is atomic within its collection, and there is no ordering or atomic visibility across collections. When one event, such as an incarnation closing, changes rows in several collections, each collection commits its own transaction. The host defers reader wakes until every affected collection has committed, but a reader that holds leases on two collections may still observe one change before the other. Facts that must become visible together belong in one collection. References between collections travel as capability attachments, which fail closed: closing revokes publications before it removes rows, so a reader that still sees a stale row gets `revoked` when it uses the row's reference, never a dead provider. A cross-collection commit epoch is deferred until a concrete reader needs snapshot reads across collections.
+
 Revocation prevents future host operations and removes data from managed guest
 replicas. It cannot revoke knowledge a guest already copied into its own memory, and
 the ADR makes no such promise.
