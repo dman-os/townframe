@@ -186,10 +186,6 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         .await?;
         let (ownership, ownership_stop) =
             ByteOwnership::boot(config.sql, store.clone(), Arc::clone(&provider)).await?;
-        if let Err(error) = roots.bind_ownership().await {
-            ownership_stop.stop().await;
-            return Err(error);
-        }
         Ok::<_, utils_rs::prelude::eyre::Report>((roots, ownership, availability, ownership_stop))
     }
     .await;

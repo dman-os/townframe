@@ -288,12 +288,12 @@ impl ByteOwnership {
 
 impl State {
     async fn new(sql: Database, store: Store, provider: Arc<CipherBlobProvider>) -> Res<Self> {
+        let roots = PairRoots::boot(sql.clone()).await?;
         sql.apply_migrations(
             "big_blobs_byte_ownership_migrations",
             sqlite::queries::MIGRATIONS,
         )
         .await?;
-        let roots = PairRoots::boot(sql.clone()).await?;
         let mut ownership = Self {
             sql,
             store,

@@ -54,7 +54,6 @@ pub(crate) struct VirtualPair {
 #[derive(Clone)]
 pub struct PairRoots {
     sql: Database,
-    ownership_bound: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One ledger row a boot has to resolve.
@@ -77,7 +76,6 @@ impl PairRoots {
         Self::init_schema(&sql).await?;
         Ok(Self {
             sql,
-            ownership_bound: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -91,44 +89,9 @@ impl PairRoots {
         Ok(())
     }
 
-    pub(crate) async fn bind_ownership(&self) -> Res<bool> {
-        use std::sync::atomic::Ordering;
-
-        if self.ownership_bound.load(Ordering::Acquire) {
-            return Ok(true);
-        }
-        if self.sql.query(
-            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'big_blobs_byte_dependencies'",
-            (),
-        ).await?.optional::<i64>()?.is_none() {
-            return Ok(false);
-        }
-        self.sql
-            .execute_batch(
-                "CREATE TRIGGER IF NOT EXISTS big_blobs_virtual_pair_dependency_release
-             AFTER DELETE ON big_blobs_byte_dependencies
-             BEGIN
-                 DELETE FROM big_blobs_virtual_pairs WHERE digest = OLD.digest;
-             END;
-             CREATE TRIGGER IF NOT EXISTS big_blobs_virtual_pair_preclaim_release
-             AFTER DELETE ON blob_pair_root
-             WHEN NOT EXISTS (
-                 SELECT 1
-                   FROM big_blobs_virtual_pairs AS pair
-                   JOIN big_blobs_byte_dependencies AS dependency ON dependency.digest = pair.digest
-                  WHERE pair.cipher_hash = OLD.cipher_hash
-             )
-             BEGIN
-                 DELETE FROM big_blobs_virtual_pairs WHERE cipher_hash = OLD.cipher_hash;
-             END;",
-            )
-            .await?;
-        self.ownership_bound.store(true, Ordering::Release);
-        Ok(true)
-    }
 
     pub(crate) async fn record_virtual(&self, pair: &VirtualPair) -> Res<()> {
-        self.bind_ownership().await?;
+
         let tx = self.sql.begin_write().await?;
         let cipher = pair.cipher.to_hex().to_string();
         let changed = sqlite::queries::record_virtual(
@@ -163,7 +126,7 @@ impl PairRoots {
     }
 
     pub(crate) async fn virtual_pairs(&self) -> Res<Vec<(VirtualPair, bool, bool, bool)>> {
-        self.bind_ownership().await?;
+
         let rows = sqlite::queries::virtual_pairs(&self.sql).await?;
         let mut pairs = Vec::with_capacity(rows.len());
         for row in rows {
@@ -256,12 +219,10 @@ impl PairRoots {
     /// Deleting an absent row is a no-op, so both the boot drain and the pin
     /// worker may call this without coordinating.
     pub async fn clear(&self, c_hash: Hash) -> Res<()> {
-        let bound = self.bind_ownership().await?;
+
         let tx = self.sql.begin_write().await?;
         sqlite::queries::delete_root(&tx, c_hash.to_hex().to_string()).await?;
-        if !bound {
-            sqlite::queries::delete_virtual(&tx, c_hash.to_hex().to_string()).await?;
-        }
+        sqlite::queries::delete_virtual(&tx, c_hash.to_hex().to_string()).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -312,6 +273,11 @@ mod tests {
         let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
         let sql = runtime.ephemeral(&[])?;
         let roots = PairRoots::boot(sql.clone()).await?;
+        sql.apply_migrations(
+            crate::ownership::sqlite::queries::MIGRATION_TABLE,
+            crate::ownership::sqlite::queries::MIGRATIONS,
+        )
+        .await?;
         let mut pair = VirtualPair {
             cipher: Hash::new(b"accepted cipher"),
             plaintext: Hash::new(b"accepted plaintext"),

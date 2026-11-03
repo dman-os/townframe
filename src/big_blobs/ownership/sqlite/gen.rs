@@ -7,6 +7,7 @@ pub const MIGRATION_TABLE: &str = "_big_blobs_ownership_migrations";
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_byte_owners_and_effects.sql", sql: include_str!("migrations/001_byte_owners_and_effects.sql") },
     Migration { version: 2, name: "002_upload_receipts.sql", sql: include_str!("migrations/002_upload_receipts.sql") },
+    Migration { version: 3, name: "003_pair_root_triggers.sql", sql: include_str!("migrations/003_pair_root_triggers.sql") },
 ];
 
 pub const CONTAINS_SQL: &str = include_str!("queries/contains.sql");
