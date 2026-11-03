@@ -79,23 +79,12 @@ impl Retention {
             .ownership
             .transaction(move |ownership| {
                 Box::pin(async move {
-                    ownership
-                        .sql()
-                        .execute(
-                            "INSERT OR IGNORE INTO big_blobs_retention_effects (digest)
-             SELECT digest FROM big_blobs_retention
-             UNION SELECT digest FROM big_blobs_writer_claims
-             UNION SELECT digest FROM big_blobs_writer_effects",
-                            (),
-                        )
-                        .await?;
-                    let digests = ownership
-                        .sql()
-                        .query("SELECT digest FROM big_blobs_retention_effects", ())
+                    sqlite::queries::refresh_effects(ownership.sql()).await?;
+                    let digests = sqlite::queries::effect_digests(ownership.sql())
                         .await?
-                        .all::<String>()?
                         .into_iter()
                         .collect();
+
                     Self::reconcile(&service, ownership, digests).await
                 })
             })
@@ -111,36 +100,24 @@ impl Retention {
         for digest in digests {
             let id: BlobId = digest.parse()?;
             let available = ownership.contains(&id).await? || service.stat(&id).await?.is_some();
-            let documents = ownership
-                .sql()
-                .query(
-                    "SELECT doc_id FROM big_blobs_retention WHERE digest = ?",
-                    (digest.as_str(),),
-                )
+
+            let documents =
+                sqlite::queries::retention_docs_by_digest(ownership.sql(), digest.clone()).await?;
+            let claims = sqlite::queries::writer_claims_by_digest(ownership.sql(), digest.clone())
                 .await?
-                .all::<String>()?;
-            let claims = ownership
-                .sql()
-                .query(
-                    "SELECT doc_id
-                      , drawer_id
-                      , root
-                      , name
-                      , inventory_id
-                   FROM big_blobs_writer_claims
-                  WHERE digest = ?",
-                    (digest.as_str(),),
-                )
-                .await?
-                .all::<(String, String, String, String, String)>()?;
-            let effects = ownership
-                .sql()
-                .query(
-                    "SELECT inventory_id FROM big_blobs_writer_effects WHERE digest = ?",
-                    (digest.as_str(),),
-                )
-                .await?
-                .all::<String>()?;
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.doc_id,
+                        row.drawer_id,
+                        row.root,
+                        row.name,
+                        row.inventory_id,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let effects =
+                sqlite::queries::writer_effects_by_digest(ownership.sql(), digest).await?;
             let mut document_owners = Vec::new();
             let mut writer_owners = Vec::new();
             if available {
