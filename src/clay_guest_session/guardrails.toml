@@ -12,6 +12,8 @@ allow_external_api_types = false
 
 # The browser host (ADR 018) links this crate on wasm32, so both targets are contracts.
 [builds.native]
+# `test-utils` carries the engine conformance scenarios the engine crates run natively.
+features = ["test-utils"]
 
 [builds.wasm32-unknown-unknown]
 
