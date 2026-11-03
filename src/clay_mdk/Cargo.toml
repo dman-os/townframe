@@ -19,6 +19,12 @@ path = "sleeper_fixture.rs"
 crate-type = ["cdylib"]
 required-features = ["dioxus"]
 
+[[example]]
+name = "lifecycle"
+path = "lifecycle_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["dioxus"]
+
 [dependencies]
 clay_collection = { workspace = true }
 wit-bindgen = { workspace = true, features = ["async-spawn"] }
@@ -38,6 +44,10 @@ sha2 = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clay_rt_wasmtime = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+# The lifecycle fixture decodes its CBOR `initial-context.arguments`.
+ciborium.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 clay_surface = { workspace = true }

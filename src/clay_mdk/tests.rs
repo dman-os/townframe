@@ -281,14 +281,19 @@ impl TestHost {
         let guest =
             host_bindings::MicroClient::instantiate_async(&mut *store, component, linker).await?;
         let lifecycle = guest.townframe_dayframe_micro_lifecycle();
+        let context =
+            host_bindings::exports::townframe::dayframe::micro_lifecycle::InitialContext {
+                arguments: Vec::new(),
+                configs: Vec::new(),
+                collections: Vec::new(),
+                registrations: Vec::new(),
+                requirements: Vec::new(),
+            };
+        // The root is left in the store: these hosts never close an incarnation, they drop it.
         store
-            .run_concurrent(async |accessor| {
-                lifecycle
-                    .call_activate(accessor, Vec::new(), Vec::new(), Vec::new())
-                    .await
-            })
+            .run_concurrent(async |accessor| lifecycle.call_initialize(accessor, context).await)
             .await??
-            .map_err(wasmtime::Error::msg)?;
+            .map_err(|failure| wasmtime::Error::msg(format!("{failure:?}")))?;
         Ok(guest)
     }
 

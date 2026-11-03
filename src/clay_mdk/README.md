@@ -25,11 +25,20 @@ for guests), `wcmp` (the browser-engine twin of that provider assembly, ADR 018)
 
 ## Manifests and contracts
 
-A micro's compile-time declaration is a `MicroManifest`: id, version, requirements, provisions,
-optional config grant, and **contributions** — data (`Contribution { provision, payload:
-serde_json::Value }`) routed at activation to the contract it names. Contracts that accept
-contributions implement `Contributable`; a payload that violates the contract is rejected with
-`AccessError::Denied`, never trusted (payloads may arrive over the wire).
+A micro's static declaration is a `MicroManifest` (ADR 024 §§11–15): schema, id, package
+version, entrypoints, `provides` / `requires` (contract refs keyed by stable ids and local
+binding names), configuration requests, collection contracts, **contributions** — data
+(`ContributionDeclaration { target_binding, extension_contract, payload, .. }`) aimed at one of
+the micro's own requirement bindings — and activation defaults (registration templates with a
+`target-live` or `explicit-root` trigger). It describes possibilities, never configured identity
+or live state, and carries unknown members so newer manifests round-trip through older tooling.
+`MicroManifest::validate` checks what serde cannot — the schema this build reads, unique ids and
+bindings, contributions aimed at declared requirement bindings, and activation defaults naming a
+declared contribution through its own binding and contract — and `Package::from_bytes` rejects a
+package whose manifest fails it.
+Contracts that accept contributions implement `Contributable`; a payload that violates the
+contract is rejected with `AccessError::Denied`, never trusted (payloads may arrive over the
+wire).
 
 Contract-crate pattern (`micro_<name>_manifest`, following `plug_<name>_manifest`): shared
 contract types, the manifest, and provision identity live in a crate any consumer can depend on

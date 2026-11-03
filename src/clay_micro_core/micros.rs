@@ -896,7 +896,10 @@ impl MicroRegistry {
         };
         for provision in requirements.values() {
             provision.host.check(&provision.owner)?;
-            host.bind_dependency(&instance, &provision.owner)?;
+            if provision.owner != instance {
+                let binding = host.bind(&instance, &provision.owner)?;
+                host.own(&instance, Box::new(move || drop(binding)))?;
+            }
         }
         let context = MicroActivation {
             host: host.clone(),

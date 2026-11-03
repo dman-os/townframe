@@ -23,11 +23,17 @@ use super::output;
 use super::provider;
 use super::routine_facets;
 use crate::ComponentRef;
-use crate::Contribution;
+use crate::ContractRef;
+use crate::ContributionDeclaration;
+use crate::Entrypoints;
+use crate::MANIFEST_SCHEMA;
 use crate::MicroId;
 use crate::MicroManifest;
+use crate::Necessity;
+use crate::ProvidedContract;
 use crate::Provision;
-use crate::ProvisionRef;
+use crate::RequiredContract;
+use crate::Retention;
 use crate::manifest::FacetAccess;
 
 // ── Fixtures ──
@@ -93,10 +99,46 @@ impl Contributable for Shelf {
     }
 }
 
-fn contribution(slot: &str, reject: bool) -> Contribution {
-    Contribution {
-        provision: Shelf::ID.into(),
+fn contribution(slot: &str, reject: bool) -> ContributionDeclaration {
+    ContributionDeclaration {
+        id: slot.into(),
+        target_binding: Shelf::ID.into(),
+        extension_contract: ContractRef::of::<Shelf>(),
         payload: serde_json::json!({ "slot": slot, "reject": reject }),
+        capability_slots: vec![],
+    }
+}
+
+/// A manifest declaring nothing but its identity; tests fill in what they exercise.
+fn bare_manifest(id: &str) -> MicroManifest {
+    MicroManifest {
+        schema: MANIFEST_SCHEMA,
+        id: MicroId::new(id),
+        package_version: 1,
+        entrypoints: Entrypoints::micro_client(),
+        provides: vec![],
+        requires: vec![],
+        configuration_requests: vec![],
+        collection_contracts: vec![],
+        contributions: vec![],
+        activation_defaults: vec![],
+        extra: BTreeMap::new(),
+    }
+}
+
+fn provided(contract: ContractRef) -> ProvidedContract {
+    ProvidedContract {
+        id: contract.id.clone(),
+        contract,
+        retention: Retention::Strong,
+    }
+}
+
+fn required(contract: ContractRef) -> RequiredContract {
+    RequiredContract {
+        binding: contract.id.clone(),
+        contract,
+        necessity: Necessity::Required,
     }
 }
 
@@ -104,12 +146,8 @@ fn shelf_provider(app: &Runtime, contributable: bool) -> clay_micro_core::micros
     provider(
         app,
         MicroManifest {
-            id: MicroId::new("test.shelf"),
-            version: 1,
-            requirements: vec![],
-            provisions: vec![ProvisionRef::of::<Shelf>()],
-            config: None,
-            contributions: vec![],
+            provides: vec![provided(ContractRef::of::<Shelf>())],
+            ..bare_manifest("test.shelf")
         },
         move |context| {
             let shelf = Shelf {
@@ -130,18 +168,15 @@ fn shelf_provider(app: &Runtime, contributable: bool) -> clay_micro_core::micros
 // (wasm.rs): activate, publish a surface, then contribute the manifest's declared entries.
 fn contributor_provider(
     app: &Runtime,
-    contributions: Vec<Contribution>,
-    requirements: Vec<ProvisionRef>,
+    contributions: Vec<ContributionDeclaration>,
+    requires: Vec<RequiredContract>,
 ) -> clay_micro_core::micros::MicroFactory {
     provider(
         app,
         MicroManifest {
-            id: MicroId::new("test.contributor"),
-            version: 1,
-            requirements,
-            provisions: vec![],
-            config: None,
+            requires,
             contributions: contributions.clone(),
+            ..bare_manifest("test.contributor")
         },
         move |context| {
             let surface = context.publish_component(|| ())?;
@@ -152,14 +187,14 @@ fn contributor_provider(
 }
 
 fn composed(
-    contributions: Vec<Contribution>,
-    requirements: Vec<ProvisionRef>,
+    contributions: Vec<ContributionDeclaration>,
+    requires: Vec<RequiredContract>,
     contributable: bool,
 ) -> Runtime {
     let mut app = Runtime::new();
     app.register_provider(shelf_provider(&app, contributable))
         .unwrap();
-    app.register_provider(contributor_provider(&app, contributions, requirements))
+    app.register_provider(contributor_provider(&app, contributions, requires))
         .unwrap();
     app
 }
@@ -200,8 +235,8 @@ fn shelved(app: &Runtime) -> (Vec<ComponentRef>, Vec<(Instance, Value, Component
     (entries, seen)
 }
 
-fn declared() -> Vec<ProvisionRef> {
-    vec![ProvisionRef::of::<Shelf>()]
+fn declared() -> Vec<RequiredContract> {
+    vec![required(ContractRef::of::<Shelf>())]
 }
 
 // ── Contribution routing ──
@@ -301,12 +336,8 @@ async fn require_returns_the_published_value_for_a_declared_requirement() {
     app.register_provider(provider(
         &app,
         MicroManifest {
-            id: MicroId::new("test.consumer"),
-            version: 1,
-            requirements: declared(),
-            provisions: vec![],
-            config: None,
-            contributions: vec![],
+            requires: declared(),
+            ..bare_manifest("test.consumer")
         },
         move |context: &Context<StubRegistry>| {
             *captured.lock().unwrap() = Some(context.require::<Shelf>().unwrap());
@@ -364,24 +395,22 @@ async fn output_at_the_wrong_native_type_for_a_contract_id_is_an_invariant_failu
 #[test]
 fn compose_descriptor_lowers_identity_and_contracts_verbatim() {
     let manifest = MicroManifest {
-        id: MicroId::new("test.counter"),
-        version: 2,
-        requirements: vec![
-            ProvisionRef {
+        package_version: 2,
+        requires: vec![
+            required(ContractRef {
                 id: "a".into(),
                 version: 1,
-            },
-            ProvisionRef {
+            }),
+            required(ContractRef {
                 id: "b".into(),
                 version: 3,
-            },
+            }),
         ],
-        provisions: vec![ProvisionRef {
+        provides: vec![provided(ContractRef {
             id: "c".into(),
             version: 1,
-        }],
-        config: None,
-        contributions: vec![],
+        })],
+        ..bare_manifest("test.counter")
     };
 
     assert_eq!(

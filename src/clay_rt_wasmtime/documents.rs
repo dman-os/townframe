@@ -1,12 +1,12 @@
 use super::ActivationError;
 use super::WasmIncarnation;
 use super::WasmStoreState;
+use super::bindings::exports::townframe::dayframe::micro_lifecycle as lifecycle_wit;
 use super::bindings::townframe::dayframe::collection_registration as registration_wit;
 use super::bindings::townframe::dayframe::collections as collection_wit;
 use super::bindings::townframe::dayframe::documents as wit;
 use super::first_poll;
 use super::wasmtime;
-use clay_docs::DocumentRef;
 use clay_docs::DocumentSnapshot;
 use clay_docs::FacetMutation;
 use clay_docs::FacetRoute;
@@ -18,16 +18,18 @@ use clay_docs::OperationStatus;
 use clay_docs::WatchSelection;
 pub use clay_guest_session::Access as WasmDocumentAccess;
 use clay_guest_session::Delivery;
+use clay_guest_session::InitialContext;
+use clay_guest_session::InitializationFailure;
 pub use clay_guest_session::Operation as WasmOperation;
 pub use clay_guest_session::Watch as WasmDocumentWatch;
 use clay_guest_session::Work;
-use clay_guest_session::collections::BytesProjection;
-use clay_guest_session::collections::BytesRegistrations;
+use clay_guest_session::capabilities::PublishedCapability;
 use clay_host::AccessError;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use wasmtime::component::Resource;
+use wasmtime::component::ResourceAny;
 
 pub(super) fn deliver(
     incarnation: &Arc<Mutex<Option<WasmIncarnation>>>,
@@ -70,12 +72,20 @@ pub(super) fn deliver(
     DeliveryOutcome::Delivered
 }
 
-pub(super) async fn activate(
+/// Grant `context` into the guest's resource table, run `micro-lifecycle.initialize`, and take
+/// over what it answered: the guest's `instance-root` and the publication lease of every
+/// provision, keyed by contract.
+pub(super) async fn initialize(
     active: &mut WasmIncarnation,
-    configs: BTreeMap<String, DocumentRef>,
-    collections: BTreeMap<String, BytesProjection>,
-    registrations: BTreeMap<String, BytesRegistrations>,
-) -> Result<(), ActivationError> {
+    context: InitialContext,
+) -> Result<(ResourceAny, BTreeMap<String, PublishedCapability>), ActivationError> {
+    let InitialContext {
+        arguments,
+        configs,
+        collections,
+        registrations,
+        requirements,
+    } = context;
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {
         let access = active.store.data().documents.grant(document.access())?;
@@ -124,28 +134,77 @@ pub(super) async fn activate(
             })?;
         registration_bindings.push(registration_wit::RegistrationBinding { name, writer });
     }
+    let mut requirement_bindings = Vec::with_capacity(requirements.len());
+    for (name, publication) in requirements {
+        let capability = active
+            .store
+            .data()
+            .capabilities
+            .mint(&publication)
+            .map_err(|failure| {
+                ActivationError::Initialization(format!("minting requirement {name}: {failure:?}"))
+            })?;
+        let capability = active
+            .store
+            .data_mut()
+            .table
+            .push(capability)
+            .map_err(|error| {
+                ActivationError::Initialization(format!("granting requirement {name}: {error}"))
+            })?;
+        requirement_bindings.push(lifecycle_wit::RequirementBinding { name, capability });
+    }
+    let context = lifecycle_wit::InitialContext {
+        arguments,
+        configs: bindings,
+        collections: collection_bindings,
+        registrations: registration_bindings,
+        requirements: requirement_bindings,
+    };
     active.refuel();
     let lifecycle = active.client.townframe_dayframe_micro_lifecycle();
-    active
+    let initialized = active
         .store
-        .run_concurrent(async |accessor| {
-            lifecycle
-                .call_activate(
-                    accessor,
-                    bindings,
-                    collection_bindings,
-                    registration_bindings,
-                )
-                .await
-        })
+        .run_concurrent(async |accessor| lifecycle.call_initialize(accessor, context).await)
         .await
+        .and_then(|trapped| trapped)
         .map_err(|trap| {
-            ActivationError::Initialization(format!("guest trapped during activation: {trap:#}"))
+            ActivationError::Initialization(format!(
+                "guest trapped during initialization: {trap:#}"
+            ))
         })?
-        .map_err(|trap| {
-            ActivationError::Initialization(format!("guest trapped during activation: {trap:#}"))
-        })?
-        .map_err(ActivationError::Initialization)
+        .map_err(|failure| {
+            ActivationError::Refused(match failure {
+                lifecycle_wit::InitializationError::InvalidConfiguration(message) => {
+                    InitializationFailure::InvalidConfiguration(message)
+                }
+                lifecycle_wit::InitializationError::Unavailable(message) => {
+                    InitializationFailure::Unavailable(message)
+                }
+                lifecycle_wit::InitializationError::Rejected(message) => {
+                    InitializationFailure::Rejected(message)
+                }
+            })
+        })?;
+    let mut provisions = BTreeMap::new();
+    for provision in initialized.provisions {
+        let lease = active
+            .store
+            .data_mut()
+            .table
+            .delete(provision.capability)
+            .expect("a provided capability must be in the host resource table");
+        if provisions
+            .insert(provision.contract.clone(), lease)
+            .is_some()
+        {
+            return Err(ActivationError::Initialization(format!(
+                "guest provided {} twice",
+                provision.contract
+            )));
+        }
+    }
+    Ok((initialized.root, provisions))
 }
 
 fn access_error(error: AccessError) -> wit::DocumentError {

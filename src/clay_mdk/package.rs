@@ -22,14 +22,20 @@ pub struct Package {
 }
 
 impl Package {
-    /// Read a package from component bytes. Errors are plain messages: an unreadable
-    /// package is an installation defect a launcher reports per entry, not a host fault.
+    /// Read a package from component bytes. The manifest must parse and pass
+    /// [`MicroManifest::validate`], so a held `Package` always declares a schema this build
+    /// reads and internally consistent references. Errors are plain messages: an unreadable
+    /// or incoherent package is an installation defect a launcher reports per entry, not a
+    /// host fault.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, String> {
         let bytes = bytes.into();
         let section = manifest_section(&bytes)?
             .ok_or_else(|| format!("component carries no {MANIFEST_SECTION} custom section"))?;
         let manifest: MicroManifest = serde_json::from_slice(section).map_err(|error| {
             format!("{MANIFEST_SECTION} custom section is not a manifest: {error}")
+        })?;
+        manifest.validate().map_err(|error| {
+            format!("{MANIFEST_SECTION} custom section declares an invalid manifest: {error}")
         })?;
         let digest = format!("{:x}", Sha256::digest(&bytes));
         Ok(Self {
@@ -75,16 +81,48 @@ fn manifest_section(bytes: &[u8]) -> Result<Option<&[u8]>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ActivationRegistrationTemplate;
+    use crate::ContractRef;
+    use crate::Entrypoints;
+    use crate::MANIFEST_SCHEMA;
     use crate::MicroId;
+    use crate::Trigger;
 
     fn manifest() -> MicroManifest {
         MicroManifest {
+            schema: MANIFEST_SCHEMA,
             id: MicroId::new("dayframe.test"),
-            version: 1,
-            requirements: vec![],
-            provisions: vec![],
-            config: None,
+            package_version: 1,
+            entrypoints: Entrypoints::micro_client(),
+            provides: vec![],
+            requires: vec![],
+            configuration_requests: vec![],
+            collection_contracts: vec![],
             contributions: vec![],
+            activation_defaults: vec![],
+            extra: Default::default(),
+        }
+    }
+
+    /// The manifest the lifecycle fixture guest embeds in its `dayframe.manifest` section.
+    fn lifecycle_fixture_manifest() -> MicroManifest {
+        serde_json::from_str(include_str!("lifecycle_fixture.manifest.json")).unwrap()
+    }
+
+    /// The fixture's one default registration: activate its `serve-host` contribution while
+    /// the instance configured for its `host` binding is live and accepts the lifecycle
+    /// presentation contract.
+    fn serve_host() -> ActivationRegistrationTemplate {
+        ActivationRegistrationTemplate {
+            id: "serve-host".into(),
+            trigger: Trigger::TargetLive {
+                target_binding: "host".into(),
+                extension_contract: ContractRef {
+                    id: "dayframe.lifecycle.presentation".into(),
+                    version: 1,
+                },
+            },
+            declaration_id: "serve-host".into(),
         }
     }
 
@@ -162,6 +200,21 @@ mod tests {
     }
 
     #[test]
+    fn package_with_an_invalid_manifest_is_an_installation_error() {
+        let mut newer = manifest();
+        newer.schema = MANIFEST_SCHEMA + 1;
+        let bytes = module_with_section(MANIFEST_SECTION, &manifest_section_bytes(&newer));
+        assert_eq!(
+            Package::from_bytes(bytes).unwrap_err(),
+            format!(
+                "{MANIFEST_SECTION} custom section declares an invalid manifest: manifest \
+                 declares schema {}, this build reads schema {MANIFEST_SCHEMA}",
+                MANIFEST_SCHEMA + 1
+            )
+        );
+    }
+
+    #[test]
     fn prepared_counter_component_declares_its_manifest_statically() {
         let Ok(path) = std::env::var("DAYFRAME_COUNTER_COMPONENT") else {
             return;
@@ -169,5 +222,27 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         let package = Package::from_bytes(bytes).unwrap();
         assert_eq!(package.manifest().id.as_str(), "dayframe.counter");
+    }
+
+    #[test]
+    fn lifecycle_fixture_manifest_declares_its_activation_default() {
+        let manifest = lifecycle_fixture_manifest();
+        assert_eq!(manifest.id.as_str(), "dayframe.lifecycle-fixture");
+        assert_eq!(manifest.activation_defaults, vec![serve_host()]);
+        manifest.validate().unwrap();
+    }
+
+    /// Reverse activation is registered from the manifest alone (ADR 024 validation 1): the
+    /// prepared component's section is read without instantiating it and must declare exactly
+    /// the fixture file it embedded.
+    #[test]
+    fn prepared_lifecycle_component_declares_its_activation_defaults_statically() {
+        let Ok(path) = std::env::var("DAYFRAME_LIFECYCLE_COMPONENT") else {
+            return;
+        };
+        let bytes = std::fs::read(path).unwrap();
+        let package = Package::from_bytes(bytes).unwrap();
+        assert_eq!(package.manifest().activation_defaults, vec![serve_host()]);
+        assert_eq!(package.manifest(), &lifecycle_fixture_manifest());
     }
 }

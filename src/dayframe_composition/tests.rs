@@ -243,9 +243,9 @@ fn linked_provider_manifests_configuration_and_contributions_are_coherent() {
                 )
             });
         let requirements: BTreeSet<&str> = manifest
-            .requirements
+            .requires
             .iter()
-            .map(|requirement| requirement.id.as_str())
+            .map(|requirement| requirement.contract.id.as_str())
             .collect();
         let bound: BTreeSet<&str> = configured.bindings.keys().map(String::as_str).collect();
         assert_eq!(
@@ -262,30 +262,32 @@ fn linked_provider_manifests_configuration_and_contributions_are_coherent() {
                 .expect("target provider checked linked above");
             assert!(
                 target_manifest
-                    .provisions
+                    .provides
                     .iter()
-                    .any(|provision| provision.id == *contract),
+                    .any(|provided| provided.contract.id == *contract),
                 "instance {target} does not provide the {contract} contract that {name} binds to it"
             );
         }
     }
 
     // A declared contribution may only target one of the contributing manifest's own
-    // requirements, and its payload must satisfy the target contract's acceptor — for
-    // `settings.sections` that acceptor is `DeclaredSection`. Current behavior pins a
-    // shape violation as a denied contribution at activation, not a pre-activation error.
+    // requirement bindings, through the contract that binding requires, and its payload must
+    // satisfy the target contract's acceptor — for `settings.sections` that acceptor is
+    // `DeclaredSection`. Current behavior pins a shape violation as a denied contribution at
+    // activation, not a pre-activation error.
     for manifest in &manifests {
         for contribution in &manifest.contributions {
             assert!(
-                manifest
-                    .requirements
-                    .iter()
-                    .any(|requirement| requirement.id == contribution.provision),
-                "manifest {:?} contributes to undeclared requirement {:?}",
+                manifest.requires.iter().any(|requirement| {
+                    requirement.binding == contribution.target_binding
+                        && requirement.contract == contribution.extension_contract
+                }),
+                "manifest {:?} contribution {:?} targets undeclared requirement binding {:?}",
                 manifest.id,
-                contribution.provision
+                contribution.id,
+                contribution.target_binding
             );
-            if contribution.provision == "settings.sections" {
+            if contribution.extension_contract.id == "settings.sections" {
                 serde_json::from_value::<DeclaredSection>(contribution.payload.clone())
                     .unwrap_or_else(|error| {
                         panic!(

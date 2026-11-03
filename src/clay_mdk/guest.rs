@@ -1,10 +1,12 @@
 //! The guest backend: the same authoring shape as [`crate::native`], implemented over the WIT
 //! imports a wasm micro is linked against. A micro writes one `activate(&Context)` and one
-//! Dioxus view; [`export_micro!`] turns that into the `micro-client` world the host drives.
-//! Activation receives already-granted configuration bindings and publishes one component —
+//! Dioxus view; [`export_micro!`] turns that into the `micro-client` world the host drives,
+//! running `activate` inside `micro-lifecycle.initialize` (ADR 024 §5).
+//! Initialization receives already-granted configuration bindings and publishes one component —
 //! the surface the host mounts — exactly as a native activation receives a [`crate::native::Context`].
-//! What the guest cannot yet do (require provisions, write collections, mount roots) is absent
-//! here rather than stubbed; it arrives with the collections WIT waist.
+//! What the guest cannot yet do (require provisions, write collections, mount roots, provide
+//! contracts) is absent here rather than stubbed; such bindings fail initialization as an
+//! invalid configuration.
 //!
 //! Document flow: the host's `document-events` callbacks advance the [`DocumentMirror`]; the
 //! mirror's one notifier bumps a Dioxus signal inside the guest runtime, so any component that
@@ -19,9 +21,8 @@ pub use crate::mirror::MirrorStatus;
 pub use crate::mirror::MirrorWatch;
 pub use dom::GuestDom;
 
-use crate::collection_registration;
-use crate::collections;
 use crate::documents;
+use crate::micro_lifecycle;
 use crate::mirror::DocumentMirror;
 use crate::presentation;
 use crate::presentation_events;
@@ -96,15 +97,15 @@ macro_rules! export_micro {
         struct ClayMdkExportedMicro;
 
         impl $crate::micro_lifecycle::Guest for ClayMdkExportedMicro {
-            async fn activate(
-                configs: ::std::vec::Vec<$crate::documents::DocumentBinding>,
-                collections: ::std::vec::Vec<$crate::collections::CollectionBinding>,
-                registrations: ::std::vec::Vec<
-                    $crate::collection_registration::RegistrationBinding,
-                >,
-            ) -> ::std::result::Result<(), ::std::string::String> {
-                $crate::guest::Runtime::activate($activate, configs, collections, registrations)
-                    .await
+            type InstanceRoot = $crate::StatelessRoot;
+
+            async fn initialize(
+                context: $crate::micro_lifecycle::InitialContext,
+            ) -> ::std::result::Result<
+                $crate::micro_lifecycle::Initialized,
+                $crate::micro_lifecycle::InitializationError,
+            > {
+                $crate::guest::Runtime::initialize($activate, context)
             }
         }
 
@@ -164,16 +165,27 @@ thread_local! {
 }
 
 impl Runtime {
-    pub async fn activate(
+    /// The MDK's `initialize`: bind the granted configuration documents, run `activate`, and
+    /// answer with a [`crate::StatelessRoot`] and no provisions. Bindings the authoring surface
+    /// cannot express yet (collections, registrations, requirements) are a configuration the
+    /// micro cannot run under, not a guest fault. `arguments` are unused: no MDK micro takes
+    /// any yet.
+    pub fn initialize(
         activate: impl FnOnce(&Context) -> Result<(), documents::DocumentError>,
-        configs: Vec<documents::DocumentBinding>,
-        collections: Vec<collections::CollectionBinding>,
-        registrations: Vec<collection_registration::RegistrationBinding>,
-    ) -> Result<(), String> {
-        assert!(
-            collections.is_empty() && registrations.is_empty(),
-            "guest collection bindings are not supported by the MDK yet"
-        );
+        context: micro_lifecycle::InitialContext,
+    ) -> Result<micro_lifecycle::Initialized, micro_lifecycle::InitializationError> {
+        let micro_lifecycle::InitialContext {
+            arguments: _,
+            configs,
+            collections,
+            registrations,
+            requirements,
+        } = context;
+        if !(collections.is_empty() && registrations.is_empty() && requirements.is_empty()) {
+            return Err(micro_lifecycle::InitializationError::InvalidConfiguration(
+                "MDK guest micros accept only configuration document bindings".into(),
+            ));
+        }
         let mirror = DocumentMirror::default();
         let presentation = Rc::new(RefCell::new(None));
         let changes = Rc::new(Cell::new(None));
@@ -202,17 +214,22 @@ impl Runtime {
         RUNTIME.with_borrow_mut(|slot| {
             assert!(
                 slot.replace(runtime).is_none(),
-                "guest micro activated twice"
+                "guest micro initialized twice"
             );
         });
-        activate(&context).map_err(|error| error.to_string())
+        activate(&context)
+            .map_err(|error| micro_lifecycle::InitializationError::Rejected(error.to_string()))?;
+        Ok(micro_lifecycle::Initialized {
+            root: micro_lifecycle::InstanceRoot::new(crate::StatelessRoot),
+            provisions: Vec::new(),
+        })
     }
 
     fn with<T>(f: impl FnOnce(&Runtime) -> T) -> T {
         RUNTIME.with_borrow(|slot| {
             f(slot
                 .as_ref()
-                .expect("host drove a guest micro before activating it"))
+                .expect("host drove a guest micro before initializing it"))
         })
     }
 

@@ -8,6 +8,7 @@ use clay_host::AccessError;
 use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
+use clay_host::Lifecycle;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -56,6 +57,9 @@ struct PublicationInner {
     contract: ContractIdentity,
     component: ComponentRef,
     host: Host,
+    /// The publishing incarnation. Until it commits initialization the publication is staged
+    /// (ADR 024 §5): only the owner itself may redeem it.
+    owner: Instance,
     revoked: AtomicBool,
 }
 
@@ -63,8 +67,16 @@ impl PublicationInner {
     fn revoke(&self) {
         self.revoked.store(true, Ordering::Release);
     }
-    fn live_component(&self) -> Result<ComponentRef, CapabilityFailure> {
+    fn live_component(&self, recipient: &Instance) -> Result<ComponentRef, CapabilityFailure> {
         if self.revoked.load(Ordering::Acquire) {
+            return Err(CapabilityFailure::Revoked);
+        }
+        if *recipient != self.owner
+            && !matches!(
+                self.host.lifecycle(&self.owner),
+                Lifecycle::Active | Lifecycle::Closing
+            )
+        {
             return Err(CapabilityFailure::Revoked);
         }
         self.host
@@ -250,6 +262,7 @@ impl CapabilitySession {
                 contract: PRESENTATION_COMPONENT_CONTRACT,
                 component,
                 host: self.state.host.clone(),
+                owner: self.state.instance.clone(),
                 revoked: AtomicBool::new(false),
             }),
         };
@@ -316,7 +329,9 @@ impl CapabilityRef {
         if self.publication.contract() != contract {
             return Err(CapabilityFailure::ContractMismatch);
         }
-        self.publication.inner.live_component()?;
+        self.publication
+            .inner
+            .live_component(&self.recipient.instance)?;
         let mut counts = self.recipient.counts.lock().unwrap();
         if counts.proxies >= self.recipient.limits.proxies {
             return Err(CapabilityFailure::LimitExceeded);
@@ -352,7 +367,9 @@ pub struct PresentationComponent {
 impl PresentationComponent {
     pub fn component(&self) -> Result<ComponentRef, CapabilityFailure> {
         self.recipient.check()?;
-        self.publication.inner.live_component()
+        self.publication
+            .inner
+            .live_component(&self.recipient.instance)
     }
     pub fn is_revoked(&self) -> bool {
         self.publication.is_revoked()

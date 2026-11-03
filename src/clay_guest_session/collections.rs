@@ -14,10 +14,12 @@ use clay_collection::WriterId;
 use clay_host::AccessError;
 use clay_host::Host;
 use clay_host::Instance;
+use clay_host::Lifecycle;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -283,6 +285,9 @@ struct State {
     limits: CollectionLimits,
     readers: Mutex<usize>,
     writers: Mutex<usize>,
+    /// Writers granted before the incarnation committed initialization. Their rows are in the
+    /// authoritative replica but not the projection until the commit publishes them.
+    staged: Mutex<Vec<(BytesRegistrations, WriterId)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -301,6 +306,21 @@ impl State {
         }
         *count += 1;
         Ok(Permit(Arc::clone(self), budget))
+    }
+
+    /// Initialization committed: publish every staged writer's rows, one transaction per
+    /// collection. Runs inside the host's commit, so it completes before the incarnation is
+    /// reported `Active` to whoever committed it.
+    fn publish_staged(&self) {
+        let mut staged = std::mem::take(&mut *self.staged.lock().unwrap());
+        while let Some((registrations, _)) = staged.first() {
+            let registrations = registrations.clone();
+            let (batch, rest): (Vec<_>, Vec<_>) = staged
+                .into_iter()
+                .partition(|(collection, _)| *collection == registrations);
+            registrations.commit_staged(batch.into_iter().map(|(_, writer)| writer));
+            staged = rest;
+        }
     }
 
     fn budget(&self, budget: Budget) -> (&Mutex<usize>, usize) {
@@ -334,6 +354,7 @@ impl CollectionSession {
                 limits,
                 readers: Mutex::new(0),
                 writers: Mutex::new(0),
+                staged: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -355,7 +376,11 @@ impl CollectionSession {
         registrations: &BytesRegistrations,
     ) -> Result<RegistrationWriter, AccessError> {
         let permit = self.state.admit(Budget::Writers)?;
-        let slot = Arc::new(Mutex::new(Some(registrations.writer())));
+        // Every writer starts staged (ADR 024 §5): rows written while the incarnation is still
+        // initializing must not reach readers unless initialization commits.
+        let writer = registrations.staged_writer();
+        let id = writer.id();
+        let slot = Arc::new(Mutex::new(Some(writer)));
         let revoked = Arc::downgrade(&slot);
         self.state.host.own(
             &self.state.instance,
@@ -366,6 +391,36 @@ impl CollectionSession {
                 }
             }),
         )?;
+        self.state
+            .staged
+            .lock()
+            .unwrap()
+            .push((registrations.clone(), id));
+        // The hook holds the session weakly: the host owns its hooks and the session holds the
+        // host, so a strong reference would be a cycle. `Closing` withdraws the rows before any
+        // owned effect of the closing incarnation is torn down.
+        let state: Weak<State> = Arc::downgrade(&self.state);
+        let withdrawn = Arc::downgrade(&slot);
+        let lifecycle = self
+            .state
+            .host
+            .on_outward(&self.state.instance, move |lifecycle| match lifecycle {
+                Lifecycle::Active => {
+                    if let Some(state) = state.upgrade() {
+                        state.publish_staged();
+                    }
+                }
+                Lifecycle::Closing => {
+                    if let Some(slot) = withdrawn.upgrade() {
+                        let writer = slot.lock().unwrap().take();
+                        drop(writer);
+                    }
+                }
+                other => unreachable!("outward hooks are never told {other:?}"),
+            })?;
+        if lifecycle == Lifecycle::Active {
+            self.state.publish_staged();
+        }
         Ok(RegistrationWriter {
             slot,
             _permit: permit,
@@ -683,3 +738,6 @@ mod capability_tests;
 
 #[cfg(test)]
 mod registration_tests;
+
+#[cfg(test)]
+mod staging_tests;

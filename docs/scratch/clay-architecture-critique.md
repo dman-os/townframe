@@ -2,10 +2,8 @@
 
 
 > [!IMPORTANT]
-> ADRs 017, 023, and 024 supersede this document where they conflict. In particular, the current collection design uses projection leases with transactional inline row pages and `bootstrap_complete`, not listing/hydration, `Subscription`, or `ReplayComplete`; ADR 024 supersedes the open lifecycle/configuration questions below. This file remains an audit trail and workstream index, not an implementation specification. The presentation targets are Dioxus Native and the browser DOM; React Native is not a target. A direct DOM backend is a later measured optimization, not a prerequisite for the collection/lifecycle work.
-Status: findings reviewed with the operator; W2 (sync/async boundary) landed as code + ADR 015 R5 /
-ADR 018 §3 rewrites, with its four follow-up gaps closed (§3.1); W1 (collection waist) redesigned in
-ADR 017, code not built; §5 status corrections applied. Remaining workstreams not yet redesigned.
+> ADRs 017, 023, 024, and 025 supersede this document where they conflict. In particular, the current collection design uses projection leases with transactional inline row pages and `bootstrap_complete`, not listing/hydration, `Subscription`, or `ReplayComplete`; ADR 024 supersedes the open lifecycle/configuration questions below. This file remains an audit trail and workstream index, not an implementation specification. The presentation targets are Dioxus Native and the browser DOM; React Native is not a target. A direct DOM backend is a later measured optimization, not a prerequisite for the collection/lifecycle work.
+Status: findings reviewed with the operator; W2 (sync/async boundary) landed, ADR 017's leased collection waist and ADR 023's capability boundary now cross both engines, and ADRs 024/025 capture the remaining lifecycle, manifest, durable-collection, and lazy-activation work. Historical implementation findings below retain their original dates and wording.
 Owner: operator + dayframe track
 Updated: 2026-10-31
 Scope: ADRs 014, 015, 017, 018 and the `clay_*`, `micro_*`, `dayframe_*` crates. Findings are a
@@ -16,6 +14,23 @@ steps; each one should become its own ADR amendment or ADR before implementation
 Related: `docs/scratch/dayframe-micros.md` (original design log), `docs/scratch/dayframe-crate-map.md`,
 `docs/scratch/dayframe-app-model.md`, `src/big_cabinet_core/doc.rs` (the node doc service as landed).
 
+
+## Current collection and lifecycle resolution (2026-11-03)
+
+The design discussion after this audit resolved the remaining collection/lifecycle shape in ADR 025:
+
+- a collection declared by an installed plug exists as a host facility without activating its declaring micro;
+- every cross-plug collection names manifest Lexicons for selectors, keys, and values;
+- volatile, durable, and node-materialized sources share ADR 017's projection lease protocol;
+- registration scopes own rows, while writer handles only convey mutation authority;
+- incarnation-scope rows retract when the incarnation closes; installation-scope rows survive inactivity and retract on uninstall;
+- static contributions are durable rows containing metadata plus weak lazy endpoint attachments;
+- reading a lazy endpoint does not start its provider; redemption, invocation, or mounting starts or joins activation and returns a strong live resource;
+- named publication slots eliminate activate-then-poll coordination and normally eliminate a secondary ephemeral collection;
+- dropping the final live strong resource makes the provider eligible for orderly `instance-root.close()` cleanup; and
+- Clay will use a runtime-owned desired-state/enablement service shaped like `big_nodule`'s separation of portable desired datums from host-local applied grants, while retaining micro-specific lifecycle policy.
+
+This replaces the older `TargetLive` trigger and writer-handle-drop descriptions still present in historical portions of this file. It also rejects per-extension host hooks: toolbar, completion, layout, and automation vocabulary belongs to target micros and their schemas; Clay supplies collections, capability transport, activation, and ownership.
 ## 0. One-paragraph verdict
 
 The implementation is substantial plugin-runtime machinery documented as a finished application

@@ -7,8 +7,6 @@
 //! and the host must treat it as a trap (withdraw surface, close instance).
 
 use clay_mdk::bindings;
-use clay_mdk::collection_registration;
-use clay_mdk::collections;
 use clay_mdk::document_events;
 use clay_mdk::documents;
 use clay_mdk::micro_lifecycle;
@@ -23,15 +21,20 @@ use dioxus_core::WriteMutations;
 struct Sleeper;
 
 impl micro_lifecycle::Guest for Sleeper {
-    async fn activate(
-        configs: Vec<documents::DocumentBinding>,
-        collections: Vec<collections::CollectionBinding>,
-        registrations: Vec<collection_registration::RegistrationBinding>,
-    ) -> Result<(), String> {
-        assert!(configs.is_empty());
-        assert!(collections.is_empty());
-        assert!(registrations.is_empty());
-        Ok(())
+    type InstanceRoot = clay_mdk::StatelessRoot;
+
+    async fn initialize(
+        context: micro_lifecycle::InitialContext,
+    ) -> Result<micro_lifecycle::Initialized, micro_lifecycle::InitializationError> {
+        assert!(context.arguments.is_empty());
+        assert!(context.configs.is_empty());
+        assert!(context.collections.is_empty());
+        assert!(context.registrations.is_empty());
+        assert!(context.requirements.is_empty());
+        Ok(micro_lifecycle::Initialized {
+            root: micro_lifecycle::InstanceRoot::new(clay_mdk::StatelessRoot),
+            provisions: Vec::new(),
+        })
     }
 }
 

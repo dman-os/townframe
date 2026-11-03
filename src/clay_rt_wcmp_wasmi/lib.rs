@@ -47,4 +47,6 @@ impl WcmpPackage {
 #[cfg(test)]
 mod documents_tests;
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod tests;

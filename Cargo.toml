@@ -394,6 +394,27 @@ opt-level = 3
 [profile.dev.package."winit"]
 opt-level = 3
 
+# Wasmtime compiles every guest component with Cranelift on a cache miss. At the dev
+# opt-level a cold compile of one debug guest takes ~30s, so parallel tests that each
+# compile a fresh component blow past nextest's slow-timeout. Optimizing the compiler
+# itself keeps cold compiles to a few seconds without touching the code under test.
+[profile.dev.package."cranelift-codegen"]
+opt-level = 3
+[profile.dev.package."cranelift-assembler-x64"]
+opt-level = 3
+[profile.dev.package."cranelift-bforest"]
+opt-level = 3
+[profile.dev.package."cranelift-entity"]
+opt-level = 3
+[profile.dev.package."cranelift-frontend"]
+opt-level = 3
+[profile.dev.package."regalloc2"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-cranelift"]
+opt-level = 3
+[profile.dev.package."wasmparser"]
+opt-level = 3
+
 # dx serve uses this profile for the native desktop development binary.
 [profile.desktop-dev]
 inherits = "dev"

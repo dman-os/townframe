@@ -11,10 +11,16 @@
 //! guest cannot implement or consume its typed provisions. Porting the contents to isomorphic
 //! vocabulary is workstream W5 (finding F6, `docs/scratch/clay-architecture-critique.md`).
 use clay_mdk::ComponentRef;
+use clay_mdk::ConfigurationRequest;
+use clay_mdk::ContractRef;
+use clay_mdk::Entrypoints;
+use clay_mdk::FacetAccess;
+use clay_mdk::MANIFEST_SCHEMA;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
+use clay_mdk::ProvidedContract;
 use clay_mdk::Provision;
-use clay_mdk::ProvisionRef;
+use clay_mdk::Retention;
 use clay_mdk::native::AccessError;
 use clay_mdk::native::Collection;
 use clay_mdk::native::CollectionWriter;
@@ -37,7 +43,7 @@ pub struct SettingsSection {
 }
 
 /// The payload a declared contribution to [`SettingsSections`] carries (see
-/// [`clay_mdk::Contribution`]): everything of a section except the detail component, which is
+/// [`clay_mdk::ContributionDeclaration`]): everything of a section except the detail component, which is
 /// the contributor's published surface.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,31 +108,44 @@ impl SettingsContribution {
     }
 }
 
-/// The Settings micro's compile-time declaration: it provides the sections collection and the
+/// The Settings micro's package declaration: it provides the sections collection and the
 /// controller provision, and requires nothing.
 pub fn manifest() -> MicroManifest {
     MicroManifest {
+        schema: MANIFEST_SCHEMA,
         id: MicroId::new(ID),
-        version: 1,
-        requirements: vec![],
-        provisions: vec![
-            ProvisionRef::of::<SettingsSections>(),
-            ProvisionRef {
-                id: "settings.controller".into(),
-                version: 1,
+        package_version: 1,
+        entrypoints: Entrypoints::micro_client(),
+        provides: vec![
+            ProvidedContract {
+                id: "sections".into(),
+                contract: ContractRef::of::<SettingsSections>(),
+                retention: Retention::Strong,
+            },
+            ProvidedContract {
+                id: "controller".into(),
+                contract: ContractRef {
+                    id: "settings.controller".into(),
+                    version: 1,
+                },
+                retention: Retention::Strong,
             },
         ],
-        config: Some(clay_mdk::ConfigGrant {
-            name: CONFIG_NAME.into(),
-            facets: vec![clay_mdk::FacetAccess {
+        requires: vec![],
+        configuration_requests: vec![ConfigurationRequest {
+            binding: CONFIG_NAME.into(),
+            facets: vec![FacetAccess {
                 tag: CONFIG_TAG.into(),
                 key_id: Some(CONFIG_KEY.into()),
                 read: true,
                 write: true,
                 ..Default::default()
             }],
-        }),
+        }],
+        collection_contracts: vec![],
         contributions: vec![],
+        activation_defaults: vec![],
+        extra: Default::default(),
     }
 }
 
@@ -136,7 +155,7 @@ mod tests {
     use clay_host::Host;
     use clay_host::HostedCollection;
 
-    // ── manifest and contract wire shapes: the manifest is wire data (ADR 015 §9) and
+    // ── manifest and contract wire shapes: the manifest is wire data (ADR 024 §11) and
     //    `DeclaredSection` is the contribution payload acceptor; both snapshots follow the
     //    current shape so drift is a reviewable diff ────────────────────────────────────
 

@@ -62,14 +62,26 @@ thread_local! {
 struct CollectionProbe;
 
 impl micro_lifecycle::Guest for CollectionProbe {
-    async fn activate(
-        configs: Vec<documents::DocumentBinding>,
-        collection_bindings: Vec<collections::CollectionBinding>,
-        registrations: Vec<collection_registration::RegistrationBinding>,
-    ) -> Result<(), String> {
+    type InstanceRoot = clay_mdk::StatelessRoot;
+
+    async fn initialize(
+        context: micro_lifecycle::InitialContext,
+    ) -> Result<micro_lifecycle::Initialized, micro_lifecycle::InitializationError> {
+        use micro_lifecycle::InitializationError;
+        let micro_lifecycle::InitialContext {
+            arguments,
+            configs,
+            collections: collection_bindings,
+            registrations,
+            requirements,
+        } = context;
+        assert!(arguments.is_empty());
         assert!(configs.is_empty());
+        assert!(requirements.is_empty());
         if collection_bindings.len() != 1 {
-            return Err("collection probe expects exactly one collection binding".into());
+            return Err(InitializationError::InvalidConfiguration(
+                "collection probe expects exactly one collection binding".into(),
+            ));
         }
         let mut registrations = registrations.into_iter();
         let (writer_a, writer_b, cap_writer) = match (
@@ -83,10 +95,10 @@ impl micro_lifecycle::Guest for CollectionProbe {
             }
             (Some(cap), None, None) if cap.name == "cap" => (None, None, Some(Rc::new(cap.writer))),
             _ => {
-                return Err(
+                return Err(InitializationError::InvalidConfiguration(
                     "collection probe expects no registrations, exactly `a` and `b`, or exactly `cap`"
                         .into(),
-                );
+                ));
             }
         };
         let binding = collection_bindings.into_iter().next().unwrap();
@@ -96,7 +108,9 @@ impl micro_lifecycle::Guest for CollectionProbe {
             .reader
             .acquire(selector.clone(), None)
             .await
-            .map_err(|error| format!("collection acquire failed: {error:?}"))?;
+            .map_err(|error| {
+                InitializationError::Unavailable(format!("collection acquire failed: {error:?}"))
+            })?;
         let state = Rc::new(RefCell::new(State {
             reader: Rc::new(binding.reader),
             selector,
@@ -126,7 +140,10 @@ impl micro_lifecycle::Guest for CollectionProbe {
             assert!(slot.replace(state.clone()).is_none());
         });
         wit_bindgen::spawn_local(read_loop(state));
-        Ok(())
+        Ok(micro_lifecycle::Initialized {
+            root: micro_lifecycle::InstanceRoot::new(clay_mdk::StatelessRoot),
+            provisions: Vec::new(),
+        })
     }
 }
 

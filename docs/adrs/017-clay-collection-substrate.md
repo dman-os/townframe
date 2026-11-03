@@ -7,7 +7,7 @@ criteria below pass through an actual component boundary.
 
 **Amends:** ADR 014's live-query and optimistic-state requirements and ADR 015's
 collection boundary. ADR 023 defines capability references carried by collection
-values.
+values. ADR 025 defines manifest-declared collections, durable registration scopes, and lazy capability attachments.
 
 ## Context
 
@@ -47,6 +47,8 @@ features and guest libraries build richer behavior above it.
 
 A collection source exposes keyed projected current state. It is not a history API,
 event bus, CRDT change transport, blob transport, or persistence layer.
+
+A manifest-declared collection is a logical host facility independent of the declaring micro's activation. Once its plug definition is admitted, an untouched collection still exists and bootstraps as known-empty. Volatile, durable, and node-backed materializations share this read waist; backing and registration-scope lifetime are specified by ADR 025 rather than exposed through pages.
 
 A consumer acquires an immutable source-defined selector and receives a projection
 lease:
@@ -262,24 +264,19 @@ mutation semantics.
 
 ### 9. Owner-scoped registrations
 
-Independently keyed contributions use an ephemeral writer lease. The host supplies
-the writer identity; a guest addresses only local keys:
+Independently keyed contributions use a host-assigned registration scope. A guest addresses only local keys:
 
 ```text
 registration-writer.put(local_key, based_on?, value)
 registration-writer.remove(local_key, based_on?)
+registration-writer.clear()
 ```
 
-Physical identity is `(writer, local_key)`, so one contributor cannot overwrite or
-delete another contributor's row. `based_on` is optional compare-and-set protection
-for the writer's own row. The host serializes accepted mutations and returns
-acceptance separately from when the resulting projection page reaches the caller.
+Physical identity is `(registration_scope, local_key)`, so one contributor cannot overwrite or delete another contributor's row. `based_on` is optional compare-and-set protection for the caller's own row. The host serializes accepted mutations and returns acceptance separately from when the resulting projection page reaches the caller.
 
-Dropping an ephemeral writer removes its physical rows. A host materializer combines
-all active inputs into a consumer-facing projection using an explicitly selected
-policy such as union, grouping, actor priority, host-ordered LWW, rejection of
-collisions, or provider-defined logic. The framework has no silent default for
-concurrent writes to the same logical scalar.
+The registration scope, not a particular writer-table handle, owns row lifetime. Closing a writer releases mutation authority. Closing an incarnation removes all rows in its incarnation scopes atomically; uninstalling a plug removes all rows in its durable installation scopes atomically. Durable rows survive process and guest inactivity. ADR 025 specifies these ownership classes and supersedes the earlier writer-drop rule.
+
+A host materializer combines all inputs into a consumer-facing projection using an explicitly selected policy such as union, grouping, actor priority, host-ordered LWW, rejection of collisions, or provider-defined logic. The framework has no silent default for concurrent writes to the same logical scalar.
 
 ### 10. Causal contributions to one logical row
 
@@ -445,8 +442,7 @@ programming/invariant failures and must not be silently recovered.
 - durable cursor retention across host restarts;
 - a generic library of causal materializers beyond the first concrete workload;
 - query planning beyond collection-specific typed IRs; and
-- persistent collection storage, which belongs to source adapters rather than the
-  waist.
+- backing adapters, durable registration scopes, and manifest admission are specified by ADR 025 and remain implementation work rather than changes to this read waist.
 
 ## Validation before acceptance
 
@@ -454,11 +450,12 @@ This ADR becomes Accepted only after the same protocol validates:
 
 1. one ordinary host collection with bootstrap, empty progress, long polling, resume,
    and clear-on-reset;
-2. one owner-scoped contribution collection whose rows disappear on writer closure;
+2. one owner-scoped contribution collection whose rows survive writer-handle closure and disappear atomically when its incarnation scope closes;
 3. one causal shared-row contribution with observed context and deterministic
    concurrent resolution;
 4. one node-backed datum projection with host-owned optimism and heads-based
    settlement;
-5. one capability-bearing toolbar or surface-mount row using ADR 023; and
+5. one capability-bearing toolbar or surface-mount row using ADR 023;
 6. one real Wasm component crossing the WIT boundary, not only an in-process Rust
-   adapter.
+   adapter; and
+7. one durable manifest-declared collection that exists while its declaring micro is inactive, reloads after host restart, and removes one installation scope on uninstall.

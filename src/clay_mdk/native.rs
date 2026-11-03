@@ -51,9 +51,10 @@ use std::sync::Arc;
 
 /// A contract that accepts contributions from micros that cannot write its collection
 /// themselves — a wasm guest, whose manifest names this contract and carries the payload as data
-/// (see [`crate::Contribution`]). The contract crate implements this next to its [`Provision`];
-/// the micro providing it publishes with [`Context::publish_contributable`], and the backend
-/// routes each declared contribution here by contract id once the contributor has activated.
+/// (see [`crate::ContributionDeclaration`]). The contract crate implements this next to its
+/// [`Provision`]; the micro providing it publishes with [`Context::publish_contributable`], and
+/// the backend routes each declared contribution here by contract id once the contributor has
+/// activated.
 pub trait Contributable: Provision {
     /// Land one contribution. `contributor` is the activated incarnation making it, `surface`
     /// the component it published; the payload's shape is the contract's own vocabulary. A
@@ -272,7 +273,7 @@ impl<R: RendererRegistry> Context<R> {
     #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
     pub(crate) fn contribute(
         &self,
-        contributions: &[crate::Contribution],
+        contributions: &[crate::ContributionDeclaration],
         surface: ComponentRef,
     ) -> Result<(), AccessError> {
         let instance = self.instance();
@@ -282,12 +283,12 @@ impl<R: RendererRegistry> Context<R> {
                 .descriptor()
                 .requirements
                 .iter()
-                .find(|requirement| requirement.id == contribution.provision)
+                .find(|requirement| requirement.id == contribution.extension_contract.id)
                 .expect("manifest contributes to a contract it does not require")
                 .version;
             let target = self
                 .activation
-                .require_erased(&contribution.provision, version)?;
+                .require_erased(&contribution.extension_contract.id, version)?;
             let accept = target
                 .downcast_ref::<Envelope>()
                 .expect("MDK contract published outside the MDK")
@@ -296,7 +297,7 @@ impl<R: RendererRegistry> Context<R> {
                 .unwrap_or_else(|| {
                     panic!(
                         "contract {} accepts no contributions",
-                        contribution.provision
+                        contribution.extension_contract.id
                     )
                 });
             accept(&instance, &contribution.payload, surface)?;
@@ -363,21 +364,23 @@ pub fn provider<R: RendererRegistry + 'static>(
     let registry = application.renderer();
     let roots = application.root_mounts();
     let descriptor = compose_descriptor(&manifest);
-    let config = manifest.config.clone();
+    let configuration_requests = manifest.configuration_requests.clone();
     let activate = std::rc::Rc::new(activate);
     let contributions = manifest
         .contributions
         .iter()
         .map(|contribution| clay_micro_core::micros::MicroContribution {
-            provision: contribution.provision.clone(),
+            provision: contribution.extension_contract.id.clone(),
             payload: contribution.payload.clone(),
         })
         .collect();
     MicroFactory::new(descriptor, move |activation| {
-        let configs = match &config {
-            Some(grant) => activation.grant_config(&grant.name, routine_facets(&grant.facets))?,
-            None => BTreeMap::new(),
-        };
+        let mut configs = BTreeMap::new();
+        for request in &configuration_requests {
+            configs.extend(
+                activation.grant_config(&request.binding, routine_facets(&request.facets))?,
+            );
+        }
         let context = Context::new(activation, registry.clone(), roots.clone(), configs);
         activate(&context)
     })
@@ -397,15 +400,19 @@ pub fn output<T: Provision, R: RendererRegistry>(
 pub(crate) fn compose_descriptor(manifest: &MicroManifest) -> MicroDescriptor {
     MicroDescriptor {
         id: ComposeMicroId::new(manifest.id.as_str()),
-        version: manifest.version,
-        provisions: compose_provisions(&manifest.provisions),
-        requirements: compose_provisions(&manifest.requirements),
+        version: manifest.package_version,
+        provisions: compose_provisions(manifest.provides.iter().map(|provided| &provided.contract)),
+        requirements: compose_provisions(
+            manifest.requires.iter().map(|required| &required.contract),
+        ),
     }
 }
 
-fn compose_provisions(references: &[crate::manifest::ProvisionRef]) -> Vec<ComposeMicroProvision> {
+fn compose_provisions<'a>(
+    references: impl IntoIterator<Item = &'a crate::ContractRef>,
+) -> Vec<ComposeMicroProvision> {
     references
-        .iter()
+        .into_iter()
         .map(|reference| ComposeMicroProvision {
             id: reference.id.clone(),
             version: reference.version,

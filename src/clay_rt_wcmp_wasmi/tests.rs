@@ -3,6 +3,7 @@ use super::WcmpRuntime;
 use clay_guest_session::Limits as DocumentLimits;
 use clay_host::ComponentRef;
 use clay_host::Host;
+use clay_rt_wcmp::InitialContext;
 use clay_rt_wcmp::WcmpPlacement;
 use clay_rt_wcmp::test_utils::WcmpStoreState;
 use clay_rt_wcmp::test_utils::convert_mutation;
@@ -15,7 +16,6 @@ use clay_surface::NodeId;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSink;
 use clay_surface::SurfaceTree;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -101,13 +101,11 @@ async fn counter_activates_and_mount_dispatch_unmount_complete_on_first_poll() {
         .expect("prepared counter component is valid");
     let host = Host::new();
     let owner = host.start("counter");
-    let (runtime, _driver) = WcmpRuntime::activate(
+    let (runtime, _driver) = WcmpRuntime::initialize(
         &host,
         owner.clone(),
         package.as_shared(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
+        InitialContext::default(),
     )
     .await
     .unwrap();
@@ -176,13 +174,11 @@ async fn guest_blocking_in_dispatch_fails_as_trap_on_the_wcmp_engine() {
     let package = WcmpPackage::from_env("sleeper")
         .await
         .expect("prepared sleeper component is valid");
-    let (runtime, driver) = WcmpRuntime::activate(
+    let (runtime, driver) = WcmpRuntime::initialize(
         &host,
         owner.clone(),
         package.as_shared(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
+        InitialContext::default(),
     )
     .await
     .unwrap();
@@ -226,13 +222,11 @@ async fn close_before_mount_revokes_the_incarnation() {
         .expect("prepared counter component is valid");
     let host = Host::new();
     let owner = host.start("close-before-mount");
-    let (runtime, driver) = WcmpRuntime::activate(
+    let (runtime, driver) = WcmpRuntime::initialize(
         &host,
         owner.clone(),
         package.as_shared(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
+        InitialContext::default(),
     )
     .await
     .unwrap();
@@ -291,13 +285,14 @@ async fn document_driver_delivers_neutral_updates() {
     let package = WcmpPackage::from_env("counter")
         .await
         .expect("prepared counter component is valid");
-    let (runtime, driver) = WcmpRuntime::activate(
+    let (runtime, driver) = WcmpRuntime::initialize(
         &host,
         owner.clone(),
         package.as_shared(),
-        [("counter".into(), document)].into(),
-        BTreeMap::new(),
-        BTreeMap::new(),
+        InitialContext {
+            configs: [("counter".into(), document)].into(),
+            ..InitialContext::default()
+        },
     )
     .await
     .unwrap();
@@ -373,13 +368,14 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     let projection =
         BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [11, 12]);
     projection.publish(vec![upsert("alpha", "one", 1), upsert("beta", "two", 2)]);
-    let (runtime, driver) = WcmpRuntime::activate(
+    let (runtime, driver) = WcmpRuntime::initialize(
         &host,
         owner.clone(),
         package.as_shared(),
-        BTreeMap::new(),
-        [("rows".into(), projection.clone())].into(),
-        BTreeMap::new(),
+        InitialContext {
+            collections: [("rows".into(), projection.clone())].into(),
+            ..InitialContext::default()
+        },
     )
     .await
     .unwrap();
@@ -484,17 +480,19 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
     let mut lease = observer.acquire(Vec::new(), None).unwrap();
     let bootstrap = lease.read(None, ReadLimits::default()).await.unwrap();
     assert!(bootstrap.bootstrap_complete);
-    let (runtime, driver) = WcmpRuntime::activate(
+    let (runtime, driver) = WcmpRuntime::initialize(
         &host,
         owner.clone(),
         package.as_shared(),
-        BTreeMap::new(),
-        [("rows".into(), registrations.projection())].into(),
-        [
-            ("a".into(), registrations.clone()),
-            ("b".into(), registrations.clone()),
-        ]
-        .into(),
+        InitialContext {
+            collections: [("rows".into(), registrations.projection())].into(),
+            registrations: [
+                ("a".into(), registrations.clone()),
+                ("b".into(), registrations.clone()),
+            ]
+            .into(),
+            ..InitialContext::default()
+        },
     )
     .await
     .unwrap();
@@ -593,13 +591,15 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
         .await
         .expect("prepared collection probe is valid");
     let registrations = bytes_registrations(NonZeroUsize::new(64).unwrap(), [41, 42]);
-    let (runtime, driver) = WcmpRuntime::activate(
+    let (runtime, driver) = WcmpRuntime::initialize(
         &host,
         owner.clone(),
         package.as_shared(),
-        BTreeMap::new(),
-        [("rows".into(), registrations.projection())].into(),
-        [("cap".into(), registrations.clone())].into(),
+        InitialContext {
+            collections: [("rows".into(), registrations.projection())].into(),
+            registrations: [("cap".into(), registrations.clone())].into(),
+            ..InitialContext::default()
+        },
     )
     .await
     .unwrap();

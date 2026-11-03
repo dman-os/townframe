@@ -223,3 +223,87 @@ fn physical_key_encoding_carries_rows_to_the_projection() {
         [Change::Upsert { key, value: "five", .. }] if *key == format!("{}/5", writer.id().0)
     ));
 }
+
+#[test]
+fn staged_rows_stay_out_of_the_projection_until_one_commit_publishes_them_together() {
+    let collection = RegistrationCollection::new([1, 2]);
+    let mut live = collection.writer();
+    live.put(9, None, "live").unwrap();
+    let mut lease = collection.projection().acquire((), None).unwrap();
+    let bootstrap = ready(lease.read(None, ReadLimits::default())).unwrap();
+    assert!(bootstrap.bootstrap_complete);
+
+    let mut a = collection.staged_writer();
+    let mut b = collection.staged_writer();
+    let first = a.put(1, None, "a1").unwrap();
+    // Staged writers keep full compare-and-set semantics against real versions.
+    assert_eq!(
+        a.put(1, None, "blind"),
+        Err(MutationError::Conflict {
+            current: Some(first)
+        })
+    );
+    a.put(1, Some(first), "a1'").unwrap();
+    a.put(2, None, "a2").unwrap();
+    let doomed = a.version(&2).unwrap();
+    a.remove(2, Some(doomed)).unwrap();
+    b.put(1, None, "b1").unwrap();
+    assert_eq!(rows(&collection), [((live.id(), 9), "live")]);
+    let quiet = lease
+        .read(Some(bootstrap.through.clone()), ReadLimits::default())
+        .complete_timeout()
+        .unwrap();
+    assert!(
+        quiet.transactions.is_empty(),
+        "staged rows leaked: {quiet:?}"
+    );
+
+    collection.commit_staged([a.id(), b.id()]);
+    let page = ready(lease.read(Some(bootstrap.through), ReadLimits::default())).unwrap();
+    assert_eq!(page.transactions.len(), 1, "commit must be one transaction");
+    let mut published = page.transactions[0]
+        .changes
+        .iter()
+        .map(|change| match change {
+            Change::Upsert { key, value, .. } => (*key, *value),
+            Change::Remove { .. } => panic!("commit published a removal"),
+        })
+        .collect::<Vec<_>>();
+    published.sort();
+    assert_eq!(published, [((a.id(), 1), "a1'"), ((b.id(), 1), "b1")]);
+
+    // After commit the writer publishes directly.
+    a.put(3, None, "a3").unwrap();
+    assert_eq!(
+        rows(&collection),
+        [
+            ((live.id(), 9), "live"),
+            ((a.id(), 1), "a1'"),
+            ((a.id(), 3), "a3"),
+            ((b.id(), 1), "b1")
+        ]
+    );
+    collection.commit_staged([a.id()]);
+}
+
+#[test]
+fn dropping_a_staged_writer_discards_its_rows_without_a_projection_change() {
+    let collection = RegistrationCollection::new([1, 2]);
+    let mut lease = collection.projection().acquire((), None).unwrap();
+    let bootstrap = ready(lease.read(None, ReadLimits::default())).unwrap();
+    let mut staged = collection.staged_writer();
+    let id = staged.id();
+    staged.put(1, None, "never seen").unwrap();
+    drop(staged);
+    collection.commit_staged([id]);
+    assert!(rows(&collection).is_empty());
+    let mut live = collection.writer();
+    live.put(2, None, "seen").unwrap();
+    let page = ready(lease.read(Some(bootstrap.through), ReadLimits::default())).unwrap();
+    assert_eq!(page.transactions.len(), 1);
+    assert!(matches!(
+        &page.transactions[0].changes[..],
+        [Change::Upsert { key, value: "seen", .. }] if *key == (live.id(), 2)
+    ));
+    assert!(collection.lock().staged.is_empty());
+}

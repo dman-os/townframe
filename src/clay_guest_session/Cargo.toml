@@ -16,7 +16,13 @@ clay_docs = { workspace = true }
 clay_host = { workspace = true }
 clay_surface = { workspace = true }
 futures.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
+ciborium = { workspace = true, optional = true }
+
+[features]
+# Engine conformance scenarios (`lifecycle_conformance`) for engine crates' tests.
+test-utils = ["dep:ciborium", "tokio/rt"]
 
 [dev-dependencies]
 daybook_types = { workspace = true, default-features = false, features = ["manifest"] }

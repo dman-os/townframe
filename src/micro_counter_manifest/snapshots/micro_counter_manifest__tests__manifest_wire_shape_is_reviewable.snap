@@ -2,25 +2,51 @@
 source: src/micro_counter_manifest/lib.rs
 expression: manifest()
 ---
+schema: 1
 id: dayframe.counter
-version: 1
-requirements:
-  - id: settings.sections
-    version: 1
-provisions:
-  - id: wasm.controller
-    version: 1
-config:
-  name: counter
-  facets:
-    - owner_plug_id: ~
-      tag: org.dayframe.counter.config
-      key_id: count
-      read: true
-      write: true
-      create: false
-      delete: false
+package_version: 1
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.3.0"
+  presentation: "townframe:dayframe/presentation-events@0.3.0"
+  installer: ~
+provides:
+  - id: controller
+    contract:
+      id: wasm.controller
+      version: 1
+    retention: strong
+requires:
+  - binding: settings
+    contract:
+      id: settings.sections
+      version: 1
+    necessity: optional
+configuration_requests:
+  - binding: counter
+    facets:
+      - owner_plug_id: ~
+        tag: org.dayframe.counter.config
+        key_id: count
+        read: true
+        write: true
+        create: false
+        delete: false
+collection_contracts: []
 contributions:
-  - provision: settings.sections
+  - id: settings-section
+    target_binding: settings
+    extension_contract:
+      id: settings.sections
+      version: 1
     payload:
       title: Counter (Wasm)
+    capability_slots: []
+activation_defaults:
+  - id: settings-section
+    trigger:
+      kind: target-live
+      target_binding: settings
+      extension_contract:
+        id: settings.sections
+        version: 1
+    declaration_id: settings-section

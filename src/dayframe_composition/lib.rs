@@ -63,7 +63,7 @@ pub struct CompositionRuntime {
 
 impl CompositionRuntime {
     /// Build the composition from the launcher's catalog: register every installed
-    /// provider, bind one mock configuration document per manifest config grant
+    /// provider, bind one mock configuration document per manifest configuration request
     /// (`<name>-config`), and seed the composition facet — only when absent — with one
     /// enabled on-demand instance per installed micro that `locked` does not already pin.
     pub fn new(installed: Vec<InstalledMicro>, locked: BTreeMap<String, ConfiguredMicro>) -> Self {
@@ -74,10 +74,10 @@ impl CompositionRuntime {
             .map(|micro| micro.manifest.clone())
             .collect();
         for manifest in &manifests {
-            if let Some(config) = &manifest.config {
+            for request in &manifest.configuration_requests {
                 documents.bind_config(
-                    config.name.clone(),
-                    format!("{}-config", config.name),
+                    request.binding.clone(),
+                    format!("{}-config", request.binding),
                     "main".into(),
                 );
             }
@@ -214,18 +214,18 @@ fn seeded_instances(
         .filter(|(name, _)| !locked.contains_key(name))
         .map(|(name, manifest)| {
             let mut bindings = BTreeMap::new();
-            for requirement in &manifest.requirements {
+            for requirement in &manifest.requires {
                 let mut candidates = instances
                     .iter()
                     .filter(|(_, provider)| {
                         provider
-                            .provisions
+                            .provides
                             .iter()
-                            .any(|provision| provision.id == requirement.id)
+                            .any(|provided| provided.contract.id == requirement.contract.id)
                     })
                     .map(|(candidate, _)| candidate);
                 if let (Some(only), None) = (candidates.next(), candidates.next()) {
-                    bindings.insert(requirement.id.clone(), only.clone());
+                    bindings.insert(requirement.contract.id.clone(), only.clone());
                 }
             }
             (

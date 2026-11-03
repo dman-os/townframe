@@ -15,6 +15,7 @@ use clay_micro_core::application::ApplicationRuntime;
 use clay_micro_core::micros::ActivationError;
 use clay_micro_core::micros::MicroFactory;
 use clay_micro_core::micros::Provision as ComposeProvision;
+use clay_rt_wasmtime::InitialContext;
 pub use clay_rt_wasmtime::WasmPackage;
 use clay_rt_wasmtime::WasmRuntime;
 use std::collections::BTreeMap;
@@ -78,19 +79,23 @@ impl WasmMicro {
         package: &WasmPackage,
     ) -> Result<Self, ActivationError> {
         let instance = context.instance();
-        let (runtime, driver) = WasmRuntime::activate(
+        let (runtime, driver) = WasmRuntime::initialize(
             context.registry().host(),
             instance.clone(),
             package,
-            context.configs().clone(),
-            BTreeMap::new(),
-            BTreeMap::new(),
+            InitialContext {
+                configs: context.configs().clone(),
+                ..InitialContext::default()
+            },
         )
         .await
         .map_err(|error| match error {
             clay_rt_wasmtime::ActivationError::Access(error) => ActivationError::Access(error),
             clay_rt_wasmtime::ActivationError::Initialization(message) => {
                 ActivationError::Initialization(message)
+            }
+            clay_rt_wasmtime::ActivationError::Refused(failure) => {
+                ActivationError::Initialization(failure.to_string())
             }
         })?;
         let fuel = runtime.fuel_budget();
@@ -144,7 +149,7 @@ where
         }),
         "Wasm manifest must declare its controller provision"
     );
-    let config = manifest.config.clone();
+    let configuration_requests = manifest.configuration_requests.clone();
     // The same declarations are both routed on activation (below) and readable from the static
     // registry while this micro is idle, which is what lets a consumer list its rows without
     // booting their contributors (ADR 014 §Composition and lifecycle).
@@ -152,7 +157,7 @@ where
         .contributions
         .iter()
         .map(|contribution| clay_micro_core::micros::MicroContribution {
-            provision: contribution.provision.clone(),
+            provision: contribution.extension_contract.id.clone(),
             payload: contribution.payload.clone(),
         })
         .collect();
@@ -161,19 +166,19 @@ where
     let roots = application.root_mounts();
     let package = Rc::new(package);
     MicroFactory::new_async(descriptor, move |activation| {
-        let config = config.clone();
+        let configuration_requests = configuration_requests.clone();
         let contributions = contributions.clone();
         let registry = registry.clone();
         let roots = roots.clone();
         let package = package.clone();
         async move {
             let package = package().await.map_err(ActivationError::Initialization)?;
-            let configs = match &config {
-                Some(grant) => {
-                    activation.grant_config(&grant.name, routine_facets(&grant.facets))?
-                }
-                None => BTreeMap::new(),
-            };
+            let mut configs = BTreeMap::new();
+            for request in &configuration_requests {
+                configs.extend(
+                    activation.grant_config(&request.binding, routine_facets(&request.facets))?,
+                );
+            }
             let context = Context::new(activation, registry, roots, configs);
             let micro = WasmMicro::activate(&context, &package).await?;
             context.contribute(&contributions, micro.surface())?;

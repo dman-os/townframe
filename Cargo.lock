@@ -2606,6 +2606,7 @@ dependencies = [
 name = "clay_guest_session"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "clay_collection",
  "clay_docs",
  "clay_host",
@@ -2613,6 +2614,7 @@ dependencies = [
  "daybook_types",
  "futures",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
 ]
 
@@ -2633,6 +2635,7 @@ name = "clay_mdk"
 version = "0.1.0"
 dependencies = [
  "blitz-dom",
+ "ciborium",
  "clay_collection",
  "clay_dioxus",
  "clay_docs",

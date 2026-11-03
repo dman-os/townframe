@@ -1,10 +1,16 @@
 use super::*;
-use crate::ConfigGrant;
-use crate::Contribution;
+use crate::ConfigurationRequest;
+use crate::ContractRef;
+use crate::ContributionDeclaration;
+use crate::Entrypoints;
 use crate::FacetAccess;
+use crate::MANIFEST_SCHEMA;
 use crate::MicroId;
+use crate::Necessity;
+use crate::ProvidedContract;
 use crate::Provision;
-use crate::ProvisionRef;
+use crate::RequiredContract;
+use crate::Retention;
 use crate::native::Collection;
 use crate::native::Contributable;
 use crate::native::output;
@@ -71,11 +77,13 @@ fn shelf_provider(app: &ApplicationRuntime) -> MicroFactory {
         app,
         MicroManifest {
             id: MicroId::new("test.shelf"),
-            version: 1,
-            requirements: vec![],
-            provisions: vec![ProvisionRef::of::<Shelf>()],
-            config: None,
-            contributions: vec![],
+            provides: vec![ProvidedContract {
+                id: "shelf".into(),
+                contract: ContractRef::of::<Shelf>(),
+                retention: Retention::Strong,
+            }],
+            requires: vec![],
+            ..manifest()
         },
         |context| {
             context.publish_contributable(Shelf {
@@ -87,24 +95,40 @@ fn shelf_provider(app: &ApplicationRuntime) -> MicroFactory {
     )
 }
 
-fn contribution(reject: bool) -> Contribution {
-    Contribution {
-        provision: Shelf::ID.into(),
+fn contribution(reject: bool) -> ContributionDeclaration {
+    ContributionDeclaration {
+        id: if reject { "rejected" } else { "accepted" }.into(),
+        target_binding: "shelf".into(),
+        extension_contract: ContractRef::of::<Shelf>(),
         payload: serde_json::json!({ "reject": reject }),
+        capability_slots: vec![],
     }
 }
 
 fn manifest() -> MicroManifest {
     MicroManifest {
+        schema: MANIFEST_SCHEMA,
         id: MicroId::new("test.wasm"),
-        version: 1,
-        requirements: vec![ProvisionRef::of::<Shelf>()],
-        provisions: vec![ProvisionRef {
-            id: WasmMicro::ID.into(),
-            version: 1,
+        package_version: 1,
+        entrypoints: Entrypoints::micro_client(),
+        provides: vec![ProvidedContract {
+            id: "controller".into(),
+            contract: ContractRef {
+                id: WasmMicro::ID.into(),
+                version: 1,
+            },
+            retention: Retention::Strong,
         }],
-        config: None,
+        requires: vec![RequiredContract {
+            binding: "shelf".into(),
+            contract: ContractRef::of::<Shelf>(),
+            necessity: Necessity::Required,
+        }],
+        configuration_requests: vec![],
+        collection_contracts: vec![],
         contributions: vec![],
+        activation_defaults: vec![],
+        extra: BTreeMap::new(),
     }
 }
 
@@ -201,13 +225,11 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
     let viewer = host.start("viewer");
     let child = host.start("counter child");
     let layout = host.start("wasm layout");
-    let (counter, _counter_driver) = WasmRuntime::activate(
+    let (counter, _counter_driver) = WasmRuntime::initialize(
         &host,
         child.clone(),
         &counter_package().await,
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
+        InitialContext::default(),
     )
     .await
     .unwrap();
@@ -219,16 +241,10 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
     let package = super::component_package("slots")
         .await
         .expect("prepared slots component is valid");
-    let (runtime, _layout_driver) = WasmRuntime::activate(
-        &host,
-        layout.clone(),
-        &package,
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .await
-    .unwrap();
+    let (runtime, _layout_driver) =
+        WasmRuntime::initialize(&host, layout.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
     let foreign = Host::new();
     let foreign_owner = foreign.start("foreign");
     let foreign_reference = foreign.publish_component(&foreign_owner).unwrap();
@@ -345,9 +361,9 @@ async fn failed_contribution_rolls_back_surfaces_entries_and_publications() {
     app.host().close();
 }
 
-fn config_grant(read: bool, write: bool) -> ConfigGrant {
-    ConfigGrant {
-        name: "counter".into(),
+fn configuration_request(read: bool, write: bool) -> ConfigurationRequest {
+    ConfigurationRequest {
+        binding: "counter".into(),
         facets: vec![FacetAccess {
             tag: "org.dayframe.counter.config".into(),
             key_id: Some("count".into()),
@@ -375,7 +391,7 @@ fn seed(app: &ApplicationRuntime) {
 #[tokio::test]
 async fn manifest_read_only_grant_cannot_be_escalated_by_guest_mutation() {
     let mut declared = manifest();
-    declared.config = Some(config_grant(true, false));
+    declared.configuration_requests = vec![configuration_request(true, false)];
     let app = composed(declared);
     seed(&app);
     assert_eq!(
@@ -400,7 +416,7 @@ async fn manifest_read_only_grant_cannot_be_escalated_by_guest_mutation() {
 #[tokio::test]
 async fn guest_activation_failure_does_not_run_contributions_or_publish_a_controller() {
     let mut declared = manifest();
-    declared.config = Some(config_grant(false, true));
+    declared.configuration_requests = vec![configuration_request(false, true)];
     declared.contributions = vec![contribution(false)];
     let app = composed(declared);
     seed(&app);
