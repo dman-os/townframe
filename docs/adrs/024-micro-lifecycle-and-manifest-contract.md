@@ -158,9 +158,9 @@ trap, cancellation, or dropped initialization, the pending incarnation scope is
 dropped and all acquired/staged resources unwind through RAII. This is transactional
 visibility, not a general rollback protocol for arbitrary external side effects.
 
-The host owns lifecycle authority. The exported `instance-root` proves successful
-initialization and is held by the host for the incarnation; it is not a guest-visible
-`stop` capability.
+The host owns lifecycle authority. A successful `initialize` return proves initialization;
+the host then starts the guest's `serve` main loop (§7a) and owns its inbox for the
+incarnation. The guest receives no `stop` capability.
 
 ### 6. Closing preserves dependencies through cleanup
 
@@ -174,7 +174,7 @@ When an active incarnation loses its final external strong binding, is disabled,
 6. recompute reachability and close newly unreachable suppliers.
 
 
-The host invokes `instance-root.close()` exactly once while the incarnation's existing dependencies remain retained. The guest uses it to finish or cancel asynchronous owned work; returning does not grant authority to publish new outward resources. After it returns, traps, or is cancelled by host supervision, the host drops the incarnation scope and its resources. Abrupt engine loss may skip guest cleanup, so correctness still relies on host-owned RAII cleanup rather than on `close()` completing.
+Guest cleanup happens when the host closes the `serve` inbox, exactly once, while the incarnation's existing dependencies are still retained. The guest's main loop sees the end of the stream, finishes or cancels its in-flight handlers and owned work, and returns from `serve`. Returning does not grant authority to publish new outward resources. After `serve` returns, traps, or is abandoned by host supervision, the host drops the incarnation scope and its resources. A forced close (disable or shutdown) may abandon `serve` without waiting for its handlers, and abrupt engine loss skips guest cleanup entirely, so correctness relies on host-owned RAII cleanup, not on `serve` returning.
 This naturally closes dependents before providers. Mandatory configured dependency
 cycles are rejected. A dynamically formed unreachable strongly connected component
 closes as a group; members must tolerate peers becoming revoked during cleanup.
@@ -206,10 +206,6 @@ interface lifecycle-host {
 }
 
 interface lifecycle-guest {
-    resource instance-root {
-        close: async func();
-    }
-
     variant initialization-error {
         invalid-configuration(string),
         unavailable(string),
@@ -222,15 +218,29 @@ interface lifecycle-guest {
     }
 
     record initialized {
-        root: instance-root,
         publications: list<named-publication>,
     }
 
     initialize: async func(context: lifecycle-host.initial-context)
         -> result<initialized, initialization-error>;
 
-    // Publications are served through exports keyed by publication name.
-    call: async func(publication: string, request: list<u8>) -> result<list<u8>, call-error>;
+    // The incarnation's main loop (§7a). Started once after `initialize` succeeds;
+    // returns after the host closes the inbox and in-flight handlers finish.
+    serve: async func(inbox: stream<request>);
+}
+
+interface lifecycle-host-requests {
+    // Host-owned; dropping it unanswered reports a provider error to the caller.
+    resource responder {
+        respond: func(result: result<list<u8>, string>);
+        cancelled: func() -> future;   // resolves when the caller gave up
+    }
+
+    record request {
+        publication: string,           // a Call publication of this micro
+        payload: list<u8>,             // CBOR per the publication's request Lexicon
+        responder: responder,
+    }
 }
 
 world micro-client {
@@ -244,6 +254,37 @@ world micro-client {
     export presentation-events;
 }
 ```
+
+### 7a. The guest is an actor with one long-lived main loop
+
+After `initialize` succeeds, the host starts `serve` once and keeps its inbox open for the
+incarnation. Every Call routed to this micro arrives as a `request`. The guest runs one
+handler per request *inside* the `serve` task, so handlers run concurrently, a handler that
+awaits another micro does not block the rest, and a call chain that re-enters this micro
+(A→B→A) is just another request to an already running loop. Presentation `mount`,
+`dispatch`, and `unmount` stay synchronous exports and enter between the host's bounded
+drive bursts while handlers are suspended.
+
+There are two reasons for one long-lived task instead of one async export task per call:
+
+1. wit-bindgen scopes spawned work to the export task that spawned it, so background work
+   (UI effects, long polls, session state) needs a task that lives as long as the incarnation.
+2. On `wasm32-wasip3`, wit-bindgen stores the current export task in a libc thread-local,
+   and the wasi-libc we pin does not swap it per component-model task. A second async export
+   task entering while one is suspended aborts the guest. Upstream LLVM moves the wasip3
+   stack and TLS base into `context.get`/`context.set`. Once our toolchain has that, per-call
+   exports may be added *alongside* `serve`; the main loop stays.
+
+Two consequences for guest authors, both handled by the MDK:
+
+- Guest thread-locals written inside `serve` are not visible to the sync presentation
+  exports. State shared between handlers and presentation lives in statics, or crosses
+  through the MDK, which delivers handler results into the presentation side.
+- The MDK owns the loop. Authors write `async fn` handlers per publication; the MDK reads
+  the inbox, spawns handlers, honours `cancelled`, and drains on close.
+
+The host bounds the number of in-flight requests per incarnation and holds a Call's strong
+edge until its responder answers or is dropped.
 
 A separate `get-args()` import may replace `initial-context.arguments()` if bindings
 make it more ergonomic. It remains one-shot initialization input, not another lifecycle
@@ -530,7 +571,7 @@ Not built:
 - durable collection backing and installation registration scopes;
 - lazy activation attachments and named publication slots;
 - the unified writer-handle versus registration-scope ownership rule;
-- resource-driven idle `Closing` sequencing and async `instance-root.close()` across both engines;
+- resource-driven idle `Closing` sequencing and the `serve` inbox main loop (§7a) across both engines;
 - the revised context-centered MDK surface; and
 - installer/enablement reconciliation.
 
@@ -567,7 +608,7 @@ This ADR becomes Accepted only after tests demonstrate:
 3. reading its lazy endpoint does not activate the provider, while redemption starts or joins exactly one staged activation;
 4. a demanded named publication is returned without polling a secondary collection;
 5. retaining the redeemed live resource keeps the provider active and dropping the final strong edge begins orderly shutdown;
-6. `instance-root.close()` runs once with dependencies retained, after which incarnation scopes and publications are revoked;
+6. closing the `serve` inbox lets the guest drain once with dependencies retained, after which incarnation publications and scopes are revoked; concurrent requests and A→B→A re-entry complete without deadlock;
 7. failed/cancelled initialization exposes no staged publication;
 8. disconnected cycles do not remain live and activation cycles fail precisely;
 9. faulted micros do not retry from demand churn; and
