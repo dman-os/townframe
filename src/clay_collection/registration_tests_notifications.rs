@@ -7,12 +7,19 @@ use std::task::Poll;
 use std::task::Wake;
 use std::task::Waker;
 
+use super::semantics_tests::writer_id;
 use super::*;
+use crate::types::Cursor;
 use crate::types::ReadError;
 use crate::types::ReadLimits;
 
+type Collection = RegistrationCollection<u32, u32>;
+type Writer = RegistrationWriter<u32, u32>;
+
+/// On wake: assert that no lock is held and that the published state is already
+/// visible through both the authority snapshot and a fresh bootstrap read.
 struct SnapshotOnWake {
-    collection: Arc<RegistrationCollection<u32, u32>>,
+    collection: Arc<Collection>,
     expected: Vec<(u32, u32)>,
     calls: AtomicUsize,
 }
@@ -23,10 +30,11 @@ impl Wake for SnapshotOnWake {
             self.collection.inner.try_lock().is_ok(),
             "registration locked during wake"
         );
-        let rows = self.collection.snapshot();
         assert_eq!(
-            rows.iter()
-                .map(|((_, key), entry)| (*key, entry.value))
+            self.collection
+                .snapshot()
+                .into_iter()
+                .map(|(key, row)| (key, row.value))
                 .collect::<Vec<_>>(),
             self.expected
         );
@@ -48,11 +56,7 @@ impl Wake for SnapshotOnWake {
                 .into_iter()
                 .flat_map(|transaction| transaction.changes)
                 .map(|change| match change {
-                    Change::Upsert {
-                        key: (_, key),
-                        value,
-                        ..
-                    } => (key, value),
+                    Change::Upsert { key, value, .. } => (key, value.value),
                     Change::Remove { .. } => panic!("remove in bootstrap"),
                 })
                 .collect::<Vec<_>>(),
@@ -62,47 +66,60 @@ impl Wake for SnapshotOnWake {
     }
 }
 
-fn assert_reentrant_wake(
-    mutate: impl FnOnce(
-        &RegistrationScope<u32, u32>,
-        &mut Option<RegistrationWriter<u32, u32>>,
-        Version,
-    ),
-    expected: Vec<(u32, u32)>,
-    changes: Option<usize>,
-) {
-    let collection = Arc::new(RegistrationCollection::new([1, 2]));
-    let scope = collection.create_scope();
-    let writer = scope.writer().unwrap();
-    let version = writer.put(1, None, 10).unwrap().dispatch();
-    writer.put(2, None, 20).unwrap().dispatch();
-    let mut writer = Some(writer);
+fn poll_ready<T>(future: &mut (impl Future<Output = T> + Unpin), waker: &Waker) -> Poll<T> {
+    Pin::new(future).poll(&mut Context::from_waker(waker))
+}
+
+fn bootstrap_through(
+    collection: &Collection,
+) -> (crate::ProjectionLease<u32, Stamped<u32>>, Cursor) {
     let mut lease = collection.projection().acquire((), None).unwrap();
-    let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
-        .poll(&mut Context::from_waker(Waker::noop()))
+    let Poll::Ready(Ok(bootstrap)) =
+        poll_ready(&mut lease.read(None, ReadLimits::default()), Waker::noop())
     else {
         panic!("expected ready bootstrap");
     };
     assert!(bootstrap.bootstrap_complete);
-    let observer = Arc::new(SnapshotOnWake {
-        collection: Arc::clone(&collection),
+    (lease, bootstrap.through)
+}
+
+/// A wake observer that expects the published state to equal `expected`.
+fn observer(collection: &Arc<Collection>, expected: Vec<(u32, u32)>) -> Arc<SnapshotOnWake> {
+    Arc::new(SnapshotOnWake {
+        collection: Arc::clone(collection),
         expected,
         calls: AtomicUsize::new(0),
-    });
+    })
+}
+
+fn assert_reentrant_wake(
+    mutate: impl FnOnce(&RegistrationScope<u32, u32>, &Writer, Stamp),
+    expected: Vec<(u32, u32)>,
+    changes: Option<usize>,
+) {
+    let collection = Arc::new(Collection::new([1, 2]));
+    let scope = collection.create_scope(writer_id("a"));
+    let writer = scope.writer().unwrap();
+    let stamp = writer
+        .put(1, WriteBasis::Concurrent, 10)
+        .unwrap()
+        .dispatch();
+    writer
+        .put(2, WriteBasis::Concurrent, 20)
+        .unwrap()
+        .dispatch();
+    let (mut lease, through) = bootstrap_through(&collection);
+    let observer = observer(&collection, expected);
     let waker = Waker::from(Arc::clone(&observer));
-    let mut pending = lease.read(Some(bootstrap.through), ReadLimits::default());
-    assert!(
-        Pin::new(&mut pending)
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending()
-    );
-    mutate(&scope, &mut writer, version);
+    let mut pending = lease.read(Some(through), ReadLimits::default());
+    assert!(poll_ready(&mut pending, &waker).is_pending());
+    mutate(&scope, &writer, stamp);
     assert_eq!(
         observer.calls.load(Ordering::SeqCst),
         1,
         "wake must reenter after registration mutex is released"
     );
-    let result = Pin::new(&mut pending).poll(&mut Context::from_waker(&waker));
+    let result = poll_ready(&mut pending, &waker);
     if let Some(changes) = changes {
         let Poll::Ready(Ok(page)) = result else {
             panic!("expected published transaction");
@@ -117,161 +134,108 @@ fn assert_reentrant_wake(
 #[test]
 fn deferred_mutations_commit_before_dispatch() {
     for dispatch in [false, true] {
-        let collection = Arc::new(RegistrationCollection::new([1, 2]));
-        let scope = collection.create_scope();
+        let collection = Arc::new(Collection::new([1, 2]));
+        let scope = collection.create_scope(writer_id("a"));
         let writer = scope.writer().unwrap();
         let mut current = None;
         for value in [Some(10), None] {
-            let mut lease = collection.projection().acquire((), None).unwrap();
-            let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
-                .poll(&mut Context::from_waker(Waker::noop()))
-            else {
-                panic!("expected ready bootstrap");
-            };
-            let observer = Arc::new(SnapshotOnWake {
-                collection: Arc::clone(&collection),
-                expected: value.into_iter().map(|value| (1, value)).collect(),
-                calls: AtomicUsize::new(0),
-            });
-            let waker = Waker::from(Arc::clone(&observer));
-            let mut pending = lease.read(Some(bootstrap.through), ReadLimits::default());
-            assert!(
-                Pin::new(&mut pending)
-                    .poll(&mut Context::from_waker(&waker))
-                    .is_pending()
+            let (mut lease, through) = bootstrap_through(&collection);
+            let observer = observer(
+                &collection,
+                value.into_iter().map(|value| (1, value)).collect(),
             );
-            let (version, notifications) = match value {
-                Some(value) => {
-                    let notifications = writer.put(1, current, value).unwrap();
-                    (
-                        *notifications.output(),
-                        Box::new(|| {
-                            notifications.dispatch();
-                        }) as Box<dyn FnOnce()>,
-                    )
-                }
-                None => {
-                    let notifications = writer.remove(1, current).unwrap();
-                    (
-                        notifications.output().unwrap(),
-                        Box::new(|| {
-                            notifications.dispatch();
-                        }) as Box<dyn FnOnce()>,
-                    )
-                }
-            };
+            let waker = Waker::from(Arc::clone(&observer));
+            let mut pending = lease.read(Some(through), ReadLimits::default());
+            assert!(poll_ready(&mut pending, &waker).is_pending());
+
+            let basis = WriteBasis::CompareAndSet(current.take());
+            let notifications = match value {
+                Some(value) => writer.put(1, basis, value),
+                None => writer.delete(1, basis),
+            }
+            .unwrap();
+            let stamp = notifications.output().clone();
             assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
-            assert_eq!(writer.version(&1), value.map(|_| version));
-            assert_eq!(writer.row_count(), usize::from(value.is_some()));
             assert_eq!(
                 collection
                     .snapshot()
                     .into_iter()
-                    .map(|((_, key), entry)| (key, entry.value))
+                    .map(|(key, row)| (key, row.value))
                     .collect::<Vec<_>>(),
                 observer.expected
             );
-            let Poll::Ready(Ok(page)) =
-                Pin::new(&mut pending).poll(&mut Context::from_waker(&waker))
-            else {
+            let Poll::Ready(Ok(page)) = poll_ready(&mut pending, &waker) else {
                 panic!("expected committed mutation before dispatch");
             };
-            let expected = match value {
-                Some(value) => Change::Upsert {
-                    key: (writer.scope_id(), 1),
-                    row_version: version,
-                    value,
-                    evidence: crate::RowEvidence::Authoritative,
-                    write_context: None,
-                },
-                None => Change::Remove {
-                    key: (writer.scope_id(), 1),
-                    row_version: version,
-                },
+            let [transaction] = &page.transactions[..] else {
+                panic!("expected one transaction");
             };
-            assert_eq!(
-                page.transactions,
-                vec![crate::Transaction {
-                    changes: vec![expected]
-                }]
-            );
+            match (value, &transaction.changes[..]) {
+                (
+                    Some(value),
+                    [
+                        Change::Upsert {
+                            key: 1, value: row, ..
+                        },
+                    ],
+                ) => {
+                    assert_eq!(
+                        row,
+                        &Stamped {
+                            stamp: stamp.clone(),
+                            value
+                        }
+                    );
+                }
+                (None, [Change::Remove { key: 1, .. }]) => {}
+                other => panic!("unexpected publication {other:?}"),
+            }
             assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
             if dispatch {
-                notifications();
+                notifications.dispatch();
             } else {
                 drop(notifications);
             }
             assert_eq!(observer.calls.load(Ordering::SeqCst), usize::from(dispatch));
-            assert_eq!(writer.version(&1), value.map(|_| version));
-            current = value.map(|_| version);
+            current = value.map(|_| stamp);
         }
     }
 }
 
 #[test]
-fn deferred_noops_and_conflicts_leave_state_and_parked_reads_unchanged() {
-    let collection = Arc::new(RegistrationCollection::new([1, 2]));
-    let scope = collection.create_scope();
-    let writer = scope.writer().unwrap();
-    let version = writer.put(1, None, 10).unwrap().dispatch();
-    let initial = collection.lock().scopes[&scope.id()].rows.clone();
-    let mut lease = collection.projection().acquire((), None).unwrap();
-    let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
-        .poll(&mut Context::from_waker(Waker::noop()))
-    else {
-        panic!("expected ready bootstrap");
-    };
-    let observer = Arc::new(SnapshotOnWake {
-        collection: Arc::clone(&collection),
-        expected: Vec::new(),
-        calls: AtomicUsize::new(0),
-    });
+fn writes_that_do_not_change_the_winner_and_conflicts_publish_and_wake_nothing() {
+    let collection = Arc::new(Collection::new([1, 2]));
+    let high_scope = collection.create_scope(writer_id("b"));
+    let low_scope = collection.create_scope(writer_id("a"));
+    let (high, low) = (high_scope.writer().unwrap(), low_scope.writer().unwrap());
+    let winner = high.put(1, WriteBasis::Concurrent, 10).unwrap().dispatch();
+    let (mut lease, through) = bootstrap_through(&collection);
+    let observer = observer(&collection, vec![(1, 10)]);
     let waker = Waker::from(Arc::clone(&observer));
-    let mut pending = lease.read(Some(bootstrap.through), ReadLimits::default());
-    assert!(
-        Pin::new(&mut pending)
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending()
-    );
-    let absent = writer.remove(2, None).unwrap().dispatch();
-    assert_eq!(absent, None);
-    crate::PendingNotifications::default().dispatch();
+    let mut pending = lease.read(Some(through), ReadLimits::default());
+    assert!(poll_ready(&mut pending, &waker).is_pending());
+
+    // Loses the tie to the higher writer id; a lone tombstone on an absent key is no row.
+    low.put(1, WriteBasis::Concurrent, 99).unwrap().dispatch();
+    low.delete(2, WriteBasis::Concurrent).unwrap().dispatch();
     assert_eq!(
-        writer.put(1, None, 20).unwrap_err(),
-        MutationError::Conflict {
-            current: Some(version)
-        }
+        low.put(1, WriteBasis::CompareAndSet(None), 5)
+            .map(RegistrationDispatch::dispatch),
+        Err(MutationError::Conflict {
+            current: Some(winner.clone())
+        })
     );
-    assert_eq!(
-        writer.remove(1, None).unwrap_err(),
-        MutationError::Conflict {
-            current: Some(version)
-        }
-    );
-    assert_eq!(
-        writer.remove(2, Some(version)).unwrap_err(),
-        MutationError::Conflict { current: None }
-    );
-    assert_eq!(collection.lock().scopes[&scope.id()].rows, initial);
-    assert_eq!(writer.row_count(), 1);
+    assert_eq!(collection.get(&1).unwrap().stamp, winner);
     assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
-    assert!(
-        Pin::new(&mut pending)
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending()
-    );
-    writer.remove(1, Some(version)).unwrap().dispatch();
-    assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+    assert!(poll_ready(&mut pending, &waker).is_pending());
 }
 
 #[test]
 fn put_wakes_after_unlocking_registration() {
     assert_reentrant_wake(
-        |_, writer, version| {
+        |_, writer, stamp| {
             writer
-                .as_mut()
-                .unwrap()
-                .put(1, Some(version), 11)
+                .put(1, WriteBasis::Observed(stamp), 11)
                 .unwrap()
                 .dispatch();
         },
@@ -281,13 +245,11 @@ fn put_wakes_after_unlocking_registration() {
 }
 
 #[test]
-fn remove_wakes_after_unlocking_registration() {
+fn delete_wakes_after_unlocking_registration() {
     assert_reentrant_wake(
-        |_, writer, version| {
+        |_, writer, stamp| {
             writer
-                .as_mut()
-                .unwrap()
-                .remove(1, Some(version))
+                .delete(1, WriteBasis::Observed(stamp))
                 .unwrap()
                 .dispatch();
         },
@@ -302,15 +264,6 @@ fn scope_close_wakes_after_unlocking_registration() {
 }
 
 #[test]
-fn clear_wakes_after_unlocking_registration() {
-    assert_reentrant_wake(
-        |_, writer, _| writer.as_ref().unwrap().clear().unwrap().dispatch(),
-        Vec::new(),
-        Some(2),
-    );
-}
-
-#[test]
 fn reset_wakes_after_unlocking_registration() {
     assert_reentrant_wake(
         |scope, _, _| scope.collection.reset().dispatch(),
@@ -320,8 +273,8 @@ fn reset_wakes_after_unlocking_registration() {
 }
 
 struct MutateOnWake {
-    collection: Arc<RegistrationCollection<u32, u32>>,
-    writer: Mutex<RegistrationWriter<u32, u32>>,
+    collection: Arc<Collection>,
+    writer: Mutex<Writer>,
     calls: AtomicUsize,
 }
 
@@ -336,48 +289,24 @@ impl Wake for MutateOnWake {
             crate::projection::callback_tests::unlocked(&projection),
             "projection locked during wake"
         );
-        let mut lease = projection.acquire((), None).unwrap();
-        let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
-            .poll(&mut Context::from_waker(Waker::noop()))
-        else {
-            panic!("expected snapshot before reentrant mutation");
-        };
-        assert_eq!(bootstrap.transactions.len(), 1);
-        assert!(matches!(
-            &bootstrap.transactions[0].changes[..],
-            [Change::Upsert { value: 11, .. }]
-        ));
-        let observer = Arc::new(SnapshotOnWake {
-            collection: Arc::clone(&self.collection),
-            expected: vec![(1, 11), (2, 20)],
-            calls: AtomicUsize::new(0),
-        });
+        let (mut lease, through) = bootstrap_through(&self.collection);
+        let observer = observer(&self.collection, vec![(1, 11), (2, 20)]);
         let waker = Waker::from(Arc::clone(&observer));
-        let mut pending = lease.read(Some(bootstrap.through), ReadLimits::default());
-        assert!(
-            Pin::new(&mut pending)
-                .poll(&mut Context::from_waker(&waker))
-                .is_pending()
-        );
+        let mut pending = lease.read(Some(through), ReadLimits::default());
+        assert!(poll_ready(&mut pending, &waker).is_pending());
         self.writer
             .lock()
             .unwrap()
-            .put(2, None, 20)
+            .put(2, WriteBasis::Concurrent, 20)
             .unwrap()
             .dispatch();
         assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
-        let Poll::Ready(Ok(page)) = Pin::new(&mut pending).poll(&mut Context::from_waker(&waker))
-        else {
+        let Poll::Ready(Ok(page)) = poll_ready(&mut pending, &waker) else {
             panic!("expected reentrant mutation to notify parked reader");
         };
-        assert_eq!(page.transactions.len(), 1);
         assert!(matches!(
-            &page.transactions[0].changes[..],
-            [Change::Upsert {
-                key: (_, 2),
-                value: 20,
-                ..
-            }]
+            &page.transactions[..],
+            [crate::Transaction { changes }] if matches!(&changes[..], [Change::Upsert { key: 2, .. }])
         ));
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
@@ -385,33 +314,28 @@ impl Wake for MutateOnWake {
 
 #[test]
 fn notification_reentrant_mutation_preserves_publication_order_and_wakes() {
-    let collection = Arc::new(RegistrationCollection::new([1, 2]));
-    let scope = collection.create_scope();
+    let collection = Arc::new(Collection::new([1, 2]));
+    let scope = collection.create_scope(writer_id("a"));
     let writer = scope.writer().unwrap();
-    let version = writer.put(1, None, 10).unwrap().dispatch();
+    let stamp = writer
+        .put(1, WriteBasis::Concurrent, 10)
+        .unwrap()
+        .dispatch();
     let observer = Arc::new(MutateOnWake {
         collection: Arc::clone(&collection),
         writer: Mutex::new(scope.writer().unwrap()),
         calls: AtomicUsize::new(0),
     });
-    let mut lease = collection.projection().acquire((), None).unwrap();
-    let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
-        .poll(&mut Context::from_waker(Waker::noop()))
-    else {
-        panic!("expected initial snapshot");
-    };
+    let (mut lease, through) = bootstrap_through(&collection);
     let waker = Waker::from(Arc::clone(&observer));
-    let mut pending = lease.read(Some(bootstrap.through), ReadLimits::default());
-    assert!(
-        Pin::new(&mut pending)
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending()
-    );
-    writer.put(1, Some(version), 11).unwrap().dispatch();
+    let mut pending = lease.read(Some(through), ReadLimits::default());
+    assert!(poll_ready(&mut pending, &waker).is_pending());
+    writer
+        .put(1, WriteBasis::Observed(stamp), 11)
+        .unwrap()
+        .dispatch();
     assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
-    let Poll::Ready(Ok(page)) =
-        Pin::new(&mut pending).poll(&mut Context::from_waker(Waker::noop()))
-    else {
+    let Poll::Ready(Ok(page)) = poll_ready(&mut pending, Waker::noop()) else {
         panic!("expected both ordered mutations");
     };
     assert_eq!(
@@ -421,63 +345,56 @@ fn notification_reentrant_mutation_preserves_publication_order_and_wakes() {
                 .changes
                 .into_iter()
                 .map(|change| match change {
-                    Change::Upsert { key, value, .. } => (key, value),
+                    Change::Upsert { key, value, .. } => (key, value.value),
                     Change::Remove { .. } => panic!("unexpected removal"),
                 })
                 .collect::<Vec<_>>())
             .collect::<Vec<_>>(),
-        vec![
-            vec![((writer.scope_id(), 1), 11)],
-            vec![((observer.writer.lock().unwrap().scope_id(), 2), 20)]
-        ]
+        vec![vec![(1, 11)], vec![(2, 20)]]
     );
 }
 
 #[test]
 fn deferred_batch_commit_and_close_wake_only_after_dispatch() {
-    let collection = Arc::new(RegistrationCollection::new([1, 2]));
-    let a = collection.create_staged_scope();
-    let b = collection.create_staged_scope();
-    a.writer().unwrap().put(1, None, 10).unwrap().dispatch();
-    b.writer().unwrap().put(2, None, 20).unwrap().dispatch();
+    let collection = Arc::new(Collection::new([1, 2]));
+    let a = collection.create_staged_scope(writer_id("a"));
+    let b = collection.create_staged_scope(writer_id("b"));
+    a.writer()
+        .unwrap()
+        .put(1, WriteBasis::Concurrent, 10)
+        .unwrap()
+        .dispatch();
+    b.writer()
+        .unwrap()
+        .put(2, WriteBasis::Concurrent, 20)
+        .unwrap()
+        .dispatch();
     for commit in [true, false] {
-        let mut lease = collection.projection().acquire((), None).unwrap();
-        let Poll::Ready(Ok(bootstrap)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
-            .poll(&mut Context::from_waker(Waker::noop()))
-        else {
-            panic!("expected bootstrap")
-        };
-        let observer = Arc::new(SnapshotOnWake {
-            collection: Arc::clone(&collection),
-            expected: if commit {
+        let (mut lease, through) = bootstrap_through(&collection);
+        let observer = observer(
+            &collection,
+            if commit {
                 vec![(1, 10), (2, 20)]
             } else {
                 Vec::new()
             },
-            calls: AtomicUsize::new(0),
-        });
+        );
         let waker = Waker::from(Arc::clone(&observer));
         let mut pending = lease.read(
-            Some(bootstrap.through),
+            Some(through),
             ReadLimits {
                 max_transactions: Some(1),
                 max_changes: Some(1),
             },
         );
-        assert!(
-            Pin::new(&mut pending)
-                .poll(&mut Context::from_waker(&waker))
-                .is_pending()
-        );
+        assert!(poll_ready(&mut pending, &waker).is_pending());
         let dispatch = if commit {
             collection.commit_scopes(&[&a, &b])
         } else {
             collection.close_scopes(&[&a, &b])
         };
         assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
-        let Poll::Ready(Ok(page)) =
-            Pin::new(&mut pending).poll(&mut Context::from_waker(Waker::noop()))
-        else {
+        let Poll::Ready(Ok(page)) = poll_ready(&mut pending, Waker::noop()) else {
             panic!("expected committed transaction")
         };
         assert_eq!(page.transactions.len(), 1);
@@ -499,69 +416,65 @@ impl Drop for DropProbe {
 #[test]
 fn retired_values_reenter_after_authority_projection_and_host_unlock() {
     for staged in [false, true] {
-        let collection = RegistrationCollection::<u32, DropProbe>::with_source(
-            (),
-            NonZeroUsize::new(1).unwrap(),
-            [1, 2],
-            |scope, key| (scope, *key),
-        );
-        let scope = if staged {
-            collection.create_staged_scope()
-        } else {
-            collection.create_scope()
-        };
-        let writer = scope.writer().unwrap();
-        let host_lock = Arc::new(Mutex::new(()));
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let probe = DropProbe(Arc::new({
-            let inner = Arc::downgrade(&collection.inner);
-            let host_lock = Arc::clone(&host_lock);
-            let events = Arc::clone(&events);
-            move || {
-                let Some(inner) = inner.upgrade() else { return };
-                let collection = RegistrationCollection { inner };
-                let authority_unlocked = collection.inner.try_lock().is_ok();
-                let host_unlocked = host_lock.try_lock().is_ok();
-                let projection_unlocked = authority_unlocked
-                    && crate::projection::callback_tests::unlocked(&collection.projection());
-                events.lock().unwrap().push((
-                    authority_unlocked,
-                    projection_unlocked,
-                    host_unlocked,
-                ));
-                if authority_unlocked && projection_unlocked && host_unlocked {
-                    let scope = collection.create_scope();
-                    assert_eq!(scope.writer().unwrap().row_count(), 0);
-                    scope.close().dispatch();
+        for operation in 0..4 {
+            let collection = RegistrationCollection::<u32, DropProbe>::new([1, 2]);
+            let host_lock = Arc::new(Mutex::new(()));
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let probe = DropProbe(Arc::new({
+                let inner = Arc::downgrade(&collection.inner);
+                let host_lock = Arc::clone(&host_lock);
+                let events = Arc::clone(&events);
+                move || {
+                    let Some(inner) = inner.upgrade() else { return };
+                    let collection = RegistrationCollection { inner };
+                    let authority_unlocked = collection.inner.try_lock().is_ok();
+                    let host_unlocked = host_lock.try_lock().is_ok();
+                    let projection_unlocked = authority_unlocked
+                        && crate::projection::callback_tests::unlocked(&collection.projection());
+                    events.lock().unwrap().push((
+                        authority_unlocked,
+                        projection_unlocked,
+                        host_unlocked,
+                    ));
+                    if authority_unlocked && projection_unlocked && host_unlocked {
+                        let scope = collection.create_scope(writer_id("reentrant"));
+                        scope.close().dispatch();
+                    }
                 }
-            }
-        }));
-        writer.put(1, None, probe.clone()).unwrap().dispatch();
-        for operation in 0..5 {
+            }));
+            let scope = if staged {
+                collection.create_staged_scope(writer_id("a"))
+            } else {
+                collection.create_scope(writer_id("a"))
+            };
+            let writer = scope.writer().unwrap();
+            writer
+                .put(1, WriteBasis::Concurrent, probe.clone())
+                .unwrap()
+                .dispatch();
+
             let guard = host_lock.lock().unwrap();
             let before = events.lock().unwrap().len();
-            let dispatch = match operation {
+            let deferred = match operation {
                 0 => {
-                    let dispatch = writer.put(1, writer.version(&1), probe.clone()).unwrap();
+                    let dispatch = writer
+                        .put(1, WriteBasis::Concurrent, probe.clone())
+                        .unwrap();
                     Box::new(move || {
                         dispatch.dispatch();
                     }) as Box<dyn FnOnce()>
                 }
                 1 => {
-                    let dispatch = writer.remove(1, writer.version(&1)).unwrap();
+                    let dispatch = writer.delete(1, WriteBasis::Concurrent).unwrap();
                     Box::new(move || {
                         dispatch.dispatch();
                     })
                 }
                 2 => {
-                    let dispatch = writer.clear().unwrap();
-                    Box::new(move || dispatch.dispatch())
-                }
-                3 => {
                     let dispatch = scope.close();
                     Box::new(move || dispatch.dispatch())
                 }
-                4 => {
+                3 => {
                     let dispatch = collection.reset();
                     Box::new(move || dispatch.dispatch())
                 }
@@ -573,29 +486,30 @@ fn retired_values_reenter_after_authority_projection_and_host_unlock() {
                 "destructor ran before dispatch: {operation}"
             );
             drop(guard);
-            dispatch();
-            if operation != 4 || !staged {
-                assert!(events.lock().unwrap().len() > before);
-            }
-            if (1..=2).contains(&operation) {
-                writer.put(1, None, probe.clone()).unwrap().dispatch();
-            }
+            deferred();
+            // Every operation retires the probe the scope held.
+            assert!(
+                events.lock().unwrap().len() > before,
+                "retired value not dropped by dispatch: {operation}"
+            );
+            drop(scope);
+            drop(writer);
+            drop(probe);
+            assert!(
+                events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|event| *event == (true, true, true))
+            );
         }
-        drop(probe);
-        assert!(
-            events
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|event| *event == (true, true, true))
-        );
     }
 }
 
 #[test]
 fn scope_drop_and_projection_bootstrap_retirement_run_destructors_unlocked() {
-    let collection = RegistrationCollection::new([1, 2]);
-    let scope = collection.create_scope();
+    let collection = RegistrationCollection::<u32, DropProbe>::new([1, 2]);
+    let scope = collection.create_scope(writer_id("a"));
     let events = Arc::new(Mutex::new(Vec::new()));
     let value = DropProbe(Arc::new({
         let inner = Arc::downgrade(&collection.inner);
@@ -614,10 +528,13 @@ fn scope_drop_and_projection_bootstrap_retirement_run_destructors_unlocked() {
         }
     }));
     let writer = scope.writer().unwrap();
-    writer.put(1, None, value).unwrap().dispatch();
+    writer
+        .put(1, WriteBasis::Concurrent, value)
+        .unwrap()
+        .dispatch();
     let mut lease = collection.projection().acquire((), None).unwrap();
-    let Poll::Ready(Ok(page)) = Pin::new(&mut lease.read(None, ReadLimits::default()))
-        .poll(&mut Context::from_waker(Waker::noop()))
+    let Poll::Ready(Ok(page)) =
+        poll_ready(&mut lease.read(None, ReadLimits::default()), Waker::noop())
     else {
         panic!("expected bootstrap")
     };
