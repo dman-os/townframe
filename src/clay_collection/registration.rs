@@ -1,52 +1,61 @@
-//! Owner-scoped contribution registrations (ADR 017 §9).
+//! Owner-scoped contribution registrations (ADR 017 §9 and ADR 025 §4).
 //!
-//! A [`RegistrationCollection`] is the substrate primitive behind "guests register rows
-//! and the rows live exactly as long as their writer": each writer gets a [`WriterId`],
-//! rows are physically keyed by `(WriterId, local key)` so two writers never collide on
-//! the same local key, `put`/`remove` are compare-and-set against the row version the
-//! writer last saw, and dropping a writer withdraws all of its rows in one transaction.
+//! A [`RegistrationCollection`] mints host-owned [`RegistrationScope`]s. Rows are
+//! physically keyed by `(RegistrationScopeId, local key)`. Writers share the scope's
+//! compare-and-set state, but do not retain its owner: dropping a writer preserves rows,
+//! while closing or dropping the scope withdraws its rows and invalidates every writer.
 //!
-//! A writer minted with [`RegistrationCollection::staged_writer`] belongs to an incarnation that
-//! is still initializing (ADR 024 §5): its mutations are applied to the authoritative replica,
-//! so versions and compare-and-set behave exactly as for a live writer, but nothing reaches the
-//! projection. [`RegistrationCollection::commit_staged`] later publishes every row such writers
-//! hold as one transaction; dropping a staged writer discards its rows without readers ever
-//! having seen them.
+//! A scope minted with [`RegistrationCollection::create_staged_scope`] belongs to an
+//! initializing incarnation (ADR 024 §5). Its mutations receive authoritative versions
+//! but remain invisible until [`RegistrationCollection::commit_scopes`] publishes the
+//! named scopes together. Closing a staged scope discards its rows unseen.
 //!
-//! Reads go through the collection's [`Projection`]: it is the same leased waist every
-//! other collection uses. The physical key type `P` is whatever that projection is keyed
-//! by; the default is the `(WriterId, K)` tuple, and a byte-keyed waist supplies an
-//! encoding of the pair instead.
+//! Reads use the collection's [`Projection`]. The default physical key is the
+//! `(RegistrationScopeId, K)` tuple; a byte-keyed waist supplies an injective encoding
+//! of that pair instead.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::projection::PendingNotifications;
 use crate::projection::Projection;
+use crate::projection::ProjectionDispatch;
 use crate::replica::Entry;
-use crate::replica::Replica;
 use crate::source::Source;
 use crate::types::Change;
 use crate::types::MutationError;
+use crate::types::RegistrationScopeId;
+use crate::types::RowEvidence;
 use crate::types::Version;
-use crate::types::WriterId;
+
+struct ScopeState<K, V> {
+    rows: BTreeMap<K, Entry<V>>,
+    staged: bool,
+}
 
 struct Inner<K, V, P, S: Source<P, V>> {
-    replica: Replica<P, V>,
     projection: Projection<P, V, S>,
-    physical: fn(WriterId, &K) -> P,
-    next_writer: u64,
-    /// Local keys per writer, so closure withdraws exactly that writer's rows.
-    rows: BTreeMap<WriterId, BTreeSet<K>>,
-    /// Writers whose rows are in the replica but not yet in the projection.
-    staged: BTreeSet<WriterId>,
+    physical: fn(RegistrationScopeId, &K) -> P,
+    next_scope: u64,
+    version: Version,
+    /// Local rows per live scope; removing the scope also revokes its writers.
+    scopes: BTreeMap<RegistrationScopeId, ScopeState<K, V>>,
+}
+
+impl<K, V, P, S: Source<P, V>> Inner<K, V, P, S> {
+    fn next_version(&mut self) -> Version {
+        self.version.seq = self
+            .version
+            .seq
+            .checked_add(1)
+            .expect("row version exhausted");
+        self.version
+    }
 }
 
 /// The authority side of an owner-scoped contribution collection.
-pub struct RegistrationCollection<K, V, P = (WriterId, K), S: Source<P, V> = ()> {
+pub struct RegistrationCollection<K, V, P = (RegistrationScopeId, K), S: Source<P, V> = ()> {
     inner: Arc<Mutex<Inner<K, V, P, S>>>,
 }
 
@@ -80,7 +89,7 @@ impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
             (),
             NonZeroUsize::new(256).unwrap(),
             runtime_epoch,
-            |writer, key| (writer, key.clone()),
+            |scope, key| (scope, key.clone()),
         )
     }
 }
@@ -90,53 +99,56 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         source: S,
         replay_capacity: NonZeroUsize,
         runtime_epoch: [u64; 2],
-        physical: fn(WriterId, &K) -> P,
+        physical: fn(RegistrationScopeId, &K) -> P,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                replica: Replica::new(1),
                 projection: Projection::with_source(source, replay_capacity, runtime_epoch),
                 physical,
-                next_writer: 0,
-                rows: BTreeMap::new(),
-                staged: BTreeSet::new(),
+                next_scope: 0,
+                version: Version::new(1, 0),
+                scopes: BTreeMap::new(),
             })),
         }
     }
 
-    /// Mint a writer. The returned handle owns its rows: dropping it withdraws them in
-    /// one transaction.
-    pub fn writer(&self) -> RegistrationWriter<K, V, P, S> {
+    /// Mint a scope owner. Dropping it withdraws all its rows in one transaction;
+    /// writers minted from it convey mutation authority without retaining the owner.
+    pub fn create_scope(&self) -> RegistrationScope<K, V, P, S> {
         self.mint(false)
     }
 
-    /// Mint a writer whose rows stay out of the projection until
-    /// [`Self::commit_staged`] names it. Dropping it first discards its rows unseen.
-    pub fn staged_writer(&self) -> RegistrationWriter<K, V, P, S> {
+    /// Mint a scope whose rows stay out of the projection until
+    /// [`Self::commit_scopes`] names it. Closing it first discards its rows unseen.
+    pub fn create_staged_scope(&self) -> RegistrationScope<K, V, P, S> {
         self.mint(true)
     }
 
-    /// Publish every row the named staged writers currently hold as one projection
-    /// transaction, and make those writers publish directly from now on. Writers already
-    /// dropped (or already committed) are skipped: their rows are either gone or visible.
-    pub fn commit_staged(&self, writers: impl IntoIterator<Item = WriterId>) {
-        let notifications;
-        let mut guard = self.lock();
-        let inner = &mut *guard;
+    /// Publish all rows in the named staged scopes as one projection transaction.
+    /// Closed or already committed scopes are skipped. All owners must belong here.
+    pub fn commit_scopes(&self, scopes: &[&RegistrationScope<K, V, P, S>]) {
+        self.commit_scopes_deferred(scopes).dispatch();
+    }
+
+    pub fn commit_scopes_deferred(
+        &self,
+        scopes: &[&RegistrationScope<K, V, P, S>],
+    ) -> RegistrationDispatch<K, V, P, S> {
+        self.validate_scopes(scopes);
+        let mut inner = self.lock();
+        let physical = inner.physical;
         let mut changes = Vec::new();
-        for writer in writers {
-            assert!(writer.0 <= inner.next_writer, "unknown writer {writer:?}");
-            if !inner.staged.remove(&writer) {
+        for scope in scopes {
+            let Some(state) = inner.scopes.get_mut(&scope.id) else {
+                continue;
+            };
+            if !state.staged {
                 continue;
             }
-            for key in inner.rows.get(&writer).into_iter().flatten() {
-                let physical = (inner.physical)(writer, key);
-                let entry = inner
-                    .replica
-                    .get(&physical)
-                    .expect("staged writer row missing from the replica");
+            state.staged = false;
+            for (key, entry) in &state.rows {
                 changes.push(Change::Upsert {
-                    key: physical,
+                    key: physical(scope.id, key),
                     row_version: entry.version,
                     value: entry.value.clone(),
                     evidence: entry.evidence,
@@ -144,27 +156,81 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
                 });
             }
         }
-        if changes.is_empty() {
-            return;
-        }
-        notifications = inner.projection.publish_deferred(changes);
-        drop(guard);
-        notifications.dispatch();
+        let dispatch = RegistrationDispatch {
+            projection: if changes.is_empty() {
+                None
+            } else {
+                Some(inner.projection.publish_deferred(changes))
+            },
+            rows: Vec::new(),
+            entries: Vec::new(),
+            keys: Vec::new(),
+        };
+        drop(inner);
+        dispatch
     }
 
-    fn mint(&self, staged: bool) -> RegistrationWriter<K, V, P, S> {
+    pub fn close_scopes(&self, scopes: &[&RegistrationScope<K, V, P, S>]) {
+        self.close_scopes_deferred(scopes).dispatch();
+    }
+
+    pub fn close_scopes_deferred(
+        &self,
+        scopes: &[&RegistrationScope<K, V, P, S>],
+    ) -> RegistrationDispatch<K, V, P, S> {
+        self.validate_scopes(scopes);
         let mut inner = self.lock();
-        inner.next_writer = inner
-            .next_writer
-            .checked_add(1)
-            .expect("writer identity exhausted");
-        let id = WriterId(inner.next_writer);
-        if staged {
-            inner.staged.insert(id);
+        let mut dispatch = RegistrationDispatch::default();
+        let mut changes = Vec::new();
+        for scope in scopes {
+            if let Some(state) = inner.scopes.remove(&scope.id) {
+                if !state.staged {
+                    for key in state.rows.keys() {
+                        changes.push(Change::Remove {
+                            key: (inner.physical)(scope.id, key),
+                            row_version: inner.next_version(),
+                        });
+                    }
+                }
+                dispatch.rows.push(state.rows);
+            }
         }
-        RegistrationWriter {
+        if !changes.is_empty() {
+            dispatch.projection = Some(inner.projection.publish_deferred(changes));
+        }
+        drop(inner);
+        dispatch
+    }
+
+    fn validate_scopes(&self, scopes: &[&RegistrationScope<K, V, P, S>]) {
+        assert!(
+            scopes.iter().all(|scope| self == &scope.collection),
+            "registration scope belongs to another collection"
+        );
+    }
+
+    fn mint(&self, staged: bool) -> RegistrationScope<K, V, P, S> {
+        let mut inner = self.lock();
+        inner.next_scope = inner
+            .next_scope
+            .checked_add(1)
+            .expect("registration scope identity exhausted");
+        let id = RegistrationScopeId(inner.next_scope);
+        assert!(
+            inner
+                .scopes
+                .insert(
+                    id,
+                    ScopeState {
+                        rows: BTreeMap::new(),
+                        staged
+                    }
+                )
+                .is_none()
+        );
+        RegistrationScope {
             id,
-            inner: Arc::clone(&self.inner),
+            collection: self.clone(),
         }
     }
 
@@ -173,43 +239,51 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         self.lock().projection.clone()
     }
 
-    /// Host-local snapshot of the published rows. Reading through a lease is the contract
-    /// for consumers; this is the convenience the authority itself (and its tests) uses.
-    /// Rows of staged writers are not published, so they are not part of it.
+    /// Host-local snapshot of published rows. Staged scope rows are excluded;
+    /// consumers use projection leases rather than this authority convenience.
     pub fn snapshot(&self) -> BTreeMap<P, Entry<V>> {
         let inner = self.lock();
-        let staged = inner
-            .staged
-            .iter()
-            .flat_map(|writer| {
-                inner
-                    .rows
-                    .get(writer)
-                    .into_iter()
-                    .flatten()
-                    .map(|key| (inner.physical)(*writer, key))
-            })
-            .collect::<BTreeSet<_>>();
         inner
-            .replica
-            .rows()
-            .filter(|(key, _)| !staged.contains(*key))
-            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .scopes
+            .iter()
+            .filter(|(_, state)| !state.staged)
+            .flat_map(|(id, state)| {
+                state
+                    .rows
+                    .iter()
+                    .map(|(key, entry)| ((inner.physical)(*id, key), entry.clone()))
+            })
             .collect()
     }
 
-    /// Withdraw every registration and begin a new projection generation: outstanding
-    /// leases report `ResetRequired` and re-bootstrap into the empty collection.
+    /// Withdraw every scope and begin a new projection generation: outstanding
+    /// leases report `ResetRequired`; old writers remain closed after re-bootstrap.
     pub fn reset(&self) {
-        let notifications;
+        self.reset_deferred().dispatch();
+    }
+
+    pub fn reset_deferred(&self) -> RegistrationDispatch<K, V, P, S> {
         let mut inner = self.lock();
-        let next = inner.replica.incarnation() + 1;
-        inner.replica.reset(next);
-        inner.rows.clear();
-        inner.staged.clear();
-        notifications = inner.projection.reset_deferred();
+        inner.version = Version::new(
+            inner
+                .version
+                .incarnation
+                .checked_add(1)
+                .expect("registration generation exhausted"),
+            0,
+        );
+        let rows = std::mem::take(&mut inner.scopes)
+            .into_values()
+            .map(|state| state.rows)
+            .collect();
+        let dispatch = RegistrationDispatch {
+            projection: Some(inner.projection.reset_deferred()),
+            rows,
+            entries: Vec::new(),
+            keys: Vec::new(),
+        };
         drop(inner);
-        notifications.dispatch();
+        dispatch
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner<K, V, P, S>> {
@@ -217,18 +291,60 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
     }
 }
 
-/// One registrant's write handle. Mutations are compare-and-set: `based_on` must equal
-/// the version the collection currently holds for the key (`None` meaning absent), and a
-/// mismatch returns [`MutationError::Conflict`] carrying the actual version so the
-/// writer can rebase and retry — the handle stays usable.
+pub struct RegistrationScope<
+    K: Ord + Clone,
+    V: Clone,
+    P: Ord + Clone = (RegistrationScopeId, K),
+    S: Source<P, V> = (),
+> {
+    id: RegistrationScopeId,
+    collection: RegistrationCollection<K, V, P, S>,
+}
+
+impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationScope<K, V, P, S> {
+    pub fn id(&self) -> RegistrationScopeId {
+        self.id
+    }
+
+    pub fn writer(&self) -> Result<RegistrationWriter<K, V, P, S>, MutationError> {
+        if !self.collection.lock().scopes.contains_key(&self.id) {
+            return Err(MutationError::Closed);
+        }
+        Ok(RegistrationWriter {
+            id: self.id,
+            collection: self.collection.clone(),
+        })
+    }
+
+    pub fn close(&self) {
+        self.close_deferred().dispatch();
+    }
+
+    pub fn close_deferred(&self) -> RegistrationDispatch<K, V, P, S> {
+        self.collection.close_scopes_deferred(&[self])
+    }
+}
+
+impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> Drop
+    for RegistrationScope<K, V, P, S>
+{
+    /// Scope-owner closure withdraws its rows, even if mutation handles remain alive.
+    /// Staged rows leave authority state without ever reaching a projection.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// A scope's mutation handle, not its owner. `based_on` must equal the current row
+/// version (`None` means absent); mismatches report the actual version for retry.
 pub struct RegistrationWriter<
     K: Ord + Clone,
     V: Clone,
-    P: Ord + Clone = (WriterId, K),
+    P: Ord + Clone = (RegistrationScopeId, K),
     S: Source<P, V> = (),
 > {
-    id: WriterId,
-    inner: Arc<Mutex<Inner<K, V, P, S>>>,
+    id: RegistrationScopeId,
+    collection: RegistrationCollection<K, V, P, S>,
 }
 
 impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> std::fmt::Debug
@@ -236,148 +352,201 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> std::fmt::Debug
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistrationWriter")
-            .field("id", &self.id)
+            .field("scope_id", &self.id)
             .finish_non_exhaustive()
     }
 }
 
 impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWriter<K, V, P, S> {
-    pub fn id(&self) -> WriterId {
+    pub fn scope_id(&self) -> RegistrationScopeId {
         self.id
     }
 
     pub fn version(&self, key: &K) -> Option<Version> {
-        let inner = self.lock();
-        inner
-            .replica
-            .get(&(inner.physical)(self.id, key))
+        self.collection
+            .lock()
+            .scopes
+            .get(&self.id)
+            .and_then(|state| state.rows.get(key))
             .map(|entry| entry.version)
     }
 
     pub fn row_count(&self) -> usize {
-        self.lock().rows.get(&self.id).map_or(0, BTreeSet::len)
+        self.collection
+            .lock()
+            .scopes
+            .get(&self.id)
+            .map_or(0, |state| state.rows.len())
     }
 
     /// Register or replace `key`, returning the new row version.
     pub fn put(
-        &mut self,
+        &self,
         key: K,
         based_on: Option<Version>,
         value: V,
     ) -> Result<Version, MutationError> {
-        let (version, notifications) = self.put_deferred(key, based_on, value)?;
-        notifications.dispatch();
+        let (version, dispatch) = self.put_deferred(key, based_on, value)?;
+        dispatch.dispatch();
         Ok(version)
     }
 
     pub fn put_deferred(
-        &mut self,
+        &self,
         key: K,
         based_on: Option<Version>,
         value: V,
-    ) -> Result<(Version, PendingNotifications), MutationError> {
-        let mut inner = self.lock();
-        let physical = (inner.physical)(self.id, &key);
-        let current = inner.replica.get(&physical).map(|entry| entry.version);
+    ) -> Result<(Version, RegistrationDispatch<K, V, P, S>), MutationError> {
+        let mut inner = self.collection.lock();
+        let state = inner.scopes.get(&self.id).ok_or(MutationError::Closed)?;
+        let current = state.rows.get(&key).map(|entry| entry.version);
         if current != based_on {
             return Err(MutationError::Conflict { current });
         }
-        let change = inner.replica.plan_put(&physical, None, value);
-        let version = change.row_version();
-        inner.replica.apply(std::slice::from_ref(&change));
-        inner.rows.entry(self.id).or_default().insert(key);
-        let notifications = if inner.staged.contains(&self.id) {
-            PendingNotifications::default()
+        let staged = state.staged;
+        let version = inner.next_version();
+        let change = if staged {
+            None
         } else {
-            inner.projection.publish_deferred(vec![change])
+            Some(Change::Upsert {
+                key: (inner.physical)(self.id, &key),
+                row_version: version,
+                value: value.clone(),
+                evidence: RowEvidence::Authoritative,
+                write_context: None,
+            })
         };
+        let rows = &mut inner.scopes.get_mut(&self.id).unwrap().rows;
+        let mut dispatch = RegistrationDispatch::default();
+        if let Some(previous) = rows.remove_entry(&key) {
+            dispatch.entries.push(previous);
+        }
+        assert!(
+            rows.insert(
+                key,
+                Entry {
+                    version,
+                    value,
+                    evidence: RowEvidence::Authoritative,
+                    write_context: None
+                }
+            )
+            .is_none()
+        );
+        if let Some(change) = change {
+            dispatch.projection = Some(inner.projection.publish_deferred(vec![change]));
+        }
         drop(inner);
-        Ok((version, notifications))
+        Ok((version, dispatch))
     }
 
-    /// Withdraw `key`, returning the version of the removal. Idempotent when the row is
-    /// already absent and no version was claimed: the end state is what the writer asked
-    /// for, nothing is published, and the result is `None`.
+    /// Withdraw `key`, returning its removal version. An absent row with no claimed
+    /// version is an idempotent no-op and returns `None` without publication.
     pub fn remove(
-        &mut self,
+        &self,
         key: K,
         based_on: Option<Version>,
     ) -> Result<Option<Version>, MutationError> {
-        let (version, notifications) = self.remove_deferred(key, based_on)?;
-        notifications.dispatch();
+        let (version, dispatch) = self.remove_deferred(key, based_on)?;
+        dispatch.dispatch();
         Ok(version)
     }
 
     pub fn remove_deferred(
-        &mut self,
+        &self,
         key: K,
         based_on: Option<Version>,
-    ) -> Result<(Option<Version>, PendingNotifications), MutationError> {
-        let mut inner = self.lock();
-        let physical = (inner.physical)(self.id, &key);
-        let current = inner.replica.get(&physical).map(|entry| entry.version);
+    ) -> Result<(Option<Version>, RegistrationDispatch<K, V, P, S>), MutationError> {
+        let mut inner = self.collection.lock();
+        let state = inner
+            .scopes
+            .get_mut(&self.id)
+            .ok_or(MutationError::Closed)?;
+        let current = state.rows.get(&key).map(|entry| entry.version);
         if current != based_on {
             return Err(MutationError::Conflict { current });
         }
-        if current.is_none() {
-            return Ok((None, PendingNotifications::default()));
-        }
-        let change = inner.replica.plan_remove(&physical);
-        let version = change.row_version();
-        inner.replica.apply(std::slice::from_ref(&change));
-        inner
-            .replica
-            .retire_authoritative_removal(&physical, version);
-        if let Some(keys) = inner.rows.get_mut(&self.id) {
-            keys.remove(&key);
-        }
-        let notifications = if inner.staged.contains(&self.id) {
-            PendingNotifications::default()
-        } else {
-            inner.projection.publish_deferred(vec![change])
+        let mut dispatch = RegistrationDispatch::default();
+        let Some(previous) = state.rows.remove_entry(&key) else {
+            dispatch.keys.push(key);
+            drop(inner);
+            return Ok((None, dispatch));
         };
+        let staged = state.staged;
+        dispatch.entries.push(previous);
+        let version = inner.next_version();
+        if !staged {
+            dispatch.projection = Some(inner.projection.publish_deferred(vec![Change::Remove {
+                key: (inner.physical)(self.id, &key),
+                row_version: version,
+            }]));
+        }
+        dispatch.keys.push(key);
         drop(inner);
-        Ok((Some(version), notifications))
+        Ok((Some(version), dispatch))
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner<K, V, P, S>> {
-        self.inner.lock().expect("registration state poisoned")
+    pub fn clear(&self) -> Result<(), MutationError> {
+        self.clear_deferred()?.dispatch();
+        Ok(())
+    }
+
+    pub fn clear_deferred(&self) -> Result<RegistrationDispatch<K, V, P, S>, MutationError> {
+        let mut inner = self.collection.lock();
+        let state = inner
+            .scopes
+            .get_mut(&self.id)
+            .ok_or(MutationError::Closed)?;
+        let rows = std::mem::take(&mut state.rows);
+        let staged = state.staged;
+        let mut dispatch = RegistrationDispatch::default();
+        if !staged && !rows.is_empty() {
+            let changes = rows
+                .keys()
+                .map(|key| Change::Remove {
+                    key: (inner.physical)(self.id, key),
+                    row_version: inner.next_version(),
+                })
+                .collect();
+            dispatch.projection = Some(inner.projection.publish_deferred(changes));
+        }
+        dispatch.rows.push(rows);
+        drop(inner);
+        Ok(dispatch)
     }
 }
 
-impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> Drop
-    for RegistrationWriter<K, V, P, S>
-{
-    /// Writer closure withdraws every row it still holds, as one transaction: the
-    /// collection cannot outlive a registrant's interest by accident. A staged writer's
-    /// rows were never published, so they leave the replica without a projection change.
-    fn drop(&mut self) {
-        let notifications;
-        let mut inner = self.lock();
-        let staged = inner.staged.remove(&self.id);
-        let Some(keys) = inner.rows.remove(&self.id) else {
-            return;
-        };
-        if keys.is_empty() {
-            return;
+#[must_use = "dispatch after releasing host authority locks"]
+pub struct RegistrationDispatch<K, V, P = (RegistrationScopeId, K), S: Source<P, V> = ()> {
+    projection: Option<ProjectionDispatch<P, V, S::Selector>>,
+    rows: Vec<BTreeMap<K, Entry<V>>>,
+    entries: Vec<(K, Entry<V>)>,
+    keys: Vec<K>,
+}
+
+impl<K, V, P, S: Source<P, V>> Default for RegistrationDispatch<K, V, P, S> {
+    fn default() -> Self {
+        Self {
+            projection: None,
+            rows: Vec::new(),
+            entries: Vec::new(),
+            keys: Vec::new(),
         }
-        let physical = inner.physical;
-        let changes: Vec<Change<P, V>> = keys
-            .iter()
-            .map(|key| inner.replica.plan_remove(&physical(self.id, key)))
-            .collect();
-        inner.replica.apply(&changes);
-        for change in &changes {
-            inner
-                .replica
-                .retire_authoritative_removal(change.key(), change.row_version());
+    }
+}
+
+impl<K, V, P, S: Source<P, V>> std::fmt::Debug for RegistrationDispatch<K, V, P, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrationDispatch")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<K, V, P, S: Source<P, V>> RegistrationDispatch<K, V, P, S> {
+    pub fn dispatch(self) {
+        if let Some(projection) = self.projection {
+            projection.dispatch();
         }
-        if staged {
-            return;
-        }
-        notifications = inner.projection.publish_deferred(changes);
-        drop(inner);
-        notifications.dispatch();
     }
 }
 

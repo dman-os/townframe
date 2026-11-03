@@ -40,6 +40,16 @@ impl Incarnations for Wasmtime {
         runtime.provision(contract)
     }
 
+    fn inspect(runtime: &WasmRuntime) -> GuestResidue {
+        let active = runtime.incarnation.lock().unwrap();
+        let state = active.as_ref().unwrap().store.data();
+        GuestResidue::of(
+            state.table.is_empty(),
+            &state.capabilities,
+            &state.collections,
+        )
+    }
+
     fn close(runtime: WasmRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
         Box::pin(async move {
             let taken = runtime.incarnation.lock().unwrap().take();
@@ -48,10 +58,32 @@ impl Incarnations for Wasmtime {
             let state = active.store.data();
             (
                 closed,
-                GuestResidue::of(state.table.is_empty(), &state.capabilities),
+                GuestResidue::of(
+                    state.table.is_empty(),
+                    &state.capabilities,
+                    &state.collections,
+                ),
             )
         })
     }
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_registration_scope_ownership() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::registration_scope_ownership(engine))
+        .await;
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_failed_registration_initialization() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(
+            lifecycle_conformance::failed_registration_initialization_publishes_nothing(engine),
+        )
+        .await;
 }
 
 #[tokio::test]
