@@ -22,20 +22,20 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use wcmp::Resource;
 
-struct RecordingSink {
+pub(super) struct RecordingSink {
     tree: Mutex<Option<SurfaceTree<ComponentRef>>>,
     changed: tokio::sync::Notify,
 }
 
 impl RecordingSink {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             tree: Mutex::new(Some(SurfaceTree::new())),
             changed: tokio::sync::Notify::new(),
         }
     }
 
-    fn tree<R>(&self, read: impl FnOnce(&SurfaceTree<ComponentRef>) -> R) -> R {
+    pub(super) fn tree<R>(&self, read: impl FnOnce(&SurfaceTree<ComponentRef>) -> R) -> R {
         read(self.tree.lock().unwrap().as_ref().expect("surface is live"))
     }
 
@@ -111,7 +111,9 @@ async fn counter_activates_and_mount_dispatch_unmount_complete_on_first_poll() {
     .unwrap();
 
     let sink = Arc::new(RecordingSink::new());
-    let session = runtime.mount(Arc::clone(&sink) as _, &[]).unwrap();
+    let session = runtime
+        .mount("presentation", Arc::clone(&sink) as _, &[])
+        .unwrap();
     assert_eq!(sink.tree(SurfaceTree::text_content), "0");
 
     let dispatch = session.handler();
@@ -184,7 +186,7 @@ async fn guest_blocking_in_dispatch_fails_as_trap_on_the_wcmp_engine() {
     .unwrap();
     let writer = Arc::new(LiveSink(AtomicBool::new(false)));
     let session = runtime
-        .mount(Arc::clone(&writer) as _, &[])
+        .mount("presentation", Arc::clone(&writer) as _, &[])
         .expect("mount must complete before dispatch blocks");
     assert!(writer.is_live());
 
@@ -233,7 +235,9 @@ async fn close_before_mount_revokes_the_incarnation() {
     host.close_instance(&owner).unwrap();
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     assert_eq!(
-        runtime.mount(Arc::clone(&writer), &[]).err(),
+        runtime
+            .mount("presentation", Arc::clone(&writer), &[])
+            .err(),
         Some(PresentationError::Revoked)
     );
     assert!(writer.is_live());
@@ -297,7 +301,9 @@ async fn document_driver_delivers_neutral_updates() {
     .await
     .unwrap();
     let writer = Arc::new(RecordingSink::new());
-    let surface = runtime.mount(Arc::clone(&writer) as _, &[]).unwrap();
+    let surface = runtime
+        .mount("presentation", Arc::clone(&writer) as _, &[])
+        .unwrap();
     assert_eq!(
         writer.tree(SurfaceTree::text_content),
         "3Pending counter writes: 0Refresh counter"
@@ -382,7 +388,7 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount(Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("presentation", Arc::<RecordingSink>::clone(&writer), &[])
             .unwrap();
         let text = writer
             .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
@@ -499,7 +505,7 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount(Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("presentation", Arc::<RecordingSink>::clone(&writer), &[])
             .unwrap();
         writer.wait_for(|text| text.contains("status=live")).await;
         let command = |element: u32| {
@@ -600,7 +606,7 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount(Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("presentation", Arc::<RecordingSink>::clone(&writer), &[])
             .unwrap();
         writer.wait_for(|text| text.contains("status=live")).await;
         let command = |element: u32| {
@@ -1519,7 +1525,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
     assert_eq!(stored.capabilities[0].id(), lease.publication().id());
     assert_eq!(
         stored.capabilities[0].contract(),
-        &clay_guest_session::capabilities::PRESENTATION_COMPONENT_CONTRACT
+        &clay_guest_session::capabilities::ContractIdentity::presentation_component()
     );
     assert!(writer.remove(vec![1], Some(version)).unwrap().is_some());
     assert!(registrations.snapshot().is_empty());

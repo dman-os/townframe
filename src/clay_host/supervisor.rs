@@ -188,8 +188,16 @@ struct ServedRequests<'a, P> {
 }
 
 impl<P> Drop for ServedRequests<'_, P> {
+    /// Hand the channel back for a later driver, after discarding what is queued. A request
+    /// still queued when its driver goes away has nobody left to answer it, and parking it
+    /// for a later driver would hang its requester if none ever runs. Dropping its reply
+    /// sender instead makes [`Activator::acquire`] observe a closed channel and panic: the
+    /// supervisor outlives every incarnation, so losing the driver under demand is an
+    /// invariant break, never a hang.
     fn drop(&mut self) {
-        *self.home.borrow_mut() = self.receiver.take();
+        let mut receiver = self.receiver.take().unwrap();
+        while receiver.try_recv().is_ok() {}
+        *self.home.borrow_mut() = Some(receiver);
     }
 }
 
@@ -828,7 +836,7 @@ impl<P> Activator<P> {
             .unwrap_or_else(|_| panic!("the supervisor outlives every incarnation"));
         response
             .await
-            .expect("the driver answers every request it accepted")
+            .expect("the supervisor's driver ended while a request was outstanding")
     }
 
     /// The micro's state as last recorded by the supervisor, without activating anything.

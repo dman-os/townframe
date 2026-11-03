@@ -1,3 +1,5 @@
+use super::GuestCallTarget;
+use super::IncarnationWake;
 use super::WasmComponentRef;
 use super::WasmStoreState;
 use super::bindings::townframe::dayframe::capability_bank as cap_wit;
@@ -11,16 +13,21 @@ use clay_collection::ReadError;
 use clay_collection::ReadLimits;
 use clay_collection::RowEvidence;
 use clay_collection::Version;
+use clay_guest_session::capabilities::CallBinding;
+use clay_guest_session::capabilities::CallError;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityRef;
+use clay_guest_session::capabilities::ContractIdentity;
 use clay_guest_session::capabilities::PresentationComponent;
 use clay_guest_session::capabilities::PublishedCapability;
+use clay_guest_session::capabilities::RefStatus;
 use clay_guest_session::collections::CollectionReader;
 use clay_guest_session::collections::CollectionValue;
 use clay_guest_session::collections::ProjectionReader;
 use clay_guest_session::collections::ReadFailure;
 use clay_guest_session::collections::RegistrationWriter;
 use clay_guest_session::collections::WriteFailure;
+use std::sync::Arc;
 use std::time::Duration;
 use wasmtime::component::Accessor;
 use wasmtime::component::HasSelf;
@@ -271,9 +278,9 @@ fn value_from_wire(
 ) -> wasmtime::Result<CollectionValue> {
     let mut capabilities = Vec::with_capacity(value.capabilities.len());
     for reference in value.capabilities {
-        let publication = state.table.get(&reference)?.publication().expect(
-            "lazy references are not guest-mintable yet (C3b), so every attached reference is bound",
-        );
+        let publication = state.table.get(&reference)?.publication().ok_or_else(|| {
+            wasmtime::Error::msg("a lazy capability reference cannot be attached to a row")
+        })?;
         capabilities.push(publication);
         state.table.delete(reference)?;
     }
@@ -288,18 +295,50 @@ fn capability_error(failure: CapabilityFailure) -> cap_wit::CapabilityError {
         CapabilityFailure::ContractMismatch => cap_wit::CapabilityError::ContractMismatch,
         CapabilityFailure::Revoked => cap_wit::CapabilityError::Revoked,
         CapabilityFailure::LimitExceeded => cap_wit::CapabilityError::LimitExceeded,
-        CapabilityFailure::Unavailable => {
-            todo!("C3b: capability-error needs an `unavailable` case (ADR 024 §9)")
-        }
+        CapabilityFailure::Unavailable => cap_wit::CapabilityError::Unavailable,
+    }
+}
+
+fn call_error(error: CallError) -> cap_wit::CallError {
+    match error {
+        CallError::Capability(failure) => cap_wit::CallError::Capability(capability_error(failure)),
+        CallError::Provider(message) => cap_wit::CallError::Provider(message),
+    }
+}
+
+fn ref_status(status: RefStatus) -> cap_wit::RefStatus {
+    match status {
+        RefStatus::Live => cap_wit::RefStatus::Live,
+        RefStatus::Dormant => cap_wit::RefStatus::Dormant,
+        RefStatus::Disabled => cap_wit::RefStatus::Disabled,
+        RefStatus::Faulted => cap_wit::RefStatus::Faulted,
+        RefStatus::Unavailable => cap_wit::RefStatus::Unavailable,
+        RefStatus::Revoked => cap_wit::RefStatus::Revoked,
     }
 }
 
 impl cap_wit::Host for WasmStoreState {
-    fn publish_presentation_component(
+    fn publish_presentation(
         &mut self,
+        name: String,
     ) -> wasmtime::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
-        match // C3b: the WIT carries no publication name yet.
-        self.capabilities.publish_presentation("presentation") {
+        match self.capabilities.publish_presentation(&name) {
+            Ok(lease) => Ok(Ok(self.table.push(lease)?)),
+            Err(failure) => Ok(Err(capability_error(failure))),
+        }
+    }
+
+    fn publish_call(
+        &mut self,
+        name: String,
+        contract: cap_wit::Contract,
+    ) -> wasmtime::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
+        let target = Arc::new(GuestCallTarget {
+            publication: name.clone(),
+            calls: self.calls.clone(),
+        });
+        let contract = ContractIdentity::new(contract.namespace, contract.name, contract.version);
+        match self.capabilities.publish_call(&name, contract, target) {
             Ok(lease) => Ok(Ok(self.table.push(lease)?)),
             Err(failure) => Ok(Err(capability_error(failure))),
         }
@@ -324,19 +363,101 @@ impl cap_wit::HostPublishedCapability for WasmStoreState {
 }
 
 impl cap_wit::HostCapabilityRef for WasmStoreState {
-    fn as_presentation_component(
+    fn status(
         &mut self,
-        _reference: Resource<CapabilityRef>,
-    ) -> wasmtime::Result<Result<Resource<PresentationComponent>, cap_wit::CapabilityError>> {
-        todo!(
-            "C3b: redemption is async (CapabilityRef::redeem_presentation); \
-             capability-ref.redeem-presentation must become an async WIT function"
-        )
+        reference: Resource<CapabilityRef>,
+    ) -> wasmtime::Result<cap_wit::RefStatus> {
+        Ok(ref_status(self.table.get(&reference)?.status()))
     }
 
     fn drop(&mut self, reference: Resource<CapabilityRef>) -> wasmtime::Result<()> {
         self.table.delete(reference)?;
         Ok(())
+    }
+}
+
+/// Take a second handle to the table entry `resource` names, so the host import can await a
+/// redemption that may activate a provider while the store (and the guest's own handle) stay
+/// free to move on. The await is wrapped in the incarnation's wake so that the activation
+/// finishing re-drives the store.
+fn shared<T: 'static, R: 'static>(
+    accessor: &Accessor<T, HasSelf<WasmStoreState>>,
+    resource: &Resource<R>,
+    share: impl FnOnce(&R) -> R,
+) -> (R, Option<Arc<IncarnationWake>>) {
+    accessor.with(|mut access| {
+        let state = access.get();
+        (
+            share(state.table.get(resource).unwrap()),
+            state.collection_wake.clone(),
+        )
+    })
+}
+
+async fn awaited<F: std::future::Future>(
+    wake: Option<Arc<IncarnationWake>>,
+    pending: F,
+) -> F::Output {
+    match wake {
+        Some(wake) => wake.drive(pending).await,
+        None => pending.await,
+    }
+}
+
+impl<T: 'static> cap_wit::HostCapabilityRefWithStore<T> for HasSelf<WasmStoreState> {
+    async fn call(
+        accessor: &Accessor<T, Self>,
+        reference: Resource<CapabilityRef>,
+        request: Vec<u8>,
+    ) -> wasmtime::Result<Result<Vec<u8>, cap_wit::CallError>> {
+        let (reference, wake) = shared(accessor, &reference, CapabilityRef::share);
+        Ok(awaited(wake, reference.call(request))
+            .await
+            .map_err(call_error))
+    }
+
+    async fn retain_call(
+        accessor: &Accessor<T, Self>,
+        reference: Resource<CapabilityRef>,
+    ) -> wasmtime::Result<Result<Resource<CallBinding>, cap_wit::CapabilityError>> {
+        let (reference, wake) = shared(accessor, &reference, CapabilityRef::share);
+        match awaited(wake, reference.retain_call()).await {
+            Ok(binding) => accessor.with(|mut access| Ok(Ok(access.get().table.push(binding)?))),
+            Err(failure) => Ok(Err(capability_error(failure))),
+        }
+    }
+
+    async fn redeem_presentation(
+        accessor: &Accessor<T, Self>,
+        reference: Resource<CapabilityRef>,
+    ) -> wasmtime::Result<Result<Resource<PresentationComponent>, cap_wit::CapabilityError>> {
+        let (reference, wake) = shared(accessor, &reference, CapabilityRef::share);
+        match awaited(wake, reference.redeem_presentation()).await {
+            Ok(component) => {
+                accessor.with(|mut access| Ok(Ok(access.get().table.push(component)?)))
+            }
+            Err(failure) => Ok(Err(capability_error(failure))),
+        }
+    }
+}
+
+impl cap_wit::HostCallBinding for WasmStoreState {
+    fn drop(&mut self, binding: Resource<CallBinding>) -> wasmtime::Result<()> {
+        self.table.delete(binding)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> cap_wit::HostCallBindingWithStore<T> for HasSelf<WasmStoreState> {
+    async fn call(
+        accessor: &Accessor<T, Self>,
+        binding: Resource<CallBinding>,
+        request: Vec<u8>,
+    ) -> wasmtime::Result<Result<Vec<u8>, cap_wit::CallError>> {
+        let (binding, wake) = shared(accessor, &binding, CallBinding::share);
+        Ok(awaited(wake, binding.call(request))
+            .await
+            .map_err(call_error))
     }
 }
 

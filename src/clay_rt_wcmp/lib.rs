@@ -80,6 +80,7 @@ mod bindings {
             "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
             "townframe:dayframe/collection-registration.registration-writer": clay_guest_session::collections::RegistrationWriter,
             "townframe:dayframe/capability-bank.capability-ref": clay_guest_session::capabilities::CapabilityRef,
+            "townframe:dayframe/capability-bank.call-binding": clay_guest_session::capabilities::CallBinding,
             "townframe:dayframe/capability-bank.published-capability": clay_guest_session::capabilities::PublishedCapability,
             "townframe:dayframe/capability-bank.presentation-component": clay_guest_session::capabilities::PresentationComponent,
         },
@@ -412,9 +413,9 @@ struct WcmpIncarnation {
     waker: Waker,
     /// The guest's `instance-root`, held from a successful `initialize` until [`Self::close`].
     root: Option<ResourceAny>,
-    /// Publication leases of the incarnation's provisions, by contract. Dropping one revokes
-    /// the publication and every consumer proxy derived from it.
-    provisions: BTreeMap<String, PublishedCapability>,
+    /// Publication leases of the publications `initialize` returned, by name. Dropping one
+    /// revokes the publication and every consumer proxy derived from it.
+    publications: BTreeMap<String, PublishedCapability>,
 }
 
 impl WcmpIncarnation {
@@ -424,7 +425,7 @@ impl WcmpIncarnation {
 
     /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
     /// incarnation's host authority and dependencies are still live, then drop the root (its
-    /// guest destructor releases whatever the root held) and only then revoke the provisions.
+    /// guest destructor releases whatever the root held) and only then revoke the publications.
     /// The store itself stays up so a caller can audit what the guest still holds.
     async fn close(&mut self) -> Result<(), String> {
         let root = self
@@ -443,7 +444,7 @@ impl WcmpIncarnation {
         let dropped = root
             .resource_drop(&mut self.store.as_context_mut())
             .map_err(|trap| format!("guest trapped dropping its instance root: {trap}"));
-        self.provisions.clear();
+        self.publications.clear();
         closed??;
         dropped
     }
@@ -457,9 +458,9 @@ pub struct WcmpRuntime {
     host: Host,
     instance: Instance,
     incarnation: Rc<RefCell<Option<WcmpIncarnation>>>,
-    /// What each provision publishes, by contract. The leases themselves live in the
+    /// What each returned publication publishes, by name. The leases themselves live in the
     /// incarnation, so a close revokes them.
-    provisions: Rc<BTreeMap<String, CapabilityPublication>>,
+    publications: Rc<BTreeMap<String, CapabilityPublication>>,
     revoked: Arc<AtomicBool>,
 }
 
@@ -494,15 +495,15 @@ impl WcmpRuntime {
             wake,
             waker,
             root: None,
-            provisions: BTreeMap::new(),
+            publications: BTreeMap::new(),
         };
-        let (root, provisions) = documents::initialize(&mut active, context).await?;
+        let (root, leases) = documents::initialize(&mut active, context).await?;
         active.root = Some(root);
-        let publications = provisions
+        let publications = leases
             .iter()
-            .map(|(contract, lease)| (contract.clone(), lease.publication()))
+            .map(|(name, lease)| (name.clone(), lease.publication()))
             .collect();
-        active.provisions = provisions;
+        active.publications = leases;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let incarnation = Rc::new(RefCell::new(Some(active)));
         let driver_incarnation = Rc::clone(&incarnation);
@@ -569,21 +570,22 @@ impl WcmpRuntime {
                 host: host.clone(),
                 instance,
                 incarnation,
-                provisions: Rc::new(publications),
+                publications: Rc::new(publications),
                 revoked,
             },
             driver,
         ))
     }
 
-    /// The publication this incarnation provides for `contract`, if it provides it.
-    pub fn provision(&self, contract: &str) -> Option<CapabilityPublication> {
-        self.provisions.get(contract).cloned()
+    /// The publications this incarnation's `initialize` returned, by name. They become
+    /// reachable to other micros only once the host commits the initialization.
+    pub fn publications(&self) -> BTreeMap<String, CapabilityPublication> {
+        (*self.publications).clone()
     }
 
     /// Close the incarnation's guest half (ADR 024 §6 step 2). The incarnation stops taking
     /// presentation and document calls, its `instance-root.close` runs to completion, the
-    /// root and the provision leases are released, and the store is dropped. The caller has
+    /// root and the publication leases are released, and the store is dropped. The caller has
     /// already withdrawn outward visibility and tears the host incarnation down afterwards.
     pub async fn close(&self) -> Result<(), String> {
         let taken = self.incarnation.borrow_mut().take();
@@ -591,8 +593,10 @@ impl WcmpRuntime {
         active.close().await
     }
 
+    /// Mount the presentation this incarnation published as `publication`.
     pub fn mount(
         &self,
+        publication: &str,
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
         components: &[ComponentRef],
     ) -> Result<SurfaceSession, PresentationError> {
@@ -606,7 +610,7 @@ impl WcmpRuntime {
                     ),
                 })?;
         }
-        let surface = self.mount_guest_surface(&writer, components)?;
+        let surface = self.mount_guest_surface(publication, &writer, components)?;
         let dispatch = self.clone();
         let dispatch_writer = Arc::clone(&writer);
         let unmount = self.clone();
@@ -618,6 +622,7 @@ impl WcmpRuntime {
 
     fn mount_guest_surface(
         &self,
+        publication: &str,
         writer: &Arc<dyn SurfaceSink<ComponentRef>>,
         components: &[ComponentRef],
     ) -> Result<u32, PresentationError> {
@@ -645,6 +650,7 @@ impl WcmpRuntime {
                 .townframe_dayframe_presentation_events()
                 .call_mount(
                     &mut active.store,
+                    publication,
                     Resource::new_borrow(placement_rep),
                     components,
                 ),

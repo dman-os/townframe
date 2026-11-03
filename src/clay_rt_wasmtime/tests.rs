@@ -2,20 +2,20 @@ use super::*;
 use clay_surface::SurfaceTree;
 use wasmtime::component::Resource;
 
-struct RecordingSink {
+pub(super) struct RecordingSink {
     tree: Mutex<Option<SurfaceTree<ComponentRef>>>,
     changed: tokio::sync::Notify,
 }
 
 impl RecordingSink {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             tree: Mutex::new(Some(SurfaceTree::new())),
             changed: tokio::sync::Notify::new(),
         }
     }
 
-    fn tree<R>(&self, read: impl FnOnce(&SurfaceTree<ComponentRef>) -> R) -> R {
+    pub(super) fn tree<R>(&self, read: impl FnOnce(&SurfaceTree<ComponentRef>) -> R) -> R {
         read(self.tree.lock().unwrap().as_ref().expect("surface is live"))
     }
 
@@ -52,6 +52,29 @@ impl SurfaceSink<ComponentRef> for RecordingSink {
         self.tree.lock().unwrap().take();
         self.changed.notify_waiters();
     }
+}
+
+/// Redeem the table entry `reference` as a presentation, through the async host import a guest
+/// would call.
+async fn redeem(
+    store: &mut Store<WasmStoreState>,
+    reference: u32,
+) -> Result<
+    Resource<clay_guest_session::capabilities::PresentationComponent>,
+    bindings::townframe::dayframe::capability_bank::CapabilityError,
+> {
+    use bindings::townframe::dayframe::capability_bank::HostCapabilityRefWithStore;
+    store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::redeem_presentation(
+                accessor,
+                Resource::new_borrow(reference),
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 async fn counter_package() -> WasmPackage {
@@ -104,7 +127,7 @@ async fn capability_delivery(
 
     let owner = host.start(name);
     let (mut state, incoming) =
-        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     let reader = state
         .table
         .push(state.collections.grant(projection.clone()).unwrap())
@@ -149,7 +172,7 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
     let owner = host.start("layout");
     let component = host.publish_component(&owner).unwrap();
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     let mut resources = state
         .grant_components(&vec![component; PresentationHost::MAX_COMPONENT_HANDLES])
         .unwrap();
@@ -217,7 +240,7 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
     };
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [31, 32]);
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     state.collections = CollectionSession::new(host.clone(), owner, limits);
     state.table.set_max_capacity(limits.writers);
     let first = state
@@ -331,7 +354,7 @@ fn registration_writer_table_capacity_failure_releases_its_permit() {
     let owner = host.start("writer-table-capacity");
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [33, 34]);
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     state.table.set_max_capacity(1);
     let first = state
         .table
@@ -386,7 +409,7 @@ async fn registration_writer_adapter_revokes_without_affecting_other_instances()
     );
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [35, 36]);
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let writer = state
         .table
         .push(state.collections.grant_writer(&registrations).unwrap())
@@ -558,24 +581,10 @@ async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independe
     assert_eq!(publication_a, lease.publication().id());
     assert_ne!(scope_a, scope_b);
 
-    let proxy_a = {
-        let state = store_a.data_mut();
-        let proxy =
-            HostCapabilityRef::as_presentation_component(state, Resource::new_borrow(reference_a))
-                .unwrap()
-                .unwrap();
-        assert_eq!(state.capabilities.proxy_count(), 1);
-        proxy
-    };
-    let proxy_b = {
-        let state = store_b.data_mut();
-        let proxy =
-            HostCapabilityRef::as_presentation_component(state, Resource::new_borrow(reference_b))
-                .unwrap()
-                .unwrap();
-        assert_eq!(state.capabilities.proxy_count(), 1);
-        proxy
-    };
+    let proxy_a = redeem(&mut store_a, reference_a).await.unwrap();
+    assert_eq!(store_a.data().capabilities.proxy_count(), 1);
+    let proxy_b = redeem(&mut store_b, reference_b).await.unwrap();
+    assert_eq!(store_b.data().capabilities.proxy_count(), 1);
 
     let component_a = {
         let state = store_a.data_mut();
@@ -663,12 +672,7 @@ async fn retained_presentation_proxy_survives_row_removal_but_turns_inert_when_l
     }]);
     let (mut store, _incoming, lease_rep, reference, through) =
         capability_delivery(&host, "retained-reader", &projection).await;
-    let proxy = {
-        let state = store.data_mut();
-        HostCapabilityRef::as_presentation_component(state, Resource::new_borrow(reference))
-            .unwrap()
-            .unwrap()
-    };
+    let proxy = redeem(&mut store, reference).await.unwrap();
     {
         let state = store.data_mut();
         let resource =
@@ -729,13 +733,13 @@ async fn registration_writer_surfaces_invalid_attachment_for_fabricated_capabili
     let owner = host.start("capability-writer");
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [45, 46]);
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     let writer = state
         .table
         .push(state.collections.grant_writer(&registrations).unwrap())
         .unwrap();
     let writer_rep = writer.rep();
-    let lease = cap_wit::Host::publish_presentation_component(&mut state)
+    let lease = cap_wit::Host::publish_presentation(&mut state, "view".into())
         .unwrap()
         .unwrap();
     let publication_id = state.table.get(&lease).unwrap().publication().id();
@@ -798,8 +802,8 @@ async fn registration_writer_surfaces_invalid_attachment_for_fabricated_capabili
     host.close();
 }
 
-#[test]
-fn capability_bank_table_drops_release_reference_and_proxy_capacity() {
+#[tokio::test]
+async fn capability_bank_table_drops_release_reference_and_proxy_capacity() {
     use bindings::townframe::dayframe::capability_bank as cap_wit;
     use cap_wit::HostCapabilityRef;
     use cap_wit::HostPresentationComponent;
@@ -810,7 +814,7 @@ fn capability_bank_table_drops_release_reference_and_proxy_capacity() {
     let host = Host::new();
     let owner = host.start("capability-budget");
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     state.capabilities = CapabilitySession::new(
         host.clone(),
         owner,
@@ -820,61 +824,47 @@ fn capability_bank_table_drops_release_reference_and_proxy_capacity() {
             proxies: 1,
         },
     );
-    let lease = cap_wit::Host::publish_presentation_component(&mut state)
+    let mut store = Store::new(&engine().unwrap(), state);
+    let lease = cap_wit::Host::publish_presentation(store.data_mut(), "view".into())
         .unwrap()
         .unwrap();
-    assert_eq!(state.capabilities.publication_count(), 1);
+    assert_eq!(store.data().capabilities.publication_count(), 1);
 
     let reference =
-        HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease.rep()))
+        HostPublishedCapability::reference(store.data_mut(), Resource::new_borrow(lease.rep()))
             .unwrap()
             .unwrap();
-    assert_eq!(state.capabilities.reference_count(), 1);
+    assert_eq!(store.data().capabilities.reference_count(), 1);
     assert!(matches!(
-        HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease.rep()))
+        HostPublishedCapability::reference(store.data_mut(), Resource::new_borrow(lease.rep()))
             .unwrap()
             .err(),
         Some(cap_wit::CapabilityError::LimitExceeded)
     ));
-    HostCapabilityRef::drop(&mut state, reference).unwrap();
-    assert_eq!(state.capabilities.reference_count(), 0);
+    HostCapabilityRef::drop(store.data_mut(), reference).unwrap();
+    assert_eq!(store.data().capabilities.reference_count(), 0);
     let reference =
-        HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease.rep()))
+        HostPublishedCapability::reference(store.data_mut(), Resource::new_borrow(lease.rep()))
             .unwrap()
             .unwrap();
 
-    let proxy = HostCapabilityRef::as_presentation_component(
-        &mut state,
-        Resource::new_borrow(reference.rep()),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(state.capabilities.proxy_count(), 1);
+    let proxy = redeem(&mut store, reference.rep()).await.unwrap();
+    assert_eq!(store.data().capabilities.proxy_count(), 1);
     assert!(matches!(
-        HostCapabilityRef::as_presentation_component(
-            &mut state,
-            Resource::new_borrow(reference.rep()),
-        )
-        .unwrap()
-        .err(),
+        redeem(&mut store, reference.rep()).await.err(),
         Some(cap_wit::CapabilityError::LimitExceeded)
     ));
-    HostPresentationComponent::drop(&mut state, proxy).unwrap();
-    assert_eq!(state.capabilities.proxy_count(), 0);
-    let proxy = HostCapabilityRef::as_presentation_component(
-        &mut state,
-        Resource::new_borrow(reference.rep()),
-    )
-    .unwrap()
-    .unwrap();
+    HostPresentationComponent::drop(store.data_mut(), proxy).unwrap();
+    assert_eq!(store.data().capabilities.proxy_count(), 0);
+    let proxy = redeem(&mut store, reference.rep()).await.unwrap();
 
-    HostPresentationComponent::drop(&mut state, proxy).unwrap();
-    HostCapabilityRef::drop(&mut state, reference).unwrap();
-    HostPublishedCapability::drop(&mut state, lease).unwrap();
-    assert_eq!(state.capabilities.proxy_count(), 0);
-    assert_eq!(state.capabilities.reference_count(), 0);
-    assert_eq!(state.capabilities.publication_count(), 0);
-    assert!(state.table.is_empty());
+    HostPresentationComponent::drop(store.data_mut(), proxy).unwrap();
+    HostCapabilityRef::drop(store.data_mut(), reference).unwrap();
+    HostPublishedCapability::drop(store.data_mut(), lease).unwrap();
+    assert_eq!(store.data().capabilities.proxy_count(), 0);
+    assert_eq!(store.data().capabilities.reference_count(), 0);
+    assert_eq!(store.data().capabilities.publication_count(), 0);
+    assert!(store.data().table.is_empty());
     host.close();
 }
 
@@ -955,7 +945,7 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
     let owner = host.start("ingress-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(Placement::new(
@@ -986,7 +976,7 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
 async fn execution_and_linear_memory_are_bounded_per_incarnation() {
     let host = Host::new();
     let package = counter_package().await;
-    let (mut active, _incoming) = package
+    let (mut active, _incoming, _calls) = package
         .instantiate(&host, host.start("bounded"))
         .await
         .unwrap();
@@ -1036,7 +1026,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     host.close_instance(&owner).unwrap();
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     assert_eq!(
-        runtime.mount(writer.clone(), &[]).err(),
+        runtime.mount("presentation", writer.clone(), &[]).err(),
         Some(PresentationError::Revoked)
     );
     assert!(writer.is_live());
@@ -1081,7 +1071,7 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
             .unwrap();
     let writer = Arc::new(LiveSink(AtomicBool::new(false)));
     let session = runtime
-        .mount(Arc::clone(&writer) as _, &[])
+        .mount("presentation", Arc::clone(&writer) as _, &[])
         .expect("mount must complete before dispatch blocks");
     assert!(writer.is_live());
 
@@ -1197,7 +1187,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     .await
     .unwrap();
     let writer = Arc::new(RecordingSink::new());
-    let surface = runtime.mount(writer.clone(), &[]).unwrap();
+    let surface = runtime.mount("presentation", writer.clone(), &[]).unwrap();
     assert_eq!(
         writer.tree(SurfaceTree::text_content),
         "3Pending counter writes: 0Refresh counter"
@@ -1285,7 +1275,7 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     .unwrap();
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
-        let session = runtime.mount(writer.clone(), &[]).unwrap();
+        let session = runtime.mount("presentation", writer.clone(), &[]).unwrap();
         let text = writer
             .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
             .await;
@@ -1401,7 +1391,7 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount(Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("presentation", Arc::<RecordingSink>::clone(&writer), &[])
             .unwrap();
         writer.wait_for(|text| text.contains("status=live")).await;
         let command = |element: u32| {
@@ -1502,7 +1492,7 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount(Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("presentation", Arc::<RecordingSink>::clone(&writer), &[])
             .unwrap();
         writer.wait_for(|text| text.contains("status=live")).await;
         let command = |element: u32| {
@@ -1576,7 +1566,7 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     let owner = host.start("surface-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(Placement::new(

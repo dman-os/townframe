@@ -1,6 +1,11 @@
-package townframe:dayframe@0.3.0;
+package townframe:dayframe@0.4.0;
 
-@since(version = 0.3.0)
+/// The capability bank (ADR 024 §9, ADR 025 §§5-6). A `capability-ref` is bound to one live
+/// publication or lazy (it names a micro's publication and activates the micro on use);
+/// consumers cannot tell which except through `status`. Because using a lazy reference may
+/// activate its provider, every redemption and invocation is async. Presentation `mount`,
+/// `dispatch` and `unmount` stay synchronous (ADR 018): redeem first, then mount.
+@since(version = 0.4.0)
 interface capability-bank {
     use presentation.{component-ref};
 
@@ -8,10 +13,47 @@ interface capability-bank {
         contract-mismatch,
         revoked,
         limit-exceeded,
+        /// A lazy reference's provider could not be activated or does not publish the name.
+        unavailable,
+    }
+
+    /// Why a call failed: the reference was unusable, or the provider's handler rejected it.
+    variant call-error {
+        capability(capability-error),
+        provider(string),
+    }
+
+    /// What a reference reports without activating anything.
+    enum ref-status {
+        live,
+        dormant,
+        disabled,
+        faulted,
+        unavailable,
+        revoked,
+    }
+
+    /// A publication's contract identity (ADR 025 §5). A call's contract names its request and
+    /// response Lexicons.
+    record contract {
+        namespace: string,
+        name: string,
+        version: tuple<u32, u32, u32>,
     }
 
     resource capability-ref {
-        as-presentation-component: func() -> result<presentation-component, capability-error>;
+        /// Never activates.
+        status: func() -> ref-status;
+        /// One call: strong for the duration of the call only.
+        call: async func(request: list<u8>) -> result<list<u8>, call-error>;
+        /// Strong while the binding is held.
+        retain-call: async func() -> result<call-binding, capability-error>;
+        /// Strong while the component is held or mounted.
+        redeem-presentation: async func() -> result<presentation-component, capability-error>;
+    }
+
+    resource call-binding {
+        call: async func(request: list<u8>) -> result<list<u8>, call-error>;
     }
 
     resource presentation-component {
@@ -22,5 +64,10 @@ interface capability-bank {
         reference: func() -> result<capability-ref, capability-error>;
     }
 
-    publish-presentation-component: func() -> result<published-capability, capability-error>;
+    /// Publish a presentation named `name`; the host serves it through `mount`.
+    publish-presentation: func(name: string) -> result<published-capability, capability-error>;
+
+    /// Publish a call named `name` under `contract`; the host serves it through the exported
+    /// `micro-lifecycle.call`.
+    publish-call: func(name: string, contract: contract) -> result<published-capability, capability-error>;
 }

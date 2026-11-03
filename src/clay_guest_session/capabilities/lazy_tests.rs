@@ -35,6 +35,11 @@ impl Script {
     }
 }
 
+/// The provider's `echo` call contract: a manifest-declared identity, not a bank constant.
+fn echo_contract() -> ContractIdentity {
+    ContractIdentity::new("townframe:dayframe", "echo", (0, 4, 0))
+}
+
 struct Provider(Arc<Script>);
 struct ProviderRoot {
     script: Arc<Script>,
@@ -58,7 +63,7 @@ impl Factory<CapabilityPublication> for Provider {
             }
             let bank = CapabilitySession::new(host, instance, CapabilityLimits::default());
             let echo = bank
-                .publish_call("echo", Arc::new(Echo(Arc::clone(&script))))
+                .publish_call("echo", echo_contract(), Arc::new(Echo(Arc::clone(&script))))
                 .unwrap();
             let view = bank.publish_presentation("view").unwrap();
             let publications = BTreeMap::from([
@@ -87,7 +92,7 @@ impl Root for ProviderRoot {
 }
 
 impl CallTarget for Echo {
-    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, String>> {
+    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
         let script = Arc::clone(&self.0);
         async move {
             script.calls.fetch_add(1, Ordering::SeqCst);
@@ -183,7 +188,7 @@ impl World {
 async fn reading_a_lazy_status_never_starts_the_provider() {
     let world = World::new();
     let recipient = world.recipient("recipient");
-    let reference = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    let reference = world.lazy(&recipient, "echo", echo_contract());
     world
         .driven(async {
             for _ in 0..4 {
@@ -198,7 +203,7 @@ async fn reading_a_lazy_status_never_starts_the_provider() {
         .mint_lazy(LazyEndpoint {
             micro: MicroId::new("nobody"),
             publication: "echo".to_owned(),
-            contract: CALL_CONTRACT,
+            contract: echo_contract(),
             activator: world.supervisor.activator(),
         })
         .unwrap();
@@ -213,8 +218,8 @@ async fn concurrent_lazy_calls_from_two_recipients_initialize_once() {
     world.script.gate_init.store(true, Ordering::SeqCst);
     let (first, second) = (world.recipient("first"), world.recipient("second"));
     let (a, b) = (
-        world.lazy(&first, "echo", CALL_CONTRACT),
-        world.lazy(&second, "echo", CALL_CONTRACT),
+        world.lazy(&first, "echo", echo_contract()),
+        world.lazy(&second, "echo", echo_contract()),
     );
     let (from_a, from_b, ()) = world
         .driven(async {
@@ -237,7 +242,7 @@ async fn a_lazy_call_holds_the_provider_only_for_the_call() {
     let world = World::new();
     world.script.gate_call.store(true, Ordering::SeqCst);
     let recipient = world.recipient("recipient");
-    let reference = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    let reference = world.lazy(&recipient, "echo", echo_contract());
     world
         .driven(async {
             let (response, ()) = tokio::join!(reference.call(b"ping".to_vec()), async {
@@ -260,8 +265,12 @@ async fn a_lazy_call_holds_the_provider_only_for_the_call() {
 async fn retained_proxies_keep_the_provider_live_until_dropped() {
     let world = World::new();
     let recipient = world.recipient("recipient");
-    let echo = world.lazy(&recipient, "echo", CALL_CONTRACT);
-    let view = world.lazy(&recipient, "view", PRESENTATION_COMPONENT_CONTRACT);
+    let echo = world.lazy(&recipient, "echo", echo_contract());
+    let view = world.lazy(
+        &recipient,
+        "view",
+        ContractIdentity::presentation_component(),
+    );
     world
         .driven(async {
             let binding = echo.retain_call().await.unwrap();
@@ -315,7 +324,7 @@ async fn a_lazy_ref_used_while_the_provider_closes_gets_a_fresh_incarnation() {
     let world = World::new();
     world.script.gate_close.store(true, Ordering::SeqCst);
     let recipient = world.recipient("recipient");
-    let reference = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    let reference = world.lazy(&recipient, "echo", echo_contract());
     let activator = world.supervisor.activator();
     world
         .driven(async {
@@ -339,7 +348,7 @@ async fn a_wrong_contract_use_fails_without_activating_the_provider() {
     let world = World::new();
     let recipient = world.recipient("recipient");
     // The endpoint promises a call; asking for a presentation is refused before activation.
-    let reference = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    let reference = world.lazy(&recipient, "echo", echo_contract());
     world
         .driven(async {
             assert_eq!(
@@ -357,7 +366,7 @@ async fn a_wrong_contract_use_fails_without_activating_the_provider() {
 async fn an_endpoint_naming_no_publication_is_unavailable() {
     let world = World::new();
     let recipient = world.recipient("recipient");
-    let reference = world.lazy(&recipient, "absent", CALL_CONTRACT);
+    let reference = world.lazy(&recipient, "absent", echo_contract());
     world
         .driven(async {
             assert_eq!(

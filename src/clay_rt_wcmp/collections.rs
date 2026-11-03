@@ -10,10 +10,12 @@ use clay_collection::ReadError;
 use clay_collection::ReadLimits;
 use clay_collection::RowEvidence;
 use clay_collection::Version;
+use clay_guest_session::capabilities::CallBinding;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityRef;
 use clay_guest_session::capabilities::PresentationComponent;
 use clay_guest_session::capabilities::PublishedCapability;
+use clay_guest_session::capabilities::RefStatus;
 use clay_guest_session::collections::BytesPage;
 use clay_guest_session::collections::CollectionReader;
 use clay_guest_session::collections::CollectionValue;
@@ -307,21 +309,31 @@ fn capability_error(failure: CapabilityFailure) -> cap_wit::CapabilityError {
         CapabilityFailure::ContractMismatch => cap_wit::CapabilityError::ContractMismatch,
         CapabilityFailure::Revoked => cap_wit::CapabilityError::Revoked,
         CapabilityFailure::LimitExceeded => cap_wit::CapabilityError::LimitExceeded,
-        CapabilityFailure::Unavailable => {
-            todo!("C3b: capability-error needs an `unavailable` case (ADR 024 §9)")
-        }
+        CapabilityFailure::Unavailable => cap_wit::CapabilityError::Unavailable,
     }
 }
 
 impl cap_wit::Host for WcmpStoreState {
-    fn publish_presentation_component(
+    fn publish_presentation(
         &mut self,
+        name: String,
     ) -> wcmp::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
-        match // C3b: the WIT carries no publication name yet.
-        self.capabilities.publish_presentation("presentation") {
+        match self.capabilities.publish_presentation(&name) {
             Ok(lease) => Ok(Ok(self.table.push(lease)?)),
             Err(failure) => Ok(Err(capability_error(failure))),
         }
+    }
+
+    fn publish_call(
+        &mut self,
+        _name: String,
+        _contract: cap_wit::Contract,
+    ) -> wcmp::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
+        todo!(
+            "C3c: a call publication needs a CallTarget that runs the guest's exported `call` \
+             in this incarnation's own store, routed through its driver like the Wasmtime \
+             adapter's GuestCallTarget"
+        )
     }
 }
 
@@ -343,19 +355,66 @@ impl cap_wit::HostPublishedCapability for WcmpStoreState {
 }
 
 impl cap_wit::HostCapabilityRef for WcmpStoreState {
-    fn as_presentation_component(
-        &mut self,
-        _reference: Resource<CapabilityRef>,
-    ) -> wcmp::Result<Result<Resource<PresentationComponent>, cap_wit::CapabilityError>> {
-        todo!(
-            "C3b: redemption is async (CapabilityRef::redeem_presentation); \
-             capability-ref.redeem-presentation must become an async WIT function"
-        )
+    fn status(&mut self, reference: Resource<CapabilityRef>) -> wcmp::Result<cap_wit::RefStatus> {
+        Ok(match self.table.get(&reference)?.status() {
+            RefStatus::Live => cap_wit::RefStatus::Live,
+            RefStatus::Dormant => cap_wit::RefStatus::Dormant,
+            RefStatus::Disabled => cap_wit::RefStatus::Disabled,
+            RefStatus::Faulted => cap_wit::RefStatus::Faulted,
+            RefStatus::Unavailable => cap_wit::RefStatus::Unavailable,
+            RefStatus::Revoked => cap_wit::RefStatus::Revoked,
+        })
     }
 
     fn drop(&mut self, reference: Resource<CapabilityRef>) -> wcmp::Result<()> {
         self.table.delete(reference)?;
         Ok(())
+    }
+}
+
+impl<T: 'static> cap_wit::HostCapabilityRefWithStore<T> for HasSelf<WcmpStoreState> {
+    async fn call(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<CapabilityRef>,
+        _request: Vec<u8>,
+    ) -> wcmp::Result<Result<Vec<u8>, cap_wit::CallError>> {
+        todo!(
+            "C3c: capability-ref.call is async (CapabilityRef::call); share the reference out of \
+             the table, await it under the incarnation wake, map CallError"
+        )
+    }
+
+    async fn retain_call(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<CapabilityRef>,
+    ) -> wcmp::Result<Result<Resource<CallBinding>, cap_wit::CapabilityError>> {
+        todo!("C3c: capability-ref.retain-call is async (CapabilityRef::retain_call)")
+    }
+
+    async fn redeem_presentation(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<CapabilityRef>,
+    ) -> wcmp::Result<Result<Resource<PresentationComponent>, cap_wit::CapabilityError>> {
+        todo!(
+            "C3c: capability-ref.redeem-presentation is async (CapabilityRef::redeem_presentation)"
+        )
+    }
+}
+
+impl cap_wit::HostCallBinding for WcmpStoreState {
+    fn drop(&mut self, binding: Resource<CallBinding>) -> wcmp::Result<()> {
+        self.table.delete(binding)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> cap_wit::HostCallBindingWithStore<T> for HasSelf<WcmpStoreState> {
+    async fn call(
+        _accessor: &Accessor<T, Self>,
+        _binding: Resource<CallBinding>,
+        _request: Vec<u8>,
+    ) -> wcmp::Result<Result<Vec<u8>, cap_wit::CallError>> {
+        todo!("C3c: call-binding.call is async (CallBinding::call)")
     }
 }
 

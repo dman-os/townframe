@@ -58,7 +58,7 @@ impl ContractRef {
     }
 }
 
-/// A fully qualified WIT interface, e.g. `townframe:dayframe/micro-lifecycle@0.3.0`.
+/// A fully qualified WIT interface, e.g. `townframe:dayframe/micro-lifecycle@0.4.0`.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct InterfaceRef(String);
@@ -89,9 +89,9 @@ impl Entrypoints {
     /// presentation events.
     pub fn micro_client() -> Self {
         Self {
-            initialize: InterfaceRef::new("townframe:dayframe/micro-lifecycle@0.3.0"),
+            initialize: InterfaceRef::new("townframe:dayframe/micro-lifecycle@0.4.0"),
             presentation: Some(InterfaceRef::new(
-                "townframe:dayframe/presentation-events@0.3.0",
+                "townframe:dayframe/presentation-events@0.4.0",
             )),
             installer: None,
             extra: BTreeMap::new(),

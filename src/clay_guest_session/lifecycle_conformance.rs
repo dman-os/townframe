@@ -9,6 +9,7 @@
 //!
 //! Scenarios must run inside a [`tokio::task::LocalSet`]: incarnation drivers are spawned with
 //! [`tokio::task::spawn_local`] and joined (panics propagate) once the host closes.
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -34,19 +35,47 @@ use clay_host::StartError;
 use clay_host::Supervisor;
 
 use crate::InitialContext;
+use crate::capabilities::CallError;
 use crate::capabilities::CapabilityFailure;
 use crate::capabilities::CapabilityLimits;
 use crate::capabilities::CapabilityPublication;
 use crate::capabilities::CapabilityRef;
 use crate::capabilities::CapabilitySession;
+use crate::capabilities::ContractIdentity;
+use crate::capabilities::DeclaredPublication;
+use crate::capabilities::LazyEndpoint;
+use crate::capabilities::PublicationKind;
+use crate::capabilities::RefStatus;
 
-/// The contract the fixture's guest provides (`lifecycle_fixture.manifest.json`). The guest
-/// still returns its provisions keyed by contract (WIT reshape is a later checkpoint), so
-/// [`Fixture`] names the one it returns [`PUBLICATION`] when handing it to the supervisor.
-pub const PRESENTATION: &str = "dayframe.lifecycle.presentation";
-
-/// The manifest's name (`provides[].id`) for the fixture's presentation publication.
+/// The manifest's names (`provides[].id`) for the fixture's two publications: a presentation
+/// and an `echo` call whose handler answers `echo:` plus the request.
 const PUBLICATION: &str = "presentation";
+const ECHO: &str = "echo";
+
+fn echo_contract() -> ContractIdentity {
+    ContractIdentity::new("dayframe.lifecycle", ECHO, (1, 0, 0))
+}
+
+/// What the fixture's manifest declares it publishes (the manifest vocabulary has no kind yet,
+/// so the scenarios state it).
+fn declared_publications() -> BTreeMap<String, DeclaredPublication> {
+    BTreeMap::from([
+        (
+            PUBLICATION.to_owned(),
+            DeclaredPublication {
+                kind: PublicationKind::Presentation,
+                contract: ContractIdentity::presentation_component(),
+            },
+        ),
+        (
+            ECHO.to_owned(),
+            DeclaredPublication {
+                kind: PublicationKind::Call,
+                contract: echo_contract(),
+            },
+        ),
+    ])
+}
 
 /// What an incarnation's store still holds once its guest half closed. Anything but
 /// [`GuestResidue::NONE`] is a resource the close path leaked to the store's drop.
@@ -104,7 +133,13 @@ pub trait Incarnations: 'static {
         context: InitialContext,
     ) -> LocalFuture<'static, Result<(Self::Runtime, LocalFuture<'static, ()>), String>>;
 
-    fn provision(runtime: &Self::Runtime, contract: &str) -> Option<CapabilityPublication>;
+    /// The publications `initialize` returned, by name (admitted against the declarations in
+    /// the [`InitialContext`]).
+    fn publications(runtime: &Self::Runtime) -> BTreeMap<String, CapabilityPublication>;
+
+    /// Mount the presentation the runtime published as `publication` into an engine-owned
+    /// sink and check that the guest rendered into it. Dropping the result unmounts.
+    fn mount(runtime: &Self::Runtime, publication: &str) -> Result<Box<dyn Any>, String>;
 
     fn inspect(runtime: &Self::Runtime) -> GuestResidue;
 
@@ -151,6 +186,18 @@ pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
         supervisor.acquire(&consumer_id, PUBLICATION).await.is_err(),
         "the consumer publishes nothing"
     );
+    // The consumer's own initialization already called the provider's `echo` from its store
+    // into the provider's (it fails unless the provider answered `echo:ping`); a host-side
+    // recipient does the same through the same publication.
+    let echo = supervisor
+        .acquire(&provider_id, ECHO)
+        .await
+        .expect("the committed provider publishes its echo call");
+    assert_eq!(
+        harness.observe(&echo).call(b"ping".to_vec()).await,
+        Ok(b"echo:ping".to_vec())
+    );
+    drop(echo);
 
     // Closing the provider closes its dependent first; the consumer's guest `close`
     // redeems its proxy and fails unless the provider is still live at that point.
@@ -175,6 +222,155 @@ pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
     );
     drop((observed, lease));
     harness.finish(supervisor).await;
+}
+
+/// ADR 025 §§6 and 9 against a lazy reference to the fixture's provider: `status` reports
+/// `Dormant` without starting anything; a `call` activates the provider, answers, and lets it
+/// idle-close once the call's lease drops; a `retain-call` binding keeps it up until dropped;
+/// a redeemed presentation can be mounted, keeps it up while held, and lets it close when
+/// dropped.
+pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine: E) {
+    let harness = Harness::new(engine);
+    let supervisor = harness.supervisor("provider");
+    let provider_id = MicroId::new("provider");
+    let lazy = |publication: &str, contract: ContractIdentity| {
+        harness
+            .shared
+            .observer
+            .mint_lazy(LazyEndpoint {
+                micro: provider_id.clone(),
+                publication: publication.to_owned(),
+                contract,
+                activator: supervisor.activator(),
+            })
+            .unwrap()
+    };
+    let echo = lazy(ECHO, echo_contract());
+    let view = lazy(PUBLICATION, ContractIdentity::presentation_component());
+    let closed = |closes: usize| {
+        let mut expected = Vec::new();
+        for _ in 0..closes {
+            expected.extend([
+                "initialize provider".to_owned(),
+                "close provider".to_owned(),
+            ]);
+        }
+        expected
+    };
+    let idle = async |expected: Vec<String>| {
+        while supervisor.state(&provider_id) != MicroState::Idle {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(harness.log(), expected);
+    };
+    let stays_up = async |lives: usize| {
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(supervisor.state(&provider_id), MicroState::Active);
+        assert_eq!(
+            harness.log().len(),
+            lives * 2 - 1,
+            "no further activation or close"
+        );
+    };
+    tokio::select! {
+        never = supervisor.drive() => never,
+        () = async {
+            assert_eq!(echo.status(), RefStatus::Dormant);
+            assert_eq!(view.status(), RefStatus::Dormant);
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            assert!(harness.log().is_empty(), "reading a status never starts the provider");
+
+            // A call activates the provider and holds it only for the call.
+            assert_eq!(echo.call(b"one".to_vec()).await, Ok(b"echo:one".to_vec()));
+            idle(closed(1)).await;
+            assert_eq!(echo.status(), RefStatus::Dormant);
+
+            // A retained binding keeps the provider up for as long as it is held.
+            let binding = echo.retain_call().await.unwrap();
+            assert_eq!(binding.call(b"two".to_vec()).await, Ok(b"echo:two".to_vec()));
+            assert_eq!(echo.status(), RefStatus::Live);
+            stays_up(2).await;
+            assert_eq!(binding.call(b"three".to_vec()).await, Ok(b"echo:three".to_vec()));
+            drop(binding);
+            idle(closed(2)).await;
+
+            // A redeemed presentation retains it too, and it mounts while held.
+            let component = view.redeem_presentation().await.unwrap();
+            assert!(component.component().is_ok());
+            let runtime = harness
+                .shared
+                .runtime("provider")
+                .downcast::<E::Runtime>()
+                .unwrap_or_else(|_| panic!("the provider runs this engine"));
+            let mounted = E::mount(&runtime, PUBLICATION).expect("a live presentation mounts");
+            drop(runtime);
+            stays_up(3).await;
+            drop(mounted);
+            stays_up(3).await;
+            drop(component);
+            idle(closed(3)).await;
+            assert_eq!(view.status(), RefStatus::Dormant);
+            assert!(matches!(
+                echo.call(b"after".to_vec()).await,
+                Ok(response) if response == b"echo:after"
+            ));
+            idle(closed(4)).await;
+        } => {}
+    }
+    drop((echo, view));
+    harness.finish(supervisor).await;
+}
+
+/// A guest that returns a publication its manifest does not declare, or declares as another
+/// kind or under another contract, fails its initialization (ADR 025 §8).
+pub async fn undeclared_publications_fail_initialization<E: Incarnations>(engine: E) {
+    let engine = Rc::new(engine);
+    let declared = declared_publications();
+    let mut wrong_kind = declared.clone();
+    wrong_kind.get_mut(ECHO).unwrap().kind = PublicationKind::Presentation;
+    let mut wrong_contract = declared.clone();
+    wrong_contract.get_mut(ECHO).unwrap().contract =
+        ContractIdentity::new("dayframe.lifecycle", ECHO, (2, 0, 0));
+    let mut undeclared = declared;
+    undeclared.remove(ECHO);
+    for (publications, refusal) in [
+        (
+            undeclared,
+            "guest published \"echo\", which its manifest does not declare",
+        ),
+        (
+            wrong_kind,
+            "guest published \"echo\" as Call, but its manifest declares Presentation",
+        ),
+        (wrong_contract, "but its manifest declares"),
+    ] {
+        let host = Host::new();
+        let instance = host.create("provider").unwrap();
+        host.begin_initialization(&instance).unwrap();
+        let mut arguments = Vec::new();
+        ciborium::into_writer("provider", &mut arguments).unwrap();
+        let result = Rc::clone(&engine)
+            .initialize(
+                host.clone(),
+                instance.clone(),
+                InitialContext {
+                    arguments,
+                    publications,
+                    ..InitialContext::default()
+                },
+            )
+            .await;
+        let error = result
+            .err()
+            .expect("an undeclared publication fails initialization");
+        assert!(error.contains(refusal), "{error}");
+        host.close_instance(&instance).unwrap();
+        host.close();
+    }
 }
 
 /// A lease alone retains a lazy provider; dropping the last one lets the supervisor's idle
@@ -455,6 +651,15 @@ struct Shared {
     /// A live incarnation outside the graph, standing in for every other recipient.
     observer: CapabilitySession,
     observer_instance: Instance,
+    /// Each live incarnation's runtime by identity, shared with its root, so a scenario can
+    /// reach the guest the supervisor started (for example to mount its presentation).
+    runtimes: RefCell<BTreeMap<&'static str, Rc<dyn Any>>>,
+}
+
+impl Shared {
+    fn runtime(&self, identity: &str) -> Rc<dyn Any> {
+        Rc::clone(&self.runtimes.borrow()[identity])
+    }
 }
 
 impl<E: Incarnations> Harness<E> {
@@ -474,12 +679,14 @@ impl<E: Incarnations> Harness<E> {
                 drivers: RefCell::default(),
                 observer,
                 observer_instance,
+                runtimes: RefCell::default(),
             }),
         }
     }
 
-    /// The configured graph: an eager `consumer` that requires the `presentation` publication
-    /// of a lazy `provider` playing `provider_role`.
+    /// The configured graph: an eager `consumer` that requires the `presentation` and `echo`
+    /// publications (bound as `presentation` and `service`) of a lazy `provider` playing
+    /// `provider_role`.
     fn supervisor(&self, provider_role: &'static str) -> Supervisor<CapabilityPublication> {
         let provider = ConfiguredMicro {
             identity: MicroId::new("provider"),
@@ -490,13 +697,22 @@ impl<E: Incarnations> Harness<E> {
         let consumer = ConfiguredMicro {
             identity: MicroId::new("consumer"),
             eager: true,
-            requirements: BTreeMap::from([(
-                "presentation".to_owned(),
-                Requirement {
-                    provider: MicroId::new("provider"),
-                    publication: PUBLICATION.to_owned(),
-                },
-            )]),
+            requirements: BTreeMap::from([
+                (
+                    "presentation".to_owned(),
+                    Requirement {
+                        provider: MicroId::new("provider"),
+                        publication: PUBLICATION.to_owned(),
+                    },
+                ),
+                (
+                    "service".to_owned(),
+                    Requirement {
+                        provider: MicroId::new("provider"),
+                        publication: ECHO.to_owned(),
+                    },
+                ),
+            ]),
             factory: self.factory("consumer", "consumer"),
         };
         Supervisor::new(self.host.clone(), [provider, consumer])
@@ -566,6 +782,7 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
             let context = InitialContext {
                 arguments,
                 requirements,
+                publications: declared_publications(),
                 ..InitialContext::default()
             };
             let (runtime, driver) = engine
@@ -576,17 +793,28 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
                 .borrow_mut()
                 .push(tokio::task::spawn_local(driver));
             assert_eq!(host.lifecycle(&instance), Lifecycle::Initializing);
-            let mut publications = BTreeMap::new();
-            if let Some(publication) = E::provision(&runtime, PRESENTATION) {
+            let publications = E::publications(&runtime);
+            for (name, publication) in &publications {
                 // Staged until the supervisor commits this initialization (ADR 024 §5).
-                let staged = shared.observer.mint(&publication).unwrap();
+                let staged = shared.observer.mint(publication).unwrap();
+                let outcome = match publication.kind() {
+                    PublicationKind::Presentation => staged.redeem_presentation().await.err(),
+                    PublicationKind::Call => match staged.call(Vec::new()).await {
+                        Err(CallError::Capability(failure)) => Some(failure),
+                        other => panic!("staged call {name} answered {other:?}"),
+                    },
+                };
                 assert_eq!(
-                    staged.redeem_presentation().await.err(),
+                    outcome,
                     Some(CapabilityFailure::Revoked),
-                    "{identity}'s provision is visible before its initialization committed"
+                    "{identity}'s {name} is visible before its initialization committed"
                 );
-                publications.insert(PUBLICATION.to_owned(), publication);
             }
+            let runtime = Rc::new(runtime);
+            shared
+                .runtimes
+                .borrow_mut()
+                .insert(identity, Rc::clone(&runtime) as Rc<dyn Any>);
             let root = Box::new(FixtureRoot::<E> {
                 runtime,
                 shared,
@@ -598,7 +826,7 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
 }
 
 struct FixtureRoot<E: Incarnations> {
-    runtime: E::Runtime,
+    runtime: Rc<E::Runtime>,
     shared: Rc<Shared>,
     identity: &'static str,
 }
@@ -611,6 +839,9 @@ impl<E: Incarnations> Root for FixtureRoot<E> {
             identity,
         } = *self;
         Box::pin(async move {
+            shared.runtimes.borrow_mut().remove(identity);
+            let runtime = Rc::try_unwrap(runtime)
+                .unwrap_or_else(|_| panic!("{identity}'s runtime is still shared at its close"));
             let (closed, residue) = E::close(runtime).await;
             assert_eq!(
                 residue,

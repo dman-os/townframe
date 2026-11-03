@@ -6,8 +6,8 @@ schema: 1
 id: dayframe.sample
 package_version: 1
 entrypoints:
-  initialize: "townframe:dayframe/micro-lifecycle@0.3.0"
-  presentation: "townframe:dayframe/presentation-events@0.3.0"
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
   installer: ~
 provides:
   - id: controller
