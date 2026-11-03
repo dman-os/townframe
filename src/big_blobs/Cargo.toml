@@ -47,4 +47,5 @@ ed25519-dalek.workspace = true
 [dev-dependencies]
 subduction_iroh.workspace = true
 tempfile.workspace = true
+proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -9,7 +9,6 @@ const PEER_COUNT: usize = 2;
 #[derive(Clone, Copy, Debug, Default)]
 struct Source {
     seen: bool,
-    revision: u64,
     present: bool,
 }
 
@@ -117,15 +116,14 @@ impl AdmissionModel {
         inventory: usize,
         digest: usize,
         peer: usize,
-        revision: u64,
+        _revision: u64,
         present: bool,
     ) {
+        // Big Sync delivers observations in cursor order and this backend treats
+        // the durable (inventory, digest, peer) row as the idempotency key. The
+        // compatibility revision argument is therefore intentionally ignored.
         let source = &mut self.sources[inventory][digest][peer];
-        if source.seen && revision <= source.revision {
-            return;
-        }
         source.seen = true;
-        source.revision = revision;
         source.present = present;
         let observed = self.observed(inventory, digest);
         let pair = &mut self.pairs[inventory][digest];

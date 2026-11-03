@@ -30,14 +30,18 @@ pub(super) struct Harness {
 
 impl Harness {
     pub async fn new() -> Res<Self> {
-        Self::boot(None).await
+        Self::boot(None, false).await
+    }
+
+    pub async fn new_network() -> Res<Self> {
+        Self::boot(None, true).await
     }
 
     pub async fn reopen(path: &std::path::Path) -> Res<Self> {
-        Self::boot(Some(path)).await
+        Self::boot(Some(path), false).await
     }
 
-    async fn boot(path: Option<&std::path::Path>) -> Res<Self> {
+    async fn boot(path: Option<&std::path::Path>, network: bool) -> Res<Self> {
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
         let (repo, repo_stop) = big_repo::BigRepo::boot(
             Arc::clone(&runtime),
@@ -84,13 +88,14 @@ impl Harness {
         let (mirrors, mirror_stop) =
             InventoryMirrors::boot(sql, blobs.service, parts, repo, queue).await?;
         let lookup = iroh::address_lookup::MemoryLookup::default();
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let mut endpoint_builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .address_lookup(lookup.clone())
-            .clear_ip_transports()
             .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
-            .relay_mode(iroh::RelayMode::Disabled)
-            .bind()
-            .await?;
+            .relay_mode(iroh::RelayMode::Disabled);
+        if !network {
+            endpoint_builder = endpoint_builder.clear_ip_transports();
+        }
+        let endpoint = endpoint_builder.bind().await?;
         let backend = BlobSyncBackend::new(mirrors.clone(), endpoint.clone(), lookup);
         Ok(Self {
             backend,

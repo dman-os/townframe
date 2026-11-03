@@ -496,6 +496,9 @@ impl State {
 }
 
 #[cfg(test)]
+mod model_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
