@@ -179,42 +179,23 @@ impl Retention {
     }
 
     async fn candidates(&self, doc: &DocId) -> Res<Vec<WriterTarget>> {
-        let rows = self.sql.query(
-            "WITH containing(drawer_id) AS (
-                 SELECT drawer_id FROM big_cabinet_drawer_docs WHERE doc_id = ?1
-                 UNION
-                 SELECT links.parent_id
-                   FROM big_cabinet_drawer_children AS links
-                   JOIN big_cabinet_drawers AS child ON child.drawer_id = links.child_id
-                  WHERE links.child_id = ?1
-                    AND json_extract(child.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
-             )
-             SELECT meta.drawer_id
-                  , meta.root
-                  , meta.name
-                  , meta.doc_id
-               FROM containing
-               JOIN big_cabinet_drawer_meta_docs AS meta USING (drawer_id)
-              WHERE meta.kind = ?2
-             UNION
-             SELECT drawer_id
-                  , root
-                  , name
-                  , inventory_id
-               FROM big_blobs_writer_targets
-              WHERE doc_id = ?1",
-            (doc.to_string(), crate::workers::INVENTORY_KIND),
-        ).await?.all::<(String, String, String, String)>()?;
+        let rows = sqlite::queries::candidate_targets(
+            &self.sql,
+            doc.to_string(),
+            crate::workers::INVENTORY_KIND.to_owned(),
+        )
+        .await?;
         rows.into_iter()
-            .map(|(drawer, root, name, inventory)| {
+            .map(|row| {
                 Ok(WriterTarget {
-                    drawer: drawer.parse()?,
-                    root: root.parse()?,
-                    name,
-                    inventory: inventory.parse()?,
+                    drawer: row.drawer_id.parse()?,
+                    root: row.root.parse()?,
+                    name: row.name,
+                    inventory: row.doc_id.parse()?,
                 })
             })
             .collect()
+
     }
 
     async fn refresh_targets(&mut self, doc: &DocId) -> Res<()> {
@@ -286,11 +267,15 @@ impl Retention {
             match root.datums.get(&key) {
                 Some(DatumRead::Accepted { value, .. }) => {
                     let reference: DrawerMetaDoc = serde_json::from_value(value.clone())?;
-                    let admitted = self.sql.query(
-                        "SELECT 1 FROM big_cabinet_drawer_meta_docs
-                          WHERE drawer_id = ? AND root = ? AND kind = ? AND name = ? AND doc_id = ?",
-                        (target.drawer.to_string(), target.root.as_str(), crate::workers::INVENTORY_KIND, target.name.as_str(), reference.doc_id.to_string()),
-                    ).await?.all::<i64>()?;
+                    let admitted = sqlite::queries::admitted_meta_doc(
+                        &self.sql,
+                        target.drawer.to_string(),
+                        target.root.as_str().to_owned(),
+                        crate::workers::INVENTORY_KIND.to_owned(),
+                        target.name.clone(),
+                        reference.doc_id.to_string(),
+                    )
+                    .await?;
                     if !admitted.is_empty() && reference.doc_id == target.inventory {
                         self.update_target(doc, target, Some(&target.inventory))
                             .await?;
@@ -341,93 +326,109 @@ impl Retention {
             target.root.as_str(),
             target.name.as_str(),
         );
-        let previous = tx
-            .query(
-                "SELECT inventory_id FROM big_blobs_writer_targets
-              WHERE doc_id = ?1 AND drawer_id = ?2 AND root = ?3 AND name = ?4",
-                params.clone(),
-            )
-            .await?
-            .all::<String>()?;
-        let claims = tx
-            .query(
-                "SELECT digest
-                  , length_octets
-               FROM big_blobs_writer_claims
-              WHERE doc_id = ?1 AND drawer_id = ?2 AND root = ?3 AND name = ?4
-              ORDER BY digest",
-                params.clone(),
-            )
-            .await?
-            .all::<(String, u64)>()?;
+        let previous = sqlite::queries::writer_target_inventory(
+            tx,
+            params.0.clone(),
+            params.1.clone(),
+            params.2.to_owned(),
+            params.3.to_owned(),
+        )
+        .await?;
+        let claims = sqlite::queries::target_claims(
+            tx,
+            params.0.clone(),
+            params.1.clone(),
+            params.2.to_owned(),
+            params.3.to_owned(),
+        )
+        .await?
+        .into_iter()
+        .map(|row| (row.digest, row.length_octets as u64))
+        .collect::<Vec<_>>();
         let desired = if inventory.is_some() {
-            tx.query(
-                "SELECT digest
-                           , length_octets
-                        FROM big_blobs_retention
-                       WHERE doc_id = ?1 AND root = ?2
-                       ORDER BY digest",
-                (doc.to_string(), target.root.as_str()),
-            )
-            .await?
-            .all::<(String, u64)>()?
+            sqlite::queries::target_retention(tx, doc.to_string(), target.root.as_str().to_owned())
+                .await?
+                .into_iter()
+                .map(|row| (row.digest, row.length_octets as u64))
+                .collect()
         } else {
             Vec::new()
         };
-        if previous.first() == inventory.map(ToString::to_string).as_ref() && claims == desired {
+        if previous.as_ref() == inventory.map(ToString::to_string).as_ref() && claims == desired {
             return Ok(());
         }
-        tx.execute(
-            "INSERT OR IGNORE INTO big_blobs_retention_effects (digest)
-             SELECT digest FROM big_blobs_writer_claims
-              WHERE doc_id = ?1 AND drawer_id = ?2 AND root = ?3 AND name = ?4",
-            params.clone(),
+        sqlite::queries::retention_effects_from_claims(
+            tx,
+            params.0.clone(),
+            params.1.clone(),
+            params.2.to_owned(),
+            params.3.to_owned(),
         )
         .await?;
-        tx.execute(
-            "INSERT OR IGNORE INTO big_blobs_writer_effects (inventory_id, digest)
-             SELECT inventory_id
-                  , digest
-               FROM big_blobs_writer_claims
-              WHERE doc_id = ?1 AND drawer_id = ?2 AND root = ?3 AND name = ?4",
-            params.clone(),
+        sqlite::queries::writer_effects_from_claims(
+            tx,
+            params.0.clone(),
+            params.1.clone(),
+            params.2.to_owned(),
+            params.3.to_owned(),
         )
         .await?;
-        tx.execute("DELETE FROM big_blobs_writer_claims WHERE doc_id = ?1 AND drawer_id = ?2 AND root = ?3 AND name = ?4", params.clone()).await?;
-        tx.execute("DELETE FROM big_blobs_writer_targets WHERE doc_id = ?1 AND drawer_id = ?2 AND root = ?3 AND name = ?4", params.clone()).await?;
+        sqlite::queries::delete_claims(
+            tx,
+            params.0.clone(),
+            params.1.clone(),
+            params.2.to_owned(),
+            params.3.to_owned(),
+        )
+        .await?;
+        sqlite::queries::delete_targets(
+            tx,
+            params.0.clone(),
+            params.1.clone(),
+            params.2.to_owned(),
+            params.3.to_owned(),
+        )
+        .await?;
+
+
         if let Some(inventory) = inventory {
-            tx.execute("INSERT INTO big_blobs_writer_targets (doc_id, drawer_id, root, name, inventory_id) VALUES (?, ?, ?, ?, ?)",
-                (params.0.as_str(), params.1.as_str(), params.2, params.3, inventory.to_string())).await?;
-            tx.execute(
-                "INSERT INTO big_blobs_writer_claims (doc_id, drawer_id, root, name, inventory_id, digest, length_octets)
-                 SELECT ?1
-                      , ?2
-                      , ?3
-                      , ?4
-                      , ?5
-                      , digest
-                      , length_octets
-                   FROM big_blobs_retention
-                  WHERE doc_id = ?1 AND root = ?3",
-                (params.0.as_str(), params.1.as_str(), params.2, params.3, inventory.to_string()),
-            ).await?;
+            sqlite::queries::insert_target(
+                tx,
+                params.0.clone(),
+                params.1.clone(),
+                params.2.to_owned(),
+                params.3.to_owned(),
+                inventory.to_string(),
+            )
+            .await?;
+            sqlite::queries::insert_claims_from_retention(
+                tx,
+                params.0.clone(),
+                params.1.clone(),
+                params.2.to_owned(),
+                params.3.to_owned(),
+                inventory.to_string(),
+            )
+            .await?;
         }
-        tx.execute(
-            "INSERT OR IGNORE INTO big_blobs_retention_effects (digest)
-             SELECT digest FROM big_blobs_writer_claims
-              WHERE doc_id = ?1 AND drawer_id = ?2 AND root = ?3 AND name = ?4",
-            params.clone(),
+        sqlite::queries::retention_effects_from_claims(
+            tx,
+            params.0.clone(),
+            params.1.clone(),
+            params.2.to_owned(),
+            params.3.to_owned(),
         )
         .await?;
-        tx.execute(
-            "INSERT OR IGNORE INTO big_blobs_writer_effects (inventory_id, digest)
-             SELECT inventory_id
-                  , digest
-               FROM big_blobs_writer_claims
-              WHERE doc_id = ?1 AND drawer_id = ?2 AND root = ?3 AND name = ?4",
-            params,
+        sqlite::queries::writer_effects_from_claims(
+            tx,
+            params.0,
+            params.1,
+            params.2.to_owned(),
+            params.3.to_owned(),
         )
         .await?;
+
+
         let digests = claims
             .into_iter()
             .chain(desired)
@@ -438,18 +439,14 @@ impl Retention {
     }
 
     pub(crate) async fn is_inventory(&self, doc: &DocId) -> Res<bool> {
-        Ok(!self
-            .sql
-            .query(
-                "SELECT 1 FROM big_cabinet_drawer_meta_docs WHERE doc_id = ?1 AND kind = ?2
-             UNION ALL
-             SELECT 1 FROM big_blobs_writer_targets WHERE inventory_id = ?1
-             LIMIT 1",
-                (doc.to_string(), crate::workers::INVENTORY_KIND),
-            )
-            .await?
-            .all::<i64>()?
-            .is_empty())
+
+        Ok(!sqlite::queries::is_inventory(
+            &self.sql,
+            doc.to_string(),
+            crate::workers::INVENTORY_KIND.to_owned(),
+        )
+        .await?
+        .is_empty())
     }
 
     pub async fn replace(
@@ -483,43 +480,51 @@ impl Retention {
         let service = Arc::clone(&self.service);
         self.service.ownership.transaction(move |ownership| Box::pin(async move {
         let tx = ownership.sql();
-        let mut digests: BTreeSet<String> = tx
-            .query(
-                "SELECT digest FROM big_blobs_retention WHERE doc_id = ?",
-                (doc_id.as_str(),),
-            )
+        let mut digests: BTreeSet<String> = sqlite::queries::retention_digests(tx, doc_id.clone())
             .await?
-            .all::<String>()?
             .into_iter()
             .collect();
-        tx.execute("INSERT OR IGNORE INTO big_blobs_retention_effects (digest) SELECT digest FROM big_blobs_retention WHERE doc_id = ?", (doc_id.as_str(),)).await?;
+        sqlite::queries::retention_effects_for_doc(tx, doc_id.clone()).await?;
         if !preserve {
-            tx.execute(
-                "DELETE FROM big_blobs_retention WHERE doc_id = ?",
-                (doc_id.as_str(),),
+            sqlite::queries::delete_retention_doc(tx, doc_id.clone()).await?;
+        }
+        for (digest, plaintext, length, root) in representations {
+            match root {
+                MetaRoot::Public => {
+                    sqlite::queries::insert_retention_plain(
+                        tx,
+                        doc_id.clone(),
+                        digest.to_string(),
+                        plaintext.expect("public retention has plaintext"),
+                        i64::try_from(length)?,
+                        root.as_str().to_owned(),
+                    )
+                    .await?;
+                }
+                MetaRoot::Sensitive => {
+                    sqlite::queries::insert_retention_cipher(
+                        tx,
+                        doc_id.clone(),
+                        digest.to_string(),
+                        i64::try_from(length)?,
+                        root.as_str().to_owned(),
+                    )
+                    .await?;
+                }
+            }
+
+        }
+        for (digest, length) in pins {
+            sqlite::queries::insert_retention_pin(
+                tx,
+                doc_id.clone(),
+                digest.to_string(),
+                i64::try_from(length)?,
             )
             .await?;
         }
-        for (digest, plaintext, length, root) in representations {
-            tx.execute(
-                "INSERT INTO big_blobs_retention (doc_id, digest, plaintext, length_octets, root) VALUES (?, ?, ?, ?, ?)
-                 ON CONFLICT (doc_id, digest) DO UPDATE SET plaintext = excluded.plaintext, length_octets = excluded.length_octets, root = excluded.root",
-                (doc_id.as_str(), digest.to_string(), plaintext, i64::try_from(length)?, root.as_str()),
-            ).await?;
-        }
-        for (digest, length) in pins {
-            tx.execute("INSERT INTO big_blobs_retention (doc_id, digest, plaintext, length_octets) VALUES (?, ?, NULL, ?)
-                        ON CONFLICT (doc_id, digest) DO NOTHING", (doc_id.as_str(), digest.to_string(), i64::try_from(length)?)).await?;
-        }
-        tx.execute("INSERT OR IGNORE INTO big_blobs_retention_effects (digest) SELECT digest FROM big_blobs_retention WHERE doc_id = ?", (doc_id.as_str(),)).await?;
-        digests.extend(
-            tx.query(
-                "SELECT digest FROM big_blobs_retention WHERE doc_id = ?",
-                (doc_id,),
-            )
-            .await?
-            .all::<String>()?,
-        );
+        sqlite::queries::retention_effects_for_doc(tx, doc_id.clone()).await?;
+        digests.extend(sqlite::queries::retention_digests(tx, doc_id).await?);
         Self::reconcile(&service, ownership, digests).await
         })).await?;
         self.refresh_targets(doc).await?;
@@ -598,20 +603,24 @@ impl Retention {
     }
 
     async fn flush_writers(&mut self) -> Res<BTreeSet<DocId>> {
-        let effects = self.sql.query("SELECT inventory_id, digest FROM big_blobs_writer_effects ORDER BY inventory_id, digest", ()).await?.all::<(String, String)>()?;
+        let effects = sqlite::queries::writer_effects(&self.sql).await?;
         let mut changed = BTreeSet::new();
-        for (inventory, digest) in effects {
+        for effect in effects {
+            let inventory = effect.inventory_id;
+            let digest = effect.digest;
             let inventory_id: DocId = inventory.parse()?;
             let id: BlobId = digest.parse()?;
-            let lengths = self.sql.query(
-                "SELECT DISTINCT length_octets FROM big_blobs_writer_claims WHERE inventory_id = ? AND digest = ?",
-                (inventory.as_str(), digest.as_str()),
-            ).await?.all::<u64>()?;
+            let lengths = sqlite::queries::claim_lengths(
+                &self.sql,
+                inventory.clone(),
+                digest.clone(),
+            )
+            .await?;
             eyre::ensure!(
                 lengths.len() <= 1,
                 "writer claims disagree on object length"
             );
-            let length = lengths.first().copied();
+            let length = lengths.first().copied().map(u64::try_from).transpose()?;
             if !self.write_pin(&inventory_id, &id, length).await? {
                 continue;
             }
@@ -632,16 +641,8 @@ impl Retention {
                 .transaction(move |ownership| {
                     Box::pin(async move {
                         let tx = ownership.sql();
-                        tx.execute(
-                            "INSERT OR IGNORE INTO big_blobs_retention_effects (digest) VALUES (?)",
-                            (digest.as_str(),),
-                        )
-                        .await?;
-                        tx.execute(
-                "DELETE FROM big_blobs_writer_effects WHERE inventory_id = ? AND digest = ?",
-                (inventory, digest.clone()),
-            )
-            .await?;
+                        sqlite::queries::mark_retention_effect(tx, digest.clone()).await?;
+                        sqlite::queries::delete_writer_effect(tx, inventory, digest.clone()).await?;
                         Self::reconcile(&service, ownership, BTreeSet::from([digest])).await
                     })
                 })
@@ -653,14 +654,7 @@ impl Retention {
 
     pub async fn flush(&mut self) -> Res<BTreeSet<DocId>> {
         let changed = self.flush_writers().await?;
-        let effects = self
-            .sql
-            .query(
-                "SELECT digest FROM big_blobs_retention_effects ORDER BY digest",
-                (),
-            )
-            .await?
-            .all::<String>()?;
+        let effects = sqlite::queries::retention_effect_digests(&self.sql).await?;
         for digest in effects {
             let id: BlobId = digest.parse()?;
             let service = Arc::clone(&self.service);
@@ -683,13 +677,7 @@ impl Retention {
                 .ownership
                 .transaction(move |ownership| {
                     Box::pin(async move {
-                        ownership
-                            .sql()
-                            .execute(
-                                "DELETE FROM big_blobs_retention_effects WHERE digest = ?",
-                                (digest.clone(),),
-                            )
-                            .await?;
+                        sqlite::queries::delete_retention_effect(ownership.sql(), digest.clone()).await?;
                         Self::reconcile(&service, ownership, BTreeSet::from([digest])).await
                     })
                 })
