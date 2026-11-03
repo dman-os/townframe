@@ -1,24 +1,30 @@
-//! Activation supervisor (ADR 024 §§1–6): configured singleton micros, authorized activation
-//! registrations, strong requirement bindings, staged initialization, and ordered closing.
+//! Activation supervisor (ADR 024 §§1–6, ADR 025 §§8–9): configured singleton micros, strong
+//! requirement bindings, external leases, staged initialization, and ordered closing.
 //!
 //! The supervisor is engine-neutral. An engine (or a test) supplies a [`Factory`] that runs one
-//! incarnation's initialization and hands back its [`Root`]; the supervisor decides when an
-//! incarnation exists. A configured micro is started either because it is an eager root or
-//! because a micro that requires it is being started. Each resolved requirement becomes a
-//! [`Binding`] owned by the consumer incarnation, so the provider stays live exactly while some
-//! consumer incarnation holds it, and a provider whose last binding drops is closed unless it
-//! is itself an eager root.
+//! incarnation's initialization and hands back its [`Root`] and named publications; the
+//! supervisor decides when an incarnation exists. A configured micro is started because it is
+//! an eager root, because a micro that requires it is being started, or because something
+//! [`Supervisor::acquire`]s one of its publications. Each resolved requirement becomes a
+//! [`Binding`] owned by the consumer incarnation and each acquisition a [`Lease`]; the provider
+//! stays live exactly while some binding or lease retains it, and a provider whose last
+//! retention drops is closed unless it is itself an eager root.
 //!
 //! Closing is ordered: dependents close before their providers, `Root::close` runs while the
-//! closing incarnation's own bindings still hold its providers live, and only then is the
-//! incarnation torn down — which drops those bindings last, in reverse acquisition order.
+//! closing incarnation's own bindings still hold its providers live, its publications are then
+//! dropped (revoked) before the incarnation is torn down (which removes its registration
+//! scopes), and the teardown drops those bindings last, in reverse acquisition order.
 //!
 //! Single-threaded by construction (`Rc`/`RefCell`): it lives on one local executor beside the
 //! engines it drives. No `RefCell` borrow is held across an `.await`.
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
+use std::fmt;
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -29,8 +35,29 @@ use crate::instance::Lifecycle;
 
 pub type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+/// The configured name of a singleton micro: its package, its configured instance, and the
+/// at-most-one live incarnation (ADR 025 §5).
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MicroId(String);
+
+impl MicroId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for MicroId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 /// Runs one incarnation's initialization. `requirements` maps each local requirement binding
-/// to the provision its provider published. Everything the incarnation publishes before the
+/// to the publication its provider serves. Everything the incarnation publishes before the
 /// returned future resolves stays staged until the supervisor commits it.
 pub trait Factory<P> {
     fn initialize(
@@ -38,92 +65,57 @@ pub trait Factory<P> {
         host: Host,
         instance: Instance,
         requirements: BTreeMap<String, P>,
-    ) -> LocalFuture<'static, Result<Box<dyn Root<P>>, String>>;
+    ) -> LocalFuture<'static, Result<Initialized<P>, String>>;
+}
+
+/// What a successful initialization hands the supervisor (ADR 025 §8): the incarnation's
+/// lifecycle proof and the publications it serves, by the names its manifest declares. They
+/// become reachable together, only once `initialize` has returned.
+pub struct Initialized<P> {
+    pub root: Box<dyn Root>,
+    pub publications: BTreeMap<String, P>,
 }
 
 /// Proof of a successful initialization, held by the supervisor for the incarnation.
-pub trait Root<P> {
-    /// The provision this incarnation publishes for `contract`, if it provides it.
-    fn provision(&self, contract: &str) -> Option<P>;
+pub trait Root {
     /// Called exactly once, before teardown, while the incarnation's dependencies are live.
     fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>>;
 }
 
 pub struct ConfiguredMicro<P> {
-    pub identity: String,
+    pub identity: MicroId,
     pub eager: bool,
     /// Local requirement binding -> what satisfies it.
     pub requirements: BTreeMap<String, Requirement>,
-    /// Extension contracts this micro accepts activation registrations for, as a target.
-    pub accepts: BTreeSet<String>,
-    /// Which (target, contract) registrations configuration authorizes for this subject.
-    pub registration_grants: Vec<RegistrationGrant>,
-    /// The subject's contribution target bindings, routed to configured target identities.
-    pub routes: BTreeMap<String, String>,
     pub factory: Rc<dyn Factory<P>>,
 }
 
+/// A strong requirement: the configured `provider`'s named `publication` (ADR 025 §5).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Requirement {
-    pub contract: String,
-    /// A configured supplier. `None` leaves the requirement to accepted registrations.
-    pub provider: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RegistrationGrant {
-    pub target: String,
-    pub contract: String,
-}
-
-/// An installable activation default, read from a package manifest without instantiating it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RegistrationTemplate {
-    pub id: String,
-    pub target_binding: String,
-    pub contract: String,
-    pub declaration_id: String,
-}
-
-/// An installed registration: data, not a live resource. It produces a strong binding only
-/// when its target starts, accepts the contract, and requires it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ActivationRegistration {
-    pub id: String,
-    pub subject: String,
-    pub target: String,
-    pub contract: String,
-    pub declaration_id: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum RegistrationError {
-    #[error("no configured micro {0}")]
-    UnknownSubject(String),
-    #[error("configuration routes no target for binding {0}")]
-    Unrouted(String),
-    #[error("{subject} is not authorized to register {contract} on {target}")]
-    Unauthorized {
-        subject: String,
-        target: String,
-        contract: String,
-    },
+    pub provider: MicroId,
+    pub publication: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum StartError {
     #[error("no configured micro {0}")]
-    Unknown(String),
+    Unknown(MicroId),
     #[error("{0} is disabled")]
-    Disabled(String),
-    #[error("unresolved requirements {0:?}")]
-    Blocked(Vec<String>),
+    Disabled(MicroId),
     #[error("requirement cycle through {0}")]
-    Cycle(String),
+    Cycle(MicroId),
     #[error("requirement {binding} unavailable: {cause}")]
     Unavailable {
         binding: String,
         cause: Box<StartError>,
+    },
+    /// The provider's live incarnation does not serve this publication. It stays up for its
+    /// other users.
+    #[error("{provider} does not publish {publication}")]
+    Unpublished {
+        provider: MicroId,
+        publication: String,
     },
     #[error("initialization failed: {0}")]
     Faulted(String),
@@ -135,7 +127,7 @@ pub enum StartError {
 /// happened for every listed micro; it is recorded `Faulted` until retried.
 #[derive(Clone, Debug, Default, Eq, PartialEq, thiserror::Error)]
 #[error("close failed: {0:?}")]
-pub struct CloseError(pub BTreeMap<String, String>);
+pub struct CloseError(pub BTreeMap<MicroId, String>);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MicroState {
@@ -148,14 +140,35 @@ pub enum MicroState {
     Faulted(String),
 }
 
+/// An external strong edge to one publication of one incarnation (ADR 024 §2, ADR 025 §9).
+/// While any lease on an incarnation lives, it is retained. Dropping the last one makes a
+/// non-eager incarnation without bindings eligible for idle close, which
+/// [`Supervisor::drive`] performs. The lease dereferences to the publication it was acquired
+/// for; after its incarnation closes, the publication is revoked and the lease is inert.
+pub struct Lease<P> {
+    publication: P,
+    micro: MicroId,
+    /// The leases on the incarnation this one was acquired from.
+    retention: Rc<Cell<usize>>,
+    idle: Rc<Idle>,
+}
+
+/// Micros whose last lease dropped. `Lease::drop` is synchronous and cannot close anything,
+/// so it enqueues here and wakes `Supervisor::drive`.
+#[derive(Default)]
+struct Idle {
+    queue: RefCell<VecDeque<MicroId>>,
+    wake: tokio::sync::Notify,
+}
+
 pub struct Supervisor<P> {
     host: Host,
     inner: RefCell<Inner<P>>,
+    idle: Rc<Idle>,
 }
 
 struct Inner<P> {
-    nodes: BTreeMap<String, Node<P>>,
-    registrations: BTreeMap<String, ActivationRegistration>,
+    nodes: BTreeMap<MicroId, Node<P>>,
 }
 
 struct Node<P> {
@@ -173,8 +186,10 @@ enum NodeState<P> {
     Initializing(Instance, Rc<tokio::sync::Notify>),
     Active {
         instance: Instance,
-        root: Box<dyn Root<P>>,
-        providers: Vec<String>,
+        root: Box<dyn Root>,
+        publications: BTreeMap<String, P>,
+        providers: Vec<MicroId>,
+        leases: Rc<Cell<usize>>,
     },
     Closing(Instance),
     Faulted(String),
@@ -189,6 +204,8 @@ enum Next {
 }
 
 impl<P: Clone + 'static> Supervisor<P> {
+    /// Configuration is trusted: a duplicate micro or a requirement on an unconfigured
+    /// provider is a programming error.
     pub fn new(host: Host, micros: impl IntoIterator<Item = ConfiguredMicro<P>>) -> Self {
         let mut nodes = BTreeMap::new();
         for config in micros {
@@ -202,63 +219,24 @@ impl<P: Clone + 'static> Supervisor<P> {
                 "configured micro {identity} declared twice"
             );
         }
+        for (identity, node) in &nodes {
+            for (binding, requirement) in &node.config.requirements {
+                assert!(
+                    nodes.contains_key(&requirement.provider),
+                    "{identity} requires {binding} from unconfigured micro {}",
+                    requirement.provider
+                );
+            }
+        }
         Self {
             host,
-            inner: RefCell::new(Inner {
-                nodes,
-                registrations: BTreeMap::new(),
-            }),
+            inner: RefCell::new(Inner { nodes }),
+            idle: Rc::default(),
         }
-    }
-
-    /// Resolve `template` for `subject` against configuration and record it. Only routing and
-    /// authority are checked here; whether the target accepts it is decided when it starts.
-    pub fn install(
-        &self,
-        subject: &str,
-        template: RegistrationTemplate,
-    ) -> Result<ActivationRegistration, RegistrationError> {
-        let mut inner = self.inner.borrow_mut();
-        let config = &inner
-            .nodes
-            .get(subject)
-            .ok_or_else(|| RegistrationError::UnknownSubject(subject.to_owned()))?
-            .config;
-        let target = config
-            .routes
-            .get(&template.target_binding)
-            .ok_or_else(|| RegistrationError::Unrouted(template.target_binding.clone()))?
-            .clone();
-        let authorized = config
-            .registration_grants
-            .iter()
-            .any(|grant| grant.target == target && grant.contract == template.contract);
-        if !authorized {
-            return Err(RegistrationError::Unauthorized {
-                subject: subject.to_owned(),
-                target,
-                contract: template.contract,
-            });
-        }
-        let registration = ActivationRegistration {
-            id: template.id,
-            subject: subject.to_owned(),
-            target,
-            contract: template.contract,
-            declaration_id: template.declaration_id,
-        };
-        inner
-            .registrations
-            .insert(registration.id.clone(), registration.clone());
-        Ok(registration)
-    }
-
-    pub fn uninstall(&self, registration: &str) -> Option<ActivationRegistration> {
-        self.inner.borrow_mut().registrations.remove(registration)
     }
 
     /// Start every enabled eager root that is not live, returning the ones that failed.
-    pub async fn reconcile(&self) -> BTreeMap<String, StartError> {
+    pub async fn reconcile(&self) -> BTreeMap<MicroId, StartError> {
         let roots = self
             .inner
             .borrow()
@@ -276,17 +254,49 @@ impl<P: Clone + 'static> Supervisor<P> {
         failures
     }
 
+    /// Start or join the one activation of `micro` and lease its `publication`. Resolves only
+    /// once initialization has returned, so a publication is never observed staged. A faulted
+    /// micro is not retried by demand; see [`Self::retry`]. A publication the live incarnation
+    /// does not serve is [`StartError::Unpublished`]; the incarnation stays up.
+    pub async fn acquire(
+        &self,
+        micro: &MicroId,
+        publication: &str,
+    ) -> Result<Lease<P>, StartError> {
+        self.start(micro).await?;
+        self.lease(micro, publication)
+    }
+
+    /// Run idle closes for the life of the supervisor: whenever a micro's last [`Lease`]
+    /// drops, close it if nothing else retains it and it is not an eager root. There is no
+    /// grace period. A failed close is recorded as the micro's `Faulted` state, which is
+    /// where it is observed, so one micro's failure does not stop the others idling.
+    /// The host spawns this on its local executor and drops it at shutdown.
+    pub async fn drive(&self) -> ! {
+        loop {
+            let next = self.idle.queue.borrow_mut().pop_front();
+            let Some(micro) = next else {
+                self.idle.wake.notified().await;
+                continue;
+            };
+            let idle = self.inner.borrow().nodes[&micro].is_idle(&self.host);
+            if idle && let Err(CloseError(_)) = self.close(micro).await {
+                // `close` already recorded each failure as `Faulted` on the micro it concerns,
+                // which is where it is observed; nothing is lost by carrying on.
+            }
+        }
+    }
+
     /// Bring `identity` live, starting the providers its requirements resolve to first.
     /// A faulted micro is not retried by demand; see [`Self::retry`].
-    pub async fn start(&self, identity: &str) -> Result<(), StartError> {
-        self.start_visiting(identity.to_owned(), BTreeSet::new())
-            .await
+    async fn start(&self, identity: &MicroId) -> Result<(), StartError> {
+        self.start_visiting(identity.clone(), BTreeSet::new()).await
     }
 
     fn start_visiting(
         &self,
-        identity: String,
-        mut visiting: BTreeSet<String>,
+        identity: MicroId,
+        mut visiting: BTreeSet<MicroId>,
     ) -> LocalFuture<'_, Result<(), StartError>> {
         Box::pin(async move {
             if visiting.contains(&identity) {
@@ -301,12 +311,17 @@ impl<P: Clone + 'static> Supervisor<P> {
                 }
             }
             visiting.insert(identity.clone());
-            let (resolved, factory) = self.resolve(&identity)?;
+            let (requirements, factory) = {
+                let inner = self.inner.borrow();
+                let config = &inner.nodes[&identity].config;
+                let requirements = config.requirements.clone();
+                (requirements, Rc::clone(&config.factory))
+            };
             self.set(&identity, NodeState::Starting(Rc::default()));
             let mut providers = Vec::new();
-            for (binding, (provider, _)) in &resolved {
+            for (binding, requirement) in &requirements {
                 if let Err(cause) = self
-                    .start_visiting(provider.clone(), visiting.clone())
+                    .start_visiting(requirement.provider.clone(), visiting.clone())
                     .await
                 {
                     if matches!(cause, StartError::Cycle(_)) {
@@ -321,27 +336,38 @@ impl<P: Clone + 'static> Supervisor<P> {
                         cause: Box::new(cause),
                     });
                 }
-                providers.push(provider.clone());
+                providers.push(requirement.provider.clone());
             }
-            let mut requirements = BTreeMap::new();
+            let mut resolved = BTreeMap::new();
             let mut provider_instances = Vec::new();
             let mut unprovided = None;
-            for (binding, (provider, contract)) in &resolved {
+            for (binding, requirement) in &requirements {
                 let inner = self.inner.borrow();
                 // A provider started earlier in this loop may have been closed while a later
                 // one was starting; nothing binds it yet, so that is an ordinary unavailability.
-                let NodeState::Active { instance, root, .. } = &inner.nodes[provider].state else {
-                    let cause = format!("{provider} closed while {identity} was starting");
-                    unprovided = Some((binding.clone(), cause));
+                let NodeState::Active {
+                    instance,
+                    publications,
+                    ..
+                } = &inner.nodes[&requirement.provider].state
+                else {
+                    let cause = format!(
+                        "{} closed while {identity} was starting",
+                        requirement.provider
+                    );
+                    unprovided = Some((binding.clone(), StartError::Faulted(cause)));
                     break;
                 };
-                match root.provision(contract) {
-                    Some(provision) => {
-                        requirements.insert(binding.clone(), provision);
+                match publications.get(&requirement.publication) {
+                    Some(publication) => {
+                        resolved.insert(binding.clone(), publication.clone());
                         provider_instances.push(instance.clone());
                     }
                     None => {
-                        let cause = format!("{provider} does not provide {contract}");
+                        let cause = StartError::Unpublished {
+                            provider: requirement.provider.clone(),
+                            publication: requirement.publication.clone(),
+                        };
                         unprovided = Some((binding.clone(), cause));
                         break;
                     }
@@ -350,12 +376,14 @@ impl<P: Clone + 'static> Supervisor<P> {
             if let Some((binding, cause)) = unprovided {
                 self.set(&identity, NodeState::Blocked(vec![binding.clone()]));
                 self.release(providers).await;
-                let cause = Box::new(StartError::Faulted(cause));
-                return Err(StartError::Unavailable { binding, cause });
+                return Err(StartError::Unavailable {
+                    binding,
+                    cause: Box::new(cause),
+                });
             }
             let host = self.host.clone();
             let initialized = host
-                .initialize(identity.clone(), |instance| {
+                .initialize(identity.as_str(), |instance| {
                     let host = host.clone();
                     let identity = identity.clone();
                     async move {
@@ -375,18 +403,20 @@ impl<P: Clone + 'static> Supervisor<P> {
                             NodeState::Initializing(instance.clone(), outcome),
                         );
                         factory
-                            .initialize(host, instance, requirements)
+                            .initialize(host, instance, resolved)
                             .await
                             .map_err(StartError::Faulted)
                     }
                 })
                 .await;
             match initialized {
-                Ok((instance, root)) => {
+                Ok((instance, Initialized { root, publications })) => {
                     let state = NodeState::Active {
                         instance,
                         root,
+                        publications,
                         providers,
+                        leases: Rc::default(),
                     };
                     self.set(&identity, state);
                     Ok(())
@@ -409,15 +439,15 @@ impl<P: Clone + 'static> Supervisor<P> {
 
     /// Close `identity` and keep it closed until [`Self::enable`]. Dependents close first; the
     /// providers it alone held are released afterwards.
-    pub async fn disable(&self, identity: &str) -> Result<(), CloseError> {
-        let result = self.close(identity.to_owned()).await;
+    pub async fn disable(&self, identity: &MicroId) -> Result<(), CloseError> {
+        let result = self.close(identity.clone()).await;
         if !matches!(self.state(identity), MicroState::Faulted(_)) {
             self.set(identity, NodeState::Disabled);
         }
         result
     }
 
-    pub fn enable(&self, identity: &str) {
+    pub fn enable(&self, identity: &MicroId) {
         let mut inner = self.inner.borrow_mut();
         let node = inner.nodes.get_mut(identity).expect("unknown micro");
         if matches!(node.state, NodeState::Disabled) {
@@ -426,7 +456,7 @@ impl<P: Clone + 'static> Supervisor<P> {
     }
 
     /// Clear a recorded fault so demand may start the micro again.
-    pub fn retry(&self, identity: &str) {
+    pub fn retry(&self, identity: &MicroId) {
         let mut inner = self.inner.borrow_mut();
         let node = inner.nodes.get_mut(identity).expect("unknown micro");
         if matches!(node.state, NodeState::Faulted(_)) {
@@ -453,7 +483,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         failures.into_result()
     }
 
-    pub fn state(&self, identity: &str) -> MicroState {
+    pub fn state(&self, identity: &MicroId) -> MicroState {
         let inner = self.inner.borrow();
         let node = inner.nodes.get(identity).expect("unknown micro");
         if let NodeState::Active { instance, .. } = &node.state
@@ -472,18 +502,40 @@ impl<P: Clone + 'static> Supervisor<P> {
         }
     }
 
-    pub fn instance(&self, identity: &str) -> Option<Instance> {
+    pub fn instance(&self, identity: &MicroId) -> Option<Instance> {
         self.inner.borrow().nodes.get(identity)?.live().cloned()
     }
 
-    pub fn provision(&self, identity: &str, contract: &str) -> Option<P> {
-        match &self.inner.borrow().nodes.get(identity)?.state {
-            NodeState::Active { root, .. } => root.provision(contract),
-            _ => None,
-        }
+    /// A lease on `publication` of the live incarnation of `micro`. `start` returns `Ok` only
+    /// in the poll that observed or established `Active`, with no `.await` after it, so no
+    /// other task can have closed the incarnation by the time this runs.
+    fn lease(&self, micro: &MicroId, publication: &str) -> Result<Lease<P>, StartError> {
+        let inner = self.inner.borrow();
+        let NodeState::Active {
+            publications,
+            leases,
+            ..
+        } = &inner.nodes[micro].state
+        else {
+            panic!("{micro} is not active although its start returned Ok in the same poll");
+        };
+        let publication = publications
+            .get(publication)
+            .ok_or_else(|| StartError::Unpublished {
+                provider: micro.clone(),
+                publication: publication.to_owned(),
+            })?
+            .clone();
+        leases.set(leases.get() + 1);
+        Ok(Lease {
+            publication,
+            micro: micro.clone(),
+            retention: Rc::clone(leases),
+            idle: Rc::clone(&self.idle),
+        })
     }
 
-    fn next(&self, identity: &str) -> Result<Next, StartError> {
+    fn next(&self, identity: &MicroId) -> Result<Next, StartError> {
         if let MicroState::Faulted(fault) = self.state(identity) {
             // Pin an out-of-band ending the host observed as the node's fault.
             self.set(identity, NodeState::Faulted(fault.clone()));
@@ -493,9 +545,9 @@ impl<P: Clone + 'static> Supervisor<P> {
         let node = inner
             .nodes
             .get(identity)
-            .ok_or_else(|| StartError::Unknown(identity.to_owned()))?;
+            .ok_or_else(|| StartError::Unknown(identity.clone()))?;
         Ok(match &node.state {
-            NodeState::Disabled => return Err(StartError::Disabled(identity.to_owned())),
+            NodeState::Disabled => return Err(StartError::Disabled(identity.clone())),
             NodeState::Faulted(_) => unreachable!("handled above"),
             NodeState::Idle | NodeState::Blocked(_) => Next::Start,
             NodeState::Active { .. } => Next::Done,
@@ -506,51 +558,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         })
     }
 
-    /// Requirement binding -> (provider identity, contract), plus the factory.
-    #[allow(clippy::type_complexity)]
-    fn resolve(
-        &self,
-        identity: &str,
-    ) -> Result<(BTreeMap<String, (String, String)>, Rc<dyn Factory<P>>), StartError> {
-        let mut inner = self.inner.borrow_mut();
-        let node = &inner.nodes[identity];
-        let mut resolved = BTreeMap::new();
-        let mut missing = Vec::new();
-        for (binding, requirement) in &node.config.requirements {
-            let provider = requirement.provider.clone().or_else(|| {
-                node.config
-                    .accepts
-                    .contains(&requirement.contract)
-                    .then(|| {
-                        inner.registrations.values().find(|registration| {
-                            registration.target == identity
-                                && registration.contract == requirement.contract
-                                && inner.nodes.contains_key(&registration.subject)
-                        })
-                    })
-                    .flatten()
-                    .map(|registration| registration.subject.clone())
-            });
-            match provider {
-                Some(provider) => {
-                    if !inner.nodes.contains_key(&provider) {
-                        return Err(StartError::Unknown(provider));
-                    }
-                    resolved.insert(binding.clone(), (provider, requirement.contract.clone()));
-                }
-                None => missing.push(binding.clone()),
-            }
-        }
-        let factory = Rc::clone(&node.config.factory);
-        if !missing.is_empty() {
-            let node = inner.nodes.get_mut(identity).unwrap();
-            node.state = NodeState::Blocked(missing.clone());
-            return Err(StartError::Blocked(missing));
-        }
-        Ok((resolved, factory))
-    }
-
-    fn close(&self, identity: String) -> LocalFuture<'_, Result<(), CloseError>> {
+    fn close(&self, identity: MicroId) -> LocalFuture<'_, Result<(), CloseError>> {
         Box::pin(async move {
             let state = {
                 let mut inner = self.inner.borrow_mut();
@@ -570,12 +578,14 @@ impl<P: Clone + 'static> Supervisor<P> {
                     _ => return Ok(()),
                 }
             };
-            let (instance, root, providers) = match state {
+            let (instance, root, publications, providers) = match state {
                 NodeState::Active {
                     instance,
                     root,
+                    publications,
                     providers,
-                } => (instance, root, providers),
+                    ..
+                } => (instance, root, publications, providers),
                 // Another close drives this incarnation; wait for its teardown.
                 NodeState::Closing(instance) => {
                     self.host.await_close(&instance).await;
@@ -611,6 +621,10 @@ impl<P: Clone + 'static> Supervisor<P> {
                 drop(root);
                 Ok(())
             };
+            // Revoke the publications while the incarnation's registration scopes still exist,
+            // so nothing is reachable through a publication whose backing scope is gone
+            // (ADR 017 §6, ADR 025 §9). Teardown removes those scopes next.
+            drop(publications);
             self.host.close_instance(&instance).unwrap();
             let state = match closed {
                 Ok(()) => NodeState::Idle,
@@ -625,18 +639,12 @@ impl<P: Clone + 'static> Supervisor<P> {
         })
     }
 
-    /// Close each of `providers` that is live, not an eager root, and no longer bound. Close
-    /// failures are also recorded as each provider's fault.
-    async fn release(&self, providers: Vec<String>) -> CloseError {
+    /// Close each of `providers` that is live, not an eager root, and no longer retained by a
+    /// binding or a lease. Close failures are also recorded as each provider's fault.
+    async fn release(&self, providers: Vec<MicroId>) -> CloseError {
         let mut failures = CloseError::default();
         for provider in providers {
-            let unneeded = {
-                let inner = self.inner.borrow();
-                let node = &inner.nodes[&provider];
-                matches!(node.state, NodeState::Active { .. })
-                    && !node.config.eager
-                    && !self.host.is_bound(node.live().unwrap())
-            };
+            let unneeded = self.inner.borrow().nodes[&provider].is_idle(&self.host);
             if unneeded && let Err(error) = self.close(provider).await {
                 failures.0.extend(error.0);
             }
@@ -644,7 +652,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         failures
     }
 
-    fn set(&self, identity: &str, state: NodeState<P>) {
+    fn set(&self, identity: &MicroId, state: NodeState<P>) {
         let previous = std::mem::replace(
             &mut self
                 .inner
@@ -670,6 +678,35 @@ impl<P> Node<P> {
             | NodeState::Active { instance, .. }
             | NodeState::Closing(instance) => Some(instance),
             _ => None,
+        }
+    }
+
+    /// Active, not an eager root, and retained by neither a consumer binding nor a lease.
+    fn is_idle(&self, host: &Host) -> bool {
+        match &self.state {
+            NodeState::Active {
+                instance, leases, ..
+            } => !self.config.eager && leases.get() == 0 && !host.is_bound(instance),
+            _ => false,
+        }
+    }
+}
+
+impl<P> Deref for Lease<P> {
+    type Target = P;
+
+    fn deref(&self) -> &P {
+        &self.publication
+    }
+}
+
+impl<P> Drop for Lease<P> {
+    fn drop(&mut self) {
+        let remaining = self.retention.get() - 1;
+        self.retention.set(remaining);
+        if remaining == 0 {
+            self.idle.queue.borrow_mut().push_back(self.micro.clone());
+            self.idle.wake.notify_one();
         }
     }
 }
