@@ -2574,7 +2574,11 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 name = "clay_collection"
 version = "0.1.0"
 dependencies = [
+ "clay_store",
  "proptest",
+ "sqlite_rs",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2623,6 +2627,7 @@ name = "clay_host"
 version = "0.1.0"
 dependencies = [
  "clay_collection",
+ "futures",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
  "proptest",
