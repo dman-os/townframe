@@ -16,8 +16,9 @@
 //! scopes), and the teardown drops those bindings last, in reverse acquisition order.
 //!
 //! Single-threaded by construction (`Rc`/`RefCell`): it lives on one local executor beside the
-//! engines it drives. No `RefCell` borrow is held across an `.await`.
-use std::cell::Cell;
+//! engines it drives. No `RefCell` borrow is held across an `.await`. Engine store state must
+//! be `Send` and so cannot hold the supervisor; it holds an [`Activator`], a `Send + Sync`
+//! handle whose requests [`Supervisor::drive`] serves on the supervisor's executor.
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -27,6 +28,15 @@ use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
+use futures::StreamExt as _;
+use futures::stream::FuturesUnordered;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crate::instance::AccessError;
 use crate::instance::Host;
@@ -149,22 +159,55 @@ pub struct Lease<P> {
     publication: P,
     micro: MicroId,
     /// The leases on the incarnation this one was acquired from.
-    retention: Rc<Cell<usize>>,
-    idle: Rc<Idle>,
+    retention: Arc<AtomicUsize>,
+    idle: Arc<Idle>,
 }
 
 /// Micros whose last lease dropped. `Lease::drop` is synchronous and cannot close anything,
 /// so it enqueues here and wakes `Supervisor::drive`.
 #[derive(Default)]
 struct Idle {
-    queue: RefCell<VecDeque<MicroId>>,
+    queue: Mutex<VecDeque<MicroId>>,
     wake: tokio::sync::Notify,
+}
+
+/// A `Send + Sync` handle to the supervisor's demand and status surface, for engine state that
+/// cannot hold the `Rc` supervisor. Requests are served by [`Supervisor::drive`], so
+/// `acquire` makes progress only while a driver runs. The supervisor outlives every
+/// incarnation (shutdown closes them first), so a closed channel here is an invariant break.
+pub struct Activator<P> {
+    requests: mpsc::UnboundedSender<Request<P>>,
+    mirror: Arc<Mutex<BTreeMap<MicroId, MicroState>>>,
+}
+
+/// The request queue while a driver owns it. Dropping the driver puts it back, so a later
+/// driver (or an `Activator` call made in between) still finds an open channel.
+struct ServedRequests<'a, P> {
+    receiver: Option<mpsc::UnboundedReceiver<Request<P>>>,
+    home: &'a RefCell<Option<mpsc::UnboundedReceiver<Request<P>>>>,
+}
+
+impl<P> Drop for ServedRequests<'_, P> {
+    fn drop(&mut self) {
+        *self.home.borrow_mut() = self.receiver.take();
+    }
+}
+
+struct Request<P> {
+    micro: MicroId,
+    publication: String,
+    reply: oneshot::Sender<Result<Lease<P>, StartError>>,
 }
 
 pub struct Supervisor<P> {
     host: Host,
     inner: RefCell<Inner<P>>,
-    idle: Rc<Idle>,
+    idle: Arc<Idle>,
+    requests: mpsc::UnboundedSender<Request<P>>,
+    /// Taken by the one running [`Self::drive`] and handed back when it is dropped.
+    served: RefCell<Option<mpsc::UnboundedReceiver<Request<P>>>>,
+    /// Every node's state as last [`Self::set`], for [`Activator::status`].
+    mirror: Arc<Mutex<BTreeMap<MicroId, MicroState>>>,
 }
 
 struct Inner<P> {
@@ -189,7 +232,7 @@ enum NodeState<P> {
         root: Box<dyn Root>,
         publications: BTreeMap<String, P>,
         providers: Vec<MicroId>,
-        leases: Rc<Cell<usize>>,
+        leases: Arc<AtomicUsize>,
     },
     Closing(Instance),
     Faulted(String),
@@ -228,10 +271,25 @@ impl<P: Clone + 'static> Supervisor<P> {
                 );
             }
         }
+        let mirror = nodes
+            .keys()
+            .map(|identity| (identity.clone(), MicroState::Idle))
+            .collect();
+        let (requests, served) = mpsc::unbounded_channel();
         Self {
             host,
             inner: RefCell::new(Inner { nodes }),
-            idle: Rc::default(),
+            idle: Arc::default(),
+            requests,
+            served: RefCell::new(Some(served)),
+            mirror: Arc::new(Mutex::new(mirror)),
+        }
+    }
+
+    pub fn activator(&self) -> Activator<P> {
+        Activator {
+            requests: self.requests.clone(),
+            mirror: Arc::clone(&self.mirror),
         }
     }
 
@@ -264,26 +322,62 @@ impl<P: Clone + 'static> Supervisor<P> {
         publication: &str,
     ) -> Result<Lease<P>, StartError> {
         self.start(micro).await?;
-        self.lease(micro, publication)
+        let leased = self.lease(micro, publication);
+        if leased.is_err() {
+            // The demand may have been what started it, and no lease exists whose drop would
+            // queue the idle check.
+            self.idle.queue.lock().unwrap().push_back(micro.clone());
+            self.idle.wake.notify_one();
+        }
+        leased
     }
 
-    /// Run idle closes for the life of the supervisor: whenever a micro's last [`Lease`]
-    /// drops, close it if nothing else retains it and it is not an eager root. There is no
-    /// grace period. A failed close is recorded as the micro's `Faulted` state, which is
-    /// where it is observed, so one micro's failure does not stop the others idling.
-    /// The host spawns this on its local executor and drops it at shutdown.
+    /// Serve the supervisor's deferred work for its whole life: [`Activator`] requests, and
+    /// idle closes whenever a micro's last [`Lease`] drops while nothing else retains it and it
+    /// is not an eager root. There is no grace period. Work runs concurrently, so one slow
+    /// activation does not delay an idle close. A failed close is recorded as the micro's
+    /// `Faulted` state, which is where it is observed, so one micro's failure does not stop
+    /// the others. The host spawns this on its local executor and drops it at shutdown.
+    /// Running two drivers at once is a programming error.
     pub async fn drive(&self) -> ! {
+        let mut served = ServedRequests {
+            receiver: Some(
+                self.served
+                    .borrow_mut()
+                    .take()
+                    .expect("Supervisor::drive is already running"),
+            ),
+            home: &self.served,
+        };
+        let mut work: FuturesUnordered<LocalFuture<'_, ()>> = FuturesUnordered::new();
         loop {
-            let next = self.idle.queue.borrow_mut().pop_front();
-            let Some(micro) = next else {
-                self.idle.wake.notified().await;
-                continue;
-            };
-            let idle = self.inner.borrow().nodes[&micro].is_idle(&self.host);
-            if idle && let Err(CloseError(_)) = self.close(micro).await {
-                // `close` already recorded each failure as `Faulted` on the micro it concerns,
-                // which is where it is observed; nothing is lost by carrying on.
+            tokio::select! {
+                request = served.receiver.as_mut().unwrap().recv() => {
+                    let Request { micro, publication, reply } =
+                        request.expect("the supervisor holds a sender");
+                    work.push(Box::pin(async move {
+                        let leased = self.acquire(&micro, &publication).await;
+                        // The requester may have been cancelled meanwhile; dropping the lease
+                        // then enqueues the micro for an idle check like any other release.
+                        drop(reply.send(leased));
+                    }));
+                }
+                () = self.idle.wake.notified() => {
+                    let queued = std::mem::take(&mut *self.idle.queue.lock().unwrap());
+                    for micro in queued {
+                        work.push(Box::pin(self.close_if_idle(micro)));
+                    }
+                }
+                Some(()) = work.next() => {}
             }
+        }
+    }
+
+    async fn close_if_idle(&self, micro: MicroId) {
+        let idle = self.inner.borrow().nodes[&micro].is_idle(&self.host);
+        if idle && let Err(CloseError(_)) = self.close(micro).await {
+            // `close` already recorded each failure as `Faulted` on the micro it concerns,
+            // which is where it is observed; nothing is lost by carrying on.
         }
     }
 
@@ -416,7 +510,7 @@ impl<P: Clone + 'static> Supervisor<P> {
                         root,
                         publications,
                         providers,
-                        leases: Rc::default(),
+                        leases: Arc::default(),
                     };
                     self.set(&identity, state);
                     Ok(())
@@ -448,20 +542,21 @@ impl<P: Clone + 'static> Supervisor<P> {
     }
 
     pub fn enable(&self, identity: &MicroId) {
-        let mut inner = self.inner.borrow_mut();
-        let node = inner.nodes.get_mut(identity).expect("unknown micro");
-        if matches!(node.state, NodeState::Disabled) {
-            node.state = NodeState::Idle;
+        if self.is_in(identity, |state| matches!(state, NodeState::Disabled)) {
+            self.set(identity, NodeState::Idle);
         }
     }
 
     /// Clear a recorded fault so demand may start the micro again.
     pub fn retry(&self, identity: &MicroId) {
-        let mut inner = self.inner.borrow_mut();
-        let node = inner.nodes.get_mut(identity).expect("unknown micro");
-        if matches!(node.state, NodeState::Faulted(_)) {
-            node.state = NodeState::Idle;
+        if self.is_in(identity, |state| matches!(state, NodeState::Faulted(_))) {
+            self.set(identity, NodeState::Idle);
         }
+    }
+
+    fn is_in(&self, identity: &MicroId, test: impl FnOnce(&NodeState<P>) -> bool) -> bool {
+        let inner = self.inner.borrow();
+        test(&inner.nodes.get(identity).expect("unknown micro").state)
     }
 
     /// Close every live micro, dependents before providers.
@@ -491,15 +586,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         {
             return MicroState::Faulted("incarnation ended outside supervision".into());
         }
-        match &node.state {
-            NodeState::Disabled => MicroState::Disabled,
-            NodeState::Idle => MicroState::Idle,
-            NodeState::Blocked(missing) => MicroState::Blocked(missing.clone()),
-            NodeState::Starting(_) | NodeState::Initializing(..) => MicroState::Initializing,
-            NodeState::Active { .. } => MicroState::Active,
-            NodeState::Closing(_) => MicroState::Closing,
-            NodeState::Faulted(message) => MicroState::Faulted(message.clone()),
-        }
+        node.state.micro_state()
     }
 
     pub fn instance(&self, identity: &MicroId) -> Option<Instance> {
@@ -526,12 +613,12 @@ impl<P: Clone + 'static> Supervisor<P> {
                 publication: publication.to_owned(),
             })?
             .clone();
-        leases.set(leases.get() + 1);
+        leases.fetch_add(1, Ordering::AcqRel);
         Ok(Lease {
             publication,
             micro: micro.clone(),
-            retention: Rc::clone(leases),
-            idle: Rc::clone(&self.idle),
+            retention: Arc::clone(leases),
+            idle: Arc::clone(&self.idle),
         })
     }
 
@@ -653,6 +740,10 @@ impl<P: Clone + 'static> Supervisor<P> {
     }
 
     fn set(&self, identity: &MicroId, state: NodeState<P>) {
+        self.mirror
+            .lock()
+            .unwrap()
+            .insert(identity.clone(), state.micro_state());
         let previous = std::mem::replace(
             &mut self
                 .inner
@@ -686,9 +777,65 @@ impl<P> Node<P> {
         match &self.state {
             NodeState::Active {
                 instance, leases, ..
-            } => !self.config.eager && leases.get() == 0 && !host.is_bound(instance),
+            } => {
+                !self.config.eager
+                    && leases.load(Ordering::Acquire) == 0
+                    && !host.is_bound(instance)
+            }
             _ => false,
         }
+    }
+}
+
+impl<P> NodeState<P> {
+    fn micro_state(&self) -> MicroState {
+        match self {
+            NodeState::Disabled => MicroState::Disabled,
+            NodeState::Idle => MicroState::Idle,
+            NodeState::Blocked(missing) => MicroState::Blocked(missing.clone()),
+            NodeState::Starting(_) | NodeState::Initializing(..) => MicroState::Initializing,
+            NodeState::Active { .. } => MicroState::Active,
+            NodeState::Closing(_) => MicroState::Closing,
+            NodeState::Faulted(message) => MicroState::Faulted(message.clone()),
+        }
+    }
+}
+
+impl<P> Clone for Activator<P> {
+    fn clone(&self) -> Self {
+        Self {
+            requests: self.requests.clone(),
+            mirror: Arc::clone(&self.mirror),
+        }
+    }
+}
+
+impl<P> Activator<P> {
+    /// [`Supervisor::acquire`], served by the supervisor's driver.
+    pub async fn acquire(
+        &self,
+        micro: &MicroId,
+        publication: &str,
+    ) -> Result<Lease<P>, StartError> {
+        let (reply, response) = oneshot::channel();
+        let request = Request {
+            micro: micro.clone(),
+            publication: publication.to_owned(),
+            reply,
+        };
+        self.requests
+            .send(request)
+            .unwrap_or_else(|_| panic!("the supervisor outlives every incarnation"));
+        response
+            .await
+            .expect("the driver answers every request it accepted")
+    }
+
+    /// The micro's state as last recorded by the supervisor, without activating anything.
+    /// `None` for a micro that is not configured. An incarnation that ended outside
+    /// supervision shows as `Active` until the supervisor next observes it.
+    pub fn status(&self, micro: &MicroId) -> Option<MicroState> {
+        self.mirror.lock().unwrap().get(micro).cloned()
     }
 }
 
@@ -702,10 +849,12 @@ impl<P> Deref for Lease<P> {
 
 impl<P> Drop for Lease<P> {
     fn drop(&mut self) {
-        let remaining = self.retention.get() - 1;
-        self.retention.set(remaining);
-        if remaining == 0 {
-            self.idle.queue.borrow_mut().push_back(self.micro.clone());
+        if self.retention.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle
+                .queue
+                .lock()
+                .unwrap()
+                .push_back(self.micro.clone());
             self.idle.wake.notify_one();
         }
     }

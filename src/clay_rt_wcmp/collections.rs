@@ -290,7 +290,9 @@ fn value_from_wire(
 ) -> wcmp::Result<CollectionValue> {
     let mut capabilities = Vec::with_capacity(value.capabilities.len());
     for reference in value.capabilities {
-        let publication = state.table.get(&reference)?.publication();
+        let publication = state.table.get(&reference)?.publication().expect(
+            "lazy references are not guest-mintable yet (C3b), so every attached reference is bound",
+        );
         capabilities.push(publication);
         state.table.delete(reference)?;
     }
@@ -305,6 +307,9 @@ fn capability_error(failure: CapabilityFailure) -> cap_wit::CapabilityError {
         CapabilityFailure::ContractMismatch => cap_wit::CapabilityError::ContractMismatch,
         CapabilityFailure::Revoked => cap_wit::CapabilityError::Revoked,
         CapabilityFailure::LimitExceeded => cap_wit::CapabilityError::LimitExceeded,
+        CapabilityFailure::Unavailable => {
+            todo!("C3b: capability-error needs an `unavailable` case (ADR 024 §9)")
+        }
     }
 }
 
@@ -312,7 +317,8 @@ impl cap_wit::Host for WcmpStoreState {
     fn publish_presentation_component(
         &mut self,
     ) -> wcmp::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
-        match self.capabilities.publish_presentation_component() {
+        match // C3b: the WIT carries no publication name yet.
+        self.capabilities.publish_presentation("presentation") {
             Ok(lease) => Ok(Ok(self.table.push(lease)?)),
             Err(failure) => Ok(Err(capability_error(failure))),
         }
@@ -339,12 +345,12 @@ impl cap_wit::HostPublishedCapability for WcmpStoreState {
 impl cap_wit::HostCapabilityRef for WcmpStoreState {
     fn as_presentation_component(
         &mut self,
-        reference: Resource<CapabilityRef>,
+        _reference: Resource<CapabilityRef>,
     ) -> wcmp::Result<Result<Resource<PresentationComponent>, cap_wit::CapabilityError>> {
-        match self.table.get(&reference)?.as_presentation_component() {
-            Ok(proxy) => Ok(Ok(self.table.push(proxy)?)),
-            Err(failure) => Ok(Err(capability_error(failure))),
-        }
+        todo!(
+            "C3b: redemption is async (CapabilityRef::redeem_presentation); \
+             capability-ref.redeem-presentation must become an async WIT function"
+        )
     }
 
     fn drop(&mut self, reference: Resource<CapabilityRef>) -> wcmp::Result<()> {

@@ -509,7 +509,7 @@ async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independe
         host.start("capability-provider"),
         CapabilityLimits::default(),
     );
-    let lease = provider.publish_presentation_component().unwrap();
+    let lease = provider.publish_presentation("view").unwrap();
     let projection =
         BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [41, 42]);
     projection.publish(vec![Change::Upsert {
@@ -536,7 +536,10 @@ async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independe
             .unwrap();
         assert!(state.capabilities.same_recipient(reference));
         assert_eq!(state.capabilities.reference_count(), 1);
-        (reference.publication_id(), reference.recipient_scope())
+        (
+            reference.publication().unwrap().id(),
+            reference.recipient_scope(),
+        )
     };
     let (publication_b, scope_b) = {
         let state = store_b.data_mut();
@@ -546,7 +549,10 @@ async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independe
             .unwrap();
         assert!(state.capabilities.same_recipient(reference));
         assert_eq!(state.capabilities.reference_count(), 1);
-        (reference.publication_id(), reference.recipient_scope())
+        (
+            reference.publication().unwrap().id(),
+            reference.recipient_scope(),
+        )
     };
     assert_eq!(publication_a, publication_b);
     assert_eq!(publication_a, lease.publication().id());
@@ -642,7 +648,7 @@ async fn retained_presentation_proxy_survives_row_removal_but_turns_inert_when_l
         host.start("retained-provider"),
         CapabilityLimits::default(),
     );
-    let lease = provider.publish_presentation_component().unwrap();
+    let lease = provider.publish_presentation("view").unwrap();
     let projection =
         BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [43, 44]);
     projection.publish(vec![Change::Upsert {

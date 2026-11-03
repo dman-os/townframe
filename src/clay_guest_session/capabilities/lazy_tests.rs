@@ -1,0 +1,379 @@
+//! Lazy references against a real supervisor: activation, retention, and revocation.
+use super::*;
+use clay_host::ConfiguredMicro;
+use clay_host::Factory;
+use clay_host::Initialized;
+use clay_host::LocalFuture;
+use clay_host::Root;
+use clay_host::StartError;
+use clay_host::Supervisor;
+use futures::FutureExt as _;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use tokio::sync::Notify;
+
+/// What the one fake provider did, and the gates that park it mid-initialization, mid-call
+/// or mid-close.
+#[derive(Default)]
+struct Script {
+    inits: AtomicUsize,
+    closes: AtomicUsize,
+    calls: AtomicUsize,
+    gate_init: AtomicBool,
+    gate_call: AtomicBool,
+    gate_close: AtomicBool,
+    init: Notify,
+    call: Notify,
+    close: Notify,
+}
+
+impl Script {
+    fn count(counter: &AtomicUsize) -> usize {
+        counter.load(Ordering::SeqCst)
+    }
+}
+
+struct Provider(Arc<Script>);
+struct ProviderRoot {
+    script: Arc<Script>,
+    _published: Vec<PublishedCapability>,
+}
+/// The provider's call handler: echoes the request.
+struct Echo(Arc<Script>);
+
+impl Factory<CapabilityPublication> for Provider {
+    fn initialize(
+        &self,
+        host: Host,
+        instance: Instance,
+        _requirements: BTreeMap<String, CapabilityPublication>,
+    ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
+        let script = Arc::clone(&self.0);
+        Box::pin(async move {
+            script.inits.fetch_add(1, Ordering::SeqCst);
+            if script.gate_init.load(Ordering::SeqCst) {
+                script.init.notified().await;
+            }
+            let bank = CapabilitySession::new(host, instance, CapabilityLimits::default());
+            let echo = bank
+                .publish_call("echo", Arc::new(Echo(Arc::clone(&script))))
+                .unwrap();
+            let view = bank.publish_presentation("view").unwrap();
+            let publications = BTreeMap::from([
+                ("echo".to_owned(), echo.publication()),
+                ("view".to_owned(), view.publication()),
+            ]);
+            let root = Box::new(ProviderRoot {
+                script,
+                _published: vec![echo, view],
+            });
+            Ok(Initialized { root, publications })
+        })
+    }
+}
+
+impl Root for ProviderRoot {
+    fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
+        Box::pin(async move {
+            self.script.closes.fetch_add(1, Ordering::SeqCst);
+            if self.script.gate_close.load(Ordering::SeqCst) {
+                self.script.close.notified().await;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl CallTarget for Echo {
+    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, String>> {
+        let script = Arc::clone(&self.0);
+        async move {
+            script.calls.fetch_add(1, Ordering::SeqCst);
+            if script.gate_call.load(Ordering::SeqCst) {
+                script.call.notified().await;
+            }
+            Ok(request)
+        }
+        .boxed()
+    }
+}
+
+struct World {
+    host: Host,
+    script: Arc<Script>,
+    supervisor: Supervisor<CapabilityPublication>,
+}
+
+fn provider() -> MicroId {
+    MicroId::new("provider")
+}
+
+impl World {
+    fn new() -> Self {
+        let host = Host::new();
+        let script = Arc::new(Script::default());
+        let micro = ConfiguredMicro {
+            identity: provider(),
+            eager: false,
+            requirements: BTreeMap::new(),
+            factory: Rc::new(Provider(Arc::clone(&script))),
+        };
+        Self {
+            supervisor: Supervisor::new(host.clone(), [micro]),
+            host,
+            script,
+        }
+    }
+
+    /// A fresh recipient incarnation's bank session.
+    fn recipient(&self, name: &str) -> CapabilitySession {
+        CapabilitySession::new(
+            self.host.clone(),
+            self.host.start(name),
+            CapabilityLimits::default(),
+        )
+    }
+
+    fn lazy(
+        &self,
+        recipient: &CapabilitySession,
+        publication: &str,
+        contract: ContractIdentity,
+    ) -> CapabilityRef {
+        recipient
+            .mint_lazy(LazyEndpoint {
+                micro: provider(),
+                publication: publication.to_owned(),
+                contract,
+                activator: self.supervisor.activator(),
+            })
+            .unwrap()
+    }
+
+    fn state(&self) -> MicroState {
+        self.supervisor.state(&provider())
+    }
+
+    /// Run `scenario` while the supervisor serves activations and idle closes beside it.
+    async fn driven<T>(&self, scenario: impl Future<Output = T>) -> T {
+        tokio::select! {
+            never = self.supervisor.drive() => never,
+            out = scenario => out,
+        }
+    }
+
+    async fn settle(&self, done: impl Fn() -> bool) {
+        while !done() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Give the driver every chance to close the provider; it must not while retained.
+    async fn stay_live(&self) {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(self.state(), MicroState::Active);
+    }
+}
+
+#[tokio::test]
+async fn reading_a_lazy_status_never_starts_the_provider() {
+    let world = World::new();
+    let recipient = world.recipient("recipient");
+    let reference = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    world
+        .driven(async {
+            for _ in 0..4 {
+                assert_eq!(reference.status(), RefStatus::Dormant);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+    assert_eq!(Script::count(&world.script.inits), 0);
+
+    let unknown = recipient
+        .mint_lazy(LazyEndpoint {
+            micro: MicroId::new("nobody"),
+            publication: "echo".to_owned(),
+            contract: CALL_CONTRACT,
+            activator: world.supervisor.activator(),
+        })
+        .unwrap();
+    assert_eq!(unknown.status(), RefStatus::Unavailable);
+    world.supervisor.disable(&provider()).await.unwrap();
+    assert_eq!(reference.status(), RefStatus::Disabled);
+}
+
+#[tokio::test]
+async fn concurrent_lazy_calls_from_two_recipients_initialize_once() {
+    let world = World::new();
+    world.script.gate_init.store(true, Ordering::SeqCst);
+    let (first, second) = (world.recipient("first"), world.recipient("second"));
+    let (a, b) = (
+        world.lazy(&first, "echo", CALL_CONTRACT),
+        world.lazy(&second, "echo", CALL_CONTRACT),
+    );
+    let (from_a, from_b, ()) = world
+        .driven(async {
+            tokio::join!(a.call(b"a".to_vec()), b.call(b"b".to_vec()), async {
+                world
+                    .settle(|| Script::count(&world.script.inits) > 0)
+                    .await;
+                assert_eq!(a.status(), RefStatus::Dormant);
+                world.script.init.notify_one();
+            })
+        })
+        .await;
+    assert_eq!(from_a, Ok(b"a".to_vec()));
+    assert_eq!(from_b, Ok(b"b".to_vec()));
+    assert_eq!(Script::count(&world.script.inits), 1);
+}
+
+#[tokio::test]
+async fn a_lazy_call_holds_the_provider_only_for_the_call() {
+    let world = World::new();
+    world.script.gate_call.store(true, Ordering::SeqCst);
+    let recipient = world.recipient("recipient");
+    let reference = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    world
+        .driven(async {
+            let (response, ()) = tokio::join!(reference.call(b"ping".to_vec()), async {
+                world
+                    .settle(|| Script::count(&world.script.calls) > 0)
+                    .await;
+                // Mid-call nothing else retains the provider, but the call's lease does.
+                world.stay_live().await;
+                world.script.call.notify_one();
+            });
+            assert_eq!(response, Ok(b"ping".to_vec()));
+            world.settle(|| world.state() == MicroState::Idle).await;
+        })
+        .await;
+    assert_eq!(Script::count(&world.script.closes), 1);
+    assert_eq!(reference.status(), RefStatus::Dormant);
+}
+
+#[tokio::test]
+async fn retained_proxies_keep_the_provider_live_until_dropped() {
+    let world = World::new();
+    let recipient = world.recipient("recipient");
+    let echo = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    let view = world.lazy(&recipient, "view", PRESENTATION_COMPONENT_CONTRACT);
+    world
+        .driven(async {
+            let binding = echo.retain_call().await.unwrap();
+            world.stay_live().await;
+            assert_eq!(binding.call(b"held".to_vec()).await, Ok(b"held".to_vec()));
+            drop(binding);
+            world.settle(|| world.state() == MicroState::Idle).await;
+            assert_eq!(Script::count(&world.script.closes), 1);
+
+            let component = view.redeem_presentation().await.unwrap();
+            assert_eq!(Script::count(&world.script.inits), 2);
+            world.stay_live().await;
+            assert!(component.component().is_ok());
+            drop(component);
+            world.settle(|| world.state() == MicroState::Idle).await;
+            assert_eq!(Script::count(&world.script.closes), 2);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_bound_ref_is_revoked_after_its_incarnation_closes_and_never_reactivates() {
+    let world = World::new();
+    let recipient = world.recipient("recipient");
+    let activator = world.supervisor.activator();
+    world
+        .driven(async {
+            let lease = activator.acquire(&provider(), "echo").await.unwrap();
+            let bound = recipient.mint(&lease).unwrap();
+            assert_eq!(bound.status(), RefStatus::Live);
+            assert_eq!(bound.call(b"x".to_vec()).await, Ok(b"x".to_vec()));
+            drop(lease);
+            world.settle(|| world.state() == MicroState::Idle).await;
+            assert_eq!(bound.status(), RefStatus::Revoked);
+            assert_eq!(
+                bound.call(b"x".to_vec()).await,
+                Err(CallError::Capability(CapabilityFailure::Revoked))
+            );
+            assert_eq!(
+                bound.retain_call().await.err(),
+                Some(CapabilityFailure::Revoked)
+            );
+        })
+        .await;
+    assert_eq!(world.state(), MicroState::Idle);
+    assert_eq!(Script::count(&world.script.inits), 1);
+}
+
+#[tokio::test]
+async fn a_lazy_ref_used_while_the_provider_closes_gets_a_fresh_incarnation() {
+    let world = World::new();
+    world.script.gate_close.store(true, Ordering::SeqCst);
+    let recipient = world.recipient("recipient");
+    let reference = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    let activator = world.supervisor.activator();
+    world
+        .driven(async {
+            drop(activator.acquire(&provider(), "echo").await.unwrap());
+            world.settle(|| world.state() == MicroState::Closing).await;
+            let (response, ()) = tokio::join!(reference.call(b"again".to_vec()), async {
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(Script::count(&world.script.inits), 1);
+                world.script.close.notify_one();
+            });
+            assert_eq!(response, Ok(b"again".to_vec()));
+            assert_eq!(Script::count(&world.script.inits), 2);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_wrong_contract_use_fails_without_activating_the_provider() {
+    let world = World::new();
+    let recipient = world.recipient("recipient");
+    // The endpoint promises a call; asking for a presentation is refused before activation.
+    let reference = world.lazy(&recipient, "echo", CALL_CONTRACT);
+    world
+        .driven(async {
+            assert_eq!(
+                reference.redeem_presentation().await.err(),
+                Some(CapabilityFailure::ContractMismatch)
+            );
+        })
+        .await;
+    assert_eq!(Script::count(&world.script.inits), 0);
+    assert_eq!(world.state(), MicroState::Idle);
+    assert_eq!(recipient.proxy_count(), 0);
+}
+
+#[tokio::test]
+async fn an_endpoint_naming_no_publication_is_unavailable() {
+    let world = World::new();
+    let recipient = world.recipient("recipient");
+    let reference = world.lazy(&recipient, "absent", CALL_CONTRACT);
+    world
+        .driven(async {
+            assert_eq!(
+                reference.call(Vec::new()).await,
+                Err(CallError::Capability(CapabilityFailure::Unavailable))
+            );
+            let (activator, micro) = (world.supervisor.activator(), provider());
+            assert_eq!(
+                activator.acquire(&micro, "absent").await.err(),
+                Some(StartError::Unpublished {
+                    provider: provider(),
+                    publication: "absent".to_owned()
+                })
+            );
+            // The provider started for the demand stays up only while retained.
+            world.settle(|| world.state() == MicroState::Idle).await;
+        })
+        .await;
+}

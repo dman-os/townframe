@@ -5,6 +5,7 @@ use super::*;
 use crate::capabilities::CapabilityFailure;
 use crate::capabilities::CapabilityLimits;
 use crate::capabilities::CapabilitySession;
+use futures::FutureExt as _;
 use std::task::Poll;
 
 fn registrations(epoch: u64) -> BytesRegistrations {
@@ -53,7 +54,7 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
         CollectionSession::new(host.clone(), provider.clone(), CollectionLimits::default());
     let capabilities =
         CapabilitySession::new(host.clone(), provider.clone(), CapabilityLimits::default());
-    let published = capabilities.publish_presentation_component().unwrap();
+    let published = capabilities.publish_presentation("view").unwrap();
     let first = collections.grant_writer(&shelf).unwrap();
     let second = collections.grant_writer(&shelf).unwrap();
     let elsewhere = collections.grant_writer(&menu).unwrap();
@@ -85,13 +86,14 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
     // The staged publication is redeemable by its owner only.
     let staged = consumer.mint(&published.publication()).unwrap();
     assert_eq!(
-        staged.as_presentation_component().err(),
+        staged.redeem_presentation().await.err(),
         Some(CapabilityFailure::Revoked)
     );
     published
         .reference()
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
 
     host.commit_initialization(&provider).unwrap();
@@ -113,9 +115,10 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
     consumer
         .mint(&row.capabilities[0])
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
-    staged.as_presentation_component().unwrap();
+    staged.redeem_presentation().await.unwrap();
     assert_eq!(shelf.snapshot().len(), 2);
     assert_eq!(menu.snapshot().len(), 1);
 
@@ -146,7 +149,7 @@ async fn failed_initialization_exposes_no_rows_or_capabilities() {
                 CollectionSession::new(host.clone(), provider.clone(), CollectionLimits::default());
             let capabilities =
                 CapabilitySession::new(host.clone(), provider, CapabilityLimits::default());
-            let published = capabilities.publish_presentation_component().unwrap();
+            let published = capabilities.publish_presentation("view").unwrap();
             let writer = collections.grant_writer(&shelf).unwrap();
             writer
                 .put_value(
@@ -164,7 +167,9 @@ async fn failed_initialization_exposes_no_rows_or_capabilities() {
                 consumer
                     .mint(&publication)
                     .unwrap()
-                    .as_presentation_component()
+                    .redeem_presentation()
+                    .now_or_never()
+                    .unwrap()
                     .err(),
                 Some(CapabilityFailure::Revoked)
             );
@@ -185,7 +190,8 @@ async fn failed_initialization_exposes_no_rows_or_capabilities() {
         consumer
             .mint(&publication)
             .unwrap()
-            .as_presentation_component()
+            .redeem_presentation()
+            .await
             .err(),
         Some(CapabilityFailure::Revoked)
     );

@@ -36,7 +36,7 @@ fn fabricated_indices_and_copied_cbor_convey_no_authority() {
         host.start("provider"),
         CapabilityLimits::default(),
     );
-    let lease = provider.publish_presentation_component().unwrap();
+    let lease = provider.publish_presentation("view").unwrap();
 
     // Index 0 named, but no attachment list at all.
     assert_eq!(
@@ -77,8 +77,8 @@ fn fabricated_indices_and_copied_cbor_convey_no_authority() {
     );
 }
 
-#[test]
-fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
+#[tokio::test]
+async fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
     let (host, _instance, session, registrations) = setup();
     let writer = session.grant_writer(&registrations).unwrap();
     let provider = CapabilitySession::new(
@@ -86,7 +86,7 @@ fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
         host.start("provider"),
         CapabilityLimits::default(),
     );
-    let lease = provider.publish_presentation_component().unwrap();
+    let lease = provider.publish_presentation("view").unwrap();
     let consumer = CapabilitySession::new(
         host.clone(),
         host.start("consumer"),
@@ -112,9 +112,12 @@ fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
     // Two recipients mint distinct local refs to the one publication.
     let mirror_ref = consumer.mint(&stored.capabilities[0]).unwrap();
     let other_ref = other.mint(&stored.capabilities[0]).unwrap();
-    assert_eq!(mirror_ref.publication_id(), other_ref.publication_id());
+    assert_eq!(
+        mirror_ref.publication().unwrap().id(),
+        other_ref.publication().unwrap().id()
+    );
     assert_ne!(mirror_ref.recipient_scope(), other_ref.recipient_scope());
-    let proxy = mirror_ref.as_presentation_component().unwrap();
+    let proxy = mirror_ref.redeem_presentation().await.unwrap();
 
     // Replace then remove the row: substrate drops its stored clones.
     let version = writer
@@ -126,7 +129,7 @@ fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
     drop(mirror_ref);
     assert_eq!(consumer.reference_count(), 0);
     assert!(proxy.component().is_ok());
-    assert!(other_ref.as_presentation_component().is_ok());
+    assert!(other_ref.redeem_presentation().await.is_ok());
 
     drop(lease);
     assert!(proxy.component().is_err());

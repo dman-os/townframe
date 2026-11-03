@@ -144,7 +144,7 @@ pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
     );
     let observed = harness.observe(&lease);
     assert!(
-        observed.as_presentation_component().is_ok(),
+        observed.redeem_presentation().await.is_ok(),
         "a committed publication is visible outside its incarnation"
     );
     assert!(
@@ -170,7 +170,7 @@ pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
     assert_eq!(harness.host.lifecycle(&provider), Lifecycle::Closed);
     assert!(lease.is_revoked());
     assert_eq!(
-        observed.as_presentation_component().err(),
+        observed.redeem_presentation().await.err(),
         Some(CapabilityFailure::Revoked)
     );
     drop((observed, lease));
@@ -190,7 +190,7 @@ pub async fn leased_provider_closes_when_idle<E: Incarnations>(engine: E) {
             assert_eq!(harness.log(), ["initialize provider"]);
             let instance = supervisor.instance(&provider_id).unwrap();
             let observed = harness.observe(&lease);
-            assert!(observed.as_presentation_component().is_ok());
+            assert!(observed.redeem_presentation().await.is_ok());
             drop(lease);
             while supervisor.state(&provider_id) != MicroState::Idle {
                 tokio::task::yield_now().await;
@@ -198,7 +198,7 @@ pub async fn leased_provider_closes_when_idle<E: Incarnations>(engine: E) {
             assert_eq!(harness.log(), ["initialize provider", "close provider"]);
             assert_eq!(harness.host.lifecycle(&instance), Lifecycle::Closed);
             assert_eq!(
-                observed.as_presentation_component().err(),
+                observed.redeem_presentation().await.err(),
                 Some(CapabilityFailure::Revoked)
             );
         } => {}
@@ -581,7 +581,7 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
                 // Staged until the supervisor commits this initialization (ADR 024 §5).
                 let staged = shared.observer.mint(&publication).unwrap();
                 assert_eq!(
-                    staged.as_presentation_component().err(),
+                    staged.redeem_presentation().await.err(),
                     Some(CapabilityFailure::Revoked),
                     "{identity}'s provision is visible before its initialization committed"
                 );

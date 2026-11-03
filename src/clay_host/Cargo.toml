@@ -10,6 +10,7 @@ path = "lib.rs"
 [dependencies]
 clay_collection = { workspace = true }
 thiserror.workspace = true
+futures.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 
 [dev-dependencies]

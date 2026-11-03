@@ -19,6 +19,7 @@ pub use instance::Lifecycle;
 pub use instance::Mount;
 pub use instance::RendererRegistry;
 pub use instance::RootMount;
+pub use supervisor::Activator;
 pub use supervisor::CloseError;
 pub use supervisor::ConfiguredMicro;
 pub use supervisor::Factory;
