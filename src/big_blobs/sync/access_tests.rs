@@ -269,7 +269,7 @@ impl Fixture {
             .await)
     }
 
-    async fn observe(&self, inventory: &DocId, digest: BlobId, revision: u64) -> Res<()> {
+    async fn observe(&self, inventory: &DocId, digest: BlobId, _revision: u64) -> Res<()> {
         self.backend
             .sync_obj(
                 self.owner.repo.local_peer_id(),

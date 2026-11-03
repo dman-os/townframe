@@ -30,23 +30,23 @@ pub(super) struct Harness {
 
 impl Harness {
     pub async fn new() -> Res<Self> {
-        Self::boot(None, false).await
+        Self::boot(None, false, 101).await
     }
 
-    pub async fn new_network() -> Res<Self> {
-        Self::boot(None, true).await
+    pub async fn new_network_with_seed(seed: u8) -> Res<Self> {
+        Self::boot(None, true, seed).await
     }
 
     pub async fn reopen(path: &std::path::Path) -> Res<Self> {
-        Self::boot(Some(path), false).await
+        Self::boot(Some(path), false, 101).await
     }
 
-    async fn boot(path: Option<&std::path::Path>, network: bool) -> Res<Self> {
+    async fn boot(path: Option<&std::path::Path>, network: bool, seed: u8) -> Res<Self> {
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
         let (repo, repo_stop) = big_repo::BigRepo::boot(
             Arc::clone(&runtime),
             big_repo::Config {
-                node_identity_seed: [101; 32],
+                node_identity_seed: [seed; 32],
                 storage: path.map_or(big_repo::StorageConfig::Memory, |path| {
                     big_repo::StorageConfig::Disk {
                         path: path.join("repo"),
@@ -89,6 +89,7 @@ impl Harness {
             InventoryMirrors::boot(sql, blobs.service, parts, repo, queue).await?;
         let lookup = iroh::address_lookup::MemoryLookup::default();
         let mut endpoint_builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(iroh::SecretKey::from_bytes(&[seed; 32]))
             .address_lookup(lookup.clone())
             .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
             .relay_mode(iroh::RelayMode::Disabled);

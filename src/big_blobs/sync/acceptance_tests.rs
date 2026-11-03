@@ -1,15 +1,55 @@
 use super::tests::Harness;
 use super::*;
+use big_repo::BigRepoConnection;
+use big_repo::SharedBigRepo;
 use big_repo::keyhive_core::access::Access;
 use big_sync::SyncBackend;
 use big_sync::rpc::spawn_big_sync_rpc;
 use big_sync_core::PartKey;
+use iroh::protocol::AcceptError;
+use iroh::protocol::ProtocolHandler;
 use iroh::protocol::Router;
 use iroh_blobs::BlobsProtocol;
 use iroh_blobs::Hash;
 use iroh_blobs::api::Store;
 use iroh_blobs::api::TempTag;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+#[derive(Debug)]
+struct AcceptRepo {
+    repo: SharedBigRepo,
+    endpoint: iroh::Endpoint,
+    accepted: mpsc::UnboundedSender<BigRepoConnection>,
+}
+
+impl ProtocolHandler for AcceptRepo {
+    async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+        let connection = self
+            .repo
+            .accept_connection_iroh(connection, self.endpoint.clone(), None)
+            .await
+            .map_err(|error| AcceptError::from_boxed(error.into()))?;
+        self.accepted.send(connection).unwrap();
+        Ok(())
+    }
+}
+
+fn repo_router(harness: &Harness) -> (Router, mpsc::UnboundedReceiver<BigRepoConnection>) {
+    let (accepted, receiver) = mpsc::unbounded_channel();
+    let router = Router::builder(harness.endpoint.clone())
+        .accept(
+            subduction_iroh::ALPN,
+            AcceptRepo {
+                repo: Arc::clone(&harness.mirrors.projection.repo),
+                endpoint: harness.endpoint.clone(),
+                accepted,
+            },
+        )
+        .spawn();
+    (router, receiver)
+}
 
 struct SourceNode {
     router: Router,
@@ -66,22 +106,70 @@ async fn source_node(
 async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() -> Res<()> {
     let bytes = vec![61; 200_000];
     let digest = BlobId::new(*Hash::new(&bytes).as_bytes());
-    let inventory = big_cabinet_core::DocId::new([91; 32]);
+    let middle = Harness::new_network_with_seed(101).await?;
+    let inventory = middle.inventory().await?;
+    let receiver = Harness::new_network_with_seed(102).await?;
+    let (middle_router, mut middle_accepted) = repo_router(&middle);
+    let (receiver_router, _receiver_accepted) = repo_router(&receiver);
+
+    let receiver_connection = receiver
+        .mirrors
+        .projection
+        .repo
+        .open_connection_iroh(
+            receiver.endpoint.clone(),
+            middle.endpoint.addr(),
+            middle.mirrors.projection.repo.local_peer_id(),
+            None,
+        )
+        .await?;
+    let middle_connection = middle_accepted.recv().await.unwrap();
+    let receiver_agent = middle
+        .mirrors
+        .projection
+        .repo
+        .receive_keyhive_contact_card(
+            &receiver
+                .mirrors
+                .projection
+                .repo
+                .local_keyhive_contact_card(),
+        )
+        .await?;
+    middle
+        .mirrors
+        .projection
+        .repo
+        .grant_doc_access(inventory.clone(), receiver_agent, Access::Read)
+        .await?;
+    middle_connection.sync_keyhive_with_peer().await?;
+    receiver_connection.sync_keyhive_with_peer().await?;
+    middle
+        .mirrors
+        .projection
+        .repo
+        .wait_for_keyhive_reconciliation()
+        .await?;
+    receiver
+        .mirrors
+        .projection
+        .repo
+        .wait_for_keyhive_reconciliation()
+        .await?;
+    assert!(receiver.mirrors.projection.readable(&inventory).await?);
+
     let part = crate::workers::inventory_part(&inventory);
     let owner_parts: big_repo::SharedPartStore = Arc::new(big_sync::MemoryPartStore::new());
-    let middle = Harness::new_network().await?;
-    let receiver = Harness::new_network().await?;
     let middle_peer = big_sync_core::PeerKey::new(*middle.endpoint.id().as_bytes());
     let receiver_peer = big_sync_core::PeerKey::new(*receiver.endpoint.id().as_bytes());
     let source = source_node(&bytes, owner_parts, part.clone(), middle_peer.clone()).await?;
     let source_peer = big_sync_core::PeerKey::new(*source.router.endpoint().id().as_bytes());
 
-    middle.mirrors.admission.register(&inventory).await?;
-    receiver.mirrors.admission.register(&inventory).await?;
     middle
         .mirrors
         .select_inventory(inventory.clone(), "ciphertext".into())
         .await?;
+    receiver.mirrors.admission.register(&inventory).await?;
     receiver
         .mirrors
         .select_inventory(inventory.clone(), "ciphertext".into())
@@ -128,14 +216,17 @@ async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() 
         .mirrors
         .projection
         .parts
-        .set_part_members(part.clone(), HashMap::from([(receiver_peer.clone(), Access::Read)]))
+        .set_part_members(
+            part.clone(),
+            HashMap::from([(receiver_peer.clone(), Access::Read)]),
+        )
         .await?;
     let (middle_rpc, middle_rpc_stop) = spawn_big_sync_rpc(HashMap::from([(
         Arc::from("inventory-transfers"),
         Arc::clone(&middle.mirrors.projection.parts),
     )]))
     .await?;
-    let middle_router = Router::builder(middle.endpoint.clone())
+    let middle_blob_router = Router::builder(middle.endpoint.clone())
         .accept(
             iroh_blobs::ALPN,
             BlobsProtocol::new(middle.mirrors.projection.service.store(), None),
@@ -183,11 +274,15 @@ async fn three_nodes_transfer_inventory_bytes_without_direct_child_invitation() 
 
     receiver_stop.stop().await?;
     middle_stop.stop().await?;
-    middle_router.shutdown().await?;
     middle_rpc_stop.stop().await?;
     source.rpc_stop.stop().await?;
     source.router.shutdown().await?;
+    drop(receiver_connection);
+    drop(middle_connection);
     middle.shutdown().await?;
     receiver.shutdown().await?;
+    receiver_router.shutdown().await?;
+    middle_router.shutdown().await?;
+    middle_blob_router.shutdown().await?;
     Ok(())
 }
