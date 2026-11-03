@@ -2587,7 +2587,6 @@ dependencies = [
  "dioxus-core",
  "dioxus-html",
  "dioxus-native-dom",
- "futures",
  "insta",
  "serde",
  "serde_json",
@@ -9162,7 +9161,6 @@ dependencies = [
  "clay_collection",
  "clay_mdk",
  "dioxus-core",
- "futures",
  "serde",
  "wit-bindgen 0.62.0",
 ]

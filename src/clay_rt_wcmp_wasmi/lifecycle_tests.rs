@@ -1,13 +1,10 @@
 use super::WcmpPackage;
 use super::WcmpRuntime;
 use super::tests::RecordingSink;
-use clay_guest_session::GuestClose;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
-use clay_guest_session::lifecycle_conformance::Mounted;
-use clay_host::CloseMode;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_host::LocalFuture;
@@ -54,15 +51,16 @@ impl Incarnations for Wasmi {
         runtime.publications()
     }
 
-    fn mount(runtime: &WcmpRuntime, publication: &str) -> Result<Mounted, String> {
+    fn mount(runtime: &WcmpRuntime, publication: &str) -> Result<Box<dyn std::any::Any>, String> {
         let sink = Arc::new(RecordingSink::new());
         let session = runtime
             .mount(publication, Arc::clone(&sink) as _, &[])
             .map_err(|error| format!("{error:?}"))?;
-        Ok(Mounted {
-            session: Box::new(session),
-            rendered: sink.tree(SurfaceTree::text_content),
-        })
+        let rendered = sink.tree(SurfaceTree::text_content);
+        if rendered != "lifecycle provider" {
+            return Err(format!("the guest rendered {rendered:?}"));
+        }
+        Ok(Box::new(session))
     }
 
     fn inspect(runtime: &WcmpRuntime) -> GuestResidue {
@@ -75,13 +73,9 @@ impl Incarnations for Wasmi {
         })
     }
 
-    fn close(
-        runtime: WcmpRuntime,
-        mode: CloseMode,
-    ) -> LocalFuture<'static, (Result<GuestClose, String>, GuestResidue)> {
+    fn close(runtime: WcmpRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
         Box::pin(async move {
-            // C3c: the WCMP engine cannot close yet (no `serve`), so this reaches its `todo!`.
-            close_inspecting(&runtime, mode, |state| {
+            close_inspecting(&runtime, |state| {
                 GuestResidue::of(
                     state.table.is_empty(),
                     &state.capabilities,

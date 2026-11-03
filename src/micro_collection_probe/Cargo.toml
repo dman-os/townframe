@@ -12,7 +12,6 @@ crate-type = ["cdylib", "rlib"]
 clay_mdk = { workspace = true, features = ["wit", "dioxus"] }
 clay_collection.workspace = true
 ciborium.workspace = true
-futures.workspace = true
 serde.workspace = true
 wit-bindgen = { workspace = true, features = ["async-spawn"] }
 dioxus-core.workspace = true
