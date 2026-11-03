@@ -1,4 +1,5 @@
 use crate::documents::RetainedRepresentation;
+mod sqlite;
 use crate::ownership::OwnershipTransaction;
 use crate::service::BlobService;
 use crate::workers::MetadataCapabilities;
@@ -49,53 +50,11 @@ struct WriterTarget {
 
 impl Retention {
     pub(crate) async fn migrate(sql: &Database) -> Res<()> {
-        sql.apply_migrations("big_blobs_retention_migrations", &[
-            sqlite_rs::Migration {
-                version: 1,
-                name: "representation_retention",
-                sql: "CREATE TABLE big_blobs_retention (
-                       doc_id TEXT NOT NULL
-                     , digest TEXT NOT NULL
-                     , plaintext TEXT
-                     , length_octets INTEGER NOT NULL
-                     , PRIMARY KEY (doc_id, digest)
-                  ) STRICT;
-                  CREATE INDEX big_blobs_retention_digest ON big_blobs_retention (digest);
-                  CREATE TABLE big_blobs_retention_effects (digest TEXT PRIMARY KEY NOT NULL) STRICT;",
-            },
-            sqlite_rs::Migration {
-                version: 2,
-                name: "root_aware_writer_targets",
-                sql: "ALTER TABLE big_blobs_retention ADD COLUMN root TEXT CHECK (root IN ('public', 'sensitive'));
-                  UPDATE big_blobs_retention SET root = 'public' WHERE plaintext IS NOT NULL;
-                  CREATE TABLE big_blobs_writer_targets (
-                       doc_id TEXT NOT NULL
-                     , drawer_id TEXT NOT NULL
-                     , root TEXT NOT NULL CHECK (root IN ('public', 'sensitive'))
-                     , name TEXT NOT NULL
-                     , inventory_id TEXT NOT NULL
-                     , PRIMARY KEY (doc_id, drawer_id, root, name)
-                  ) STRICT;
-                  CREATE INDEX big_blobs_writer_targets_inventory ON big_blobs_writer_targets (inventory_id);
-                  CREATE TABLE big_blobs_writer_claims (
-                       doc_id TEXT NOT NULL
-                     , drawer_id TEXT NOT NULL
-                     , root TEXT NOT NULL CHECK (root IN ('public', 'sensitive'))
-                     , name TEXT NOT NULL
-                     , inventory_id TEXT NOT NULL
-                     , digest TEXT NOT NULL
-                     , length_octets INTEGER NOT NULL
-                     , PRIMARY KEY (doc_id, drawer_id, root, name, inventory_id, digest)
-                  ) STRICT;
-                  CREATE INDEX big_blobs_writer_claims_pair ON big_blobs_writer_claims (inventory_id, digest);
-                  CREATE INDEX big_blobs_writer_claims_digest ON big_blobs_writer_claims (digest);
-                  CREATE TABLE big_blobs_writer_effects (
-                       inventory_id TEXT NOT NULL
-                     , digest TEXT NOT NULL
-                     , PRIMARY KEY (inventory_id, digest)
-                  ) STRICT;",
-            },
-        ]).await?;
+        sql.apply_migrations(
+            "big_blobs_retention_migrations",
+            sqlite::queries::MIGRATIONS,
+        )
+        .await?;
         Ok(())
     }
 

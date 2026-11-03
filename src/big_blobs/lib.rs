@@ -1,3 +1,4 @@
+pub(crate) use sqlite_rs as sqlite_rs_alias;
 mod admission;
 pub mod documents;
 pub mod encrypt;

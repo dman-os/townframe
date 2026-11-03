@@ -15,6 +15,7 @@ mod discovery;
 mod producers;
 mod project;
 mod runtime;
+mod sqlite;
 
 pub use discovery::Coverage;
 pub use discovery::CoverageGap;
@@ -83,50 +84,11 @@ impl PairState {
 
 impl State {
     pub async fn new(sql: Database) -> Res<Self> {
-        sql.apply_migrations("big_blobs_admission_migrations", &[sqlite_rs::Migration {
-            version: 1,
-            name: "inventory_pair_admission",
-            sql: "CREATE TABLE big_blobs_inventory_registry (
-                     inventory_id TEXT PRIMARY KEY NOT NULL
-                   , part_id BLOB NOT NULL UNIQUE
-                   , readable INTEGER NOT NULL DEFAULT 0 CHECK (readable IN (0, 1))
-                   , authorization INTEGER NOT NULL DEFAULT 0
-                   , pin_revision INTEGER NOT NULL DEFAULT 0
-                   , pins_complete INTEGER NOT NULL DEFAULT 0 CHECK (pins_complete IN (0, 1))
-                 ) STRICT;
-                 CREATE TABLE big_blobs_mirror_claims (
-                     inventory_id TEXT NOT NULL
-                   , owner TEXT NOT NULL
-                   , PRIMARY KEY (inventory_id, owner)
-                 ) STRICT;
-                 CREATE TABLE big_blobs_admission_pairs (
-                     inventory_id TEXT NOT NULL
-                   , digest TEXT NOT NULL
-                   , length_octets INTEGER
-                   , bytes INTEGER NOT NULL DEFAULT 0 CHECK (bytes IN (0, 1))
-                   , generation INTEGER NOT NULL DEFAULT 1
-                   , attempt INTEGER
-                   , dirty INTEGER NOT NULL DEFAULT 1 CHECK (dirty IN (0, 1))
-                   , PRIMARY KEY (inventory_id, digest)
-                 ) STRICT;
-                 CREATE INDEX big_blobs_admission_dirty ON big_blobs_admission_pairs (dirty, inventory_id, digest);
-                 CREATE TABLE big_blobs_producer_claims (
-                     inventory_id TEXT NOT NULL
-                   , digest TEXT NOT NULL
-                   , owner TEXT NOT NULL
-                   , PRIMARY KEY (inventory_id, digest, owner)
-                 ) STRICT;
-                 CREATE TABLE big_blobs_source_observations (
-                     inventory_id TEXT NOT NULL
-                   , digest TEXT NOT NULL
-                   , peer_id BLOB NOT NULL
-                   , revision INTEGER NOT NULL
-                   , present INTEGER NOT NULL CHECK (present IN (0, 1))
-                   , payload TEXT
-                   , PRIMARY KEY (inventory_id, digest, peer_id)
-                 ) STRICT;
-                 CREATE INDEX big_blobs_source_present ON big_blobs_source_observations (inventory_id, digest, present);",
-        }]).await?;
+        sql.apply_migrations(
+            "big_blobs_admission_migrations",
+            sqlite::queries::MIGRATIONS,
+        )
+        .await?;
         let state = Self {
             sql,
             changed: Arc::new(Notify::new()),
@@ -138,21 +100,18 @@ impl State {
 
     pub async fn register(&self, inventory: &DocId) -> Res<()> {
         let part = crate::workers::inventory_part(inventory);
-        self.sql.execute(
-            "INSERT OR IGNORE INTO big_blobs_inventory_registry (inventory_id, part_id) VALUES (?, ?)",
-            (inventory.to_string(), part.as_bytes().to_vec()),
-        ).await?;
+        sqlite::queries::register_inventory(
+            &self.sql,
+            inventory.to_string(),
+            part.as_bytes().to_vec(),
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn inventory(&self, part: &PartKey) -> Res<Option<DocId>> {
-        self.sql
-            .query(
-                "SELECT inventory_id FROM big_blobs_inventory_registry WHERE part_id = ?",
-                (part.as_bytes().to_vec(),),
-            )
+        sqlite::queries::inventory_for_part(&self.sql, part.as_bytes().to_vec())
             .await?
-            .all::<String>()?
             .into_iter()
             .next()
             .map(|id| Ok(id.parse()?))
@@ -329,38 +288,22 @@ impl State {
     }
 
     async fn state_in(tx: &Tx, inventory: &DocId, digest: BlobId) -> Res<Option<PairState>> {
-        let rows = tx.query(
-            "SELECT EXISTS (SELECT 1 FROM big_blobs_mirror_claims s WHERE s.inventory_id = p.inventory_id) AS selected
-                  , EXISTS (SELECT 1 FROM big_blobs_producer_claims w WHERE w.inventory_id = p.inventory_id AND w.digest = p.digest) AS writer
-                  , p.length_octets IS NOT NULL AS pinned
-                  , EXISTS (SELECT 1 FROM big_blobs_source_observations o WHERE o.inventory_id = p.inventory_id AND o.digest = p.digest AND o.present = 1) AS observed
-                  , r.readable
-                  , p.bytes
-                  , p.generation
-                  , r.authorization
-                  , p.attempt IS NOT NULL AS fetching
-               FROM big_blobs_admission_pairs p
-               JOIN big_blobs_inventory_registry r USING (inventory_id)
-              WHERE p.inventory_id = ? AND p.digest = ?",
-            (inventory.to_string(), digest.to_string()),
-        ).await?;
-        rows.rows
-            .into_iter()
-            .next()
-            .map(|row| {
-                Ok(PairState {
-                    selected: row.get("selected")?,
-                    writer: row.get("writer")?,
-                    pinned: row.get("pinned")?,
-                    observed: row.get("observed")?,
-                    readable: row.get("readable")?,
-                    bytes: row.get("bytes")?,
-                    generation: row.get("generation")?,
-                    authorization: row.get("authorization")?,
-                    fetching: row.get("fetching")?,
-                })
-            })
-            .transpose()
+        Ok(
+            sqlite::queries::state(tx, inventory.to_string(), digest.to_string())
+                .await?
+                .map(|row| PairState {
+                    selected: row.selected,
+                    writer: row.writer,
+                    pinned: row.pinned,
+                    observed: row.observed,
+                    readable: row.readable,
+                    bytes: row.bytes,
+                    generation: u64::try_from(row.generation).expect("generation is non-negative"),
+                    authorization: u64::try_from(row.authorization)
+                        .expect("authorization is non-negative"),
+                    fetching: row.fetching,
+                }),
+        )
     }
 
     pub async fn state(&self, inventory: &DocId, digest: BlobId) -> Res<Option<PairState>> {
@@ -380,24 +323,34 @@ impl State {
     }
 
     pub async fn length(&self, inventory: &DocId, digest: BlobId) -> Res<Option<u64>> {
-        Ok(self.sql.query("SELECT length_octets FROM big_blobs_admission_pairs WHERE inventory_id = ? AND digest = ? AND length_octets IS NOT NULL", (inventory.to_string(), digest.to_string())).await?.all::<u64>()?.into_iter().next())
+        Ok(
+            sqlite::queries::length(&self.sql, inventory.to_string(), digest.to_string())
+                .await?
+                .map(u64::try_from)
+                .transpose()?,
+        )
     }
 
     pub async fn inventories(&self) -> Res<Vec<DocId>> {
-        self.sql
-            .query(
-                "SELECT inventory_id FROM big_blobs_inventory_registry ORDER BY inventory_id",
-                (),
-            )
+        sqlite::queries::inventories(&self.sql)
             .await?
-            .all::<String>()?
             .into_iter()
             .map(|id| Ok(id.parse()?))
             .collect()
     }
 
     pub async fn dirty(&self) -> Res<Vec<(DocId, BlobId, u64)>> {
-        self.sql.query("SELECT inventory_id, digest, generation FROM big_blobs_admission_pairs WHERE dirty = 1 ORDER BY inventory_id, digest LIMIT 128", ()).await?.all::<(String, String, u64)>()?.into_iter().map(|(inventory, digest, generation)| Ok((inventory.parse()?, digest.parse()?, generation))).collect()
+        sqlite::queries::dirty(&self.sql)
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.inventory_id.parse()?,
+                    row.digest.parse()?,
+                    u64::try_from(row.generation)?,
+                ))
+            })
+            .collect()
     }
 
     #[cfg(test)]
