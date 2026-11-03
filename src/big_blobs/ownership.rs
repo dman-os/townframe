@@ -1,4 +1,5 @@
 use crate::encrypt::CipherBlobProvider;
+mod sqlite;
 use crate::service::ImportedBlob;
 use big_blobs_core::BlobId;
 use futures::future::BoxFuture;
@@ -290,31 +291,11 @@ impl ByteOwnership {
 
 impl State {
     async fn new(sql: Database, store: Store, provider: Arc<CipherBlobProvider>) -> Res<Self> {
-        sql.apply_migrations("big_blobs_byte_ownership_migrations", &[sqlite_rs::Migration {
-            version: 1,
-            name: "byte_owners_and_effects",
-            sql: "CREATE TABLE big_blobs_byte_owners (
-                     owner TEXT NOT NULL
-                   , digest TEXT NOT NULL
-                   , PRIMARY KEY (owner, digest)
-                 ) STRICT;
-                 CREATE INDEX big_blobs_byte_owners_digest ON big_blobs_byte_owners (digest);
-                 CREATE TABLE big_blobs_byte_dependencies (
-                     digest TEXT PRIMARY KEY NOT NULL
-                   , plaintext TEXT NOT NULL
-                 ) STRICT;
-                 CREATE INDEX big_blobs_byte_dependencies_plaintext ON big_blobs_byte_dependencies (plaintext);
-                 CREATE TABLE big_blobs_byte_pin_roots (digest TEXT PRIMARY KEY NOT NULL) STRICT;
-                 CREATE TABLE big_blobs_byte_effects (digest TEXT PRIMARY KEY NOT NULL) STRICT;",
-        }, sqlite_rs::Migration {
-            version: 2,
-            name: "upload_receipts",
-            sql: "CREATE TABLE big_blobs_upload_receipts (
-                      owner TEXT PRIMARY KEY NOT NULL
-                    , digest TEXT NOT NULL
-                    , released INTEGER NOT NULL DEFAULT 0 CHECK (released IN (0, 1))
-                  ) STRICT;",
-        }]).await?;
+        sql.apply_migrations(
+            "big_blobs_byte_ownership_migrations",
+            sqlite::queries::MIGRATIONS,
+        )
+        .await?;
         let mut ownership = Self {
             sql,
             store,
