@@ -11,10 +11,15 @@
 //! * `failing-provider` publishes the same two and then rejects initialization, so the host
 //!   must discard publications that were never visible.
 //! * `consumer` redeems its `presentation` requirement during initialization and keeps the
-//!   proxy in its root. If it also has a `service` requirement, it calls the provider's `echo`
-//!   through it, which crosses from this incarnation's store into the provider's. Its `close`
-//!   redeems the proxy again: it fails unless the provider is still live while the consumer
-//!   closes, which is the close-order guarantee under test.
+//!   proxy. If it also has a `service` requirement, it calls the provider's `echo` through it,
+//!   which crosses from this incarnation's store into the provider's. When the host closes its
+//!   inbox, its `serve` redeems the proxy again after draining: it traps unless the provider is
+//!   still live while the consumer closes, which is the close-order guarantee under test.
+//!
+//! State shared between `initialize`, the `serve` handlers and the sync presentation exports
+//! lives in statics (ADR 024 §7a: `serve` does not share thread-locals with sync exports). The
+//! one deliberate exception is `IN_FLIGHT_LOCAL`, which `mount` renders beside its static
+//! twin so a conformance test can pin that difference.
 //!
 //! The package embeds `lifecycle_fixture.manifest.json` as its `dayframe.manifest` section.
 
@@ -30,11 +35,17 @@ use clay_mdk::presentation;
 use clay_mdk::presentation_events::Event;
 use clay_mdk::presentation_events::EventResponse;
 use clay_mdk::presentation_events::{self};
+use clay_mdk::serve;
 use clay_mdk::wire::WireMutations;
 use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::cell::Cell;
+use std::future::ready;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 
 const MANIFEST: &[u8] = include_bytes!("lifecycle_fixture.manifest.json");
 
@@ -46,37 +57,39 @@ const PRESENTATION: &str = "presentation";
 const ECHO: &str = "echo";
 const RELAY: &str = "relay";
 
+static ROLE: OnceLock<String> = OnceLock::new();
+/// The provider's `service` requirement, which its `relay` call forwards to.
+static SERVICE: Mutex<Option<Arc<capability_bank::CapabilityRef>>> = Mutex::new(None);
+/// The consumer's redeemed `presentation` proxy, checked again when it closes.
+static PROXY: Mutex<Option<capability_bank::PresentationComponent>> = Mutex::new(None);
+/// How many `relay` handlers are in flight, counted in a static and in a thread-local.
+static IN_FLIGHT: AtomicU32 = AtomicU32::new(0);
+
 thread_local! {
-    static ROLE: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// The provider's `service` requirement, which its `relay` call forwards to.
-    static SERVICE: RefCell<Option<Rc<capability_bank::CapabilityRef>>> = const { RefCell::new(None) };
+    static IN_FLIGHT_LOCAL: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Counts a handler as in flight from its creation until it is dropped, finished or not.
+struct InFlight;
+
+impl InFlight {
+    fn new() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        IN_FLIGHT_LOCAL.with(|count| count.set(count.get() + 1));
+        Self
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        IN_FLIGHT_LOCAL.with(|count| count.set(count.get() - 1));
+    }
 }
 
 struct Lifecycle;
 
-enum Root {
-    Provider,
-    Consumer(capability_bank::PresentationComponent),
-}
-
-impl micro_lifecycle::GuestInstanceRoot for Root {
-    async fn close(&self) -> Result<(), String> {
-        match self {
-            Root::Provider => {
-                // The service reference is part of what the guest holds until its close.
-                SERVICE.with_borrow_mut(Option::take);
-                Ok(())
-            }
-            Root::Consumer(proxy) => proxy.component().map(drop).map_err(|error| {
-                format!("provider withdrawn before its consumer closed: {error:?}")
-            }),
-        }
-    }
-}
-
 impl micro_lifecycle::Guest for Lifecycle {
-    type InstanceRoot = Root;
-
     async fn initialize(
         context: micro_lifecycle::InitialContext,
     ) -> Result<micro_lifecycle::Initialized, InitializationError> {
@@ -92,11 +105,10 @@ impl micro_lifecycle::Guest for Lifecycle {
                     .requirements
                     .into_iter()
                     .find(|requirement| requirement.name == "service")
-                    .map(|requirement| Rc::new(requirement.capability));
+                    .map(|requirement| Arc::new(requirement.capability));
                 let relays = service.is_some();
-                SERVICE.with_borrow_mut(|slot| *slot = service);
+                *SERVICE.lock().unwrap() = service;
                 micro_lifecycle::Initialized {
-                    root: micro_lifecycle::InstanceRoot::new(Root::Provider),
                     publications: publish_all(relays)?,
                 }
             }
@@ -138,8 +150,8 @@ impl micro_lifecycle::Guest for Lifecycle {
                         )));
                     }
                 }
+                *PROXY.lock().unwrap() = Some(proxy);
                 micro_lifecycle::Initialized {
-                    root: micro_lifecycle::InstanceRoot::new(Root::Consumer(proxy)),
                     publications: Vec::new(),
                 }
             }
@@ -151,7 +163,6 @@ impl micro_lifecycle::Guest for Lifecycle {
                     ));
                 }
                 micro_lifecycle::Initialized {
-                    root: micro_lifecycle::InstanceRoot::new(Root::Provider),
                     publications: Vec::new(),
                 }
             }
@@ -161,27 +172,45 @@ impl micro_lifecycle::Guest for Lifecycle {
                 )));
             }
         };
-        ROLE.with_borrow_mut(|slot| assert!(slot.replace(role).is_none()));
+        ROLE.set(role).expect("lifecycle fixture initialized twice");
         Ok(initialized)
     }
 
-    async fn call(publication: String, request: Vec<u8>) -> Result<Vec<u8>, String> {
-        match publication.as_str() {
-            ECHO => Ok([b"echo:".as_slice(), &request].concat()),
-            RELAY => {
-                // Clone the handle out so no borrow is held across the suspension: other
-                // calls and sync entries run in this instance meanwhile.
-                let service = SERVICE
-                    .with_borrow(Clone::clone)
-                    .ok_or("relay has no service requirement")?;
-                service
-                    .call(request)
-                    .await
-                    .map_err(|error| format!("relayed call failed: {error:?}"))
+    async fn serve(inbox: serve::Inbox) {
+        serve::run(inbox, |publication, request| match publication {
+            ECHO => Box::pin(ready(Ok([b"echo:".as_slice(), &request].concat()))),
+            RELAY => Box::pin(relay(request)),
+            other => {
+                let message = format!("lifecycle fixture serves no call {other:?}");
+                Box::pin(ready(Err(message)))
             }
-            other => Err(format!("lifecycle fixture serves no call {other:?}")),
+        })
+        .await;
+        // The inbox closed and every handler finished: the incarnation's cleanup, run while its
+        // dependencies are still live (ADR 024 §6). What the guest holds is released here.
+        SERVICE.lock().unwrap().take();
+        if let Some(proxy) = PROXY.lock().unwrap().take() {
+            proxy
+                .component()
+                .expect("provider withdrawn before its consumer closed");
         }
     }
+}
+
+/// Forward `request` to the `service` requirement and answer what it answered.
+async fn relay(request: Vec<u8>) -> serve::Outcome {
+    let _counted = InFlight::new();
+    // Clone the handle out so no lock is held across the suspension: other calls and sync
+    // entries run in this instance meanwhile.
+    let service = SERVICE
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("relay has no service requirement")?;
+    service
+        .call(request)
+        .await
+        .map_err(|error| format!("relayed call failed: {error:?}"))
 }
 
 async fn register(bindings: Vec<collection_registration::RegistrationBinding>) {
@@ -284,15 +313,20 @@ impl presentation_events::Guest for Lifecycle {
         placement: &presentation::MountPoint,
         _components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {
-        let role = ROLE.with_borrow(|role| {
-            role.clone()
-                .expect("host mounted the lifecycle fixture before initializing it")
-        });
+        let role = ROLE
+            .get()
+            .expect("host mounted the lifecycle fixture before initializing it");
+        let (in_flight, local) = (
+            IN_FLIGHT.load(Ordering::SeqCst),
+            IN_FLIGHT_LOCAL.with(Cell::get),
+        );
         let surface = placement.open()?;
         let mut edits = WireMutations::default();
         edits.push_id(ElementId::ROOT);
         edits.create_element("section", None);
-        edits.create_text(&format!("lifecycle {role}"));
+        edits.create_text(&format!(
+            "lifecycle {role} (relays in flight: static={in_flight} thread-local={local})"
+        ));
         edits.append_children(1);
         edits.append_children(1);
         edits.pop();

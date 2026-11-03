@@ -268,17 +268,8 @@ pub mod bindings {
     });
 }
 
-/// The `instance-root` of a guest whose incarnation needs no orderly close work: its state
-/// is released when the host drops the store.
 #[cfg(feature = "wit")]
-pub struct StatelessRoot;
-
-#[cfg(feature = "wit")]
-impl micro_lifecycle::GuestInstanceRoot for StatelessRoot {
-    async fn close(&self) -> Result<(), String> {
-        Ok(())
-    }
-}
+pub mod serve;
 
 #[cfg(feature = "wit")]
 pub use bindings::exports::townframe::dayframe::document_events;
@@ -294,6 +285,8 @@ pub use bindings::townframe::dayframe::collection_registration;
 pub use bindings::townframe::dayframe::collections;
 #[cfg(feature = "wit")]
 pub use bindings::townframe::dayframe::documents;
+#[cfg(feature = "wit")]
+pub use bindings::townframe::dayframe::lifecycle_host_requests;
 #[cfg(feature = "wit")]
 pub use bindings::townframe::dayframe::presentation;
 

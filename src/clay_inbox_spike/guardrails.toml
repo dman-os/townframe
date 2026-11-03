@@ -1,9 +1,0 @@
-version = 1
-role = "plugin"
-dependency_reason = "spike of the inbox call model: one guest fixture plus host tests on both engines, above the engine crates"
-allowed_dependencies = [
-    "clay_rt_wcmp",
-]
-allow_external_api_types = false
-
-[builds.wasm32-wasip3]

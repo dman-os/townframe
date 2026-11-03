@@ -310,7 +310,6 @@ fn capability_error(failure: CapabilityFailure) -> cap_wit::CapabilityError {
         CapabilityFailure::Revoked => cap_wit::CapabilityError::Revoked,
         CapabilityFailure::LimitExceeded => cap_wit::CapabilityError::LimitExceeded,
         CapabilityFailure::Unavailable => cap_wit::CapabilityError::Unavailable,
-        CapabilityFailure::CallCycle => cap_wit::CapabilityError::CallCycle,
     }
 }
 
@@ -331,9 +330,8 @@ impl cap_wit::Host for WcmpStoreState {
         _contract: cap_wit::Contract,
     ) -> wcmp::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
         todo!(
-            "C3c: a call publication needs a CallTarget that runs the guest's exported `call` \
-             in this incarnation's own store, routed through its driver like the Wasmtime \
-             adapter's GuestCallTarget"
+            "C3c: a call publication needs a CallTarget that feeds the guest's `serve` inbox, \
+             like the Wasmtime adapter's GuestCallTarget; waits on `spawn` in the polyfill"
         )
     }
 }

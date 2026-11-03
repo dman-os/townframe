@@ -1,5 +1,6 @@
 //! Lazy references against a real supervisor: activation, retention, and revocation.
 use super::*;
+use clay_host::CloseMode;
 use clay_host::ConfiguredMicro;
 use clay_host::Factory;
 use clay_host::Initialized;
@@ -80,7 +81,7 @@ impl Factory<CapabilityPublication> for Provider {
 }
 
 impl Root for ProviderRoot {
-    fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
+    fn close(self: Box<Self>, _mode: CloseMode) -> LocalFuture<'static, Result<(), String>> {
         Box::pin(async move {
             self.script.closes.fetch_add(1, Ordering::SeqCst);
             if self.script.gate_close.load(Ordering::SeqCst) {
@@ -92,9 +93,14 @@ impl Root for ProviderRoot {
 }
 
 impl CallTarget for Echo {
-    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
+    fn call(
+        &self,
+        request: Vec<u8>,
+        retain: Option<Lease<CapabilityPublication>>,
+    ) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
         let script = Arc::clone(&self.0);
         async move {
+            let _retain = retain;
             script.calls.fetch_add(1, Ordering::SeqCst);
             if script.gate_call.load(Ordering::SeqCst) {
                 script.call.notified().await;
