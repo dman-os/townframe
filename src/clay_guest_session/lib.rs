@@ -1,5 +1,6 @@
 use clay_docs::DocumentAccess;
 use clay_docs::DocumentError;
+use clay_docs::DocumentRef;
 use clay_docs::DocumentSnapshot;
 use clay_docs::DocumentWatch;
 use clay_docs::FacetMutation;
@@ -10,6 +11,7 @@ use clay_docs::WatchSelection;
 use clay_host::AccessError;
 use clay_host::Host;
 use clay_host::Instance;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
@@ -22,6 +24,8 @@ mod tests;
 
 pub mod capabilities;
 pub mod collections;
+#[cfg(feature = "test-utils")]
+pub mod lifecycle_conformance;
 pub mod presentation;
 pub use presentation::Placement;
 pub use presentation::PresentationHost;
@@ -32,6 +36,31 @@ pub use presentation::ingress_budget;
 pub struct Limits {
     pub handles: usize,
     pub pending_deliveries: usize,
+}
+
+/// Everything one guest incarnation's `micro-lifecycle.initialize` receives (ADR 024 §5), in
+/// host terms. Engines grant each entry into the guest's resource table under its local
+/// binding name; `requirements` are the provisions the incarnation's resolved providers
+/// published, minted into recipient-local capability references for this incarnation.
+#[derive(Default)]
+pub struct InitialContext {
+    /// Opaque, configuration-supplied CBOR.
+    pub arguments: Vec<u8>,
+    pub configs: BTreeMap<String, DocumentRef>,
+    pub collections: BTreeMap<String, collections::BytesProjection>,
+    pub registrations: BTreeMap<String, collections::BytesRegistrations>,
+    pub requirements: BTreeMap<String, capabilities::CapabilityPublication>,
+}
+
+/// A guest's own refusal to initialize, as opposed to a trap.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum InitializationFailure {
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+    #[error("rejected: {0}")]
+    Rejected(String),
 }
 
 impl Default for Limits {

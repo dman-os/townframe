@@ -1,4 +1,4 @@
-# ADR 024: Micro lifecycle, activation registrations, and manifest contract
+# ADR 024: Micro lifecycle, lazy activation, and manifest contract
 
 **Status:** Proposed. The lifecycle core is partially implemented; the WIT and revised
 manifest shape are not.
@@ -17,8 +17,7 @@ capability references can connect otherwise unrelated micros.
 We want the familiar parts of a process model — one initialization entry point,
 owned resources, isolated failure, host supervision, and deterministic cleanup —
 without inventing `fork`, parent/child ownership, or explicit `start`/`stop` APIs.
-Disablement is the only intentional stop. Enabled micros may remain idle until an
-eager root or a resolved binding requires them.
+Enabled micros may remain dormant until an eager application root or lazy endpoint demand starts them. Once active, they remain live only while an external strong runtime resource retains them; losing the final edge makes them eligible for orderly idle shutdown. Disablement prevents new activation, while uninstall additionally removes installation-owned durable registrations.
 
 Lazy startup creates a discovery problem. A contributor cannot run in order to tell
 the host that running it would contribute a toolbar button. Packages therefore expose
@@ -46,7 +45,7 @@ ConfiguredMicro {
     enabled,
     eager,
     requirement_bindings,
-    accepted_activation_registrations,
+    collection_bindings_and_durable_scopes,
     configuration_grants,
 }
 ```
@@ -75,101 +74,64 @@ configuration generation change.
 
 ### 2. Roots and resource edges determine liveness
 
-An enabled configured instance is live exactly when reachable from an eager root
-through strong binding resources. Incoming-reference counts do not determine
-liveness; disconnected cycles cannot keep themselves alive.
+An enabled configured instance is live while held by an eager application root or a concrete strong runtime resource. Durable collection rows and lazy activation references are weak discovery data: they neither require a live provider nor keep one running. A disconnected cycle of live implementation resources cannot retain itself merely by reference counting; the lifecycle controller computes reachability from external roots.
 
 Every host resource contract declares one lifecycle class:
 
 ```text
 NoMicroRetention  // host state only; no micro target
-Weak              // usable while target lives, becomes inert after closure
+Lazy              // may activate a target on use; does not retain while idle
+Weak              // usable while target lives, inert after closure
 Strong            // keeps the target incarnation live
 OwnedEffect       // destroyed with its owner; not a target-retention edge
 ```
 
-The holder cannot promote a weak contract to strong. Examples:
+Examples:
 
-- required provision binding: `Strong`;
-- accepted reverse-dependency binding: `Strong`;
-- guest-served projection lease: `Strong`;
+- durable collection row and lazy endpoint attachment: `Lazy`;
+- required live service binding: `Strong`;
+- redeemed presentation proxy or mounted surface: `Strong` while retained;
+- in-flight service invocation: `Strong` until completion;
 - host-materialized projection lease: `NoMicroRetention`;
-- in-flight required invocation: `Strong`;
-- surface-mount/capability proxy: `Weak` by default;
-- contribution writer, publication lease, and owned future: `OwnedEffect`.
+- guest-served live projection lease: `Strong`;
+- incarnation registration scope, publication slot, and owned future: `OwnedEffect`.
 
-A strong resource combines authority to use the target with the reason the target must
-remain live. There is no separate runtime demand signal shadowing the reference.
+The holder cannot promote a contract's retention class. Redemption converts a lazy logical endpoint into a live strong binding only after successful staged activation. Dropping the final external strong binding makes the provider eligible for orderly idle shutdown.
+### 3. Reverse dependencies are durable collection contributions
 
-### 3. Reverse dependencies have declaration, registration, and binding phases
+A reverse dependency is not a separate runtime registry and does not require a live contributor to announce itself. The target micro defines a schema-bound durable collection contract. A contributor manifest declares a row for that contract containing static metadata and, when behavior is required, a logical lazy endpoint.
 
-A reverse dependency is not a live row and not code executed merely to discover that
-code should run.
-
-#### Package declaration
-
-The package manifest declares a possible contribution and default activation
-registration. It is inspectable without instantiating the guest.
-
-#### Installation registration
-
-Configuration grants the package manager authority to register only allowed subjects,
-targets, and extension contracts. Installation writes a persistent record:
-
-```text
-ActivationRegistration {
-    id,
-    subject_configured_instance,
-    trigger,
-    requested_contract,
-    declaration_id,
-}
-```
-
-The record is data, not a live resource. Disablement makes it ineligible without
-deleting it; uninstall removes it. The first implementation installs manifest defaults
-and permits authorized configuration tools to add/remove records. Executable install
-or enable hooks are deferred.
-
-#### Runtime binding
-
-When the trigger is active, the subject is enabled, and the target policy accepts the
-registration, the host resolves it into a concrete strong binding. That resource pulls
-the subject live. Successful initialization then publishes the actual contribution.
+Installation admits the declaration and writes it under an installation-owned registration scope. The row remains visible while the contributor is inactive and across host restart. Uninstalling its plug removes that scope atomically. The target's own configuration may refer to stable registration ids for ordering, hiding, or placement; contributors do not edit the target's configuration document.
 
 ```text
 manifest declaration
-    -> authorized persistent registration
-    -> active target acceptance
-    -> strong binding target -> contributor
-    -> contributor initialization
-    -> live contribution row/publication
+    -> schema and authority admission
+    -> durable collection row
+    -> target reads metadata without activating provider
+    -> target redeems or invokes lazy endpoint on demand
+    -> host starts or joins provider activation
+    -> named publication slot is fulfilled
+    -> live strong proxy/invocation
 ```
 
-Declarations, registrations, bindings, and live rows remain distinct and inspectable.
+The durable row, lazy endpoint, live binding, and provider publication remain distinct and inspectable. Static rows need no secondary ephemeral coordination collection. Ephemeral registration collections remain appropriate when the contributed set itself is runtime-derived.
 
-### 4. Activation triggers are host-inspectable data
+### 4. Activation demand is represented by resource use
 
-The initial trigger vocabulary is deliberately small:
+The host does not define a growing vocabulary of toolbar, route, completion, or extension triggers. Target micros own those semantics in their collection contracts and Lexicons. Clay understands only generic demand:
 
 ```text
-Trigger =
-    TargetLive {
-        target_configured_instance,
-        extension_contract,
-    }
-  | ExplicitRoot
+Demand =
+    ExplicitRoot
+  | RedeemLazyEndpoint
+  | InvokeLazyService
+  | MountLazyPresentation
+  | RetainLiveBinding
 ```
 
-A target may accept all eligible registrations for an extension contract or a
-configured subset/order. Registration authority plus target acceptance is required;
-a package cannot unilaterally pin an arbitrary privileged target or inject itself into
-an extension point.
+Reading a durable row or holding its lazy attachment does not activate the provider. Redeeming, invoking, or mounting it starts or joins one activation attempt. A target that intentionally wants eager contributors may retain their endpoints explicitly; helpers may retain visible, selected, or selector-matching entries without changing collection semantics.
 
-Future trigger members may include command invocation, route mounting, guest-served
-projection acquisition, or capability request. Each still resolves to an ordinary
-strong resource edge. Unknown trigger members are carried by the manifest vocabulary
-but are not activated by hosts that do not understand them.
+Package declarations and Clay configuration determine which entrypoint and named publication may satisfy an endpoint. Guests never send trusted provider identities in an invocation. Unknown application extension vocabulary remains data interpreted by target micros, not a host lifecycle enum. ADR 025 specifies manifest-declared collection and endpoint ownership.
 
 ### 5. Initialization stages outward visibility
 
@@ -185,6 +147,8 @@ Outward effects remain staged until initialization succeeds:
 - mounts; and
 - guest-served collection sources.
 
+
+A demanded lazy endpoint names a declared publication slot. Initialization fulfills that slot directly; callers await the activation result rather than polling an ephemeral collection. A demanded required slot left unfulfilled makes initialization fail. Concurrent demand joins the same pending incarnation.
 On successful return, the host atomically exposes staged publications. On error,
 trap, cancellation, or dropped initialization, the pending incarnation scope is
 dropped and all acquired/staged resources unwind through RAII. This is transactional
@@ -196,9 +160,9 @@ initialization and is held by the host for the incarnation; it is not a guest-vi
 
 ### 6. Closing preserves dependencies through cleanup
 
-When an active incarnation becomes unreachable or disabled, it enters `Closing`:
+When an active incarnation loses its final external strong binding, is disabled, or must be replaced, it enters `Closing` immediately or after a bounded host policy grace period:
 
-1. reject new outward publications and new strong acquisitions;
+1. reject new outward publications; new lazy demand waits for a fresh incarnation rather than entering the closing one;
 2. stop ordinary delivery and request owned work to finish/cancel;
 3. retain existing strong dependencies while incarnation cleanup runs;
 4. drop the incarnation scope after cleanup;
@@ -347,6 +311,7 @@ interface collection-registration {
             -> result<mutation-accepted, mutation-error>;
         remove: async func(local-key: list<u8>, based-on: option<list<u8>>)
             -> result<mutation-accepted, mutation-error>;
+        clear: async func() -> result<_, mutation-error>;
     }
 }
 
@@ -361,6 +326,7 @@ interface collection-causal-write {
 }
 ```
 
+`registration-writer` mutates a host-assigned registration scope. Dropping the handle releases mutation authority only. The host removes incarnation-scope rows when the instance closes and installation-scope rows when the owning plug is uninstalled, as specified by ADR 025.
 Documents retain their domain command interface and heads-based settlement rather than
 being forced through either generic writer.
 
@@ -388,25 +354,21 @@ attachment-slot indices; `encoded-value.capabilities` carries recipient-local au
 A retained typed proxy is owned by the consumer but becomes inert when its publication
 or provider closes.
 
-### 10. Installation registration API
+### 10. Installation applies durable registration scopes
 
-Phase one has no guest installer world. The package manager consumes manifest defaults
-and writes through a privileged host API:
+Phase one has no guest installer world and no separate activation-registry protocol. The package/enablement service consumes admitted manifest defaults and writes them through privileged durable collection administration:
 
-```wit
-interface activation-registry-admin {
-    resource registration-editor {
-        put: func(registration: list<u8>) -> result<_, registration-error>;
-        remove: func(id: string) -> result<_, registration-error>;
-        commit: func() -> result<_, registration-error>;
-    }
-}
+```text
+begin installation scope(plug revision)
+    validate target collection contract and schemas
+    put(scope, local_key, value + logical endpoints)
+commit atomically
+
+uninstall plug
+    remove installation scope atomically
 ```
 
-Ordinary micro guests never receive this editor. A future installer component may
-receive a narrowly scoped editor and propose one atomic registration/configuration
-change set. It may not publish runtime resources.
-
+Ordinary micro guests never receive this administration authority. A future installer or configuration component may receive a narrowly scoped durable editor and propose one atomic configuration change set. It may not forge target scope ids, recipient capability references, or live runtime publications.
 ## Manifest shape
 
 ### 11. The manifest describes possibilities, not live state
@@ -432,7 +394,6 @@ MicroManifest {
     configuration_requests: [ConfigurationRequest],
     collection_contracts: [CollectionContract],
     contributions: [ContributionDeclaration],
-    activation_defaults: [ActivationRegistrationTemplate],
 }
 ```
 
@@ -479,6 +440,8 @@ CollectionContract {
     value_schema,
     write_context_schema?,
     offered_capabilities: Read | Register | CausalWrite | DomainCommands,
+    backing: Volatile | Durable | Materialized,
+    writer_policy: IncarnationScope | InstallationScope | DomainSpecific,
 }
 ```
 
@@ -486,36 +449,29 @@ These are requested/declared shapes, not grants. Configuration chooses concrete
 documents, suppliers, and allowed access. Collection query IRs remain contract-specific
 CBOR interpreted by host and guest libraries.
 
-### 14. Contributions and reverse activation
+### 14. Contributions are durable collection rows with lazy endpoints
 
 ```text
 ContributionDeclaration {
     id,
     target_binding,       // local RequiredContract.binding
-    extension_contract,
-    payload,              // Lexicon-compatible CBOR
-    capability_slots: [CapabilitySlotDeclaration],
+    collection_contract,
+    local_key,
+    value,                // schema-compatible CBOR
+    endpoints: [LazyEndpointDeclaration],
 }
 
-ActivationRegistrationTemplate {
-    id,
-    subject: Self,
-    trigger: TargetLive {
-        target_binding,
-        extension_contract,
-    },
-    declaration_id,
+LazyEndpointDeclaration {
+    attachment_slot,
+    publication_name,
+    contract,
 }
 ```
 
-The target binding identifies where configuration routes the declaration; it does not
-hard-code a configured target instance into the package. Installation resolves `Self`
-and the configured binding, validates registration authority, and writes the persistent
-registration. Target acceptance then produces the runtime strong edge.
+The target binding identifies where configuration routes the declaration; it does not hard-code a configured target instance into the package. Installation resolves the binding, validates registration authority and the target collection's schemas, then writes the row under the plug revision's installation scope. The row remains visible while the contributor is inactive and disappears when that scope is removed on uninstall.
 
-A static contribution payload may describe a toolbar item before the contributor runs,
-but live capability slots are filled only during successful initialization. Manifest
-payload cannot contain authority.
+A lazy endpoint declaration contains no live authority. Projection mints an authorized lazy attachment for each recipient. Redemption activates or joins the contributor, and successful initialization fulfills the named publication slot. Static contributions therefore need neither `TargetLive` activation triggers nor a second ephemeral collection.
+ADR 025 specifies registration-scope ownership, collection availability, schema admission, and the toolbar/completion/layout examples.
 
 ### 15. What does not belong in the manifest
 
@@ -547,15 +503,15 @@ Built today:
 
 Not built:
 
-- the WIT above;
-- resource-classified strong/weak lifecycle edges;
-- persistent installation activation registrations;
-- durable target acceptance configuration distinct from incarnation broker state;
-- resource-driven `Closing` sequencing;
-- capability bank and capability attachments;
-- collection waist;
-- async initialization returning `instance-root`; and
-- installer/enablement code.
+- manifest admission from the `big_plugs_core` envelope and a Clay desired-state/enablement service;
+- durable collection backing and installation registration scopes;
+- lazy activation attachments and named publication slots;
+- the unified writer-handle versus registration-scope ownership rule;
+- resource-driven idle `Closing` sequencing and async `instance-root.close()` across both engines;
+- the revised context-centered MDK surface; and
+- installer/enablement reconciliation.
+
+Built checkpoints include the leased collection WIT, owner-scoped registration writers with writer-owned cleanup (now to be revised to scope ownership), and ADR 023 capability attachments/redemption. Those checkpoints do not yet implement ADR 025's durable or lazy lifecycle.
 
 ## Consequences
 
@@ -572,7 +528,7 @@ Not built:
 
 - executable installation/enablement hooks;
 - installer upgrade/downgrade/uninstall migrations;
-- triggers beyond target-live and explicit roots;
+- activation carriers beyond explicit roots, lazy capability redemption/invocation, and presentation mounting;
 - idle grace, freezing, and preinitialized pools;
 - dynamic mandatory dependency cycles;
 - guest-served collection sources; and
@@ -583,13 +539,13 @@ Not built:
 
 This ADR becomes Accepted only after tests demonstrate:
 
-1. a manifest is inspected and reverse activation registered without instantiating its
-   guest;
-2. a live target resolves an accepted registration into a strong contributor binding;
-3. dropping the target closes the contributor after dependent cleanup;
-4. weak surface proxies survive as inert, droppable resources without retaining the
-   provider;
-5. failed/cancelled initialization exposes no staged publication;
-6. disconnected cycles do not remain live;
-7. faulted micros do not retry from demand churn; and
-8. native and Wasm micros exercise the same lifecycle contract.
+1. a manifest and its collection definitions are inspected without instantiating the guest;
+2. a durable contribution remains visible while its provider is inactive;
+3. reading its lazy endpoint does not activate the provider, while redemption starts or joins exactly one staged activation;
+4. a demanded named publication is returned without polling a secondary collection;
+5. retaining the redeemed live resource keeps the provider active and dropping the final strong edge begins orderly shutdown;
+6. `instance-root.close()` runs once with dependencies retained, after which incarnation scopes and publications are revoked;
+7. failed/cancelled initialization exposes no staged publication;
+8. disconnected cycles do not remain live and activation cycles fail precisely;
+9. faulted micros do not retry from demand churn; and
+10. native, Wasmtime, and WCMP micros exercise the same lifecycle contract.

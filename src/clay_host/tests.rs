@@ -80,7 +80,7 @@ async fn stale_identity_cannot_revoke_replacement_and_terminal_storage_is_draine
         let state = host.inner.lock().unwrap();
         assert!(state.instances.is_empty());
         assert!(state.ending.is_empty());
-        assert!(state.closing.is_empty());
+        assert!(state.tearing_down.is_empty());
         assert!(state.dependencies.is_empty());
         assert!(state.recovery.pending.is_empty());
     }
@@ -151,7 +151,7 @@ async fn cancelling_async_activation_withdraws_owned_effects() {
     let root = host.start("root");
     let host_for_activation = host.clone();
     let (ready, started) = tokio::sync::oneshot::channel();
-    let mut activation = Box::pin(host.activate_async("async", move |instance| async move {
+    let mut activation = Box::pin(host.initialize("async", move |instance| async move {
         let component = host_for_activation.publish_component(&instance)?;
         if ready.send((instance.clone(), component)).is_err() {
             panic!("activation waiter dropped before publication");
@@ -181,12 +181,12 @@ fn closure_notifications_follow_the_entire_dependent_recovery() {
     let host = Host::new();
     let provider = host.start("provider");
     let consumer = host.start("consumer");
-    host.bind_dependency(&consumer, &provider).unwrap();
+    let _consumer_binding = host.bind(&consumer, &provider).unwrap();
     let provider_ended = host.observe_instance(&provider).unwrap();
     let consumer_ended = host.observe_instance(&consumer).unwrap();
     let mut changes = host.changes();
     let sibling = host.start("sibling");
-    host.bind_dependency(&sibling, &provider).unwrap();
+    let _sibling_binding = host.bind(&sibling, &provider).unwrap();
     let sibling_ended = host.observe_instance(&sibling).unwrap();
     changes.borrow_and_update();
     for instance in [&provider, &consumer, &sibling] {
@@ -254,7 +254,7 @@ fn a_close_started_inside_cleanup_recovers_dependents_before_their_provider() {
     let host = Host::new();
     let provider = host.start("provider");
     let consumer = host.start("consumer");
-    host.bind_dependency(&consumer, &provider).unwrap();
+    let _binding = host.bind(&consumer, &provider).unwrap();
     let provider_ended = host.observe_instance(&provider).unwrap();
     let consumer_ended = host.observe_instance(&consumer).unwrap();
     let changes = host.changes();
@@ -318,7 +318,7 @@ async fn closing_an_instance_cancels_its_pending_activation() {
 
     let host = Host::new();
     let (ready, started) = tokio::sync::oneshot::channel();
-    let mut activation = Box::pin(host.activate_async("pending", |instance| async move {
+    let mut activation = Box::pin(host.initialize("pending", |instance| async move {
         assert!(ready.send(instance).is_ok());
         std::future::pending::<Result<(), AccessError>>().await
     }));
@@ -328,7 +328,7 @@ async fn closing_an_instance_cancels_its_pending_activation() {
     })
     .await;
     host.close_instance(&started.await.unwrap()).unwrap();
-    assert_eq!(activation.await, Err(AccessError::Revoked));
+    assert_eq!(activation.await.map(drop), Err(AccessError::Revoked));
     host.close();
 }
 // ── Lifecycle model property: random op sequences against an in-memory model ─
@@ -475,6 +475,7 @@ fn run_host_script(ops: Vec<HostOp>) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut slots: BTreeMap<u8, SlotModel> = BTreeMap::new();
     let mut edges: Vec<(u64, u64)> = Vec::new();
+    let mut bindings = Vec::new();
     let mut sequence = 0u64;
     let mut host_closed = false;
     for op in ops {
@@ -524,18 +525,18 @@ fn run_host_script(ops: Vec<HostOp>) {
                 else {
                     continue;
                 };
-                if !consumer_model.live() || !provider_model.live() {
-                    assert_eq!(
-                        host.bind_dependency(&consumer_model.instance, &provider_model.instance),
+                if consumer == provider {
+                    // Binding an incarnation to itself is an invariant failure, never requested.
+                } else if !consumer_model.live() || !provider_model.live() {
+                    assert!(matches!(
+                        host.bind(&consumer_model.instance, &provider_model.instance),
                         Err(AccessError::Revoked)
-                    );
-                } else if consumer == provider {
-                    // A self-dependency is a no-op, not an edge.
-                    host.bind_dependency(&consumer_model.instance, &provider_model.instance)
-                        .unwrap();
+                    ));
                 } else if !would_cycle(&slots, consumer, provider) {
-                    host.bind_dependency(&consumer_model.instance, &provider_model.instance)
-                        .unwrap();
+                    bindings.push(
+                        host.bind(&consumer_model.instance, &provider_model.instance)
+                            .unwrap(),
+                    );
                     edges.push((consumer_model.instance.id, provider_model.instance.id));
                     slots.get_mut(&consumer).unwrap().providers.insert(provider);
                 }
@@ -606,11 +607,14 @@ fn run_host_script(ops: Vec<HostOp>) {
     let state = host.inner.lock().unwrap();
     assert!(state.instances.is_empty());
     assert!(state.ending.is_empty());
-    assert!(state.closing.is_empty());
+    assert!(state.tearing_down.is_empty());
     assert!(state.dependencies.is_empty());
     assert!(state.components.is_empty());
     assert!(state.mounts.is_empty());
     drop(state);
+    // Teardown already removed every edge; dropping the stale bindings must not resurrect one.
+    drop(bindings);
+    assert!(host.inner.lock().unwrap().dependencies.is_empty());
     foreign.close();
 }
 
@@ -721,4 +725,203 @@ fn component_lifetimes_track_publication_and_supplier_withdrawal() {
     assert_eq!(*lifetimes.borrow_and_update(), BTreeSet::from([unrelated]));
     host.close();
     assert!(lifetimes.borrow_and_update().is_empty());
+}
+
+// ── Staged lifecycle: initialization, outward hooks, and strong bindings ─────
+
+type Events = Arc<Mutex<Vec<Lifecycle>>>;
+
+fn record_outward(host: &Host, instance: &Instance) -> (Lifecycle, Events) {
+    let events = Events::default();
+    let recorded = events.clone();
+    let current = host
+        .on_outward(instance, move |lifecycle| {
+            recorded.lock().unwrap().push(lifecycle)
+        })
+        .unwrap();
+    (current, events)
+}
+
+#[tokio::test]
+async fn committed_initialization_exposes_then_withdraws_outward_effects() {
+    let host = Host::new();
+    let mut hooked = None;
+    let (instance, ()) = host
+        .initialize("staged", |instance| {
+            let (current, events) = record_outward(&host, &instance);
+            assert_eq!(current, Lifecycle::Initializing);
+            assert_eq!(host.lifecycle(&instance), Lifecycle::Initializing);
+            hooked = Some(events);
+            async { Ok::<_, AccessError>(()) }
+        })
+        .await
+        .unwrap();
+    let events = hooked.unwrap();
+    assert_eq!(host.lifecycle(&instance), Lifecycle::Active);
+    assert_eq!(*events.lock().unwrap(), [Lifecycle::Active]);
+    let mut lifecycle = host.observe_lifecycle(&instance).unwrap();
+    assert_eq!(*lifecycle.borrow_and_update(), Lifecycle::Active);
+
+    assert!(host.begin_close(&instance).unwrap());
+    assert_eq!(
+        *events.lock().unwrap(),
+        [Lifecycle::Active, Lifecycle::Closing]
+    );
+    assert_eq!(*lifecycle.borrow_and_update(), Lifecycle::Closing);
+    // Exactly one caller drives each close.
+    assert!(!host.begin_close(&instance).unwrap());
+    // A closing incarnation keeps its own authority but acquires nothing outward.
+    assert_eq!(host.check(&instance), Ok(()));
+    host.own(&instance, Box::new(|| {})).unwrap();
+    assert_eq!(host.publish_component(&instance), Err(AccessError::Revoked));
+    let peer = host.start("peer");
+    assert!(matches!(
+        host.bind(&peer, &instance),
+        Err(AccessError::Revoked)
+    ));
+    assert!(matches!(
+        host.bind(&instance, &peer),
+        Err(AccessError::Revoked)
+    ));
+    assert!(matches!(
+        host.on_outward(&instance, |_| {}),
+        Err(AccessError::Revoked)
+    ));
+
+    host.close_instance(&instance).unwrap();
+    assert_eq!(*lifecycle.borrow_and_update(), Lifecycle::Closed);
+    assert_eq!(host.lifecycle(&instance), Lifecycle::Closed);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [Lifecycle::Active, Lifecycle::Closing]
+    );
+    host.close();
+}
+
+#[tokio::test]
+async fn failed_initialization_never_reports_active_and_unwinds_owned_effects() {
+    let host = Host::new();
+    let unwound = Arc::new(Mutex::new(false));
+    let mut observed = None;
+    let result = host
+        .initialize("failing", |instance| {
+            let (_, events) = record_outward(&host, &instance);
+            let unwound = unwound.clone();
+            host.own(&instance, Box::new(move || *unwound.lock().unwrap() = true))
+                .unwrap();
+            observed = Some((instance, events));
+            async { Err::<(), _>(AccessError::Denied) }
+        })
+        .await;
+    assert_eq!(result.map(drop), Err(AccessError::Denied));
+    let (instance, events) = observed.unwrap();
+    assert_eq!(*events.lock().unwrap(), [Lifecycle::Closing]);
+    assert!(*unwound.lock().unwrap());
+    assert_eq!(host.lifecycle(&instance), Lifecycle::Closed);
+    assert!(host.inner.lock().unwrap().instances.is_empty());
+    host.close();
+}
+
+#[test]
+fn initialization_cannot_commit_once_closing() {
+    let host = Host::new();
+    let instance = host.create("late").unwrap();
+    assert_eq!(host.lifecycle(&instance), Lifecycle::Created);
+    host.begin_initialization(&instance).unwrap();
+    let (_, events) = record_outward(&host, &instance);
+    assert!(host.begin_close(&instance).unwrap());
+    assert_eq!(
+        host.commit_initialization(&instance),
+        Err(AccessError::Revoked)
+    );
+    assert_eq!(*events.lock().unwrap(), [Lifecycle::Closing]);
+    host.close_instance(&instance).unwrap();
+    assert_eq!(
+        host.commit_initialization(&instance),
+        Err(AccessError::Revoked)
+    );
+    host.close();
+}
+
+#[test]
+#[should_panic(expected = "initialization committed twice")]
+fn committing_initialization_twice_is_an_invariant_failure() {
+    let host = Host::new();
+    let instance = host.create("twice").unwrap();
+    host.begin_initialization(&instance).unwrap();
+    host.commit_initialization(&instance).unwrap();
+    let _ = host.commit_initialization(&instance);
+}
+
+#[test]
+fn a_hook_registered_after_commit_is_told_only_of_withdrawal() {
+    let host = Host::new();
+    let instance = host.start("active");
+    let (current, events) = record_outward(&host, &instance);
+    assert_eq!(current, Lifecycle::Active);
+    assert!(events.lock().unwrap().is_empty());
+    host.close_instance(&instance).unwrap();
+    assert_eq!(*events.lock().unwrap(), [Lifecycle::Closing]);
+    host.close();
+}
+
+#[test]
+fn bindings_retain_their_provider_until_the_last_one_drops() {
+    let host = Host::new();
+    let provider = host.start("provider");
+    let consumer = host.start("consumer");
+    let first = host.bind(&consumer, &provider).unwrap();
+    let second = host.bind(&consumer, &provider).unwrap();
+    assert!(host.is_bound(&provider));
+    assert!(!host.is_bound(&consumer));
+    drop(first);
+    assert!(host.is_bound(&provider));
+    drop(second);
+    assert!(!host.is_bound(&provider));
+    assert!(host.inner.lock().unwrap().dependencies.is_empty());
+    // Without an edge, closing the provider no longer reaches the consumer.
+    host.close_instance(&provider).unwrap();
+    assert_eq!(host.check(&consumer), Ok(()));
+    host.close();
+}
+
+#[test]
+fn a_stale_binding_cannot_release_its_replacements_edge() {
+    let host = Host::new();
+    let provider = host.start("provider");
+    let consumer = host.start("consumer");
+    let consumer_ended = host.observe_instance(&consumer).unwrap();
+    let stale = host.bind(&consumer, &provider).unwrap();
+    // Closing a bound provider closes its consumer first and removes the edge.
+    host.close_instance(&provider).unwrap();
+    assert_eq!(
+        *consumer_ended.borrow(),
+        Some(CloseReason::DependencyWithdrawn)
+    );
+    let provider = host.start("provider");
+    let consumer = host.start("consumer");
+    let live = host.bind(&consumer, &provider).unwrap();
+    drop(stale);
+    assert!(host.is_bound(&provider));
+    drop(live);
+    assert!(!host.is_bound(&provider));
+    host.close();
+}
+
+#[test]
+#[should_panic(expected = "a micro cannot bind itself")]
+fn binding_an_incarnation_to_itself_is_an_invariant_failure() {
+    let host = Host::new();
+    let instance = host.start("self");
+    let _binding = host.bind(&instance, &instance);
+}
+
+#[test]
+#[should_panic(expected = "cyclic micro dependency")]
+fn closing_a_binding_cycle_is_an_invariant_failure() {
+    let host = Host::new();
+    let first = host.start("first");
+    let second = host.start("second");
+    let _forward = host.bind(&first, &second).unwrap();
+    let _backward = host.bind(&second, &first);
 }

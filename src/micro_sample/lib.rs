@@ -5,12 +5,19 @@ mod tests;
 mod view;
 
 use clay_mdk::ComponentRef;
-use clay_mdk::ConfigGrant;
+use clay_mdk::ConfigurationRequest;
+use clay_mdk::ContractRef;
+use clay_mdk::ContributionDeclaration;
+use clay_mdk::Entrypoints;
 use clay_mdk::FacetAccess;
+use clay_mdk::MANIFEST_SCHEMA;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
+use clay_mdk::Necessity;
+use clay_mdk::ProvidedContract;
 use clay_mdk::Provision;
-use clay_mdk::ProvisionRef;
+use clay_mdk::RequiredContract;
+use clay_mdk::Retention;
 use clay_mdk::native::AccessError;
 use clay_mdk::native::Context;
 use clay_mdk::native::DocumentService;
@@ -56,15 +63,22 @@ impl Provision for SampleMicro {
 /// provides its controller, and declares read/write access to its own configuration facet.
 pub fn manifest() -> MicroManifest {
     MicroManifest {
+        schema: MANIFEST_SCHEMA,
         id: MicroId::new(ID),
-        version: 1,
-        requirements: vec![ProvisionRef::of::<SettingsSections>()],
-        provisions: vec![ProvisionRef {
-            id: SampleMicro::ID.into(),
-            version: 1,
+        package_version: 1,
+        entrypoints: Entrypoints::micro_client(),
+        provides: vec![ProvidedContract {
+            id: "controller".into(),
+            contract: ContractRef::of::<SampleMicro>(),
+            retention: Retention::Strong,
         }],
-        config: Some(ConfigGrant {
-            name: CONFIG_NAME.into(),
+        requires: vec![RequiredContract {
+            binding: "settings".into(),
+            contract: ContractRef::of::<SettingsSections>(),
+            necessity: Necessity::Required,
+        }],
+        configuration_requests: vec![ConfigurationRequest {
+            binding: CONFIG_NAME.into(),
             facets: vec![FacetAccess {
                 tag: CONFIG_TAG.into(),
                 key_id: Some(CONFIG_KEY.into()),
@@ -72,14 +86,20 @@ pub fn manifest() -> MicroManifest {
                 write: true,
                 ..Default::default()
             }],
-        }),
-        contributions: vec![clay_mdk::Contribution {
-            provision: SettingsSections::ID.into(),
+        }],
+        collection_contracts: vec![],
+        contributions: vec![ContributionDeclaration {
+            id: "settings-section".into(),
+            target_binding: "settings".into(),
+            extension_contract: ContractRef::of::<SettingsSections>(),
             payload: serde_json::to_value(micro_settings_manifest::DeclaredSection {
                 title: "Sample micro".into(),
             })
             .unwrap(),
+            capability_slots: vec![],
         }],
+        activation_defaults: vec![],
+        extra: Default::default(),
     }
 }
 

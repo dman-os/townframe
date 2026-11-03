@@ -8,13 +8,16 @@
 mod collections;
 mod documents;
 
-use clay_docs::DocumentRef;
 use clay_guest_session::DocumentSession;
+pub use clay_guest_session::InitialContext;
+pub use clay_guest_session::InitializationFailure;
 use clay_guest_session::Limits as DocumentLimits;
 use clay_guest_session::Placement;
 use clay_guest_session::PresentationHost;
 use clay_guest_session::Surface;
 use clay_guest_session::Work;
+use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
 use clay_host::ComponentRef;
@@ -34,6 +37,9 @@ pub enum ActivationError {
     Access(#[from] clay_host::AccessError),
     #[error("Wasm initialization failed: {0}")]
     Initialization(String),
+    /// The guest declined to initialize under this configuration (no trap).
+    #[error("guest refused initialization: {0}")]
+    Refused(#[from] InitializationFailure),
 }
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -173,6 +179,7 @@ use wasmtime::component::Component;
 use wasmtime::component::HasSelf;
 use wasmtime::component::Linker;
 use wasmtime::component::Resource;
+use wasmtime::component::ResourceAny;
 use wasmtime::component::ResourceTable;
 
 mod bindings {
@@ -502,7 +509,11 @@ fn compile_component(engine: &Engine, bytes: &[u8]) -> Result<Component, String>
     })?;
     std::fs::rename(&temporary, &path)
         .map_err(|error| format!("cannot publish component cache {}: {error}", path.display()))?;
-    Component::new(engine, bytes).map_err(|error| error.to_string())
+    // Load the artifact just compiled instead of compiling `bytes` a second time: a miss costs
+    // one compile, not two.
+    // SAFETY: `compiled` is the output of `precompile_component` on this same engine, in this
+    // call; it is not untrusted input.
+    unsafe { Component::deserialize(engine, &compiled) }.map_err(|error| error.to_string())
 }
 
 /// `$DAYFRAME_COMPONENT_CACHE`, else the XDG/home cache, keyed by content and engine
@@ -594,6 +605,8 @@ impl WasmPackage {
                 fuel_per_call,
                 wake,
                 waker,
+                root: None,
+                provisions: BTreeMap::new(),
             },
             incoming,
         ))
@@ -606,6 +619,11 @@ struct WasmIncarnation {
     fuel_per_call: Arc<AtomicU64>,
     wake: Arc<IncarnationWake>,
     waker: Waker,
+    /// The guest's `instance-root`, held from a successful `initialize` until [`Self::close`].
+    root: Option<ResourceAny>,
+    /// Publication leases of the incarnation's provisions, by contract. Dropping one revokes
+    /// the publication and every consumer proxy derived from it.
+    provisions: BTreeMap<String, PublishedCapability>,
 }
 
 impl WasmIncarnation {
@@ -624,6 +642,35 @@ impl WasmIncarnation {
         self.refuel();
         self.store.drive_until_stalled().await
     }
+
+    /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
+    /// incarnation's host authority and dependencies are still live, then drop the root (its
+    /// guest destructor releases whatever the root held) and only then revoke the provisions.
+    /// The store itself stays up so a caller can audit what the guest still holds.
+    async fn close(&mut self) -> Result<(), String> {
+        let root = self
+            .root
+            .take()
+            .expect("only an initialized incarnation is closed");
+        self.refuel();
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle();
+        let closed = self
+            .store
+            .run_concurrent(async |accessor| {
+                lifecycle.instance_root().call_close(accessor, root).await
+            })
+            .await
+            .and_then(|trapped| trapped)
+            .map_err(|trap| format!("guest trapped while closing: {trap:#}"));
+        self.refuel();
+        let dropped = root
+            .resource_drop_async(&mut self.store)
+            .await
+            .map_err(|trap| format!("guest trapped dropping its instance root: {trap:#}"));
+        self.provisions.clear();
+        closed??;
+        dropped
+    }
 }
 
 #[derive(Clone)]
@@ -631,21 +678,31 @@ pub struct WasmRuntime {
     host: Host,
     instance: Instance,
     incarnation: Arc<Mutex<Option<WasmIncarnation>>>,
+    /// What each provision publishes, by contract. The leases themselves live in the
+    /// incarnation, so a close revokes them.
+    provisions: Arc<BTreeMap<String, CapabilityPublication>>,
     revoked: Arc<AtomicBool>,
     fuel: Arc<AtomicU64>,
 }
 
 impl WasmRuntime {
-    pub async fn activate(
+    /// Instantiate `package` for `instance` and run its `micro-lifecycle.initialize` with
+    /// `context`. The returned driver future delivers document events and drives the guest's
+    /// background tasks until the incarnation ends; the caller owns it.
+    pub async fn initialize(
         host: &Host,
         instance: Instance,
         package: &WasmPackage,
-        configs: BTreeMap<String, DocumentRef>,
-        collections: BTreeMap<String, clay_guest_session::collections::BytesProjection>,
-        registrations: BTreeMap<String, clay_guest_session::collections::BytesRegistrations>,
+        context: InitialContext,
     ) -> Result<(Self, impl std::future::Future<Output = ()> + 'static), ActivationError> {
         let (mut active, incoming) = package.instantiate(host, instance.clone()).await?;
-        documents::activate(&mut active, configs, collections, registrations).await?;
+        let (root, provisions) = documents::initialize(&mut active, context).await?;
+        active.root = Some(root);
+        let publications = provisions
+            .iter()
+            .map(|(contract, lease)| (contract.clone(), lease.publication()))
+            .collect();
+        active.provisions = provisions;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let fuel = active.fuel_per_call.clone();
         let incarnation = Arc::new(Mutex::new(Some(active)));
@@ -713,11 +770,31 @@ impl WasmRuntime {
                 host: host.clone(),
                 instance,
                 incarnation,
+                provisions: Arc::new(publications),
                 revoked,
                 fuel,
             },
             driver,
         ))
+    }
+
+    /// The publication this incarnation provides for `contract`, if it provides it.
+    pub fn provision(&self, contract: &str) -> Option<CapabilityPublication> {
+        self.provisions.get(contract).cloned()
+    }
+
+    /// Close the incarnation's guest half (ADR 024 §6 step 2). The incarnation stops taking
+    /// presentation and document calls, its `instance-root.close` runs to completion, the
+    /// root and the provision leases are released, and the store is dropped. The caller has
+    /// already withdrawn outward visibility and tears the host incarnation down afterwards.
+    pub async fn close(&self) -> Result<(), String> {
+        let mut active = self
+            .incarnation
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| "the incarnation already ended".to_owned())?;
+        active.close().await
     }
 
     pub fn mount(
@@ -952,5 +1029,7 @@ impl WasmRuntime {
     }
 }
 
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod tests;

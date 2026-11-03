@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "id": "dayframe.lifecycle-fixture",
+  "package_version": 1,
+  "entrypoints": {
+    "initialize": "townframe:dayframe/micro-lifecycle@0.3.0",
+    "presentation": "townframe:dayframe/presentation-events@0.3.0",
+    "installer": null
+  },
+  "provides": [
+    {
+      "id": "presentation",
+      "contract": {
+        "id": "dayframe.lifecycle.presentation",
+        "version": 1
+      },
+      "retention": "strong"
+    }
+  ],
+  "requires": [
+    {
+      "binding": "presentation",
+      "contract": {
+        "id": "dayframe.lifecycle.presentation",
+        "version": 1
+      },
+      "necessity": "required"
+    },
+    {
+      "binding": "host",
+      "contract": {
+        "id": "dayframe.lifecycle.host",
+        "version": 1
+      },
+      "necessity": "optional"
+    }
+  ],
+  "configuration_requests": [],
+  "collection_contracts": [],
+  "contributions": [
+    {
+      "id": "serve-host",
+      "target_binding": "host",
+      "extension_contract": {
+        "id": "dayframe.lifecycle.presentation",
+        "version": 1
+      },
+      "payload": {
+        "title": "Lifecycle fixture"
+      },
+      "capability_slots": [
+        {
+          "index": 0,
+          "contract": {
+            "id": "dayframe.lifecycle.presentation",
+            "version": 1
+          }
+        }
+      ]
+    }
+  ],
+  "activation_defaults": [
+    {
+      "id": "serve-host",
+      "trigger": {
+        "kind": "target-live",
+        "target_binding": "host",
+        "extension_contract": {
+          "id": "dayframe.lifecycle.presentation",
+          "version": 1
+        }
+      },
+      "declaration_id": "serve-host"
+    }
+  ]
+}

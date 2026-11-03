@@ -1017,13 +1017,11 @@ async fn execution_and_linear_memory_are_bounded_per_incarnation() {
 async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     let host = Host::new();
     let owner = host.start("close-before-mount");
-    let (runtime, driver) = WasmRuntime::activate(
+    let (runtime, driver) = WasmRuntime::initialize(
         &host,
         owner.clone(),
         &counter_package().await,
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
+        InitialContext::default(),
     )
     .await
     .unwrap();
@@ -1070,16 +1068,10 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
     let package = WasmPackage::from_env("sleeper")
         .await
         .expect("prepared sleeper component is valid");
-    let (runtime, driver) = WasmRuntime::activate(
-        &host,
-        owner.clone(),
-        &package,
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .await
-    .unwrap();
+    let (runtime, driver) =
+        WasmRuntime::initialize(&host, owner.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
     let writer = Arc::new(LiveSink(AtomicBool::new(false)));
     let session = runtime
         .mount(Arc::clone(&writer) as _, &[])
@@ -1186,13 +1178,14 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     let document = access
         .document(route.document.clone(), route.branch.clone())
         .unwrap();
-    let (runtime, driver) = WasmRuntime::activate(
+    let (runtime, driver) = WasmRuntime::initialize(
         &host,
         owner.clone(),
         &counter_package().await,
-        [("counter".into(), document)].into(),
-        BTreeMap::new(),
-        BTreeMap::new(),
+        InitialContext {
+            configs: [("counter".into(), document)].into(),
+            ..InitialContext::default()
+        },
     )
     .await
     .unwrap();
@@ -1272,13 +1265,14 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     let projection =
         BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [11, 12]);
     projection.publish(vec![upsert("alpha", "one", 1), upsert("beta", "two", 2)]);
-    let (runtime, driver) = WasmRuntime::activate(
+    let (runtime, driver) = WasmRuntime::initialize(
         &host,
         owner.clone(),
         &package,
-        BTreeMap::new(),
-        [("rows".into(), projection.clone())].into(),
-        BTreeMap::new(),
+        InitialContext {
+            collections: [("rows".into(), projection.clone())].into(),
+            ..InitialContext::default()
+        },
     )
     .await
     .unwrap();
@@ -1381,17 +1375,19 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
     let mut lease = observer.acquire(Vec::new(), None).unwrap();
     let bootstrap = lease.read(None, ReadLimits::default()).await.unwrap();
     assert!(bootstrap.bootstrap_complete);
-    let (runtime, driver) = WasmRuntime::activate(
+    let (runtime, driver) = WasmRuntime::initialize(
         &host,
         owner.clone(),
         &package,
-        BTreeMap::new(),
-        [("rows".into(), registrations.projection())].into(),
-        [
-            ("a".into(), registrations.clone()),
-            ("b".into(), registrations.clone()),
-        ]
-        .into(),
+        InitialContext {
+            collections: [("rows".into(), registrations.projection())].into(),
+            registrations: [
+                ("a".into(), registrations.clone()),
+                ("b".into(), registrations.clone()),
+            ]
+            .into(),
+            ..InitialContext::default()
+        },
     )
     .await
     .unwrap();
@@ -1490,13 +1486,15 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
         .await
         .expect("prepared collection probe is valid");
     let registrations = bytes_registrations(NonZeroUsize::new(64).unwrap(), [41, 42]);
-    let (runtime, driver) = WasmRuntime::activate(
+    let (runtime, driver) = WasmRuntime::initialize(
         &host,
         owner.clone(),
         &package,
-        BTreeMap::new(),
-        [("rows".into(), registrations.projection())].into(),
-        [("cap".into(), registrations.clone())].into(),
+        InitialContext {
+            collections: [("rows".into(), registrations.projection())].into(),
+            registrations: [("cap".into(), registrations.clone())].into(),
+            ..InitialContext::default()
+        },
     )
     .await
     .unwrap();
