@@ -2,9 +2,14 @@
 //! ADR 024 lifecycle fixture: one package that plays a provider/consumer activation graph, its
 //! role picked by the configuration-supplied CBOR text in `initial-context.arguments`.
 //!
-//! * `provider` returns two named publications from `initialize`: the `presentation`
-//!   presentation and the `echo` call, whose exported handler answers `echo:` plus the request.
-//! * `failing-provider` publishes the same two and then rejects initialization, so the host
+//! * `provider` returns three named publications from `initialize`: the `presentation`
+//!   presentation, the `echo` call, whose exported handler answers `echo:` plus the request,
+//!   and the `relay` call, whose handler forwards its request to the optional
+//!   `peer` requirement and answers `relay:` plus the peer's answer. What the peer is decides
+//!   what a test exercises: a host-gated call (a handler suspended until the test releases
+//!   it), another incarnation's `relay` (A to B to A), or the incarnation's own `echo`. The
+//!   request `trap` traps the guest instead.
+//! * `failing-provider` publishes the same three and then rejects initialization, so the host
 //!   must discard publications that were never visible.
 //! * `consumer` redeems its `presentation` requirement during initialization and keeps the
 //!   proxy in its root. If it also has a `service` requirement, it calls the provider's `echo`
@@ -30,6 +35,7 @@ use clay_mdk::wire::WireMutations;
 use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 const MANIFEST: &[u8] = include_bytes!("lifecycle_fixture.manifest.json");
 
@@ -39,9 +45,14 @@ static DAYFRAME_MANIFEST: [u8; MANIFEST.len()] = *include_bytes!("lifecycle_fixt
 
 const PRESENTATION: &str = "presentation";
 const ECHO: &str = "echo";
+const RELAY: &str = "relay";
 
 thread_local! {
     static ROLE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The `relay` handler's peer. Handlers clone the `Rc` out before awaiting: a `RefCell`
+    /// borrow must never be held across an `.await` (a second call overlapping the first
+    /// would hit a live borrow).
+    static PEER: RefCell<Option<Rc<capability_bank::CapabilityRef>>> = const { RefCell::new(None) };
 }
 
 struct Lifecycle;
@@ -54,7 +65,12 @@ enum Root {
 impl micro_lifecycle::GuestInstanceRoot for Root {
     async fn close(&self) -> Result<(), String> {
         match self {
-            Root::Provider => Ok(()),
+            Root::Provider => {
+                // Releases the peer reference (a guest resource); an in-flight handler that
+                // already cloned it keeps its own share.
+                PEER.with_borrow_mut(Option::take);
+                Ok(())
+            }
             Root::Consumer(proxy) => proxy.component().map(drop).map_err(|error| {
                 format!("provider withdrawn before its consumer closed: {error:?}")
             }),
@@ -75,10 +91,19 @@ impl micro_lifecycle::Guest for Lifecycle {
                 ))
             })?;
         let initialized = match role.as_str() {
-            "provider" => micro_lifecycle::Initialized {
-                root: micro_lifecycle::InstanceRoot::new(Root::Provider),
-                publications: publish_all()?,
-            },
+            "provider" => {
+                let peer = context
+                    .requirements
+                    .into_iter()
+                    .find(|requirement| requirement.name == "peer");
+                PEER.with_borrow_mut(|slot| {
+                    *slot = peer.map(|requirement| Rc::new(requirement.capability));
+                });
+                micro_lifecycle::Initialized {
+                    root: micro_lifecycle::InstanceRoot::new(Root::Provider),
+                    publications: publish_all()?,
+                }
+            }
             "failing-provider" => {
                 let _staged = publish_all()?;
                 return Err(InitializationError::Rejected(
@@ -147,6 +172,17 @@ impl micro_lifecycle::Guest for Lifecycle {
     async fn call(publication: String, request: Vec<u8>) -> Result<Vec<u8>, String> {
         match publication.as_str() {
             ECHO => Ok([b"echo:".as_slice(), &request].concat()),
+            RELAY => {
+                assert!(request != b"trap", "lifecycle fixture was told to trap");
+                let peer = PEER
+                    .with_borrow(Clone::clone)
+                    .ok_or_else(|| "the relay has no peer requirement".to_owned())?;
+                let response = peer
+                    .call(request)
+                    .await
+                    .map_err(|error| format!("peer call failed: {error:?}"))?;
+                Ok([b"relay:".as_slice(), &response].concat())
+            }
             other => Err(format!("lifecycle fixture serves no call {other:?}")),
         }
     }
@@ -220,6 +256,18 @@ fn publish_all() -> Result<Vec<micro_lifecycle::NamedPublication>, Initializatio
             name: PRESENTATION.into(),
             capability: capability_bank::publish_presentation(PRESENTATION)
                 .map_err(|error| unavailable(PRESENTATION, error))?,
+        },
+        micro_lifecycle::NamedPublication {
+            name: RELAY.into(),
+            capability: capability_bank::publish_call(
+                RELAY,
+                &capability_bank::Contract {
+                    namespace: "dayframe.lifecycle".into(),
+                    name: RELAY.into(),
+                    version: (1, 0, 0),
+                },
+            )
+            .map_err(|error| unavailable(RELAY, error))?,
         },
         micro_lifecycle::NamedPublication {
             name: ECHO.into(),

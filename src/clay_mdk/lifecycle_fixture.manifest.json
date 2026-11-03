@@ -23,6 +23,14 @@
         "version": 1
       },
       "retention": "strong"
+    },
+    {
+      "id": "relay",
+      "contract": {
+        "id": "dayframe.lifecycle.relay",
+        "version": 1
+      },
+      "retention": "strong"
     }
   ],
   "requires": [
@@ -36,6 +44,14 @@
     },
     {
       "binding": "service",
+      "contract": {
+        "id": "dayframe.lifecycle.echo",
+        "version": 1
+      },
+      "necessity": "optional"
+    },
+    {
+      "binding": "peer",
       "contract": {
         "id": "dayframe.lifecycle.echo",
         "version": 1

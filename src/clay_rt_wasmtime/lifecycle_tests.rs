@@ -20,6 +20,19 @@ impl Wasmtime {
     }
 }
 
+/// What the incarnation's store holds, with the call tasks the host still has in it.
+fn residue_of(active: &WasmIncarnation) -> GuestResidue {
+    let state = active.store.data();
+    GuestResidue {
+        calls: active.calls_in_flight.load(Ordering::Acquire),
+        ..GuestResidue::of(
+            state.table.is_empty(),
+            &state.capabilities,
+            &state.collections,
+        )
+    }
+}
+
 impl Incarnations for Wasmtime {
     type Runtime = WasmRuntime;
 
@@ -56,12 +69,7 @@ impl Incarnations for Wasmtime {
 
     fn inspect(runtime: &WasmRuntime) -> GuestResidue {
         let active = runtime.incarnation.lock().unwrap();
-        let state = active.as_ref().unwrap().store.data();
-        GuestResidue::of(
-            state.table.is_empty(),
-            &state.capabilities,
-            &state.collections,
-        )
+        residue_of(active.as_ref().unwrap())
     }
 
     fn close(runtime: WasmRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
@@ -69,77 +77,38 @@ impl Incarnations for Wasmtime {
             let taken = runtime.incarnation.lock().unwrap().take();
             let mut active = taken.expect("only a live incarnation is closed");
             let closed = active.close().await;
-            let state = active.store.data();
-            (
-                closed,
-                GuestResidue::of(
-                    state.table.is_empty(),
-                    &state.capabilities,
-                    &state.collections,
-                ),
-            )
+            (closed, residue_of(&active))
         })
     }
 }
 
-#[tokio::test]
-async fn lifecycle_conformance_registration_scope_ownership() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::registration_scope_ownership(engine))
-        .await;
+/// One test per conformance scenario, each in a fresh engine and `LocalSet`.
+macro_rules! conformance {
+    ($($name:ident => $scenario:ident),+ $(,)?) => {$(
+        #[tokio::test]
+        async fn $name() {
+            let engine = Wasmtime::load().await;
+            tokio::task::LocalSet::new()
+                .run_until(lifecycle_conformance::$scenario(engine))
+                .await;
+        }
+    )+};
 }
 
-#[tokio::test]
-async fn lifecycle_conformance_failed_registration_initialization() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(
-            lifecycle_conformance::failed_registration_initialization_publishes_nothing(engine),
-        )
-        .await;
-}
-
-#[tokio::test]
-async fn provider_consumer_graph_activates_and_closes_in_order() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::provider_consumer_graph(engine))
-        .await;
-}
-
-#[tokio::test]
-async fn failing_provider_publishes_nothing() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::failing_provider_publishes_nothing(
-            engine,
-        ))
-        .await;
-}
-
-#[tokio::test]
-async fn leased_provider_closes_when_idle() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::leased_provider_closes_when_idle(
-            engine,
-        ))
-        .await;
-}
-
-#[tokio::test]
-async fn lazy_references_activate_retain_and_release() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::lazy_references_activate_retain_and_release(engine))
-        .await;
-}
-
-#[tokio::test]
-async fn undeclared_publications_fail_initialization() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::undeclared_publications_fail_initialization(engine))
-        .await;
+conformance! {
+    lifecycle_conformance_registration_scope_ownership => registration_scope_ownership,
+    lifecycle_conformance_failed_registration_initialization => failed_registration_initialization_publishes_nothing,
+    provider_consumer_graph_activates_and_closes_in_order => provider_consumer_graph,
+    failing_provider_publishes_nothing => failing_provider_publishes_nothing,
+    leased_provider_closes_when_idle => leased_provider_closes_when_idle,
+    lazy_references_activate_retain_and_release => lazy_references_activate_retain_and_release,
+    undeclared_publications_fail_initialization => undeclared_publications_fail_initialization,
+    overlapping_calls_complete_out_of_order => overlapping_calls_complete_out_of_order,
+    many_overlapping_calls_complete => many_overlapping_calls_complete,
+    sync_exports_interleave_with_suspended_calls => sync_exports_interleave_with_suspended_calls,
+    calls_reenter_their_provider => calls_reenter_their_provider,
+    guest_trap_fails_outstanding_calls => guest_trap_fails_outstanding_calls,
+    disable_with_calls_in_flight_revokes_callers => disable_with_calls_in_flight_revokes_callers,
+    shutdown_with_calls_in_flight_revokes_callers => shutdown_with_calls_in_flight_revokes_callers,
+    dropped_call_finishes_in_the_guest_without_leaks => dropped_call_finishes_in_the_guest_without_leaks,
 }

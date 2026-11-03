@@ -13,5 +13,5 @@ clay_mdk = { workspace = true, features = ["wit", "dioxus"] }
 clay_collection.workspace = true
 ciborium.workspace = true
 serde.workspace = true
-wit-bindgen = { workspace = true, features = ["async-spawn"] }
+wit-bindgen = { workspace = true, features = ["async", "macros", "realloc", "async-spawn", "inter-task-wakeup"] }
 dioxus-core.workspace = true

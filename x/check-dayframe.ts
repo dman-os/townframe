@@ -13,6 +13,30 @@ await useDotenvTargetDir();
 // workspace's native closure (tokio/net, mio) does not leak into the wasm builds. See
 // CONTRIBUTING.md on `resolver.feature-unification`.
 const isolated = ["--config", 'resolver.feature-unification="selected"'];
+
+// wit-bindgen's `std` feature moves the async export task state into a libc thread-local that
+// is not swapped per component-model task, so a guest could hold only one suspended call.
+// `clay_mdk` swaps that state itself through symbols named after the wit-bindgen version
+// (see its `task_hook`), which only works with `std` off; any dependency's default features
+// can turn it back on, so check what every wasip3 guest closure resolves to. The guest
+// workspace has its own lockfile and resolution.
+const witBindgen = ["-e", "features", "-i", "wit-bindgen@0.62.0"];
+const resolutions = [
+  ...["micro_counter", "micro_collection_probe", "clay_mdk"].map((guest) =>
+    $`cargo tree --locked --offline ${isolated} -p ${guest} --target wasm32-wasip3 ${witBindgen}`
+      .text()
+  ),
+  $`cargo tree --locked --offline --manifest-path src/wasm_utils_rs/Cargo.toml --workspace --target wasm32-wasip3 ${witBindgen}`
+    .text(),
+];
+for (const resolved of await Promise.all(resolutions)) {
+  if (resolved.includes('feature "std"')) {
+    throw new Error(
+      `wit-bindgen resolves with its \`std\` feature on a wasip3 guest; some dependency enables its default features:\n${resolved}`,
+    );
+  }
+}
+
 await $`cargo build --locked ${isolated} -p micro_counter --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p micro_collection_probe --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example slots --target wasm32-wasip3`;
