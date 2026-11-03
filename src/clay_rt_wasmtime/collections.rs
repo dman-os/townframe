@@ -1,10 +1,10 @@
+use super::GuestCallTarget;
 use super::IncarnationWake;
 use super::WasmComponentRef;
 use super::WasmStoreState;
 use super::bindings::townframe::dayframe::capability_bank as cap_wit;
 use super::bindings::townframe::dayframe::collection_registration as registration_wit;
 use super::bindings::townframe::dayframe::collections as wit;
-use super::inbox::GuestCallTarget;
 use super::wasmtime;
 use clay_collection::AcquireError;
 use clay_collection::Change;
@@ -77,7 +77,7 @@ impl<T: 'static> wit::HostProjectionLeaseWithStore<T> for HasSelf<WasmStoreState
             let state = access.get();
             (
                 state.table.get(&lease).unwrap().clone(),
-                Arc::clone(&state.wake),
+                state.collection_wake.clone(),
             )
         });
         let timeout = lease.poll_timeout(Duration::from_millis(limits.poll_timeout_ms.into()));
@@ -89,7 +89,10 @@ impl<T: 'static> wit::HostProjectionLeaseWithStore<T> for HasSelf<WasmStoreState
             },
             tokio::time::sleep(timeout),
         );
-        let result = wake.drive(read).await;
+        let result = match wake {
+            Some(wake) => wake.drive(read).await,
+            None => read.await,
+        };
         match result {
             Ok(page) => accessor.with(|mut access| Ok(Ok(page_to_wire(access.get(), page)?))),
             Err(ReadFailure::Read(error)) => Ok(Err(read_error(error))),
@@ -332,7 +335,7 @@ impl cap_wit::Host for WasmStoreState {
     ) -> wasmtime::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
         let target = Arc::new(GuestCallTarget {
             publication: name.clone(),
-            inbox: Arc::clone(&self.inbox),
+            calls: self.calls.clone(),
         });
         let contract = ContractIdentity::new(contract.namespace, contract.name, contract.version);
         match self.capabilities.publish_call(&name, contract, target) {
@@ -381,18 +384,24 @@ fn shared<T: 'static, R: 'static>(
     accessor: &Accessor<T, HasSelf<WasmStoreState>>,
     resource: &Resource<R>,
     share: impl FnOnce(&R) -> R,
-) -> (R, Arc<IncarnationWake>) {
+) -> (R, Option<Arc<IncarnationWake>>) {
     accessor.with(|mut access| {
         let state = access.get();
         (
             share(state.table.get(resource).unwrap()),
-            Arc::clone(&state.wake),
+            state.collection_wake.clone(),
         )
     })
 }
 
-async fn awaited<F: std::future::Future>(wake: Arc<IncarnationWake>, pending: F) -> F::Output {
-    wake.drive(pending).await
+async fn awaited<F: std::future::Future>(
+    wake: Option<Arc<IncarnationWake>>,
+    pending: F,
+) -> F::Output {
+    match wake {
+        Some(wake) => wake.drive(pending).await,
+        None => pending.await,
+    }
 }
 
 impl<T: 'static> cap_wit::HostCapabilityRefWithStore<T> for HasSelf<WasmStoreState> {

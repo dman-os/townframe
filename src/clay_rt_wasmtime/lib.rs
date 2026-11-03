@@ -7,10 +7,8 @@
 
 mod collections;
 mod documents;
-mod inbox;
 
 use clay_guest_session::DocumentSession;
-use clay_guest_session::GuestClose;
 pub use clay_guest_session::InitialContext;
 pub use clay_guest_session::InitializationFailure;
 use clay_guest_session::Limits as DocumentLimits;
@@ -18,11 +16,13 @@ use clay_guest_session::Placement;
 use clay_guest_session::PresentationHost;
 use clay_guest_session::Surface;
 use clay_guest_session::Work;
+use clay_guest_session::capabilities::CallError;
+use clay_guest_session::capabilities::CallTarget;
+use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
-use clay_host::CloseMode;
 use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
@@ -33,6 +33,9 @@ use clay_surface::Mutation;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
+use tokio::sync::oneshot;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ActivationError {
@@ -182,21 +185,17 @@ use wasmtime::component::Component;
 use wasmtime::component::HasSelf;
 use wasmtime::component::Linker;
 use wasmtime::component::Resource;
+use wasmtime::component::ResourceAny;
 use wasmtime::component::ResourceTable;
-use wasmtime::component::StreamReader;
 
 mod bindings {
     wash_runtime::wasmtime::component::bindgen!({
         path: "../clay_guest_session/wit",
         world: "micro-client",
         wasmtime_crate: wash_runtime::wasmtime,
-        imports: {
-            default: trappable,
-            "townframe:dayframe/lifecycle-host-requests.[method]responder.cancelled": store | trappable,
-        },
+        imports: { default: trappable },
         exports: { default: async },
         with: {
-            "townframe:dayframe/lifecycle-host-requests.responder": super::inbox::Responder,
             "townframe:dayframe/presentation.surface": clay_guest_session::Surface,
             "townframe:dayframe/presentation.mount-point": clay_guest_session::Placement,
             "townframe:dayframe/presentation.component-ref": super::WasmComponentRef,
@@ -220,36 +219,41 @@ use bindings::townframe::dayframe::presentation::{self as wit_presentation};
 
 pub struct WasmComponentRef(ComponentRef);
 
-/// The store task that is the guest's `serve` main loop (ADR 024 §7a). It is started once
-/// after `initialize` succeeds and lives in the store for the incarnation: like any store task
-/// it makes progress only while the store's event loop is driven, which [`WasmIncarnation::tick`]
-/// does in bounded bursts, so sync presentation and document entries run between bursts while
-/// its handlers are suspended.
-struct ServeTask {
-    lifecycle: bindings::exports::townframe::dayframe::micro_lifecycle::Guest,
-    inbox: wasmtime::component::StreamReader<
-        bindings::townframe::dayframe::lifecycle_host_requests::Request,
-    >,
-    /// Set when `serve` returned, so the driver knows the loop is over.
-    served: Arc<AtomicBool>,
-    wake: Arc<IncarnationWake>,
+/// A request to run one call publication's exported `call` inside its provider's own store.
+/// Only the provider incarnation's driver ever touches that store: a foreign import (another
+/// incarnation's store, or any bank user) queues one of these and awaits the reply.
+struct GuestCall {
+    publication: String,
+    request: Vec<u8>,
+    reply: oneshot::Sender<Result<Vec<u8>, CallError>>,
 }
 
-impl wasmtime::component::AccessorTask<WasmStoreState> for ServeTask {
-    async fn run(
-        self,
-        accessor: &wasmtime::component::Accessor<WasmStoreState>,
-    ) -> wasmtime::Result<()> {
-        let Self {
-            lifecycle,
-            inbox,
-            served,
-            wake,
-        } = self;
-        lifecycle.call_serve(accessor, inbox).await?;
-        served.store(true, Ordering::Release);
-        wake.wake_by_ref();
-        Ok(())
+/// The [`CallTarget`] of one call publication of one Wasmtime incarnation: it queues a
+/// [`GuestCall`] into the incarnation's driver. A closed queue or a reply dropped unanswered
+/// means the incarnation ended before the handler ran, which is exactly `Revoked`: a call can
+/// race the provider's close after the liveness check, and the answer is never a hang.
+struct GuestCallTarget {
+    publication: String,
+    calls: mpsc::UnboundedSender<GuestCall>,
+}
+
+impl CallTarget for GuestCallTarget {
+    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
+        let (reply, response) = oneshot::channel();
+        let queued = self.calls.send(GuestCall {
+            publication: self.publication.clone(),
+            request,
+            reply,
+        });
+        async move {
+            if queued.is_err() {
+                return Err(CapabilityFailure::Revoked.into());
+            }
+            response
+                .await
+                .unwrap_or_else(|_ended| Err(CapabilityFailure::Revoked.into()))
+        }
+        .boxed()
     }
 }
 
@@ -259,10 +263,9 @@ struct WasmStoreState {
     documents: DocumentSession,
     collections: clay_guest_session::collections::CollectionSession,
     capabilities: clay_guest_session::capabilities::CapabilitySession,
-    /// Wakes this incarnation's driver; every host future the guest awaits is driven through it.
-    wake: Arc<IncarnationWake>,
-    /// Where this incarnation's call publications send their requests (see [`inbox`]).
-    inbox: Arc<inbox::Inbox>,
+    collection_wake: Option<Arc<IncarnationWake>>,
+    /// Where this incarnation's call publications queue their requests (see [`GuestCall`]).
+    calls: mpsc::UnboundedSender<GuestCall>,
     presentation: PresentationHost,
     limits: StoreLimits,
 }
@@ -270,19 +273,13 @@ struct WasmStoreState {
 #[cfg(test)]
 impl WasmStoreState {
     /// A store state for tests that drive host imports directly, with nothing to serve its
-    /// call publications: the inbox's receiving end is dropped, so calls answer `Revoked`.
+    /// call publications: the call queue's receiving end is dropped.
     fn detached(
         host: Host,
         instance: Instance,
         limits: DocumentLimits,
     ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
-        let (state, incoming, _requests) = Self::new(
-            host,
-            instance,
-            limits,
-            clay_guest_session::DEFAULT_IN_FLIGHT_REQUESTS,
-        )?;
-        Ok((state, incoming))
+        Self::new(host, instance, limits, mpsc::unbounded_channel().0)
     }
 }
 
@@ -316,15 +313,8 @@ impl WasmStoreState {
         host: Host,
         instance: Instance,
         limits: DocumentLimits,
-        in_flight_requests: usize,
-    ) -> Result<
-        (
-            Self,
-            mpsc::Receiver<Work>,
-            mpsc::UnboundedReceiver<inbox::HostRequest>,
-        ),
-        clay_host::AccessError,
-    > {
+        calls: mpsc::UnboundedSender<GuestCall>,
+    ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
         let (documents, incoming) = DocumentSession::new(host.clone(), instance.clone(), limits)?;
         let presentation = PresentationHost::new(host.clone(), instance.clone());
         let collections = clay_guest_session::collections::CollectionSession::new(
@@ -339,8 +329,6 @@ impl WasmStoreState {
         );
         let mut wasi = WasiCtx::builder();
         wasi.inherit_stderr();
-        let wake = Arc::new(IncarnationWake::new());
-        let (inbox, requests) = inbox::Inbox::new(in_flight_requests, Arc::clone(&wake));
         Ok((
             Self {
                 wasi: wasi.build(),
@@ -348,8 +336,8 @@ impl WasmStoreState {
                 documents,
                 collections,
                 capabilities,
-                wake,
-                inbox,
+                collection_wake: None,
+                calls,
                 presentation,
                 limits: StoreLimitsBuilder::new()
                     .memory_size(64 * 1024 * 1024)
@@ -357,7 +345,6 @@ impl WasmStoreState {
                     .build(),
             },
             incoming,
-            requests,
         ))
     }
 }
@@ -656,24 +643,20 @@ impl WasmPackage {
         &self,
         host: &Host,
         instance: Instance,
-        in_flight_requests: usize,
     ) -> Result<
         (
             WasmIncarnation,
             mpsc::Receiver<Work>,
-            mpsc::UnboundedReceiver<inbox::HostRequest>,
+            mpsc::UnboundedReceiver<GuestCall>,
         ),
         ActivationError,
     > {
-        let (state, incoming, requests) = WasmStoreState::new(
-            host.clone(),
-            instance,
-            DocumentLimits::default(),
-            in_flight_requests,
-        )?;
-        let wake = Arc::clone(&state.wake);
-        let inbox = Arc::clone(&state.inbox);
+        let (calls, incoming_calls) = mpsc::unbounded_channel();
+        let (mut state, incoming) =
+            WasmStoreState::new(host.clone(), instance, DocumentLimits::default(), calls)?;
+        let wake = Arc::new(IncarnationWake::new());
         let waker = Waker::from(Arc::clone(&wake));
+        state.collection_wake = Some(Arc::clone(&wake));
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
         let fuel_per_call = Arc::new(AtomicU64::new(WasmIncarnation::FUEL_PER_CALL));
@@ -692,12 +675,11 @@ impl WasmPackage {
                 fuel_per_call,
                 wake,
                 waker,
+                root: None,
                 publications: BTreeMap::new(),
-                inbox,
-                served: Arc::new(AtomicBool::new(false)),
             },
             incoming,
-            requests,
+            incoming_calls,
         ))
     }
 }
@@ -708,13 +690,11 @@ struct WasmIncarnation {
     fuel_per_call: Arc<AtomicU64>,
     wake: Arc<IncarnationWake>,
     waker: Waker,
+    /// The guest's `instance-root`, held from a successful `initialize` until [`Self::close`].
+    root: Option<ResourceAny>,
     /// Publication leases of the publications `initialize` returned, by name. Dropping one
     /// revokes the publication and every consumer proxy derived from it.
     publications: BTreeMap<String, PublishedCapability>,
-    /// The sending half of the guest's inbox; closing it is the host's close (ADR 024 §6).
-    inbox: Arc<inbox::Inbox>,
-    /// Set by the [`ServeTask`] once the guest's `serve` returned.
-    served: Arc<AtomicBool>,
 }
 
 impl WasmIncarnation {
@@ -729,68 +709,55 @@ impl WasmIncarnation {
             .unwrap();
     }
 
-    /// One bounded burst of the store's event loop, which is what advances the `serve` task and
-    /// every handler it holds. Sync entries (`mount`, `dispatch`, document deliveries) borrow the
-    /// store between bursts. `serve` returning while its inbox is open is a guest bug, handled
-    /// like a trap.
     async fn tick(&mut self) -> wasmtime::Result<()> {
         self.refuel();
-        self.store.drive_until_stalled().await?;
-        if self.served.load(Ordering::Acquire) && !self.inbox.is_closed() {
-            return Err(wasmtime::Error::msg(
-                "guest `serve` returned before the host closed its inbox",
-            ));
-        }
-        Ok(())
+        self.store.drive_until_stalled().await
     }
 
-    /// Start the guest's `serve` main loop (ADR 024 §7a) as a task in this incarnation's store,
-    /// fed by `requests`. It makes progress only as [`Self::tick`] drives the store.
-    fn start_serve(
+    /// Run the guest's exported `call` for `publication`. The outer error is a trap; the inner
+    /// one is the handler's own rejection.
+    async fn call(
         &mut self,
-        requests: mpsc::UnboundedReceiver<inbox::HostRequest>,
-    ) -> wasmtime::Result<()> {
-        let inbox = StreamReader::new(&mut self.store, inbox::HostInbox(requests))?;
-        let lifecycle = self.client.townframe_dayframe_micro_lifecycle().clone();
-        self.store.spawn(ServeTask {
-            lifecycle,
-            inbox,
-            served: Arc::clone(&self.served),
-            wake: Arc::clone(&self.wake),
-        })?;
-        self.wake.wake_by_ref();
-        Ok(())
+        publication: String,
+        request: Vec<u8>,
+    ) -> wasmtime::Result<Result<Vec<u8>, String>> {
+        self.refuel();
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle();
+        self.store
+            .run_concurrent(async |accessor| {
+                lifecycle.call_call(accessor, publication, request).await
+            })
+            .await
+            .and_then(|trapped| trapped)
     }
 
-    /// The guest half of a close (ADR 024 §6): stop admitting requests, which ends the guest's
-    /// inbox once the requests already sent are read, and then either drive the store until
-    /// `serve` returns, with the incarnation's host authority and dependencies still live, or
-    /// abandon it. Only a forced close with requests still in flight abandons: waiting for those
-    /// handlers could outlast the disable that asked for the close, and their callers are
-    /// answered `Revoked` when the store drops. The publications are revoked last either way,
-    /// and the store itself stays up so a caller can audit what the guest still holds.
-    async fn close(&mut self, mode: CloseMode) -> Result<GuestClose, String> {
-        let in_flight = self.inbox.close();
-        if mode == CloseMode::Forced && in_flight > 0 {
-            self.publications.clear();
-            return Ok(GuestClose::Abandoned);
-        }
-        let drained = self.drain().await;
+    /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
+    /// incarnation's host authority and dependencies are still live, then drop the root (its
+    /// guest destructor releases whatever the root held) and only then revoke the publications.
+    /// The store itself stays up so a caller can audit what the guest still holds.
+    async fn close(&mut self) -> Result<(), String> {
+        let root = self
+            .root
+            .take()
+            .expect("only an initialized incarnation is closed");
+        self.refuel();
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle();
+        let closed = self
+            .store
+            .run_concurrent(async |accessor| {
+                lifecycle.instance_root().call_close(accessor, root).await
+            })
+            .await
+            .and_then(|trapped| trapped)
+            .map_err(|trap| format!("guest trapped while closing: {trap:#}"));
+        self.refuel();
+        let dropped = root
+            .resource_drop_async(&mut self.store)
+            .await
+            .map_err(|trap| format!("guest trapped dropping its instance root: {trap:#}"));
         self.publications.clear();
-        drained.map(|()| GuestClose::Drained)
-    }
-
-    async fn drain(&mut self) -> Result<(), String> {
-        while !self.served.load(Ordering::Acquire) {
-            self.tick()
-                .await
-                .map_err(|trap| format!("guest trapped while closing: {trap:#}"))?;
-            if !self.served.load(Ordering::Acquire) {
-                // Handlers still draining wait on host futures that wake the incarnation.
-                self.wake.wait().await;
-            }
-        }
-        Ok(())
+        closed??;
+        dropped
     }
 }
 
@@ -807,26 +774,18 @@ pub struct WasmRuntime {
 }
 
 impl WasmRuntime {
-    /// Instantiate `package` for `instance`, run its `micro-lifecycle.initialize` with
-    /// `context`, and start its `serve` main loop. The returned driver future delivers
-    /// document events and drives the guest's `serve` task until the incarnation ends; the
-    /// caller owns it.
+    /// Instantiate `package` for `instance` and run its `micro-lifecycle.initialize` with
+    /// `context`. The returned driver future delivers document events and drives the guest's
+    /// background tasks until the incarnation ends; the caller owns it.
     pub async fn initialize(
         host: &Host,
         instance: Instance,
         package: &WasmPackage,
         context: InitialContext,
     ) -> Result<(Self, impl std::future::Future<Output = ()> + 'static), ActivationError> {
-        let in_flight_requests = context
-            .in_flight_requests
-            .unwrap_or(clay_guest_session::DEFAULT_IN_FLIGHT_REQUESTS);
-        let (mut active, incoming, requests) = package
-            .instantiate(host, instance.clone(), in_flight_requests)
-            .await?;
-        let leases = documents::initialize(&mut active, context).await?;
-        active.start_serve(requests).map_err(|error| {
-            ActivationError::Initialization(format!("starting guest serve: {error:#}"))
-        })?;
+        let (mut active, incoming, mut calls) = package.instantiate(host, instance.clone()).await?;
+        let (root, leases) = documents::initialize(&mut active, context).await?;
+        active.root = Some(root);
         let publications = leases
             .iter()
             .map(|(name, lease)| (name.clone(), lease.publication()))
@@ -864,6 +823,32 @@ impl WasmRuntime {
                 };
                 tokio::select! {
                     () = &mut documents => return,
+                    Some(GuestCall { publication, request, reply }) = calls.recv() => {
+                        // The guest handler runs here, in the provider's own driver, with the
+                        // store held for the whole call, exactly like a stall-driving tick. A
+                        // requester that gave up meanwhile just loses its reply.
+                        let (outcome, trapped) = {
+                            let mut guard = pump_incarnation.lock().unwrap();
+                            let Some(active) = guard.as_mut() else {
+                                drop(reply.send(Err(CapabilityFailure::Revoked.into())));
+                                return;
+                            };
+                            match active.call(publication, request).await {
+                                Ok(handled) => (handled.map_err(CallError::Provider), false),
+                                Err(trap) => {
+                                    guard.take();
+                                    (Err(CallError::Provider(format!("guest trapped during call: {trap:#}"))), true)
+                                }
+                            }
+                        };
+                        if trapped && pump_host.check(&pump_instance).is_ok() {
+                            pump_host.close_instance(&pump_instance).unwrap();
+                        }
+                        drop(reply.send(outcome));
+                        if trapped {
+                            return;
+                        }
+                    }
                     () = wake.wait() => {
                         let trapped = {
                             let mut guard = pump_incarnation.lock().unwrap();
@@ -913,19 +898,18 @@ impl WasmRuntime {
         (*self.publications).clone()
     }
 
-    /// Close the incarnation's guest half (ADR 024 §6 step 2). The incarnation's inbox closes,
-    /// the guest's `serve` drains (or, for a [`CloseMode::Forced`] close with requests in
-    /// flight, is abandoned), the publication leases are released, and the store is dropped.
-    /// The result says which path ran. The caller has already withdrawn outward visibility and
-    /// tears the host incarnation down afterwards.
-    pub async fn close(&self, mode: CloseMode) -> Result<GuestClose, String> {
+    /// Close the incarnation's guest half (ADR 024 §6 step 2). The incarnation stops taking
+    /// presentation and document calls, its `instance-root.close` runs to completion, the
+    /// root and the publication leases are released, and the store is dropped. The caller has
+    /// already withdrawn outward visibility and tears the host incarnation down afterwards.
+    pub async fn close(&self) -> Result<(), String> {
         let mut active = self
             .incarnation
             .lock()
             .unwrap()
             .take()
             .ok_or_else(|| "the incarnation already ended".to_owned())?;
-        active.close(mode).await
+        active.close().await
     }
 
     /// Mount the presentation this incarnation published as `publication`.

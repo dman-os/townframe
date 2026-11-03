@@ -23,14 +23,6 @@
         "version": 1
       },
       "retention": "strong"
-    },
-    {
-      "id": "relay",
-      "contract": {
-        "id": "dayframe.lifecycle.relay",
-        "version": 1
-      },
-      "retention": "strong"
     }
   ],
   "requires": [

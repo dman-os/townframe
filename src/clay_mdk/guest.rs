@@ -21,40 +21,23 @@ pub use crate::mirror::MirrorStatus;
 pub use crate::mirror::MirrorWatch;
 pub use dom::GuestDom;
 
-use crate::capability_bank;
 use crate::documents;
-use crate::lifecycle_host_requests;
 use crate::micro_lifecycle;
 use crate::mirror::DocumentMirror;
 use crate::presentation;
 use crate::presentation_events;
-use crate::serve;
 use dioxus::prelude::*;
-use futures::FutureExt as _;
-use futures::future::LocalBoxFuture;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::Mutex;
-use wit_bindgen::rt::async_support::StreamReader;
 
 mod dom;
-
-type Handler = Arc<dyn Fn(Vec<u8>) -> LocalBoxFuture<'static, serve::Outcome> + Send + Sync>;
-
-/// The call handlers `activate` registered, by publication name. A `static`, not a
-/// thread-local: `serve` runs in its own export task, which does not share thread-local state
-/// with `initialize` or the sync presentation exports.
-static HANDLERS: Mutex<BTreeMap<String, Handler>> = Mutex::new(BTreeMap::new());
 
 /// The value surface one guest activation may use: its granted configuration documents and the
 /// publication of its presentation. Constructed only by the runtime behind [`export_micro!`].
 pub struct Context {
     configs: BTreeMap<String, ConfigDocument>,
-    published: RefCell<Vec<micro_lifecycle::NamedPublication>>,
     presentation: Rc<RefCell<Option<GuestDom>>>,
     changes: Rc<Cell<Option<Signal<u64>>>>,
 }
@@ -65,42 +48,6 @@ impl Context {
     /// activated the micro standalone.
     pub fn config(&self, name: &str) -> Option<&ConfigDocument> {
         self.configs.get(name)
-    }
-
-    /// Publish a call named `name` under `contract` and serve it with `handler`. The MDK's
-    /// `serve` loop runs one `handler` future per request, concurrently with every other
-    /// request, and drops it if the caller gives up. `name` must be a call the manifest
-    /// declares.
-    ///
-    /// Handlers run in the guest's `serve` task, which does not share thread-local state with
-    /// the sync presentation exports: state a handler shares with the presentation must live in
-    /// a `static`.
-    pub fn publish_call<F>(
-        &self,
-        name: &str,
-        contract: &capability_bank::Contract,
-        handler: impl Fn(Vec<u8>) -> F + Send + Sync + 'static,
-    ) -> Result<(), capability_bank::CapabilityError>
-    where
-        F: Future<Output = serve::Outcome> + 'static,
-    {
-        let capability = capability_bank::publish_call(name, contract)?;
-        self.published
-            .borrow_mut()
-            .push(micro_lifecycle::NamedPublication {
-                name: name.to_owned(),
-                capability,
-            });
-        let handler: Handler = Arc::new(move |payload| handler(payload).boxed_local());
-        assert!(
-            HANDLERS
-                .lock()
-                .unwrap()
-                .insert(name.to_owned(), handler)
-                .is_none(),
-            "guest micro published call {name:?} twice"
-        );
-        Ok(())
     }
 
     /// Publish this micro's presentation. The host mounts it into every placement it grants the
@@ -150,6 +97,8 @@ macro_rules! export_micro {
         struct ClayMdkExportedMicro;
 
         impl $crate::micro_lifecycle::Guest for ClayMdkExportedMicro {
+            type InstanceRoot = $crate::StatelessRoot;
+
             async fn initialize(
                 context: $crate::micro_lifecycle::InitialContext,
             ) -> ::std::result::Result<
@@ -159,8 +108,11 @@ macro_rules! export_micro {
                 $crate::guest::Runtime::initialize($activate, context)
             }
 
-            async fn serve(inbox: $crate::serve::Inbox) {
-                $crate::guest::Runtime::serve(inbox).await
+            async fn call(
+                publication: ::std::string::String,
+                _request: ::std::vec::Vec<u8>,
+            ) -> ::std::result::Result<::std::vec::Vec<u8>, ::std::string::String> {
+                $crate::guest::Runtime::call(&publication)
             }
         }
 
@@ -222,7 +174,7 @@ thread_local! {
 
 impl Runtime {
     /// The MDK's `initialize`: bind the granted configuration documents, run `activate`, and
-    /// answer with the calls `activate` published. Bindings the authoring surface
+    /// answer with a [`crate::StatelessRoot`] and no named publications. Bindings the authoring surface
     /// cannot express yet (collections, registrations, requirements) are a configuration the
     /// micro cannot run under, not a guest fault. `arguments` are unused: no MDK micro takes
     /// any yet.
@@ -250,7 +202,6 @@ impl Runtime {
                 .into_iter()
                 .map(|binding| (binding.name.clone(), mirror.bind(binding)))
                 .collect(),
-            published: RefCell::default(),
             presentation: presentation.clone(),
             changes: changes.clone(),
         };
@@ -277,7 +228,8 @@ impl Runtime {
         activate(&context)
             .map_err(|error| micro_lifecycle::InitializationError::Rejected(error.to_string()))?;
         Ok(micro_lifecycle::Initialized {
-            publications: context.published.take(),
+            root: micro_lifecycle::InstanceRoot::new(crate::StatelessRoot),
+            publications: Vec::new(),
         })
     }
 
@@ -340,20 +292,9 @@ impl Runtime {
         });
     }
 
-    /// The incarnation's main loop: one handler per request, looked up by publication name in
-    /// the handlers `activate` registered through [`Context::publish_call`].
-    pub async fn serve(inbox: StreamReader<lifecycle_host_requests::Request>) {
-        serve::run(inbox, |publication, payload| {
-            let handler = HANDLERS.lock().unwrap().get(publication).cloned();
-            match handler {
-                Some(handler) => handler(payload),
-                None => {
-                    let message = format!("this guest micro serves no call {publication:?}");
-                    async move { Err(message) }.boxed_local()
-                }
-            }
-        })
-        .await
+    /// The MDK authoring surface publishes no calls yet, so every publication name is refused.
+    pub fn call(publication: &str) -> Result<Vec<u8>, String> {
+        Err(format!("this guest micro serves no call {publication:?}"))
     }
 
     /// A guest micro has exactly one presentation until the authoring API grows named

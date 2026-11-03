@@ -67,7 +67,7 @@ interface capability-bank {
     /// Publish a presentation named `name`; the host serves it through `mount`.
     publish-presentation: func(name: string) -> result<published-capability, capability-error>;
 
-    /// Publish a call named `name` under `contract`; the host routes its requests into the
-    /// incarnation's `micro-lifecycle.serve` inbox with `request.publication` set to `name`.
+    /// Publish a call named `name` under `contract`; the host serves it through the exported
+    /// `micro-lifecycle.call`.
     publish-call: func(name: string, contract: contract) -> result<published-capability, capability-error>;
 }
