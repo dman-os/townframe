@@ -17,7 +17,6 @@
 //! not stable across restarts. The stable identity is the installation key bytes.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -28,14 +27,12 @@ use clay_store::OrderedStore;
 use clay_store::StoreError;
 
 use super::Inner;
-use super::InstallError;
-use super::Materializer;
 use super::RegistrationCollection;
 use super::RegistrationDispatch;
-use super::ScopeRank;
 use super::ScopeState;
 use crate::replica::Entry;
 use crate::source::Source;
+use crate::types::Change;
 use crate::types::RegistrationScopeId;
 use crate::types::RowEvidence;
 
@@ -122,28 +119,12 @@ pub(super) fn split_row_key(collection_prefix_len: usize, key: &[u8]) -> (&[u8],
     rest.split_at(length)
 }
 
-impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> Inner<K, V, P, S> {
-    fn installation_rank(
-        &self,
-        scope_key: &[u8],
-        except: Option<RegistrationScopeId>,
-    ) -> Option<ScopeRank> {
-        let Materializer::Priority {
-            installation_rank, ..
-        } = &self.materializer
-        else {
-            return None;
-        };
-        self.checked_rank(Some(installation_rank(scope_key)), except)
-    }
-
-    /// The scope for an installation key, created empty if new. Under
-    /// [`Materializer::Priority`] its rank is the policy's `installation_rank` of the key.
+impl<K, V, P, S: Source<P, V>> Inner<K, V, P, S> {
+    /// The scope for an installation key, created empty if new.
     fn installation_scope(&mut self, scope_key: &[u8]) -> RegistrationScopeId {
         if let Some(id) = self.installations.get(scope_key) {
             return *id;
         }
-        let rank = self.installation_rank(scope_key, None);
         let id = self.next_scope_id();
         assert!(
             self.scopes
@@ -152,8 +133,6 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> Inner<K, V, P, S
                     ScopeState {
                         rows: BTreeMap::new(),
                         staged: false,
-                        rank,
-                        install_key: Some(scope_key.to_vec()),
                     },
                 )
                 .is_none()
@@ -164,8 +143,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> Inner<K, V, P, S
 }
 
 impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
-    /// [`Self::with_durable_source`] with the [`Materializer::Union`] tuple physical key
-    /// and no source.
+    /// [`Self::with_durable_source`] with the default physical key and no source.
     pub async fn new_durable<St: OrderedStore + Send + Sync + 'static>(
         store: Arc<St>,
         collection_id: Vec<u8>,
@@ -179,9 +157,7 @@ impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
             (),
             NonZeroUsize::new(256).unwrap(),
             runtime_epoch,
-            Materializer::Union {
-                key: |scope, key| (scope, key.clone()),
-            },
+            |scope, key| (scope, key.clone()),
         )
         .await
     }
@@ -189,11 +165,8 @@ impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
 
 impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationCollection<K, V, P, S> {
     /// Build a durable collection: scan the collection's key range, rebuild its
-    /// installation scopes, publish their materialized rows as one transaction, and only
-    /// then return, so a reader's first bootstrap page already contains them. Only
-    /// installation rows are stored, so the materialized view of a reopened collection is
-    /// the same function of them under the same `materializer` (a `Priority` rank comes
-    /// from `installation_rank`, so it is restored too).
+    /// installation scopes, publish their rows as one transaction, and only then return,
+    /// so a reader's first bootstrap page already contains them.
     ///
     /// `St` must be `Send + Sync` because the collection handle is; a store whose futures
     /// are `!Send` is fine, its handle is not.
@@ -204,18 +177,18 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         source: S,
         replay_capacity: NonZeroUsize,
         runtime_epoch: [u64; 2],
-        materializer: Materializer<K, V, P>,
+        physical: fn(RegistrationScopeId, &K) -> P,
     ) -> Result<Self, StoreError> {
         let prefix = collection_prefix(&collection_id);
         let stored = store.scan_prefix(&prefix).await?;
-        let collection =
-            Self::with_materializer(source, replay_capacity, runtime_epoch, materializer);
+        let collection = Self::with_source(source, replay_capacity, runtime_epoch, physical);
         let mut inner = collection.lock();
         inner.durable = Some(Durable {
             store,
             collection_id,
             codec,
         });
+        let mut changes = Vec::with_capacity(stored.len());
         for (key, value) in stored {
             let (scope_key, local_key) = split_row_key(prefix.len(), &key);
             let id = inner.installation_scope(scope_key);
@@ -226,12 +199,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
                 evidence: RowEvidence::Authoritative,
                 write_context: None,
             };
-            if inner.rejects_collisions() {
-                assert!(
-                    inner.holder(&local_key, Some(id)).is_none(),
-                    "stored installation rows collide under RejectCollision"
-                );
-            }
+            changes.push(upsert(physical, id, &local_key, &entry));
             inner
                 .scopes
                 .get_mut(&id)
@@ -239,7 +207,6 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
                 .rows
                 .insert(local_key, entry);
         }
-        let changes = inner.full_changes();
         if !changes.is_empty() {
             // No leases exist yet, so there is nobody to wake.
             inner.projection.publish(changes);
@@ -257,39 +224,18 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
 
     /// Replace installation scope `scope_key` with exactly `rows`: one atomic store
     /// `apply` (`DeletePrefix` of the scope plus a `Put` per row), then one projection
-    /// transaction recomputing every key the old or new rows touch, so under a merged
-    /// policy a key another scope still contributes to is recomputed rather than removed.
-    /// An [`InstallError`] returns before any store or visible change; under
-    /// [`Materializer::RejectCollision`] it reports a key another scope holds. Wakes are
-    /// returned, not fired.
+    /// transaction with an upsert per row and a remove per row that is gone. A
+    /// `StoreError` returns before any visible change. Wakes are returned, not fired.
     ///
     /// Not safe against a concurrent `install`/`uninstall` of the same scope across an
     /// await: the supervisor serializes installation on its single-threaded executor.
-    /// The same serialization is what keeps the collision check made before the store
-    /// `apply` valid after it.
     pub async fn install(
         &self,
         scope_key: &[u8],
         rows: BTreeMap<K, V>,
-    ) -> Result<RegistrationDispatch<K, V, P, S>, InstallError> {
+    ) -> Result<RegistrationDispatch<K, V, P, S>, StoreError> {
         let durable = self.durable_handle();
         let codec = durable.codec;
-        {
-            let inner = self.lock();
-            let own = inner.installations.get(scope_key).copied();
-            if own.is_none() {
-                // A new installation scope panics here, not after the store write, if
-                // its rank is taken.
-                inner.installation_rank(scope_key, None);
-            }
-            if inner.rejects_collisions() {
-                for key in rows.keys() {
-                    if let Some(holder) = inner.holder(key, own) {
-                        return Err(InstallError::Collision { holder });
-                    }
-                }
-            }
-        }
         let prefix = scope_prefix(&durable.collection_id, scope_key);
         let mut batch = Vec::with_capacity(rows.len() + 1);
         batch.push(BatchOp::DeletePrefix(prefix.clone()));
@@ -302,38 +248,42 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         durable.store.apply(batch).await?;
 
         let mut inner = self.lock();
-        let mut touched: BTreeSet<K> = rows.keys().cloned().collect();
-        if let Some(id) = inner.installations.get(scope_key) {
-            touched.extend(inner.scopes[id].rows.keys().cloned());
+        let id = inner.installation_scope(scope_key);
+        let physical = inner.physical;
+        let mut changes = Vec::new();
+        let mut fresh = BTreeMap::new();
+        for (key, value) in rows {
+            let entry = Entry {
+                version: inner.next_version(),
+                value,
+                evidence: RowEvidence::Authoritative,
+                write_context: None,
+            };
+            changes.push(upsert(physical, id, &key, &entry));
+            fresh.insert(key, entry);
         }
-        let (previous, projection) = inner.commit(&touched, None, |inner| {
-            let id = inner.installation_scope(scope_key);
-            let fresh = rows
-                .into_iter()
-                .map(|(key, value)| {
-                    let entry = Entry {
-                        version: inner.next_version(),
-                        value,
-                        evidence: RowEvidence::Authoritative,
-                        write_context: None,
-                    };
-                    (key, entry)
-                })
-                .collect();
-            std::mem::replace(&mut inner.scopes.get_mut(&id).unwrap().rows, fresh)
-        });
-        let dispatch = RegistrationDispatch {
-            projection,
-            rows: vec![previous],
-            ..RegistrationDispatch::default()
-        };
+        let previous = std::mem::replace(&mut inner.scopes.get_mut(&id).unwrap().rows, fresh);
+        for key in previous.keys() {
+            if !inner.scopes[&id].rows.contains_key(key) {
+                changes.push(Change::Remove {
+                    key: physical(id, key),
+                    row_version: inner.next_version(),
+                });
+            }
+        }
+        let mut dispatch = RegistrationDispatch::default();
+        if !changes.is_empty() {
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(changes));
+        }
+        dispatch.rows.push(previous);
         drop(inner);
         Ok(dispatch)
     }
 
     /// Remove installation scope `scope_key`: one store `DeletePrefix`, then one
-    /// projection transaction recomputing its keys, which reveals whatever other scopes
-    /// still contribute under a merged policy. An unknown scope is a no-op. A
+    /// projection transaction removing its rows. An unknown scope is a no-op. A
     /// `StoreError` returns before any visible change. Wakes are returned, not fired.
     pub async fn uninstall(
         &self,
@@ -347,21 +297,43 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
             .await?;
 
         let mut inner = self.lock();
-        let Some(id) = inner.installations.get(scope_key).copied() else {
+        let mut dispatch = RegistrationDispatch::default();
+        let Some(id) = inner.installations.remove(scope_key) else {
             drop(inner);
-            return Ok(RegistrationDispatch::default());
+            return Ok(dispatch);
         };
-        let touched: BTreeSet<K> = inner.scopes[&id].rows.keys().cloned().collect();
-        let (state, projection) = inner.commit(&touched, None, |inner| {
-            inner.installations.remove(scope_key);
-            inner.scopes.remove(&id).unwrap()
-        });
-        let dispatch = RegistrationDispatch {
-            projection,
-            rows: vec![state.rows],
-            ..RegistrationDispatch::default()
-        };
+        let state = inner.scopes.remove(&id).unwrap();
+        let physical = inner.physical;
+        let changes: Vec<_> = state
+            .rows
+            .keys()
+            .map(|key| Change::Remove {
+                key: physical(id, key),
+                row_version: inner.next_version(),
+            })
+            .collect();
+        if !changes.is_empty() {
+            dispatch
+                .projection
+                .push(inner.projection.publish_deferred(changes));
+        }
+        dispatch.rows.push(state.rows);
         drop(inner);
         Ok(dispatch)
+    }
+}
+
+fn upsert<K, V: Clone, P>(
+    physical: fn(RegistrationScopeId, &K) -> P,
+    id: RegistrationScopeId,
+    key: &K,
+    entry: &Entry<V>,
+) -> Change<P, V> {
+    Change::Upsert {
+        key: physical(id, key),
+        row_version: entry.version,
+        value: entry.value.clone(),
+        evidence: entry.evidence,
+        write_context: entry.write_context.clone(),
     }
 }
