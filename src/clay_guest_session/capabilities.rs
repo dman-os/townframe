@@ -97,25 +97,13 @@ pub enum PublicationKind {
 }
 
 /// Runs a Call publication's handler inside the provider incarnation. The engine supplies
-/// one that routes the request into the guest's `serve` inbox (a caller must never touch the
-/// provider's store directly); it must be `Send` because it lives in the publication record
-/// that recipients' engine state holds. It answers [`CapabilityFailure::Revoked`] when the
-/// incarnation ended before the handler answered, [`CapabilityFailure::LimitExceeded`] when
-/// the incarnation already serves its limit of requests, and [`CallError::Provider`] with the
-/// handler's own rejection.
-///
-/// The request is submitted when `call` is invoked, not when the returned future is first
-/// polled. Dropping the future tells the handler its caller gave up.
+/// one that reaches the guest's exported `call` through the provider's own driver (a caller
+/// must never touch the provider's store directly); it must be `Send` because it lives in the
+/// publication record that recipients' engine state holds. It answers
+/// [`CapabilityFailure::Revoked`] when the incarnation ended before the handler could run, and
+/// [`CallError::Provider`] with the handler's own rejection.
 pub trait CallTarget: Send + Sync {
-    /// `retain` is the caller's strong edge to the provider when the reference was lazy. The
-    /// target holds it until the handler answers or drops its responder, which can outlive the
-    /// returned future when the caller cancels, so a handler that is still running keeps its
-    /// provider from idle-closing under it.
-    fn call(
-        &self,
-        request: Vec<u8>,
-        retain: Option<Lease<CapabilityPublication>>,
-    ) -> BoxFuture<'static, Result<Vec<u8>, CallError>>;
+    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>>;
 }
 
 /// A publication the manifest declares: what an incarnation's returned publication of that
@@ -557,9 +545,9 @@ impl CapabilityRef {
 
     /// One call. A lazy reference holds its lease only until the response arrives.
     pub async fn call(&self, request: Vec<u8>) -> Result<Vec<u8>, CallError> {
-        let (publication, lease) = self.resolve(PublicationKind::Call).await?;
+        let (publication, _lease) = self.resolve(PublicationKind::Call).await?;
         publication
-            .invoke(&self.0.recipient.instance, request, lease)
+            .invoke(&self.0.recipient.instance, request)
             .await
     }
 
@@ -625,16 +613,11 @@ impl CapabilityRef {
 }
 
 impl CapabilityPublication {
-    async fn invoke(
-        &self,
-        recipient: &Instance,
-        request: Vec<u8>,
-        retain: Option<Lease<CapabilityPublication>>,
-    ) -> Result<Vec<u8>, CallError> {
+    async fn invoke(&self, recipient: &Instance, request: Vec<u8>) -> Result<Vec<u8>, CallError> {
         let Behavior::Call(target) = self.inner.live(recipient)? else {
             return Err(CapabilityFailure::ContractMismatch.into());
         };
-        target.call(request, retain).await
+        target.call(request).await
     }
 }
 
@@ -668,7 +651,7 @@ impl CallBinding {
         self.0.recipient.check()?;
         self.0
             .publication
-            .invoke(&self.0.recipient.instance, request, None)
+            .invoke(&self.0.recipient.instance, request)
             .await
     }
     pub fn is_revoked(&self) -> bool {

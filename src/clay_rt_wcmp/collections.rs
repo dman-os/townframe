@@ -330,8 +330,9 @@ impl cap_wit::Host for WcmpStoreState {
         _contract: cap_wit::Contract,
     ) -> wcmp::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
         todo!(
-            "C3c: a call publication needs a CallTarget that feeds the guest's `serve` inbox, \
-             like the Wasmtime adapter's GuestCallTarget; waits on `spawn` in the polyfill"
+            "C3c: a call publication needs a CallTarget that runs the guest's exported `call` \
+             in this incarnation's own store, routed through its driver like the Wasmtime \
+             adapter's GuestCallTarget"
         )
     }
 }

@@ -21,7 +21,6 @@ pub use instance::RendererRegistry;
 pub use instance::RootMount;
 pub use supervisor::Activator;
 pub use supervisor::CloseError;
-pub use supervisor::CloseMode;
 pub use supervisor::ConfiguredMicro;
 pub use supervisor::Factory;
 pub use supervisor::Initialized;

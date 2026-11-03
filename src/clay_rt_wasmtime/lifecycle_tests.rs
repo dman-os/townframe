@@ -1,11 +1,8 @@
 use super::tests::RecordingSink;
 use super::*;
-use clay_guest_session::GuestClose;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
-use clay_guest_session::lifecycle_conformance::Mounted;
-use clay_host::CloseMode;
 use clay_host::LocalFuture;
 use clay_surface::SurfaceTree;
 use std::rc::Rc;
@@ -45,15 +42,16 @@ impl Incarnations for Wasmtime {
         runtime.publications()
     }
 
-    fn mount(runtime: &WasmRuntime, publication: &str) -> Result<Mounted, String> {
+    fn mount(runtime: &WasmRuntime, publication: &str) -> Result<Box<dyn std::any::Any>, String> {
         let sink = Arc::new(RecordingSink::new());
         let session = runtime
             .mount(publication, Arc::clone(&sink) as _, &[])
             .map_err(|error| format!("{error:?}"))?;
-        Ok(Mounted {
-            session: Box::new(session),
-            rendered: sink.tree(SurfaceTree::text_content),
-        })
+        let rendered = sink.tree(SurfaceTree::text_content);
+        if rendered != "lifecycle provider" {
+            return Err(format!("the guest rendered {rendered:?}"));
+        }
+        Ok(Box::new(session))
     }
 
     fn inspect(runtime: &WasmRuntime) -> GuestResidue {
@@ -66,14 +64,11 @@ impl Incarnations for Wasmtime {
         )
     }
 
-    fn close(
-        runtime: WasmRuntime,
-        mode: CloseMode,
-    ) -> LocalFuture<'static, (Result<GuestClose, String>, GuestResidue)> {
+    fn close(runtime: WasmRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
         Box::pin(async move {
             let taken = runtime.incarnation.lock().unwrap().take();
             let mut active = taken.expect("only a live incarnation is closed");
-            let closed = active.close(mode).await;
+            let closed = active.close().await;
             let state = active.store.data();
             (
                 closed,
@@ -146,79 +141,5 @@ async fn undeclared_publications_fail_initialization() {
     let engine = Wasmtime::load().await;
     tokio::task::LocalSet::new()
         .run_until(lifecycle_conformance::undeclared_publications_fail_initialization(engine))
-        .await;
-}
-
-#[tokio::test]
-async fn lifecycle_conformance_suspended_call_does_not_block_sync_entry() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::suspended_call_does_not_block_sync_entry(engine))
-        .await;
-}
-
-#[tokio::test]
-async fn lifecycle_conformance_two_calls_into_one_micro_are_in_flight_together() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::two_calls_into_one_micro_are_in_flight_together(engine))
-        .await;
-}
-
-#[tokio::test]
-async fn lifecycle_conformance_reentrant_call_chain_completes() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::reentrant_call_chain_completes(
-            engine,
-        ))
-        .await;
-}
-
-#[tokio::test]
-async fn lifecycle_conformance_close_revokes_calls_in_flight() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::close_revokes_calls_in_flight(engine))
-        .await;
-}
-
-#[tokio::test]
-async fn lifecycle_conformance_orderly_close_drains() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::orderly_close_drains(engine))
-        .await;
-}
-
-#[tokio::test]
-async fn lifecycle_conformance_cancellation_reaches_the_guest() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::cancellation_reaches_the_guest(
-            engine,
-        ))
-        .await;
-}
-
-#[tokio::test]
-async fn lifecycle_conformance_requests_over_the_limit_are_refused() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(lifecycle_conformance::requests_over_the_limit_are_refused(
-            engine,
-        ))
-        .await;
-}
-
-#[tokio::test]
-async fn lifecycle_conformance_mdk_guest_shares_thread_locals_between_serve_and_sync_exports() {
-    let engine = Wasmtime::load().await;
-    tokio::task::LocalSet::new()
-        .run_until(
-            lifecycle_conformance::mdk_guest_shares_thread_locals_between_serve_and_sync_exports(
-                engine,
-            ),
-        )
         .await;
 }

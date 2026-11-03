@@ -32,7 +32,7 @@ pub enum Lifecycle {
     Initializing,
     Active,
     /// Outward visibility has been withdrawn; the incarnation's own authority and its
-    /// dependencies stay usable so cleanup (the guest draining its `serve` inbox) can run.
+    /// dependencies stay usable so cleanup (`instance-root.close()`) can run.
     Closing,
     Closed,
 }

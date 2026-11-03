@@ -977,11 +977,7 @@ async fn execution_and_linear_memory_are_bounded_per_incarnation() {
     let host = Host::new();
     let package = counter_package().await;
     let (mut active, _incoming, _calls) = package
-        .instantiate(
-            &host,
-            host.start("bounded"),
-            clay_guest_session::DEFAULT_IN_FLIGHT_REQUESTS,
-        )
+        .instantiate(&host, host.start("bounded"))
         .await
         .unwrap();
     let wasm = wat::parse_str(

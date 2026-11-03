@@ -15,6 +15,8 @@ use dioxus_core::WriteMutations;
 struct Slots;
 
 impl micro_lifecycle::Guest for Slots {
+    type InstanceRoot = clay_mdk::StatelessRoot;
+
     async fn initialize(
         context: micro_lifecycle::InitialContext,
     ) -> Result<micro_lifecycle::Initialized, micro_lifecycle::InitializationError> {
@@ -24,16 +26,13 @@ impl micro_lifecycle::Guest for Slots {
         assert!(context.registrations.is_empty());
         assert!(context.requirements.is_empty());
         Ok(micro_lifecycle::Initialized {
+            root: micro_lifecycle::InstanceRoot::new(clay_mdk::StatelessRoot),
             publications: Vec::new(),
         })
     }
 
-    async fn serve(inbox: clay_mdk::serve::Inbox) {
-        clay_mdk::serve::run(inbox, |publication, _payload| {
-            let message = format!("slot fixture serves no call {publication:?}");
-            Box::pin(async move { Err(message) })
-        })
-        .await
+    async fn call(publication: String, _request: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err(format!("slot fixture serves no call {publication:?}"))
     }
 }
 

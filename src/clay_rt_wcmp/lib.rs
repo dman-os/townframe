@@ -12,7 +12,6 @@ mod documents;
 mod wasi;
 
 use clay_guest_session::DocumentSession;
-use clay_guest_session::GuestClose;
 pub use clay_guest_session::InitialContext;
 pub use clay_guest_session::InitializationFailure;
 use clay_guest_session::Limits as DocumentLimits;
@@ -23,7 +22,6 @@ use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
 use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
-use clay_host::CloseMode;
 use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
@@ -51,6 +49,7 @@ use wcmp::Engine;
 use wcmp::HasSelf;
 use wcmp::Linker;
 use wcmp::Resource;
+use wcmp::ResourceAny;
 use wcmp::ResourceTable;
 use wcmp::Store;
 
@@ -84,7 +83,6 @@ mod bindings {
             "townframe:dayframe/capability-bank.call-binding": clay_guest_session::capabilities::CallBinding,
             "townframe:dayframe/capability-bank.published-capability": clay_guest_session::capabilities::PublishedCapability,
             "townframe:dayframe/capability-bank.presentation-component": clay_guest_session::capabilities::PresentationComponent,
-            "townframe:dayframe/lifecycle-host-requests.responder": super::WcmpResponder,
         },
     });
 }
@@ -94,34 +92,6 @@ use bindings::exports::townframe::dayframe::presentation_events;
 pub use bindings::townframe::dayframe::presentation as wit_presentation;
 
 pub struct WcmpComponentRef(ComponentRef);
-
-/// The host state behind a guest `responder` resource. The WCMP engine does not serve requests
-/// yet (C3c): the polyfill has no `spawn` for the guest's `serve` task, so no request can reach
-/// a guest and none is ever created.
-pub struct WcmpResponder;
-
-impl bindings::townframe::dayframe::lifecycle_host_requests::Host for WcmpStoreState {}
-
-impl bindings::townframe::dayframe::lifecycle_host_requests::HostResponder for WcmpStoreState {
-    fn respond(
-        &mut self,
-        _responder: Resource<WcmpResponder>,
-        _outcome: Result<Vec<u8>, String>,
-    ) -> wcmp::Result<()> {
-        todo!("C3c: answer the request's oneshot, as the Wasmtime adapter's inbox::Responder does")
-    }
-
-    fn cancelled(
-        &mut self,
-        _responder: Resource<WcmpResponder>,
-    ) -> wcmp::Result<wcmp::FutureReader<()>> {
-        todo!("C3c: a future that resolves when the caller's call future is dropped")
-    }
-
-    fn drop(&mut self, _responder: Resource<WcmpResponder>) -> wcmp::Result<()> {
-        todo!("C3c: an unanswered drop reports a provider error to the caller")
-    }
-}
 
 pub use clay_guest_session::Placement as WcmpPlacement;
 pub use clay_guest_session::Surface as WcmpSurface;
@@ -441,6 +411,8 @@ struct WcmpIncarnation {
     client: MicroClient,
     wake: Arc<IncarnationWake>,
     waker: Waker,
+    /// The guest's `instance-root`, held from a successful `initialize` until [`Self::close`].
+    root: Option<ResourceAny>,
     /// Publication leases of the publications `initialize` returned, by name. Dropping one
     /// revokes the publication and every consumer proxy derived from it.
     publications: BTreeMap<String, PublishedCapability>,
@@ -451,14 +423,30 @@ impl WcmpIncarnation {
         self.store.run_until_stalled()
     }
 
-    /// The guest half of a close (ADR 024 §6): close the guest's inbox and drive `serve` to
-    /// return, or abandon it for a forced close with requests in flight.
-    async fn close(&mut self, _mode: CloseMode) -> Result<GuestClose, String> {
-        todo!(
-            "C3c: the WCMP polyfill has no `spawn`, so `serve` cannot be started as a store task \
-             and its inbox cannot be closed or drained; waits on the operator's decision to add \
-             `spawn` to the polyfill fork"
-        )
+    /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
+    /// incarnation's host authority and dependencies are still live, then drop the root (its
+    /// guest destructor releases whatever the root held) and only then revoke the publications.
+    /// The store itself stays up so a caller can audit what the guest still holds.
+    async fn close(&mut self) -> Result<(), String> {
+        let root = self
+            .root
+            .take()
+            .expect("only an initialized incarnation is closed");
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle();
+        let closed = self
+            .store
+            .run_concurrent(async |accessor| {
+                lifecycle.instance_root().call_close(accessor, root).await
+            })
+            .await
+            .and_then(|trapped| trapped)
+            .map_err(|trap| format!("guest trapped while closing: {trap}"));
+        let dropped = root
+            .resource_drop(&mut self.store.as_context_mut())
+            .map_err(|trap| format!("guest trapped dropping its instance root: {trap}"));
+        self.publications.clear();
+        closed??;
+        dropped
     }
 }
 
@@ -506,11 +494,11 @@ impl WcmpRuntime {
             client,
             wake,
             waker,
+            root: None,
             publications: BTreeMap::new(),
         };
-        // C3c: `serve` is not started here (see `WcmpIncarnation::close`), so this engine
-        // serves no calls and an incarnation cannot close.
-        let leases = documents::initialize(&mut active, context).await?;
+        let (root, leases) = documents::initialize(&mut active, context).await?;
+        active.root = Some(root);
         let publications = leases
             .iter()
             .map(|(name, lease)| (name.clone(), lease.publication()))
@@ -596,13 +584,13 @@ impl WcmpRuntime {
     }
 
     /// Close the incarnation's guest half (ADR 024 §6 step 2). The incarnation stops taking
-    /// presentation and document calls, its `serve` drains or is abandoned (C3c: not
-    /// implemented), the publication leases are released, and the store is dropped. The caller
-    /// has already withdrawn outward visibility and tears the host incarnation down afterwards.
-    pub async fn close(&self, mode: CloseMode) -> Result<GuestClose, String> {
+    /// presentation and document calls, its `instance-root.close` runs to completion, the
+    /// root and the publication leases are released, and the store is dropped. The caller has
+    /// already withdrawn outward visibility and tears the host incarnation down afterwards.
+    pub async fn close(&self) -> Result<(), String> {
         let taken = self.incarnation.borrow_mut().take();
         let mut active = taken.ok_or_else(|| "the incarnation already ended".to_owned())?;
-        active.close(mode).await
+        active.close().await
     }
 
     /// Mount the presentation this incarnation published as `publication`.
@@ -823,17 +811,16 @@ pub mod test_utils {
     pub use crate::wasi::define as define_wasi;
     pub use crate::wit_presentation;
 
-    /// [`crate::WcmpRuntime::close`], inspecting the store once the guest's `serve` returned and
-    /// before the store drops: whatever `inspect` still finds there is what the close path
-    /// leaked.
+    /// [`crate::WcmpRuntime::close`], inspecting the store once the guest released its root
+    /// and provisions and before the store drops: whatever `inspect` still finds there is what
+    /// the close path leaked.
     pub async fn close_inspecting<R>(
         runtime: &crate::WcmpRuntime,
-        mode: clay_host::CloseMode,
         inspect: impl FnOnce(&WcmpStoreState) -> R,
-    ) -> (Result<clay_guest_session::GuestClose, String>, R) {
+    ) -> (Result<(), String>, R) {
         let taken = runtime.incarnation.borrow_mut().take();
         let mut active = taken.expect("only a live incarnation is closed");
-        let closed = active.close(mode).await;
+        let closed = active.close().await;
         (closed, inspect(active.store.data()))
     }
 
