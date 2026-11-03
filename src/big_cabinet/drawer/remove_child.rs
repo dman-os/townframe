@@ -17,13 +17,14 @@ impl Core {
         parent: &DrawerId,
         child: &DrawerId,
     ) -> Result<Option<WriteReceipt>, DrawersError> {
-        // The level is irrelevant to a removal: only which pairs are delegated at all.
+        // The level is irrelevant to a removal: only which delegations exist at all. For a
+        // self-doc child this is exactly the doc grant `link` made (ADR 026 §6).
         let delegations = self.child_delegations(parent, child, Access::Relay).await?;
         let listed = self.state.child_entry(parent, child).await?.is_some();
         let mut delegated = Vec::with_capacity(delegations.len());
-        for (member, group, _) in delegations {
-            if self.group_level(&member, &group).await.is_some() {
-                delegated.push((member, group));
+        for delegation in delegations {
+            if delegation.current(self).await?.is_some() {
+                delegated.push(delegation);
             }
         }
         if !listed && delegated.is_empty() {
@@ -44,11 +45,8 @@ impl Core {
         } else {
             self.roster_receipt(context, parent).await?
         };
-        for (member, group) in delegated {
-            self.big_repo
-                .remove_member_from_group(member, &group)
-                .await
-                .map_err(keyhive_error)?;
+        for delegation in delegated {
+            delegation.revoke(self).await?;
         }
         Ok(Some(receipt))
     }

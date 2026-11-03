@@ -21,9 +21,14 @@ impl DrawerService {
             .await?
             .ok_or_else(|| DrawersError::UnknownDrawer(params.drawer_id.clone()))?;
         let (record, descriptor) = core.rescan(context, &record).await?;
+        let mut meta_docs = core.state.meta_docs_of(&record.drawer_id).await?;
+        if access < Access::Read {
+            meta_docs.remove(&MetaRoot::Sensitive);
+        }
         Ok(DrawerView {
             docs: core.state.docs_of(&record.drawer_id).await?,
             children: core.state.children_of(&record.drawer_id).await?,
+            meta_docs,
             drawer_id: record.drawer_id,
             layout: record.descriptor.layout.clone(),
             descriptor,
@@ -71,9 +76,13 @@ mod tests {
             drawer_id: DocId::new([2; 32]),
             layout: Drawer::self_doc().layout,
             descriptor: Drawer::self_doc(),
-            access: Access::Relay,
+            access: Access::Read,
             docs: BTreeMap::from([(DocId::new([3; 32]), Access::Read)]),
             children: BTreeMap::from([(DocId::new([4; 32]), Access::Write)]),
+            meta_docs: BTreeMap::from([(
+                big_cabinet_core::drawer::MetaRoot::Sensitive,
+                BTreeMap::from([("notes/private".to_owned(), DocId::new([5; 32]))]),
+            )]),
         };
         let value = serde_json::to_value(&view).expect("serialize");
         assert_eq!(
@@ -84,9 +93,10 @@ mod tests {
                 "descriptor": {
                     "layout": { "$type": "org.example.daybook.drawer.selfDoc", "empty": true },
                 },
-                "access": "Relay",
+                "access": "Read",
                 "docs": { DocId::new([3; 32]).to_string(): "Read" },
                 "children": { DocId::new([4; 32]).to_string(): "Write" },
+                "metaDocs": { "sensitive": { "notes/private": DocId::new([5; 32]).to_string() } },
             })
         );
         assert_eq!(

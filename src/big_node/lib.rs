@@ -1,3 +1,5 @@
+mod blob_boot;
+
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
 use big_cabinet::DocsConfig;
@@ -32,6 +34,7 @@ pub struct Config<'a> {
     pub schemas: Arc<SchemaRepo>,
     pub secrets: &'a SecretStore,
     pub index_concurrency: NonZeroUsize,
+    pub blob_storage: big_blobs::Storage,
 }
 
 pub struct BigNode {
@@ -41,6 +44,10 @@ pub struct BigNode {
     pub docs_namespace: Namespace,
     pub drawers_actor: Actor,
     pub drawers_namespace: Namespace,
+    pub blobs_actor: Actor,
+    pub blobs_namespace: Namespace,
+    pub blobs: big_blobs::Blobs,
+    pub blob_workers: big_blobs::workers::BlobWorkers,
     pub indexes: Arc<Indexes>,
     pub drawer_access: Arc<DrawerAccess>,
     pub docs: DocsRepo,
@@ -51,6 +58,11 @@ impl BigNode {
     pub async fn boot(config: Config<'_>) -> Res<(Self, StopToken)> {
         let mut stop = StopToken::default();
         let boot: Res<Self> = async {
+            let schemas = Arc::new(
+                config
+                    .schemas
+                    .with_groups([big_blobs::schema::registration()])?,
+            );
             let (authority, authority_stop) =
                 big_cabinet::authority::boot(config.secrets, config.sql.clone()).await?;
             stop.stages.push(Stage::Service(authority_stop));
@@ -66,6 +78,11 @@ impl BigNode {
             };
             let docs_actor = open("documents").await?;
             let drawers_actor = open("drawers").await?;
+            let blobs_actor = open("blobs").await?;
+            let blobs_namespace = authority
+                .service
+                .open_namespace(blobs_actor.actor_id)
+                .await?;
             let docs_namespace = authority
                 .service
                 .open_namespace(docs_actor.actor_id)
@@ -77,9 +94,17 @@ impl BigNode {
 
             let (repo, repo_stop) = BigRepo::boot(config.sqlite_runtime, config.repo).await?;
             stop.stages.push(Stage::Repo(repo_stop));
+            let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
+                storage: config.blob_storage,
+                sql: config.sql.clone(),
+                authority: authority.client.clone(),
+                namespace: blobs_namespace,
+            })
+            .await?;
+            stop.stages.push(Stage::Service(blobs_stop));
             let (indexes, index_stop) = Indexes::boot(
                 Arc::clone(&repo),
-                Arc::clone(&config.schemas),
+                Arc::clone(&schemas),
                 config.sql.clone(),
                 config.index_concurrency,
             )
@@ -97,13 +122,13 @@ impl BigNode {
             stop.stages.push(Stage::Service(policy_stop));
             let (docs, docs_stop) = big_cabinet::doc::prepare(DocsConfig {
                 big_repo: Arc::clone(&repo),
-                schema_repo: config.schemas,
+                schema_repo: schemas,
                 authority: authority.client.clone(),
                 issuer: docs_actor.capability,
                 namespace: docs_namespace,
                 node_issuer: authority.node_issuer.clone(),
                 access: Arc::clone(&drawer_access) as Arc<dyn DocAccess>,
-                sql: config.sql,
+                sql: config.sql.clone(),
                 datum_set: Some(Arc::clone(&indexes.datum_set)),
                 datum_ref: Some(Arc::clone(&indexes.datum_ref)),
             })
@@ -125,6 +150,18 @@ impl BigNode {
             let (drawers, drawers_stop) =
                 big_cabinet::boot_drawers(DrawerConfig { worker }).await?;
             stop.stages.push(Stage::Service(drawers_stop));
+            let (blob_workers, blob_stop) = blob_boot::boot(
+                config.sql,
+                &blobs,
+                &docs,
+                &drawers,
+                &drawer_access,
+                &repo,
+                Arc::clone(&indexes.datum_set),
+                drawers_actor.capability,
+            )
+            .await?;
+            stop.stages.push(Stage::Service(blob_stop));
             Ok(Self {
                 repo,
                 authority,
@@ -132,6 +169,10 @@ impl BigNode {
                 docs_namespace,
                 drawers_actor,
                 drawers_namespace,
+                blobs_actor,
+                blobs_namespace,
+                blobs,
+                blob_workers,
                 indexes,
                 drawer_access,
                 docs,

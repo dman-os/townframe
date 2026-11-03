@@ -7,6 +7,7 @@ use super::datum_map;
 use super::key;
 use super::note;
 use automerge::ChangeHash;
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::CapId;
@@ -19,6 +20,9 @@ use big_cabinet_core::dmeta::SignatureBytes;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::doc::*;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 use serde_json::json;
 use service_utils_rs::ContextError;
 use std::collections::BTreeMap;
@@ -243,48 +247,82 @@ fn datum_listing_wire() {
 }
 
 #[test]
-fn datum_observed_wire() {
-    for (name, observed) in [
+fn poll_datums_wire() {
+    for (name, event) in [
         (
-            "datum_observed_present",
-            DatumObserved::Entry {
+            "datum_event_enter",
+            DatumEvent::Enter {
                 revision: 7,
                 doc_id: document(1),
+                datums: BTreeMap::from([(
+                    key("main"),
+                    ObservedDatum::Present {
+                        doc_heads: vec![hash(1)],
+                        version: version(&[2]),
+                    },
+                )]),
+            },
+        ),
+        (
+            "datum_event_datum",
+            DatumEvent::Datum {
+                revision: 8,
+                doc_id: document(1),
                 datum_key: key("main"),
-                datum: ObservedDatum::Present {
-                    doc_heads: vec![hash(1)],
-                    version: version(&[2]),
+                datum: ObservedDatum::Removed {
+                    doc_heads: None,
+                    version: version(&[]),
                 },
             },
         ),
         (
-            "datum_observed_access_lost",
-            DatumObserved::Entry {
-                revision: 8,
+            "datum_event_leave",
+            DatumEvent::Leave {
+                revision: 9,
                 doc_id: document(1),
-                datum_key: key("main"),
-                datum: ObservedDatum::AccessLost,
             },
-        ),
-        (
-            "datum_observed_replay_complete",
-            DatumObserved::ReplayComplete { through: 9 },
         ),
     ] {
-        insta::assert_json_snapshot!(name, observed);
+        insta::assert_json_snapshot!(name, event);
     }
     insta::assert_json_snapshot!(
-        "observe_datums_doc",
-        ObserveDatums {
+        "datum_page",
+        DatumPage {
+            events: vec![DatumEvent::Leave {
+                revision: 9,
+                doc_id: document(1),
+            }],
+            through: 9,
+            caught_up: true,
+        }
+    );
+    insta::assert_json_snapshot!(
+        "poll_datums",
+        PollDatums {
             capability: capability(1),
-            scope: ObserveScope::Doc {
-                doc_id: document(1)
+            predicate: Predicate::And {
+                clauses: vec![
+                    Predicate::InDrawer {
+                        drawer_id: document(2),
+                        transitive: false,
+                        at_least: DrawerAccess::Read,
+                    },
+                    Predicate::HasReferenceTo {
+                        target_tag: DatumTag::new("note").unwrap(),
+                        target_doc: None,
+                    },
+                ],
             },
-            after: 3,
+            datums: DatumSelection::Of {
+                tags: [DatumTag::new("note").unwrap()].into_iter().collect(),
+                keys: [key("main")].into_iter().collect(),
+            },
+            after: 7,
+            limit: 50,
+            hold_ms: 250,
         }
     );
 }
-
 #[test]
 fn write_receipt_wire() {
     insta::assert_json_snapshot!(WriteReceipt {

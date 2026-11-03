@@ -4,6 +4,8 @@ members = [
   "./src/am_utils_rs",
   "./src/big_cabinet/",
   "./src/big_cabinet_core/",
+  "./src/big_blobs/",
+  "./src/big_blobs_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",

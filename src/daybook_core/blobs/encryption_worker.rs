@@ -31,8 +31,8 @@
 //! 5. (no step) the pin is derived from that facet, never written here
 //! 6. append the `?via=` resolution URL to the `Blob` facet
 
-use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::*;
+use big_blobs::pair_roots::PairRoots;
 
 use daybook_types::doc::AddDocArgs;
 use daybook_types::doc::Blob;
@@ -54,12 +54,6 @@ use tokio_util::sync::CancellationToken;
 use crate::blobs::BlobId;
 use crate::blobs::blob_id_to_digest_str;
 use crate::blobs::digest_str_to_blob_id_lenient;
-use crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM;
-use crate::blobs::encrypt::CipherBlobProvider;
-use crate::blobs::encrypt::CipherKeySource;
-use crate::blobs::encrypt::EncodingParams;
-use crate::blobs::encrypt::JwkOct;
-use crate::blobs::encrypt::MasterKey;
 use crate::blobs::key_source::DocKeySource;
 use crate::drawer::DrawerRepo;
 use crate::drawer::FacetWriteScope;
@@ -68,6 +62,12 @@ use crate::index::facet_set::DocFacetSetIndexRepo;
 use crate::index::facet_set::FacetSetRevisionStore;
 use crate::index::facet_set::FacetSetSelector;
 use crate::repos::RepoStopToken;
+use big_blobs::encrypt::CONTENT_ENCODING_AES128GCM;
+use big_blobs::encrypt::CipherBlobProvider;
+use big_blobs::encrypt::CipherKeySource;
+use big_blobs::encrypt::EncodingParams;
+use big_blobs::encrypt::JwkOct;
+use big_blobs::encrypt::MasterKey;
 use big_repo::BigKeyhiveGroup;
 use big_repo::SharedPartStore;
 use big_sync::DeltaWalkerSparseStateRepo as _;

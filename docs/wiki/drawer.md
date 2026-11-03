@@ -169,6 +169,12 @@ Now, the roster will specify the different child drawers and in what means they'
 Since we have different drawer archs, child relationships will take many different forms in the graph according to the architectures.
 For example, a single-group drawer that names an agent-groups drawer as a child must do delegation to each of the child's groups from itself.
 
+A single-document drawer may be a child too, but it never enters the parent's metadata group.
+Linking one delegates only the parent's collection group onto that document, the same shape as adding a document entry, while the roster still lists it as a drawer with its own identity.
+The child entry doesn't state which architecture the child uses; that would duplicate the child's own metadata, which could then disagree with it.
+The child's architecture stays a fact of its own metadata, and a node admitting a child entry checks that the delegations behind it match that metadata (a single-document child gets only the collection-group delegation, never a metadata-group one).
+Nodes holding the child below read level don't list it, so they never need its architecture either.
+
 The group-to-group delegation level itself determines how access propagates across parents to children.
 For example, I could add a drawer I only have read access to into another drawer, but since I only have read access, I can only grant read access from child to parent.
 
@@ -198,11 +204,34 @@ Agents can thus do the following operations on drawers by modifying the keyline 
   - Agents can only grant delegations equal to or below the delegation level they were granted
 - Add/remove a child drawer
 
+### Meta documents
+
+Some drawer state is too churny to keep in the drawer metadata document, because every participant and relay syncs that document's history.
+Blob inventories are the first such state; sharded rosters are the same shape.
+That state lives in a separate document, referenced from the metadata document by one fixed slot per kind:
+
+```js
+{
+  "org.example.daybook.drawer.metaDoc/blobInventory": { "docId": "zBlobInventoryA" }
+}
+```
+
+Cabinet stores and projects the slot but doesn't interpret the kind; the owning subsystem does.
+A meta document is granted to the drawer's metadata group, so relay-level participants can read it while nobody but drawer writers can write it.
+It's never a document entry: entries land in the collection group, which a relay-level participant holds as ciphertext only.
+Because one slot per kind means concurrent creators write the same datum, last-write-wins leaves exactly one reference.
+
+See [ADR 019](../adrs/019-cabinet-drawers-and-selective-mirroring.md) "Meta docs" and "Publicness": anything readable by the metadata group is relay-visible, so private drawer metadata belongs in a document entry, not here.
+
 ### Relays
 
 Relays are the highly available nodes that other nodes use as an intermediary.
 In keyline, getting relay access to a group provides visibility to delegations outgoing from the group.
 This allows relays to hold drawers without needing any special grants.
+
+A relay is told about **one** root sponsorship drawer per account, and grows its sponsored set through child entries rather than being handed a flat group of documents.
+It then walks child metadata groups, reads each drawer's descriptor, roster and meta documents, adopts the documents closure and retains the union of the inventory pins it finds there.
+Drawers outside a sponsorship closure stay invisible to it.
 
 ### Public agent
 
@@ -258,6 +287,11 @@ If the relay already has the bytes from someone else, all well and good, but it'
   // Child drawer datum
   "org.example.daybook.drawer.childEntry/zDrawerArchive": {
     "access": "Relay"
+  },
+
+  // Meta document slot, one per kind
+  "org.example.daybook.drawer.metaDoc/blobInventory": {
+    "docId": "zBlobInventoryA"
   }
 }
 ```

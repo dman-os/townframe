@@ -1,0 +1,34 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: "PollDatums\n{\n    capability: capability(1), predicate: Predicate::And\n    {\n        clauses:\n        vec![Predicate::InDrawer\n        {\n            drawer_id: document(2), transitive: false, at_least:\n            DrawerAccess::Read,\n        }, Predicate::HasReferenceTo\n        { target_tag: DatumTag::new(\"note\").unwrap(), target_doc: None, },],\n    }, datums: DatumSelection::Of\n    {\n        tags: [DatumTag::new(\"note\").unwrap()].into_iter().collect(), keys:\n        [key(\"main\")].into_iter().collect(),\n    }, after: 7, limit: 50, hold_ms: 250,\n}"
+---
+{
+  "capability": "01010101-0101-0101-0101-010101010101",
+  "predicate": {
+    "clause": "and",
+    "clauses": [
+      {
+        "clause": "inDrawer",
+        "drawerId": "z8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+        "transitive": false,
+        "atLeast": "Read"
+      },
+      {
+        "clause": "hasReferenceTo",
+        "targetTag": "note"
+      }
+    ]
+  },
+  "datums": {
+    "selection": "of",
+    "tags": [
+      "note"
+    ],
+    "keys": [
+      "org.example.note/main"
+    ]
+  },
+  "after": 7,
+  "limit": 50,
+  "holdMs": 250
+}

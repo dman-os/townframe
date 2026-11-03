@@ -612,6 +612,8 @@ const SUPPLEMENT_KEYS: &[&str] = &[
     "knownValues",
     "const",
     "not",
+    "minimum",
+    "maximum",
 ];
 
 fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str) -> Result<()> {
@@ -676,11 +678,87 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
     Ok(())
 }
 
+/// A supplement position declares an integer when its `type` is `"integer"` or the nullable
+/// `["integer", "null"]` pair the macros emit for optional scalars.
+fn declares_supplement_integer(object: &Map<String, Value>) -> bool {
+    object.get("type").is_some_and(|kind| {
+        kind.as_str() == Some("integer")
+            || kind.as_array().is_some_and(|kinds| {
+                kinds.len() == 2
+                    && kinds.iter().any(|kind| kind == "integer")
+                    && kinds.iter().any(|kind| kind == "null")
+            })
+    })
+}
+
+/// The `minimum`/`maximum` keywords are admitted only as signed 64-bit bounds on an integer
+/// leaf position: never on structural positions, never non-integer, never inverted.
+fn check_supplement_integer_bounds(
+    object: &Map<String, Value>,
+    path: &str,
+    integer: bool,
+) -> Result<()> {
+    if (object.contains_key("minimum") || object.contains_key("maximum"))
+        && [
+            "properties",
+            "required",
+            "items",
+            "anyOf",
+            "oneOf",
+            "additionalProperties",
+            "patternProperties",
+            "not",
+        ]
+        .iter()
+        .any(|key| object.contains_key(*key))
+    {
+        return Err(invalid(
+            path,
+            "integer bounds cannot annotate structural positions",
+        ));
+    }
+    for key in ["minimum", "maximum"] {
+        if let Some(value) = object.get(key)
+            && (!integer || value.as_i64().is_none())
+        {
+            return Err(invalid(
+                path,
+                format!("`{key}` requires a signed 64-bit bound on an integer position"),
+            ));
+        }
+    }
+    if let (Some(minimum), Some(maximum)) = (
+        object.get("minimum").and_then(Value::as_i64),
+        object.get("maximum").and_then(Value::as_i64),
+    ) && minimum > maximum
+    {
+        return Err(invalid(path, "inverted supplement integer bounds"));
+    }
+    Ok(())
+}
+
+/// Whether a sidecar `type` is a string position: a plain `"string"`, or the nullable spelling
+/// `["string", "null"]` an `Option` field's sidecar emits (the nullable overlay strips `null`).
+fn is_string_position(kind: Option<&Value>) -> bool {
+    match kind {
+        Some(Value::String(kind)) => kind == "string",
+        Some(Value::Array(kinds)) => {
+            kinds.iter().any(|kind| kind == "string")
+                && kinds
+                    .iter()
+                    .all(|kind| matches!(kind.as_str(), Some("string" | "null")))
+        }
+        _ => false,
+    }
+}
+
 /// The values a supplement position's own keywords may take: the storage markers, formats and
 /// encodings a native spelling uses, the `not`/`const`/vocabulary spellings a union or string
 /// vocabulary states, and the JSON types a position may declare. Its subschemas are the walk's
 /// concern in [`check_supplement`].
 fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<()> {
+    let integer = declares_supplement_integer(object);
+    check_supplement_integer_bounds(object, path, integer)?;
     if object.get("x-automerge").is_some_and(|marker| {
         !matches!(
             marker.as_str(),
@@ -702,10 +780,20 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
     if object.get("format").is_some_and(|format| {
         !matches!(
             format.as_str(),
-            Some("float" | "double" | "uint64" | "date-time" | "datetime" | "uuid")
+            Some("float" | "double" | "uint8" | "uint64" | "date-time" | "datetime" | "uuid")
         )
     }) {
         return Err(invalid(path, "unsupported supplement format"));
+    }
+    if object.get("format").and_then(Value::as_str) == Some("uint8")
+        && (!integer
+            || object.get("minimum").and_then(Value::as_i64) != Some(0)
+            || object.get("maximum").and_then(Value::as_i64) != Some(255))
+    {
+        return Err(invalid(
+            path,
+            "`uint8` requires integer bounds 0 through 255",
+        ));
     }
     // `pattern` is not a generally admissible constraint: the one spelling the declarations carry
     // is the `Uuid7` definition's, a `uuid`-formatted string, and anything else is refused.
@@ -767,10 +855,12 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
         }
     }
     // A string vocabulary spells its values as `enum` (closed) or `knownValues` (open), the
-    // same list its Lexicon projection carries; the overlay holds the two to agreement.
+    // same list its Lexicon projection carries; the overlay holds the two to agreement. An
+    // optional field's sidecar is a nullable string (`type: ["string", "null"]`), which the
+    // nullable overlay already strips to the non-null branch before it reaches the primary.
     for key in ["enum", "knownValues"] {
         if let Some(values) = object.get(key)
-            && (object.get("type").and_then(Value::as_str) != Some("string")
+            && (!is_string_position(object.get("type"))
                 || !values.as_array().is_some_and(|values| {
                     !values.is_empty() && values.iter().all(Value::is_string)
                 }))
@@ -1144,6 +1234,16 @@ impl Overlay<'_> {
                 format!("supplement type {stated} contradicts primary `{kind}`"),
             ));
         }
+        for key in ["minimum", "maximum"] {
+            if let Some(bound) = object.get(key)
+                && (kind != "integer" || primary.get(key) != Some(bound))
+            {
+                return Err(invalid(
+                    path,
+                    format!("supplement `{key}` contradicts the primary integer bounds"),
+                ));
+            }
+        }
         if let Some(values) = object.get("enum")
             && primary.get("enum") != Some(values)
         {
@@ -1236,6 +1336,11 @@ impl Overlay<'_> {
             let allowed = match marker {
                 Some("float") => matches!(format.as_str(), Some("float" | "double")),
                 Some("uint") => format.as_str() == Some("uint64"),
+                None if kind == "integer" => match format.as_str() {
+                    Some("uint8") => primary["minimum"] == 0 && primary["maximum"] == 255,
+                    Some("uint64") => primary["minimum"].as_i64().is_some_and(|bound| bound >= 0),
+                    _ => false,
+                },
                 Some("timestamp" | "datetime") | None if primary["x-automerge"] == "datetime" => {
                     matches!(format.as_str(), Some("date-time" | "datetime"))
                 }
@@ -1245,8 +1350,10 @@ impl Overlay<'_> {
             if !allowed {
                 return Err(invalid(path, "format is not an operable native supplement"));
             }
-            if marker == Some("float") {
+            if marker == Some("float") || kind == "integer" {
                 primary["format"] = format.clone();
+            }
+            if marker == Some("float") {
                 primary[KEYWORD]["width"] = format.clone();
             }
             // `uuid` is not a storage form and not a `Constraint` format; it is the declaration's

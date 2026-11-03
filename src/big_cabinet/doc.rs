@@ -133,10 +133,8 @@ use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumClaimEvidence;
 use big_cabinet_core::doc::DatumClaimsInspection;
 use big_cabinet_core::doc::DatumListing;
-use big_cabinet_core::doc::DatumObserved;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumRefSelector;
-use big_cabinet_core::doc::DatumSelector;
 use big_cabinet_core::doc::DatumVersion;
 use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocAvailability;
@@ -151,14 +149,10 @@ use big_cabinet_core::doc::ListDatums;
 use big_cabinet_core::doc::LocalDocUsability;
 use big_cabinet_core::doc::MergeDoc;
 use big_cabinet_core::doc::MintDocCapability;
-use big_cabinet_core::doc::ObserveDatums;
 use big_cabinet_core::doc::ObserveDocAvailability;
-use big_cabinet_core::doc::ObserveScope;
-use big_cabinet_core::doc::ObservedDatum;
-use big_cabinet_core::doc::QueriedDatum;
+use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::QueriedDatumRef;
 use big_cabinet_core::doc::QueryDatumRefs;
-use big_cabinet_core::doc::QueryDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::SignatureEvidence;
 use big_cabinet_core::doc::Unaccepted;
@@ -201,10 +195,9 @@ pub struct DocsConfig {
     pub node_issuer: MultibaseKey,
     pub access: Arc<dyn DocAccess>,
     pub sql: Database,
-    /// The datum-set projection backing `ObserveDatums` and `QueryDatums`, if
-    /// the embedder runs one. The embedder owns `DatumSetStore::run`; DocsRepo
-    /// only reads the committed projection. Without it, `ObserveDatums` and
-    /// `QueryDatums` are refused.
+    /// The datum-set projection backing `PollDatums`, if the embedder runs one.
+    /// The embedder owns `DatumSetStore::run`; DocsRepo only reads the committed
+    /// projection. Without it, `PollDatums` is refused.
     pub datum_set: Option<Arc<DatumSetStore>>,
     /// The declared-reference index backing `QueryDatumRefs`, if the embedder
     /// runs one.
@@ -232,8 +225,8 @@ pub struct DocsService {
     datum_set: Option<Arc<DatumSetStore>>,
     datum_ref: Option<Arc<DatumRefStore>>,
     /// Spawns the service's long-lived per-subscription tasks (the
-    /// `ObserveDatums` pumps). Stopped after the host and the mint spawner,
-    /// in reverse construction order.
+    /// `ObserveDocAvailability` pumps). Stopped after the host and the mint
+    /// spawner, in reverse construction order.
     tasks: Spawner,
 }
 
@@ -462,14 +455,13 @@ service_utils_rs::bind_service_protocol! {
             MergeDoc(MergeDoc),
             ReadDatums(ReadDatums),
             ListDatums(ListDatums),
-            QueryDatums(QueryDatums),
+            PollDatums(PollDatums),
             QueryDatumRefs(QueryDatumRefs),
             UnsafeInspectDatum(UnsafeInspectDatum),
             InspectDatumClaims(InspectDatumClaims),
             GetDocAvailability(GetDocAvailability)
         }
         stream {
-            ObserveDatums(ObserveDatums),
             ObserveDocAvailability(ObserveDocAvailability)
         }
     }

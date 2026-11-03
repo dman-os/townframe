@@ -90,6 +90,16 @@ impl Handler<ListDrawers> for DrawerService {
 mod tests {
     use super::*;
 
+    /// The grouped descriptor `a_listing_spells_the_layout_and_the_level` writes out.
+    fn listed_descriptor() -> Drawer {
+        Drawer::single_group(
+            GroupKey([3; 32]),
+            GroupKey([4; 32]),
+            GroupKey([5; 32]),
+            DocId::new([6; 32]),
+        )
+    }
+
     #[test]
     fn a_request_carries_only_capability() {
         let request = ListDrawers {
@@ -110,8 +120,8 @@ mod tests {
     fn a_listing_spells_the_layout_and_the_level() {
         let listed = ListedDrawer {
             drawer_id: DocId::new([2; 32]),
-            layout: Drawer::single_group(GroupKey([3; 32]), GroupKey([4; 32])).layout,
-            descriptor: Drawer::single_group(GroupKey([3; 32]), GroupKey([4; 32])),
+            layout: listed_descriptor().layout,
+            descriptor: listed_descriptor(),
             access: Access::Admin,
         };
         let value = serde_json::to_value(&listed).expect("serialize");
@@ -123,12 +133,16 @@ mod tests {
                     "$type": "org.example.daybook.drawer.singleGroup",
                     "metaGroup": GroupKey([3; 32]).to_string(),
                     "docsGroup": GroupKey([4; 32]).to_string(),
+                    "sensitiveGroup": GroupKey([5; 32]).to_string(),
+                    "sensitiveRoot": DocId::new([6; 32]).to_string(),
                 },
                 "descriptor": {
                     "layout": {
                         "$type": "org.example.daybook.drawer.singleGroup",
                         "metaGroup": GroupKey([3; 32]).to_string(),
                         "docsGroup": GroupKey([4; 32]).to_string(),
+                        "sensitiveGroup": GroupKey([5; 32]).to_string(),
+                        "sensitiveRoot": DocId::new([6; 32]).to_string(),
                     },
                 },
                 "access": "Admin",

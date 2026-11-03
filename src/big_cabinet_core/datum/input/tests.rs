@@ -327,6 +327,250 @@ fn native_supplements_round_trip_through_transactions_without_datetime_precision
 }
 
 #[test]
+fn generated_byte_list_and_nullable_byte_bounds_admit_and_round_trip() {
+    let bytes = serde_json::to_value(schemars::schema_for!(Vec<u8>)).unwrap();
+    let maybe = serde_json::to_value(schemars::schema_for!(Option<u8>)).unwrap();
+    let length = serde_json::to_value(schemars::schema_for!(u64)).unwrap();
+    assert_eq!(bytes["items"]["format"], json!("uint8"));
+    assert_eq!(bytes["items"]["minimum"], json!(0));
+    assert_eq!(bytes["items"]["maximum"], json!(255));
+    let primary = record(
+        json!({
+            "bytes": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "maybe": {"type": "integer", "minimum": 0, "maximum": 255},
+            "length": {"type": "integer", "minimum": 0}
+        }),
+        &["bytes"],
+        &["maybe"],
+    );
+    let universe = supplement(json!({"bytes": bytes, "maybe": maybe, "length": length}));
+    let compiled = Bundle::new(&universe, Vec::new())
+        .validate_lexicon(TAG, &primary, &[])
+        .unwrap();
+    let mut doc = Automerge::new();
+    for value in [
+        json!({"$type": TAG, "bytes": [0, 1, 254, 255], "maybe": 255, "length": i64::MAX}),
+        json!({"$type": TAG, "bytes": [], "maybe": 0, "length": 0}),
+        json!({"$type": TAG, "bytes": [255], "maybe": null}),
+    ] {
+        Stored::check(&compiled, value.clone()).unwrap();
+        reconcile_json_atomic(
+            doc.transaction(),
+            &compiled,
+            &ROOT,
+            "datum".into(),
+            value.clone(),
+        )
+        .unwrap()
+        .commit();
+        let restored = Automerge::load(&doc.save()).unwrap();
+        if let Some(byte) = value["bytes"][0].as_u64() {
+            let (_, datum) = restored.get(ROOT, "datum").unwrap().unwrap();
+            let (_, bytes) = restored.get(datum, "bytes").unwrap().unwrap();
+            assert!(matches!(
+                restored.get(bytes, 0).unwrap().unwrap().0,
+                automerge::Value::Scalar(value) if value.as_ref() == &automerge::ScalarValue::Uint(byte)
+            ));
+        }
+        assert_eq!(
+            hydrate_value(&restored, &ROOT, "datum".into(), &compiled).unwrap(),
+            value
+        );
+    }
+    for value in [
+        json!({"bytes": [-1]}),
+        json!({"bytes": [256]}),
+        json!({"bytes": [1.5]}),
+        json!({"bytes": ["1"]}),
+        json!({"bytes": [null]}),
+        json!({"bytes": [], "maybe": -1}),
+        json!({"bytes": [], "maybe": 256}),
+        json!({"bytes": [], "length": -1}),
+        json!({"bytes": [], "length": u64::MAX}),
+    ] {
+        assert!(!accepts(&compiled, value.clone()), "{value}");
+    }
+}
+
+#[test]
+fn supplement_integer_bounds_restate_primary_limits_without_narrowing_or_widening() {
+    let primary = record(
+        json!({"value": {"type": "integer", "minimum": -2, "maximum": 3}}),
+        &[],
+        &[],
+    );
+    for bounds in [
+        json!({"minimum": -2, "maximum": 3}),
+        json!({"minimum": -2}),
+        json!({"maximum": 3}),
+    ] {
+        let mut annotation = bounds;
+        annotation["type"] = json!("integer");
+        let universe = supplement(json!({"value": annotation}));
+        let compiled = Bundle::new(&universe, Vec::new())
+            .validate_lexicon(TAG, &primary, &[])
+            .unwrap();
+        for value in [-2, 0, 3] {
+            assert!(accepts(&compiled, json!({"value": value})));
+        }
+        for value in [-3, 4] {
+            assert!(!accepts(&compiled, json!({"value": value})));
+        }
+    }
+    for (field, bounds) in [
+        (
+            json!({"type": "integer", "minimum": -2, "maximum": 3}),
+            json!({"minimum": -3}),
+        ),
+        (
+            json!({"type": "integer", "minimum": -2, "maximum": 3}),
+            json!({"minimum": -1}),
+        ),
+        (
+            json!({"type": "integer", "minimum": -2, "maximum": 3}),
+            json!({"maximum": 2}),
+        ),
+        (
+            json!({"type": "integer", "minimum": -2, "maximum": 3}),
+            json!({"maximum": 4}),
+        ),
+        (
+            json!({"type": "integer"}),
+            json!({"minimum": 0, "maximum": 255}),
+        ),
+        (
+            json!({"type": "unknown"}),
+            json!({"minimum": 0, "maximum": 255}),
+        ),
+    ] {
+        let mut annotation = bounds;
+        annotation["type"] = json!("integer");
+        let universe = supplement(json!({"value": annotation}));
+        let error = Bundle::new(&universe, Vec::new())
+            .validate_lexicon(TAG, &record(json!({"value": field}), &[], &[]), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("contradicts"), "{error}");
+    }
+    let universe =
+        supplement(json!({"value": {"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX}}));
+    let compiled = Bundle::new(&universe, Vec::new())
+        .validate_lexicon(
+            TAG,
+            &record(json!({"value": {"type": "integer"}}), &[], &[]),
+            &[],
+        )
+        .unwrap();
+    for value in [i64::MIN, i64::MAX] {
+        assert!(accepts(&compiled, json!({"value": value})));
+    }
+}
+
+#[test]
+fn unsigned_integer_formats_cannot_reinterpret_negative_primary_values() {
+    let universe = supplement(json!({"value": {"type": "integer", "format": "uint64"}}));
+    for field in [
+        json!({"type": "integer"}),
+        json!({"type": "integer", "minimum": -1, "maximum": 255}),
+        json!({"type": "integer", "const": -1}),
+        json!({"type": "integer", "enum": [-1, 0]}),
+    ] {
+        let primary = record(json!({"value": field}), &[], &[]);
+        assert!(accepts(&compile(&primary), json!({"value": -1})));
+        let error = Bundle::new(&universe, Vec::new())
+            .validate_lexicon(TAG, &primary, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("format is not an operable"), "{error}");
+    }
+}
+
+#[test]
+fn malformed_or_unsupported_supplement_bounds_are_rejected_even_when_unused() {
+    let primary = record(
+        json!({"value": {"type": "integer", "minimum": 0, "maximum": 255}}),
+        &[],
+        &[],
+    );
+    let mut annotations = Vec::new();
+    for key in ["minimum", "maximum"] {
+        for bound in [
+            json!(null),
+            json!(true),
+            json!("0"),
+            json!(0.5),
+            json!([]),
+            json!({}),
+            json!(u64::MAX),
+        ] {
+            annotations.push(json!({"type": "integer", key: bound}));
+        }
+        for kind in [
+            json!(null),
+            json!("string"),
+            json!("number"),
+            json!("object"),
+            json!(["integer", "string"]),
+        ] {
+            annotations.push(json!({"type": kind, key: 0}));
+        }
+        annotations.push(json!({key: 0}));
+    }
+    for structure in [
+        json!({"properties": {"nested": {"type": "integer"}}}),
+        json!({"required": ["nested"]}),
+        json!({"items": {"type": "integer"}}),
+        json!({"anyOf": [{"type": "integer"}]}),
+        json!({"oneOf": [{"type": "integer"}]}),
+        json!({"additionalProperties": true}),
+        json!({"patternProperties": {"^[a-z]+$": {"type": "integer"}}}),
+        json!({"not": {"enum": ["org.example.other"]}}),
+    ] {
+        let mut annotation = structure;
+        annotation["type"] = json!("integer");
+        annotation["minimum"] = json!(0);
+        annotation["maximum"] = json!(255);
+        annotations.push(annotation);
+    }
+    annotations.extend([
+        json!({"type": "integer", "minimum": 255, "maximum": 0}),
+        json!({"type": "integer", "format": "uint8"}),
+        json!({"type": "integer", "format": "uint8", "minimum": 0}),
+        json!({"type": "integer", "format": "uint8", "minimum": -1, "maximum": 255}),
+        json!({"type": "integer", "format": "uint8", "minimum": 0, "maximum": 256}),
+        json!({"type": "string", "format": "uint8"}),
+        json!({"type": "integer", "format": "uint16", "minimum": 0, "maximum": 65535}),
+        json!({"type": "integer", "exclusiveMinimum": 0}),
+        json!({"type": "integer", "exclusiveMaximum": 255}),
+        json!({"type": "integer", "multipleOf": 1}),
+        json!({"type": "integer", "minimum": 0, "maximum": 255, "arbitraryKeyword": true}),
+        json!({"anyOf": [{"type": "integer"}, {"type": "null"}], "minimum": 0}),
+    ]);
+    for annotation in annotations {
+        for unused in [false, true] {
+            let mut universe = if unused {
+                supplement(json!({}))
+            } else {
+                supplement(json!({"value": annotation}))
+            };
+            if unused {
+                universe.types.push(crate::datum::TypeDecl {
+                    name: "Unused".to_owned(),
+                    schema: schemars::Schema::try_from(annotation.clone()).unwrap(),
+                });
+            }
+            let error = Bundle::new(&universe, Vec::new())
+                .validate_lexicon(TAG, &primary, &[])
+                .unwrap_err();
+            assert!(
+                matches!(error, LexiconAdmissionError::Invalid { .. }),
+                "{annotation}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_supplement_vocabulary_restates_the_primary_enum_or_is_refused() {
     let primary = record(
         json!({"value": {"type": "string", "enum": ["a", "b"]}}),
@@ -361,6 +605,47 @@ fn a_supplement_vocabulary_restates_the_primary_enum_or_is_refused() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("contradicts"), "{error}");
+}
+
+/// An `Option<open_string>` field's sidecar is `type: ["string", "null"]` with `knownValues`;
+/// the nullable overlay strips `null` before the vocabulary reaches the primary.
+#[test]
+fn a_nullable_string_vocabulary_supplement_is_admitted_as_a_string_position() {
+    let primary = record(
+        json!({
+            "value": {"type": "string", "knownValues": ["ciphertext", "plaintext"]},
+        }),
+        &["value"],
+        &["value"],
+    );
+    let compiled = Bundle::new(
+        &supplement(json!({
+            "value": {
+                "type": ["string", "null"],
+                "knownValues": ["ciphertext", "plaintext"],
+            },
+        })),
+        Vec::new(),
+    )
+    .validate_lexicon(TAG, &primary, &[])
+    .unwrap();
+    assert!(accepts(&compiled, json!({"value": "plaintext"})));
+    assert!(accepts(&compiled, json!({"value": null})));
+    // Open vocabulary: an unknown spelling still decodes; only `known()` refuses to pair it.
+    assert!(accepts(&compiled, json!({"value": "rot13"})));
+    let error = Bundle::new(
+        &supplement(json!({
+            "value": {
+                "type": ["integer", "null"],
+                "knownValues": ["ciphertext"],
+            },
+        })),
+        Vec::new(),
+    )
+    .validate_lexicon(TAG, &primary, &[])
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("string vocabulary"), "{error}");
 }
 
 #[test]

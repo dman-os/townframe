@@ -1,0 +1,15 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: "DatumPage\n{\n    events: vec![DatumEvent::Leave { revision: 9, doc_id: document(1), }],\n    through: 9, caught_up: true,\n}"
+---
+{
+  "events": [
+    {
+      "kind": "leave",
+      "revision": 9,
+      "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    }
+  ],
+  "through": 9,
+  "caughtUp": true
+}

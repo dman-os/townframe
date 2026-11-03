@@ -279,6 +279,12 @@ checking remains a tracked follow-up.
     won't work due to do async problems.
 - Do not use the cargo integration tests features.
   - I.e. avoid making tests in crate_root::tests.
+- A service operation that exposes a cursor is consumed by long polling, not by a
+  server-push subscription: the caller names a cursor, a page limit and a hold, and
+  the server holds the request when it has nothing to send. A `stream` operation
+  needs a stated reason in its own ADR.
+  - See [ADR 023](docs/adrs/023-cursor-consumption-is-long-poll.md), which
+    generalises big_sync's `replay_page` (ADR 012 §9) to every surface.
 - Git submodules? I'm using `jj` which doesn't support submodules :'/
 - Prefer `futures_buffered::BufferedStreamExt::buffered_unordered` over
   `futures::StreamExt::buffer_unordered` for unordered buffered async stream

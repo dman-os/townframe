@@ -1,0 +1,27 @@
+[package]
+name = "big_blobs_core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
+big_sync_core = { workspace = true, default-features = false }
+service_core_rs.workspace = true
+macros = { path = "../macros" }
+serde.workspace = true
+serde_json.workspace = true
+schemars = "1.2"
+thiserror.workspace = true
+bs58.workspace = true
+irpc.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+automerge.workspace = true
+postcard.workspace = true

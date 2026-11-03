@@ -24,7 +24,9 @@ use big_cabinet_core::dmeta::Dmeta;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerChildEntry;
 use big_cabinet_core::drawer::DrawerDocEntry;
+use big_cabinet_core::drawer::DrawerMetaDoc;
 use big_cabinet_core::drawer::DrawerRoster;
+use big_cabinet_core::drawer::DrawerSuccessor;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 use big_cabinet_core::drawer::SelfDocLayout;
 use big_cabinet_core::drawer::SingleGroupLayout;
@@ -51,8 +53,12 @@ static CORE: LazyLock<Universe> = LazyLock::new(|| {
             .expect("drawer doc entry is a well-formed datum declaration"),
         Declaration::of::<DrawerChildEntry>()
             .expect("drawer child entry is a well-formed datum declaration"),
+        Declaration::of::<DrawerMetaDoc>()
+            .expect("drawer meta doc is a well-formed datum declaration"),
         Declaration::of::<KnownDrawerEntry>()
             .expect("known drawer entry is a well-formed datum declaration"),
+        Declaration::of::<DrawerSuccessor>()
+            .expect("drawer successor is a well-formed datum declaration"),
     ])
 });
 
@@ -207,9 +213,19 @@ impl SchemaRepo {
     pub fn open<'a>(
         groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
     ) -> Result<Self, SchemaRepoError> {
-        let mut known: BTreeMap<String, SchemaHandle> = core_schemas()
-            .map(|handle| (handle.datum_tag().to_owned(), handle))
-            .collect();
+        Self {
+            known: core_schemas()
+                .map(|handle| (handle.datum_tag().to_owned(), handle))
+                .collect(),
+        }
+        .with_groups(groups)
+    }
+
+    pub fn with_groups<'a>(
+        &self,
+        groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
+    ) -> Result<Self, SchemaRepoError> {
+        let mut known = self.known.clone();
         let empty = Universe::default();
         for group in groups {
             let mut tags = std::collections::BTreeSet::new();

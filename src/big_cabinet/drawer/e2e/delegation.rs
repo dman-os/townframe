@@ -2,6 +2,338 @@
 
 use super::*;
 
+async fn assert_three_group_closure(
+    node: &Node,
+    chain: &[(DrawerView, DocId)],
+    self_doc: &DocId,
+    principal: GroupKey,
+    expected: [Option<Access>; 3],
+    case: &str,
+) {
+    for (depth, ((view, doc), access)) in chain.iter().zip(expected).enumerate() {
+        let levels = match access {
+            None => [None; 3],
+            Some(Access::Relay) => [Some(KeyhiveAccess::Read), Some(KeyhiveAccess::Relay), None],
+            Some(Access::Read) => [Some(KeyhiveAccess::Read); 3],
+            Some(Access::Write) => [Some(KeyhiveAccess::Edit); 3],
+            Some(Access::Admin) => [Some(KeyhiveAccess::Admin); 3],
+        };
+        let (meta, docs, sensitive) = groups_of(view);
+        assert_eq!(
+            [
+                node.group_membership_level(meta, principal).await,
+                node.group_membership_level(docs, principal).await,
+                node.group_membership_level(sensitive, principal).await,
+            ],
+            levels,
+            "{case}: principal {principal}, drawer {} at depth {depth}, expected {access:?}",
+            view.drawer_id,
+        );
+        assert_eq!(
+            [
+                node.keyhive_level(principal, view.drawer_id.to_bytes32().unwrap())
+                    .await,
+                node.keyhive_level(principal, doc.to_bytes32().unwrap())
+                    .await,
+                node.keyhive_level(
+                    principal,
+                    view.descriptor
+                        .sensitive_root()
+                        .unwrap()
+                        .to_bytes32()
+                        .unwrap(),
+                )
+                .await,
+            ],
+            levels,
+            "{case}: principal {principal}, roots/content of {}, expected {access:?}",
+            view.drawer_id,
+        );
+        for metadata in [meta, sensitive] {
+            assert_eq!(
+                node.keyhive_level(metadata, self_doc.to_bytes32().unwrap())
+                    .await,
+                None,
+                "metadata group {metadata} must never reach self-doc {self_doc}",
+            );
+        }
+    }
+    let self_doc_level = match expected[2] {
+        None => None,
+        Some(Access::Relay) => Some(KeyhiveAccess::Relay),
+        Some(Access::Read) => Some(KeyhiveAccess::Read),
+        Some(Access::Write) => Some(KeyhiveAccess::Edit),
+        Some(Access::Admin) => Some(KeyhiveAccess::Admin),
+    };
+    assert_eq!(
+        node.keyhive_level(principal, self_doc.to_bytes32().unwrap())
+            .await,
+        self_doc_level,
+        "{case}: principal {principal}, self-doc {self_doc}",
+    );
+}
+
+#[tokio::test]
+async fn three_group_root_invitations_bound_transitive_links_and_revoke_both_roots() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let parent = node.collection(&alice, "parent").await;
+    let child = node.collection(&alice, "child").await;
+    let grandchild = node.collection(&alice, "grandchild").await;
+    let home = node.collection(&alice, "unlinked home").await;
+    let self_doc = node.create_doc(&alice, &home, "self-doc").await.unwrap();
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            CreateDrawer {
+                capability: node.drawer_capability(&alice, &[&home]).await.unwrap(),
+                command: command("declare self-doc"),
+                layout: CreateLayout::SelfDoc {
+                    doc_id: self_doc.clone(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let mut chain = Vec::new();
+    for drawer in [&parent, &child, &grandchild] {
+        let doc = node
+            .create_doc(&alice, drawer, &format!("content/{drawer}"))
+            .await
+            .unwrap();
+        chain.push((node.view(&alice, drawer).await.unwrap(), doc));
+    }
+    let groups: BTreeSet<_> = chain
+        .iter()
+        .flat_map(|(view, _)| {
+            let (meta, docs, sensitive) = groups_of(view);
+            [meta, docs, sensitive]
+        })
+        .collect();
+    assert_eq!(groups.len(), 9);
+    let roots: BTreeSet<_> = chain
+        .iter()
+        .flat_map(|(view, _)| {
+            [
+                view.drawer_id.clone(),
+                view.descriptor.sensitive_root().unwrap(),
+            ]
+        })
+        .collect();
+    assert_eq!(roots.len(), 6);
+
+    let mut invitees = Vec::new();
+    for access in [Access::Relay, Access::Read, Access::Write, Access::Admin] {
+        let group = node
+            .repo
+            .create_group_with_parents(Vec::new())
+            .await
+            .unwrap();
+        let principal = group_key(&group);
+        assert_three_group_closure(
+            &node,
+            &chain,
+            &self_doc,
+            principal,
+            [None; 3],
+            "uninvited or revoked",
+        )
+        .await;
+        node.invite(
+            &alice,
+            &parent,
+            Principal::Group {
+                group_id: principal,
+            },
+            access,
+        )
+        .await
+        .unwrap();
+        assert_three_group_closure(
+            &node,
+            &chain,
+            &self_doc,
+            principal,
+            [Some(access), None, None],
+            "root invitation before linking",
+        )
+        .await;
+        invitees.push((access, principal));
+    }
+    let capability = node
+        .drawer_capability(&alice, &[&parent, &child, &grandchild, &self_doc])
+        .await
+        .unwrap();
+    let link = |name: String, parent: &DrawerId, child: &DrawerId, access| {
+        node.drawers().call(
+            RequestContext::root(),
+            AddChild {
+                capability,
+                command: command(&name),
+                parent_id: parent.clone(),
+                child_id: child.clone(),
+                access,
+            },
+        )
+    };
+    link(
+        "link self-doc".into(),
+        &grandchild,
+        &self_doc,
+        Access::Admin,
+    )
+    .await
+    .unwrap();
+    for parent_bound in [Access::Admin, Access::Write, Access::Read, Access::Relay] {
+        link(
+            format!("parent link/{parent_bound:?}"),
+            &parent,
+            &child,
+            parent_bound,
+        )
+        .await
+        .unwrap();
+        for child_bound in [Access::Admin, Access::Write, Access::Read, Access::Relay] {
+            link(
+                format!("child link/{parent_bound:?}/{child_bound:?}"),
+                &child,
+                &grandchild,
+                child_bound,
+            )
+            .await
+            .unwrap();
+            for (ancestor, descendant, bound) in [
+                (&chain[0].0, &chain[1].0, parent_bound),
+                (&chain[1].0, &chain[2].0, child_bound),
+            ] {
+                let (parent_meta, parent_docs, parent_sensitive) = groups_of(ancestor);
+                let (child_meta, child_docs, child_sensitive) = groups_of(descendant);
+                for (member, expected) in [
+                    (
+                        parent_meta,
+                        [Some(keyhive_access(bound.max(Access::Read))), None, None],
+                    ),
+                    (parent_docs, [None, Some(keyhive_access(bound)), None]),
+                    (
+                        parent_sensitive,
+                        [
+                            None,
+                            None,
+                            (bound >= Access::Read).then_some(keyhive_access(bound)),
+                        ],
+                    ),
+                ] {
+                    assert_eq!(
+                        [
+                            node.group_membership_level(child_meta, member).await,
+                            node.group_membership_level(child_docs, member).await,
+                            node.group_membership_level(child_sensitive, member).await,
+                        ],
+                        expected,
+                        "parent link {parent_bound:?}, child link {child_bound:?}: member {member}, child {}, bound {bound:?}",
+                        descendant.drawer_id,
+                    );
+                }
+            }
+            for (access, principal) in &invitees {
+                let child_access = (*access).min(parent_bound);
+                let grandchild_access = child_access.min(child_bound);
+                assert_three_group_closure(
+                    &node,
+                    &chain,
+                    &self_doc,
+                    *principal,
+                    [Some(*access), Some(child_access), Some(grandchild_access)],
+                    &format!("invite {access:?}, parent link {parent_bound:?}, child link {child_bound:?}"),
+                )
+                .await;
+            }
+        }
+    }
+    for (name, ancestor, descendant) in [
+        ("restore parent", &parent, &child),
+        ("restore child", &child, &grandchild),
+    ] {
+        link(name.into(), ancestor, descendant, Access::Admin)
+            .await
+            .unwrap();
+    }
+    for (access, principal) in &invitees {
+        assert_three_group_closure(
+            &node,
+            &chain,
+            &self_doc,
+            *principal,
+            [Some(*access); 3],
+            "restored links",
+        )
+        .await;
+    }
+    for (name, ancestor, descendant, remaining) in [
+        ("unlink child", &child, &grandchild, 2),
+        ("unlink parent", &parent, &child, 1),
+    ] {
+        node.drawers()
+            .call(
+                RequestContext::root(),
+                RemoveChild {
+                    capability,
+                    command: command(name),
+                    parent_id: ancestor.clone(),
+                    child_id: descendant.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        for (access, principal) in &invitees {
+            let expected = std::array::from_fn(|index| (index < remaining).then_some(*access));
+            assert_three_group_closure(&node, &chain, &self_doc, *principal, expected, name).await;
+        }
+    }
+    for (name, ancestor, descendant) in [
+        ("relink parent", &parent, &child),
+        ("relink child", &child, &grandchild),
+    ] {
+        link(name.into(), ancestor, descendant, Access::Admin)
+            .await
+            .unwrap();
+    }
+    for (access, principal) in invitees {
+        assert_three_group_closure(
+            &node,
+            &chain,
+            &self_doc,
+            principal,
+            [Some(access); 3],
+            "relinked before revocation",
+        )
+        .await;
+        node.drawers()
+            .call(
+                RequestContext::root(),
+                RevokePrincipal {
+                    capability,
+                    drawer_id: parent.clone(),
+                    principal: Principal::Group {
+                        group_id: principal,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        assert_three_group_closure(
+            &node,
+            &chain,
+            &self_doc,
+            principal,
+            [None; 3],
+            "uninvited or revoked",
+        )
+        .await;
+    }
+    node.stop().await;
+}
+
 #[tokio::test]
 async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_caps() {
     use big_cabinet_core::authority::InspectCapability;
@@ -76,25 +408,34 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
             .await
             .unwrap();
     }
-    let mut events = node
-        .docs()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability: doc_caps[1],
-                scope: ObserveScope::Tag {
-                    tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
-                },
-                after: 0,
+    let mut poll = crate::test_poll::Poller::new(
+        node.docs(),
+        PollDatums {
+            capability: doc_caps[1],
+            predicate: Predicate::IsDoc {
+                doc_id: doc.clone(),
             },
-        )
-        .await
-        .unwrap();
+            datums: DatumSelection::Of {
+                tags: [big_cabinet_core::DatumTag::new(NOTE).unwrap()]
+                    .into_iter()
+                    .collect(),
+                keys: BTreeSet::new(),
+            },
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    );
     let mut present = false;
-    let mut replay_complete = false;
-    while !present || !replay_complete {
-        match events.next().await.unwrap().unwrap() {
-            DatumObserved::Entry {
+    while !present {
+        match poll.next().await.unwrap().expect("the note never replayed") {
+            DatumEvent::Enter { doc_id, datums, .. } => {
+                assert_eq!(doc_id, doc);
+                present = datums
+                    .values()
+                    .any(|d| matches!(d, ObservedDatum::Present { .. }));
+            }
+            DatumEvent::Datum {
                 doc_id,
                 datum: ObservedDatum::Present { .. },
                 ..
@@ -102,8 +443,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
                 assert_eq!(doc_id, doc);
                 present = true;
             }
-            DatumObserved::ReplayComplete { .. } => replay_complete = true,
-            other => panic!("expected the note or replay completion, got {other:?}"),
+            DatumEvent::Datum { .. } | DatumEvent::Leave { .. } => {}
         }
     }
 
@@ -149,12 +489,16 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
             ClientError::Operation(DocsError::Denied)
         );
     }
+    let cursor = poll.cursor();
     assert_eq!(
-        events.next().await.unwrap(),
+        poll.next().await,
         Err(ClientError::Operation(DocsError::Denied))
     );
-    assert!(events.next().await.is_none());
-    drop(events);
+    assert_eq!(
+        poll.cursor(),
+        cursor,
+        "a denied poll must not move the cursor"
+    );
     for actor in [&alice, &bob, &node.drawers_actor] {
         assert_eq!(
             node.mint_doc(actor, doc_scope.clone()).await.unwrap_err(),
@@ -1041,6 +1385,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             caller.signer.actor_id,
             &ledger::Op::Create {
                 groups: None,
+                sensitive_root: None,
                 owner_id: caller.originating_actor,
             },
         )
@@ -1056,12 +1401,19 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         .create_group_with_parents(Vec::new())
         .await
         .unwrap();
+    let sensitive = node
+        .repo
+        .create_group_with_parents(Vec::new())
+        .await
+        .unwrap();
     let groups = DrawerGroups {
         meta_group: group_key(&meta),
         docs_group: group_key(&docs),
+        sensitive_group: group_key(&sensitive),
     };
     let collection_op = ledger::Op::Create {
         groups: Some(groups),
+        sensitive_root: Some(DocId::new([42; 32])),
         owner_id: caller.originating_actor,
     };
     node.core()
@@ -1165,7 +1517,12 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         (
             &collection_command,
             &collection_op,
-            Drawer::single_group(groups.meta_group, groups.docs_group),
+            Drawer::single_group(
+                groups.meta_group,
+                groups.docs_group,
+                groups.sensitive_group,
+                DocId::new([42; 32]),
+            ),
         ),
         (&self_doc_command, &self_doc_op, Drawer::self_doc()),
     ] {
