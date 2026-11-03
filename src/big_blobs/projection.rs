@@ -1,3 +1,4 @@
+mod sqlite;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
 use big_cabinet::index::DatumMembership;
@@ -31,8 +32,6 @@ use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;
 use sqlite_rs::QueryExecutor;
-use sqlite_rs::Row;
-use sqlite_rs::Sql;
 use sqlite_rs::Tx;
 use std::future::Future;
 use std::ops::ControlFlow;
@@ -105,37 +104,8 @@ enum Progress {
 
 impl BlobProjection {
     pub async fn new(sql: Database) -> Res<Self> {
-        let transaction = sql.begin_write().await?;
-        for statement in [
-            r#"CREATE TABLE IF NOT EXISTS big_blobs_projection_routes (
-                   doc_id TEXT NOT NULL
-                 , datum_key TEXT NOT NULL
-                 , source_revision INTEGER NOT NULL CHECK (source_revision >= 0)
-                 , blob_id BLOB
-                 , length_octets TEXT
-                 , PRIMARY KEY (doc_id, datum_key)
-                 , CHECK ((blob_id IS NULL) = (length_octets IS NULL))
-                 , CHECK (blob_id IS NULL OR length(blob_id) = 32)
-               ) WITHOUT ROWID"#,
-            r#"CREATE INDEX IF NOT EXISTS big_blobs_projection_digest
-                   ON big_blobs_projection_routes (blob_id, doc_id, datum_key)"#,
-            r#"CREATE TABLE IF NOT EXISTS big_blobs_projection_parked (
-                   doc_id TEXT NOT NULL
-                 , datum_key TEXT NOT NULL
-                 , source_revision INTEGER NOT NULL CHECK (source_revision >= 0)
-                 , membership BLOB NOT NULL
-                 , PRIMARY KEY (doc_id, datum_key)
-               ) WITHOUT ROWID"#,
-            r#"CREATE TABLE IF NOT EXISTS big_blobs_projection_progress (
-                   singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
-                 , source_revision INTEGER NOT NULL CHECK (source_revision >= 0)
-               )"#,
-            r#"INSERT OR IGNORE INTO big_blobs_projection_progress (singleton, source_revision)
-               VALUES (1, 0)"#,
-        ] {
-            Sql::new(statement).execute(&transaction).await?;
-        }
-        transaction.commit().await?;
+        sql.apply_migrations(sqlite::queries::MIGRATION_TABLE, sqlite::queries::MIGRATIONS)
+            .await?;
         let frontier = SqliteKeyedFrontier::new(
             sql.clone(),
             "big-blobs-projection-v1",
@@ -149,60 +119,47 @@ impl BlobProjection {
             rearm: Arc::new(Notify::new()),
         })
     }
-
     pub fn rearm(&self) {
         self.rearm.notify_one();
     }
 
     pub async fn query_digest(&self, blob_id: &BlobId) -> Res<Vec<DatumRoute>> {
-        Sql::new(
-            r#"SELECT doc_id
-                 , datum_key
-              FROM big_blobs_projection_routes
-             WHERE blob_id = "#,
-        )
-        .bind(blob_id.to_bytes32().to_vec())
-        .push(" ORDER BY doc_id, datum_key")
-        .query(&self.sql)
-        .await?
-        .rows
-        .into_iter()
-        .map(|row| {
-            Ok(DatumRoute {
-                doc_id: row.get::<String>("doc_id")?.parse()?,
-                datum_key: row.get::<String>("datum_key")?.parse()?,
+        sqlite::queries::query_digest(&self.sql, blob_id.to_bytes32().to_vec())
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(DatumRoute {
+                    doc_id: row.doc_id.parse()?,
+                    datum_key: row.datum_key.parse()?,
+                })
             })
-        })
-        .collect()
+            .collect::<Res<Vec<_>>>()
     }
 
     pub async fn query_doc(&self, doc_id: &DocId) -> Res<Vec<BlobReference>> {
-        Sql::new(
-            r#"SELECT doc_id
-                 , datum_key
-                 , blob_id
-                 , length_octets
-              FROM big_blobs_projection_routes
-             WHERE blob_id IS NOT NULL AND doc_id = "#,
-        )
-        .bind(doc_id.to_string())
-        .push(" ORDER BY datum_key")
-        .query(&self.sql)
-        .await?
-        .rows
-        .into_iter()
-        .map(reference_from_row)
-        .collect()
+        sqlite::queries::query_doc(&self.sql, doc_id.to_string())
+            .await?
+            .into_iter()
+            .map(|row| {
+                let bytes: [u8; 32] = row
+                    .blob_id
+                    .try_into()
+                    .expect("blob projection stores 32-byte digests");
+                Ok(BlobReference {
+                    route: DatumRoute {
+                        doc_id: row.doc_id.parse()?,
+                        datum_key: row.datum_key.parse()?,
+                    },
+                    blob_id: BlobId::new(bytes),
+                    length_octets: row.length_octets.parse()?,
+                })
+            })
+            .collect::<Res<Vec<_>>>()
     }
 
     pub async fn source_revision(&self) -> Res<u64> {
-        let rows = Sql::new(
-            "SELECT source_revision FROM big_blobs_projection_progress WHERE singleton = 1",
-        )
-        .query(&self.sql)
-        .await?
-        .rows;
-        Ok(u64::try_from(rows[0].get::<i64>("source_revision")?)?)
+        let rows = sqlite::queries::source_revision(&self.sql).await?;
+        Ok(u64::try_from(rows[0])?)
     }
 
     pub async fn open(
@@ -222,70 +179,38 @@ impl BlobProjection {
         route: &DatumRoute,
         revision: u64,
     ) -> Res<bool> {
-        let rows = Sql::new(
-            r#"SELECT source_revision
-                 , 0 AS parked
-              FROM big_blobs_projection_routes
-             WHERE doc_id = "#,
+        let rows = sqlite::queries::superseded(
+            executor,
+            route.doc_id.to_string(),
+            route.datum_key.to_string(),
         )
-        .bind(route.doc_id.to_string())
-        .push(" AND datum_key = ")
-        .bind(route.datum_key.to_string())
-        .push(
-            r#" UNION ALL
-            SELECT source_revision
-                 , 1 AS parked
-              FROM big_blobs_projection_parked
-             WHERE doc_id = "#,
-        )
-        .bind(route.doc_id.to_string())
-        .push(" AND datum_key = ")
-        .bind(route.datum_key.to_string())
-        .query(executor)
-        .await?
-        .rows;
+        .await?;
         for row in rows {
-            let stored = u64::try_from(row.get::<i64>("source_revision")?)?;
-            if stored > revision || (stored == revision && row.get::<i64>("parked")? == 0) {
+            let stored = u64::try_from(row.source_revision)?;
+            if stored > revision || (stored == revision && row.parked == 0) {
                 return Ok(true);
             }
         }
         Ok(false)
     }
-
     async fn parked(
         &self,
         before: Option<u64>,
     ) -> Res<Vec<FrontierEntry<DatumRoute, DatumMembership>>> {
-        let mut query = Sql::new(
-            r#"SELECT doc_id
-                 , datum_key
-                 , source_revision
-                 , membership
-              FROM big_blobs_projection_parked"#,
-        );
-        if let Some(before) = before {
-            query
-                .push(" WHERE source_revision < ")
-                .bind(i64::try_from(before)?);
-        }
-        query
-            .push(" ORDER BY doc_id, datum_key")
-            .query(&self.sql)
+        sqlite::queries::parked(&self.sql, before.map(i64::try_from).transpose()?)
             .await?
-            .rows
             .into_iter()
             .map(|row| {
                 Ok(FrontierEntry {
-                    revision: u64::try_from(row.get::<i64>("source_revision")?)?,
+                    revision: u64::try_from(row.source_revision)?,
                     key: DatumRoute {
-                        doc_id: row.get::<String>("doc_id")?.parse()?,
-                        datum_key: row.get::<String>("datum_key")?.parse()?,
+                        doc_id: row.doc_id.parse()?,
+                        datum_key: row.datum_key.parse()?,
                     },
-                    value: Some(serde_json::from_slice(&row.get::<Vec<u8>>("membership")?)?),
+                    value: Some(serde_json::from_slice(&row.membership)?),
                 })
             })
-            .collect()
+            .collect::<Res<Vec<_>>>()
     }
 
     async fn park(
@@ -297,28 +222,13 @@ impl BlobProjection {
         if !Self::superseded(&transaction, &entry.key, entry.revision).await? {
             let membership = entry.value.as_ref().expect("only present routes park");
             assert!(matches!(membership, DatumMembership::Present { .. }));
-            Sql::new(
-                r#"INSERT INTO big_blobs_projection_parked (
-                       doc_id
-                     , datum_key
-                     , source_revision
-                     , membership
-                   ) VALUES ("#,
+            sqlite::queries::insert_parked(
+                &transaction,
+                entry.key.doc_id.to_string(),
+                entry.key.datum_key.to_string(),
+                i64::try_from(entry.revision)?,
+                serde_json::to_vec(membership)?,
             )
-            .bind(entry.key.doc_id.to_string())
-            .push(", ")
-            .bind(entry.key.datum_key.to_string())
-            .push(", ")
-            .bind(i64::try_from(entry.revision)?)
-            .push(", ")
-            .bind(serde_json::to_vec(membership)?)
-            .push(
-                r#") ON CONFLICT (doc_id, datum_key) DO UPDATE SET
-                       source_revision = excluded.source_revision
-                     , membership = excluded.membership
-                   WHERE big_blobs_projection_parked.source_revision < excluded.source_revision"#,
-            )
-            .execute(&transaction)
             .await?;
         }
         Self::advance_in_context(&transaction, progress).await?;
@@ -331,33 +241,21 @@ impl BlobProjection {
         executor: &impl QueryExecutor,
         route: &DatumRoute,
     ) -> Res<Option<u64>> {
-        Sql::new(
-            r#"SELECT source_revision
-              FROM big_blobs_projection_routes
-             WHERE doc_id = "#,
+        sqlite::queries::projected_revision(
+            executor,
+            route.doc_id.to_string(),
+            route.datum_key.to_string(),
         )
-        .bind(route.doc_id.to_string())
-        .push(" AND datum_key = ")
-        .bind(route.datum_key.to_string())
-        .query(executor)
         .await?
-        .rows
         .into_iter()
         .next()
-        .map(|row| Ok(u64::try_from(row.get::<i64>("source_revision")?)?))
+        .map(|row| Ok(u64::try_from(row)?))
         .transpose()
     }
 
     async fn advance_in_context(transaction: &Tx, progress: Progress) -> Res<()> {
         if let Progress::Complete(revision) = progress {
-            Sql::new(
-                r#"UPDATE big_blobs_projection_progress
-                      SET source_revision = MAX(source_revision, "#,
-            )
-            .bind(i64::try_from(revision)?)
-            .push(") WHERE singleton = 1")
-            .execute(transaction)
-            .await?;
+            sqlite::queries::advance(transaction, i64::try_from(revision)?).await?;
         }
         Ok(())
     }
@@ -375,46 +273,21 @@ impl BlobProjection {
             if let Some(reference) = &reference {
                 assert_eq!(&reference.route, route);
             }
-            Sql::new(
-                r#"INSERT INTO big_blobs_projection_routes (
-                       doc_id
-                     , datum_key
-                     , source_revision
-                     , blob_id
-                     , length_octets
-                   ) VALUES ("#,
+            sqlite::queries::settle(
+                transaction,
+                route.doc_id.to_string(),
+                route.datum_key.to_string(),
+                i64::try_from(revision)?,
+                reference.as_ref().map(|value| value.blob_id.to_bytes32().to_vec()),
+                reference.as_ref().map(|value| value.length_octets.to_string()),
             )
-            .bind(route.doc_id.to_string())
-            .push(", ")
-            .bind(route.datum_key.to_string())
-            .push(", ")
-            .bind(i64::try_from(revision)?)
-            .push(", ")
-            .bind(
-                reference
-                    .as_ref()
-                    .map(|value| value.blob_id.to_bytes32().to_vec()),
-            )
-            .push(", ")
-            .bind(
-                reference
-                    .as_ref()
-                    .map(|value| value.length_octets.to_string()),
-            )
-            .push(
-                r#") ON CONFLICT (doc_id, datum_key) DO UPDATE SET
-                       source_revision = excluded.source_revision
-                     , blob_id = excluded.blob_id
-                     , length_octets = excluded.length_octets"#,
-            )
-            .execute(transaction)
             .await?;
-            Sql::new("DELETE FROM big_blobs_projection_parked WHERE doc_id = ")
-                .bind(route.doc_id.to_string())
-                .push(" AND datum_key = ")
-                .bind(route.datum_key.to_string())
-                .execute(transaction)
-                .await?;
+            sqlite::queries::delete_parked(
+                transaction,
+                route.doc_id.to_string(),
+                route.datum_key.to_string(),
+            )
+            .await?;
             self.frontier
                 .apply_in_context(transaction, [(route.clone(), reference)])
                 .await?;
@@ -719,20 +592,6 @@ fn plaintext_blob_id(blob: &Blob) -> Option<BlobId> {
     })
 }
 
-fn reference_from_row(row: Row) -> Res<BlobReference> {
-    let bytes: [u8; 32] = row
-        .get::<Vec<u8>>("blob_id")?
-        .try_into()
-        .expect("blob projection stores 32-byte digests");
-    Ok(BlobReference {
-        route: DatumRoute {
-            doc_id: row.get::<String>("doc_id")?.parse()?,
-            datum_key: row.get::<String>("datum_key")?.parse()?,
-        },
-        blob_id: BlobId::new(bytes),
-        length_octets: row.get::<String>("length_octets")?.parse()?,
-    })
-}
 
 #[cfg(test)]
 mod tests;
