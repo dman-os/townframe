@@ -311,3 +311,20 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
     `dom.in_runtime`; panics kill the instance.
   - Cooperative threads exist in Wasmtime behind a Config flag, but wit-bindgen 0.62 doesn't wrap
     thread.new/switch.
+
+## Collection model decided (2026-11-04, operator approved)
+
+- One causal map per collection. Per logical key, each live writer scope holds at most one candidate
+  (a value or a tombstone) stamped `(lamport, writer id)`. Readers see the winner: the highest stamp.
+- Stamp: `lamport = based_on.lamport + 1`, or `1` with no `based_on` (concurrent creation). Writer id is
+  a stable, ordered identity, so the tie-break survives restarts. The MDK defaults `based_on` to the
+  writer's replica of the key.
+- CAS is opt-in: the write fails unless the current winner is exactly the expected stamp (or absent).
+- Retention is the writer's scope, not the collection's or the consumer's: incarnation (dies on close),
+  installation (dies on uninstall), permanent (never retracted, needs a manifest grant). Scope death
+  retracts its candidates, tombstones included, and recomputes only the touched keys.
+- A deleting micro that goes away un-deletes: accepted consequence of scope-owned tombstones.
+- No `clear` and no per-key withdraw for guests. Write authority is a key-prefix grant; it replaces
+  ADR 024 §13 `writer_policy`. Grants live in the host layer, not in `clay_collection`.
+- Plan: C9a core rework in `clay_collection` (worktree agent), C9b consumers + WIT + grants + MDK
+  `based_on` default after the per-call exports agent lands, C9c ADR 017 §9–11 / 024 §13 / 025 §4.
