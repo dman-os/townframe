@@ -7,6 +7,7 @@ use clay_collection::Page;
 use clay_collection::RowEvidence;
 use clay_collection::Version;
 use clay_mdk::bindings;
+use clay_mdk::capability_bank;
 use clay_mdk::collection_registration;
 use clay_mdk::collections;
 use clay_mdk::document_events;
@@ -23,11 +24,16 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+struct GuestValue {
+    body: Vec<u8>,
+    capabilities: Vec<capability_bank::CapabilityRef>,
+}
+
 struct State {
     reader: Rc<collections::CollectionReader>,
     selector: Vec<u8>,
     lease: Option<Rc<collections::ProjectionLease>>,
-    mirror: Mirror<Vec<u8>, Vec<u8>>,
+    mirror: Mirror<Vec<u8>, Rc<GuestValue>>,
     surfaces: BTreeMap<u64, presentation::Surface>,
     status: &'static str,
     pages: u64,
@@ -41,6 +47,10 @@ struct State {
     running: bool,
     writer_a: Option<Rc<collection_registration::RegistrationWriter>>,
     writer_b: Option<Rc<collection_registration::RegistrationWriter>>,
+    cap_writer: Option<Rc<collection_registration::RegistrationWriter>>,
+    cap_publication: Option<capability_bank::PublishedCapability>,
+    cap_proxy: Option<capability_bank::PresentationComponent>,
+    cap_version: Option<collections::Version>,
     scenario: &'static str,
     log: Vec<String>,
 }
@@ -62,18 +72,20 @@ impl micro_lifecycle::Guest for CollectionProbe {
             return Err("collection probe expects exactly one collection binding".into());
         }
         let mut registrations = registrations.into_iter();
-        let (writer_a, writer_b) = match (
+        let (writer_a, writer_b, cap_writer) = match (
             registrations.next(),
             registrations.next(),
             registrations.next(),
         ) {
-            (None, None, None) => (None, None),
+            (None, None, None) => (None, None, None),
             (Some(a), Some(b), None) if a.name == "a" && b.name == "b" => {
-                (Some(Rc::new(a.writer)), Some(Rc::new(b.writer)))
+                (Some(Rc::new(a.writer)), Some(Rc::new(b.writer)), None)
             }
+            (Some(cap), None, None) if cap.name == "cap" => (None, None, Some(Rc::new(cap.writer))),
             _ => {
                 return Err(
-                    "collection probe expects no registrations or exactly `a` and `b`".into(),
+                    "collection probe expects no registrations, exactly `a` and `b`, or exactly `cap`"
+                        .into(),
                 );
             }
         };
@@ -103,6 +115,10 @@ impl micro_lifecycle::Guest for CollectionProbe {
             running: true,
             writer_a,
             writer_b,
+            cap_writer,
+            cap_publication: None,
+            cap_proxy: None,
+            cap_version: None,
             scenario: "idle",
             log: Vec::new(),
         }));
@@ -123,9 +139,13 @@ impl presentation_events::Guest for CollectionProbe {
         let surface = placement.open()?;
         let retained = surface.retain()?;
         let identity = surface.identity();
-        let (text, writes) = with_state(|state| {
+        let (text, writes, cap) = with_state(|state| {
             let state = state.borrow();
-            (state.text(), state.writer_b.is_some())
+            (
+                state.text(),
+                state.writer_b.is_some(),
+                state.cap_writer.is_some(),
+            )
         });
         let mut edits = WireMutations::default();
         edits.push_id(ElementId::ROOT);
@@ -133,7 +153,16 @@ impl presentation_events::Guest for CollectionProbe {
         edits.set_id(ElementId::from_raw(1));
         edits.create_text(&text);
         edits.append_children(1);
-        let buttons: &[(usize, &str)] = if writes {
+        let buttons: &[(usize, &str)] = if cap {
+            &[
+                (2, "drop-next"),
+                (3, "resume"),
+                (4, "stop"),
+                (5, "cap-write"),
+                (6, "cap-close"),
+                (7, "cap-redeem"),
+            ]
+        } else if writes {
             &[
                 (2, "drop-next"),
                 (3, "resume"),
@@ -176,6 +205,9 @@ impl presentation_events::Guest for CollectionProbe {
     fn dispatch(surface: &presentation::Surface, event: Event) -> EventResponse {
         let state = with_state(|state| state.clone());
         let mut write = false;
+        let mut cap_write = false;
+        let mut cap_close = false;
+        let mut redeem = false;
         let restart = {
             let mut state = state.borrow_mut();
             if !state.surfaces.contains_key(&surface.identity()) {
@@ -216,8 +248,22 @@ impl presentation_events::Guest for CollectionProbe {
                     write = true;
                     false
                 }
+                5 if state.cap_writer.is_some() && state.scenario == "idle" => {
+                    state.scenario = "running";
+                    render(&mut state);
+                    cap_write = true;
+                    false
+                }
+                6 if state.cap_writer.is_some() => {
+                    cap_close = true;
+                    false
+                }
                 6 => {
                     state.writer_a = None;
+                    false
+                }
+                7 if state.cap_writer.is_some() => {
+                    redeem = true;
                     false
                 }
                 _ => false,
@@ -225,6 +271,15 @@ impl presentation_events::Guest for CollectionProbe {
         };
         if write {
             wit_bindgen::spawn_local(write_scenario(state.clone()));
+        }
+        if cap_write {
+            wit_bindgen::spawn_local(cap_write_scenario(state.clone()));
+        }
+        if cap_close {
+            wit_bindgen::spawn_local(cap_close_scenario(state.clone()));
+        }
+        if redeem {
+            cap_redeem(&state, surface);
         }
         if restart {
             state.borrow_mut().running = true;
@@ -268,7 +323,7 @@ impl State {
             text.push('\n');
             text.push_str(&decode_key(&key));
             text.push('=');
-            text.push_str(&decode(&value));
+            text.push_str(&decode_value(&value));
         }
         for line in &self.log {
             text.push('\n');
@@ -284,6 +339,25 @@ fn with_state<T>(f: impl FnOnce(&Rc<RefCell<State>>) -> T) -> T {
 
 fn decode(value: &[u8]) -> String {
     ciborium::from_reader(value).expect("collection row is not a CBOR string")
+}
+
+fn decode_value(value: &GuestValue) -> String {
+    match value.body.as_slice() {
+        [0xd9, 0xa7, 0xf8, index] => format!("cap@{index}"),
+        body => decode(body),
+    }
+}
+
+fn cap_tagged_body() -> Vec<u8> {
+    vec![0xd9, 0xa7, 0xf8, 0x00]
+}
+
+fn cap_failure(error: capability_bank::CapabilityError) -> &'static str {
+    match error {
+        capability_bank::CapabilityError::ContractMismatch => "contract-mismatch",
+        capability_bank::CapabilityError::Revoked => "revoked",
+        capability_bank::CapabilityError::LimitExceeded => "limit-exceeded",
+    }
 }
 
 fn encode(value: &str) -> Vec<u8> {
@@ -308,46 +382,54 @@ fn decode_key(key: &[u8]) -> String {
     }
 }
 
+fn accepted(
+    result: Result<
+        collection_registration::MutationAccepted,
+        collection_registration::MutationError,
+    >,
+) -> (String, Option<collections::Version>) {
+    match result {
+        Ok(accepted) => (
+            format!("ok@{}", accepted.row_version.sequence),
+            Some(accepted.row_version),
+        ),
+        Err(error) => (failure(error), None),
+    }
+}
+
+fn failure(error: collection_registration::MutationError) -> String {
+    match error {
+        collection_registration::MutationError::Conflict(Some(current)) => {
+            format!("conflict@{}", current.sequence)
+        }
+        collection_registration::MutationError::Conflict(None) => "conflict@none".into(),
+        collection_registration::MutationError::Revoked => "revoked".into(),
+        collection_registration::MutationError::KeyTooLarge => "key-too-large".into(),
+        collection_registration::MutationError::ValueTooLarge => "value-too-large".into(),
+        collection_registration::MutationError::RowLimit => "row-limit".into(),
+        collection_registration::MutationError::InvalidAttachment => "invalid-attachment".into(),
+        collection_registration::MutationError::CapabilityLimit => "capability-limit".into(),
+    }
+}
+
+fn removed(
+    result: Result<
+        Option<collection_registration::MutationAccepted>,
+        collection_registration::MutationError,
+    >,
+) -> String {
+    match result {
+        Ok(Some(accepted)) => format!("ok@{}", accepted.row_version.sequence),
+        Ok(None) => "absent".into(),
+        Err(error) => failure(error),
+    }
+}
+
 async fn write_scenario(state: Rc<RefCell<State>>) {
-    fn accepted(
-        result: Result<
-            collection_registration::MutationAccepted,
-            collection_registration::MutationError,
-        >,
-    ) -> (String, Option<collections::Version>) {
-        match result {
-            Ok(accepted) => (
-                format!("ok@{}", accepted.row_version.sequence),
-                Some(accepted.row_version),
-            ),
-            Err(error) => (failure(error), None),
-        }
-    }
-    fn failure(error: collection_registration::MutationError) -> String {
-        match error {
-            collection_registration::MutationError::Conflict(Some(current)) => {
-                format!("conflict@{}", current.sequence)
-            }
-            collection_registration::MutationError::Conflict(None) => "conflict@none".into(),
-            collection_registration::MutationError::Revoked => "revoked".into(),
-            collection_registration::MutationError::KeyTooLarge => "key-too-large".into(),
-            collection_registration::MutationError::ValueTooLarge => "value-too-large".into(),
-            collection_registration::MutationError::RowLimit => "row-limit".into(),
-        }
-    }
-    fn removed(
-        result: Result<
-            Option<collection_registration::MutationAccepted>,
-            collection_registration::MutationError,
-        >,
-    ) -> String {
-        match result {
-            Ok(Some(accepted)) => format!("ok@{}", accepted.row_version.sequence),
-            Ok(None) => "absent".into(),
-            Err(error) => failure(error),
-        }
-    }
-    let value = |body: &str| collections::EncodedValue { body: encode(body) };
+    let value = |body: &str| collections::EncodedValue {
+        body: encode(body),
+        capabilities: Vec::new(),
+    };
     let (a, b) = {
         let state = state.borrow();
         (
@@ -389,6 +471,7 @@ async fn write_scenario(state: Rc<RefCell<State>>) {
     log(format!("a-put-big-key={outcome}"));
     let big = collections::EncodedValue {
         body: vec![0; 64 * 1024 + 1],
+        capabilities: Vec::new(),
     };
     let (outcome, _) = accepted(a.put(encode("y"), a_y, big).await);
     log(format!("a-put-big-value-y={outcome}"));
@@ -400,6 +483,159 @@ async fn write_scenario(state: Rc<RefCell<State>>) {
     log(format!("b-put-x-again={outcome}"));
     drop((a, b));
     let mut state = state.borrow_mut();
+    state.scenario = "done";
+    render(&mut state);
+}
+
+async fn cap_write_scenario(state: Rc<RefCell<State>>) {
+    let writer = {
+        let state = state.borrow();
+        state.cap_writer.clone().expect("cap writer is bound")
+    };
+    let log = |line: String| {
+        let mut state = state.borrow_mut();
+        state.log.push(line);
+        render(&mut state);
+    };
+    let published = match capability_bank::publish_presentation_component() {
+        Ok(published) => published,
+        Err(error) => {
+            log(format!("cap-publish={}", cap_failure(error)));
+            let mut state = state.borrow_mut();
+            state.scenario = "done";
+            render(&mut state);
+            return;
+        }
+    };
+    log("cap-publish=ok".into());
+    let (outcome, _) = accepted(
+        writer
+            .put(
+                encode("cap"),
+                None,
+                collections::EncodedValue {
+                    body: cap_tagged_body(),
+                    capabilities: Vec::new(),
+                },
+            )
+            .await,
+    );
+    log(format!("cap-fabricated-put={outcome}"));
+    let reference = match published.reference() {
+        Ok(reference) => reference,
+        Err(error) => {
+            log(format!("cap-reference={}", cap_failure(error)));
+            let mut state = state.borrow_mut();
+            state.scenario = "done";
+            render(&mut state);
+            return;
+        }
+    };
+    let (outcome, version) = accepted(
+        writer
+            .put(
+                encode("cap"),
+                None,
+                collections::EncodedValue {
+                    body: cap_tagged_body(),
+                    capabilities: vec![reference],
+                },
+            )
+            .await,
+    );
+    log(format!("cap-put={outcome}"));
+    let mut state = state.borrow_mut();
+    if version.is_some() {
+        state.cap_publication = Some(published);
+        state.cap_version = version;
+    }
+    state.scenario = "done";
+    render(&mut state);
+}
+
+fn cap_redeem(state: &Rc<RefCell<State>>, surface: &presentation::Surface) {
+    let value = {
+        let state = state.borrow();
+        state
+            .mirror
+            .rows()
+            .into_iter()
+            .map(|(_, value)| value)
+            .find(|value| !value.capabilities.is_empty())
+    };
+    let log = |line: String| {
+        let mut state = state.borrow_mut();
+        state.log.push(line);
+        render(&mut state);
+    };
+    let Some(value) = value else {
+        log("cap-redeem=absent".into());
+        return;
+    };
+    let proxy = match value.capabilities[0].as_presentation_component() {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            log(format!("cap-redeem={}", cap_failure(error)));
+            return;
+        }
+    };
+    let component = match proxy.component() {
+        Ok(component) => component,
+        Err(error) => {
+            log(format!("cap-redeem={}", cap_failure(error)));
+            return;
+        }
+    };
+    state.borrow_mut().cap_proxy = Some(proxy);
+    let mut edits = WireMutations::default();
+    edits.push_id(ElementId::from_raw(1));
+    edits.mount_component(&component);
+    edits.append_children(1);
+    edits.pop();
+    let outcome = match surface.apply(&edits.take()) {
+        Ok(_) => "mounted",
+        Err(presentation::PresentationError::Revoked) => "revoked",
+        Err(presentation::PresentationError::Unsupported(_)) => "unsupported",
+        Err(presentation::PresentationError::InvalidBatch(_)) => "invalid-batch",
+    };
+    log(format!("cap-redeem={outcome}"));
+}
+
+async fn cap_close_scenario(state: Rc<RefCell<State>>) {
+    let (writer, version) = {
+        let state = state.borrow();
+        (
+            state.cap_writer.clone().expect("cap writer is bound"),
+            state.cap_version,
+        )
+    };
+    let log = |line: String| {
+        let mut state = state.borrow_mut();
+        state.log.push(line);
+        render(&mut state);
+    };
+    log(format!(
+        "cap-remove={}",
+        removed(writer.remove(encode("cap"), version).await)
+    ));
+    let published = state.borrow_mut().cap_publication.take();
+    drop(published);
+    log("cap-close=ok".into());
+    let proxy = state.borrow_mut().cap_proxy.take();
+    match proxy {
+        Some(proxy) => {
+            let outcome = match proxy.component() {
+                Ok(_) => "ok",
+                Err(error) => cap_failure(error),
+            };
+            drop(proxy);
+            log(format!("cap-proxy={outcome}"));
+            log("cap-proxy-drop=ok".into());
+        }
+        None => log("cap-proxy=absent".into()),
+    }
+    let mut state = state.borrow_mut();
+    state.cap_version = None;
     state.scenario = "done";
     render(&mut state);
 }
@@ -612,7 +848,7 @@ fn finish_with_status(state: &Rc<RefCell<State>>, status: &'static str) {
     render(&mut state);
 }
 
-fn decode_page(page: collections::Page) -> Page<Vec<u8>, Vec<u8>> {
+fn decode_page(page: collections::Page) -> Page<Vec<u8>, Rc<GuestValue>> {
     Page {
         transactions: page
             .transactions
@@ -624,11 +860,15 @@ fn decode_page(page: collections::Page) -> Page<Vec<u8>, Vec<u8>> {
                     .map(|change| match change {
                         collections::Change::Upsert(upsert) => {
                             decode_key(&upsert.key.body);
-                            decode(&upsert.value.body);
+                            let value = Rc::new(GuestValue {
+                                body: upsert.value.body,
+                                capabilities: upsert.value.capabilities,
+                            });
+                            decode_value(&value);
                             Change::Upsert {
                                 key: upsert.key.body,
                                 row_version: version(upsert.row_version),
-                                value: upsert.value.body,
+                                value,
                                 evidence: match upsert.evidence {
                                     collections::RowEvidence::Authoritative => {
                                         RowEvidence::Authoritative

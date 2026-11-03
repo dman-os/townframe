@@ -1,7 +1,8 @@
 # ADR 023: Cross-guest capability bank
 
-**Status:** Proposed. The semantics are decided; the WIT and engine adapters remain
-unbuilt.
+**Status:** Accepted. Implemented end-to-end (host bank, collection attachments,
+typed presentation redemption) across the Wasmtime and WCMP engines, with the
+validation tests below passing.
 
 **Amends:** ADR 015's component-reference and presentation-slot direction. **Used by:**
 ADR 017 for capability-bearing collection values.

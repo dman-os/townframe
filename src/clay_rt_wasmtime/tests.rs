@@ -60,6 +60,87 @@ async fn counter_package() -> WasmPackage {
         .expect("prepared counter component is valid")
 }
 
+async fn read_capability_page(
+    store: &mut Store<WasmStoreState>,
+    lease: u32,
+    committed: Option<Vec<u8>>,
+) -> bindings::townframe::dayframe::collections::Page {
+    use bindings::townframe::dayframe::collections as wit_collections;
+    use wit_collections::HostProjectionLeaseWithStore;
+
+    store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::read(
+                accessor,
+                Resource::new_borrow(lease),
+                committed,
+                wit_collections::ReadLimits {
+                    max_transactions: None,
+                    max_changes: None,
+                    poll_timeout_ms: 1_000,
+                },
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+}
+
+async fn capability_delivery(
+    host: &Host,
+    name: &str,
+    projection: &clay_guest_session::collections::BytesProjection,
+) -> (
+    Store<WasmStoreState>,
+    mpsc::Receiver<Work>,
+    u32,
+    u32,
+    Vec<u8>,
+) {
+    use bindings::townframe::dayframe::collections as wit_collections;
+    use wit_collections::HostCollectionReaderWithStore;
+
+    let owner = host.start(name);
+    let (mut state, incoming) =
+        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+    let reader = state
+        .table
+        .push(state.collections.grant(projection.clone()).unwrap())
+        .unwrap();
+    let reader_rep = reader.rep();
+    let mut store = Store::new(&engine().unwrap(), state);
+    let lease_rep = store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::acquire(
+                accessor,
+                Resource::new_borrow(reader_rep),
+                Vec::new(),
+                None,
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .rep();
+    let page = read_capability_page(&mut store, lease_rep, None).await;
+    let wit_collections::Change::Upsert(upsert) = &page.transactions[0].changes[0] else {
+        panic!("capability delivery must start with the published upsert");
+    };
+    assert_eq!(upsert.value.body, [0xd9, 0xa7, 0xf8, 0]);
+    assert_eq!(upsert.value.capabilities.len(), 1);
+    (
+        store,
+        incoming,
+        lease_rep,
+        upsert.value.capabilities[0].rep(),
+        page.through,
+    )
+}
+
 #[test]
 fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity() {
     use wit_presentation::HostComponentRef;
@@ -185,7 +266,7 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
         registrations
             .snapshot()
             .into_values()
-            .map(|entry| entry.value)
+            .map(|entry| entry.value.body)
             .collect::<Vec<_>>(),
         [vec![2]]
     );
@@ -226,7 +307,7 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
         registrations
             .snapshot()
             .into_values()
-            .map(|entry| entry.value)
+            .map(|entry| entry.value.body)
             .collect::<Vec<_>>(),
         [vec![3]]
     );
@@ -324,7 +405,10 @@ async fn registration_writer_adapter_revokes_without_affecting_other_instances()
                     Resource::new_borrow(rep),
                     vec![1],
                     based_on,
-                    registration_wit::EncodedValue { body: vec![body] },
+                    registration_wit::EncodedValue {
+                        body: vec![body],
+                        capabilities: Vec::new(),
+                    },
                 )
                 .await
             };
@@ -344,7 +428,7 @@ async fn registration_writer_adapter_revokes_without_affecting_other_instances()
                 registrations
                     .snapshot()
                     .into_values()
-                    .map(|entry| entry.value)
+                    .map(|entry| entry.value.body)
                     .collect::<Vec<_>>(),
                 [vec![7]]
             );
@@ -378,7 +462,7 @@ async fn registration_writer_adapter_revokes_without_affecting_other_instances()
                 registrations
                     .snapshot()
                     .into_values()
-                    .map(|entry| entry.value)
+                    .map(|entry| entry.value.body)
                     .collect::<Vec<_>>(),
                 [vec![9]]
             );
@@ -399,6 +483,391 @@ async fn registration_writer_adapter_revokes_without_affecting_other_instances()
         .unwrap();
     assert_eq!(other_session.writer_count(), 0);
     assert!(registrations.snapshot().is_empty());
+    host.close();
+}
+
+#[tokio::test]
+async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independently() {
+    use bindings::townframe::dayframe::capability_bank as cap_wit;
+    use cap_wit::HostCapabilityRef;
+    use cap_wit::HostPresentationComponent;
+    use clay_collection::Change;
+    use clay_collection::RowEvidence;
+    use clay_collection::Version;
+    use clay_guest_session::capabilities::CapabilityLimits;
+    use clay_guest_session::capabilities::CapabilityRef;
+    use clay_guest_session::capabilities::CapabilitySession;
+    use clay_guest_session::collections::BytesProjection;
+    use clay_guest_session::collections::BytesSource;
+    use clay_guest_session::collections::CollectionValue;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let provider = CapabilitySession::new(
+        host.clone(),
+        host.start("capability-provider"),
+        CapabilityLimits::default(),
+    );
+    let lease = provider.publish_presentation_component().unwrap();
+    let projection =
+        BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [41, 42]);
+    projection.publish(vec![Change::Upsert {
+        key: vec![1],
+        row_version: Version::new(1, 1),
+        value: CollectionValue {
+            body: vec![0xd9, 0xa7, 0xf8, 0],
+            capabilities: vec![lease.publication()],
+        },
+        evidence: RowEvidence::Authoritative,
+        write_context: None,
+    }]);
+
+    let (mut store_a, _incoming_a, _lease_a, reference_a, _through_a) =
+        capability_delivery(&host, "capability-reader-a", &projection).await;
+    let (mut store_b, _incoming_b, _lease_b, reference_b, _through_b) =
+        capability_delivery(&host, "capability-reader-b", &projection).await;
+
+    let (publication_a, scope_a) = {
+        let state = store_a.data_mut();
+        let reference = state
+            .table
+            .get(&Resource::<CapabilityRef>::new_borrow(reference_a))
+            .unwrap();
+        assert!(state.capabilities.same_recipient(reference));
+        assert_eq!(state.capabilities.reference_count(), 1);
+        (reference.publication_id(), reference.recipient_scope())
+    };
+    let (publication_b, scope_b) = {
+        let state = store_b.data_mut();
+        let reference = state
+            .table
+            .get(&Resource::<CapabilityRef>::new_borrow(reference_b))
+            .unwrap();
+        assert!(state.capabilities.same_recipient(reference));
+        assert_eq!(state.capabilities.reference_count(), 1);
+        (reference.publication_id(), reference.recipient_scope())
+    };
+    assert_eq!(publication_a, publication_b);
+    assert_eq!(publication_a, lease.publication().id());
+    assert_ne!(scope_a, scope_b);
+
+    let proxy_a = {
+        let state = store_a.data_mut();
+        let proxy =
+            HostCapabilityRef::as_presentation_component(state, Resource::new_borrow(reference_a))
+                .unwrap()
+                .unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 1);
+        proxy
+    };
+    let proxy_b = {
+        let state = store_b.data_mut();
+        let proxy =
+            HostCapabilityRef::as_presentation_component(state, Resource::new_borrow(reference_b))
+                .unwrap()
+                .unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 1);
+        proxy
+    };
+
+    let component_a = {
+        let state = store_a.data_mut();
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy_a.rep()))
+                .unwrap()
+                .unwrap();
+        let component = state.table.get(&resource).unwrap().0;
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+        component
+    };
+    let component_b = {
+        let state = store_b.data_mut();
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy_b.rep()))
+                .unwrap()
+                .unwrap();
+        let component = state.table.get(&resource).unwrap().0;
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+        component
+    };
+    assert_eq!(component_a, component_b);
+
+    // Releasing reader A's proxy and reference leaves reader B fully usable.
+    {
+        let state = store_a.data_mut();
+        HostPresentationComponent::drop(state, proxy_a).unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 0);
+        HostCapabilityRef::drop(state, Resource::new_own(reference_a)).unwrap();
+        assert_eq!(state.capabilities.reference_count(), 0);
+    }
+    {
+        let state = store_b.data_mut();
+        assert_eq!(state.capabilities.proxy_count(), 1);
+        assert_eq!(state.capabilities.reference_count(), 1);
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy_b.rep()))
+                .unwrap()
+                .unwrap();
+        assert_eq!(state.table.get(&resource).unwrap().0, component_b);
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+        HostPresentationComponent::drop(state, proxy_b).unwrap();
+        HostCapabilityRef::drop(state, Resource::new_own(reference_b)).unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 0);
+        assert_eq!(state.capabilities.reference_count(), 0);
+    }
+    drop(lease);
+    host.close();
+}
+
+#[tokio::test]
+async fn retained_presentation_proxy_survives_row_removal_but_turns_inert_when_lease_drops() {
+    use bindings::townframe::dayframe::capability_bank as cap_wit;
+    use bindings::townframe::dayframe::collections as wit_collections;
+    use cap_wit::HostCapabilityRef;
+    use cap_wit::HostPresentationComponent;
+    use clay_collection::Change;
+    use clay_collection::RowEvidence;
+    use clay_collection::Version;
+    use clay_guest_session::capabilities::CapabilityLimits;
+    use clay_guest_session::capabilities::CapabilitySession;
+    use clay_guest_session::collections::BytesProjection;
+    use clay_guest_session::collections::BytesSource;
+    use clay_guest_session::collections::CollectionValue;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let provider = CapabilitySession::new(
+        host.clone(),
+        host.start("retained-provider"),
+        CapabilityLimits::default(),
+    );
+    let lease = provider.publish_presentation_component().unwrap();
+    let projection =
+        BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [43, 44]);
+    projection.publish(vec![Change::Upsert {
+        key: vec![1],
+        row_version: Version::new(1, 1),
+        value: CollectionValue {
+            body: vec![0xd9, 0xa7, 0xf8, 0],
+            capabilities: vec![lease.publication()],
+        },
+        evidence: RowEvidence::Authoritative,
+        write_context: None,
+    }]);
+    let (mut store, _incoming, lease_rep, reference, through) =
+        capability_delivery(&host, "retained-reader", &projection).await;
+    let proxy = {
+        let state = store.data_mut();
+        HostCapabilityRef::as_presentation_component(state, Resource::new_borrow(reference))
+            .unwrap()
+            .unwrap()
+    };
+    {
+        let state = store.data_mut();
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy.rep()))
+                .unwrap()
+                .unwrap();
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+    }
+
+    projection.publish(vec![Change::Remove {
+        key: vec![1],
+        row_version: Version::new(1, 2),
+    }]);
+    let page = read_capability_page(&mut store, lease_rep, Some(through)).await;
+    assert!(matches!(
+        page.transactions[0].changes[0],
+        wit_collections::Change::Remove(_)
+    ));
+    {
+        let state = store.data_mut();
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy.rep()))
+                .unwrap()
+                .unwrap();
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 1);
+    }
+
+    drop(lease);
+    {
+        let state = store.data_mut();
+        assert!(matches!(
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy.rep()))
+                .unwrap()
+                .err(),
+            Some(cap_wit::CapabilityError::Revoked)
+        ));
+        assert_eq!(state.capabilities.proxy_count(), 1);
+        HostPresentationComponent::drop(state, proxy).unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 0);
+        HostCapabilityRef::drop(state, Resource::new_own(reference)).unwrap();
+        assert_eq!(state.capabilities.reference_count(), 0);
+    }
+    host.close();
+}
+
+#[tokio::test]
+async fn registration_writer_surfaces_invalid_attachment_for_fabricated_capability_index() {
+    use bindings::townframe::dayframe::capability_bank as cap_wit;
+    use bindings::townframe::dayframe::collection_registration as registration_wit;
+    use cap_wit::HostPublishedCapability;
+    use clay_guest_session::capabilities::CapabilityRef;
+    use clay_guest_session::collections::bytes_registrations;
+    use registration_wit::HostRegistrationWriterWithStore;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let owner = host.start("capability-writer");
+    let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [45, 46]);
+    let (mut state, _incoming) =
+        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+    let writer = state
+        .table
+        .push(state.collections.grant_writer(&registrations).unwrap())
+        .unwrap();
+    let writer_rep = writer.rep();
+    let lease = cap_wit::Host::publish_presentation_component(&mut state)
+        .unwrap()
+        .unwrap();
+    let publication_id = state.table.get(&lease).unwrap().publication().id();
+    let lease_rep = lease.rep();
+    let reference = HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease_rep))
+        .unwrap()
+        .unwrap();
+    let reference_rep = reference.rep();
+    let mut store = Store::new(&engine().unwrap(), state);
+
+    let fabricated = store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::put(
+                accessor,
+                Resource::new_borrow(writer_rep),
+                vec![1],
+                None,
+                registration_wit::EncodedValue {
+                    body: vec![0xd9, 0xa7, 0xf8, 0],
+                    capabilities: Vec::new(),
+                },
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        fabricated.err(),
+        Some(registration_wit::MutationError::InvalidAttachment)
+    ));
+    assert!(registrations.snapshot().is_empty());
+
+    let accepted = store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::put(
+                accessor,
+                Resource::new_borrow(writer_rep),
+                vec![1],
+                None,
+                registration_wit::EncodedValue {
+                    body: vec![0xd9, 0xa7, 0xf8, 0],
+                    capabilities: vec![Resource::<CapabilityRef>::new_own(reference_rep)],
+                },
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(accepted.is_ok());
+    let stored = registrations.snapshot().into_values().next().unwrap().value;
+    assert_eq!(stored.body, [0xd9, 0xa7, 0xf8, 0]);
+    assert_eq!(stored.capabilities.len(), 1);
+    assert_eq!(stored.capabilities[0].id(), publication_id);
+
+    let state = store.data_mut();
+    HostPublishedCapability::drop(state, Resource::new_own(lease_rep)).unwrap();
+    registration_wit::HostRegistrationWriter::drop(state, Resource::new_own(writer_rep)).unwrap();
+    host.close();
+}
+
+#[test]
+fn capability_bank_table_drops_release_reference_and_proxy_capacity() {
+    use bindings::townframe::dayframe::capability_bank as cap_wit;
+    use cap_wit::HostCapabilityRef;
+    use cap_wit::HostPresentationComponent;
+    use cap_wit::HostPublishedCapability;
+    use clay_guest_session::capabilities::CapabilityLimits;
+    use clay_guest_session::capabilities::CapabilitySession;
+
+    let host = Host::new();
+    let owner = host.start("capability-budget");
+    let (mut state, _incoming) =
+        WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+    state.capabilities = CapabilitySession::new(
+        host.clone(),
+        owner,
+        CapabilityLimits {
+            publications: 1,
+            references: 1,
+            proxies: 1,
+        },
+    );
+    let lease = cap_wit::Host::publish_presentation_component(&mut state)
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.capabilities.publication_count(), 1);
+
+    let reference =
+        HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease.rep()))
+            .unwrap()
+            .unwrap();
+    assert_eq!(state.capabilities.reference_count(), 1);
+    assert!(matches!(
+        HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease.rep()))
+            .unwrap()
+            .err(),
+        Some(cap_wit::CapabilityError::LimitExceeded)
+    ));
+    HostCapabilityRef::drop(&mut state, reference).unwrap();
+    assert_eq!(state.capabilities.reference_count(), 0);
+    let reference =
+        HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease.rep()))
+            .unwrap()
+            .unwrap();
+
+    let proxy = HostCapabilityRef::as_presentation_component(
+        &mut state,
+        Resource::new_borrow(reference.rep()),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(state.capabilities.proxy_count(), 1);
+    assert!(matches!(
+        HostCapabilityRef::as_presentation_component(
+            &mut state,
+            Resource::new_borrow(reference.rep()),
+        )
+        .unwrap()
+        .err(),
+        Some(cap_wit::CapabilityError::LimitExceeded)
+    ));
+    HostPresentationComponent::drop(&mut state, proxy).unwrap();
+    assert_eq!(state.capabilities.proxy_count(), 0);
+    let proxy = HostCapabilityRef::as_presentation_component(
+        &mut state,
+        Resource::new_borrow(reference.rep()),
+    )
+    .unwrap()
+    .unwrap();
+
+    HostPresentationComponent::drop(&mut state, proxy).unwrap();
+    HostCapabilityRef::drop(&mut state, reference).unwrap();
+    HostPublishedCapability::drop(&mut state, lease).unwrap();
+    assert_eq!(state.capabilities.proxy_count(), 0);
+    assert_eq!(state.capabilities.reference_count(), 0);
+    assert_eq!(state.capabilities.publication_count(), 0);
+    assert!(state.table.is_empty());
     host.close();
 }
 
@@ -781,11 +1250,15 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
         encoded
     }
 
-    fn upsert(key: &str, value: &str, sequence: u64) -> Change<Vec<u8>, Vec<u8>> {
+    fn upsert(
+        key: &str,
+        value: &str,
+        sequence: u64,
+    ) -> Change<Vec<u8>, clay_guest_session::collections::CollectionValue> {
         Change::Upsert {
             key: cbor(key),
             row_version: Version::new(1, sequence),
-            value: cbor(value),
+            value: clay_guest_session::collections::CollectionValue::plain(cbor(value)),
             evidence: RowEvidence::Authoritative,
             write_context: None,
         }
@@ -998,6 +1471,78 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
             removals(&revoked),
             [1],
             "closing the instance withdraws the writer the store still holds"
+        );
+        assert!(registrations.snapshot().is_empty());
+        drop(session);
+        host.close();
+    };
+    tokio::join!(driver, scenario);
+}
+
+#[tokio::test]
+async fn collection_probe_capability_publication_redemption_and_closure_cross_the_boundary() {
+    use clay_guest_session::collections::bytes_registrations;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let owner = host.start("collection-probe");
+    let package = WasmPackage::from_env("collection-probe")
+        .await
+        .expect("prepared collection probe is valid");
+    let registrations = bytes_registrations(NonZeroUsize::new(64).unwrap(), [41, 42]);
+    let (runtime, driver) = WasmRuntime::activate(
+        &host,
+        owner.clone(),
+        &package,
+        BTreeMap::new(),
+        [("rows".into(), registrations.projection())].into(),
+        [("cap".into(), registrations.clone())].into(),
+    )
+    .await
+    .unwrap();
+    let scenario = async move {
+        let writer = Arc::new(RecordingSink::new());
+        let session = runtime
+            .mount(Arc::<RecordingSink>::clone(&writer), &[])
+            .unwrap();
+        writer.wait_for(|text| text.contains("status=live")).await;
+        let command = |element: u32| {
+            let revision = writer.tree(|tree| tree.revision());
+            session.handler()(Event {
+                revision,
+                element: clay_surface::NodeId::try_from(element).unwrap(),
+                name: "click".into(),
+                bubbles: true,
+                data_json: "{}".into(),
+            });
+        };
+
+        command(5);
+        let text = writer
+            .wait_for(|text| text.contains("scenario=done") && text.contains("cap-put=ok@1"))
+            .await;
+        assert!(text.contains("cap-publish=ok"), "{text}");
+        assert!(
+            text.contains("cap-fabricated-put=invalid-attachment"),
+            "a tagged body without attachments conveys no authority: {text}"
+        );
+        assert!(text.contains("cap@0"), "{text}");
+        let stored = registrations.snapshot().into_values().next().unwrap().value;
+        assert_eq!(stored.capabilities.len(), 1);
+
+        command(7);
+        let text = writer.wait_for(|text| text.contains("cap-redeem=")).await;
+        assert!(text.contains("cap-redeem=mounted"), "{text}");
+
+        command(6);
+        let text = writer
+            .wait_for(|text| text.contains("cap-proxy-drop=ok"))
+            .await;
+        assert!(text.contains("cap-remove=ok@2"), "{text}");
+        assert!(text.contains("cap-close=ok"), "{text}");
+        assert!(
+            text.contains("cap-proxy=revoked"),
+            "provider closure leaves the retained proxy inert but droppable: {text}"
         );
         assert!(registrations.snapshot().is_empty());
         drop(session);
