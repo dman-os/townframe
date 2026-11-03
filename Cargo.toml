@@ -39,6 +39,7 @@ members = [
   "./src/clay_host",
   "./src/clay_docs",
   "./src/clay_collection",
+  "./src/clay_store",
   "./src/clay_micro_core",
   "./src/clay_dioxus",
   "./src/clay_mdk",
@@ -108,6 +109,7 @@ big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }
 clay_collection = { path = "./src/clay_collection" }
+clay_store = { path = "./src/clay_store" }
 clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }
 clay_micro_core = { path = "./src/clay_micro_core" }

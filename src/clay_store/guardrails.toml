@@ -1,0 +1,13 @@
+version = 1
+role = "foundation"
+dependency_reason = "ADR 025 §2: durable Clay collections need an ordered key-value store with prefix scan and atomic batch; the native SQLite backend is the only in-repo dependency"
+allowed_dependencies = ["sqlite_rs"]
+allow_external_api_types = false
+
+# SQLite backs native hosts; IndexedDB backs the browser host (ADR 018).
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[migrations]
+"src/clay_store/sqlite/migrations/001_entries.sql" = "7567a0f5e2b4f43794c827c47d2b3823204ba90fff2639c98df120b99820c5be"

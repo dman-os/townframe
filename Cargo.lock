@@ -2744,6 +2744,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "clay_store"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "sqlite_rs",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "clay_surface"
 version = "0.1.0"
 dependencies = [
