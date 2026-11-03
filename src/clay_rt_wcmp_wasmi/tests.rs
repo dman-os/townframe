@@ -1145,8 +1145,8 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     host.close();
 }
 
-#[test]
-fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers() {
+#[tokio::test]
+async fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers() {
     use clay_guest_session::capabilities::CapabilityLimits;
     use clay_guest_session::capabilities::CapabilitySession;
     use clay_guest_session::collections::CollectionValue;
@@ -1158,7 +1158,7 @@ fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers() {
     let component = host.publish_component(&provider_instance).unwrap();
     let provider =
         CapabilitySession::new(host.clone(), provider_instance, CapabilityLimits::default());
-    let lease = provider.publish_component(component).unwrap();
+    let lease = provider.publish_component("view", component).unwrap();
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [41, 42]);
     let (mut writer_state, _writer_incoming) = WcmpStoreState::new(
         host.clone(),
@@ -1206,11 +1206,23 @@ fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers() {
     let minted_b = reader_b.capabilities.mint(&stored.capabilities[0]).unwrap();
     let ref_b = reader_b.table.push(minted_b).unwrap();
     assert_eq!(
-        reader_a.table.get(&ref_a).unwrap().publication_id(),
+        reader_a
+            .table
+            .get(&ref_a)
+            .unwrap()
+            .publication()
+            .unwrap()
+            .id(),
         lease.publication().id()
     );
     assert_eq!(
-        reader_b.table.get(&ref_b).unwrap().publication_id(),
+        reader_b
+            .table
+            .get(&ref_b)
+            .unwrap()
+            .publication()
+            .unwrap()
+            .id(),
         lease.publication().id()
     );
     assert_ne!(
@@ -1234,14 +1246,16 @@ fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers() {
         .table
         .get(&ref_a)
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
     let proxy_a = reader_a.table.push(redeemed_a).unwrap();
     let redeemed_b = reader_b
         .table
         .get(&ref_b)
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
     let proxy_b = reader_b.table.push(redeemed_b).unwrap();
     assert_eq!(
@@ -1265,7 +1279,8 @@ fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers() {
         .table
         .get(&ref_b)
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
     assert_eq!(redeemed_b_again.component().unwrap(), component);
     drop(redeemed_b_again);
@@ -1290,8 +1305,8 @@ fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers() {
     assert!(registrations.snapshot().is_empty());
 }
 
-#[test]
-fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_lease_drop_and_provider_closure()
+#[tokio::test]
+async fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_lease_drop_and_provider_closure()
  {
     use clay_guest_session::capabilities::CapabilityFailure;
     use clay_guest_session::capabilities::CapabilityLimits;
@@ -1308,7 +1323,7 @@ fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_lease_drop
         provider_instance.clone(),
         CapabilityLimits::default(),
     );
-    let lease = provider.publish_component(component).unwrap();
+    let lease = provider.publish_component("view", component).unwrap();
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [43, 44]);
     let (mut writer_state, _writer_incoming) = WcmpStoreState::new(
         host.clone(),
@@ -1348,7 +1363,8 @@ fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_lease_drop
         .table
         .get(&reference)
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
     let proxy = reader.table.push(redeemed).unwrap();
     assert_eq!(
@@ -1391,14 +1407,15 @@ fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_lease_drop
     drop(reader.table.delete(reference).unwrap());
     assert_eq!(reader.capabilities.reference_count(), 0);
 
-    let lease = provider.publish_component(component).unwrap();
+    let lease = provider.publish_component("view", component).unwrap();
     let minted = reader.capabilities.mint(&lease.publication()).unwrap();
     let reference = reader.table.push(minted).unwrap();
     let redeemed = reader
         .table
         .get(&reference)
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
     let proxy = reader.table.push(redeemed).unwrap();
     assert_eq!(
@@ -1421,8 +1438,8 @@ fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_lease_drop
     host.close();
 }
 
-#[test]
-fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_publications() {
+#[tokio::test]
+async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_publications() {
     use clay_guest_session::capabilities::CapabilityLimits;
     use clay_guest_session::capabilities::CapabilityRef;
     use clay_guest_session::capabilities::CapabilitySession;
@@ -1435,7 +1452,7 @@ fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_public
     let provider_instance = host.start("provider");
     let provider =
         CapabilitySession::new(host.clone(), provider_instance, CapabilityLimits::default());
-    let lease = provider.publish_presentation_component().unwrap();
+    let lease = provider.publish_presentation("view").unwrap();
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [45, 46]);
     let (mut state, _incoming) = WcmpStoreState::new(
         host.clone(),
@@ -1510,8 +1527,8 @@ fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_public
     host.close();
 }
 
-#[test]
-fn capability_table_resources_release_session_limits_on_drop() {
+#[tokio::test]
+async fn capability_table_resources_release_session_limits_on_drop() {
     use clay_guest_session::capabilities::CapabilityFailure;
     use clay_guest_session::capabilities::CapabilityLimits;
     use clay_guest_session::capabilities::CapabilitySession;
@@ -1530,10 +1547,10 @@ fn capability_table_resources_release_session_limits_on_drop() {
         },
     );
 
-    let published = state.capabilities.publish_presentation_component().unwrap();
+    let published = state.capabilities.publish_presentation("view").unwrap();
     let lease = state.table.push(published).unwrap();
     assert_eq!(
-        state.capabilities.publish_presentation_component().err(),
+        state.capabilities.publish_presentation("view").err(),
         Some(CapabilityFailure::LimitExceeded)
     );
     let minted = state.table.get(&lease).unwrap().reference().unwrap();
@@ -1546,7 +1563,8 @@ fn capability_table_resources_release_session_limits_on_drop() {
         .table
         .get(&reference)
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
     let proxy = state.table.push(redeemed).unwrap();
     assert_eq!(
@@ -1554,7 +1572,8 @@ fn capability_table_resources_release_session_limits_on_drop() {
             .table
             .get(&reference)
             .unwrap()
-            .as_presentation_component()
+            .redeem_presentation()
+            .await
             .err(),
         Some(CapabilityFailure::LimitExceeded)
     );
@@ -1568,7 +1587,8 @@ fn capability_table_resources_release_session_limits_on_drop() {
         .table
         .get(&reference)
         .unwrap()
-        .as_presentation_component()
+        .redeem_presentation()
+        .await
         .unwrap();
     let proxy = state.table.push(redeemed).unwrap();
     drop(state.table.delete(proxy).unwrap());
@@ -1585,7 +1605,7 @@ fn capability_table_resources_release_session_limits_on_drop() {
     assert_eq!(state.capabilities.publication_count(), 0);
     assert!(state.table.is_empty());
 
-    let lease = state.capabilities.publish_presentation_component().unwrap();
+    let lease = state.capabilities.publish_presentation("view").unwrap();
     assert_eq!(state.capabilities.publication_count(), 1);
     drop(lease);
     assert_eq!(state.capabilities.publication_count(), 0);

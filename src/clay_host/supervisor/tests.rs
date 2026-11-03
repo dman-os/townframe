@@ -788,3 +788,47 @@ async fn an_incarnation_ended_outside_supervision_is_a_fault() {
         Err(StartError::Faulted(fault))
     );
 }
+
+#[tokio::test]
+async fn a_failed_demand_that_started_the_micro_lets_it_idle_close() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
+    let solo = id("solo");
+    driven(&supervisor, async {
+        assert!(supervisor.acquire(&solo, "absent").await.is_err());
+        settle(|| supervisor.state(&solo) == MicroState::Idle).await;
+    })
+    .await;
+    assert_eq!(controls.log(), ["init solo", "close solo"]);
+}
+
+#[tokio::test]
+async fn an_activator_is_served_by_the_driver_and_status_never_activates() {
+    fn send_and_sync<T: Send + Sync>() {}
+    send_and_sync::<Activator<u32>>();
+    send_and_sync::<Lease<u32>>();
+
+    let controls = Controls::default();
+    let gate = controls.gate("solo");
+    let host = Host::new();
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
+    let (solo, activator) = (id("solo"), supervisor.activator());
+    assert_eq!(activator.status(&solo), Some(MicroState::Idle));
+    assert_eq!(activator.status(&id("nobody")), None);
+    assert!(controls.log().is_empty());
+    driven(&supervisor, async {
+        let (lease, ()) = tokio::join!(activator.acquire(&solo, PRESENTATION), async {
+            settle(|| !controls.log().is_empty()).await;
+            assert_eq!(activator.status(&solo), Some(MicroState::Initializing));
+            gate.notify_one();
+        });
+        let lease = lease.unwrap();
+        assert_eq!(activator.status(&solo), Some(MicroState::Active));
+        assert_eq!(lease.owner, supervisor.instance(&solo).unwrap());
+        drop(lease);
+        settle(|| activator.status(&solo) == Some(MicroState::Idle)).await;
+    })
+    .await;
+    assert_eq!(controls.log(), ["init solo", "close solo"]);
+}
