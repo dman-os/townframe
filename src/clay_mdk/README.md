@@ -81,6 +81,38 @@ Guest components are compiled only for Wasm: their WIT-qualified export names ar
 native shared-library export names, so native tests execute the actual Wasm component, never a
 native substitute for guest code.
 
+## Writing a guest: concurrency rules
+
+A guest is one wasm instance. Every host call into it is a component-model task: `call` is an
+async export, one task per call, and many calls can be suspended in the guest at once while the
+host also drives the synchronous `mount`/`dispatch`/`unmount` exports between them. The MDK's
+`task_hook` (`lib.rs`) keeps that sound: thread-locals are shared by all tasks, and wit-bindgen's
+per-task state is swapped on every suspend and resume. Authors owe these rules in return:
+
+- **No `RefCell` borrow, signal read/write guard or Dioxus guard across an `.await`.** Another
+  task of the same instance runs while you are suspended, on the same shared thread-locals, and
+  meets your live borrow with a panic. Clone out what you need (an `Rc`, a value) first.
+- **After an `.await` resumes, Dioxus global APIs only inside `dom.in_runtime`.** The Dioxus
+  runtime stack is a shared thread-local that other tasks push and pop; your task cannot assume
+  its runtime is current after it was suspended.
+- **A panic kills the instance.** The guest is built `panic=abort`, so a panic is a wasm trap and
+  traps are not per task: the host fails every call outstanding on the incarnation (callers see
+  `Revoked`) and closes it. Return `Err` for anything a caller can cause.
+- **Spawned work lives as long as the component-model task that spawned it.**
+  `wit_bindgen::spawn_local` futures are owned and polled by the export task that called it
+  (`initialize`, `call`, ...), not by the incarnation. That task stays alive until its spawned
+  work finishes, so work spawned in `initialize` runs on after it returned and is how a micro
+  keeps background work; but it dies with the store, and a spawn in a `call` handler is
+  attributed to that call's task, not to the instance. Put long-lived work in `initialize`.
+- **Cancelling a call does not cancel the handler.** The host cannot cancel a guest task yet:
+  if the caller gives up, the handler still runs to completion and its answer is discarded, so
+  handlers must be safe to finish unobserved.
+
+wit-bindgen must stay `default-features = false` (no `std`) in every wasip3 guest crate, or
+this task state falls back to a libc thread-local and a second concurrent call aborts the
+instance. `x/check-dayframe.ts` fails when any guest closure resolves `std`, and the first async
+export that suspends without using the MDK's task-context symbols panics with that explanation.
+
 ## The wire
 
 `presentation.wit` carries a typed `list<mutation>`. Its variants mirror Dioxus Core's

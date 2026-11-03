@@ -280,7 +280,13 @@ wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "04bb391f3f416f9
 # WASI 0.3 imports a wasm32-wasip3 component brings in.
 wasmtime-wasi = { version = "48.0.7", default-features = false, features = ["p3"] }
 wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "1bcaebaeba509b8a59fd239e668abe6f02596794", default-features = false }
-wit-bindgen = "0.62.0"
+# `default-features = false` is load-bearing on wasm32-wasip3: wit-bindgen's `std` feature keeps the
+# async export task state in a libc `thread_local!`, which cannot be swapped per component-model
+# task. Without `std` it goes through the `wit_bindgen_0_62_0_{get,set}_task_context` hooks that
+# `clay_mdk` defines over context slot 0 (see `clay_mdk/lib.rs`). Each guest crate names the
+# features it needs; `x/check-dayframe.ts` fails if `std` comes back. The exact `=` pin is on
+# purpose: `clay_mdk` defines `wit_bindgen_0_62_0_*` symbols, so a bump must be a visible edit there.
+wit-bindgen = { version = "=0.62.0", default-features = false }
 wstd = "0.6.8"
 # The browser guest engine (ADR 018). Upstream pins `wasm-bindgen = "=0.2.126"`
 # exactly; this fork moves only that pin to the 0.2.127 the Dioxus fork needs,
