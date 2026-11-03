@@ -674,7 +674,7 @@ mod tests {
                 content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
                 key_ref: key_ref.parse()?,
                 key_ref_heads: key_heads.clone(),
-                encoding_parameters: serde_json::json!({ "recordSize": 8, "padding": "legacy" }),
+                encoding_parameters: serde_json::json!({ "recordSize": 8, "padding": "padme" }),
             },
         )
         .await?;
