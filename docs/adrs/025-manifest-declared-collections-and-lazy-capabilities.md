@@ -181,10 +181,11 @@ When projecting the row to an authorized reader, Clay mints a recipient-local la
 
 ### 8. Initialization returns publications; there are no slots to poll
 
-The manifest declares a micro's publications. `initialize` returns the publication leases it serves, by name, together with its `instance-root`:
+The manifest declares a micro's publications. `initialize` returns the publication leases it serves, by name; the host then starts the guest's `serve` main loop (ADR 024 §7a):
 
 ```text
-initialize(context) -> { root, publications: [(name, published-capability)] }
+initialize(context) -> { publications: [(name, published-capability)] }
+serve(inbox: stream<request>)          // started once initialize succeeds
 ```
 
 This is ADR 024 §5's staged visibility: nothing is reachable through the publications until `initialize` returns successfully, and the host exposes all of them atomically. A demand that started the activation for publication `p` succeeds if `p` is among the returned publications with the declared kind and contract. Otherwise that demand fails with `Unavailable`, and the incarnation stays up for other users. Callers awaiting the lazy reference receive the activation result directly. No secondary collection is polled.
@@ -206,7 +207,7 @@ incarnation writer/publication      owned effect; cleaned with owner
 When the last external strong edge disappears, policy may close immediately or after a bounded grace period. Closing:
 
 1. rejects new outward publication and routes new demand to a future incarnation;
-2. retains existing dependencies while `instance-root.close()` runs;
+2. retains existing dependencies while the guest drains after the host closes its `serve` inbox;
 3. revokes live publications;
 4. removes incarnation-owned registration scopes;
 5. drops owned work and resources in reverse ownership order; and
