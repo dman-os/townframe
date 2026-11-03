@@ -4,9 +4,12 @@
 //! A [`RegistrationCollection`] projects one value per logical key `K`. Every live
 //! writer scope holds at most one candidate per key, a value or a tombstone, stamped
 //! with a [`Stamp`] `(lamport, writer id)`. Readers see the winner, the candidate with
-//! the highest stamp; a winning tombstone, or no candidates, means the key is absent.
-//! The projected value is a [`Stamped`] so a reader can hand the stamp back as a
-//! [`WriteBasis`]. The projection's `row_version` is only a feed position: retracting
+//! the highest stamp. A winning tombstone is published as an ordinary row whose value is
+//! `None`, carrying the tombstone's stamp, so a reader can name what it saw deleted. A key
+//! is removed from the projection only when it has no candidates left at all (its last
+//! scope retracted). Tombstones of permanent scopes are never retracted and so accumulate;
+//! collecting them is out of scope. The projected value is a `Stamped<Option<V>>` so a
+//! reader can hand the stamp back as a [`WriteBasis`]. The projection's `row_version` is only a feed position: retracting
 //! a scope can promote an older stamp, which is published under a fresh `row_version`.
 //!
 //! Scope retention decides when candidates die, and retraction removes a scope's
@@ -74,8 +77,8 @@ struct ScopeState<K> {
     keys: BTreeSet<K>,
 }
 
-struct Inner<K, V, S: Source<K, Stamped<V>>> {
-    projection: Projection<K, Stamped<V>, S>,
+struct Inner<K, V, S: Source<K, Stamped<Option<V>>>> {
+    projection: Projection<K, Stamped<Option<V>>, S>,
     next_scope: u64,
     version: Version,
     /// Live scopes; removing a scope also revokes its writers.
@@ -92,7 +95,7 @@ struct Inner<K, V, S: Source<K, Stamped<V>>> {
     inflight: BTreeMap<K, Vec<Waker>>,
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> Inner<K, V, S> {
     fn next_scope_id(&mut self) -> RegistrationScopeId {
         self.next_scope = self
             .next_scope
@@ -148,18 +151,18 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
             .map(|(id, candidate)| (*id, candidate))
     }
 
-    /// What readers see for `key`: the winning value's identity, `None` when absent.
+    /// What readers see for `key`: the winner's scope and stamp, tombstones included;
+    /// `None` when the key has no visible candidate.
     fn visible(&self, key: &K) -> Option<(RegistrationScopeId, Stamp)> {
         let (id, candidate) = self.winner(key, None)?;
-        candidate.slot.as_ref()?;
         Some((id, candidate.stamp.clone()))
     }
 
-    fn visible_row(&self, key: &K) -> Option<Stamped<V>> {
+    fn visible_row(&self, key: &K) -> Option<Stamped<Option<V>>> {
         let (_, candidate) = self.winner(key, None)?;
         Some(Stamped {
             stamp: candidate.stamp.clone(),
-            value: candidate.slot.clone()?,
+            value: candidate.slot.clone(),
         })
     }
 
@@ -185,17 +188,19 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
             WriteBasis::Concurrent => 0,
             WriteBasis::Observed(stamp) => stamp.lamport,
             WriteBasis::CompareAndSet(expected) => {
-                // A winning tombstone reads as absent: readers never see its stamp.
-                let current = winner
-                    .as_ref()
-                    .filter(|(_, live)| *live)
-                    .map(|(stamp, _)| stamp);
-                if current != expected.as_ref() {
+                // Readers see a winning tombstone as a stamped row, so its stamp matches
+                // like a live one; `None` matches both a missing key and a tombstone.
+                let matches = match (&winner, expected) {
+                    (None, expected) => expected.is_none(),
+                    (Some((_, live)), None) => !live,
+                    (Some((stamp, _)), Some(expected)) => stamp == expected,
+                };
+                if !matches {
                     return Err(MutationError::Conflict {
-                        current: current.cloned(),
+                        current: winner.map(|(stamp, _)| stamp),
                     });
                 }
-                // Supersede the tombstone too when the comparison was against absence.
+                // Supersede whatever was compared against, tombstone included.
                 winner.as_ref().map_or(0, |(stamp, _)| stamp.lamport)
             }
         };
@@ -246,8 +251,8 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
     }
 
     /// Run `change` and publish the net effect on `touched` keys as one transaction:
-    /// an upsert where the visible winner changed to a value, a remove where it changed
-    /// to absent, nothing where readers see the same row. Keys outside `touched` must
+    /// an upsert where the visible winner changed (a tombstone winner upserts a `None`
+    /// value), a remove where no candidate is left, nothing where readers see the same row. Keys outside `touched` must
     /// not change visibility.
     fn mutate(
         &mut self,
@@ -269,6 +274,7 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
                 continue;
             }
             let row_version = self.next_version();
+            // No visible candidate left: the key leaves the projection.
             changes.push(match self.visible_row(&key) {
                 Some(value) => Change::Upsert {
                     key,
@@ -293,18 +299,18 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Inner<K, V, S> {
 }
 
 /// The authority side of an owner-scoped contribution collection.
-pub struct RegistrationCollection<K, V, S: Source<K, Stamped<V>> = ()> {
+pub struct RegistrationCollection<K, V, S: Source<K, Stamped<Option<V>>> = ()> {
     inner: Arc<Mutex<Inner<K, V, S>>>,
 }
 
-impl<K, V, S: Source<K, Stamped<V>>> std::fmt::Debug for RegistrationCollection<K, V, S> {
+impl<K, V, S: Source<K, Stamped<Option<V>>>> std::fmt::Debug for RegistrationCollection<K, V, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistrationCollection")
             .finish_non_exhaustive()
     }
 }
 
-impl<K, V, S: Source<K, Stamped<V>>> Clone for RegistrationCollection<K, V, S> {
+impl<K, V, S: Source<K, Stamped<Option<V>>>> Clone for RegistrationCollection<K, V, S> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -313,13 +319,13 @@ impl<K, V, S: Source<K, Stamped<V>>> Clone for RegistrationCollection<K, V, S> {
 }
 
 /// Identity equality: two handles are equal when they name the same collection.
-impl<K, V, S: Source<K, Stamped<V>>> PartialEq for RegistrationCollection<K, V, S> {
+impl<K, V, S: Source<K, Stamped<Option<V>>>> PartialEq for RegistrationCollection<K, V, S> {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
-impl<K, V, S: Source<K, Stamped<V>>> Eq for RegistrationCollection<K, V, S> {}
+impl<K, V, S: Source<K, Stamped<Option<V>>>> Eq for RegistrationCollection<K, V, S> {}
 
 impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
     pub fn new(runtime_epoch: [u64; 2]) -> Self {
@@ -327,7 +333,7 @@ impl<K: Ord + Clone, V: Clone> RegistrationCollection<K, V> {
     }
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> RegistrationCollection<K, V, S> {
     pub fn with_source(source: S, replay_capacity: NonZeroUsize, runtime_epoch: [u64; 2]) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -419,18 +425,19 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<
     }
 
     /// The read waist over this collection's winners.
-    pub fn projection(&self) -> Projection<K, Stamped<V>, S> {
+    pub fn projection(&self) -> Projection<K, Stamped<Option<V>>, S> {
         self.lock().projection.clone()
     }
 
-    /// The published winner of `key`; staged candidates are excluded.
-    pub fn get(&self, key: &K) -> Option<Stamped<V>> {
+    /// The published winner of `key`, a tombstone as `Stamped { value: None, .. }`; staged
+    /// candidates are excluded.
+    pub fn get(&self, key: &K) -> Option<Stamped<Option<V>>> {
         self.lock().visible_row(key)
     }
 
-    /// Host-local snapshot of every published winner. Consumers use projection leases
+    /// Host-local snapshot of every published winner, tombstones included as `None` rows. Consumers use projection leases
     /// rather than this authority convenience.
-    pub fn snapshot(&self) -> BTreeMap<K, Stamped<V>> {
+    pub fn snapshot(&self) -> BTreeMap<K, Stamped<Option<V>>> {
         let inner = self.lock();
         inner
             .candidates
@@ -493,12 +500,12 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationCollection<
     }
 }
 
-pub struct RegistrationScope<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>> = ()> {
+pub struct RegistrationScope<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>> = ()> {
     id: RegistrationScopeId,
     collection: RegistrationCollection<K, V, S>,
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationScope<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> RegistrationScope<K, V, S> {
     pub fn id(&self) -> RegistrationScopeId {
         self.id
     }
@@ -521,7 +528,9 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationScope<K, V,
     }
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Drop for RegistrationScope<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> Drop
+    for RegistrationScope<K, V, S>
+{
     /// Scope-owner closure retracts its candidates, even if mutation handles remain
     /// alive. Staged candidates leave authority state without reaching a projection.
     fn drop(&mut self) {
@@ -532,12 +541,12 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> Drop for RegistrationSc
 /// A scope's mutation handle, not its owner. Writes are stamped with the scope's
 /// [`WriterId`] and a lamport derived from the [`WriteBasis`]; only
 /// [`WriteBasis::CompareAndSet`] can be refused.
-pub struct RegistrationWriter<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>> = ()> {
+pub struct RegistrationWriter<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>> = ()> {
     id: RegistrationScopeId,
     collection: RegistrationCollection<K, V, S>,
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> std::fmt::Debug
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> std::fmt::Debug
     for RegistrationWriter<K, V, S>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -547,9 +556,27 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> std::fmt::Debug
     }
 }
 
-impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationWriter<K, V, S> {
+impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<Option<V>>>> RegistrationWriter<K, V, S> {
     pub fn scope_id(&self) -> RegistrationScopeId {
         self.id
+    }
+
+    /// Whether this scope holds a candidate (a value or a tombstone) for `key`.
+    pub fn holds(&self, key: &K) -> bool {
+        self.collection
+            .lock()
+            .scopes
+            .get(&self.id)
+            .is_some_and(|scope| scope.keys.contains(key))
+    }
+
+    /// How many keys this scope holds candidates for, tombstones included.
+    pub fn held_keys(&self) -> usize {
+        self.collection
+            .lock()
+            .scopes
+            .get(&self.id)
+            .map_or(0, |scope| scope.keys.len())
     }
 
     /// Set this scope's candidate for `key` to `value`, replacing its previous one,
@@ -599,24 +626,26 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, Stamped<V>>> RegistrationWriter<K, V
 /// output (`T`, e.g. the new stamp). The mutation is already committed when this
 /// exists; [`Self::dispatch`] fires the wakes and returns the output.
 #[must_use = "dispatch after releasing host authority locks"]
-pub struct RegistrationDispatch<K, V, S: Source<K, Stamped<V>> = (), T = ()> {
+pub struct RegistrationDispatch<K, V, S: Source<K, Stamped<Option<V>>> = (), T = ()> {
     output: T,
     /// Usually one transaction; a reset also republishes the surviving scopes' winners
     /// into the new generation.
-    projection: Vec<ProjectionDispatch<K, Stamped<V>, S::Selector>>,
+    projection: Vec<ProjectionDispatch<K, Stamped<Option<V>>, S::Selector>>,
     /// Candidates the mutation retracted; their values drop in [`Self::dispatch`],
     /// outside every lock.
     retired: Vec<Candidate<V>>,
 }
 
-impl<K, V, S: Source<K, Stamped<V>>, T> std::fmt::Debug for RegistrationDispatch<K, V, S, T> {
+impl<K, V, S: Source<K, Stamped<Option<V>>>, T> std::fmt::Debug
+    for RegistrationDispatch<K, V, S, T>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistrationDispatch")
             .finish_non_exhaustive()
     }
 }
 
-impl<K, V, S: Source<K, Stamped<V>>> RegistrationDispatch<K, V, S> {
+impl<K, V, S: Source<K, Stamped<Option<V>>>> RegistrationDispatch<K, V, S> {
     fn with_output<T>(self, output: T) -> RegistrationDispatch<K, V, S, T> {
         RegistrationDispatch {
             output,
@@ -626,7 +655,7 @@ impl<K, V, S: Source<K, Stamped<V>>> RegistrationDispatch<K, V, S> {
     }
 }
 
-impl<K, V, S: Source<K, Stamped<V>>, T> RegistrationDispatch<K, V, S, T> {
+impl<K, V, S: Source<K, Stamped<Option<V>>>, T> RegistrationDispatch<K, V, S, T> {
     /// The mutation's output, readable before the wakes fire.
     pub fn output(&self) -> &T {
         &self.output

@@ -34,7 +34,7 @@ impl Wake for SnapshotOnWake {
             self.collection
                 .snapshot()
                 .into_iter()
-                .map(|(key, row)| (key, row.value))
+                .filter_map(|(key, row)| Some((key, row.value?)))
                 .collect::<Vec<_>>(),
             self.expected
         );
@@ -55,8 +55,9 @@ impl Wake for SnapshotOnWake {
             page.transactions
                 .into_iter()
                 .flat_map(|transaction| transaction.changes)
-                .map(|change| match change {
-                    Change::Upsert { key, value, .. } => (key, value.value),
+                .filter_map(|change| match change {
+                    // Tombstones bootstrap as `None` rows; only live values are compared.
+                    Change::Upsert { key, value, .. } => Some((key, value.value?)),
                     Change::Remove { .. } => panic!("remove in bootstrap"),
                 })
                 .collect::<Vec<_>>(),
@@ -72,7 +73,7 @@ fn poll_ready<T>(future: &mut (impl Future<Output = T> + Unpin), waker: &Waker) 
 
 fn bootstrap_through(
     collection: &Collection,
-) -> (crate::ProjectionLease<u32, Stamped<u32>>, Cursor) {
+) -> (crate::ProjectionLease<u32, Stamped<Option<u32>>>, Cursor) {
     let mut lease = collection.projection().acquire((), None).unwrap();
     let Poll::Ready(Ok(bootstrap)) =
         poll_ready(&mut lease.read(None, ReadLimits::default()), Waker::noop())
@@ -160,7 +161,7 @@ fn deferred_mutations_commit_before_dispatch() {
                 collection
                     .snapshot()
                     .into_iter()
-                    .map(|(key, row)| (key, row.value))
+                    .filter_map(|(key, row)| Some((key, row.value?)))
                     .collect::<Vec<_>>(),
                 observer.expected
             );
@@ -170,26 +171,22 @@ fn deferred_mutations_commit_before_dispatch() {
             let [transaction] = &page.transactions[..] else {
                 panic!("expected one transaction");
             };
-            match (value, &transaction.changes[..]) {
-                (
-                    Some(value),
-                    [
-                        Change::Upsert {
-                            key: 1, value: row, ..
-                        },
-                    ],
-                ) => {
-                    assert_eq!(
-                        row,
-                        &Stamped {
-                            stamp: stamp.clone(),
-                            value
-                        }
-                    );
+            // A delete publishes its tombstone as a row, not a removal.
+            let [
+                Change::Upsert {
+                    key: 1, value: row, ..
+                },
+            ] = &transaction.changes[..]
+            else {
+                panic!("unexpected publication {:?}", transaction.changes);
+            };
+            assert_eq!(
+                row,
+                &Stamped {
+                    stamp: stamp.clone(),
+                    value
                 }
-                (None, [Change::Remove { key: 1, .. }]) => {}
-                other => panic!("unexpected publication {other:?}"),
-            }
+            );
             assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
             if dispatch {
                 notifications.dispatch();
@@ -215,9 +212,8 @@ fn writes_that_do_not_change_the_winner_and_conflicts_publish_and_wake_nothing()
     let mut pending = lease.read(Some(through), ReadLimits::default());
     assert!(poll_ready(&mut pending, &waker).is_pending());
 
-    // Loses the tie to the higher writer id; a lone tombstone on an absent key is no row.
+    // Loses the tie to the higher writer id.
     low.put(1, WriteBasis::Concurrent, 99).unwrap().dispatch();
-    low.delete(2, WriteBasis::Concurrent).unwrap().dispatch();
     assert_eq!(
         low.put(1, WriteBasis::CompareAndSet(None), 5)
             .map(RegistrationDispatch::dispatch),
@@ -228,6 +224,35 @@ fn writes_that_do_not_change_the_winner_and_conflicts_publish_and_wake_nothing()
     assert_eq!(collection.get(&1).unwrap().stamp, winner);
     assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
     assert!(poll_ready(&mut pending, &waker).is_pending());
+}
+
+#[test]
+fn a_lone_tombstone_on_an_absent_key_publishes_a_stamped_none_row() {
+    let collection = Collection::new([1, 2]);
+    let scope = collection.create_scope(writer_id("a"));
+    let (mut lease, through) = bootstrap_through(&collection);
+    let tombstone = scope
+        .writer()
+        .unwrap()
+        .delete(2, WriteBasis::Concurrent)
+        .unwrap()
+        .dispatch();
+    let Poll::Ready(Ok(page)) = poll_ready(
+        &mut lease.read(Some(through), ReadLimits::default()),
+        Waker::noop(),
+    ) else {
+        panic!("expected the tombstone to publish");
+    };
+    let [transaction] = &page.transactions[..] else {
+        panic!("expected one transaction");
+    };
+    assert!(matches!(
+        &transaction.changes[..],
+        [Change::Upsert { key: 2, value: Stamped { stamp, value: None }, .. }] if *stamp == tombstone
+    ));
+    // Retracting the only scope holding the key removes it from the projection.
+    drop(scope);
+    assert!(collection.snapshot().is_empty());
 }
 
 #[test]
@@ -344,8 +369,9 @@ fn notification_reentrant_mutation_preserves_publication_order_and_wakes() {
             .map(|transaction| transaction
                 .changes
                 .into_iter()
-                .map(|change| match change {
-                    Change::Upsert { key, value, .. } => (key, value.value),
+                .filter_map(|change| match change {
+                    // Tombstones bootstrap as `None` rows; only live values are compared.
+                    Change::Upsert { key, value, .. } => Some((key, value.value?)),
                     Change::Remove { .. } => panic!("unexpected removal"),
                 })
                 .collect::<Vec<_>>())

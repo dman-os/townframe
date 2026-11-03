@@ -25,17 +25,17 @@ pub(super) fn writer_id(name: &str) -> WriterId {
     WriterId::new(name)
 }
 
+pub(super) type Changes<K, V> = Vec<Change<K, Stamped<Option<V>>>>;
+
 /// One reader's view of a collection's feed: a lease plus its committed position.
 pub(super) struct Feed<K, V> {
-    lease: ProjectionLease<K, Stamped<V>>,
+    lease: ProjectionLease<K, Stamped<Option<V>>>,
     through: Cursor,
 }
 
 impl<K: Ord + Clone, V: Clone> Feed<K, V> {
     /// Acquire a lease and consume its bootstrap page, returning its changes.
-    pub(super) fn open(
-        collection: &RegistrationCollection<K, V>,
-    ) -> (Self, Vec<Change<K, Stamped<V>>>) {
+    pub(super) fn open(collection: &RegistrationCollection<K, V>) -> (Self, Changes<K, V>) {
         let mut lease = collection.projection().acquire((), None).unwrap();
         let page = ready(lease.read(None, ReadLimits::default())).unwrap();
         assert!(page.bootstrap_complete);
@@ -54,7 +54,7 @@ impl<K: Ord + Clone, V: Clone> Feed<K, V> {
     }
 
     /// The transactions published since the last call, one `Vec` of changes each.
-    pub(super) fn transactions(&mut self) -> Vec<Vec<Change<K, Stamped<V>>>> {
+    pub(super) fn transactions(&mut self) -> Vec<Changes<K, V>> {
         let page = ready(
             self.lease
                 .read(Some(self.through.clone()), ReadLimits::default()),
@@ -82,7 +82,7 @@ fn values(collection: &Collection) -> Vec<(u32, &'static str)> {
     collection
         .snapshot()
         .into_iter()
-        .map(|(key, row)| (key, row.value))
+        .filter_map(|(key, row)| Some((key, row.value?)))
         .collect()
 }
 
@@ -122,7 +122,7 @@ fn concurrent_creation_ties_break_by_writer_id_in_any_arrival_order() {
             collection.get(&7),
             Some(Stamped {
                 stamp: stamp(1, "b"),
-                value: if low_first { "second" } else { "first" },
+                value: Some(if low_first { "second" } else { "first" }),
             })
         );
         // Low then high publishes twice; high then low leaves the winner untouched by
@@ -224,21 +224,47 @@ fn compare_and_set_succeeds_only_against_the_exact_winner() {
     );
     assert_eq!(swapped, stamp(2, "b"));
     assert_eq!(
-        conflict(a.delete(1, WriteBasis::CompareAndSet(Some(created)))),
+        conflict(a.delete(1, WriteBasis::CompareAndSet(Some(created.clone())))),
         Err(MutationError::Conflict {
             current: Some(swapped.clone())
         })
     );
 
-    // A winning tombstone reads as absent and is superseded, not merely tied.
+    // A winning tombstone is a stamped row readers can name, so its stamp matches like a
+    // live one's, and the new write supersedes it rather than tying.
     let tombstone = a
         .delete(1, WriteBasis::CompareAndSet(Some(swapped)))
         .unwrap()
         .dispatch();
-    assert_eq!(collection.get(&1), None);
-    let recreated = put(&b, 1, WriteBasis::CompareAndSet(None), "again");
+    assert_eq!(
+        collection.get(&1),
+        Some(Stamped {
+            stamp: tombstone.clone(),
+            value: None
+        })
+    );
+    assert_eq!(
+        conflict(b.put(1, WriteBasis::CompareAndSet(Some(created.clone())), "no")),
+        Err(MutationError::Conflict {
+            current: Some(tombstone.clone())
+        })
+    );
+    let recreated = put(
+        &b,
+        1,
+        WriteBasis::CompareAndSet(Some(tombstone.clone())),
+        "again",
+    );
     assert!(recreated > tombstone);
     assert_eq!(values(&collection), [(1, "again")]);
+    // `None` also matches a tombstone, which reads as absent.
+    let tombstone = b
+        .delete(1, WriteBasis::CompareAndSet(Some(recreated)))
+        .unwrap()
+        .dispatch();
+    let reabsent = put(&a, 1, WriteBasis::CompareAndSet(None), "absent");
+    assert!(reabsent > tombstone);
+    assert_eq!(values(&collection), [(1, "absent")]);
 }
 
 #[test]
@@ -257,10 +283,16 @@ fn tombstone_wins_until_its_scope_closes_then_the_older_value_resurfaces() {
         .delete(1, WriteBasis::Observed(original.clone()))
         .unwrap()
         .dispatch();
-    assert_eq!(collection.get(&1), None);
-    assert!(
-        matches!(&feed.transactions()[..], [tx] if matches!(&tx[..], [Change::Remove { key: 1, .. }]))
-    );
+    assert!(matches!(
+        collection.get(&1),
+        Some(Stamped { value: None, .. })
+    ));
+    // The tombstone replicates as a row carrying its stamp, not as a removal.
+    assert!(matches!(
+        &feed.transactions()[..],
+        [tx] if matches!(&tx[..], [Change::Upsert { key: 1, value: Stamped { stamp, value: None }, .. }]
+            if *stamp == Stamp { lamport: 2, writer: writer_id("b") })
+    ));
 
     deleter.close().dispatch();
     let published = feed.transactions();
@@ -277,8 +309,52 @@ fn tombstone_wins_until_its_scope_closes_then_the_older_value_resurfaces() {
     };
     // The winner is older than the tombstone it outlived, yet the feed position is new.
     assert_eq!(value.stamp, original);
-    assert_eq!(value.value, "kept");
+    assert_eq!(value.value, Some("kept"));
     assert!(*row_version > bootstrap[0].row_version());
+}
+
+#[test]
+fn recreating_a_key_after_observing_its_delete_beats_the_tombstone() {
+    let collection = Collection::new([1, 2]);
+    // The deleter outranks the re-creator on ties, so only the observed basis can win.
+    let (deleter, recreator) = (
+        collection.create_scope(writer_id("z")),
+        collection.create_scope(writer_id("a")),
+    );
+    let (deleter, recreator) = (deleter.writer().unwrap(), recreator.writer().unwrap());
+    let original = put(&deleter, 1, WriteBasis::Concurrent, "old");
+    let (mut feed, _) = Feed::open(&collection);
+    let tombstone = deleter
+        .delete(1, WriteBasis::Observed(original))
+        .unwrap()
+        .dispatch();
+    // The re-creator's replica names the tombstone: it arrives as a row with its stamp.
+    let seen = feed.transactions();
+    let [tx] = &seen[..] else {
+        panic!("expected one transaction")
+    };
+    let [Change::Upsert { value, .. }] = &tx[..] else {
+        panic!("expected the tombstone row")
+    };
+    assert_eq!(
+        *value,
+        Stamped {
+            stamp: tombstone.clone(),
+            value: None
+        }
+    );
+
+    let blind = put(&recreator, 1, WriteBasis::Concurrent, "blind");
+    assert!(blind < tombstone);
+    assert_eq!(collection.get(&1).unwrap().value, None);
+    let recreated = put(
+        &recreator,
+        1,
+        WriteBasis::Observed(value.stamp.clone()),
+        "new",
+    );
+    assert!(recreated > tombstone);
+    assert_eq!(values(&collection), [(1, "new")]);
 }
 
 #[test]
@@ -493,11 +569,12 @@ fn staged_scopes_are_invisible_until_commit_and_commit_publishes_one_transaction
     assert_eq!(
         tx.iter()
             .map(|change| match change {
-                Change::Upsert { key, value, .. } => (*key, Some(value.value)),
+                Change::Upsert { key, value, .. } => (*key, value.value),
                 Change::Remove { key, .. } => (*key, None),
             })
             .collect::<Vec<_>>(),
-        [(1, Some("a1'")), (9, None)]
+        // Staged tombstones publish as rows once committed.
+        [(1, Some("a1'")), (2, None), (9, None)]
     );
     // Committing again is a no-op; the scope stays live and publishes directly.
     collection.commit_scopes(&[&a, &b]).dispatch();
