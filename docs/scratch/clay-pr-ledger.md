@@ -280,3 +280,7 @@ Two isolated investigations, both in scratch crates outside the repo:
    cooperative threads, reentrancy, close with calls in flight, backpressure.
 2. WCMP wasmi + browser JSPI: context slot 0 per task, overlap, starvation, cancellation.
 Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
+- Decided 2026-11-04: at the waist, a write with no `based_on` is a **concurrent creation**. The MDK
+  defaults `based_on` to the writer's replica of that key, so an ordinary write supersedes everything
+  its writer has observed. That matches the intuition from non-causal LWW structures, while writes the
+  writer never saw are still resolved by (Lamport timestamp, tie-break).
