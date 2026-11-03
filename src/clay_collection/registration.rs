@@ -126,11 +126,10 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
 
     /// Publish all rows in the named staged scopes as one projection transaction.
     /// Closed or already committed scopes are skipped. All owners must belong here.
-    pub fn commit_scopes(&self, scopes: &[&RegistrationScope<K, V, P, S>]) {
-        self.commit_scopes_deferred(scopes).dispatch();
-    }
-
-    pub fn commit_scopes_deferred(
+    ///
+    /// Mutation happens under the collection lock; wakes are returned, not fired.
+    /// The caller must dispatch the result after releasing host locks.
+    pub fn commit_scopes(
         &self,
         scopes: &[&RegistrationScope<K, V, P, S>],
     ) -> RegistrationDispatch<K, V, P, S> {
@@ -157,6 +156,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
             }
         }
         let dispatch = RegistrationDispatch {
+            output: (),
             projection: if changes.is_empty() {
                 None
             } else {
@@ -170,11 +170,9 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
         dispatch
     }
 
-    pub fn close_scopes(&self, scopes: &[&RegistrationScope<K, V, P, S>]) {
-        self.close_scopes_deferred(scopes).dispatch();
-    }
-
-    pub fn close_scopes_deferred(
+    /// Withdraw the named scopes in one transaction. Wakes are returned, not fired;
+    /// the caller must dispatch the result after releasing host locks.
+    pub fn close_scopes(
         &self,
         scopes: &[&RegistrationScope<K, V, P, S>],
     ) -> RegistrationDispatch<K, V, P, S> {
@@ -258,11 +256,9 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
 
     /// Withdraw every scope and begin a new projection generation: outstanding
     /// leases report `ResetRequired`; old writers remain closed after re-bootstrap.
-    pub fn reset(&self) {
-        self.reset_deferred().dispatch();
-    }
-
-    pub fn reset_deferred(&self) -> RegistrationDispatch<K, V, P, S> {
+    /// Wakes are returned, not fired; the caller must dispatch the result after
+    /// releasing host locks.
+    pub fn reset(&self) -> RegistrationDispatch<K, V, P, S> {
         let mut inner = self.lock();
         inner.version = Version::new(
             inner
@@ -277,6 +273,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationColl
             .map(|state| state.rows)
             .collect();
         let dispatch = RegistrationDispatch {
+            output: (),
             projection: Some(inner.projection.reset_deferred()),
             rows,
             entries: Vec::new(),
@@ -316,12 +313,11 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationScop
         })
     }
 
-    pub fn close(&self) {
-        self.close_deferred().dispatch();
-    }
-
-    pub fn close_deferred(&self) -> RegistrationDispatch<K, V, P, S> {
-        self.collection.close_scopes_deferred(&[self])
+    /// Withdraw this scope's rows. Wakes are returned, not fired; the caller must
+    /// dispatch the result after releasing host locks. Dropping the scope closes
+    /// and dispatches immediately.
+    pub fn close(&self) -> RegistrationDispatch<K, V, P, S> {
+        self.collection.close_scopes(&[self])
     }
 }
 
@@ -331,7 +327,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> Drop
     /// Scope-owner closure withdraws its rows, even if mutation handles remain alive.
     /// Staged rows leave authority state without ever reaching a projection.
     fn drop(&mut self) {
-        self.close();
+        self.close().dispatch();
     }
 }
 
@@ -379,24 +375,14 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
             .map_or(0, |state| state.rows.len())
     }
 
-    /// Register or replace `key`, returning the new row version.
+    /// Register or replace `key`, returning the new row version. Wakes are returned,
+    /// not fired; the caller must dispatch after releasing host locks.
     pub fn put(
         &self,
         key: K,
         based_on: Option<Version>,
         value: V,
-    ) -> Result<Version, MutationError> {
-        let (version, dispatch) = self.put_deferred(key, based_on, value)?;
-        dispatch.dispatch();
-        Ok(version)
-    }
-
-    pub fn put_deferred(
-        &self,
-        key: K,
-        based_on: Option<Version>,
-        value: V,
-    ) -> Result<(Version, RegistrationDispatch<K, V, P, S>), MutationError> {
+    ) -> Result<RegistrationDispatch<K, V, P, S, Version>, MutationError> {
         let mut inner = self.collection.lock();
         let state = inner.scopes.get(&self.id).ok_or(MutationError::Closed)?;
         let current = state.rows.get(&key).map(|entry| entry.version);
@@ -437,26 +423,18 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
             dispatch.projection = Some(inner.projection.publish_deferred(vec![change]));
         }
         drop(inner);
-        Ok((version, dispatch))
+        Ok(dispatch.with_output(version))
     }
 
     /// Withdraw `key`, returning its removal version. An absent row with no claimed
     /// version is an idempotent no-op and returns `None` without publication.
+    /// Wakes are returned, not fired; the caller must dispatch after releasing host
+    /// locks.
     pub fn remove(
         &self,
         key: K,
         based_on: Option<Version>,
-    ) -> Result<Option<Version>, MutationError> {
-        let (version, dispatch) = self.remove_deferred(key, based_on)?;
-        dispatch.dispatch();
-        Ok(version)
-    }
-
-    pub fn remove_deferred(
-        &self,
-        key: K,
-        based_on: Option<Version>,
-    ) -> Result<(Option<Version>, RegistrationDispatch<K, V, P, S>), MutationError> {
+    ) -> Result<RegistrationDispatch<K, V, P, S, Option<Version>>, MutationError> {
         let mut inner = self.collection.lock();
         let state = inner
             .scopes
@@ -470,7 +448,7 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
         let Some(previous) = state.rows.remove_entry(&key) else {
             dispatch.keys.push(key);
             drop(inner);
-            return Ok((None, dispatch));
+            return Ok(dispatch.with_output(None));
         };
         let staged = state.staged;
         dispatch.entries.push(previous);
@@ -483,15 +461,12 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
         }
         dispatch.keys.push(key);
         drop(inner);
-        Ok((Some(version), dispatch))
+        Ok(dispatch.with_output(Some(version)))
     }
 
-    pub fn clear(&self) -> Result<(), MutationError> {
-        self.clear_deferred()?.dispatch();
-        Ok(())
-    }
-
-    pub fn clear_deferred(&self) -> Result<RegistrationDispatch<K, V, P, S>, MutationError> {
+    /// Withdraw every row of this scope. Wakes are returned, not fired; the caller
+    /// must dispatch after releasing host locks.
+    pub fn clear(&self) -> Result<RegistrationDispatch<K, V, P, S>, MutationError> {
         let mut inner = self.collection.lock();
         let state = inner
             .scopes
@@ -516,8 +491,12 @@ impl<K: Ord + Clone, V: Clone, P: Ord + Clone, S: Source<P, V>> RegistrationWrit
     }
 }
 
+/// The wakes and deferred drops a committed mutation owes, plus the mutation's own
+/// output (`T`, e.g. the new row version). The mutation is already committed when
+/// this exists; [`Self::dispatch`] fires the wakes and returns the output.
 #[must_use = "dispatch after releasing host authority locks"]
-pub struct RegistrationDispatch<K, V, P = (RegistrationScopeId, K), S: Source<P, V> = ()> {
+pub struct RegistrationDispatch<K, V, P = (RegistrationScopeId, K), S: Source<P, V> = (), T = ()> {
+    output: T,
     projection: Option<ProjectionDispatch<P, V, S::Selector>>,
     rows: Vec<BTreeMap<K, Entry<V>>>,
     entries: Vec<(K, Entry<V>)>,
@@ -527,6 +506,7 @@ pub struct RegistrationDispatch<K, V, P = (RegistrationScopeId, K), S: Source<P,
 impl<K, V, P, S: Source<P, V>> Default for RegistrationDispatch<K, V, P, S> {
     fn default() -> Self {
         Self {
+            output: (),
             projection: None,
             rows: Vec::new(),
             entries: Vec::new(),
@@ -535,7 +515,7 @@ impl<K, V, P, S: Source<P, V>> Default for RegistrationDispatch<K, V, P, S> {
     }
 }
 
-impl<K, V, P, S: Source<P, V>> std::fmt::Debug for RegistrationDispatch<K, V, P, S> {
+impl<K, V, P, S: Source<P, V>, T> std::fmt::Debug for RegistrationDispatch<K, V, P, S, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistrationDispatch")
             .finish_non_exhaustive()
@@ -543,10 +523,30 @@ impl<K, V, P, S: Source<P, V>> std::fmt::Debug for RegistrationDispatch<K, V, P,
 }
 
 impl<K, V, P, S: Source<P, V>> RegistrationDispatch<K, V, P, S> {
-    pub fn dispatch(self) {
+    fn with_output<T>(self, output: T) -> RegistrationDispatch<K, V, P, S, T> {
+        RegistrationDispatch {
+            output,
+            projection: self.projection,
+            rows: self.rows,
+            entries: self.entries,
+            keys: self.keys,
+        }
+    }
+}
+
+impl<K, V, P, S: Source<P, V>, T> RegistrationDispatch<K, V, P, S, T> {
+    /// The mutation's output, readable before the wakes fire.
+    pub fn output(&self) -> &T {
+        &self.output
+    }
+
+    /// Fire the wakes and drop the withdrawn rows, then return the mutation's output.
+    /// Call after releasing host locks.
+    pub fn dispatch(self) -> T {
         if let Some(projection) = self.projection {
             projection.dispatch();
         }
+        self.output
     }
 }
 

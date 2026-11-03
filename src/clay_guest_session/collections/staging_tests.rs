@@ -1,6 +1,6 @@
 //! Staged initialization (ADR 024 §5) as seen through a collection session: rows and capability
 //! publications made while an incarnation initializes are invisible until it commits, appear
-//! together when it does, vanish unseen when it fails, and are withdrawn first when it closes.
+//! together when it does, vanish unseen when it fails, and are withdrawn when it is torn down after closing.
 use super::*;
 use crate::capabilities::CapabilityFailure;
 use crate::capabilities::CapabilityLimits;
@@ -195,7 +195,7 @@ async fn failed_initialization_exposes_no_rows_or_capabilities() {
 }
 
 #[tokio::test]
-async fn closing_withdraws_rows_before_any_owned_teardown() {
+async fn closing_keeps_rows_through_cleanup_and_teardown_withdraws_them() {
     let host = Host::new();
     let shelf = registrations(4);
     let provider = host.start("provider");
@@ -204,23 +204,26 @@ async fn closing_withdraws_rows_before_any_owned_teardown() {
     let writer = collections.grant_writer(&shelf).unwrap();
     writer.put(vec![1], None, vec![1]).unwrap();
     assert_eq!(shelf.snapshot().len(), 1);
-    // Registered after the writer, so teardown runs it first.
+    // Registered after the writer, so teardown runs it first: cleanup still sees the rows.
     let observed = shelf.clone();
     host.own(
         &provider,
-        Box::new(move || assert!(observed.snapshot().is_empty())),
+        Box::new(move || assert_eq!(observed.snapshot().len(), 2)),
     )
     .unwrap();
 
     assert!(host.begin_close(&provider).unwrap());
-    // Outward withdrawal alone removes the rows; the incarnation itself is still live.
-    assert!(shelf.snapshot().is_empty());
+    // Outward withdrawal alone keeps the scope: the incarnation's authority is intact until
+    // teardown (ADR 024 §6).
+    assert_eq!(shelf.snapshot().len(), 1);
     assert_eq!(host.check(&provider), Ok(()));
+    writer.put(vec![2], None, vec![2]).unwrap();
+    host.close_instance(&provider).unwrap();
+    assert!(shelf.snapshot().is_empty());
     assert_eq!(
-        writer.put(vec![2], None, vec![2]),
+        writer.put(vec![3], None, vec![3]),
         Err(WriteFailure::Revoked)
     );
-    host.close_instance(&provider).unwrap();
     drop(writer);
     assert_eq!(collections.writer_count(), 0);
 }
