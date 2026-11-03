@@ -72,7 +72,7 @@ async fn source(bytes: &[u8], corrupt: bool) -> Res<(Router, Arc<Notify>, Arc<No
 #[tokio::test]
 async fn pin_first_and_object_first_download_only_after_same_inventory_admission() -> Res<()> {
     for pin_first in [true, false] {
-        let harness = Harness::new_network_with_seed(101).await?;
+        let harness = Harness::new_with_seed(101).await?;
         let inventory = harness.inventory().await?;
         let bytes =
             crate::encrypt::encrypt_bytes(&crate::encrypt::MasterKey::random(), &vec![7; 200_000]);

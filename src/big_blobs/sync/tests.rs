@@ -30,18 +30,18 @@ pub(super) struct Harness {
 
 impl Harness {
     pub async fn new() -> Res<Self> {
-        Self::boot(None, false, 101).await
+        Self::boot(None, 101).await
     }
 
-    pub async fn new_network_with_seed(seed: u8) -> Res<Self> {
-        Self::boot(None, true, seed).await
+    pub async fn new_with_seed(seed: u8) -> Res<Self> {
+        Self::boot(None, seed).await
     }
 
     pub async fn reopen(path: &std::path::Path) -> Res<Self> {
-        Self::boot(Some(path), false, 101).await
+        Self::boot(Some(path), 101).await
     }
 
-    async fn boot(path: Option<&std::path::Path>, network: bool, seed: u8) -> Res<Self> {
+    async fn boot(path: Option<&std::path::Path>, seed: u8) -> Res<Self> {
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
         let (repo, repo_stop) = big_repo::BigRepo::boot(
             Arc::clone(&runtime),
@@ -88,14 +88,11 @@ impl Harness {
         let (mirrors, mirror_stop) =
             InventoryMirrors::boot(sql, blobs.service, parts, repo, queue).await?;
         let lookup = iroh::address_lookup::MemoryLookup::default();
-        let mut endpoint_builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let endpoint_builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .secret_key(iroh::SecretKey::from_bytes(&[seed; 32]))
             .address_lookup(lookup.clone())
             .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
             .relay_mode(iroh::RelayMode::Disabled);
-        if !network {
-            endpoint_builder = endpoint_builder.clear_ip_transports();
-        }
         let endpoint = endpoint_builder.bind().await?;
         let backend = BlobSyncBackend::new(mirrors.clone(), endpoint.clone(), lookup);
         Ok(Self {
@@ -183,7 +180,7 @@ impl Harness {
 
 #[tokio::test]
 async fn observations_are_durable_candidates_not_hash_only_admission() -> Res<()> {
-    let harness = Harness::new_network_with_seed(101).await?;
+    let harness = Harness::new_with_seed(101).await?;
     let first = harness.inventory().await?;
     let second = harness.inventory().await?;
     let bytes = b"a source observation cannot unlock a different inventory";
