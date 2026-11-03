@@ -219,7 +219,7 @@ async fn shutdown_drains_accepted_operations_before_database_reopen() -> Res<()>
     let inventory = DocId::new([90; 32]);
     let digest = BlobId::new([91; 32]);
     admission
-        .produce(&inventory, digest, "writer", true)
+        .produce(&inventory, digest, "accepted-before-shutdown", true)
         .await?;
     let (started, entered) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
@@ -251,6 +251,104 @@ async fn shutdown_drains_accepted_operations_before_database_reopen() -> Res<()>
     let (admission, stop) =
         Admission::boot(runtime.database(&path, &[], "fixture_migrations")).await?;
     assert!(admission.state(&inventory, digest).await?.unwrap().selected);
+    stop.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_candidate_write_is_rolled_back_and_restart_retries_the_observation() -> Res<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("admission-observation-fault.sqlite");
+    let inventory = DocId::new([101; 32]);
+    let digest = BlobId::new([102; 32]);
+    let peer = PeerKey::new([103; 32]);
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.database(&path, &[], "fixture_migrations");
+    let (admission, stop) = Admission::boot(sql.clone()).await?;
+
+    admission.select(&inventory, "fault-test", true).await?;
+    admission.authorize(&inventory, true).await?;
+    admission
+        .pins(&inventory, 1, &BTreeMap::from([(digest, 7)]), true)
+        .await?;
+    sql.execute_batch(
+        "CREATE TRIGGER reject_candidate BEFORE INSERT ON big_blobs_source_observations
+         BEGIN SELECT RAISE(ABORT, 'candidate write rejected'); END;",
+    )
+    .await?;
+
+    let error = admission
+        .observe(&inventory, digest, &peer, 1, true, None)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("candidate write rejected"));
+    let state = admission.state(&inventory, digest).await?.unwrap();
+    assert!(!state.observed);
+    assert!(!state.fetching);
+
+    sql.execute_batch("DROP TRIGGER reject_candidate;").await?;
+    stop.stop().await;
+    drop(admission);
+    drop(sql);
+    drop(runtime);
+
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.database(&path, &[], "fixture_migrations");
+    let (admission, stop) = Admission::boot(sql).await?;
+    admission.recover().await?;
+    admission.authorize(&inventory, true).await?;
+    admission
+        .observe(&inventory, digest, &peer, 1, true, None)
+        .await?;
+    let attempt = admission.begin(&inventory, digest).await?;
+    assert!(attempt.is_some(), "the retried candidate becomes fetchable");
+    stop.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_clears_reserved_fetch_and_preserves_same_inventory_gating() -> Res<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("admission-fetch-fault.sqlite");
+    let inventory = DocId::new([104; 32]);
+    let unrelated = DocId::new([105; 32]);
+    let digest = BlobId::new([106; 32]);
+    let peer = PeerKey::new([107; 32]);
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.database(&path, &[], "fixture_migrations");
+    let (admission, stop) = Admission::boot(sql).await?;
+
+    admission.select(&inventory, "fault-test", true).await?;
+    admission.authorize(&inventory, true).await?;
+    admission
+        .pins(&inventory, 1, &BTreeMap::from([(digest, 7)]), true)
+        .await?;
+    admission
+        .observe(&inventory, digest, &peer, 1, true, None)
+        .await?;
+    admission.select(&unrelated, "fault-test", true).await?;
+    admission
+        .pins(&unrelated, 1, &BTreeMap::from([(digest, 7)]), true)
+        .await?;
+    admission.authorize(&unrelated, true).await?;
+    assert!(admission.begin(&unrelated, digest).await?.is_none());
+
+    let attempt = admission.begin(&inventory, digest).await?.unwrap();
+    assert!(admission.state(&inventory, digest).await?.unwrap().fetching);
+    stop.stop().await;
+    drop(admission);
+    drop(runtime);
+
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.database(&path, &[], "fixture_migrations");
+    let (admission, stop) = Admission::boot(sql).await?;
+    admission.recover().await?;
+    admission.authorize(&inventory, true).await?;
+    let restarted = admission.state(&inventory, digest).await?.unwrap();
+    assert!(!restarted.fetching);
+    assert!(!restarted.bytes);
+    assert!(admission.begin(&inventory, digest).await?.is_some());
+    assert!(!admission.complete(&attempt, true).await?);
     stop.stop().await;
     Ok(())
 }
