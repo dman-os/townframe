@@ -1,4 +1,5 @@
 use super::WasmStoreState;
+use super::bindings::townframe::dayframe::collection_registration as registration_wit;
 use super::bindings::townframe::dayframe::collections as wit;
 use super::wasmtime;
 use clay_collection::AcquireError;
@@ -11,6 +12,8 @@ use clay_collection::Version;
 use clay_guest_session::collections::CollectionReader;
 use clay_guest_session::collections::ProjectionReader;
 use clay_guest_session::collections::ReadFailure;
+use clay_guest_session::collections::RegistrationWriter;
+use clay_guest_session::collections::WriteFailure;
 use std::time::Duration;
 use wasmtime::component::Accessor;
 use wasmtime::component::HasSelf;
@@ -87,6 +90,73 @@ impl<T: 'static> wit::HostProjectionLeaseWithStore<T> for HasSelf<WasmStoreState
             )),
         }
     }
+}
+
+impl registration_wit::Host for WasmStoreState {}
+
+impl registration_wit::HostRegistrationWriter for WasmStoreState {
+    fn drop(&mut self, writer: Resource<RegistrationWriter>) -> wasmtime::Result<()> {
+        self.table.delete(writer)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> registration_wit::HostRegistrationWriterWithStore<T> for HasSelf<WasmStoreState> {
+    async fn put(
+        accessor: &Accessor<T, Self>,
+        writer: Resource<RegistrationWriter>,
+        local_key: Vec<u8>,
+        based_on: Option<wit::Version>,
+        value: wit::EncodedValue,
+    ) -> wasmtime::Result<Result<registration_wit::MutationAccepted, registration_wit::MutationError>>
+    {
+        accessor.with(|mut access| {
+            let writer = access.get().table.get(&writer)?;
+            Ok(writer
+                .put(local_key, based_on.map(version_from_wire), value.body)
+                .map(accepted)
+                .map_err(write_failure))
+        })
+    }
+
+    async fn remove(
+        accessor: &Accessor<T, Self>,
+        writer: Resource<RegistrationWriter>,
+        local_key: Vec<u8>,
+        based_on: Option<wit::Version>,
+    ) -> wasmtime::Result<
+        Result<Option<registration_wit::MutationAccepted>, registration_wit::MutationError>,
+    > {
+        accessor.with(|mut access| {
+            let writer = access.get().table.get(&writer)?;
+            Ok(writer
+                .remove(local_key, based_on.map(version_from_wire))
+                .map(|version| version.map(accepted))
+                .map_err(write_failure))
+        })
+    }
+}
+
+fn accepted(version: Version) -> registration_wit::MutationAccepted {
+    registration_wit::MutationAccepted {
+        row_version: version_to_wire(version),
+    }
+}
+
+fn write_failure(failure: WriteFailure) -> registration_wit::MutationError {
+    match failure {
+        WriteFailure::Conflict { current } => {
+            registration_wit::MutationError::Conflict(current.map(version_to_wire))
+        }
+        WriteFailure::Revoked => registration_wit::MutationError::Revoked,
+        WriteFailure::KeyTooLarge => registration_wit::MutationError::KeyTooLarge,
+        WriteFailure::ValueTooLarge => registration_wit::MutationError::ValueTooLarge,
+        WriteFailure::RowLimit => registration_wit::MutationError::RowLimit,
+    }
+}
+
+fn version_from_wire(version: wit::Version) -> Version {
+    Version::new(version.incarnation, version.sequence)
 }
 
 fn acquire_error(error: AcquireError) -> wit::AcquireError {

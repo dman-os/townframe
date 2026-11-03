@@ -31,6 +31,7 @@ pub use ledger::Overlay;
 pub use ledger::OverlayWait;
 pub use mirror::Mirror;
 pub use mirror::ReadTicket;
+pub use projection::PendingNotifications;
 pub use projection::Projection;
 pub use projection::ProjectionLease;
 pub use projection::ProjectionRead;

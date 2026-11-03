@@ -1,4 +1,5 @@
 use super::WcmpStoreState;
+pub use super::bindings::townframe::dayframe::collection_registration as registration_wit;
 pub use super::bindings::townframe::dayframe::collections as wit;
 use clay_collection::AcquireError;
 use clay_collection::Change;
@@ -6,10 +7,13 @@ use clay_collection::Cursor;
 use clay_collection::ReadError;
 use clay_collection::ReadLimits;
 use clay_collection::RowEvidence;
+use clay_collection::Version;
 use clay_guest_session::collections::BytesPage;
 use clay_guest_session::collections::CollectionReader;
 use clay_guest_session::collections::ProjectionReader;
 use clay_guest_session::collections::ReadFailure;
+use clay_guest_session::collections::RegistrationWriter;
+use clay_guest_session::collections::WriteFailure;
 use std::time::Duration;
 use wcmp::Accessor;
 use wcmp::HasSelf;
@@ -95,6 +99,80 @@ impl wit::HostProjectionLease for WcmpStoreState {
     }
 }
 
+impl registration_wit::Host for WcmpStoreState {}
+
+impl registration_wit::HostRegistrationWriter for WcmpStoreState {
+    fn drop(&mut self, writer: Resource<RegistrationWriter>) -> wcmp::Result<()> {
+        self.table.delete(writer)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> registration_wit::HostRegistrationWriterWithStore<T> for HasSelf<WcmpStoreState> {
+    async fn put(
+        accessor: &Accessor<T, Self>,
+        writer: Resource<RegistrationWriter>,
+        local_key: Vec<u8>,
+        based_on: Option<wit::Version>,
+        value: wit::EncodedValue,
+    ) -> wcmp::Result<Result<registration_wit::MutationAccepted, registration_wit::MutationError>>
+    {
+        accessor.with(|mut access| {
+            let writer = access.get().table.get(&writer)?;
+            Ok(writer
+                .put(local_key, based_on.map(version_from_wire), value.body)
+                .map(accepted)
+                .map_err(write_failure_to_wire))
+        })
+    }
+
+    async fn remove(
+        accessor: &Accessor<T, Self>,
+        writer: Resource<RegistrationWriter>,
+        local_key: Vec<u8>,
+        based_on: Option<wit::Version>,
+    ) -> wcmp::Result<
+        Result<Option<registration_wit::MutationAccepted>, registration_wit::MutationError>,
+    > {
+        accessor.with(|mut access| {
+            let writer = access.get().table.get(&writer)?;
+            Ok(writer
+                .remove(local_key, based_on.map(version_from_wire))
+                .map(|version| version.map(accepted))
+                .map_err(write_failure_to_wire))
+        })
+    }
+}
+
+fn accepted(version: Version) -> registration_wit::MutationAccepted {
+    registration_wit::MutationAccepted {
+        row_version: version_to_wire(version),
+    }
+}
+
+fn write_failure_to_wire(failure: WriteFailure) -> registration_wit::MutationError {
+    match failure {
+        WriteFailure::Conflict { current } => {
+            registration_wit::MutationError::Conflict(current.map(version_to_wire))
+        }
+        WriteFailure::Revoked => registration_wit::MutationError::Revoked,
+        WriteFailure::KeyTooLarge => registration_wit::MutationError::KeyTooLarge,
+        WriteFailure::ValueTooLarge => registration_wit::MutationError::ValueTooLarge,
+        WriteFailure::RowLimit => registration_wit::MutationError::RowLimit,
+    }
+}
+
+fn version_from_wire(version: wit::Version) -> Version {
+    Version::new(version.incarnation, version.sequence)
+}
+
+fn version_to_wire(version: Version) -> wit::Version {
+    wit::Version {
+        incarnation: version.incarnation,
+        sequence: version.seq,
+    }
+}
+
 fn acquire_error_to_wire(error: AcquireError) -> wit::AcquireError {
     match error {
         AcquireError::ResetRequired => wit::AcquireError::ResetRequired,
@@ -141,10 +219,7 @@ fn change_to_wire(change: Change<Vec<u8>, Vec<u8>>) -> wit::Change {
             write_context,
         } => wit::Change::Upsert(wit::Upsert {
             key: wit::EncodedValue { body: key },
-            row_version: wit::Version {
-                incarnation: row_version.incarnation,
-                sequence: row_version.seq,
-            },
+            row_version: version_to_wire(row_version),
             value: wit::EncodedValue { body: value },
             evidence: match evidence {
                 RowEvidence::Authoritative => wit::RowEvidence::Authoritative,
@@ -154,10 +229,7 @@ fn change_to_wire(change: Change<Vec<u8>, Vec<u8>>) -> wit::Change {
         }),
         Change::Remove { key, row_version } => wit::Change::Remove(wit::Removal {
             key: wit::EncodedValue { body: key },
-            row_version: wit::Version {
-                incarnation: row_version.incarnation,
-                sequence: row_version.seq,
-            },
+            row_version: version_to_wire(row_version),
         }),
     }
 }

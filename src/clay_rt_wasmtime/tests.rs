@@ -118,6 +118,291 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
 }
 
 #[test]
+fn registration_writer_resources_release_budget_and_reuse_table_slots() {
+    use bindings::townframe::dayframe::collection_registration::HostRegistrationWriter;
+    use clay_guest_session::collections::CollectionLimits;
+    use clay_guest_session::collections::CollectionSession;
+    use clay_guest_session::collections::RegistrationWriter;
+    use clay_guest_session::collections::WriteFailure;
+    use clay_guest_session::collections::bytes_registrations;
+    use std::num::NonZeroUsize;
+    use wasmtime::component::ResourceAny;
+
+    let host = Host::new();
+    let owner = host.start("writer-budget");
+    let limits = CollectionLimits {
+        writers: 2,
+        ..CollectionLimits::default()
+    };
+    let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [31, 32]);
+    let (mut state, _incoming) =
+        WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+    state.collections = CollectionSession::new(host.clone(), owner, limits);
+    state.table.set_max_capacity(limits.writers);
+    let first = state
+        .table
+        .push(state.collections.grant_writer(&registrations).unwrap())
+        .unwrap();
+    let other = state
+        .table
+        .push(state.collections.grant_writer(&registrations).unwrap())
+        .unwrap();
+    assert_eq!(state.collections.writer_count(), limits.writers);
+    assert_eq!(
+        state.collections.grant_writer(&registrations).err(),
+        Some(clay_host::AccessError::Denied)
+    );
+    let first_version = state
+        .table
+        .get(&first)
+        .unwrap()
+        .put(vec![1], None, vec![1])
+        .unwrap();
+    let other_version = state
+        .table
+        .get(&other)
+        .unwrap()
+        .put(vec![1], None, vec![2])
+        .unwrap();
+    let first_rep = first.rep();
+    let mut store = Store::new(&engine().unwrap(), state);
+    let stale = ResourceAny::try_from_resource(first, &mut store).unwrap();
+    let first = stale
+        .try_into_resource::<RegistrationWriter>(&mut store)
+        .unwrap();
+    HostRegistrationWriter::drop(store.data_mut(), first).unwrap();
+    assert_eq!(store.data().collections.writer_count(), 1);
+    assert!(
+        store
+            .data()
+            .table
+            .get(&Resource::<RegistrationWriter>::new_borrow(first_rep))
+            .is_err()
+    );
+    assert!(HostRegistrationWriter::drop(store.data_mut(), Resource::new_own(first_rep)).is_err());
+    assert_eq!(store.data().collections.writer_count(), 1);
+    assert_eq!(
+        registrations
+            .snapshot()
+            .into_values()
+            .map(|entry| entry.value)
+            .collect::<Vec<_>>(),
+        [vec![2]]
+    );
+    let state = store.data_mut();
+    let replacement = state
+        .table
+        .push(state.collections.grant_writer(&registrations).unwrap())
+        .unwrap();
+    assert_eq!(replacement.rep(), first_rep);
+    assert_eq!(state.collections.writer_count(), limits.writers);
+    let current = ResourceAny::try_from_resource(replacement, &mut store).unwrap();
+    assert_ne!(stale, current);
+    assert!(
+        stale
+            .try_into_resource::<RegistrationWriter>(&mut store)
+            .is_err()
+    );
+    let replacement = current
+        .try_into_resource::<RegistrationWriter>(&mut store)
+        .unwrap();
+    let state = store.data_mut();
+    let writer = state.table.get(&replacement).unwrap();
+    assert_eq!(
+        writer.put(vec![1], Some(first_version), vec![3]),
+        Err(WriteFailure::Conflict { current: None })
+    );
+    writer.put(vec![1], None, vec![3]).unwrap();
+    assert!(
+        state
+            .table
+            .get(&other)
+            .unwrap()
+            .remove(vec![1], Some(other_version))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        registrations
+            .snapshot()
+            .into_values()
+            .map(|entry| entry.value)
+            .collect::<Vec<_>>(),
+        [vec![3]]
+    );
+    HostRegistrationWriter::drop(state, replacement).unwrap();
+    HostRegistrationWriter::drop(state, other).unwrap();
+    assert_eq!(state.collections.writer_count(), 0);
+    assert!(state.table.is_empty());
+    assert!(registrations.snapshot().is_empty());
+    host.close();
+}
+
+#[test]
+fn registration_writer_table_capacity_failure_releases_its_permit() {
+    use bindings::townframe::dayframe::collection_registration::HostRegistrationWriter;
+    use clay_guest_session::collections::bytes_registrations;
+    use std::num::NonZeroUsize;
+    use wasmtime::component::ResourceTableError;
+
+    let host = Host::new();
+    let owner = host.start("writer-table-capacity");
+    let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [33, 34]);
+    let (mut state, _incoming) =
+        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+    state.table.set_max_capacity(1);
+    let first = state
+        .table
+        .push(state.collections.grant_writer(&registrations).unwrap())
+        .unwrap();
+    state
+        .table
+        .get(&first)
+        .unwrap()
+        .put(vec![1], None, vec![1])
+        .unwrap();
+    assert!(matches!(
+        state
+            .table
+            .push(state.collections.grant_writer(&registrations).unwrap()),
+        Err(ResourceTableError::Full)
+    ));
+    assert_eq!(state.collections.writer_count(), 1);
+    assert_eq!(registrations.snapshot().len(), 1);
+    let first_rep = first.rep();
+    HostRegistrationWriter::drop(&mut state, first).unwrap();
+    assert_eq!(state.collections.writer_count(), 0);
+    assert!(registrations.snapshot().is_empty());
+    let replacement = state
+        .table
+        .push(state.collections.grant_writer(&registrations).unwrap())
+        .unwrap();
+    assert_eq!(replacement.rep(), first_rep);
+    assert_eq!(state.collections.writer_count(), 1);
+    HostRegistrationWriter::drop(&mut state, replacement).unwrap();
+    assert_eq!(state.collections.writer_count(), 0);
+    assert!(state.table.is_empty());
+    host.close();
+}
+
+#[tokio::test]
+async fn registration_writer_adapter_revokes_without_affecting_other_instances() {
+    use bindings::townframe::dayframe::collection_registration as registration_wit;
+    use clay_guest_session::collections::CollectionLimits;
+    use clay_guest_session::collections::CollectionSession;
+    use clay_guest_session::collections::bytes_registrations;
+    use registration_wit::HostRegistrationWriter;
+    use registration_wit::HostRegistrationWriterWithStore;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let owner = host.start("revoked-writer");
+    let other_session = CollectionSession::new(
+        host.clone(),
+        host.start("live-writer"),
+        CollectionLimits::default(),
+    );
+    let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [35, 36]);
+    let (mut state, _incoming) =
+        WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+    let writer = state
+        .table
+        .push(state.collections.grant_writer(&registrations).unwrap())
+        .unwrap();
+    let other = state
+        .table
+        .push(other_session.grant_writer(&registrations).unwrap())
+        .unwrap();
+    let writer_rep = writer.rep();
+    let other_rep = other.rep();
+    let mut store = Store::new(&engine().unwrap(), state);
+    store
+        .run_concurrent(async |accessor| {
+            let put = async |rep, based_on, body| {
+                HasSelf::<WasmStoreState>::put(
+                    accessor,
+                    Resource::new_borrow(rep),
+                    vec![1],
+                    based_on,
+                    registration_wit::EncodedValue { body: vec![body] },
+                )
+                .await
+            };
+            let remove = async |rep, based_on| {
+                HasSelf::<WasmStoreState>::remove(
+                    accessor,
+                    Resource::new_borrow(rep),
+                    vec![1],
+                    based_on,
+                )
+                .await
+            };
+            let accepted = put(writer_rep, None, 1).await.unwrap().unwrap();
+            let other_accepted = put(other_rep, None, 7).await.unwrap().unwrap();
+            host.close_instance(&owner).unwrap();
+            assert_eq!(
+                registrations
+                    .snapshot()
+                    .into_values()
+                    .map(|entry| entry.value)
+                    .collect::<Vec<_>>(),
+                [vec![7]]
+            );
+            assert!(matches!(
+                put(writer_rep, None, 2).await.unwrap(),
+                Err(registration_wit::MutationError::Revoked)
+            ));
+            assert!(matches!(
+                remove(writer_rep, Some(accepted.row_version))
+                    .await
+                    .unwrap(),
+                Err(registration_wit::MutationError::Revoked)
+            ));
+            accessor.with(|mut access| {
+                let state = access.get();
+                assert_eq!(state.collections.writer_count(), 1);
+                assert_eq!(
+                    state.collections.grant_writer(&registrations).err(),
+                    Some(clay_host::AccessError::Revoked)
+                );
+                HostRegistrationWriter::drop(state, writer).unwrap();
+                assert_eq!(state.collections.writer_count(), 0);
+            });
+            assert!(put(writer_rep, None, 3).await.is_err());
+            assert!(remove(writer_rep, None).await.is_err());
+            let updated = put(other_rep, Some(other_accepted.row_version), 9)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                registrations
+                    .snapshot()
+                    .into_values()
+                    .map(|entry| entry.value)
+                    .collect::<Vec<_>>(),
+                [vec![9]]
+            );
+            assert!(
+                remove(other_rep, Some(updated.row_version))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_some()
+            );
+            accessor.with(|mut access| {
+                let state = access.get();
+                HostRegistrationWriter::drop(state, other).unwrap();
+                assert!(state.table.is_empty());
+            });
+        })
+        .await
+        .unwrap();
+    assert_eq!(other_session.writer_count(), 0);
+    assert!(registrations.snapshot().is_empty());
+    host.close();
+}
+
+#[test]
 fn ingress_budget_rejects_oversized_batches_before_conversion() {
     use clay_guest_session::ingress_budget;
     use clay_surface::AttributeValue;
@@ -229,14 +514,14 @@ async fn execution_and_linear_memory_are_bounded_per_incarnation() {
         .instantiate(&host, host.start("bounded"))
         .await
         .unwrap();
-    let module = wasmtime::Module::new(
-        &package.engine,
+    let wasm = wat::parse_str(
         r#"(module
         (memory (export "memory") 1)
         (func (export "loop") (loop br 0))
     )"#,
     )
     .unwrap();
+    let module = wasmtime::Module::new(&package.engine, wasm).unwrap();
     // The component's async imports set `async_required` on the store, so core-module
     // entrypoints must use the async variants (`Instance::new_async`,
     // `Memory::grow_async`, `TypedFunc::call_async`).
@@ -267,6 +552,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
         &host,
         owner.clone(),
         &counter_package().await,
+        BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
     )
@@ -319,6 +605,7 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
         &host,
         owner.clone(),
         &package,
+        BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
     )
@@ -436,6 +723,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
         &counter_package().await,
         [("counter".into(), document)].into(),
         BTreeMap::new(),
+        BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -517,6 +805,7 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
         &package,
         BTreeMap::new(),
         [("rows".into(), projection.clone())].into(),
+        BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -583,6 +872,134 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
         writer
             .wait_for(|text| text.contains("status=revoked"))
             .await;
+        drop(session);
+        host.close();
+    };
+    tokio::join!(driver, scenario);
+}
+
+#[tokio::test]
+async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_and_withdrawn() {
+    use clay_collection::Change;
+    use clay_collection::ReadLimits;
+    use clay_guest_session::collections::bytes_registrations;
+    use std::num::NonZeroUsize;
+
+    fn removals(page: &clay_guest_session::collections::BytesPage) -> Vec<usize> {
+        page.transactions
+            .iter()
+            .map(|transaction| {
+                transaction
+                    .changes
+                    .iter()
+                    .filter(|change| matches!(change, Change::Remove { .. }))
+                    .count()
+            })
+            .collect()
+    }
+
+    let host = Host::new();
+    let owner = host.start("collection-probe");
+    let package = WasmPackage::from_env("collection-probe")
+        .await
+        .expect("prepared collection probe is valid");
+    let registrations = bytes_registrations(NonZeroUsize::new(64).unwrap(), [21, 22]);
+    let observer = registrations.projection();
+    let mut lease = observer.acquire(Vec::new(), None).unwrap();
+    let bootstrap = lease.read(None, ReadLimits::default()).await.unwrap();
+    assert!(bootstrap.bootstrap_complete);
+    let (runtime, driver) = WasmRuntime::activate(
+        &host,
+        owner.clone(),
+        &package,
+        BTreeMap::new(),
+        [("rows".into(), registrations.projection())].into(),
+        [
+            ("a".into(), registrations.clone()),
+            ("b".into(), registrations.clone()),
+        ]
+        .into(),
+    )
+    .await
+    .unwrap();
+    let scenario = async move {
+        let writer = Arc::new(RecordingSink::new());
+        let session = runtime
+            .mount(Arc::<RecordingSink>::clone(&writer), &[])
+            .unwrap();
+        writer.wait_for(|text| text.contains("status=live")).await;
+        let command = |element: u32| {
+            let revision = writer.tree(|tree| tree.revision());
+            session.handler()(Event {
+                revision,
+                element: clay_surface::NodeId::try_from(element).unwrap(),
+                name: "click".into(),
+                bubbles: true,
+                data_json: "{}".into(),
+            });
+        };
+
+        command(5);
+        let text = writer
+            .wait_for(|text| text.contains("scenario=done") && text.contains("rows=3"))
+            .await;
+        let log = text
+            .lines()
+            .skip_while(|line| !line.starts_with("a-put-x="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            log,
+            [
+                "a-put-x=ok@1",
+                "b-put-x=ok@2",
+                "a-blind-put-x=conflict@1",
+                "a-cas-put-x=ok@3",
+                "a-stale-remove-x=conflict@3",
+                "b-put-with-a-version-x=conflict@2",
+                "a-put-y=ok@4",
+                "b-remove-y=absent",
+                "b-remove-with-a-version-y=conflict@none",
+                "a-put-big-key=key-too-large",
+                "a-put-big-value-y=value-too-large",
+                "b-remove-x=ok@5",
+                "b-put-x-again=ok@6",
+            ],
+            "{text}"
+        );
+        assert!(
+            text.contains("\n1:x=a2\n1:y=a3\n2:x=b2\n"),
+            "both writers hold rows under the same local key: {text}"
+        );
+        let writes = lease
+            .read(Some(bootstrap.through), ReadLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(removals(&writes), [0, 0, 0, 0, 1, 0]);
+
+        command(6);
+        let withdrawn = lease
+            .read(Some(writes.through), ReadLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            removals(&withdrawn),
+            [2],
+            "dropping writer a withdraws both of its rows in one transaction"
+        );
+        let text = writer.wait_for(|text| text.contains("rows=1")).await;
+        assert!(text.contains("\n2:x=b2\n"), "{text}");
+
+        host.close_instance(&owner).unwrap();
+        let revoked = lease
+            .read(Some(withdrawn.through), ReadLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            removals(&revoked),
+            [1],
+            "closing the instance withdraws the writer the store still holds"
+        );
+        assert!(registrations.snapshot().is_empty());
         drop(session);
         host.close();
     };

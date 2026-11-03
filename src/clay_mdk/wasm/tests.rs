@@ -207,6 +207,7 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
         &counter_package().await,
         BTreeMap::new(),
         BTreeMap::new(),
+        BTreeMap::new(),
     )
     .await
     .unwrap();
@@ -222,6 +223,7 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
         &host,
         layout.clone(),
         &package,
+        BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
     )

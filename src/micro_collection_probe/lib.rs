@@ -7,6 +7,7 @@ use clay_collection::Page;
 use clay_collection::RowEvidence;
 use clay_collection::Version;
 use clay_mdk::bindings;
+use clay_mdk::collection_registration;
 use clay_mdk::collections;
 use clay_mdk::document_events;
 use clay_mdk::documents;
@@ -38,6 +39,10 @@ struct State {
     resume_requested: bool,
     stop_requested: bool,
     running: bool,
+    writer_a: Option<Rc<collection_registration::RegistrationWriter>>,
+    writer_b: Option<Rc<collection_registration::RegistrationWriter>>,
+    scenario: &'static str,
+    log: Vec<String>,
 }
 
 thread_local! {
@@ -50,11 +55,28 @@ impl micro_lifecycle::Guest for CollectionProbe {
     async fn activate(
         configs: Vec<documents::DocumentBinding>,
         collection_bindings: Vec<collections::CollectionBinding>,
+        registrations: Vec<collection_registration::RegistrationBinding>,
     ) -> Result<(), String> {
         assert!(configs.is_empty());
         if collection_bindings.len() != 1 {
             return Err("collection probe expects exactly one collection binding".into());
         }
+        let mut registrations = registrations.into_iter();
+        let (writer_a, writer_b) = match (
+            registrations.next(),
+            registrations.next(),
+            registrations.next(),
+        ) {
+            (None, None, None) => (None, None),
+            (Some(a), Some(b), None) if a.name == "a" && b.name == "b" => {
+                (Some(Rc::new(a.writer)), Some(Rc::new(b.writer)))
+            }
+            _ => {
+                return Err(
+                    "collection probe expects no registrations or exactly `a` and `b`".into(),
+                );
+            }
+        };
         let binding = collection_bindings.into_iter().next().unwrap();
         let mut selector = Vec::new();
         ciborium::into_writer(&"all", &mut selector).expect("CBOR selector encoding failed");
@@ -79,6 +101,10 @@ impl micro_lifecycle::Guest for CollectionProbe {
             resume_requested: false,
             stop_requested: false,
             running: true,
+            writer_a,
+            writer_b,
+            scenario: "idle",
+            log: Vec::new(),
         }));
         STATE.with_borrow_mut(|slot| {
             assert!(slot.replace(state.clone()).is_none());
@@ -97,14 +123,28 @@ impl presentation_events::Guest for CollectionProbe {
         let surface = placement.open()?;
         let retained = surface.retain()?;
         let identity = surface.identity();
-        let text = with_state(|state| state.borrow().text());
+        let (text, writes) = with_state(|state| {
+            let state = state.borrow();
+            (state.text(), state.writer_b.is_some())
+        });
         let mut edits = WireMutations::default();
         edits.push_id(ElementId::ROOT);
         edits.create_element("section", None);
         edits.set_id(ElementId::from_raw(1));
         edits.create_text(&text);
         edits.append_children(1);
-        for (id, label) in [(2, "drop-next"), (3, "resume"), (4, "stop")] {
+        let buttons: &[(usize, &str)] = if writes {
+            &[
+                (2, "drop-next"),
+                (3, "resume"),
+                (4, "stop"),
+                (5, "write"),
+                (6, "drop-a"),
+            ]
+        } else {
+            &[(2, "drop-next"), (3, "resume"), (4, "stop")]
+        };
+        for &(id, label) in buttons {
             edits.create_element("button", None);
             edits.set_id(ElementId::from_raw(id));
             edits.add_event_listener("click");
@@ -135,6 +175,7 @@ impl presentation_events::Guest for CollectionProbe {
 
     fn dispatch(surface: &presentation::Surface, event: Event) -> EventResponse {
         let state = with_state(|state| state.clone());
+        let mut write = false;
         let restart = {
             let mut state = state.borrow_mut();
             if !state.surfaces.contains_key(&surface.identity()) {
@@ -169,9 +210,22 @@ impl presentation_events::Guest for CollectionProbe {
                     render(&mut state);
                     false
                 }
+                5 if state.writer_b.is_some() && state.scenario == "idle" => {
+                    state.scenario = "running";
+                    render(&mut state);
+                    write = true;
+                    false
+                }
+                6 => {
+                    state.writer_a = None;
+                    false
+                }
                 _ => false,
             }
         };
+        if write {
+            wit_bindgen::spawn_local(write_scenario(state.clone()));
+        }
         if restart {
             state.borrow_mut().running = true;
             wit_bindgen::spawn_local(read_loop(state));
@@ -200,8 +254,9 @@ impl document_events::Guest for CollectionProbe {
 impl State {
     fn text(&self) -> String {
         let mut text = format!(
-            "status={}\npages={}\nempty-reads={}\nreplays={}\nresumes={}\nresets={}\nrows={}",
+            "status={}\nscenario={}\npages={}\nempty-reads={}\nreplays={}\nresumes={}\nresets={}\nrows={}",
             self.status,
+            self.scenario,
             self.pages,
             self.empty_reads,
             self.replays,
@@ -211,9 +266,13 @@ impl State {
         );
         for (key, value) in self.mirror.rows() {
             text.push('\n');
-            text.push_str(&decode(&key));
+            text.push_str(&decode_key(&key));
             text.push('=');
             text.push_str(&decode(&value));
+        }
+        for line in &self.log {
+            text.push('\n');
+            text.push_str(line);
         }
         text
     }
@@ -225,6 +284,124 @@ fn with_state<T>(f: impl FnOnce(&Rc<RefCell<State>>) -> T) -> T {
 
 fn decode(value: &[u8]) -> String {
     ciborium::from_reader(value).expect("collection row is not a CBOR string")
+}
+
+fn encode(value: &str) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(value, &mut encoded).expect("CBOR string encoding failed");
+    encoded
+}
+
+fn decode_key(key: &[u8]) -> String {
+    match ciborium::from_reader(key).expect("collection key is not CBOR") {
+        ciborium::Value::Text(key) => key,
+        ciborium::Value::Array(pair) => match &pair[..] {
+            [
+                ciborium::Value::Integer(writer),
+                ciborium::Value::Bytes(local),
+            ] => {
+                format!("{}:{}", u64::try_from(*writer).unwrap(), decode(local))
+            }
+            _ => panic!("registration key is not a [writer, local-key] pair"),
+        },
+        _ => panic!("collection key is neither a string nor a registration pair"),
+    }
+}
+
+async fn write_scenario(state: Rc<RefCell<State>>) {
+    fn accepted(
+        result: Result<
+            collection_registration::MutationAccepted,
+            collection_registration::MutationError,
+        >,
+    ) -> (String, Option<collections::Version>) {
+        match result {
+            Ok(accepted) => (
+                format!("ok@{}", accepted.row_version.sequence),
+                Some(accepted.row_version),
+            ),
+            Err(error) => (failure(error), None),
+        }
+    }
+    fn failure(error: collection_registration::MutationError) -> String {
+        match error {
+            collection_registration::MutationError::Conflict(Some(current)) => {
+                format!("conflict@{}", current.sequence)
+            }
+            collection_registration::MutationError::Conflict(None) => "conflict@none".into(),
+            collection_registration::MutationError::Revoked => "revoked".into(),
+            collection_registration::MutationError::KeyTooLarge => "key-too-large".into(),
+            collection_registration::MutationError::ValueTooLarge => "value-too-large".into(),
+            collection_registration::MutationError::RowLimit => "row-limit".into(),
+        }
+    }
+    fn removed(
+        result: Result<
+            Option<collection_registration::MutationAccepted>,
+            collection_registration::MutationError,
+        >,
+    ) -> String {
+        match result {
+            Ok(Some(accepted)) => format!("ok@{}", accepted.row_version.sequence),
+            Ok(None) => "absent".into(),
+            Err(error) => failure(error),
+        }
+    }
+    let value = |body: &str| collections::EncodedValue { body: encode(body) };
+    let (a, b) = {
+        let state = state.borrow();
+        (
+            state.writer_a.clone().expect("writer a is bound"),
+            state.writer_b.clone().expect("writer b is bound"),
+        )
+    };
+    let log = |line: String| {
+        let mut state = state.borrow_mut();
+        state.log.push(line);
+        render(&mut state);
+    };
+
+    let (outcome, a_x) = accepted(a.put(encode("x"), None, value("a1")).await);
+    log(format!("a-put-x={outcome}"));
+    let (outcome, b_x) = accepted(b.put(encode("x"), None, value("b1")).await);
+    log(format!("b-put-x={outcome}"));
+    let (outcome, _) = accepted(a.put(encode("x"), None, value("blind")).await);
+    log(format!("a-blind-put-x={outcome}"));
+    let (outcome, a_x2) = accepted(a.put(encode("x"), a_x, value("a2")).await);
+    log(format!("a-cas-put-x={outcome}"));
+    log(format!(
+        "a-stale-remove-x={}",
+        removed(a.remove(encode("x"), a_x).await)
+    ));
+    let (outcome, _) = accepted(b.put(encode("x"), a_x2, value("stolen")).await);
+    log(format!("b-put-with-a-version-x={outcome}"));
+    let (outcome, a_y) = accepted(a.put(encode("y"), None, value("a3")).await);
+    log(format!("a-put-y={outcome}"));
+    log(format!(
+        "b-remove-y={}",
+        removed(b.remove(encode("y"), None).await)
+    ));
+    log(format!(
+        "b-remove-with-a-version-y={}",
+        removed(b.remove(encode("y"), a_y).await)
+    ));
+    let (outcome, _) = accepted(a.put(vec![0; 1025], None, value("big-key")).await);
+    log(format!("a-put-big-key={outcome}"));
+    let big = collections::EncodedValue {
+        body: vec![0; 64 * 1024 + 1],
+    };
+    let (outcome, _) = accepted(a.put(encode("y"), a_y, big).await);
+    log(format!("a-put-big-value-y={outcome}"));
+    log(format!(
+        "b-remove-x={}",
+        removed(b.remove(encode("x"), b_x).await)
+    ));
+    let (outcome, _) = accepted(b.put(encode("x"), None, value("b2")).await);
+    log(format!("b-put-x-again={outcome}"));
+    drop((a, b));
+    let mut state = state.borrow_mut();
+    state.scenario = "done";
+    render(&mut state);
 }
 
 fn render(state: &mut State) {
@@ -446,7 +623,7 @@ fn decode_page(page: collections::Page) -> Page<Vec<u8>, Vec<u8>> {
                     .into_iter()
                     .map(|change| match change {
                         collections::Change::Upsert(upsert) => {
-                            decode(&upsert.key.body);
+                            decode_key(&upsert.key.body);
                             decode(&upsert.value.body);
                             Change::Upsert {
                                 key: upsert.key.body,
@@ -462,7 +639,7 @@ fn decode_page(page: collections::Page) -> Page<Vec<u8>, Vec<u8>> {
                             }
                         }
                         collections::Change::Remove(removal) => {
-                            decode(&removal.key.body);
+                            decode_key(&removal.key.body);
                             Change::Remove {
                                 key: removal.key.body,
                                 row_version: version(removal.row_version),

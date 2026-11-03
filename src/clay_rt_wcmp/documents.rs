@@ -20,6 +20,7 @@ pub use clay_guest_session::Operation as WasmOperation;
 pub use clay_guest_session::Watch as WasmDocumentWatch;
 use clay_guest_session::Work;
 use clay_guest_session::collections::BytesProjection;
+use clay_guest_session::collections::BytesRegistrations;
 use clay_host::AccessError;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -69,6 +70,7 @@ pub(super) async fn activate(
     active: &mut WcmpIncarnation,
     configs: BTreeMap<String, DocumentRef>,
     collections: BTreeMap<String, BytesProjection>,
+    registrations: BTreeMap<String, BytesRegistrations>,
 ) -> Result<(), ActivationError> {
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {
@@ -101,12 +103,35 @@ pub(super) async fn activate(
             })?;
         collection_bindings.push(super::collections::wit::CollectionBinding { name, reader });
     }
+    let mut registration_bindings = Vec::with_capacity(registrations.len());
+    for (name, registrations) in registrations {
+        let writer = active
+            .store
+            .data()
+            .collections
+            .grant_writer(&registrations)?;
+        let writer = active
+            .store
+            .data_mut()
+            .table
+            .push(writer)
+            .map_err(|error| {
+                ActivationError::Initialization(format!("granting registration {name}: {error}"))
+            })?;
+        registration_bindings
+            .push(super::collections::registration_wit::RegistrationBinding { name, writer });
+    }
     let lifecycle = active.client.townframe_dayframe_micro_lifecycle();
     active
         .store
         .run_concurrent(async |accessor| {
             lifecycle
-                .call_activate(accessor, bindings, collection_bindings)
+                .call_activate(
+                    accessor,
+                    bindings,
+                    collection_bindings,
+                    registration_bindings,
+                )
                 .await
         })
         .await
