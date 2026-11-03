@@ -152,18 +152,22 @@ impl<K, V, S: Source<K, V>> Projection<K, V, S> {
         self.reset_deferred().dispatch();
     }
 
-    pub(crate) fn reset_deferred(&self) -> PendingNotifications {
+    pub(crate) fn reset_deferred(&self) -> ProjectionDispatch<K, V, S::Selector> {
         let mut state = self.lock();
         state.generation = state
             .generation
             .checked_add(1)
             .expect("generation exhausted");
-        state.current.clear();
-        state.log.clear();
-        state.scopes.clear();
+        let dispatch = ProjectionDispatch {
+            notifications: state.wake_all(),
+            current: std::mem::take(&mut state.current),
+            log: std::mem::take(&mut state.log),
+            scopes: std::mem::take(&mut state.scopes),
+            keys: Vec::new(),
+        };
         state.resume_positions.clear();
         state.head = 0;
-        state.wake_all()
+        dispatch
     }
 
     pub fn revoke(&self) {
@@ -192,7 +196,17 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, V>> Projection<K, V, S> {
         self.publish_deferred(changes).dispatch();
     }
 
-    pub(crate) fn publish_deferred(&self, changes: Vec<Change<K, V>>) -> PendingNotifications {
+    pub(crate) fn publish_deferred(
+        &self,
+        changes: Vec<Change<K, V>>,
+    ) -> ProjectionDispatch<K, V, S::Selector> {
+        let mut dispatch = ProjectionDispatch {
+            notifications: PendingNotifications::default(),
+            current: BTreeMap::new(),
+            log: VecDeque::new(),
+            scopes: BTreeMap::new(),
+            keys: Vec::new(),
+        };
         let mut state = self.lock();
         assert_ne!(
             state.status,
@@ -202,10 +216,16 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, V>> Projection<K, V, S> {
         let transitions = changes
             .into_iter()
             .map(|after| {
-                let before = match &after {
-                    Change::Upsert { key, .. } => state.current.insert(key.clone(), after.clone()),
-                    Change::Remove { key, .. } => state.current.remove(key),
-                };
+                let before = state
+                    .current
+                    .remove_entry(after.key())
+                    .map(|(key, before)| {
+                        dispatch.keys.push(key);
+                        before
+                    });
+                if let Change::Upsert { key, .. } = &after {
+                    assert!(state.current.insert(key.clone(), after.clone()).is_none());
+                }
                 Transition { before, after }
             })
             .collect();
@@ -215,10 +235,12 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, V>> Projection<K, V, S> {
             .expect("source position exhausted");
         state.log.push_back(transitions);
         while state.log.len() > state.capacity.get() {
-            state.log.pop_front().unwrap();
+            dispatch.log.push_back(state.log.pop_front().unwrap());
         }
         state.prune_issued();
-        state.wake_all()
+        dispatch.notifications = state.wake_all();
+        drop(state);
+        dispatch
     }
 
     pub fn acquire(
@@ -231,6 +253,7 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, V>> Projection<K, V, S> {
             check_acquire(state.status)?;
         }
         let (selector, interest) = self.source.acquire(selector)?;
+        let mut retired_scopes = Vec::new();
         let mut state = self.lock();
         check_acquire(state.status)?;
         let bootstrap = resume.is_none();
@@ -286,11 +309,12 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, V>> Projection<K, V, S> {
         );
         while state.scopes.len() > state.capacity.get() {
             let (scope, metadata) = state.scopes.pop_first().unwrap();
-            for sequence in metadata.issued {
-                assert!(state.resume_positions.remove(&(sequence, scope)));
+            for sequence in &metadata.issued {
+                assert!(state.resume_positions.remove(&(*sequence, scope)));
             }
+            retired_scopes.push(metadata);
         }
-        Ok(ProjectionLease {
+        let lease = ProjectionLease {
             state: Arc::clone(&self.state),
             source: Arc::clone(&self.source),
             selector,
@@ -305,7 +329,10 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, V>> Projection<K, V, S> {
             acknowledged: None,
             issued: BTreeSet::new(),
             invalid: false,
-        })
+        };
+        drop(state);
+        drop(retired_scopes);
+        Ok(lease)
     }
 }
 
@@ -344,6 +371,7 @@ impl<K, V, S: Source<K, V>> ProjectionLease<K, V, S> {
         &mut self,
         state: &State<K, V, S::Selector>,
         committed: Option<&Cursor>,
+        retired: &mut VecDeque<Change<K, V>>,
     ) -> Result<Position, ReadError> {
         if state.status == Status::Revoked {
             return Err(ReadError::Revoked);
@@ -386,9 +414,9 @@ impl<K, V, S: Source<K, V>> ProjectionLease<K, V, S> {
         if committed.is_some() && self.acknowledged != Some(position) {
             let retained_start = self.snapshot_len - self.snapshot.len();
             if position.snapshot == self.snapshot_len as u64 {
-                self.snapshot = VecDeque::new();
+                *retired = std::mem::take(&mut self.snapshot);
             } else {
-                drop(
+                retired.extend(
                     self.snapshot
                         .drain(..position.snapshot as usize - retained_start),
                 );
@@ -446,11 +474,12 @@ pub struct ProjectionRead<'a, K, V, S: Source<K, V> = ()> {
 
 impl<K, V, S: Source<K, V>> ProjectionRead<'_, K, V, S> {
     pub fn complete_timeout(mut self) -> Result<Page<K, V>, ReadError> {
+        let mut retired = VecDeque::new();
         let result = {
             let shared = Arc::clone(&self.lease.state);
             let mut state = shared.lock().expect("projection state poisoned");
             self.lease
-                .position(&state, self.committed.as_ref())
+                .position(&state, self.committed.as_ref(), &mut retired)
                 .and_then(|position| {
                     if state.status == Status::SourceUnavailable
                         && position.snapshot == self.lease.snapshot_len as u64
@@ -478,8 +507,11 @@ impl<K: Clone, V: Clone, S: Source<K, V>> ProjectionRead<'_, K, V, S> {
     fn read_page(
         &mut self,
         state: &mut State<K, V, S::Selector>,
+        retired: &mut VecDeque<Change<K, V>>,
     ) -> Result<Option<Page<K, V>>, ReadError> {
-        let mut position = self.lease.position(state, self.committed.as_ref())?;
+        let mut position = self
+            .lease
+            .position(state, self.committed.as_ref(), retired)?;
         let mut transactions = Vec::new();
         let mut changes = 0;
         let retained_start = self.lease.snapshot_len - self.lease.snapshot.len();
@@ -569,6 +601,7 @@ impl<K: Clone, V: Clone, S: Source<K, V>> Future for ProjectionRead<'_, K, V, S>
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         let mut candidate = Some(cx.waker().clone());
+        let mut retired = VecDeque::new();
         let retired_waker;
         let result = {
             let shared = Arc::clone(&this.lease.state);
@@ -640,6 +673,28 @@ fn check_acquire(status: Status) -> Result<(), AcquireError> {
         Status::Live => Ok(()),
         Status::SourceUnavailable => Err(AcquireError::SourceUnavailable),
         Status::Revoked => Err(AcquireError::Revoked),
+    }
+}
+
+pub(crate) struct ProjectionDispatch<K, V, T> {
+    notifications: PendingNotifications,
+    current: BTreeMap<K, Change<K, V>>,
+    log: VecDeque<Vec<Transition<K, V>>>,
+    scopes: BTreeMap<u64, Scope<T>>,
+    keys: Vec<K>,
+}
+
+impl<K, V, T> ProjectionDispatch<K, V, T> {
+    pub(crate) fn dispatch(self) {
+        let Self {
+            notifications,
+            current,
+            log,
+            scopes,
+            keys,
+        } = self;
+        notifications.dispatch();
+        drop((current, log, scopes, keys));
     }
 }
 

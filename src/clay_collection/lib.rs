@@ -13,7 +13,8 @@
 //! [`Ledger`] retires when the authoritative row it predicted arrives.
 //!
 //! [`RegistrationCollection`] is the owner-scoped contribution primitive: rows keyed by
-//! writer, compare-and-set mutations, and withdrawal of a writer's rows when it closes.
+//! registration scope, shared compare-and-set mutations, and atomic withdrawal when the
+//! scope owner closes. Writer handles do not own row lifetime.
 
 mod ledger;
 mod mirror;
@@ -36,6 +37,8 @@ pub use projection::Projection;
 pub use projection::ProjectionLease;
 pub use projection::ProjectionRead;
 pub use registration::RegistrationCollection;
+pub use registration::RegistrationDispatch;
+pub use registration::RegistrationScope;
 pub use registration::RegistrationWriter;
 pub use replica::Entry;
 pub use replica::Replica;
@@ -48,9 +51,9 @@ pub use types::OperationId;
 pub use types::Page;
 pub use types::ReadError;
 pub use types::ReadLimits;
+pub use types::RegistrationScopeId;
 pub use types::RowEvidence;
 pub use types::ScopeId;
 pub use types::Transaction;
 pub use types::Version;
 pub use types::WriteOutcome;
-pub use types::WriterId;

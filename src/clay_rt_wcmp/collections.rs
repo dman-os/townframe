@@ -151,6 +151,16 @@ impl<T: 'static> registration_wit::HostRegistrationWriterWithStore<T> for HasSel
                 .map_err(write_failure_to_wire))
         })
     }
+
+    async fn clear(
+        accessor: &Accessor<T, Self>,
+        writer: Resource<RegistrationWriter>,
+    ) -> wcmp::Result<Result<(), registration_wit::MutationError>> {
+        accessor.with(|mut access| {
+            let writer = access.get().table.get(&writer)?;
+            Ok(writer.clear().map_err(write_failure_to_wire))
+        })
+    }
 }
 
 fn accepted(version: Version) -> registration_wit::MutationAccepted {

@@ -101,6 +101,8 @@ interface collection-registration {
     resource registration-writer {
         put: async func(local-key: list<u8>, based-on: option<version>, value: encoded-value) -> result<mutation-accepted, mutation-error>;
         remove: async func(local-key: list<u8>, based-on: option<version>) -> result<option<mutation-accepted>, mutation-error>;
+        @since(version = 0.3.0)
+        clear: async func() -> result<_, mutation-error>;
     }
 
     record registration-binding {

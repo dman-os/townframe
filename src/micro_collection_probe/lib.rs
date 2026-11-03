@@ -277,6 +277,8 @@ impl presentation_events::Guest for CollectionProbe {
                 }
                 6 => {
                     state.writer_a = None;
+                    state.log.push("a-writer-drop=ok".into());
+                    render(&mut state);
                     false
                 }
                 7 if state.cap_writer.is_some() => {

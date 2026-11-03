@@ -551,28 +551,22 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
         assert_eq!(removals(&writes), [0, 0, 0, 0, 1, 0]);
 
         command(6);
-        let withdrawn = lease
-            .read(Some(writes.through), ReadLimits::default())
-            .await
+        let text = writer
+            .wait_for(|text| text.contains("a-writer-drop=ok"))
+            .await;
+        assert!(text.contains("\n1:x=a2\n1:y=a3\n2:x=b2\n"), "{text}");
+        let unchanged = lease
+            .read(Some(writes.through.clone()), ReadLimits::default())
+            .complete_timeout()
             .unwrap();
-        assert_eq!(
-            removals(&withdrawn),
-            [2],
-            "dropping writer a withdraws both of its rows in one transaction"
-        );
-        let text = writer.wait_for(|text| text.contains("rows=1")).await;
-        assert!(text.contains("\n2:x=b2\n"), "{text}");
+        assert!(unchanged.transactions.is_empty());
 
         host.close_instance(&owner).unwrap();
         let revoked = lease
-            .read(Some(withdrawn.through), ReadLimits::default())
+            .read(Some(writes.through), ReadLimits::default())
             .await
             .unwrap();
-        assert_eq!(
-            removals(&revoked),
-            [1],
-            "closing the instance withdraws the writer the store still holds"
-        );
+        assert_eq!(removals(&revoked), [3]);
         assert!(registrations.snapshot().is_empty());
         drop(session);
         host.close();
@@ -788,7 +782,7 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
             .into_values()
             .map(|entry| entry.value.body)
             .collect::<Vec<_>>(),
-        [vec![2]]
+        [vec![1], vec![2]]
     );
     let state = store.data_mut();
     let replacement = state
@@ -829,14 +823,15 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
             .into_values()
             .map(|entry| entry.value.body)
             .collect::<Vec<_>>(),
-        [vec![3]]
+        [vec![1], vec![3]]
     );
     drop(state.table.delete(replacement).unwrap());
     drop(state.table.delete(other).unwrap());
     assert_eq!(state.collections.writer_count(), 0);
     assert!(state.table.is_empty());
-    assert!(registrations.snapshot().is_empty());
+    assert_eq!(registrations.snapshot().len(), 2);
     host.close();
+    assert!(registrations.snapshot().is_empty());
 }
 
 #[test]
@@ -872,7 +867,7 @@ fn registration_writer_table_capacity_failure_releases_its_permit() {
     let first_rep = first.rep();
     drop(state.table.delete(first).unwrap());
     assert_eq!(state.collections.writer_count(), 0);
-    assert!(registrations.snapshot().is_empty());
+    assert_eq!(registrations.snapshot().len(), 1);
     let replacement = state
         .table
         .push(state.collections.grant_writer(&registrations).unwrap())
@@ -1288,10 +1283,11 @@ fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers() {
 
     drop(writer_state.table.delete(writer).unwrap());
     assert_eq!(writer_state.collections.writer_count(), 0);
-    assert!(registrations.snapshot().is_empty());
+    assert_eq!(registrations.snapshot().len(), 1);
     drop(lease);
     assert_eq!(provider.publication_count(), 0);
     host.close();
+    assert!(registrations.snapshot().is_empty());
 }
 
 #[test]

@@ -504,6 +504,13 @@ impl collection_registration::HostRegistrationWriter for TestHost {
 }
 
 impl<T: 'static> collection_registration::HostRegistrationWriterWithStore<T> for HasSelf<TestHost> {
+    async fn clear(
+        _accessor: &Accessor<T, Self>,
+        _writer: Resource<collection_registration::RegistrationWriter>,
+    ) -> wasmtime::Result<Result<(), collection_registration::MutationError>> {
+        wasmtime::bail!("test host grants no registration writers")
+    }
+
     async fn put(
         _accessor: &Accessor<T, Self>,
         _writer: Resource<collection_registration::RegistrationWriter>,

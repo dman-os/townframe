@@ -28,11 +28,17 @@ pub struct ScopeId(pub u64);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OperationId(pub u64);
 
-/// Identity of one registration writer. A registration collection keys its projection
-/// by `(WriterId, local key)`, so two writers registering the same local key hold
-/// distinct physical rows and one writer's closure cannot disturb another's.
+/// Host-minted identity of a registration scope within its collection. Rows are keyed
+/// by `(RegistrationScopeId, local key)`; the identity carries no mutation authority.
+/// Closing the scope owner withdraws its rows, independently of writer-handle lifetime.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct WriterId(pub u64);
+pub struct RegistrationScopeId(pub(crate) u64);
+
+impl RegistrationScopeId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
 /// An opaque read position in one projection generation.
 ///
@@ -138,6 +144,7 @@ pub enum AcquireError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MutationError {
     Conflict { current: Option<Version> },
+    Closed,
 }
 
 #[derive(Clone, Debug, PartialEq)]
