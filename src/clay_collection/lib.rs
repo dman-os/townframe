@@ -37,6 +37,8 @@ pub use projection::Projection;
 pub use projection::ProjectionLease;
 pub use projection::ProjectionRead;
 pub use registration::DurableCodec;
+pub use registration::InstalledWriteError;
+pub use registration::InstalledWriter;
 pub use registration::RegistrationCollection;
 pub use registration::RegistrationDispatch;
 pub use registration::RegistrationScope;

@@ -444,6 +444,311 @@ fn reset_keeps_installed_scopes_and_drops_incarnations() {
     assert_eq!(collection.snapshot().len(), 1);
 }
 
+/// Runtime writes through `installed_writer` persist, reload with identical stamps,
+/// and are retracted with their scope by `uninstall`; permanent scopes keep theirs.
+async fn runtime_writes_survive_reload_and_uninstall_retracts_them<Keep, Fut>(
+    reopen: impl Fn() -> Fut,
+) where
+    Fut: Future<Output = (Keep, Collection)>,
+{
+    let (keep, collection) = reopen().await;
+    install(
+        &collection,
+        b"a",
+        Retention::Installation,
+        &[(1, Some("a1"))],
+    )
+    .await;
+    install(&collection, b"p", Retention::Permanent, &[]).await;
+    let installation = collection.installed_writer(b"a").unwrap();
+    let permanent = collection.installed_writer(b"p").unwrap();
+    installation
+        .put(2, WriteBasis::Concurrent, "a2".into())
+        .await
+        .unwrap()
+        .dispatch();
+    permanent
+        .put(3, WriteBasis::Concurrent, "p3".into())
+        .await
+        .unwrap()
+        .dispatch();
+    // Deleting an installed row writes a tombstone one lamport above it.
+    let tombstone = installation
+        .delete(
+            1,
+            WriteBasis::CompareAndSet(Some(collection.get(&1).unwrap().stamp)),
+        )
+        .await
+        .unwrap()
+        .dispatch();
+    assert_eq!(
+        tombstone,
+        Stamp {
+            lamport: 2,
+            writer: writer_id("a")
+        }
+    );
+    assert_eq!(winners(&collection), [(2, "a2".into()), (3, "p3".into())]);
+    let before = collection.snapshot();
+    drop((installation, permanent, collection));
+    drop(keep);
+
+    let (keep, collection) = reopen().await;
+    assert_eq!(collection.snapshot(), before);
+    // A tombstone also came back: creating over it with `CompareAndSet(None)` outranks it.
+    let created = collection
+        .installed_writer(b"a")
+        .unwrap()
+        .put(1, WriteBasis::CompareAndSet(None), "again".into())
+        .await
+        .unwrap()
+        .dispatch();
+    assert_eq!(created.lamport, 3);
+
+    collection.uninstall(b"a").await.unwrap().dispatch();
+    assert_eq!(winners(&collection), [(3, "p3".into())]);
+    assert!(matches!(
+        collection.installed_writer(b"a"),
+        Err(MutationError::Closed)
+    ));
+    drop(collection);
+    drop(keep);
+
+    let (_keep, collection) = reopen().await;
+    assert_eq!(winners(&collection), [(3, "p3".into())]);
+}
+
+#[test]
+fn memory_store_runtime_writes_survive_reload() {
+    let store = Arc::new(MemoryStore::new());
+    ready(runtime_writes_survive_reload_and_uninstall_retracts_them(
+        || async { ((), open(&store).await) },
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_store_runtime_writes_survive_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("clay.sqlite");
+    runtime_writes_survive_reload_and_uninstall_retracts_them(|| async {
+        let runtime = sqlite_rs::SqliteRuntime::new(sqlite_rs::RuntimeConfig::default());
+        let store = Arc::new(
+            SqliteStore::open(runtime.database(&path, &[], "_unused"))
+                .await
+                .unwrap(),
+        );
+        let collection = open(&store).await;
+        (runtime, collection)
+    })
+    .await;
+}
+
+#[test]
+fn failed_runtime_write_changes_nothing_visible_and_leaves_no_stamp_gap() {
+    let store = Arc::new(FailingStore {
+        inner: MemoryStore::new(),
+        armed: AtomicBool::new(false),
+    });
+    let collection = ready(open(&store));
+    ready(install(
+        &collection,
+        b"a",
+        Retention::Installation,
+        &[(1, Some("one"))],
+    ));
+    let writer = collection.installed_writer(b"a").unwrap();
+    let (mut feed, _) = Feed::open(&collection);
+    let before = collection.snapshot();
+    let stored = ready(stored_keys(&*store));
+
+    store.armed.store(true, Ordering::SeqCst);
+    for result in [
+        ready(writer.put(1, WriteBasis::Concurrent, "lost".into())),
+        ready(writer.delete(1, WriteBasis::Concurrent)),
+        ready(writer.put(2, WriteBasis::Concurrent, "lost".into())),
+    ] {
+        assert!(matches!(result, Err(InstalledWriteError::Store(_))));
+    }
+    assert_eq!(collection.snapshot(), before);
+    assert_eq!(ready(stored_keys(&*store)), stored);
+    feed.assert_quiet();
+    // The failed attempts released their key slots and burned no lamport.
+    store.armed.store(false, Ordering::SeqCst);
+    let stamp = ready(writer.put(1, WriteBasis::Concurrent, "kept".into()))
+        .unwrap()
+        .dispatch();
+    assert_eq!(stamp.lamport, 2);
+}
+
+/// Yields once before every `apply`, so concurrently polled writers interleave at the
+/// store write, then runs the one-shot hook.
+struct InterleavingStore {
+    inner: MemoryStore,
+    hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl OrderedStore for InterleavingStore {
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.inner.get(key).await
+    }
+
+    async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        self.inner.scan_prefix(prefix).await
+    }
+
+    async fn apply(&self, batch: Vec<BatchOp>) -> Result<(), StoreError> {
+        tokio::task::yield_now().await;
+        if let Some(hook) = self.hook.lock().unwrap().take() {
+            hook();
+        }
+        self.inner.apply(batch).await
+    }
+}
+
+#[tokio::test]
+async fn concurrent_compare_and_set_on_durable_scopes_admits_exactly_one() {
+    let store = Arc::new(InterleavingStore {
+        inner: MemoryStore::new(),
+        hook: std::sync::Mutex::new(None),
+    });
+    let collection = open(&store).await;
+    install(
+        &collection,
+        b"a",
+        Retention::Installation,
+        &[(1, Some("seed"))],
+    )
+    .await;
+    install(&collection, b"b", Retention::Installation, &[]).await;
+    install(&collection, b"p", Retention::Permanent, &[]).await;
+    let first = collection.get(&1).unwrap().stamp;
+    let writers = [b"a".as_slice(), b"b", b"p", b"a"]
+        .map(|scope| collection.installed_writer(scope).unwrap());
+    let attempt = |index: usize| {
+        writers[index].put(
+            1,
+            WriteBasis::CompareAndSet(Some(first.clone())),
+            format!("contender {index}"),
+        )
+    };
+    let outcomes = tokio::join!(attempt(0), attempt(1), attempt(2), attempt(3));
+    let outcomes = [outcomes.0, outcomes.1, outcomes.2, outcomes.3];
+    let winners_: Vec<Stamp> = outcomes
+        .iter()
+        .filter_map(|outcome| {
+            outcome
+                .as_ref()
+                .ok()
+                .map(|dispatch| dispatch.output().clone())
+        })
+        .collect();
+    assert_eq!(winners_.len(), 1);
+    for outcome in outcomes {
+        match outcome {
+            Ok(dispatch) => {
+                dispatch.dispatch();
+            }
+            Err(InstalledWriteError::Mutation(MutationError::Conflict { current })) => {
+                assert_eq!(current.as_ref(), Some(&winners_[0]));
+            }
+            Err(other) => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(collection.get(&1).unwrap().stamp, winners_[0]);
+    // Exactly the winner's row is stored for the key beyond the seeded one.
+    let reloaded = open(&store).await;
+    assert_eq!(reloaded.snapshot(), collection.snapshot());
+}
+
+#[tokio::test]
+async fn compare_and_set_beaten_by_an_incarnation_write_restores_the_stored_row() {
+    let store = Arc::new(InterleavingStore {
+        inner: MemoryStore::new(),
+        hook: std::sync::Mutex::new(None),
+    });
+    let collection = open(&store).await;
+    install(
+        &collection,
+        b"a",
+        Retention::Installation,
+        &[(1, Some("installed"))],
+    )
+    .await;
+    let first = collection.get(&1).unwrap().stamp;
+    let writer = collection.installed_writer(b"a").unwrap();
+    let scope = collection.create_scope(writer_id("runtime"));
+    let incarnation = scope.writer().unwrap();
+    let observed = first.clone();
+    // Lands while the durable write is parked at the store.
+    *store.hook.lock().unwrap() = Some(Box::new(move || {
+        incarnation
+            .put(1, WriteBasis::Observed(observed), "runtime".into())
+            .unwrap()
+            .dispatch();
+    }));
+    let result = writer
+        .put(1, WriteBasis::CompareAndSet(Some(first)), "durable".into())
+        .await;
+    let Err(InstalledWriteError::Mutation(MutationError::Conflict { current })) = result else {
+        panic!("expected conflict")
+    };
+    assert_eq!(current, Some(collection.get(&1).unwrap().stamp));
+    assert_eq!(collection.get(&1).unwrap().value, "runtime");
+    // The store still holds the installed row, not the refused write.
+    scope.close().dispatch();
+    let reloaded = open(&store).await;
+    assert_eq!(winners(&reloaded), [(1, "installed".into())]);
+    assert_eq!(reloaded.get(&1).unwrap().stamp.lamport, 1);
+}
+
+#[test]
+fn reinstall_keeps_unchanged_stamps_and_advances_changed_ones() {
+    let store = Arc::new(MemoryStore::new());
+    let collection = ready(open(&store));
+    ready(install(
+        &collection,
+        b"a",
+        Retention::Installation,
+        &[(1, Some("x")), (2, Some("y")), (3, None)],
+    ));
+    let lamports = |collection: &Collection| {
+        let inner = collection.lock();
+        inner
+            .candidates
+            .iter()
+            .map(|(key, holders)| (*key, holders.values().next().unwrap().stamp.lamport))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(lamports(&collection), [(1, 1), (2, 1), (3, 1)]);
+    let observed = collection.get(&2).unwrap().stamp;
+
+    ready(install(
+        &collection,
+        b"a",
+        Retention::Installation,
+        &[
+            (1, Some("x")),
+            (2, Some("y2")),
+            (3, Some("z")),
+            (4, Some("new")),
+        ],
+    ));
+    // 1 unchanged, 2 changed, 3 tombstone to value, 4 created concurrently.
+    assert_eq!(lamports(&collection), [(1, 1), (2, 2), (3, 2), (4, 1)]);
+
+    // A write that observed the old row at lamport 1 no longer outranks the update.
+    let scope = collection.create_scope(writer_id("0"));
+    scope
+        .writer()
+        .unwrap()
+        .put(2, WriteBasis::Observed(observed), "stale".into())
+        .unwrap()
+        .dispatch();
+    assert_eq!(collection.get(&2).unwrap().value, "y2");
+    // The stored rows reload with the same stamps.
+    assert_eq!(ready(open(&store)).snapshot(), collection.snapshot());
+}
+
 proptest! {
     #[test]
     fn store_keys_are_injective_and_prefix_free(
