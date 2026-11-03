@@ -8,6 +8,7 @@ use std::task::Wake;
 use std::task::Waker;
 
 use super::*;
+use crate::types::Change;
 use crate::types::ReadError;
 use crate::types::ReadLimits;
 
