@@ -4,6 +4,10 @@
 //!
 //! * `provider` returns two named publications from `initialize`: the `presentation`
 //!   presentation and the `echo` call, whose exported handler answers `echo:` plus the request.
+//!   When the provider is configured with a `service` requirement, it also publishes `relay`,
+//!   whose handler forwards the request to that service and answers what it answered. A test
+//!   binds `service` to a call it controls, so a `relay` call can be held suspended in this
+//!   guest on something external.
 //! * `failing-provider` publishes the same two and then rejects initialization, so the host
 //!   must discard publications that were never visible.
 //! * `consumer` redeems its `presentation` requirement during initialization and keeps the
@@ -30,6 +34,7 @@ use clay_mdk::wire::WireMutations;
 use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 const MANIFEST: &[u8] = include_bytes!("lifecycle_fixture.manifest.json");
 
@@ -39,9 +44,12 @@ static DAYFRAME_MANIFEST: [u8; MANIFEST.len()] = *include_bytes!("lifecycle_fixt
 
 const PRESENTATION: &str = "presentation";
 const ECHO: &str = "echo";
+const RELAY: &str = "relay";
 
 thread_local! {
     static ROLE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The provider's `service` requirement, which its `relay` call forwards to.
+    static SERVICE: RefCell<Option<Rc<capability_bank::CapabilityRef>>> = const { RefCell::new(None) };
 }
 
 struct Lifecycle;
@@ -54,7 +62,11 @@ enum Root {
 impl micro_lifecycle::GuestInstanceRoot for Root {
     async fn close(&self) -> Result<(), String> {
         match self {
-            Root::Provider => Ok(()),
+            Root::Provider => {
+                // The service reference is part of what the guest holds until its close.
+                SERVICE.with_borrow_mut(Option::take);
+                Ok(())
+            }
             Root::Consumer(proxy) => proxy.component().map(drop).map_err(|error| {
                 format!("provider withdrawn before its consumer closed: {error:?}")
             }),
@@ -75,12 +87,21 @@ impl micro_lifecycle::Guest for Lifecycle {
                 ))
             })?;
         let initialized = match role.as_str() {
-            "provider" => micro_lifecycle::Initialized {
-                root: micro_lifecycle::InstanceRoot::new(Root::Provider),
-                publications: publish_all()?,
-            },
+            "provider" => {
+                let service = context
+                    .requirements
+                    .into_iter()
+                    .find(|requirement| requirement.name == "service")
+                    .map(|requirement| Rc::new(requirement.capability));
+                let relays = service.is_some();
+                SERVICE.with_borrow_mut(|slot| *slot = service);
+                micro_lifecycle::Initialized {
+                    root: micro_lifecycle::InstanceRoot::new(Root::Provider),
+                    publications: publish_all(relays)?,
+                }
+            }
             "failing-provider" => {
-                let _staged = publish_all()?;
+                let _staged = publish_all(false)?;
                 return Err(InitializationError::Rejected(
                     "failing provider rejects its initialization".into(),
                 ));
@@ -147,6 +168,17 @@ impl micro_lifecycle::Guest for Lifecycle {
     async fn call(publication: String, request: Vec<u8>) -> Result<Vec<u8>, String> {
         match publication.as_str() {
             ECHO => Ok([b"echo:".as_slice(), &request].concat()),
+            RELAY => {
+                // Clone the handle out so no borrow is held across the suspension: other
+                // calls and sync entries run in this instance meanwhile.
+                let service = SERVICE
+                    .with_borrow(Clone::clone)
+                    .ok_or("relay has no service requirement")?;
+                service
+                    .call(request)
+                    .await
+                    .map_err(|error| format!("relayed call failed: {error:?}"))
+            }
             other => Err(format!("lifecycle fixture serves no call {other:?}")),
         }
     }
@@ -211,29 +243,39 @@ async fn register(bindings: Vec<collection_registration::RegistrationBinding>) {
     drop((first, second));
 }
 
-fn publish_all() -> Result<Vec<micro_lifecycle::NamedPublication>, InitializationError> {
+fn publish_all(
+    relays: bool,
+) -> Result<Vec<micro_lifecycle::NamedPublication>, InitializationError> {
     let unavailable = |what: &str, error: capability_bank::CapabilityError| {
         InitializationError::Unavailable(format!("publishing {what} failed: {error:?}"))
     };
-    Ok(vec![
+    let call = |name: &str| {
+        capability_bank::publish_call(
+            name,
+            &capability_bank::Contract {
+                namespace: "dayframe.lifecycle".into(),
+                name: name.into(),
+                version: (1, 0, 0),
+            },
+        )
+        .map(|capability| micro_lifecycle::NamedPublication {
+            name: name.into(),
+            capability,
+        })
+        .map_err(|error| unavailable(name, error))
+    };
+    let mut publications = vec![
         micro_lifecycle::NamedPublication {
             name: PRESENTATION.into(),
             capability: capability_bank::publish_presentation(PRESENTATION)
                 .map_err(|error| unavailable(PRESENTATION, error))?,
         },
-        micro_lifecycle::NamedPublication {
-            name: ECHO.into(),
-            capability: capability_bank::publish_call(
-                ECHO,
-                &capability_bank::Contract {
-                    namespace: "dayframe.lifecycle".into(),
-                    name: ECHO.into(),
-                    version: (1, 0, 0),
-                },
-            )
-            .map_err(|error| unavailable(ECHO, error))?,
-        },
-    ])
+        call(ECHO)?,
+    ];
+    if relays {
+        publications.push(call(RELAY)?);
+    }
+    Ok(publications)
 }
 
 impl presentation_events::Guest for Lifecycle {

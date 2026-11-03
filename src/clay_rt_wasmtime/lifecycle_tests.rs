@@ -1,5 +1,6 @@
 use super::tests::RecordingSink;
 use super::*;
+use clay_guest_session::GuestClose;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
@@ -64,7 +65,9 @@ impl Incarnations for Wasmtime {
         )
     }
 
-    fn close(runtime: WasmRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
+    fn close(
+        runtime: WasmRuntime,
+    ) -> LocalFuture<'static, (Result<GuestClose, String>, GuestResidue)> {
         Box::pin(async move {
             let taken = runtime.incarnation.lock().unwrap().take();
             let mut active = taken.expect("only a live incarnation is closed");
@@ -141,5 +144,51 @@ async fn undeclared_publications_fail_initialization() {
     let engine = Wasmtime::load().await;
     tokio::task::LocalSet::new()
         .run_until(lifecycle_conformance::undeclared_publications_fail_initialization(engine))
+        .await;
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_suspended_call_does_not_block_sync_entry() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::suspended_call_does_not_block_sync_entry(engine))
+        .await;
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_calls_into_one_micro_are_serialized() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::calls_into_one_micro_are_serialized(
+            engine,
+        ))
+        .await;
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_reentrant_call_chain_never_hangs() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::reentrant_call_chain_never_hangs(
+            engine,
+        ))
+        .await;
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_close_revokes_calls_in_flight() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::close_revokes_calls_in_flight(engine))
+        .await;
+}
+
+#[tokio::test]
+async fn lifecycle_conformance_cycle_through_queued_call_is_refused() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::cycle_through_queued_call_is_refused(
+            engine,
+        ))
         .await;
 }

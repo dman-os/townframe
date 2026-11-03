@@ -1,6 +1,7 @@
 use super::WcmpPackage;
 use super::WcmpRuntime;
 use super::tests::RecordingSink;
+use clay_guest_session::GuestClose;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
@@ -73,16 +74,20 @@ impl Incarnations for Wasmi {
         })
     }
 
-    fn close(runtime: WcmpRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
+    fn close(
+        runtime: WcmpRuntime,
+    ) -> LocalFuture<'static, (Result<GuestClose, String>, GuestResidue)> {
         Box::pin(async move {
-            close_inspecting(&runtime, |state| {
+            // The WCMP engine does not serialize or skip yet (C3c): its close always runs.
+            let (closed, residue) = close_inspecting(&runtime, |state| {
                 GuestResidue::of(
                     state.table.is_empty(),
                     &state.capabilities,
                     &state.collections,
                 )
             })
-            .await
+            .await;
+            (closed.map(|()| GuestClose::Completed), residue)
         })
     }
 }

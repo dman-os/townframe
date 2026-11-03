@@ -15,6 +15,9 @@ interface capability-bank {
         limit-exceeded,
         /// A lazy reference's provider could not be activated or does not publish the name.
         unavailable,
+        /// A call would wait on an incarnation that already waits on the caller. An
+        /// incarnation serves one call at a time, so such a call can never be answered.
+        call-cycle,
     }
 
     /// Why a call failed: the reference was unusable, or the provider's handler rejected it.

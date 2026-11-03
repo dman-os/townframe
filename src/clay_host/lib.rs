@@ -5,9 +5,12 @@
 //! engine crates and document data lives in `clay_docs`; neither is this crate's concern
 //! (ADR 015 §3, §6).
 
+mod call_graph;
 mod instance;
 mod supervisor;
 
+pub use call_graph::CallCycle;
+pub use call_graph::CallEdge;
 pub use instance::AccessError;
 pub use instance::Binding;
 pub use instance::CloseReason;
