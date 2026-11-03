@@ -70,6 +70,7 @@ use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
 use dioxus_native_dom::DioxusState;
 use host_bindings::exports::townframe::dayframe::presentation_events::Event;
+use host_bindings::townframe::dayframe::capability_bank;
 use host_bindings::townframe::dayframe::collection_registration;
 use host_bindings::townframe::dayframe::collections;
 use host_bindings::townframe::dayframe::documents;
@@ -591,6 +592,71 @@ impl documents::HostOperation for TestHost {
 
     fn drop(&mut self, operation: Resource<documents::Operation>) -> wasmtime::Result<()> {
         self.table.delete(operation)?;
+        Ok(())
+    }
+}
+
+impl capability_bank::Host for TestHost {
+    fn publish_presentation_component(
+        &mut self,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::PublishedCapability>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+}
+
+impl capability_bank::HostCapabilityRef for TestHost {
+    fn as_presentation_component(
+        &mut self,
+        _reference: Resource<capability_bank::CapabilityRef>,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::PresentationComponent>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    fn drop(
+        &mut self,
+        reference: Resource<capability_bank::CapabilityRef>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(reference)?;
+        Ok(())
+    }
+}
+
+impl capability_bank::HostPresentationComponent for TestHost {
+    fn component(
+        &mut self,
+        _proxy: Resource<capability_bank::PresentationComponent>,
+    ) -> wasmtime::Result<Result<Resource<ComponentRef>, capability_bank::CapabilityError>> {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    fn drop(
+        &mut self,
+        proxy: Resource<capability_bank::PresentationComponent>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(proxy)?;
+        Ok(())
+    }
+}
+
+impl capability_bank::HostPublishedCapability for TestHost {
+    fn reference(
+        &mut self,
+        _published: Resource<capability_bank::PublishedCapability>,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::CapabilityRef>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    fn drop(
+        &mut self,
+        published: Resource<capability_bank::PublishedCapability>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(published)?;
         Ok(())
     }
 }

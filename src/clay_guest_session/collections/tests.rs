@@ -19,11 +19,15 @@ fn session(limits: CollectionLimits) -> (CollectionSession, BytesProjection, Hos
     )
 }
 
-fn upsert(key: &[u8], value: &[u8], write_context: Option<Vec<u8>>) -> Change<Bytes, Bytes> {
+fn upsert(
+    key: &[u8],
+    value: &[u8],
+    write_context: Option<Vec<u8>>,
+) -> Change<Bytes, CollectionValue> {
     Change::Upsert {
         key: key.to_vec(),
         row_version: Version::new(1, 1),
-        value: value.to_vec(),
+        value: CollectionValue::plain(value.to_vec()),
         evidence: RowEvidence::Authoritative,
         write_context,
     }
