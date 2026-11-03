@@ -373,13 +373,12 @@ granted.
 A micro has one asynchronous initialization entry point, analogous to process start:
 
 ```text
-initialize(arguments and capabilities) -> publications
-serve(inbox)   // the incarnation's long-lived main loop (ADR 024 §7a)
+initialize(arguments and capabilities) -> instance-root
 ```
 
 Initialization may acquire projection leases, create writer leases, publish
-capabilities, and create presentation resources. A successful return marks the
-incarnation initialized; closing the `serve` inbox ends it and its owned resources. This
+capabilities, and create presentation resources. Returning the root marks successful
+initialization; dropping it closes the incarnation and its owned resources. This
 replaces framework-specific preload phases: acquiring a lease is preload, and resource
 ownership defines cleanup.
 

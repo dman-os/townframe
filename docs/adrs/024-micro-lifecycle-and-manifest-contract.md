@@ -158,9 +158,9 @@ trap, cancellation, or dropped initialization, the pending incarnation scope is
 dropped and all acquired/staged resources unwind through RAII. This is transactional
 visibility, not a general rollback protocol for arbitrary external side effects.
 
-The host owns lifecycle authority. A successful `initialize` return proves initialization;
-the host then starts the guest's `serve` main loop (§7a) and owns its inbox for the
-incarnation. The guest receives no `stop` capability.
+The host owns lifecycle authority. The exported `instance-root` proves successful
+initialization and is held by the host for the incarnation; it is not a guest-visible
+`stop` capability.
 
 ### 6. Closing preserves dependencies through cleanup
 
@@ -174,7 +174,7 @@ When an active incarnation loses its final external strong binding, is disabled,
 6. recompute reachability and close newly unreachable suppliers.
 
 
-Guest cleanup happens when the host closes the `serve` inbox, exactly once, while the incarnation's existing dependencies are still retained. The guest's main loop sees the end of the stream, finishes or cancels its in-flight handlers and owned work, and returns from `serve`. Returning does not grant authority to publish new outward resources. After `serve` returns, traps, or is abandoned by host supervision, the host drops the incarnation scope and its resources. A forced close (disable or shutdown) may abandon `serve` without waiting for its handlers, and abrupt engine loss skips guest cleanup entirely, so correctness relies on host-owned RAII cleanup, not on `serve` returning.
+The host invokes `instance-root.close()` exactly once while the incarnation's existing dependencies remain retained. The guest uses it to finish or cancel asynchronous owned work; returning does not grant authority to publish new outward resources. After it returns, traps, or is cancelled by host supervision, the host drops the incarnation scope and its resources. Abrupt engine loss may skip guest cleanup, so correctness still relies on host-owned RAII cleanup rather than on `close()` completing.
 This naturally closes dependents before providers. Mandatory configured dependency
 cycles are rejected. A dynamically formed unreachable strongly connected component
 closes as a group; members must tolerate peers becoming revoked during cleanup.
@@ -206,6 +206,10 @@ interface lifecycle-host {
 }
 
 interface lifecycle-guest {
+    resource instance-root {
+        close: async func();
+    }
+
     variant initialization-error {
         invalid-configuration(string),
         unavailable(string),
@@ -218,29 +222,15 @@ interface lifecycle-guest {
     }
 
     record initialized {
+        root: instance-root,
         publications: list<named-publication>,
     }
 
     initialize: async func(context: lifecycle-host.initial-context)
         -> result<initialized, initialization-error>;
 
-    // The incarnation's main loop (§7a). Started once after `initialize` succeeds;
-    // returns after the host closes the inbox and in-flight handlers finish.
-    serve: async func(inbox: stream<request>);
-}
-
-interface lifecycle-host-requests {
-    // Host-owned; dropping it unanswered reports a provider error to the caller.
-    resource responder {
-        respond: func(result: result<list<u8>, string>);
-        cancelled: func() -> future;   // resolves when the caller gave up
-    }
-
-    record request {
-        publication: string,           // a Call publication of this micro
-        payload: list<u8>,             // CBOR per the publication's request Lexicon
-        responder: responder,
-    }
+    // Publications are served through exports keyed by publication name.
+    call: async func(publication: string, request: list<u8>) -> result<list<u8>, call-error>;
 }
 
 world micro-client {
@@ -255,36 +245,57 @@ world micro-client {
 }
 ```
 
-### 7a. The guest is an actor with one long-lived main loop
+### 7a. Calls are ordinary component-model async exports
 
-After `initialize` succeeds, the host starts `serve` once and keeps its inbox open for the
-incarnation. Every Call routed to this micro arrives as a `request`. The guest runs one
-handler per request *inside* the `serve` task, so handlers run concurrently, a handler that
-awaits another micro does not block the rest, and a call chain that re-enters this micro
-(A→B→A) is just another request to an already running loop. Presentation `mount`,
-`dispatch`, and `unmount` stay synchronous exports and enter between the host's bounded
-drive bursts while handlers are suspended.
+Every Call routed to a micro is one invocation of its async `call` export, and therefore
+one component-model task. Clay adds no guest-side dispatch loop: the component model is
+reentrant, so an instance holds many suspended tasks at once, and the host drives them in
+bounded bursts (`drive_until_stalled` on Wasmtime, `run_until_stalled` on WCMP). Sync
+presentation exports (`mount`, `dispatch`, `unmount`) enter between bursts while calls are
+suspended. A call chain that comes back into the same micro (A→B→A) is just another task.
+The host never re-enters an instance on the first poll of a host import that the
+instance's own task is still running. Cross-micro calls are queued into the provider
+incarnation's driver, which guarantees this.
 
-There are two reasons for one long-lived task instead of one async export task per call:
+Background work spawned by a call (wit-bindgen `spawn`) lives as long as that call's task:
+the export may deliver its result and keep running its spawned futures. Work that must
+outlive any single call runs in the task of `initialize`, or, once the toolchain exposes
+them, on component-model cooperative threads.
 
-1. wit-bindgen scopes spawned work to the export task that spawned it, so background work
-   (UI effects, long polls, session state) needs a task that lives as long as the incarnation.
-2. On `wasm32-wasip3`, wit-bindgen stores the current export task in a libc thread-local,
-   and the wasi-libc we pin does not swap it per component-model task. A second async export
-   task entering while one is suspended aborts the guest. Upstream LLVM moves the wasip3
-   stack and TLS base into `context.get`/`context.set`. Once our toolchain has that, per-call
-   exports may be added *alongside* `serve`; the main loop stays.
+Cancellation follows the component model: it is cooperative and delivered to the callee
+task, which unwinds. In Rust that means its future is dropped and its destructors run.
+Guest-to-guest cancellation (a caller dropping an import future) works this way on both
+engines. The pinned Wasmtime and WCMP cannot yet cancel an export call from the host
+(Wasmtime #11833), so a host-side caller that gives up is detached: the guest task runs
+to completion and its result is discarded. A host-initiated cancel token is deferred
+until a concrete need appears.
 
-Two consequences for guest authors, both handled by the MDK:
+A guest trap ends the instance. The host fails every outstanding call on it, so callers
+observe `revoked`, and runs host teardown. It never leaves callers waiting on a dead
+store.
 
-- Guest thread-locals written inside `serve` are not visible to the sync presentation
-  exports. State shared between handlers and presentation lives in statics, or crosses
-  through the MDK, which delivers handler results into the presentation side.
-- The MDK owns the loop. Authors write `async fn` handlers per publication; the MDK reads
-  the inbox, spawns handlers, honours `cancelled`, and drains on close.
+The guest runtime must keep thread-locals shared across tasks while keeping per-task
+runtime state separate:
 
-The host bounds the number of in-flight requests per incarnation and holds a Call's strong
-edge until its responder answers or is dropped.
+- The MDK overrides wasi-libc's `__wasilibc_task_hook` so all tasks share one TLS block.
+  UI runtime state written in `activate`, such as Dioxus' runtime stack, must survive
+  into `mount`, and stock per-task TLS would discard it.
+- wit-bindgen keeps the current export task's state in a single slot that `start_task`
+  requires to be empty. With `std`, that slot is a thread-local, which shared TLS turns
+  into one global, so a second overlapping task aborts. Guests therefore build
+  wit-bindgen without `std`. The MDK supplies the per-task slot, and its hook parks the
+  value in component context slot 0 while the task is suspended, as stock wasi-libc
+  parks the TLS base.
+- Cross-task wakeups (close signals, channels) require wit-bindgen's `inter-task-wakeup`
+  feature.
+
+Authoring rules that follow (no guard held across `.await`, UI global APIs only inside
+the runtime, panics end the instance) are documented with the MDK.
+
+Rejected: a guest-side dispatch loop (one long-lived `serve` export multiplexing calls).
+It re-implemented scheduling, cancellation and backpressure that the component model
+already defines, diverged from how browsers and jco will run components, and its only
+motivation was an abort that turned out to be our own TLS hook, not a toolchain limit.
 
 A separate `get-args()` import may replace `initial-context.arguments()` if bindings
 make it more ergonomic. It remains one-shot initialization input, not another lifecycle
@@ -571,7 +582,7 @@ Not built:
 - durable collection backing and installation registration scopes;
 - lazy activation attachments and named publication slots;
 - the unified writer-handle versus registration-scope ownership rule;
-- resource-driven idle `Closing` sequencing and the `serve` inbox main loop (§7a) across both engines;
+- resource-driven idle `Closing` sequencing and async `instance-root.close()` across both engines;
 - the revised context-centered MDK surface; and
 - installer/enablement reconciliation.
 
@@ -608,7 +619,7 @@ This ADR becomes Accepted only after tests demonstrate:
 3. reading its lazy endpoint does not activate the provider, while redemption starts or joins exactly one staged activation;
 4. a demanded named publication is returned without polling a secondary collection;
 5. retaining the redeemed live resource keeps the provider active and dropping the final strong edge begins orderly shutdown;
-6. closing the `serve` inbox lets the guest drain once with dependencies retained, after which incarnation publications and scopes are revoked; concurrent requests and A→B→A re-entry complete without deadlock;
+6. `instance-root.close()` runs once with dependencies retained, after which incarnation scopes and publications are revoked;
 7. failed/cancelled initialization exposes no staged publication;
 8. disconnected cycles do not remain live and activation cycles fail precisely;
 9. faulted micros do not retry from demand churn; and
