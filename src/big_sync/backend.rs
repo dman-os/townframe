@@ -6,18 +6,14 @@ use big_sync_core::part_store::ObjPayload;
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
-    fn replay_receiver(&self) -> Option<&dyn crate::receive::ReplayReceiver> {
-        None
-    }
-
-    /// `parts` maps membership hints to their newest source revisions within `peer_id`
-    /// and this backend's permanently bound storage scope. An empty map is content-only.
-    /// The backend owns local part-membership and decides whether to adopt these parts.
+    /// `parts` carries the part hints that triggered this sync. The backend
+    /// owns local part-membership: adopt the obj into these parts if its
+    /// domain semantics want it re-advertised to other peers, or ignore them.
     async fn sync_obj(
         &self,
         peer_id: PeerKey,
         obj_id: ObjKey,
-        parts: big_sync_core::PartObservations,
+        parts: Vec<PartKey>,
         remote_payload: Option<ObjPayload>,
     ) -> Res<crate::SyncTaskRunOutcome>;
 
@@ -28,7 +24,7 @@ pub trait SyncBackend: Send + Sync + 'static {
         &self,
         peer_id: PeerKey,
         obj_id: ObjKey,
-        parts: big_sync_core::PartObservations,
+        parts: Vec<PartKey>,
     ) -> Res<()>;
 }
 
@@ -172,11 +168,7 @@ pub mod contract {
             .sync_obj(
                 case.peer_id.clone(),
                 case.obj_id.clone(),
-                case.initial_parts
-                    .iter()
-                    .cloned()
-                    .map(|part| (part, 1))
-                    .collect(),
+                case.initial_parts.clone(),
                 case.remote_payload.clone(),
             )
             .await?;

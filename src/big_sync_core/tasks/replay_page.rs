@@ -63,7 +63,6 @@ pub struct ReplayPageTask {
 pub struct ReplayPageResult {
     pub peer_id: PeerKey,
     pub page: rpc::ReplayPage,
-    pub requested: Vec<rpc::SubscriptionTarget>,
     /// The outcome of the `Update` this round carried, when it carried one.
     pub update: Option<ReplayUpdateOutcome>,
 }
@@ -78,29 +77,14 @@ structstruck::strike! {
         pub updated_subscription_id: Option<rpc::ReplaySubscriptionId>,
         pub deets:
             pub enum ReplayPageTaskErrorDeets {
-                #![derive(thiserror::Error)]
+                #![derive(thiserror::Error, displaydoc::Display)]
                 /// {0}
-                #[error("{0}")]
                 Rpc(#[from] rpc::RpcError),
-                #[error("stale durable receive bounds")]
-                StaleReceiveBounds,
             }
     }
 }
 
 impl ReplayPageTask {
-    fn requested_targets(
-        &self,
-        update: Option<&ReplayUpdateOutcome>,
-    ) -> Vec<rpc::SubscriptionTarget> {
-        if matches!(update, Some(ReplayUpdateOutcome::Superseded { .. })) {
-            return Vec::new();
-        }
-        self.targets.iter().filter(|(id, _)| !matches!(update,
-            Some(ReplayUpdateOutcome::Applied { rejected, .. }) if rejected.iter().any(|(refused, _)| refused == id)
-        )).map(|(_, target)| target.clone()).collect()
-    }
-
     /// Events per page. A knob rather than a threshold, but it was measured: on
     /// the 100k-object catchup case, 256-event pages took 64s against 31s for
     /// 1024, because every page costs a fresh responder-side read. The number
@@ -198,7 +182,6 @@ impl ReplayPageTask {
         Ok(TaskResultDeets::ReplayPage(ReplayPageResult {
             peer_id: self.peer_id.clone(),
             page,
-            requested: self.requested_targets(update.as_ref()),
             update,
         }))
     }

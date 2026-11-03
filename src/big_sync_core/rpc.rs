@@ -289,7 +289,6 @@ structstruck::strike! {
             pub struct LeafBucketPage {
                 pub entries: Vec<pub struct BucketObjPageEntry {
                     pub obj_id: ObjKey,
-                    pub source_revision: CursorIndex,
                     pub dead: bool,
                     pub fp: Fingerprint<(&'static str, ObjKey, ObjPayload)>,
                 }>,

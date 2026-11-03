@@ -87,7 +87,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         &self,
         _peer_id: PeerKey,
         _obj_id: ObjKey,
-        _parts: big_sync_core::PartObservations,
+        _parts: Vec<PartKey>,
     ) -> Res<()> {
         Ok(())
     }
@@ -103,7 +103,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         // Part hints are deliberately ignored: big_repo part membership is
         // owned by the runtime2 workers (group-part reconciliation, frontier
         // publishing), never by the sync path.
-        _parts: big_sync_core::PartObservations,
+        _parts: Vec<big_sync_core::PartKey>,
         remote_payload: Option<big_sync::ObjPayload>,
     ) -> Res<big_sync::SyncTaskRunOutcome> {
         let repo: Arc<crate::BigRepo> = self

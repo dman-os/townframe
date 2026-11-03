@@ -78,12 +78,7 @@ pub(crate) fn restart_hinted_sync_workers(
     let affected_sync_workers: Vec<_> = peer_state
         .sync_workers
         .iter()
-        .filter(|(_, worker)| {
-            worker
-                .part_observations
-                .keys()
-                .any(|part| removed_parts.contains(part))
-        })
+        .filter(|(_, worker)| !worker.part_hints.is_disjoint(removed_parts))
         .map(|(obj_id, _)| obj_id.clone())
         .collect();
     for obj_id in affected_sync_workers {
@@ -93,9 +88,9 @@ pub(crate) fn restart_hinted_sync_workers(
             .expect(ERROR_IMPOSSIBLE);
         let _state = tasks.cancel(worker.task_id).expect(ERROR_UNRECONIZED);
         worker
-            .part_observations
-            .retain(|part_id, _| !removed_parts.contains(part_id));
-        if worker.part_observations.is_empty() && !peer_state.objects.contains(&obj_id) {
+            .part_hints
+            .retain(|part_id| !removed_parts.contains(part_id));
+        if worker.part_hints.is_empty() && !peer_state.objects.contains(&obj_id) {
             // The task is dropped here and nothing will complete it, so the
             // replay it owed is abandoned: forget the claim instead of keeping
             // a cursor slot no completion can settle.
@@ -106,7 +101,7 @@ pub(crate) fn restart_hinted_sync_workers(
             std::time::Instant::now(),
             TaskSeed::Sync(SyncTaskSeed {
                 kind: SyncTaskKind::Sync,
-                part_observations: worker.part_observations.clone(),
+                part_hints: worker.part_hints.clone(),
                 deets: SyncTaskDeets {
                     peer_id: peer_id.clone(),
                     obj_id: obj_id.clone(),

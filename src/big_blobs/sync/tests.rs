@@ -134,10 +134,10 @@ impl Harness {
         &self,
         inventory: &big_cabinet_core::DocId,
         digest: BlobId,
-        revision: u64,
+        _revision: u64,
         present: bool,
     ) -> Res<()> {
-        let parts = [(crate::workers::inventory_part(inventory), revision)].into();
+        let parts = vec![crate::workers::inventory_part(inventory)];
         if present {
             self.backend
                 .sync_obj(PeerKey::new([103; 32]), digest.into(), parts, None)
@@ -225,7 +225,7 @@ async fn observations_are_durable_candidates_not_hash_only_admission() -> Res<()
     harness.wait_membership(&first, digest, false).await?;
     harness.observe(&first, digest, 10, true).await?;
     assert!(
-        !harness
+        harness
             .mirrors
             .admission
             .state(&first, digest)
@@ -249,7 +249,7 @@ async fn unknown_parts_and_non_digest_objects_are_rejected_without_side_effects(
                 .sync_obj(
                     PeerKey::new([103; 32]),
                     object.clone(),
-                    [(part.clone(), 1)].into(),
+                    vec![part.clone()],
                     None
                 )
                 .await
@@ -261,7 +261,7 @@ async fn unknown_parts_and_non_digest_objects_are_rejected_without_side_effects(
                 .remove_obj_from_parts(
                     PeerKey::new([103; 32]),
                     object.clone(),
-                    [(part.clone(), 2)].into()
+                    vec![part.clone()]
                 )
                 .await
                 .is_err()
@@ -277,98 +277,6 @@ async fn unknown_parts_and_non_digest_objects_are_rejected_without_side_effects(
         );
     }
     assert!(harness.mirrors.admission.inventories().await?.is_empty());
-    harness.shutdown().await
-}
-
-#[tokio::test]
-async fn journaled_replay_handoff_is_idempotent_and_exact_target_bounded() -> Res<()> {
-    use big_sync::receive::ReceivedReplay;
-    use big_sync::receive::ReplayReceipt;
-    use big_sync::receive::ReplayReceiver;
-    use big_sync_core::rpc::*;
-
-    let harness = Harness::new().await?;
-    let first = harness.inventory().await?;
-    let second = harness.inventory().await?;
-    let first_part = crate::workers::inventory_part(&first);
-    let second_part = crate::workers::inventory_part(&second);
-    let digest = BlobId::new([104; 32]);
-    let requested = vec![
-        SubscriptionTarget::Part {
-            part_id: first_part.clone(),
-            cursor: 5,
-        },
-        SubscriptionTarget::Part {
-            part_id: second_part.clone(),
-            cursor: 5,
-        },
-    ];
-    let targets = requested
-        .iter()
-        .map(ReplaySubscriptionTarget::from)
-        .collect::<Vec<_>>();
-    let receipt = ReplayReceipt {
-        id: 1,
-        replay: ReceivedReplay {
-            peer_id: PeerKey::new([103; 32]),
-            requested: requested.clone(),
-            routes: Vec::new(),
-            page: ReplayPage {
-                events: vec![
-                    PartEvent::Changed(ObjChanged {
-                        cursor: 10,
-                        part_ids: vec![first_part.clone(), second_part],
-                        obj_id: digest.into(),
-                        payload: serde_json::json!({"lengthOctets": 13}),
-                    }),
-                    PartEvent::Removed(ObjRemovedFromPart {
-                        cursor: 20,
-                        part_id: first_part,
-                        obj_id: digest.into(),
-                    }),
-                ],
-                targets: vec![
-                    (
-                        requested[0].clone(),
-                        TargetVerdict::Events {
-                            resume: 15,
-                            drained: false,
-                        },
-                    ),
-                    (requested[1].clone(), TargetVerdict::Unauthorized),
-                ],
-            },
-        },
-    };
-    for _ in 0..2 {
-        harness.backend.receive_replay(&receipt, &targets).await?;
-        let state = harness
-            .mirrors
-            .admission
-            .state(&first, digest)
-            .await?
-            .unwrap();
-        assert!(state.observed);
-        assert!(!state.fetching);
-        assert!(!state.bytes);
-        assert!(
-            harness
-                .mirrors
-                .admission
-                .state(&second, digest)
-                .await?
-                .is_none()
-        );
-    }
-    assert!(
-        harness
-            .mirrors
-            .projection
-            .service
-            .stat(&digest)
-            .await?
-            .is_none()
-    );
     harness.shutdown().await
 }
 

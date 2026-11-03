@@ -273,20 +273,15 @@ impl State {
         inventory: &DocId,
         digest: BlobId,
         peer: &PeerKey,
-        revision: u64,
+        _revision: u64,
         present: bool,
         payload: Option<&serde_json::Value>,
     ) -> Res<()> {
         self.register(inventory).await?;
         let tx = self.sql.begin_write().await?;
-        let previous = tx.query("SELECT revision FROM big_blobs_source_observations WHERE inventory_id = ? AND digest = ? AND peer_id = ?", (inventory.to_string(), digest.to_string(), peer.as_bytes().to_vec())).await?.all::<u64>()?.into_iter().next();
-        if previous.is_some_and(|previous| revision <= previous) {
-            tx.rollback().await?;
-            return Ok(());
-        }
-        tx.execute("INSERT INTO big_blobs_source_observations (inventory_id, digest, peer_id, revision, present, payload) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (inventory_id, digest, peer_id) DO UPDATE SET revision = excluded.revision, present = excluded.present, payload = COALESCE(excluded.payload, payload)",
-                    (inventory.to_string(), digest.to_string(), peer.as_bytes().to_vec(), i64::try_from(revision)?, present, payload.map(serde_json::to_string).transpose()?)).await?;
+        tx.execute("INSERT INTO big_blobs_source_observations (inventory_id, digest, peer_id, revision, present, payload) VALUES (?, ?, ?, 0, ?, ?)
+                    ON CONFLICT (inventory_id, digest, peer_id) DO UPDATE SET present = excluded.present, payload = COALESCE(excluded.payload, payload)",
+                    (inventory.to_string(), digest.to_string(), peer.as_bytes().to_vec(), present, payload.map(serde_json::to_string).transpose()?)).await?;
         Self::touch(&tx, inventory, digest).await?;
         tx.commit().await?;
         self.changes.send_modify(|revision| *revision += 1);

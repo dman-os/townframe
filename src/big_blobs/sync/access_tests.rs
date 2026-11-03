@@ -274,7 +274,7 @@ impl Fixture {
             .sync_obj(
                 self.owner.repo.local_peer_id(),
                 digest.into(),
-                [(crate::workers::inventory_part(inventory), revision)].into(),
+                vec![crate::workers::inventory_part(inventory)],
                 None,
             )
             .await?;

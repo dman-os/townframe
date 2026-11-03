@@ -369,10 +369,6 @@ pub struct PartStoreStats {
 
 #[async_trait]
 pub trait HostPartStore: Send + Sync {
-    fn receive_journal(&self) -> Option<&dyn crate::receive::ReceiveJournal> {
-        None
-    }
-
     async fn latest_revision(&self) -> Res<CursorIndex>;
     async fn summarize_parts(
         &self,
@@ -1067,15 +1063,15 @@ pub fn bucket_index_bounds(bucket_id: BuckId) -> (u16, Option<u16>) {
 
 /// The bytes one leaf-page entry adds to its bucket's page on the wire.
 ///
-/// An entry is the key, the source revision, the `dead` flag, and the keyed fingerprint's
-/// `u64`. IRPC encodes messages as postcard: the key is a varint length followed by bytes,
-/// the revision is a varint, and the fingerprint hashes the payload without carrying it.
+/// An entry is the key, the `dead` flag, and the keyed fingerprint's `u64`. The key is the
+/// only variable-width part — ADR 012 decision 1 makes identity *is* the byte string, so any
+/// length is a valid key — and IRPC encodes messages as postcard, which frames a byte string
+/// as a varint length followed by the bytes. This is that arithmetic and nothing else: a
+/// responder decides what a page costs from the key alone, because the fingerprint hashes the
+/// payload without ever carrying it.
 #[must_use]
-pub fn leaf_entry_wire_bytes(key_len: usize, source_revision: CursorIndex) -> usize {
-    let revision_bytes = (u64::BITS - source_revision.leading_zeros())
-        .div_ceil(7)
-        .max(1) as usize;
-    varint_wire_bytes(key_len) + key_len + revision_bytes + 1 + 8
+pub fn leaf_entry_wire_bytes(key_len: usize) -> usize {
+    varint_wire_bytes(key_len) + key_len + 1 + 8
 }
 
 /// The bytes postcard spends on a byte string's length prefix.
@@ -1087,10 +1083,10 @@ fn varint_wire_bytes(value: usize) -> usize {
 /// The encoded size one bucket's leaf page is bounded by, whatever `limit_hint` asks for.
 ///
 /// `LeafBucketsRequest::limit_hint` bounds entries, and an entry is its key's width, so the rpc
-/// layer's `MAX_BUCKET_LIMIT` (1024) entries of 32-byte keys is at least 43 KiB and a page of
-/// longer keys is more: trusting the hint alone leaves the per-page cost unbounded. At 64 KiB
-/// this budget holds at most 1524 of 32-byte keys, so the entry hint still binds first for
-/// ordinary keys and this budget binds once 1024 entries average wider than ~64 bytes.
+/// layer's `MAX_BUCKET_LIMIT` (1024) entries of 32-byte keys is ~42 KiB and a page of longer
+/// keys is more: trusting the hint alone leaves the per-page cost unbounded. At 64 KiB this
+/// budget holds ~1560 of 32-byte keys, so the entry hint still binds first for ordinary keys
+/// and this budget binds once 1024 entries average wider than ~64 bytes.
 ///
 /// A page is never empty: one entry is sent even when it alone exceeds the budget, because a
 /// page with no entries reads as `done` while entries remain, which would strand the tail.

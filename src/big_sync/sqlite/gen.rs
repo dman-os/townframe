@@ -7,7 +7,6 @@ pub const MIGRATION_TABLE: &str = "_big_sync_migrations";
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
     Migration { version: 2, name: "002_frontier_state.sql", sql: include_str!("migrations/002_frontier_state.sql") },
-    Migration { version: 3, name: "003_receive_journal.sql", sql: include_str!("migrations/003_receive_journal.sql") },
 ];
 
 pub const ACCESS_CHANGES_SQL: &str = include_str!("queries/access_changes.sql");

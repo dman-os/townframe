@@ -15,6 +15,7 @@ use leaf_buckets::LeafBucketsResult;
 use leaf_buckets::LeafBucketsTask;
 use leaf_buckets::LeafBucketsTaskError;
 
+use crate::mpsc;
 use crate::part_store::PartStoreReadOnly;
 use crate::rpc::BigSyncRpcClient;
 use std::time::Instant;
@@ -24,7 +25,7 @@ structstruck::strike! {
     pub enum MachineTaskMsg {
         MachineTaskResult (pub struct {
             pub task_id: TaskId,
-            pub deets: pub enum TaskResultDeets {
+            pub(crate) deets: pub(crate) enum TaskResultDeets {
                 SetPeerStrategy (SetPeerStrategy),
                 ListBuckets (ListBucketsResult),
                 LeafBuckets (LeafBucketsResult),
@@ -33,7 +34,7 @@ structstruck::strike! {
         }),
         MachineTaskError (pub struct {
             pub task_id: TaskId,
-            pub deets: pub enum MachineTaskErrDeets {
+            pub(crate) deets: pub(crate) enum MachineTaskErrDeets {
                 DecidePeerStrategy(DecidePeerStrategyTaskError)
                 ReplayPage(ReplayPageTaskError)
                 ListBuckets(ListBucketsTaskError)
@@ -52,7 +53,7 @@ structstruck::strike! {
         /// by the sync machine and is supposed run concurrently
         /// to the main event loop
         pub id: TaskId,
-        pub deets: pub enum MachineTaskDeets {
+        pub(crate) deets: pub(crate) enum MachineTaskDeets {
             #![derive(Clone)]
             DecidePeerStrategy (DecidePeerStrategyTask)
             ReplayPage(ReplayPageTask)
@@ -67,7 +68,7 @@ structstruck::strike! {
     pub struct SyncTask {
         pub id: TaskId,
         pub kind: SyncTaskKind,
-        pub part_observations: crate::PartObservations,
+        pub part_hints: Set<PartKey>,
         pub deets: struct SyncTaskDeets {
             #![derive(Clone)]
 
@@ -92,7 +93,7 @@ structstruck::strike! {
     #[derive(Clone)]
     pub struct SyncTaskSeed {
         pub kind: SyncTaskKind,
-        pub part_observations: crate::PartObservations,
+        pub part_hints: Set<PartKey>,
         pub deets: SyncTaskDeets,
     }
 }
@@ -145,6 +146,7 @@ impl TaskCounts {
 
 pub struct TaskCtx<K, PStore, Rpc, Rng> {
     pub task_id: TaskId,
+    pub main_tx: mpsc::Sender<MachineTaskMsg>,
     pub rpc_clients: Map<PeerKey, Rpc>,
     pub part_store: PStore,
     pub rng: Rng,
@@ -152,10 +154,7 @@ pub struct TaskCtx<K, PStore, Rpc, Rng> {
 }
 
 impl MachineTask {
-    pub async fn run<K, PStore, Rpc, Rng>(
-        self,
-        mut cx: TaskCtx<K, PStore, Rpc, Rng>,
-    ) -> MachineTaskMsg
+    pub async fn run<K, PStore, Rpc, Rng>(self, mut cx: TaskCtx<K, PStore, Rpc, Rng>)
     where
         K: FutureForm,
         PStore: PartStoreReadOnly<K>,
@@ -180,7 +179,7 @@ impl MachineTask {
                 .await
                 .map_err(MachineTaskErrDeets::LeafBuckets),
         };
-        match res {
+        let msg = match res {
             Ok(deets) => MachineTaskMsg::MachineTaskResult(MachineTaskResult {
                 task_id: cx.task_id,
                 deets,
@@ -189,6 +188,7 @@ impl MachineTask {
                 task_id: cx.task_id,
                 deets,
             }),
-        }
+        };
+        cx.main_tx.send(msg).await.expect(ERROR_CHANNEL)
     }
 }

@@ -21,7 +21,6 @@ use crate::tasks::TaskResultDeets;
 pub struct DecidePeerStrategyTask {
     pub peer_id: PeerKey,
     pub parts: Set<PartKey>,
-    pub received_cursors: Map<PartKey, CursorIndex>,
     /// Per-part strategy override. A part with no entry here uses
     /// [`Self::default_sync_mode`].
     pub sync_modes: Map<PartKey, SyncMode>,
@@ -73,40 +72,6 @@ structstruck::strike! {
 }
 
 impl DecidePeerStrategyTask {
-    pub fn new(peer_id: PeerKey, parts: Set<PartKey>, default_sync_mode: SyncMode) -> Self {
-        Self {
-            peer_id,
-            parts,
-            received_cursors: Map::new(),
-            sync_modes: Map::new(),
-            default_sync_mode,
-        }
-    }
-
-    async fn asker_part_cursors<K, PStore>(&self, part_store: &PStore) -> Map<PartKey, CursorIndex>
-    where
-        K: FutureForm,
-        PStore: PartStoreReadOnly<K>,
-    {
-        // The peer counts relevance against the cursor we advertise, so gather the
-        // cursors we hold for it first and reuse them as this decision's own
-        // bookkeeping: the value we advertise and the value we decide with have to be
-        // the same one.
-        let mut cursors = Map::new();
-        for part_id in &self.parts {
-            let cursor = match self.received_cursors.get(part_id) {
-                Some(cursor) => *cursor,
-                None => {
-                    part_store
-                        .get_peer_part_cursor(self.peer_id.clone(), part_id.clone())
-                        .await
-                }
-            };
-            cursors.insert(part_id.clone(), cursor);
-        }
-        cursors
-    }
-
     #[tracing::instrument(skip(self, cx), fields(peer_id = %self.peer_id, part_count = self.parts.len()))]
     pub async fn run<K, PStore, Rpc, Rng>(
         self,
@@ -139,7 +104,18 @@ impl DecidePeerStrategyTask {
             return Err(DecidePeerStrategyErrorDeets::Rpc(RpcError::TransportError));
         };
 
-        let asker_part_cursors = self.asker_part_cursors::<K, PStore>(&cx.part_store).await;
+        // The peer counts relevance against the cursor we advertise, so gather the
+        // cursors we hold for it first and reuse them as this decision's own
+        // bookkeeping: the value we advertise and the value we decide with have to be
+        // the same one.
+        let mut asker_part_cursors = Map::new();
+        for part_id in &self.parts {
+            let cursor = cx
+                .part_store
+                .get_peer_part_cursor(self.peer_id.clone(), part_id.clone())
+                .await;
+            asker_part_cursors.insert(part_id.clone(), cursor);
+        }
         // A whole-request refusal is not a per-part answer. Folding it into the
         // part-absent-from-the-map case would decide every part `Unkown` and re-ask,
         // which is the same starvation the per-part answer avoids, only silent: the
@@ -188,19 +164,6 @@ impl DecidePeerStrategyTask {
                 PartStratSummary::Cursor(_) => None,
             });
             let last_peer_cursor = asker_part_cursors.get(&part_id).copied().unwrap_or(0);
-            if self.received_cursors.contains_key(&part_id) {
-                let cursor = cursor_summary.ok_or_else(|| {
-                    RpcError::InvalidRequest("durable receive requires cursor replay".into())
-                })?;
-                part_strats.insert(
-                    part_id,
-                    PeerPartStratDecision::Cursor(CursorStrat {
-                        latest_cursor: cursor.latest_cursor,
-                        last_cursor: last_peer_cursor,
-                    }),
-                );
-                continue;
-            }
             let sync_mode = self
                 .sync_modes
                 .get(&part_id)
@@ -281,9 +244,17 @@ impl DecidePeerStrategyTask {
                 ?sync_mode,
                 "decide peer part strategy",
             );
-            if sync_mode == SyncMode::CursorOnly
-                || dirty.total() <= BucketMachine::BUCKET_DIRTY_THRESHOLD
-            {
+            if sync_mode == SyncMode::CursorOnly {
+                part_strats.insert(
+                    part_id,
+                    PeerPartStratDecision::Cursor(CursorStrat {
+                        latest_cursor,
+                        last_cursor: last_peer_cursor,
+                    }),
+                );
+                continue;
+            }
+            if dirty.total() <= BucketMachine::BUCKET_DIRTY_THRESHOLD {
                 part_strats.insert(
                     part_id,
                     PeerPartStratDecision::Cursor(CursorStrat {
@@ -374,10 +345,6 @@ impl DecidePeerStrategyTask {
 }
 
 #[cfg(test)]
-#[path = "decide_peer_strat_receive_tests.rs"]
-mod receive_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -387,6 +354,7 @@ mod tests {
     use crate::PeerKey;
     use crate::Set;
     use crate::SyncMode;
+    use crate::mpsc;
     use crate::part_store::ObjPayload;
     use crate::part_store::PartDirtyCount;
     use crate::part_store::PartStoreReadOnly;
@@ -400,6 +368,7 @@ mod tests {
     use crate::rpc::PartStratSummary;
     use crate::rpc::PeerSummaryRequest;
     use crate::rpc::PeerSummaryResult;
+    use crate::tasks::MachineTaskMsg;
     use crate::tasks::TaskCtx;
     use crate::tasks::TaskResultDeets;
     use future_form::Local;
@@ -554,11 +523,10 @@ mod tests {
     /// Run the real decision task against the fake store, returning the band it chose
     /// and whether it entered the peer's bucket walk. `dirty` is what the peer
     /// publishes, not something this side can count locally.
-    pub(super) async fn decide(
+    async fn decide(
         remote_latest_cursor: CursorIndex,
         peer_cursor: CursorIndex,
         dirty: PartDirtyCount,
-        received: Option<CursorIndex>,
     ) -> (PeerPartStratDecision, bool) {
         let part_id = PartKey::new(PART_BYTES);
         let peer_id = PeerKey::new(PEER_BYTES);
@@ -566,7 +534,7 @@ mod tests {
         let rpc = FakeRpc {
             latest_cursor: remote_latest_cursor,
             dirty_count: dirty,
-            asker_cursor: received.unwrap_or(peer_cursor),
+            asker_cursor: peer_cursor,
             dirty_bucket: BucketSummary {
                 id: BuckId::ROOT,
                 len: 1,
@@ -589,8 +557,11 @@ mod tests {
                 changed_at: peer_cursor,
             },
         };
+        let (main_tx, _main_rx): (mpsc::Sender<MachineTaskMsg>, mpsc::Receiver<MachineTaskMsg>) =
+            mpsc::unbounded("test".into(), "test".into());
         let mut cx = TaskCtx {
             task_id: 1,
+            main_tx,
             rpc_clients: Map::from_iter([(peer_id.clone(), rpc)]),
             part_store: store,
             rng: rand::rng(),
@@ -605,10 +576,6 @@ mod tests {
             // covers the override layer.
             sync_modes: Map::from_iter([(part_id.clone(), SyncMode::Bucket)]),
             default_sync_mode: SyncMode::CursorOnly,
-            received_cursors: received
-                .map(|cursor| (part_id.clone(), cursor))
-                .into_iter()
-                .collect(),
         };
         let deets = task
             .run(&mut cx)
@@ -637,7 +604,6 @@ mod tests {
                 member_changes: 1,
                 access_changes: 0,
             },
-            None,
         )
         .await;
         assert!(
@@ -665,7 +631,6 @@ mod tests {
                 member_changes: 200,
                 access_changes: 100,
             },
-            None,
         )
         .await;
         assert!(
@@ -706,8 +671,11 @@ mod tests {
             bucket_walk_entered: Rc::clone(&bucket_walk_entered),
             omit: Set::from([refused_part.clone()]),
         };
+        let (main_tx, _main_rx): (mpsc::Sender<MachineTaskMsg>, mpsc::Receiver<MachineTaskMsg>) =
+            mpsc::unbounded("test".into(), "test".into());
         let mut cx = TaskCtx {
             task_id: 1,
+            main_tx,
             rpc_clients: Map::from_iter([(peer_id.clone(), rpc)]),
             part_store: FakeStore {
                 peer_cursor: 0,
@@ -729,7 +697,6 @@ mod tests {
             // refusal mapping, not the band choice.
             sync_modes: Map::from_iter([(readable.clone(), SyncMode::CursorOnly)]),
             default_sync_mode: SyncMode::CursorOnly,
-            received_cursors: Map::new(),
         };
         let deets = task
             .run(&mut cx)

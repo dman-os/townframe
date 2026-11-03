@@ -117,7 +117,7 @@ impl SyncBackend for BlobSyncBackend {
         &self,
         peer_id: PeerKey,
         obj_id: ObjKey,
-        parts: big_sync_core::PartObservations,
+        parts: Vec<big_sync_core::PartKey>,
         remote_payload: Option<big_sync_core::part_store::ObjPayload>,
     ) -> Res<SyncTaskRunOutcome> {
         // The key was written by whichever peer holds this part, so a key that
@@ -182,7 +182,7 @@ impl SyncBackend for BlobSyncBackend {
         } else {
             SyncCompletionDeets::Noop
         };
-        for part_id in parts.into_keys() {
+        for part_id in parts {
             self.part_store
                 .add_obj_to_parts(obj_id.clone(), vec![part_id])
                 .await?;
@@ -197,9 +197,9 @@ impl SyncBackend for BlobSyncBackend {
         &self,
         _peer_id: PeerKey,
         obj_id: big_sync_core::ObjKey,
-        parts: big_sync_core::PartObservations,
+        parts: Vec<big_sync_core::PartKey>,
     ) -> Res<()> {
-        for part_id in parts.into_keys() {
+        for part_id in parts {
             self.part_store
                 .remove_obj_from_part(obj_id.clone(), part_id)
                 .await?;

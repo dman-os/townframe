@@ -53,8 +53,6 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-mod receive;
-
 structstruck::strike! {
     pub struct MemoryPartStore {
         inner: Arc<surelock::mutex::Mutex<
@@ -106,7 +104,6 @@ structstruck::strike! {
                 >,
                 tombstoned_objs: HashMap<ObjKey, CursorIndex>,
                 peer_part_cursors: HashMap<(PeerKey, PartKey), CursorIndex>,
-                receive: receive::MemoryReceiveState,
                 members: HashMap<
                     PartKey,
                     HashMap<
@@ -537,10 +534,6 @@ impl GlobalCursor {
 
 #[async_trait]
 impl HostPartStore for MemoryPartStore {
-    fn receive_journal(&self) -> Option<&dyn crate::receive::ReceiveJournal> {
-        Some(self)
-    }
-
     async fn latest_revision(&self) -> Res<CursorIndex> {
         Ok(surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
@@ -678,8 +671,8 @@ impl HostPartStore for MemoryPartStore {
                 // no entries reads as `done` while entries remain, which would strand the tail.
                 let mut bytes = 0usize;
                 let mut taken = 0usize;
-                for (obj_id, cursor, _dead) in items.iter().skip(start).take(take) {
-                    let entry_bytes = leaf_entry_wire_bytes(obj_id.as_bytes().len(), *cursor);
+                for (obj_id, _cursor, _dead) in items.iter().skip(start).take(take) {
+                    let entry_bytes = leaf_entry_wire_bytes(obj_id.as_bytes().len());
                     if taken > 0 && bytes + entry_bytes > LEAF_PAGE_BYTE_BUDGET {
                         break;
                     }
@@ -697,7 +690,7 @@ impl HostPartStore for MemoryPartStore {
                     .into_iter()
                     .skip(start)
                     .take(taken)
-                    .map(|(obj_id, source_revision, dead)| {
+                    .map(|(obj_id, _cursor, dead)| {
                         let fp = if dead {
                             Fingerprint::new(
                                 &req.seed,
@@ -720,12 +713,7 @@ impl HostPartStore for MemoryPartStore {
                                 &("big-sync-obj-fp-v1", obj_id.clone(), payload),
                             )
                         };
-                        BucketObjPageEntry {
-                            obj_id,
-                            source_revision,
-                            dead,
-                            fp,
-                        }
+                        BucketObjPageEntry { obj_id, dead, fp }
                     })
                     .collect();
                 bucks.insert(
@@ -1815,14 +1803,18 @@ mod tests {
         }
     }
 
-    mod leaf;
-
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_host_part_store_contract() -> Res<()> {
         let harness = MemoryHostHarness {
             store: MemoryPartStore::new(),
         };
         host_contract::assert_host_part_store_contract(&harness).await
+    }
+
+    /// The leaf page's byte budget, which the store applies beside the entry hint.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_leaf_page_byte_budget_contract() -> Res<()> {
+        host_contract::assert_leaf_page_byte_budget_contract(&MemoryPartStore::new()).await
     }
 
     /// What the store shows a peer, which a part-less payload is not part of.

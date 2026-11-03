@@ -339,7 +339,7 @@ impl SyncBackend for MemorySyncBackend {
         &self,
         peer_id: PeerKey,
         obj_id: ObjKey,
-        parts: big_sync_core::PartObservations,
+        parts: Vec<PartKey>,
         remote_payload: Option<serde_json::Value>,
     ) -> Res<SyncTaskRunOutcome> {
         WorkCounters::bump(&self.world.work.obj_syncs, 1);
@@ -387,19 +387,14 @@ impl SyncBackend for MemorySyncBackend {
         // adopt the hinted parts so bucket replay short-circuits on them.
         if !parts.is_empty() {
             self.local_part_store
-                .add_obj_to_parts(obj_id, parts.into_keys().collect())
+                .add_obj_to_parts(obj_id, parts.clone())
                 .await?;
         }
         Ok(SyncTaskRunOutcome::Completion(outcome))
     }
 
-    async fn remove_obj_from_parts(
-        &self,
-        _peer_id: PeerKey,
-        obj_id: ObjKey,
-        parts: big_sync_core::PartObservations,
-    ) -> Res<()> {
-        for part_id in parts.into_keys() {
+    async fn remove_obj_from_parts(&self, _peer_id: PeerKey, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
+        for part_id in parts {
             self.local_part_store
                 .remove_obj_from_part(obj_id.clone(), part_id)
                 .await?;
@@ -2003,7 +1998,7 @@ async fn memory_sync_direct_backend_errors_on_collected_object() -> Res<()> {
     let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let err = backend
-        .sync_obj(peer_a.clone(), obj.clone(), Default::default(), None)
+        .sync_obj(peer_a.clone(), obj.clone(), Vec::new(), None)
         .await
         .expect_err("remote absence should be treated as a hard error for now");
 
@@ -2055,7 +2050,7 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
         .sync_obj(
             peer_b,
             obj_b.clone(),
-            Default::default(),
+            Vec::new(),
             Some(right_payload.clone()),
         )
         .await?;
@@ -2063,7 +2058,7 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
         .sync_obj(
             peer_a,
             obj_a.clone(),
-            Default::default(),
+            Vec::new(),
             Some(left_payload.clone()),
         )
         .await?;

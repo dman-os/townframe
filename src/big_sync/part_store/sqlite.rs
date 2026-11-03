@@ -57,9 +57,6 @@ use tokio::sync::Notify;
 
 use super::sqlite_core::encode_access;
 
-mod leaf;
-mod receive;
-
 struct ReplayCandidate {
     txid: CursorIndex,
     obj_id: ObjKey,
@@ -232,6 +229,10 @@ impl SqlitePartStore {
     fn obj_from_blob(blob: Vec<u8>) -> ObjKey {
         SqliteCore::obj_from_blob(blob)
     }
+    #[cfg(test)]
+    fn peer_from_blob(blob: Vec<u8>) -> PeerKey {
+        SqliteCore::peer_from_blob(blob)
+    }
 }
 
 impl SqlitePartStore {
@@ -402,10 +403,6 @@ impl SqlitePartStore {
 
 #[async_trait]
 impl HostPartStore for SqlitePartStore {
-    fn receive_journal(&self) -> Option<&dyn crate::receive::ReceiveJournal> {
-        Some(self)
-    }
-
     async fn latest_revision(&self) -> Res<CursorIndex> {
         let revision = queries::global_cursor(&self.core.sql).await?;
         Ok(u64::try_from(revision)?)
@@ -913,7 +910,71 @@ impl HostPartStore for SqlitePartStore {
             total_count: u32,
         }
 
-        let query = leaf::query(self, req.part_id, req.since, &req.buckets, req.limit_hint);
+        let mut query =
+            Sql::new("WITH requested(req_ord, buck_id, lower_index, upper_index, after_id) AS (");
+        for (req_ord, buck_req) in req.buckets.iter().enumerate() {
+            let (lower_index, upper_index) = super::bucket_index_bounds(buck_req.buck_id);
+            if req_ord > 0 {
+                query.push(" UNION ALL ");
+            }
+            query.push("SELECT ");
+            query.bind(i64::try_from(req_ord).expect(ERROR_IMPOSSIBLE));
+            query.push(" AS req_ord, ");
+            query.bind(Self::buck_i64(buck_req.buck_id));
+            query.push(" AS buck_id, ");
+            query.bind(i64::from(lower_index));
+            query.push(" AS lower_index, ");
+            if let Some(upper_index) = upper_index {
+                query.bind(i64::from(upper_index));
+            } else {
+                query.push("NULL");
+            }
+            query.push(" AS upper_index, ");
+            if let Some(after) = &buck_req.after {
+                query.bind(Self::obj_blob(after.clone()));
+            } else {
+                query.push("NULL");
+            }
+            query.push(" AS after_id");
+        }
+        query.push(
+            "), ranked AS (
+                SELECT
+                    r.req_ord,
+                    r.buck_id,
+                    o.obj_id,
+                    m.event_type,
+                    o.payload_json,
+                    COUNT(*) OVER (PARTITION BY r.req_ord) AS total_count,
+                    ROW_NUMBER() OVER (PARTITION BY r.req_ord ORDER BY o.obj_id ASC) AS row_num
+                FROM requested r
+                JOIN big_sync_members m
+                  ON m.scope_id = ",
+        );
+        query.bind(self.core.scope_id);
+        query
+            .push(" AND m.maybe_part_ref = (SELECT part_ref FROM big_sync_parts WHERE scope_id = ");
+        query.bind(self.core.scope_id);
+        query.push(" AND part_id = ");
+        query.bind(Self::part_blob(req.part_id));
+        query.push(") JOIN big_sync_buckets s ON s.scope_id = m.scope_id AND s.part_ref = m.maybe_part_ref AND s.buck_id = r.buck_id AND s.changed_at > ");
+        query.bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
+        query.push(" AND o.buck_index >= r.lower_index");
+        query.push(" AND (r.upper_index IS NULL OR o.buck_index < r.upper_index)");
+        query.push(" AND (r.after_id IS NULL OR o.obj_id > r.after_id)");
+        query.push(
+            "
+                JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
+            )
+            SELECT req_ord, buck_id, obj_id, event_type, payload_json, total_count
+            FROM ranked
+            WHERE row_num <= ",
+        );
+        // `LeafBucketsRequest::limit_hint` is a hint, not a bound: zero means no
+        // preference, so the smallest useful page is one entry. The memory store
+        // reads it the same way, and the shared contract harness pins that.
+        query.bind(i64::from(req.limit_hint.max(1)));
+        query.push(" ORDER BY req_ord, obj_id ASC");
 
         let rows = query.query(&self.core.sql).await?.rows;
         let mut pages: Vec<_> = req
@@ -943,14 +1004,11 @@ impl HostPartStore for SqlitePartStore {
                 u32::try_from(row.get::<i64>("total_count")?).expect(ERROR_IMPOSSIBLE);
             let obj_id = Self::obj_from_blob(row.get("obj_id")?);
             let dead = row.get::<i64>("event_type")? == EVENT_REMOVED;
-            // The page's cost is decided from the key and revision — the fingerprint hashes the
+            // The page's cost is decided from the key alone — the fingerprint hashes the
             // payload without carrying it — so a row the page cannot hold costs no JSON parse.
             // The first entry is always taken, because a page with no entries reads as `done`
             // while entries remain, which would strand the tail.
-            let source_revision =
-                u64::try_from(row.get::<i64>("source_revision")?).expect(ERROR_IMPOSSIBLE);
-            let entry_bytes =
-                super::leaf_entry_wire_bytes(obj_id.as_bytes().len(), source_revision);
+            let entry_bytes = super::leaf_entry_wire_bytes(obj_id.as_bytes().len());
             if !page.entries.is_empty() && page.bytes + entry_bytes > super::LEAF_PAGE_BYTE_BUDGET {
                 budget_stopped = Some(req_ord);
                 continue;
@@ -974,12 +1032,7 @@ impl HostPartStore for SqlitePartStore {
                     .unwrap_or(serde_json::Value::Null);
                 Fingerprint::new(&req.seed, &("big-sync-obj-fp-v1", obj_id.clone(), payload))
             };
-            page.entries.push(BucketObjPageEntry {
-                obj_id,
-                source_revision,
-                dead,
-                fp,
-            });
+            page.entries.push(BucketObjPageEntry { obj_id, dead, fp });
         }
         let mut bucks = HashMap::with_capacity(pages.len());
         for page in pages {
@@ -1589,7 +1642,7 @@ impl ObservedStore for SqlitePartStore {
         for row in cursors {
             peer_part_cursors.insert(
                 (
-                    SqliteCore::peer_from_blob(row.peer_id),
+                    Self::peer_from_blob(row.peer_id),
                     Self::part_from_blob(row.part_id),
                 ),
                 u64::try_from(row.cursor).expect(ERROR_IMPOSSIBLE),
@@ -1645,9 +1698,58 @@ mod tests {
         SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await
     }
 
-    mod leaf;
-
-    mod receive;
+    #[tokio::test]
+    async fn sqlite_migrations_and_fingerprint_bitcasts_roundtrip() -> Res<()> {
+        let sql = test_sql().await?;
+        SqliteCore::init_schema(&sql, BuckId::MAX_LEVEL).await?;
+        SqliteCore::init_schema(&sql, BuckId::MAX_LEVEL).await?;
+        let status = sql
+            .migration_status_for(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
+        assert_eq!(
+            status
+                .iter()
+                .map(|(migration, state)| (migration.version, *state))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, sqlite_rs::MigrationState::Applied),
+                (2, sqlite_rs::MigrationState::Applied)
+            ]
+        );
+        let core = SqliteCore::new(sql.clone(), "bitcasts", BuckId::MAX_LEVEL).await?;
+        let part_id = test_part_id(1);
+        for live_fp in [0, 1, i64::MAX as u64, 1_u64 << 63, u64::MAX] {
+            let dead_fp = !live_fp;
+            let mut tx = sql.begin_write().await?;
+            let part_ref = core.ensure_part_ref(&mut tx, part_id.clone()).await?;
+            queries::upsert_bucket(
+                &tx,
+                core.scope_id,
+                part_ref,
+                0,
+                0,
+                7,
+                2,
+                3,
+                SqliteCore::db_from_u64(live_fp),
+                SqliteCore::db_from_u64(dead_fp),
+            )
+            .await?;
+            tx.commit().await?;
+            assert_eq!(
+                core.bucket_summary_for_path(part_id.clone(), BuckId::ROOT)
+                    .await?,
+                BucketSummary {
+                    id: BuckId::ROOT,
+                    len: 5,
+                    live_count: 2,
+                    fp: (live_fp, dead_fp),
+                    changed_at: 7,
+                }
+            );
+        }
+        Ok(())
+    }
 
     /// A hidden part stays physically present but is invisible to remote part access
     /// (`HostPartStoreConfig::hidden_parts`), and that has to hold for the bucket
@@ -2070,6 +2172,13 @@ mod tests {
             store: test_store("big-sync-sqlite-test://host-contract").await?,
         };
         host_contract::assert_host_part_store_contract(&harness).await
+    }
+
+    /// The leaf page's byte budget, which the store applies beside the entry hint.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_leaf_page_byte_budget_contract() -> Res<()> {
+        let store = test_store("big-sync-sqlite-test://leaf-byte-budget").await?;
+        host_contract::assert_leaf_page_byte_budget_contract(&store).await
     }
 
     /// What the store shows a peer, which a part-less payload is not part of.

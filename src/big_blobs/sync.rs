@@ -117,13 +117,13 @@ impl BlobSyncBackend {
         &self,
         peer: PeerKey,
         object: &ObjKey,
-        parts: big_sync_core::PartObservations,
+        parts: Vec<big_sync_core::PartKey>,
         payload: Option<&ObjPayload>,
         present: bool,
     ) -> Res<()> {
         let digest = BlobId::try_from(object)
             .wrap_err_with(|| format!("blob object key is not a blob digest: {object}"))?;
-        for (part, revision) in parts {
+        for part in parts {
             let inventory = self
                 .mirrors
                 .admission
@@ -134,7 +134,7 @@ impl BlobSyncBackend {
                 })?;
             self.mirrors
                 .admission
-                .observe(&inventory, digest, &peer, revision, present, payload)
+                .observe(&inventory, digest, &peer, 0, present, payload)
                 .await?;
         }
         Ok(())
@@ -143,15 +143,11 @@ impl BlobSyncBackend {
 
 #[async_trait]
 impl SyncBackend for BlobSyncBackend {
-    fn replay_receiver(&self) -> Option<&dyn big_sync::receive::ReplayReceiver> {
-        Some(self)
-    }
-
     async fn sync_obj(
         &self,
         peer_id: PeerKey,
         obj_id: ObjKey,
-        parts: big_sync_core::PartObservations,
+        parts: Vec<big_sync_core::PartKey>,
         remote_payload: Option<ObjPayload>,
     ) -> Res<SyncTaskRunOutcome> {
         self.observe(peer_id, &obj_id, parts, remote_payload.as_ref(), true)
@@ -166,91 +162,14 @@ impl SyncBackend for BlobSyncBackend {
         &self,
         peer_id: PeerKey,
         obj_id: ObjKey,
-        parts: big_sync_core::PartObservations,
+        parts: Vec<big_sync_core::PartKey>,
     ) -> Res<()> {
         self.observe(peer_id, &obj_id, parts, None, false).await
     }
 }
 
-#[async_trait]
-impl big_sync::receive::ReplayReceiver for BlobSyncBackend {
-    async fn receive_replay(
-        &self,
-        receipt: &big_sync::receive::ReplayReceipt,
-        targets: &[big_sync_core::rpc::ReplaySubscriptionTarget],
-    ) -> Res<()> {
-        use big_sync_core::rpc::PartEvent;
-        use big_sync_core::rpc::ReplaySubscriptionTarget;
-        use big_sync_core::rpc::TargetVerdict;
-
-        let mut bounds = BTreeMap::new();
-        for target in targets {
-            let ReplaySubscriptionTarget::Part { part_id } = target else {
-                eyre::bail!("blob replay requires an exact inventory part");
-            };
-            let requested = receipt
-                .replay
-                .requested
-                .iter()
-                .find(|requested| ReplaySubscriptionTarget::from(*requested) == *target)
-                .expect("a received target has its journaled request bound");
-            let verdict = receipt
-                .replay
-                .page
-                .targets
-                .iter()
-                .find(|(candidate, _)| ReplaySubscriptionTarget::from(candidate) == *target)
-                .map(|(_, verdict)| verdict);
-            if let Some(TargetVerdict::Events { resume, .. }) = verdict {
-                bounds.insert(part_id.clone(), (requested.cursor(), *resume));
-            }
-        }
-        for event in &receipt.replay.page.events {
-            let (object, revision, parts, payload, present) = match event {
-                PartEvent::Changed(event) => (
-                    &event.obj_id,
-                    event.cursor,
-                    event.part_ids.as_slice(),
-                    Some(&event.payload),
-                    true,
-                ),
-                PartEvent::Removed(event) => (
-                    &event.obj_id,
-                    event.cursor,
-                    std::slice::from_ref(&event.part_id),
-                    None,
-                    false,
-                ),
-            };
-            let observations = parts
-                .iter()
-                .filter(|part| {
-                    bounds
-                        .get(*part)
-                        .is_some_and(|(after, through)| revision > *after && revision <= *through)
-                })
-                .cloned()
-                .map(|part| (part, revision))
-                .collect::<BTreeMap<_, _>>();
-            if !observations.is_empty() {
-                self.observe(
-                    receipt.replay.peer_id.clone(),
-                    object,
-                    observations,
-                    payload,
-                    present,
-                )
-                .await?;
-            }
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod access_tests;
-#[cfg(test)]
-mod replay_route_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

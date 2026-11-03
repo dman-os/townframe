@@ -24,12 +24,10 @@ structstruck::strike! {
             obj_id: ObjKey,
             remote_payload: Option<ObjPayload>,
             part_id: PartKey,
-            source_revision: CursorIndex,
         },
         RemoveObjFromParts {
             obj_id: ObjKey,
             part_id: PartKey,
-            source_revision: CursorIndex,
         },
         ListBuckets {
             part_id: PartKey,
@@ -376,7 +374,6 @@ impl BucketMachine {
                         out.push(BucketMachineCommand::SyncObj {
                             obj_id: obj.obj_id.clone(),
                             part_id: self.part_id.clone(),
-                            source_revision: obj.source_revision,
                             remote_payload: None,
                         });
                         self.active_obj_jobs.insert(obj.obj_id.clone(), *buck_id);
@@ -387,7 +384,6 @@ impl BucketMachine {
                         out.push(BucketMachineCommand::RemoveObjFromParts {
                             obj_id: obj.obj_id,
                             part_id: self.part_id.clone(),
-                            source_revision: obj.source_revision,
                         });
                     }
                 }
@@ -512,7 +508,6 @@ enum PartObjDelta {
 #[derive(Debug, Clone)]
 pub struct BucketObjEntry {
     obj_id: ObjKey,
-    source_revision: CursorIndex,
     delta: PartObjDelta,
 }
 
@@ -541,7 +536,6 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
                 if !ee.dead {
                     Some(BucketObjEntry {
                         obj_id: ee.obj_id,
-                        source_revision: ee.source_revision,
                         delta: PartObjDelta::New,
                     })
                 } else {
@@ -569,7 +563,6 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
                         if local_fp != obj.fp {
                             out_objs.push(BucketObjEntry {
                                 obj_id: obj.obj_id,
-                                source_revision: obj.source_revision,
                                 delta: PartObjDelta::Change,
                             });
                         } else {
@@ -577,7 +570,6 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
                             if !local_parts.contains(&part_id) {
                                 out_objs.push(BucketObjEntry {
                                     obj_id: obj.obj_id,
-                                    source_revision: obj.source_revision,
                                     delta: PartObjDelta::New,
                                 });
                             }
@@ -585,7 +577,6 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
                     } else {
                         out_objs.push(BucketObjEntry {
                             obj_id: obj.obj_id,
-                            source_revision: obj.source_revision,
                             delta: PartObjDelta::Delete,
                         });
                     }
@@ -594,7 +585,6 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
                     if !obj.dead {
                         out_objs.push(BucketObjEntry {
                             obj_id: obj.obj_id,
-                            source_revision: obj.source_revision,
                             delta: PartObjDelta::New,
                         });
                     }
@@ -706,49 +696,6 @@ mod tests {
         ) -> LocalBoxFuture<'a, PartDirtyCount> {
             unreachable!("filter_buckets does not read dirty counts")
         }
-    }
-
-    #[test]
-    fn source_revision_survives_bucket_filter_and_payloadless_dispatch() {
-        let part = PartKey::random();
-        let obj = ObjKey::random();
-        let seed = FingerprintSeed::new(3, 4);
-        let store = SummaryStore {
-            summaries: HashMap::from([(BuckId::ROOT, summary(BuckId::ROOT, (0, 0), 0, 0, 0))]),
-        };
-        let pages = futures::executor::block_on(filter_objects::<Local, _>(
-            part.clone(),
-            [(
-                BuckId::ROOT,
-                RawLeafBucketPage {
-                    entries: vec![crate::rpc::BucketObjPageEntry {
-                        obj_id: obj.clone(),
-                        source_revision: 17,
-                        dead: false,
-                        fp: Fingerprint::new(
-                            &seed,
-                            &("big-sync-obj-fp-v1", obj.clone(), serde_json::Value::Null),
-                        ),
-                    }],
-                    next_after: None,
-                    done: true,
-                },
-            )]
-            .into(),
-            seed,
-            &store,
-        ));
-        let mut machine = BucketMachine::new(part.clone(), 0, 1, 2);
-        let mut commands = Vec::new();
-        machine.on_bucket_page(vec![summary(BuckId::ROOT, (1, 0), 1, 1, 90)], &mut commands);
-        commands.clear();
-        machine.on_obj_page(pages, &mut commands);
-        assert!(matches!(&commands[..], [BucketMachineCommand::SyncObj {
-            obj_id,
-            part_id,
-            source_revision: 17,
-            remote_payload: None,
-        }] if obj_id == &obj && part_id == &part));
     }
 
     fn summary(
