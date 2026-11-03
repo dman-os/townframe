@@ -12,9 +12,9 @@
 //! [`RowEvidence::Pending`] or [`RowEvidence::Authoritative`], and an overlay in the
 //! [`Ledger`] retires when the authoritative row it predicted arrives.
 //!
-//! [`RegistrationCollection`] is the owner-scoped contribution primitive: rows keyed by
-//! registration scope, shared compare-and-set mutations, and atomic withdrawal when the
-//! scope owner closes. Writer handles do not own row lifetime.
+//! [`RegistrationCollection`] is the owner-scoped contribution primitive: a causal map
+//! whose per-writer-scope candidates are stamped, resolved to a winner per key, and
+//! retracted atomically when the scope dies. Writer handles do not own row lifetime.
 
 mod ledger;
 mod mirror;
@@ -41,6 +41,7 @@ pub use registration::RegistrationCollection;
 pub use registration::RegistrationDispatch;
 pub use registration::RegistrationScope;
 pub use registration::RegistrationWriter;
+pub use registration::Retention;
 pub use replica::Entry;
 pub use replica::Replica;
 pub use source::Source;
@@ -55,6 +56,10 @@ pub use types::ReadLimits;
 pub use types::RegistrationScopeId;
 pub use types::RowEvidence;
 pub use types::ScopeId;
+pub use types::Stamp;
+pub use types::Stamped;
 pub use types::Transaction;
 pub use types::Version;
+pub use types::WriteBasis;
 pub use types::WriteOutcome;
+pub use types::WriterId;
