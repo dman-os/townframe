@@ -2258,17 +2258,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "macro-string"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e7b3a5bbb2f63aaa223a671ea1bd0e7bc16bd30ce387324cf63995deaddbbd2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
-
-[[package]]
 name = "manganis"
 version = "0.8.0-alpha.3"
 source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
@@ -2300,7 +2289,7 @@ version = "0.8.0-alpha.3"
 source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
 dependencies = [
  "dunce",
- "macro-string 0.1.4",
+ "macro-string",
  "manganis-core",
  "proc-macro2",
  "quote",
@@ -4643,7 +4632,6 @@ version = "0.62.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53cb4b5556c3a791e86838ea287782bdafa704d55b0e68b5b81a3a16b9ea5f4b"
 dependencies = [
- "bitflags 2.13.1",
  "wit-bindgen-rust-macro",
 ]
 
@@ -4681,7 +4669,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f19d63da8e478a370ef8192d90ccb517965b7747d6b46cd2d831dd0ef4d2541"
 dependencies = [
  "anyhow",
- "macro-string 0.3.0",
  "prettyplease",
  "proc-macro2",
  "quote",
