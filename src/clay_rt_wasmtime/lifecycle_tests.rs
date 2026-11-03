@@ -103,3 +103,13 @@ async fn failing_provider_publishes_nothing() {
         ))
         .await;
 }
+
+#[tokio::test]
+async fn leased_provider_closes_when_idle() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::leased_provider_closes_when_idle(
+            engine,
+        ))
+        .await;
+}

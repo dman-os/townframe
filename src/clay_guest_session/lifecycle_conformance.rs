@@ -2,9 +2,9 @@
 //! `lifecycle` fixture component (`src/clay_mdk/lifecycle_fixture.rs`).
 //!
 //! Each engine crate implements [`Incarnations`] over its runtime and runs these scenarios from
-//! its own tests, so every engine is held to one chain: manifest requirement → authorized
-//! registration → target acceptance → strong binding → provider initialization → publication
-//! visible only once committed → async `instance-root.close` with dependencies live →
+//! its own tests, so every engine is held to one chain: configured requirement → strong binding
+//! (or external lease) → provider initialization → named publication visible only once committed
+//! → async `instance-root.close` with dependencies live → publications revoked →
 //! reverse-order teardown that leaves the guest holding nothing.
 //!
 //! Scenarios must run inside a [`tokio::task::LocalSet`]: incarnation drivers are spawned with
@@ -19,16 +19,15 @@ use crate::collections::CollectionSession;
 use crate::collections::bytes_registrations;
 use clay_collection::Change;
 use clay_collection::ReadLimits;
-use clay_host::ActivationRegistration;
 use clay_host::ConfiguredMicro;
 use clay_host::Factory;
 use clay_host::Host;
+use clay_host::Initialized;
 use clay_host::Instance;
 use clay_host::Lifecycle;
 use clay_host::LocalFuture;
+use clay_host::MicroId;
 use clay_host::MicroState;
-use clay_host::RegistrationGrant;
-use clay_host::RegistrationTemplate;
 use clay_host::Requirement;
 use clay_host::Root;
 use clay_host::StartError;
@@ -41,8 +40,13 @@ use crate::capabilities::CapabilityPublication;
 use crate::capabilities::CapabilityRef;
 use crate::capabilities::CapabilitySession;
 
-/// The contract the fixture provides and requires (`lifecycle_fixture.manifest.json`).
+/// The contract the fixture's guest provides (`lifecycle_fixture.manifest.json`). The guest
+/// still returns its provisions keyed by contract (WIT reshape is a later checkpoint), so
+/// [`Fixture`] names the one it returns [`PUBLICATION`] when handing it to the supervisor.
 pub const PRESENTATION: &str = "dayframe.lifecycle.presentation";
+
+/// The manifest's name (`provides[].id`) for the fixture's presentation publication.
+const PUBLICATION: &str = "presentation";
 
 /// What an incarnation's store still holds once its guest half closed. Anything but
 /// [`GuestResidue::NONE`] is a resource the close path leaked to the store's drop.
@@ -108,51 +112,49 @@ pub trait Incarnations: 'static {
     fn close(runtime: Self::Runtime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)>;
 }
 
-/// The supplier publishes `provider`'s presentation through an installed registration that
-/// the consumer accepts; the consumer redeems it while initializing and again while closing.
-/// Disabling the provider must close the consumer first, with the provider still live.
+/// The consumer requires `provider`'s presentation and redeems it while initializing and again
+/// while closing. An external lease on the same publication is a second strong edge. Disabling
+/// the provider must close the consumer first, with the provider still live, and revoke the
+/// lease's publication.
 pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
     let harness = Harness::new(engine);
     let supervisor = harness.supervisor("provider");
-    let registration = supervisor
-        .install("provider", serve_host())
-        .expect("configuration authorizes the provider's registration on the consumer");
-    assert_eq!(
-        registration,
-        ActivationRegistration {
-            id: "serve-host".to_owned(),
-            subject: "provider".to_owned(),
-            target: "consumer".to_owned(),
-            contract: PRESENTATION.to_owned(),
-            declaration_id: "serve-host".to_owned(),
-        }
-    );
-    assert!(harness.log().is_empty(), "installing instantiates nothing");
+    let (provider_id, consumer_id) = (MicroId::new("provider"), MicroId::new("consumer"));
+    assert!(harness.log().is_empty(), "configuring instantiates nothing");
 
     assert_eq!(supervisor.reconcile().await, BTreeMap::new());
     assert_eq!(
         harness.log(),
         ["initialize provider", "initialize consumer"]
     );
-    let provider = supervisor.instance("provider").unwrap();
-    let consumer = supervisor.instance("consumer").unwrap();
+    let provider = supervisor.instance(&provider_id).unwrap();
+    let consumer = supervisor.instance(&consumer_id).unwrap();
     assert!(
         harness.host.is_bound(&provider),
         "the consumer holds its provider"
     );
-    assert_eq!(supervisor.provision("consumer", PRESENTATION), None);
-    let publication = supervisor
-        .provision("provider", PRESENTATION)
-        .expect("the committed provider provides its contract");
-    let observed = harness.observe(&publication);
+    let lease = supervisor
+        .acquire(&provider_id, PUBLICATION)
+        .await
+        .expect("the committed provider publishes its presentation");
+    assert_eq!(
+        harness.log().len(),
+        2,
+        "acquiring a live micro joins its incarnation"
+    );
+    let observed = harness.observe(&lease);
     assert!(
         observed.as_presentation_component().is_ok(),
         "a committed publication is visible outside its incarnation"
     );
+    assert!(
+        supervisor.acquire(&consumer_id, PUBLICATION).await.is_err(),
+        "the consumer publishes nothing"
+    );
 
     // Closing the provider closes its dependent first; the consumer's guest `close`
     // redeems its proxy and fails unless the provider is still live at that point.
-    supervisor.disable("provider").await.unwrap();
+    supervisor.disable(&provider_id).await.unwrap();
     assert_eq!(
         harness.log(),
         [
@@ -162,16 +164,45 @@ pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
             "close provider"
         ]
     );
-    assert_eq!(supervisor.state("provider"), MicroState::Disabled);
-    assert_eq!(supervisor.state("consumer"), MicroState::Idle);
+    assert_eq!(supervisor.state(&provider_id), MicroState::Disabled);
+    assert_eq!(supervisor.state(&consumer_id), MicroState::Idle);
     assert_eq!(harness.host.lifecycle(&consumer), Lifecycle::Closed);
     assert_eq!(harness.host.lifecycle(&provider), Lifecycle::Closed);
-    assert!(publication.is_revoked());
+    assert!(lease.is_revoked());
     assert_eq!(
         observed.as_presentation_component().err(),
         Some(CapabilityFailure::Revoked)
     );
-    drop(observed);
+    drop((observed, lease));
+    harness.finish(supervisor).await;
+}
+
+/// A lease alone retains a lazy provider; dropping the last one lets the supervisor's idle
+/// driver close it, which revokes the publication the lease handed out.
+pub async fn leased_provider_closes_when_idle<E: Incarnations>(engine: E) {
+    let harness = Harness::new(engine);
+    let supervisor = harness.supervisor("provider");
+    let provider_id = MicroId::new("provider");
+    tokio::select! {
+        never = supervisor.drive() => never,
+        () = async {
+            let lease = supervisor.acquire(&provider_id, PUBLICATION).await.unwrap();
+            assert_eq!(harness.log(), ["initialize provider"]);
+            let instance = supervisor.instance(&provider_id).unwrap();
+            let observed = harness.observe(&lease);
+            assert!(observed.as_presentation_component().is_ok());
+            drop(lease);
+            while supervisor.state(&provider_id) != MicroState::Idle {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(harness.log(), ["initialize provider", "close provider"]);
+            assert_eq!(harness.host.lifecycle(&instance), Lifecycle::Closed);
+            assert_eq!(
+                observed.as_presentation_component().err(),
+                Some(CapabilityFailure::Revoked)
+            );
+        } => {}
+    }
     harness.finish(supervisor).await;
 }
 
@@ -180,13 +211,13 @@ pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
 pub async fn failing_provider_publishes_nothing<E: Incarnations>(engine: E) {
     let harness = Harness::new(engine);
     let supervisor = harness.supervisor("failing-provider");
-    supervisor.install("provider", serve_host()).unwrap();
+    let (provider_id, consumer_id) = (MicroId::new("provider"), MicroId::new("consumer"));
     let refusal = "guest refused initialization: rejected: failing provider rejects its \
                    initialization";
     assert_eq!(
         supervisor.reconcile().await,
         BTreeMap::from([(
-            "consumer".to_owned(),
+            consumer_id.clone(),
             StartError::Unavailable {
                 binding: "presentation".to_owned(),
                 cause: Box::new(StartError::Faulted(refusal.to_owned())),
@@ -195,15 +226,15 @@ pub async fn failing_provider_publishes_nothing<E: Incarnations>(engine: E) {
     );
     assert_eq!(harness.log(), ["initialize provider"]);
     assert_eq!(
-        supervisor.state("provider"),
+        supervisor.state(&provider_id),
         MicroState::Faulted(refusal.to_owned())
     );
     assert_eq!(
-        supervisor.state("consumer"),
+        supervisor.state(&consumer_id),
         MicroState::Blocked(vec!["presentation".to_owned()])
     );
-    assert_eq!(supervisor.instance("provider"), None);
-    assert_eq!(supervisor.instance("consumer"), None);
+    assert_eq!(supervisor.instance(&provider_id), None);
+    assert_eq!(supervisor.instance(&consumer_id), None);
     harness.finish(supervisor).await;
 }
 
@@ -411,16 +442,6 @@ fn registration_context(role: &str, registrations: &BytesRegistrations) -> Initi
     }
 }
 
-/// The fixture's `serve-host` activation default, as installation reads it from the manifest.
-fn serve_host() -> RegistrationTemplate {
-    RegistrationTemplate {
-        id: "serve-host".to_owned(),
-        target_binding: "host".to_owned(),
-        contract: PRESENTATION.to_owned(),
-        declaration_id: "serve-host".to_owned(),
-    }
-}
-
 struct Harness<E> {
     engine: Rc<E>,
     host: Host,
@@ -457,35 +478,25 @@ impl<E: Incarnations> Harness<E> {
         }
     }
 
-    /// The configured graph: an eager `consumer` target that accepts presentation
-    /// registrations through its `presentation` requirement, and a lazy `provider` subject
-    /// playing `provider_role`, whose `host` binding is routed to and authorized on it.
+    /// The configured graph: an eager `consumer` that requires the `presentation` publication
+    /// of a lazy `provider` playing `provider_role`.
     fn supervisor(&self, provider_role: &'static str) -> Supervisor<CapabilityPublication> {
         let provider = ConfiguredMicro {
-            identity: "provider".to_owned(),
+            identity: MicroId::new("provider"),
             eager: false,
             requirements: BTreeMap::new(),
-            accepts: BTreeSet::new(),
-            registration_grants: vec![RegistrationGrant {
-                target: "consumer".to_owned(),
-                contract: PRESENTATION.to_owned(),
-            }],
-            routes: BTreeMap::from([("host".to_owned(), "consumer".to_owned())]),
             factory: self.factory("provider", provider_role),
         };
         let consumer = ConfiguredMicro {
-            identity: "consumer".to_owned(),
+            identity: MicroId::new("consumer"),
             eager: true,
             requirements: BTreeMap::from([(
                 "presentation".to_owned(),
                 Requirement {
-                    contract: PRESENTATION.to_owned(),
-                    provider: None,
+                    provider: MicroId::new("provider"),
+                    publication: PUBLICATION.to_owned(),
                 },
             )]),
-            accepts: BTreeSet::from([PRESENTATION.to_owned()]),
-            registration_grants: Vec::new(),
-            routes: BTreeMap::new(),
             factory: self.factory("consumer", "consumer"),
         };
         Supervisor::new(self.host.clone(), [provider, consumer])
@@ -540,7 +551,7 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
         host: Host,
         instance: Instance,
         requirements: BTreeMap<String, CapabilityPublication>,
-    ) -> LocalFuture<'static, Result<Box<dyn Root<CapabilityPublication>>, String>> {
+    ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
         let engine = Rc::clone(&self.engine);
         let shared = Rc::clone(&self.shared);
         let identity = self.identity;
@@ -565,6 +576,7 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
                 .borrow_mut()
                 .push(tokio::task::spawn_local(driver));
             assert_eq!(host.lifecycle(&instance), Lifecycle::Initializing);
+            let mut publications = BTreeMap::new();
             if let Some(publication) = E::provision(&runtime, PRESENTATION) {
                 // Staged until the supervisor commits this initialization (ADR 024 §5).
                 let staged = shared.observer.mint(&publication).unwrap();
@@ -573,13 +585,14 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
                     Some(CapabilityFailure::Revoked),
                     "{identity}'s provision is visible before its initialization committed"
                 );
+                publications.insert(PUBLICATION.to_owned(), publication);
             }
-            let root: Box<dyn Root<CapabilityPublication>> = Box::new(FixtureRoot::<E> {
+            let root = Box::new(FixtureRoot::<E> {
                 runtime,
                 shared,
                 identity,
             });
-            Ok(root)
+            Ok(Initialized { root, publications })
         })
     }
 }
@@ -590,11 +603,7 @@ struct FixtureRoot<E: Incarnations> {
     identity: &'static str,
 }
 
-impl<E: Incarnations> Root<CapabilityPublication> for FixtureRoot<E> {
-    fn provision(&self, contract: &str) -> Option<CapabilityPublication> {
-        E::provision(&self.runtime, contract)
-    }
-
+impl<E: Incarnations> Root for FixtureRoot<E> {
     fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
         let Self {
             runtime,
