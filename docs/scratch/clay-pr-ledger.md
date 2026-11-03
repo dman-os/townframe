@@ -328,3 +328,16 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   ADR 024 §13 `writer_policy`. Grants live in the host layer, not in `clay_collection`.
 - Plan: C9a core rework in `clay_collection` (worktree agent), C9b consumers + WIT + grants + MDK
   `based_on` default after the per-call exports agent lands, C9c ADR 017 §9–11 / 024 §13 / 025 §4.
+
+## C9a status (2026-11-04)
+
+- Done on worktree branch `c9a-causal-map` (c9271e59, a86a32ae; 123/123, clippy clean, verified by
+  manager). Not merged: it breaks consumers; merge after the WCMP port lands, then C9b.
+- Installed scopes have an async `InstalledWriter`; durable writes serialize per key across the store
+  await, sync incarnation writes that slip in make a durable CAS fail and the store row is restored.
+- `install` replaces a scope wholesale. Supervisor rule for C9b/C5: manifest-declared rows and runtime
+  writes use separate installation scope keys per micro, so an upgrade's reinstall never drops runtime
+  rows (settings); uninstall retracts both.
+- Open with the operator: how a writer names an observed tombstone. Readers never see tombstone stamps,
+  so the MDK `based_on` default treats a re-creation after a seen delete as concurrent and it loses.
+  Proposed (b): writes carry the writer's feed position; the host derives the observed lamport.
