@@ -38,6 +38,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::watch;
 use utils_rs::prelude::Res;
+use utils_rs::prelude::eyre;
+
+mod sqlite;
 
 #[cfg(test)]
 mod tests;
@@ -152,7 +155,7 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
             queue.enqueue(&document.parse()?).await?;
         }
     }
-    apply_pins_migration(&config.sql).await?;
+    config.sql.apply_migrations(sqlite::queries::MIGRATION_TABLE, sqlite::queries::MIGRATIONS).await?;
     let metadata = MetadataCapabilities::new(
         Arc::clone(&config.metadata_capability),
         config.policy.clone(),
@@ -531,53 +534,14 @@ async fn poll_writer_documents(
     polled: &mut BTreeSet<DocId>,
     document: Option<&DocId>,
 ) -> Res<()> {
-    let rows = config
-        .sql
-        .query(
-            "WITH drawers AS (
-                 SELECT drawer_id FROM big_cabinet_drawer_docs WHERE doc_id = ?1
-                 UNION
-                 SELECT links.parent_id
-                   FROM big_cabinet_drawer_children AS links
-                   JOIN big_cabinet_drawers AS child ON child.drawer_id = links.child_id
-                  WHERE links.child_id = ?1 AND json_extract(child.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
-                 UNION
-                 SELECT drawer_id FROM big_blobs_writer_targets WHERE ?1 IS NULL OR doc_id = ?1
-                 UNION
-                 SELECT drawer_id FROM big_cabinet_drawers
-                  WHERE drawer_id = ?1 OR json_extract(descriptor_json, '$.layout.sensitiveRoot') = ?1
-             )
-             SELECT inventory_id
-                  , 1
-               FROM big_blobs_writer_targets
-              WHERE ?1 IS NULL OR doc_id = ?1
-             UNION
-              SELECT inventory_id
-                   , 1
-                FROM big_blobs_writer_effects
-               WHERE ?1 IS NULL
-              UNION
-              SELECT inventory_id
-                   , 1
-                FROM big_blobs_inventory_registry
-               WHERE ?1 IS NULL OR inventory_id = ?1
-              UNION
-             SELECT drawer.drawer_id
-                  , 0
-               FROM drawers
-               JOIN big_cabinet_drawers AS drawer USING (drawer_id)
-              WHERE json_extract(drawer.descriptor_json, '$.layout.sensitiveRoot') IS NOT NULL
-             UNION
-             SELECT json_extract(drawer.descriptor_json, '$.layout.sensitiveRoot')
-                  , 0
-               FROM drawers
-               JOIN big_cabinet_drawers AS drawer USING (drawer_id)
-              WHERE json_extract(drawer.descriptor_json, '$.layout.sensitiveRoot') IS NOT NULL",
-            (document.map(ToString::to_string),),
-        )
-        .await?
-        .all::<(String, bool)>()?;
-    for (document, inventory) in rows {
+    let rows = sqlite::queries::writer_documents(
+        &config.sql,
+        document.map(ToString::to_string),
+    )
+    .await?;
+    for row in rows {
+        let document = row.document;
+        let inventory = row.inventory;
         let document: DocId = document.parse()?;
         if !polled.insert(document.clone()) {
             continue;
@@ -612,24 +576,18 @@ async fn enqueue_root_members(
     use big_cabinet::drawer::MetadataRootStatus;
     use big_cabinet_core::drawer::protocol::DrawersError;
     let sql = &config.sql;
-    let roots = sql
-        .query(
-            "SELECT drawer_id FROM big_cabinet_drawers
-          WHERE drawer_id = ?1 OR json_extract(descriptor_json, '$.layout.sensitiveRoot') = ?1",
-            (document.to_string(),),
-        )
-        .await?
-        .all::<String>()?;
+
+    let roots = sqlite::queries::root_drawers(sql, document.to_string())
+        .await?;
     let mut metadata = None;
     for drawer in roots {
-        let descriptor = sql
-            .query(
-                "SELECT descriptor_json FROM big_cabinet_drawers WHERE drawer_id = ?",
-                (drawer.as_str(),),
-            )
+
+        let descriptor = sqlite::queries::drawer_descriptor(sql, drawer.clone())
             .await?
-            .all::<String>()?
-            .remove(0);
+            .into_iter()
+            .next()
+            .ok_or_else(|| eyre::eyre!("drawer descriptor missing"))?;
+
         let descriptor: big_cabinet_core::drawer::Drawer = serde_json::from_str(&descriptor)?;
         if descriptor.groups().is_none() {
             continue;
@@ -665,16 +623,10 @@ async fn enqueue_root_members(
             }
             Err(error) => return Err(error.into()),
         }
-        let members = sql.query(
-            "SELECT doc_id FROM big_cabinet_drawer_docs WHERE drawer_id = ?1
-             UNION
-             SELECT links.child_id
-               FROM big_cabinet_drawer_children AS links
-               JOIN big_cabinet_drawers AS child ON child.drawer_id = links.child_id
-              WHERE links.parent_id = ?1 AND json_extract(child.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
-             UNION
-             SELECT doc_id FROM big_blobs_writer_targets WHERE drawer_id = ?1", (drawer,),
-        ).await?.all::<String>()?;
+        let members = sqlite::queries::drawer_members(sql, drawer.clone())
+            .await?;
+
+
         for member in members {
             queue.enqueue(&member.parse()?).await?;
         }
@@ -682,24 +634,6 @@ async fn enqueue_root_members(
     Ok(metadata)
 }
 
-/// The per-document pin ledger the worker reconciles against lives beside the blob store's own
-/// tables; it is applied here because only the workers read and write it.
-async fn apply_pins_migration(sql: &Database) -> Res<()> {
-    sql.apply_migrations(
-        "big_blobs_pins_migrations",
-        &[sqlite_rs::Migration {
-            version: 1,
-            name: "document_pins",
-            sql: "CREATE TABLE big_blobs_document_pins (
-             doc_id TEXT NOT NULL
-           , digest TEXT NOT NULL
-           , PRIMARY KEY (doc_id, digest)
-        ) STRICT;",
-        }],
-    )
-    .await?;
-    Ok(())
-}
 
 fn pin_id(key: &DatumKey) -> Res<BlobId> {
     Ok(std::str::from_utf8(key.slot_bytes())?.parse()?)

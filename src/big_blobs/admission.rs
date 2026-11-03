@@ -15,7 +15,7 @@ mod discovery;
 mod producers;
 mod project;
 mod runtime;
-mod sqlite;
+pub(crate) mod sqlite;
 
 pub use discovery::Coverage;
 pub use discovery::CoverageGap;

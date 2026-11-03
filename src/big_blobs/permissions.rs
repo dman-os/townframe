@@ -44,19 +44,11 @@ async fn seed_known(
     parts: &SharedPartStore,
     sql: &sqlite_rs::Database,
 ) -> Res<()> {
-    let inventories = sql
-        .query(
-            "SELECT doc_id FROM big_cabinet_drawer_meta_docs WHERE kind = ?
-             UNION
-             SELECT inventory_id FROM big_blobs_writer_targets
-             UNION
-             SELECT inventory_id FROM big_blobs_writer_effects
-             UNION
-             SELECT inventory_id FROM big_blobs_inventory_registry",
-            (crate::workers::INVENTORY_KIND,),
-        )
-        .await?
-        .all::<String>()?;
+    let inventories = crate::admission::sqlite::queries::known_inventories(
+        sql,
+        crate::workers::INVENTORY_KIND.to_owned(),
+    )
+    .await?;
     for inventory in inventories {
         seed(repo, parts, &inventory.parse()?).await?;
     }
@@ -119,16 +111,12 @@ pub(crate) async fn run(
                 match delta.entry.subject {
                     AccessSubject::Document(id) => {
                         let document = DocId::new(id.to_bytes());
-                        let known = sql.query(
-                            "SELECT 1 FROM big_cabinet_drawer_meta_docs WHERE doc_id = ?1 AND kind = ?2
-                             UNION ALL
-                             SELECT 1 FROM big_blobs_writer_targets WHERE inventory_id = ?1
-                             UNION ALL
-                             SELECT 1 FROM big_blobs_writer_effects WHERE inventory_id = ?1
-                             UNION ALL
-                             SELECT 1 FROM big_blobs_inventory_registry WHERE inventory_id = ?1
-                             LIMIT 1", (document.to_string(), crate::workers::INVENTORY_KIND),
-                        ).await?.all::<i64>()?;
+                        let known = crate::admission::sqlite::queries::known_inventory(
+                            &sql,
+                            document.to_string(),
+                            crate::workers::INVENTORY_KIND.to_owned(),
+                        )
+                        .await?;
                         if !known.is_empty() {
                             seed(&repo, &parts, &document).await?;
                             queue.rearm().await?;

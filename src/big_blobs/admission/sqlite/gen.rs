@@ -68,6 +68,12 @@ pub async fn dirty(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult
     set.all()
 }
 
+pub const DRAWERS_FOR_ROOTS_SQL: &str = include_str!("queries/drawers_for_roots.sql");
+pub async fn drawers_for_roots(db: &impl crate::sqlite_rs_alias::QueryExecutor, roots: String) -> SqlResult<Vec<String>> {
+    let set = db.query(DRAWERS_FOR_ROOTS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(roots)]).await?;
+    set.all()
+}
+
 pub const FAIL_ATTEMPT_SQL: &str = include_str!("queries/fail_attempt.sql");
 pub async fn fail_attempt(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, digest: String, generation: i64, attempt: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(FAIL_ATTEMPT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(generation), crate::sqlite_rs_alias::IntoValue::into_value(attempt)]).await
@@ -103,6 +109,18 @@ pub const INVENTORY_FOR_PART_SQL: &str = include_str!("queries/inventory_for_par
 pub async fn inventory_for_part(db: &impl crate::sqlite_rs_alias::QueryExecutor, part_id: Vec<u8>) -> SqlResult<Option<String>> {
     let set = db.query(INVENTORY_FOR_PART_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(part_id)]).await?;
     set.optional()
+}
+
+pub const KNOWN_INVENTORIES_SQL: &str = include_str!("queries/known_inventories.sql");
+pub async fn known_inventories(db: &impl crate::sqlite_rs_alias::QueryExecutor, inventory_kind: String) -> SqlResult<Vec<String>> {
+    let set = db.query(KNOWN_INVENTORIES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_kind)]).await?;
+    set.all()
+}
+
+pub const KNOWN_INVENTORY_SQL: &str = include_str!("queries/known_inventory.sql");
+pub async fn known_inventory(db: &impl crate::sqlite_rs_alias::QueryExecutor, document_id: String, inventory_kind: String) -> SqlResult<Vec<i64>> {
+    let set = db.query(KNOWN_INVENTORY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(document_id), crate::sqlite_rs_alias::IntoValue::into_value(inventory_kind)]).await?;
+    set.all()
 }
 
 pub const LENGTH_SQL: &str = include_str!("queries/length.sql");
@@ -199,6 +217,12 @@ pub async fn recover_pairs(db: &impl crate::sqlite_rs_alias::Executor) -> SqlRes
 pub const REGISTER_INVENTORY_SQL: &str = include_str!("queries/register_inventory.sql");
 pub async fn register_inventory(db: &impl crate::sqlite_rs_alias::Executor, inventory_id: String, part_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(REGISTER_INVENTORY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(inventory_id), crate::sqlite_rs_alias::IntoValue::into_value(part_id)]).await
+}
+
+pub const SENSITIVE_ROOTS_SQL: &str = include_str!("queries/sensitive_roots.sql");
+pub async fn sensitive_roots(db: &impl crate::sqlite_rs_alias::QueryExecutor, drawers: String) -> SqlResult<Vec<String>> {
+    let set = db.query(SENSITIVE_ROOTS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawers)]).await?;
+    set.all()
 }
 
 pub const SET_AVAILABLE_SQL: &str = include_str!("queries/set_available.sql");

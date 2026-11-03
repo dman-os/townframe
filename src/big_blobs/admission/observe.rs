@@ -91,20 +91,14 @@ impl InventoryMirrors {
         let drawers = self.admission.discovery_documents().await?;
         let inventories = self.admission.selected_inventories().await?;
         let mut desired: BTreeSet<_> = drawers.iter().chain(&inventories).cloned().collect();
-        for root in sql
-            .query(
-                "SELECT json_extract(descriptor_json, '$.layout.sensitiveRoot')
-               FROM big_cabinet_drawers
-              WHERE drawer_id IN (SELECT value FROM json_each(?))
-                AND json_extract(descriptor_json, '$.layout.sensitiveRoot') IS NOT NULL",
-                (serde_json::to_string(
-                    &drawers.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                )?,),
-            )
-            .await?
-            .all::<String>()?
+        for row in crate::admission::sqlite::queries::sensitive_roots(
+            sql,
+            serde_json::to_string(&drawers.iter().map(ToString::to_string).collect::<Vec<_>>())?,
+        )
+        .await?
         {
-            let root: DocId = root.parse()?;
+            let root: DocId = row.parse()?;
+
             if self.projection.readable(&root).await? {
                 desired.insert(root);
             }
@@ -173,13 +167,9 @@ impl InventoryMirrors {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
         )?;
-        for drawer in sql.query(
-            "SELECT drawer_id
-               FROM big_cabinet_drawers
-              WHERE json_extract(descriptor_json, '$.layout.sensitiveRoot') IN (SELECT value FROM json_each(?))",
-            (encoded,),
-        ).await?.all::<String>()? {
-            documents.insert(drawer.parse()?);
+        for row in crate::admission::sqlite::queries::drawers_for_roots(sql, encoded).await? {
+            let drawer: DocId = row.parse()?;
+            documents.insert(drawer);
         }
         self.admission.invalidate_discovery(documents).await
     }
