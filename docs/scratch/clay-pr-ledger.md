@@ -242,3 +242,22 @@ abandons `serve`; a guest trap during `serve` means callers see `Revoked`.
 `clay_mdk/lib.rs` overrides `__wasilibc_task_hook` so every CM task shares one TLS block. This may be the
 real cause of the "one suspended async export" abort that ADR 024 §7a attributes to wasi-libc. An agent is
 verifying with a hook-free guest. Do not rely on the §7a TLS rationale until it reports.
+
+## TLS hook finding: resolved (2026-11-04)
+- Root cause of the "one suspended async export" abort is **our** MDK `__wasilibc_task_hook` (shared TLS,
+  needed so Dioxus/MDK thread-locals survive from `activate` into `mount`) combined with wit-bindgen 0.62
+  p3+`std` keeping task state in a `thread_local!`. Stock wasi-libc v34 is per-task TLS and works.
+  ADR 024 §7a's toolchain rationale is **wrong**.
+- Verified fix on Wasmtime 04bb391, in a scratch crate:
+  - wit-bindgen with `default-features = false`. `std` is on today through the workspace dep's default
+    features, reached via clay_mdk, micro_collection_probe and wasm_utils_rs.
+  - The MDK defines `wit_bindgen_0_62_0_{get,set}_task_context` (a `CURRENT` pointer).
+  - The hook parks the task state in CM context slot 0 on AsyncBlock and restores it on AsyncResume,
+    exactly as stock v34 parks the TLS base.
+  - Result: overlapping async exports complete out of order, and sync exports still see shared TLS.
+- Consequence: calls can be ordinary reentrant async exports, one CM task per call. The inbox loop
+  (`e1044a06`) and the C3d serialization (`9e87066b`) are unjustified and should be reverted pending
+  operator go-ahead.
+- Untested: WCMP / browser JSPI keeping slot 0 per task; cancelled parked tasks leaking TaskState.
+  The symbol names embed the wit-bindgen version, so add a guardrail that `std` stays off on guest targets.
+- C3c partial work (repin + inbox port) is uncommitted in the tree; the inbox part is now moot.
