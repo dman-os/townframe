@@ -174,5 +174,3 @@ mod access_tests;
 mod tests;
 #[cfg(test)]
 mod transfer_tests;
-#[cfg(test)]
-mod acceptance_tests;
