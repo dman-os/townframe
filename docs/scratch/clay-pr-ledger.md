@@ -34,9 +34,15 @@ decided, what is running, what is open. Update it whenever a checkpoint lands or
 |---|---|---|
 | C0 | Recover gen-34 B (`9f19a2fb`, scope-owned registration rows) | was broken; completed by C1 |
 | C1 | Collapse `_deferred` (dispatch carries output `T`); migrate `clay_guest_session` + engines onto scopes | committed `e22f80b0`; 191/191 (clay_collection, clay_guest_session, clay_rt_wasmtime, clay_rt_wcmp_wasmi), clippy clean. Scopes close at teardown **after** `instance-root.close()` (ADR 024 §6), not at Closing |
-| C2 | Lifecycle core: evolve `clay_host::Supervisor` (see "Two controllers" below) | agent running (fresh) |
+| C2 | Lifecycle core: evolve `clay_host::Supervisor` (see "Two controllers" below) | committed `b2f380df` (134/134, guardrails clean) |
 | C2b | Move MDK + shells (`dayframe_composition`, desktop, web) onto the Supervisor; delete `clay_micro_core::micros` composition/broker | after C2 |
-| C3 | WIT + both engines: bound/lazy `capability-ref`, Call/Presentation publications, `initialized.publications`, async redemption | after C2 |
+| C3a | Host side, no WIT: `Send` activation bridge in `clay_host`; bank refs Bound/Lazy; Call + Presentation publication kinds; in-process tests | committed `a7df27a1` (92/92 host side; 7 engine tests stubbed until C3b/C3c) |
+| C3b | WIT reshape + Wasmtime adapter + lifecycle fixture (call + presentation publications, lazy consumer); owned `ContractIdentity` + per-call contract; drain queued activations when `drive` drops | committed `27a07a83` (123/123; 6 wcmp_wasmi tests stubbed until C3c) |
+| C3d | Calls as store tasks (lock per burst); serialized per incarnation; waits-for graph refuses cycles (`call-cycle`); forced close mid-call skips guest close | committed `9e87066b` (129/129, 20x loop clean). Fallback baseline; superseded by C3e if the stream spike passes |
+| C3e-spike | Prove `serve(inbox: stream<request{publication,payload,responder}>)` on Wasmtime + WCMP: concurrency, sync entry, nested await, drain-on-close | agent running (C3d agent reused) |
+| C3e | Replace per-call `call` export + `instance-root.close()` with the serve inbox; MDK owns the loop; drop serialization (keep waits-for graph only if still needed) | after spike |
+| C3c | WCMP port onto the C3e model | after C3e |
+| C8 | ADR 017 §9 host materializer: explicit merge policy over registration scopes, recomputed in the same transaction when a scope closes | operator agreed 2026-11-04 |
 | C4a | `clay_store`: `OrderedStore` trait (get / scan_prefix / atomic `apply(Vec<BatchOp>)`), `MemoryStore`, `SqliteStore` (sqlite_rs, one `clay_store_entry` table), `IndexedDbStore` (compile-only) | committed `bc52dd23` (17/17, clippy native+wasm clean) |
 | C4b | Durable backing in `clay_collection`: scope id = Incarnation(counter) or Installation(durable key); async durable constructor loads before existing; privileged whole-scope `install`/`uninstall` (persist first, then project); incarnation scopes never persisted | agent running (store agent reused) |
 | C4c | IndexedDB exercised in a browser (dayframe_web e2e: install, reload, rows present) | after C2b (needs a building web shell) |
@@ -134,3 +140,84 @@ in a fresh checkout: TBD.
 - C4a: Sonnet/medium, new `src/clay_store` crate: `OrderedKv` trait (get / scan_prefix / atomic
   batch with DeletePrefix), in-memory + `sqlite_rs` + IndexedDB (compile-only), shared contract
   tests. Browser test of IndexedDB is deferred to a dayframe_web e2e in C4b.
+
+## C3 design (2026-11-03)
+
+Constraint found: engine store state must be `Send`. `WasiView: Send`, and `WasmStoreState` holds the
+`CollectionSession`/`CapabilitySession`, which are why the bank is `Arc`/`Mutex`. The Supervisor is
+`Rc`/`RefCell` on the local executor. So a guest host import that redeems a lazy ref cannot hold
+the Supervisor directly.
+
+- **Activation bridge (clay_host).** `Supervisor::activator() -> Activator<P>`: a `Clone + Send + Sync`
+  handle holding an mpsc sender. `Activator::acquire(micro, publication).await` sends a request with
+  a oneshot reply. `drive()` serves those requests concurrently (a `FuturesUnordered` inside the loop,
+  so one slow activation doesn't block idle closes) alongside the idle queue. `Lease<P>` becomes `Send`:
+  `Arc<AtomicUsize>` retention and an `Arc` idle queue with a tokio `Notify`. `Activator::status(micro)`
+  reads an `Arc<Mutex<BTreeMap<MicroId, MicroState>>>` mirror that `Supervisor::set` updates, so
+  status never activates and never round-trips. Channel lifetime: the supervisor outlives every
+  incarnation (shutdown closes them first), so a failed send is an invariant break and panics.
+- **Bank refs (clay_guest_session::capabilities).** `CapabilityRef` targets `Bound(publication)` or
+  `Lazy { micro, publication, contract, activator }`. Methods: `status()`, `call(request).await`,
+  `retain_call().await -> CallBinding`, `redeem_presentation().await -> PresentationComponent`.
+  Lazy use = `activator.acquire` → `Lease<CapabilityPublication>` → a proxy that owns the lease
+  (strong). `call` holds the lease only for the call. Bound use never activates; it is `revoked`
+  after its incarnation closes. Contract checks happen at redemption, as today.
+- **Publication kinds.** `PublicationInner` carries `kind: Call | Presentation` and its name.
+  Presentation keeps today's `ComponentRef` path. Call needs a cross-incarnation call path: the
+  engine registers a `CallTarget` (a `Send` handle into the provider incarnation's driver, which runs
+  the guest's exported `call(publication, request)`) when it publishes. In C3a, test with an
+  in-process `CallTarget`.
+- **WIT (C3b).** `capabilities.wit` per ADR 024 §9; `micro-lifecycle.initialized { root,
+  publications: list<named-publication> }` replaces `provisions`; export
+  `call(publication, request)`; `presentation-events.mount` gains the publication name.
+  `publish-presentation-component()` becomes `publish-presentation(name)` plus `publish-call(name)`.
+- **Lazy minting from rows.** `CapabilitySession::mint_lazy(endpoint)` exists in C3a. Projection
+  minting for durable rows is wired in C5 together with manifest admission.
+
+## C3a notes carried forward
+- Lazy `RefStatus` mapping: Active→Live; Idle, Initializing, Closing→Dormant; Blocked or unknown→Unavailable;
+  Disabled→Disabled; Faulted→Faulted. A bound ref is Revoked once its publication or recipient closes.
+- A cancelled requester (reply send fails) drops the lease, which queues an idle check, rather than
+  panicking. That is accepted.
+- `Activator::status` mirror is updated only in `Supervisor::set`, so it may show Active for an
+  incarnation that ended outside supervision until the supervisor next observes it. Accepted
+  (status is a snapshot).
+
+## C3b decisions (2026-11-03)
+- WIT package is 0.4.0 (breaking: sync `as-presentation-component` removed).
+- Declared publications reach the engine via `InitialContext.publications` from the caller. C5 derives
+  them from the manifest.
+- Call errors: `capability(capability-error)` for bank failures and `provider(string)` for handler
+  errors. A guest trap during a call is `provider(..)` and closes the incarnation. A provider gone
+  mid-call is `Revoked`, since only a forced disable can cause it.
+- MDK micros publish nothing by name until C6. That is intended.
+
+## Guest concurrency finding (2026-11-04)
+- On `wasm32-wasip3`, wit-bindgen (0.62, unchanged in 0.63) stores the export-task pointer in a libc
+  TLS (`std`) or the `wasip3_context` hook. Our wasi-libc v34 does not swap it per CM task, so a
+  second async export task (`call`, `initialize`, `instance-root.close`) entering while one is
+  suspended asserts in `start_task`. Wasmtime itself allows the re-entry. Upstream LLVM PR #175800
+  moves wasip3 SP/TLS into CM `context.get/set`; whether it is merged, and which rustc/wasi-sdk ship it,
+  is unverified.
+- Baseline committed (C3d): serialize, plus a waits-for graph.
+- Proposed to the operator: an **inbox model**. One long-lived async `serve(inbox: stream<call-request>)`
+  export started after `initialize`; requests are spawned inside that single task; closing the inbox =
+  close (it replaces `instance-root.close()`). This gives concurrent calls and A→B→A today, with no toolchain
+  bump. Requires proving `stream<record>` on our wit-bindgen/Wasmtime pins.
+
+## Writes / materializer (2026-11-04)
+- Registration scopes are the RAII contributor sets: incarnation-scope rows end with the incarnation;
+  installation-scope rows end with uninstall.
+- Missing: ADR 017 §9 host **materializer** with an explicit merge policy (union / grouping / priority /
+  host-ordered LWW / reject collisions). Readers get the raw per-scope union today. Proposed for this PR.
+- ADR 017 §10 field-level causal writer: proposed deferred until a workload needs it (operator to confirm).
+- Out of scope (operator agreed 2026-11-04): node-backed optimism, `dayframe_app`/mobile, browser
+  isolation, browser hop-cost measurement.
+
+## Decision 2026-11-04: guest inbox model (operator approved)
+The guest is an actor with a long-lived main loop: `serve(inbox)` runs for the incarnation, handlers run
+concurrently inside it, and closing the inbox is close. This is the design, not only a workaround:
+wit-bindgen-spawned work is scoped to its export task, so GUI and background work needs a long-lived
+task anyway. Per-call exports may be added back once the wasip3 TLS gap is fixed upstream. The MDK
+hides the loop (authors write `async fn` handlers). Costs we own: per-request cancellation signal,
+backpressure, and per-call attribution. Risk to retire first: `stream<T>` support on the WCMP polyfill.
