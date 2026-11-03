@@ -1,3 +1,4 @@
+use super::IncarnationWake;
 use super::WcmpComponentRef;
 use super::WcmpStoreState;
 pub use super::bindings::townframe::dayframe::capability_bank as cap_wit;
@@ -11,8 +12,11 @@ use clay_collection::ReadLimits;
 use clay_collection::RowEvidence;
 use clay_collection::Version;
 use clay_guest_session::capabilities::CallBinding;
+use clay_guest_session::capabilities::CallError;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityRef;
+use clay_guest_session::capabilities::ContractIdentity;
+use clay_guest_session::capabilities::GuestCallTarget;
 use clay_guest_session::capabilities::PresentationComponent;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::capabilities::RefStatus;
@@ -23,6 +27,7 @@ use clay_guest_session::collections::ProjectionReader;
 use clay_guest_session::collections::ReadFailure;
 use clay_guest_session::collections::RegistrationWriter;
 use clay_guest_session::collections::WriteFailure;
+use std::sync::Arc;
 use std::time::Duration;
 use wcmp::Accessor;
 use wcmp::HasSelf;
@@ -304,6 +309,13 @@ fn value_from_wire(
     })
 }
 
+fn call_error(error: CallError) -> cap_wit::CallError {
+    match error {
+        CallError::Capability(failure) => cap_wit::CallError::Capability(capability_error(failure)),
+        CallError::Provider(message) => cap_wit::CallError::Provider(message),
+    }
+}
+
 fn capability_error(failure: CapabilityFailure) -> cap_wit::CapabilityError {
     match failure {
         CapabilityFailure::ContractMismatch => cap_wit::CapabilityError::ContractMismatch,
@@ -326,14 +338,15 @@ impl cap_wit::Host for WcmpStoreState {
 
     fn publish_call(
         &mut self,
-        _name: String,
-        _contract: cap_wit::Contract,
+        name: String,
+        contract: cap_wit::Contract,
     ) -> wcmp::Result<Result<Resource<PublishedCapability>, cap_wit::CapabilityError>> {
-        todo!(
-            "C3c: a call publication needs a CallTarget that runs the guest's exported `call` \
-             in this incarnation's own store, routed through its driver like the Wasmtime \
-             adapter's GuestCallTarget"
-        )
+        let target = Arc::new(GuestCallTarget::new(name.clone(), self.calls.clone()));
+        let contract = ContractIdentity::new(contract.namespace, contract.name, contract.version);
+        match self.capabilities.publish_call(&name, contract, target) {
+            Ok(lease) => Ok(Ok(self.table.push(lease)?)),
+            Err(failure) => Ok(Err(capability_error(failure))),
+        }
     }
 }
 
@@ -372,32 +385,68 @@ impl cap_wit::HostCapabilityRef for WcmpStoreState {
     }
 }
 
+/// Take a second handle to the table entry `resource` names, so the host import can await a
+/// redemption that may activate a provider while the store (and the guest's own handle) stay
+/// free to move on. The await is wrapped in the incarnation's wake so that the activation
+/// finishing re-drives the store.
+fn shared<T: 'static, R: 'static>(
+    accessor: &Accessor<T, HasSelf<WcmpStoreState>>,
+    resource: &Resource<R>,
+    share: impl FnOnce(&R) -> R,
+) -> (R, Option<Arc<IncarnationWake>>) {
+    accessor.with(|mut access| {
+        let state = access.get();
+        (
+            share(state.table.get(resource).unwrap()),
+            state.collection_wake.clone(),
+        )
+    })
+}
+
+async fn awaited<F: std::future::Future>(
+    wake: Option<Arc<IncarnationWake>>,
+    pending: F,
+) -> F::Output {
+    match wake {
+        Some(wake) => wake.drive(pending).await,
+        None => pending.await,
+    }
+}
+
 impl<T: 'static> cap_wit::HostCapabilityRefWithStore<T> for HasSelf<WcmpStoreState> {
     async fn call(
-        _accessor: &Accessor<T, Self>,
-        _reference: Resource<CapabilityRef>,
-        _request: Vec<u8>,
+        accessor: &Accessor<T, Self>,
+        reference: Resource<CapabilityRef>,
+        request: Vec<u8>,
     ) -> wcmp::Result<Result<Vec<u8>, cap_wit::CallError>> {
-        todo!(
-            "C3c: capability-ref.call is async (CapabilityRef::call); share the reference out of \
-             the table, await it under the incarnation wake, map CallError"
-        )
+        let (reference, wake) = shared(accessor, &reference, CapabilityRef::share);
+        Ok(awaited(wake, reference.call(request))
+            .await
+            .map_err(call_error))
     }
 
     async fn retain_call(
-        _accessor: &Accessor<T, Self>,
-        _reference: Resource<CapabilityRef>,
+        accessor: &Accessor<T, Self>,
+        reference: Resource<CapabilityRef>,
     ) -> wcmp::Result<Result<Resource<CallBinding>, cap_wit::CapabilityError>> {
-        todo!("C3c: capability-ref.retain-call is async (CapabilityRef::retain_call)")
+        let (reference, wake) = shared(accessor, &reference, CapabilityRef::share);
+        match awaited(wake, reference.retain_call()).await {
+            Ok(binding) => accessor.with(|mut access| Ok(Ok(access.get().table.push(binding)?))),
+            Err(failure) => Ok(Err(capability_error(failure))),
+        }
     }
 
     async fn redeem_presentation(
-        _accessor: &Accessor<T, Self>,
-        _reference: Resource<CapabilityRef>,
+        accessor: &Accessor<T, Self>,
+        reference: Resource<CapabilityRef>,
     ) -> wcmp::Result<Result<Resource<PresentationComponent>, cap_wit::CapabilityError>> {
-        todo!(
-            "C3c: capability-ref.redeem-presentation is async (CapabilityRef::redeem_presentation)"
-        )
+        let (reference, wake) = shared(accessor, &reference, CapabilityRef::share);
+        match awaited(wake, reference.redeem_presentation()).await {
+            Ok(component) => {
+                accessor.with(|mut access| Ok(Ok(access.get().table.push(component)?)))
+            }
+            Err(failure) => Ok(Err(capability_error(failure))),
+        }
     }
 }
 
@@ -410,11 +459,14 @@ impl cap_wit::HostCallBinding for WcmpStoreState {
 
 impl<T: 'static> cap_wit::HostCallBindingWithStore<T> for HasSelf<WcmpStoreState> {
     async fn call(
-        _accessor: &Accessor<T, Self>,
-        _binding: Resource<CallBinding>,
-        _request: Vec<u8>,
+        accessor: &Accessor<T, Self>,
+        binding: Resource<CallBinding>,
+        request: Vec<u8>,
     ) -> wcmp::Result<Result<Vec<u8>, cap_wit::CallError>> {
-        todo!("C3c: call-binding.call is async (CallBinding::call)")
+        let (binding, wake) = shared(accessor, &binding, CallBinding::share);
+        Ok(awaited(wake, binding.call(request))
+            .await
+            .map_err(call_error))
     }
 }
 

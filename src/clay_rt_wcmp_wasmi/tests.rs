@@ -663,7 +663,7 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
     let owner = host.start("layout");
     let component = host.publish_component(&owner).unwrap();
     let (mut state, _incoming) =
-        WcmpStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WcmpStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     let mut resources = state
         .grant_components(&vec![component; PresentationHost::MAX_COMPONENT_HANDLES])
         .unwrap();
@@ -730,7 +730,7 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
     };
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [31, 32]);
     let (mut state, _incoming) =
-        WcmpStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WcmpStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     state.collections = CollectionSession::new(host.clone(), owner, limits);
     state.table.set_max_capacity(limits.writers);
     let first = state
@@ -850,7 +850,7 @@ fn registration_writer_table_capacity_failure_releases_its_permit() {
     let owner = host.start("writer-table-capacity");
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [33, 34]);
     let (mut state, _incoming) =
-        WcmpStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WcmpStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     state.table.set_max_capacity(1);
     let first = state
         .table
@@ -904,7 +904,7 @@ fn registration_writer_table_entries_revoke_without_affecting_other_instances() 
     );
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [35, 36]);
     let (mut state, _incoming) =
-        WcmpStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WcmpStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let writer = state
         .table
         .push(state.collections.grant_writer(&registrations).unwrap())
@@ -1020,7 +1020,7 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
     let owner = host.start("ingress-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WcmpStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WcmpStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(WcmpPlacement::new(
@@ -1057,7 +1057,7 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     let owner = host.start("surface-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WcmpStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WcmpStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(WcmpPlacement::new(
@@ -1166,7 +1166,7 @@ async fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers
         CapabilitySession::new(host.clone(), provider_instance, CapabilityLimits::default());
     let lease = provider.publish_component("view", component).unwrap();
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [41, 42]);
-    let (mut writer_state, _writer_incoming) = WcmpStoreState::new(
+    let (mut writer_state, _writer_incoming) = WcmpStoreState::detached(
         host.clone(),
         host.start("writer"),
         DocumentLimits::default(),
@@ -1195,13 +1195,13 @@ async fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers
     assert_eq!(stored.capabilities.len(), 1);
     assert_eq!(stored.capabilities[0], lease.publication());
 
-    let (mut reader_a, _reader_a_incoming) = WcmpStoreState::new(
+    let (mut reader_a, _reader_a_incoming) = WcmpStoreState::detached(
         host.clone(),
         host.start("reader-a"),
         DocumentLimits::default(),
     )
     .unwrap();
-    let (mut reader_b, _reader_b_incoming) = WcmpStoreState::new(
+    let (mut reader_b, _reader_b_incoming) = WcmpStoreState::detached(
         host.clone(),
         host.start("reader-b"),
         DocumentLimits::default(),
@@ -1331,7 +1331,7 @@ async fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_leas
     );
     let lease = provider.publish_component("view", component).unwrap();
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [43, 44]);
-    let (mut writer_state, _writer_incoming) = WcmpStoreState::new(
+    let (mut writer_state, _writer_incoming) = WcmpStoreState::detached(
         host.clone(),
         host.start("writer"),
         DocumentLimits::default(),
@@ -1357,7 +1357,7 @@ async fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_leas
         .unwrap();
     let stored = registrations.snapshot().into_values().next().unwrap().value;
 
-    let (mut reader, _reader_incoming) = WcmpStoreState::new(
+    let (mut reader, _reader_incoming) = WcmpStoreState::detached(
         host.clone(),
         host.start("reader"),
         DocumentLimits::default(),
@@ -1460,7 +1460,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
         CapabilitySession::new(host.clone(), provider_instance, CapabilityLimits::default());
     let lease = provider.publish_presentation("view").unwrap();
     let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [45, 46]);
-    let (mut state, _incoming) = WcmpStoreState::new(
+    let (mut state, _incoming) = WcmpStoreState::detached(
         host.clone(),
         host.start("writer"),
         DocumentLimits::default(),
@@ -1542,7 +1542,7 @@ async fn capability_table_resources_release_session_limits_on_drop() {
     let host = Host::new();
     let owner = host.start("capability-limits");
     let (mut state, _incoming) =
-        WcmpStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WcmpStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     state.capabilities = CapabilitySession::new(
         host.clone(),
         owner,

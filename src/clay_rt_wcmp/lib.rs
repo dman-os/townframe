@@ -16,7 +16,11 @@ pub use clay_guest_session::InitialContext;
 pub use clay_guest_session::InitializationFailure;
 use clay_guest_session::Limits as DocumentLimits;
 use clay_guest_session::Work;
+use clay_guest_session::capabilities::CallError;
+use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::capabilities::GuestCall;
+use clay_guest_session::capabilities::InFlightCall;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
@@ -38,6 +42,7 @@ use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
@@ -51,6 +56,7 @@ use wcmp::Linker;
 use wcmp::Resource;
 use wcmp::ResourceAny;
 use wcmp::ResourceTable;
+use wcmp::Stalled;
 use wcmp::Store;
 
 #[derive(Debug, thiserror::Error)]
@@ -103,14 +109,37 @@ pub struct WcmpStoreState {
     pub capabilities: clay_guest_session::capabilities::CapabilitySession,
     collection_limits: CollectionLimits,
     collection_wake: Option<Arc<IncarnationWake>>,
+    /// Where this incarnation's call publications queue their requests (see [`GuestCall`]).
+    calls: mpsc::UnboundedSender<GuestCall>,
+    /// How many call handlers are in the store, including those whose caller gave up.
+    calls_in_flight: Arc<AtomicUsize>,
     pub presentation: clay_guest_session::PresentationHost,
 }
 
+#[cfg(feature = "test-utils")]
 impl WcmpStoreState {
-    pub fn new(
+    /// A store state for tests that drive host imports directly, with nothing to serve its
+    /// call publications: the call queue's receiving end is dropped.
+    pub fn detached(
         host: Host,
         instance: Instance,
         limits: DocumentLimits,
+    ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
+        Self::new(host, instance, limits, mpsc::unbounded_channel().0)
+    }
+
+    /// How many call handlers are in the store.
+    pub fn calls_in_flight(&self) -> usize {
+        self.calls_in_flight.load(Ordering::Acquire)
+    }
+}
+
+impl WcmpStoreState {
+    fn new(
+        host: Host,
+        instance: Instance,
+        limits: DocumentLimits,
+        calls: mpsc::UnboundedSender<GuestCall>,
     ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
         let (documents, incoming) = DocumentSession::new(host.clone(), instance.clone(), limits)?;
         let collection_limits = CollectionLimits::default();
@@ -128,6 +157,8 @@ impl WcmpStoreState {
                 capabilities,
                 collection_limits,
                 collection_wake: None,
+                calls,
+                calls_in_flight: Arc::new(AtomicUsize::new(0)),
                 presentation: clay_guest_session::PresentationHost::new(host, instance),
             },
             incoming,
@@ -395,20 +426,13 @@ impl WcmpPackage {
             linker,
         })
     }
-
-    fn instantiate_with_incoming(
-        &self,
-        host: &Host,
-        instance: Instance,
-    ) -> Result<(WcmpStoreState, mpsc::Receiver<Work>), ActivationError> {
-        WcmpStoreState::new(host.clone(), instance, DocumentLimits::default())
-            .map_err(ActivationError::from)
-    }
 }
 
 struct WcmpIncarnation {
     store: Store<WcmpStoreState>,
-    client: MicroClient,
+    /// Shared so a call task can own a handle to the `call` export beyond a borrow of the
+    /// incarnation.
+    client: Arc<MicroClient>,
     wake: Arc<IncarnationWake>,
     waker: Waker,
     /// The guest's `instance-root`, held from a successful `initialize` until [`Self::close`].
@@ -416,11 +440,67 @@ struct WcmpIncarnation {
     /// Publication leases of the publications `initialize` returned, by name. Dropping one
     /// revokes the publication and every consumer proxy derived from it.
     publications: BTreeMap<String, PublishedCapability>,
+    /// Set by a call task whose `call` export trapped, so the next tick fails the incarnation.
+    /// A spawned task's output is not an error of the store the way Wasmtime's is.
+    call_trapped: Arc<AtomicBool>,
 }
 
 impl WcmpIncarnation {
+    /// One bounded burst of the store's event loop, which advances every call task in it.
+    /// Sync entries (`mount`, `dispatch`, document deliveries) borrow the store between bursts,
+    /// so a call suspended on something external never holds the incarnation. The store's
+    /// waker is a no-op: whatever a task awaits wakes the incarnation itself (see
+    /// [`IncarnationWake::drive`]).
     async fn tick(&mut self) -> wcmp::Result<()> {
-        self.store.run_until_stalled()
+        // A guest that yielded is still runnable but the drive returns so the other arms of the
+        // driver get their turn: ask for another tick instead of looping here.
+        if self.store.run_until_stalled()? == Stalled::Yielded {
+            self.wake.wake_by_ref();
+        }
+        if self.call_trapped.load(Ordering::Acquire) {
+            return Err(wcmp::Error::Internal {
+                message: "guest trapped during a call".into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Start the guest's exported `call` for one queued request as a task in this
+    /// incarnation's store and return without waiting for it. Any number of calls may be in
+    /// flight: each is a component-model task of its own, and the guest keeps their state apart
+    /// (see `clay_mdk`'s task hook). The reply is sent from the task when the handler returns;
+    /// dropping the store first (a trap, a forced close) drops the task and with it the reply,
+    /// which the caller reads as `Revoked`. A caller that gave up just loses the reply: the
+    /// host cannot cancel a guest task.
+    fn start_call(&mut self, call: GuestCall) -> wcmp::Result<()> {
+        let GuestCall {
+            publication,
+            request,
+            reply,
+        } = call;
+        let client = Arc::clone(&self.client);
+        let in_flight = InFlightCall::start(&self.store.data().calls_in_flight);
+        let trapped = Arc::clone(&self.call_trapped);
+        let wake = Arc::clone(&self.wake);
+        // The handle is dropped on purpose: dropping it cancels nothing.
+        self.store.spawn(move |accessor| async move {
+            let _in_flight = in_flight;
+            match client
+                .townframe_dayframe_micro_lifecycle()
+                .call_call(&accessor, publication, request)
+                .await
+            {
+                Ok(handled) => drop(reply.send(handled.map_err(CallError::Provider))),
+                Err(trap) => {
+                    drop(reply.send(Err(CallError::Provider(format!(
+                        "guest trapped during call: {trap}"
+                    )))));
+                    trapped.store(true, Ordering::Release);
+                    wake.wake_by_ref();
+                }
+            }
+        })?;
+        Ok(())
     }
 
     /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
@@ -474,7 +554,13 @@ impl WcmpRuntime {
         package: &WcmpPackage,
         context: InitialContext,
     ) -> Result<(Self, impl Future<Output = ()> + 'static), ActivationError> {
-        let (mut state, incoming) = package.instantiate_with_incoming(host, instance.clone())?;
+        let (calls, mut incoming_calls) = mpsc::unbounded_channel();
+        let (mut state, incoming) = WcmpStoreState::new(
+            host.clone(),
+            instance.clone(),
+            DocumentLimits::default(),
+            calls,
+        )?;
         let wake = Arc::new(IncarnationWake::new());
         let waker = Waker::from(Arc::clone(&wake));
         state.collection_wake = Some(Arc::clone(&wake));
@@ -491,11 +577,12 @@ impl WcmpRuntime {
                 })?;
         let mut active = WcmpIncarnation {
             store,
-            client,
+            client: Arc::new(client),
             wake,
             waker,
             root: None,
             publications: BTreeMap::new(),
+            call_trapped: Arc::new(AtomicBool::new(false)),
         };
         let (root, leases) = documents::initialize(&mut active, context).await?;
         active.root = Some(root);
@@ -535,6 +622,22 @@ impl WcmpRuntime {
                 };
                 tokio::select! {
                     () = &mut documents => return,
+                    Some(call) = incoming_calls.recv() => {
+                        // Start the handler as a task in the provider's own store and go back
+                        // to the loop: the wake arm drives it in bounded bursts, so this
+                        // incarnation's sync entries and other calls are never held up
+                        // behind a handler that is suspended on something external.
+                        let mut guard = pump_incarnation.borrow_mut();
+                        let Some(active) = guard.as_mut() else {
+                            // Closing or closed: the guest half ended before this call began.
+                            drop(call.reply.send(Err(CapabilityFailure::Revoked.into())));
+                            return;
+                        };
+                        active
+                            .start_call(call)
+                            .expect("store spawns the call task");
+                        active.wake.wake_by_ref();
+                    }
                     () = wake.wait() => {
                         let trapped = {
                             let mut guard = pump_incarnation.borrow_mut();

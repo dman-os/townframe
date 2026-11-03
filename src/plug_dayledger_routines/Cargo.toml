@@ -20,4 +20,4 @@ daybook_types = { workspace = true, features = ["wit"] }
 serde_json.workspace = true
 color-eyre.workspace = true
 url.workspace = true
-wit-bindgen = { workspace = true, features = ["async", "macros", "realloc"] }
+wit-bindgen = { workspace = true, features = ["async", "bitflags", "macros", "realloc"] }
