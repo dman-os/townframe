@@ -28,9 +28,10 @@ pub struct ScopeId(pub u64);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OperationId(pub u64);
 
-/// Host-minted identity of a registration scope within its collection. Rows are keyed
-/// by `(RegistrationScopeId, local key)`; the identity carries no mutation authority.
-/// Closing the scope owner withdraws its rows, independently of writer-handle lifetime.
+/// Host-minted identity of a registration scope within its collection. It carries no
+/// mutation authority and is not stable across restarts; the stable identity of a
+/// writer is its [`WriterId`]. Closing the scope owner retracts its candidates,
+/// independently of writer-handle lifetime.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RegistrationScopeId(pub(crate) u64);
 
@@ -38,6 +39,53 @@ impl RegistrationScopeId {
     pub fn get(self) -> u64 {
         self.0
     }
+}
+
+/// A stable, ordered writer identity (for example a micro id), supplied when a scope is
+/// created. It is the tie-break between concurrent writes with equal lamports, so it
+/// must survive restarts for durable scopes.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WriterId(std::sync::Arc<[u8]>);
+
+impl WriterId {
+    pub fn new(bytes: impl AsRef<[u8]>) -> Self {
+        Self(bytes.as_ref().into())
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The causal position of one write to one key. Stamps order lamport first, then writer
+/// id; the highest stamp among a key's live candidates is the key's winner.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Stamp {
+    pub lamport: u64,
+    pub writer: WriterId,
+}
+
+/// A projected value together with the stamp of the write that produced it, so a reader
+/// can pass the stamp back as a [`WriteBasis`]. The projection's `row_version` is only a
+/// feed position: a recomputed winner may carry an older stamp under a newer version.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Stamped<V> {
+    pub stamp: Stamp,
+    pub value: V,
+}
+
+/// What a writer claims to have seen when it writes a key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WriteBasis {
+    /// No claim (concurrent creation): lamport `1`, always accepted.
+    Concurrent,
+    /// The writer saw this stamp: lamport is one above it, always accepted. A stamp
+    /// from a replica that is behind simply loses to a higher one.
+    Observed(Stamp),
+    /// Accepted only if the current winner is exactly this stamp (`None`: the key is
+    /// absent, whether never written or deleted). Lamport is one above the current
+    /// winner, tombstones included, so the write supersedes what it compared against.
+    CompareAndSet(Option<Stamp>),
 }
 
 /// An opaque read position in one projection generation.
@@ -139,11 +187,11 @@ pub enum AcquireError {
     UnauthorizedSelector,
 }
 
-/// Why a registration mutation was refused. `current` is the row version the collection
-/// actually holds, so the writer can rebase and retry; `None` means the row is absent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Why a registration mutation was refused. `current` is the stamp of the visible
+/// winner, so the writer can rebase and retry; `None` means the key is absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MutationError {
-    Conflict { current: Option<Version> },
+    Conflict { current: Option<Stamp> },
     Closed,
 }
 
