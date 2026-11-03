@@ -30,6 +30,9 @@ use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::LayoutKind;
+use big_cabinet_core::drawer::protocol::ResolveDrawerSuccessor;
+use big_cabinet_core::drawer::protocol::SetDrawerSuccessor;
+use big_cabinet_core::drawer::protocol::SuccessorResolution;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 use big_repo::BigRepo;
@@ -438,6 +441,22 @@ impl Node {
             .drawer_id
     }
 
+    async fn self_doc(&self, actor: &Actor, home: &DrawerId, name: &str) -> DrawerId {
+        let doc_id = self.create_doc(actor, home, name).await.unwrap();
+        self.drawers()
+            .call(
+                RequestContext::root(),
+                CreateDrawer {
+                    capability: self.drawer_capability(actor, &[home]).await.unwrap(),
+                    command: command(&format!("declare {name}")),
+                    layout: CreateLayout::SelfDoc { doc_id },
+                },
+            )
+            .await
+            .unwrap()
+            .drawer_id
+    }
+
     async fn create_doc(
         &self,
         actor: &Actor,
@@ -613,7 +632,7 @@ impl Node {
             .state
             .ancestors(state::ScopeTarget::Doc(doc))
             .await?;
-        roots.insert(drawer.clone(), Access::Admin);
+        roots.insert(drawer.clone(), state::Reach::ordinary(Access::Admin));
         let mut scope = DrawerScope::default();
         for root in roots.keys() {
             if let Some((access, _)) = self
@@ -740,6 +759,42 @@ impl Node {
             .unwrap();
     }
 
+    async fn set_successor(
+        &self,
+        actor: &Actor,
+        drawer: &DrawerId,
+        successor: &DrawerId,
+    ) -> Result<(), DrawersError> {
+        self.drawers()
+            .call(
+                RequestContext::root(),
+                SetDrawerSuccessor {
+                    capability: self.drawer_capability(actor, &[drawer]).await?,
+                    drawer_id: drawer.clone(),
+                    successor: successor.clone(),
+                },
+            )
+            .await
+            .map_err(op)
+    }
+
+    async fn resolve_successor(
+        &self,
+        capability: CapId,
+        drawer: &DrawerId,
+    ) -> Result<SuccessorResolution, DrawersError> {
+        self.drawers()
+            .call(
+                RequestContext::root(),
+                ResolveDrawerSuccessor {
+                    capability,
+                    drawer_id: drawer.clone(),
+                },
+            )
+            .await
+            .map_err(op)
+    }
+
     async fn forget(&self, actor: &Actor, drawer: &DrawerId) {
         self.drawers()
             .call(
@@ -833,7 +888,8 @@ fn docs_op(error: ClientError<DocsError>) -> DocsError {
     op(error)
 }
 
-fn groups_of(view: &DrawerView) -> (GroupKey, GroupKey) {
+/// The three groups a grouped view names: (public meta, docs, sensitive meta).
+fn groups_of(view: &DrawerView) -> (GroupKey, GroupKey, GroupKey) {
     assert_eq!(
         view.layout.known(),
         Some(LayoutKind::SingleGroup),
@@ -843,7 +899,7 @@ fn groups_of(view: &DrawerView) -> (GroupKey, GroupKey) {
         .descriptor
         .groups()
         .expect("a single-group descriptor names its groups");
-    (groups.meta_group, groups.docs_group)
+    (groups.meta_group, groups.docs_group, groups.sensitive_group)
 }
 
 mod delegation;

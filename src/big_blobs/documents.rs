@@ -6,10 +6,12 @@ use crate::encrypt::JwkOct;
 use crate::encrypt::MapKeySource;
 use crate::encrypt::MasterKey;
 use crate::encrypt::Padding;
+#[cfg(test)]
 use crate::encrypt::drop_pair_tags;
 use crate::encrypt::ensure_stored;
 use crate::encrypt::get_decrypted;
 use crate::pair_roots::PairRoots;
+use crate::pair_roots::VirtualPair;
 use automerge::ChangeHash;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
@@ -714,39 +716,28 @@ impl DocumentBlobs {
                 ciphertext: Some(ciphertext),
             }));
         }
-        if cipher_present {
-            self.provider
-                .register_pair_with_provenance(
-                    &self.store,
-                    &self.roots,
-                    c_hash,
-                    &key,
-                    p_hash,
+        self.provider
+            .register_local_pair(
+                &self.store,
+                &self.roots,
+                VirtualPair {
+                    cipher: c_hash,
+                    plaintext: p_hash,
+                    key,
                     encoding,
-                    &doc_id.to_string(),
-                    "main",
-                )
-                .await?;
-        } else {
-            let actual = self
-                .provider
-                .install_with_provenance(
-                    &self.store,
-                    &self.roots,
-                    &key,
-                    p_hash,
-                    encoding,
-                    &doc_id.to_string(),
-                    "main",
-                )
-                .await?;
-            if actual != c_hash {
-                drop_pair_tags(&self.store, actual).await?;
-                self.provider.remove(&actual);
-                self.roots.clear(actual).await?;
-                eyre::bail!("reconstructed ciphertext differs from the accepted CipherBlob digest");
-            }
-        }
+                    source: serde_json::json!({
+                        "kind": "accepted-cipher-blob",
+                        "document": doc_id,
+                        "datum": cipher_key,
+                        "heads": cipher_version.heads,
+                        "keyRef": cipher.key_ref,
+                        "keyRefHeads": cipher.key_ref_heads,
+                    })
+                    .to_string(),
+                    claimed_by: Some((doc_id.to_string(), "main".to_owned())),
+                },
+            )
+            .await?;
         eyre::ensure!(
             self.ciphertext_length(c_hash).await? == cipher.representation.length_octets,
             "reconstructed ciphertext length differs from CipherBlob metadata"

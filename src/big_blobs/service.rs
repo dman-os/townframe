@@ -1,4 +1,5 @@
 use crate::encrypt::CipherBlobProvider;
+use crate::ownership::ByteOwnership;
 use crate::pair_roots::PairRoots;
 use big_blobs_core::BlobId;
 use big_blobs_core::protocol::*;
@@ -35,6 +36,37 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::Notify;
 use utils_rs::prelude::Res;
+
+#[derive(Clone)]
+pub struct ImportedBlob {
+    pub info: BlobInfo,
+    staging_id: [u8; 32],
+}
+
+impl ImportedBlob {
+    pub(crate) fn new(info: BlobInfo) -> Self {
+        Self {
+            info,
+            staging_id: rand::random(),
+        }
+    }
+
+    pub(crate) fn owner(&self) -> String {
+        format!(
+            "upload:{}",
+            data_encoding::HEXLOWER.encode(&self.staging_id)
+        )
+    }
+}
+
+impl std::fmt::Debug for ImportedBlob {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ImportedBlob")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
+}
 
 pub enum Storage {
     Memory,
@@ -79,6 +111,7 @@ pub struct BlobService {
     store: Store,
     pub provider: Arc<CipherBlobProvider>,
     pub roots: PairRoots,
+    pub(crate) ownership: ByteOwnership,
     authority: Client<AuthorityProtocol>,
     namespace: Namespace,
     availability: SqliteKeyedFrontier<AvailabilityCodec>,
@@ -143,17 +176,24 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
     };
     let prepared = async {
         let roots = PairRoots::boot(config.sql.clone()).await?;
+        provider.restore(&store, &roots).await?;
         let availability = SqliteKeyedFrontier::new(
-            config.sql,
+            config.sql.clone(),
             "big-blobs-availability-v1",
             AvailabilityCodec,
             Arc::new(Notify::new()),
         )
         .await?;
-        Ok::<_, utils_rs::prelude::eyre::Report>((roots, availability))
+        let (ownership, ownership_stop) =
+            ByteOwnership::boot(config.sql, store.clone(), Arc::clone(&provider)).await?;
+        if let Err(error) = roots.bind_ownership().await {
+            ownership_stop.stop().await;
+            return Err(error);
+        }
+        Ok::<_, utils_rs::prelude::eyre::Report>((roots, ownership, availability, ownership_stop))
     }
     .await;
-    let (roots, availability) = match prepared {
+    let (roots, ownership, availability, ownership_stop) = match prepared {
         Ok(value) => value,
         Err(error) => {
             store.shutdown().await?;
@@ -164,6 +204,7 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         store,
         provider,
         roots,
+        ownership,
         authority: config.authority,
         namespace: config.namespace,
         availability,
@@ -190,7 +231,7 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
             host,
             client,
         },
-        host_stop.then(store_stop),
+        host_stop.then(ownership_stop).then(store_stop),
     ))
 }
 
@@ -241,10 +282,20 @@ impl BlobService {
                 .status(Hash::from(blob_id.to_bytes32()))
                 .await?
             {
-                BlobStatus::Complete { size } => Some(BlobInfo {
-                    blob_id: *blob_id,
-                    length_octets: size,
-                }),
+                BlobStatus::Complete { size } => {
+                    let hash = Hash::from(blob_id.to_bytes32());
+                    use iroh_blobs::store::virtual_blob::Provider as _;
+                    if self.store.blobs().sync_reader(hash).await?.is_some()
+                        || self.provider.reader_for(&hash).is_some()
+                    {
+                        Some(BlobInfo {
+                            blob_id: *blob_id,
+                            length_octets: size,
+                        })
+                    } else {
+                        None
+                    }
+                }
                 BlobStatus::NotFound | BlobStatus::Partial { .. } => None,
             },
         )
@@ -274,29 +325,34 @@ impl BlobService {
         ))
     }
 
-    pub async fn import_stream<S>(&self, stream: S) -> Res<BlobInfo>
+    pub async fn import_stream<S>(&self, stream: S) -> Res<ImportedBlob>
     where
         S: Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
     {
         let (tag, hash) = crate::encrypt::ensure_stored(&self.store, stream).await?;
-        self.store
-            .tags()
-            .set(format!("held:{hash}"), iroh_blobs::HashAndFormat::raw(hash))
-            .await?;
         let blob_id = BlobId::new(*hash.as_bytes());
+        let imported = ImportedBlob::new(
+            self.stat(&blob_id)
+                .await?
+                .expect("an imported blob is complete"),
+        );
+        self.ownership.stage(imported.clone(), tag).await?;
         self.announce(blob_id).await?;
-        let info = self
-            .stat(&blob_id)
-            .await?
-            .expect("an imported blob is complete");
-        drop(tag);
-        Ok(info)
+        Ok(imported)
     }
 
-    pub async fn release_upload(&self, blob_id: &BlobId) -> Res<()> {
-        let hash = Hash::from(blob_id.to_bytes32());
-        self.store.tags().delete(format!("held:{hash}")).await?;
-        Ok(())
+    pub async fn adopt_import(
+        &self,
+        imported: &ImportedBlob,
+        document: &big_cabinet_core::DocId,
+    ) -> Res<()> {
+        self.ownership
+            .adopt(imported, &format!("document:retention:{document}"))
+            .await
+    }
+
+    pub async fn release_import(&self, imported: &ImportedBlob) -> Res<()> {
+        self.ownership.release_import(imported).await
     }
 }
 
@@ -329,6 +385,7 @@ impl Handler<PutBlob> for BlobService {
             .import_stream(stream)
             .await
             .map_err(storage_error)?
+            .info
             .into())
     }
 }
@@ -397,3 +454,6 @@ impl Handler<StatBlob> for BlobService {
             .into())
     }
 }
+
+#[cfg(test)]
+mod tests;

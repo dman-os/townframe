@@ -3263,7 +3263,7 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
         .sync_obj(
             client_conn.peer_id(),
             doc_id.clone(),
-            Vec::new(),
+            Default::default(),
             remote_payload.clone(),
         )
         .await?;

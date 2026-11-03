@@ -504,7 +504,7 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
         &backend,
         pair.left().peer_id(),
         doc_id.clone(),
-        vec![crate::seds_part_id()],
+        [(crate::seds_part_id(), revoked_cursor)].into(),
         None,
     )
     .await?;

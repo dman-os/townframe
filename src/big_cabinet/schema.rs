@@ -26,6 +26,7 @@ use big_cabinet_core::drawer::DrawerChildEntry;
 use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::drawer::DrawerMetaDoc;
 use big_cabinet_core::drawer::DrawerRoster;
+use big_cabinet_core::drawer::DrawerSuccessor;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 use big_cabinet_core::drawer::SelfDocLayout;
 use big_cabinet_core::drawer::SingleGroupLayout;
@@ -56,6 +57,8 @@ static CORE: LazyLock<Universe> = LazyLock::new(|| {
             .expect("drawer meta doc is a well-formed datum declaration"),
         Declaration::of::<KnownDrawerEntry>()
             .expect("known drawer entry is a well-formed datum declaration"),
+        Declaration::of::<DrawerSuccessor>()
+            .expect("drawer successor is a well-formed datum declaration"),
     ])
 });
 

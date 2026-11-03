@@ -2,6 +2,7 @@
 //! shared with another node or agent, as opposed to a local actor (`GrantDrawer`).
 
 use super::add_child::meta_access;
+use super::add_child::sensitive_access;
 use super::ledger::Op;
 use super::*;
 use crate::doc::pipeline::digest;
@@ -36,13 +37,16 @@ impl Core {
 }
 
 /// A request digest as a command-safe suffix.
-fn hex_digest(digest: &[u8; 32]) -> String {
+pub(super) fn hex_digest(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 impl Core {
-    /// Both memberships an invite establishes: the docs group at the level, the meta group at
-    /// the level that lets the principal read the canonical roster. Idempotent in Keyhive.
+    /// All three memberships an invite establishes: the docs group at the level, the public
+    /// meta group at the level that lets the principal read the canonical roster, and the
+    /// sensitive meta group at the level itself — withheld entirely for a `Relay` principal,
+    /// whose role is to carry ciphertext without reading plaintext inventories (ADR 026 §7).
+    /// Idempotent in Keyhive.
     pub(crate) async fn invite_principal(
         &self,
         _context: &RequestContext,
@@ -50,7 +54,7 @@ impl Core {
         principal: &Principal,
         access: Access,
     ) -> Result<(), DrawersError> {
-        let (meta, docs) = self.groups(drawer_id).await?;
+        let (meta, docs, sensitive) = self.groups(drawer_id).await?;
         let principal = self.principal(principal).await?;
         self.big_repo
             .add_member_to_group(principal.clone(), &docs, keyhive_access(access))
@@ -59,9 +63,28 @@ impl Core {
         #[cfg(test)]
         self.crash_at(super::CrashPoint::DocsMembershipAdded)?;
         self.big_repo
-            .add_member_to_group(principal, &meta, keyhive_access(meta_access(access)))
+            .add_member_to_group(
+                principal.clone(),
+                &meta,
+                keyhive_access(meta_access(access)),
+            )
             .await
-            .map_err(keyhive_error)
+            .map_err(keyhive_error)?;
+        match sensitive_access(access) {
+            Some(level) => self
+                .big_repo
+                .add_member_to_group(principal, &sensitive, keyhive_access(level))
+                .await
+                .map_err(keyhive_error),
+            None => {
+                // A Relay invite must leave no sensitive membership behind: an earlier
+                // Read+ invite, or a widening link, put the principal in that group.
+                self.big_repo
+                    .remove_member_from_group(principal, &sensitive)
+                    .await
+                    .map_err(keyhive_error)
+            }
+        }
     }
 
     pub(crate) async fn revoke_principal_membership(
@@ -70,14 +93,18 @@ impl Core {
         drawer_id: &DrawerId,
         principal: &Principal,
     ) -> Result<(), DrawersError> {
-        let (meta, docs) = self.groups(drawer_id).await?;
+        let (meta, docs, sensitive) = self.groups(drawer_id).await?;
         let principal = self.principal(principal).await?;
         self.big_repo
             .remove_member_from_group(principal.clone(), &docs)
             .await
             .map_err(keyhive_error)?;
         self.big_repo
-            .remove_member_from_group(principal, &meta)
+            .remove_member_from_group(principal.clone(), &meta)
+            .await
+            .map_err(keyhive_error)?;
+        self.big_repo
+            .remove_member_from_group(principal, &sensitive)
             .await
             .map_err(keyhive_error)
     }

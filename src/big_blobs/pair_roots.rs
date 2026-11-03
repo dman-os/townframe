@@ -29,9 +29,22 @@
 //! Releasing never deletes bytes: dropping the two tags hands the pair back to
 //! the store's own GC, which reclaims exactly what nothing else roots.
 
+use crate::encrypt::EncodingParams;
+use crate::encrypt::MasterKey;
+use crate::encrypt::Padding;
 use crate::interlude::*;
+use big_blobs_core::BlobId;
 
 use iroh_blobs::Hash;
+
+pub(crate) struct VirtualPair {
+    pub cipher: Hash,
+    pub plaintext: Hash,
+    pub key: MasterKey,
+    pub encoding: EncodingParams,
+    pub source: String,
+    pub claimed_by: Option<(String, String)>,
+}
 
 /// The durable root record for `ct:<C>`/`pt:<C>` pairs.
 ///
@@ -39,6 +52,7 @@ use iroh_blobs::Hash;
 #[derive(Clone)]
 pub struct PairRoots {
     sql: Database,
+    ownership_bound: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One ledger row a boot has to resolve.
@@ -59,23 +73,225 @@ impl PairRoots {
     /// over the same `Database`.
     pub async fn boot(sql: Database) -> Res<Self> {
         Self::init_schema(&sql).await?;
-        Ok(Self { sql })
+        Ok(Self {
+            sql,
+            ownership_bound: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
     }
 
     async fn init_schema(sql: &Database) -> Res<()> {
         sql.apply_migrations(
             "big_blobs_pair_roots_migrations",
-            &[sqlite_rs::Migration {
-                version: 1,
-                name: "blob_pair_root",
-                sql: "CREATE TABLE IF NOT EXISTS blob_pair_root (
+            &[
+                sqlite_rs::Migration {
+                    version: 1,
+                    name: "blob_pair_root",
+                    sql: "CREATE TABLE IF NOT EXISTS blob_pair_root (
                           cipher_hash TEXT NOT NULL PRIMARY KEY
                         , doc_id TEXT
                         , branch_path TEXT
                       ) STRICT;",
-            }],
+                },
+                sqlite_rs::Migration {
+                    version: 2,
+                    name: "local_virtual_pairs",
+                    sql: "CREATE TABLE big_blobs_virtual_pairs (
+                              cipher_hash TEXT PRIMARY KEY NOT NULL
+                            , digest TEXT UNIQUE NOT NULL
+                            , plaintext_hash TEXT NOT NULL
+                            , master_key BLOB NOT NULL CHECK (length(master_key) = 32)
+                            , record_size INTEGER NOT NULL
+                            , padding TEXT NOT NULL CHECK (padding IN ('minimal', 'record'))
+                            , source TEXT NOT NULL
+                          ) STRICT;",
+                },
+            ],
         )
         .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn bind_ownership(&self) -> Res<bool> {
+        use std::sync::atomic::Ordering;
+
+        if self.ownership_bound.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        if self.sql.query(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'big_blobs_byte_dependencies'",
+            (),
+        ).await?.optional::<i64>()?.is_none() {
+            return Ok(false);
+        }
+        self.sql
+            .execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS big_blobs_virtual_pair_dependency_release
+             AFTER DELETE ON big_blobs_byte_dependencies
+             BEGIN
+                 DELETE FROM big_blobs_virtual_pairs WHERE digest = OLD.digest;
+             END;
+             CREATE TRIGGER IF NOT EXISTS big_blobs_virtual_pair_preclaim_release
+             AFTER DELETE ON blob_pair_root
+             WHEN NOT EXISTS (
+                 SELECT 1
+                   FROM big_blobs_virtual_pairs AS pair
+                   JOIN big_blobs_byte_dependencies AS dependency ON dependency.digest = pair.digest
+                  WHERE pair.cipher_hash = OLD.cipher_hash
+             )
+             BEGIN
+                 DELETE FROM big_blobs_virtual_pairs WHERE cipher_hash = OLD.cipher_hash;
+             END;",
+            )
+            .await?;
+        self.ownership_bound.store(true, Ordering::Release);
+        Ok(true)
+    }
+
+    pub(crate) async fn record_virtual(&self, pair: &VirtualPair) -> Res<()> {
+        self.bind_ownership().await?;
+        let tx = self.sql.begin_write().await?;
+        let cipher = pair.cipher.to_hex().to_string();
+        let changed = tx
+            .execute(
+                "INSERT INTO big_blobs_virtual_pairs
+                 (cipher_hash, digest, plaintext_hash, master_key, record_size, padding, source)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (cipher_hash) DO UPDATE SET source = excluded.source
+             WHERE plaintext_hash = excluded.plaintext_hash
+               AND master_key = excluded.master_key
+               AND record_size = excluded.record_size
+               AND padding = excluded.padding",
+                (
+                    cipher.as_str(),
+                    BlobId::new(*pair.cipher.as_bytes()).to_string(),
+                    pair.plaintext.to_hex().to_string(),
+                    pair.key.0.as_slice(),
+                    i64::try_from(pair.encoding.record_size)?,
+                    match pair.encoding.padding {
+                        Padding::Minimal => "minimal",
+                        Padding::Record => "record",
+                    },
+                    pair.source.as_str(),
+                ),
+            )
+            .await?;
+        eyre::ensure!(
+            changed.rows_affected == 1,
+            "virtual ciphertext binding changed"
+        );
+        tx.execute(
+            "INSERT OR IGNORE INTO blob_pair_root (cipher_hash) VALUES (?)",
+            (cipher.as_str(),),
+        )
+        .await?;
+        if let Some((document, branch)) = &pair.claimed_by {
+            tx.execute(
+                "UPDATE blob_pair_root
+                    SET doc_id = ?
+                      , branch_path = ?
+                  WHERE cipher_hash = ?",
+                (document.as_str(), branch.as_str(), cipher.as_str()),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn virtual_pairs(&self) -> Res<Vec<(VirtualPair, bool, bool, bool)>> {
+        let bound = self.bind_ownership().await?;
+        let owned = if bound {
+            "EXISTS (SELECT 1 FROM big_blobs_byte_owners WHERE digest = pair.digest)"
+        } else {
+            "0"
+        };
+        let managed_pin = if bound {
+            "EXISTS (SELECT 1 FROM big_blobs_byte_pin_roots WHERE digest = pair.digest)"
+        } else {
+            "0"
+        };
+        let rows = self
+            .sql
+            .query(
+                &format!(
+                    "SELECT pair.cipher_hash
+                      , pair.plaintext_hash
+                      , pair.master_key
+                      , pair.record_size
+                      , pair.padding
+                      , pair.source
+                      , root.doc_id
+                      , root.branch_path
+                      , root.cipher_hash IS NOT NULL
+                      , {owned}
+                      , {managed_pin}
+                   FROM big_blobs_virtual_pairs AS pair
+                   LEFT JOIN blob_pair_root AS root ON root.cipher_hash = pair.cipher_hash"
+                ),
+                (),
+            )
+            .await?
+            .all::<(
+                String,
+                String,
+                Vec<u8>,
+                u64,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                bool,
+                bool,
+                bool,
+            )>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    cipher,
+                    plaintext,
+                    key,
+                    rs,
+                    padding,
+                    source,
+                    doc,
+                    branch,
+                    preclaim,
+                    owned,
+                    managed_pin,
+                )| {
+                    let key = key
+                        .try_into()
+                        .map_err(|_| eyre::eyre!("invalid local virtual pair key length"))?;
+                    let padding = match padding.as_str() {
+                        "minimal" => Padding::Minimal,
+                        "record" => Padding::Record,
+                        _ => eyre::bail!("invalid local virtual pair padding"),
+                    };
+                    Ok((
+                        VirtualPair {
+                            cipher: cipher.parse()?,
+                            plaintext: plaintext.parse()?,
+                            key: MasterKey(key),
+                            encoding: EncodingParams::new(rs, padding)?,
+                            source,
+                            claimed_by: doc.zip(branch),
+                        },
+                        preclaim,
+                        owned,
+                        managed_pin,
+                    ))
+                },
+            )
+            .collect()
+    }
+
+    pub(crate) async fn forget_virtual(&self, cipher: Hash) -> Res<()> {
+        self.sql
+            .execute(
+                "DELETE FROM big_blobs_virtual_pairs WHERE cipher_hash = ?",
+                (cipher.to_hex().to_string(),),
+            )
+            .await?;
         Ok(())
     }
 
@@ -136,12 +352,21 @@ impl PairRoots {
     /// Deleting an absent row is a no-op, so both the boot drain and the pin
     /// worker may call this without coordinating.
     pub async fn clear(&self, c_hash: Hash) -> Res<()> {
-        self.sql
-            .execute(
-                "DELETE FROM blob_pair_root WHERE cipher_hash = ?",
+        let bound = self.bind_ownership().await?;
+        let tx = self.sql.begin_write().await?;
+        tx.execute(
+            "DELETE FROM blob_pair_root WHERE cipher_hash = ?",
+            (c_hash.to_hex().to_string(),),
+        )
+        .await?;
+        if !bound {
+            tx.execute(
+                "DELETE FROM big_blobs_virtual_pairs WHERE cipher_hash = ?",
                 (c_hash.to_hex().to_string(),),
             )
             .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -185,6 +410,48 @@ impl PairRoots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn virtual_binding_is_immutable_but_accepted_source_can_advance() -> Res<()> {
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[])?;
+        let roots = PairRoots::boot(sql.clone()).await?;
+        let mut pair = VirtualPair {
+            cipher: Hash::new(b"accepted cipher"),
+            plaintext: Hash::new(b"accepted plaintext"),
+            key: MasterKey::random(),
+            encoding: EncodingParams::new(4096, Padding::Minimal)?,
+            source: "local".into(),
+            claimed_by: Some(("document".into(), "main".into())),
+        };
+        roots.record_virtual(&pair).await?;
+        pair.source = "accepted-document-version".into();
+        roots.record_virtual(&pair).await?;
+        pair.key = MasterKey::random();
+        let error = roots.record_virtual(&pair).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("virtual ciphertext binding changed")
+        );
+        let mut records = roots.virtual_pairs().await?;
+        assert_eq!(records.len(), 1);
+        let (stored, preclaim, owned, managed_pin) = records.pop().unwrap();
+        assert_eq!(stored.source, "accepted-document-version");
+        assert_eq!(stored.encoding, pair.encoding);
+        assert!(preclaim);
+        assert!(!owned);
+        assert!(!managed_pin);
+        assert!(stored.key != pair.key);
+        roots.clear(pair.cipher).await?;
+        assert_eq!(
+            sql.query("SELECT count(*) FROM big_blobs_virtual_pairs", ())
+                .await?
+                .one::<i64>()?,
+            0
+        );
+        Ok(())
+    }
 
     /// A row survives a reboot with its provenance, and `clear` retires it.
     #[tokio::test]

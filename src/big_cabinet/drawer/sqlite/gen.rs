@@ -7,23 +7,27 @@ pub const MIGRATION_TABLE: &str = "_big_cabinet_drawer_migrations";
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_drawers.sql", sql: include_str!("migrations/001_drawers.sql") },
     Migration { version: 2, name: "002_meta_docs.sql", sql: include_str!("migrations/002_meta_docs.sql") },
+    Migration { version: 3, name: "003_meta_doc_roots.sql", sql: include_str!("migrations/003_meta_doc_roots.sql") },
+    Migration { version: 4, name: "004_sensitive_root_index.sql", sql: include_str!("migrations/004_sensitive_root_index.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AncestorsRow {
     pub drawer_id: String,
-    pub level: i64,
+    pub ordinary: Option<i64>,
+    pub public: Option<i64>,
+    pub sensitive: Option<i64>,
 }
 impl crate::sqlite_rs_alias::FromRow for AncestorsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
-        row.require_width(2)?;
-        Ok(AncestorsRow { drawer_id: row.get::<String>("drawer_id")?, level: row.get::<i64>("level")? })
+        row.require_width(4)?;
+        Ok(AncestorsRow { drawer_id: row.get::<String>("drawer_id")?, ordinary: row.get::<Option<i64>>("ordinary")?, public: row.get::<Option<i64>>("public")?, sensitive: row.get::<Option<i64>>("sensitive")? })
     }
 }
 
 pub const ANCESTORS_SQL: &str = include_str!("queries/ancestors.sql");
-pub async fn ancestors(db: &impl crate::sqlite_rs_alias::QueryExecutor, target_id: String, document: bool) -> SqlResult<Vec<AncestorsRow>> {
-    let set = db.query(ANCESTORS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(target_id), crate::sqlite_rs_alias::IntoValue::into_value(document)]).await?;
+pub async fn ancestors(db: &impl crate::sqlite_rs_alias::QueryExecutor, document: bool, target_id: String) -> SqlResult<Vec<AncestorsRow>> {
+    let set = db.query(ANCESTORS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(document), crate::sqlite_rs_alias::IntoValue::into_value(target_id)]).await?;
     set.all()
 }
 
@@ -172,13 +176,15 @@ pub async fn load_local(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlR
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetaDocsRow {
+    pub root: String,
     pub kind: String,
+    pub name: String,
     pub doc_id: String,
 }
 impl crate::sqlite_rs_alias::FromRow for MetaDocsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
-        row.require_width(2)?;
-        Ok(MetaDocsRow { kind: row.get::<String>("kind")?, doc_id: row.get::<String>("doc_id")? })
+        row.require_width(4)?;
+        Ok(MetaDocsRow { root: row.get::<String>("root")?, kind: row.get::<String>("kind")?, name: row.get::<String>("name")?, doc_id: row.get::<String>("doc_id")? })
     }
 }
 
@@ -201,11 +207,6 @@ pub async fn put_doc(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: Stri
 pub const PUT_DRAWER_SQL: &str = include_str!("queries/put_drawer.sql");
 pub async fn put_drawer(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String, descriptor_json: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(PUT_DRAWER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id), crate::sqlite_rs_alias::IntoValue::into_value(descriptor_json)]).await
-}
-
-pub const PUT_META_DOC_SQL: &str = include_str!("queries/put_meta_doc.sql");
-pub async fn put_meta_doc(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String, kind: String, doc_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(PUT_META_DOC_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id), crate::sqlite_rs_alias::IntoValue::into_value(kind), crate::sqlite_rs_alias::IntoValue::into_value(doc_id)]).await
 }
 
 pub const RECORD_OP_SQL: &str = include_str!("queries/record_op.sql");

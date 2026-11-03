@@ -37,6 +37,9 @@
       - i.e. rev store
     - Reuse the other machinery
     - [ ] Make BigSyncM.set_peer incremental
+    - [ ] Introduce protocol epochs for Big Sync cursor generations in a future PR
+      - Define reset/reconciliation semantics when a serving peer restores a backup or rebuilds its source revisions while preserving its identity.
+      - Until then, same-identity revision rollback cannot be distinguished safely from stale observations; existing cursors and source-observation high-water marks must not be treated as valid across such a reset.
   - [ ] Evalute every storage layer/API with regards to evolution
   - [ ] Audit all hash schemes
 

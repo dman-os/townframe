@@ -21,6 +21,7 @@
 
 use crate::interlude::*;
 use crate::pair_roots::PairRoots;
+use crate::pair_roots::VirtualPair;
 
 use bao_tree::io::mixed::ReadBytesAt as _;
 use bytes::Bytes;
@@ -47,7 +48,8 @@ use super::keys::MasterKey;
 use super::params::EncodingParams;
 use super::params::Padding;
 use super::store::PROVIDER_NAME;
-use super::store::install_virtual_encrypted;
+use super::store::PreparedCiphertext;
+use super::store::prepare_virtual_encrypted;
 use super::store::set_pair_tags;
 /// Serves virtual ciphertext entries by encrypting stored plaintext on demand.
 ///
@@ -246,9 +248,19 @@ impl CipherBlobProvider {
         p_hash: Hash,
         encoding: EncodingParams,
     ) -> Res<()> {
-        roots.record_before_root(c_hash).await?;
-        self.register_pair_recorded(store, c_hash, key, p_hash, encoding)
-            .await
+        self.register_local_pair(
+            store,
+            roots,
+            VirtualPair {
+                cipher: c_hash,
+                plaintext: p_hash,
+                key: key.clone(),
+                encoding,
+                source: serde_json::json!({"kind": "local"}).to_string(),
+                claimed_by: None,
+            },
+        )
+        .await
     }
 
     /// Register a pair with the document whose cipherBlob facet is expected to
@@ -269,36 +281,126 @@ impl CipherBlobProvider {
         doc_id: &str,
         branch_path: &str,
     ) -> Res<()> {
-        roots
-            .record_before_root_with_provenance(c_hash, doc_id, branch_path)
-            .await?;
-        self.register_pair_recorded(store, c_hash, key, p_hash, encoding)
+        self.register_local_pair(
+            store,
+            roots,
+            VirtualPair {
+                cipher: c_hash,
+                plaintext: p_hash,
+                key: key.clone(),
+                encoding,
+                source: serde_json::json!({
+                    "kind": "local-document",
+                    "document": doc_id,
+                    "branch": branch_path,
+                })
+                .to_string(),
+                claimed_by: Some((doc_id.to_owned(), branch_path.to_owned())),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn register_local_pair(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        pair: VirtualPair,
+    ) -> Res<()> {
+        let prepared = if store.blobs().has(pair.cipher).await? {
+            None
+        } else {
+            Some(prepare_virtual_encrypted(store, &pair.key, pair.plaintext, pair.encoding).await?)
+        };
+        self.register_prepared_pair(store, roots, pair, prepared)
             .await
+    }
+
+    async fn register_prepared_pair(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        pair: VirtualPair,
+        prepared: Option<PreparedCiphertext>,
+    ) -> Res<()> {
+        if let Some(prepared) = &prepared {
+            eyre::ensure!(
+                prepared.hash == pair.cipher,
+                "reconstructed ciphertext differs from accepted digest"
+            );
+        }
+        let Some(reader) = store.sync_reader(pair.plaintext).await? else {
+            eyre::bail!(
+                "cannot serve {}: plaintext {} has no readable stored data",
+                pair.cipher,
+                pair.plaintext
+            );
+        };
+        roots.record_virtual(&pair).await?;
+        if let Some(prepared) = prepared {
+            prepared.install(store).await?;
+        }
+        self.register_pair_recorded(store, &pair, reader).await
+    }
+
+    pub(crate) async fn restore(&self, store: &Store, roots: &PairRoots) -> Res<()> {
+        for (pair, preclaim, owned, managed_pin) in roots.virtual_pairs().await? {
+            let external_pin = !managed_pin
+                && store
+                    .tags()
+                    .get(format!("pin:{}", pair.cipher))
+                    .await?
+                    .is_some();
+            if !preclaim && !owned && !external_pin {
+                super::store::drop_pair_tags(store, pair.cipher).await?;
+                roots.forget_virtual(pair.cipher).await?;
+                continue;
+            }
+            let Some(reader) = store.sync_reader(pair.plaintext).await? else {
+                eyre::bail!(
+                    "cannot serve {}: plaintext {} has no readable stored data",
+                    pair.cipher,
+                    pair.plaintext
+                );
+            };
+            if !store.blobs().has(pair.cipher).await? {
+                let prepared =
+                    prepare_virtual_encrypted(store, &pair.key, pair.plaintext, pair.encoding)
+                        .await?;
+                eyre::ensure!(
+                    prepared.hash == pair.cipher,
+                    "reconstructed ciphertext differs from accepted digest"
+                );
+                prepared.install(store).await?;
+            }
+            self.register_pair_recorded(store, &pair, reader).await?;
+        }
+        Ok(())
     }
 
     async fn register_pair_recorded(
         &self,
         store: &Store,
-        c_hash: Hash,
-        key: &MasterKey,
-        p_hash: Hash,
-        encoding: EncodingParams,
+        pair: &VirtualPair,
+        reader: SyncReader,
     ) -> Res<()> {
-        let Some(reader) = store.sync_reader(p_hash).await? else {
-            eyre::bail!("cannot serve {c_hash}: plaintext {p_hash} has no readable stored data");
-        };
-        set_pair_tags(store, c_hash, p_hash).await?;
-        let pair = Arc::new(PlainPair::new(key, p_hash, reader, encoding));
+        set_pair_tags(store, pair.cipher, pair.plaintext).await?;
+        let binding = Arc::new(PlainPair::new(
+            &pair.key,
+            pair.plaintext,
+            reader,
+            pair.encoding,
+        ));
         self.pairs
             .write()
             .expect("pairs lock poisoned")
-            .insert(c_hash, pair);
+            .insert(pair.cipher, binding);
         Ok(())
     }
 
     /// Make `c` servable in one step: run the encrypt pass over the stored
-    /// plaintext ([`install_virtual_encrypted`]), then register the resulting
-    /// pair, which roots `C` and `P`.
+    /// plaintext ([`prepare_virtual_encrypted`]), persist its provenance, and
+    /// install the prepared outboard before registering and rooting `C` and `P`.
     ///
     /// Returns the computed representation digest, a pure function of
     /// `(key, p_hash, padding)`.
@@ -315,9 +417,22 @@ impl CipherBlobProvider {
         p_hash: Hash,
         encoding: EncodingParams,
     ) -> Res<Hash> {
-        let c_hash = install_virtual_encrypted(store, key, p_hash, encoding).await?;
-        self.register_pair(store, roots, c_hash, key, p_hash, encoding)
-            .await?;
+        let prepared = prepare_virtual_encrypted(store, key, p_hash, encoding).await?;
+        let c_hash = prepared.hash;
+        self.register_prepared_pair(
+            store,
+            roots,
+            VirtualPair {
+                cipher: c_hash,
+                plaintext: p_hash,
+                key: key.clone(),
+                encoding,
+                source: serde_json::json!({"kind": "local"}).to_string(),
+                claimed_by: None,
+            },
+            Some(prepared),
+        )
+        .await?;
         Ok(c_hash)
     }
 
@@ -336,16 +451,25 @@ impl CipherBlobProvider {
         doc_id: &str,
         branch_path: &str,
     ) -> Res<Hash> {
-        let c_hash = install_virtual_encrypted(store, key, p_hash, encoding).await?;
-        self.register_pair_with_provenance(
+        let prepared = prepare_virtual_encrypted(store, key, p_hash, encoding).await?;
+        let c_hash = prepared.hash;
+        self.register_prepared_pair(
             store,
             roots,
-            c_hash,
-            key,
-            p_hash,
-            encoding,
-            doc_id,
-            branch_path,
+            VirtualPair {
+                cipher: c_hash,
+                plaintext: p_hash,
+                key: key.clone(),
+                encoding,
+                source: serde_json::json!({
+                    "kind": "local-document",
+                    "document": doc_id,
+                    "branch": branch_path,
+                })
+                .to_string(),
+                claimed_by: Some((doc_id.to_owned(), branch_path.to_owned())),
+            },
+            Some(prepared),
         )
         .await?;
         Ok(c_hash)
@@ -462,6 +586,133 @@ mod tests {
 
     use super::super::RECORD_SIZE;
     use super::super::encrypt_with_rs;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provenance_failure_never_registers_or_roots_a_virtual_pair() -> Res<()> {
+        for rejected_table in ["big_blobs_virtual_pairs", "blob_pair_root"] {
+            let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+            let sql = runtime.ephemeral(&[])?;
+            let roots = PairRoots::boot(sql.clone()).await?;
+            sql.execute_batch(&format!(
+                "CREATE TRIGGER reject_virtual_provenance BEFORE INSERT ON {rejected_table}
+                 BEGIN
+                     SELECT RAISE(ABORT, 'rejected local provenance');
+                 END;"
+            ))
+            .await?;
+            let (memory, virtuals) =
+                iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+            let store = Store::from(memory);
+            let provider = Arc::new(CipherBlobProvider::new());
+            provider.register(&virtuals)?;
+            let tag = store
+                .blobs()
+                .add_bytes(b"local durable provenance".as_slice())
+                .temp_tag()
+                .await?;
+            let key = MasterKey::random();
+            let expected =
+                encrypt_with_rs(&key, b"local durable provenance", 4096, Padding::Minimal);
+            let cipher = Hash::new(&expected);
+            let encoding = EncodingParams::new(4096, Padding::Minimal)?;
+            for path in ["accepted", "local", "local-document"] {
+                let result = match path {
+                    "accepted" => {
+                        provider
+                            .register_pair_with_provenance(
+                                &store,
+                                &roots,
+                                cipher,
+                                &key,
+                                tag.hash(),
+                                encoding,
+                                "accepted-document",
+                                "main",
+                            )
+                            .await
+                    }
+                    "local" => provider
+                        .install(&store, &roots, &key, tag.hash(), encoding)
+                        .await
+                        .map(|_| ()),
+                    "local-document" => provider
+                        .install_with_provenance(
+                            &store,
+                            &roots,
+                            &key,
+                            tag.hash(),
+                            encoding,
+                            "local-document",
+                            "main",
+                        )
+                        .await
+                        .map(|_| ()),
+                    _ => unreachable!(),
+                };
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("rejected local provenance"));
+                assert!(
+                    !store.blobs().has(cipher).await?,
+                    "{path} installed before provenance"
+                );
+                assert!(!provider.pairs.read().unwrap().contains_key(&cipher));
+                assert!(!super::super::has_pair_tags(&store, cipher).await?);
+                assert!(roots.unresolved().await?.is_empty());
+                assert_eq!(
+                    sql.query("SELECT count(*) FROM big_blobs_virtual_pairs", ())
+                        .await?
+                        .one::<i64>()?,
+                    0
+                );
+            }
+            store.shutdown().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepted_digest_mismatch_never_installs_or_records_a_virtual_pair() -> Res<()> {
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[])?;
+        let roots = PairRoots::boot(sql).await?;
+        let (memory, virtuals) =
+            iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+        let store = Store::from(memory);
+        let provider = Arc::new(CipherBlobProvider::new());
+        provider.register(&virtuals)?;
+        let plain = b"accepted digest mismatch";
+        let tag = store.blobs().add_bytes(plain.as_slice()).temp_tag().await?;
+        let key = MasterKey::random();
+        let encoding = EncodingParams::new(4096, Padding::Minimal)?;
+        let actual = Hash::new(encrypt_with_rs(
+            &key,
+            plain,
+            encoding.record_size,
+            encoding.padding,
+        ));
+        let accepted = Hash::new(b"different accepted ciphertext");
+        let error = provider
+            .register_pair_with_provenance(
+                &store,
+                &roots,
+                accepted,
+                &key,
+                tag.hash(),
+                encoding,
+                "accepted-document",
+                "main",
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("differs from accepted digest"));
+        assert!(!store.blobs().has(actual).await?);
+        assert!(!store.blobs().has(accepted).await?);
+        assert!(provider.pairs.read().unwrap().is_empty());
+        assert!(roots.virtual_pairs().await?.is_empty());
+        assert!(roots.unresolved().await?.is_empty());
+        store.shutdown().await?;
+        Ok(())
+    }
 
     /// The store's bao leaf size: the granularity its export path reads the
     /// ciphertext at, and therefore the reads a server actually issues.

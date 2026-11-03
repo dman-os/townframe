@@ -1,3 +1,8 @@
+mod leaf;
+pub use leaf::assert_leaf_source_revision_contract;
+use leaf::narrow_obj_after;
+use leaf::wide_obj_in_bucket;
+
 use super::*;
 use big_sync_core::Fingerprint;
 use big_sync_core::FingerprintSeed;
@@ -66,51 +71,6 @@ fn obj_in_bucket(bucket_id: BuckId, salt: u8) -> ObjKey {
         counter = counter
             .checked_add(1)
             .expect("some key must hash into the requested bucket");
-    }
-}
-
-/// An object key of `key_len` bytes that lands in `bucket_id` at its own level.
-///
-/// [`obj_in_bucket`]'s wide twin: only the leading counter bytes are searched and the tail
-/// is filler, so a key's *width* is a parameter while the bucket it lands in is still found
-/// rather than assumed.
-fn wide_obj_in_bucket(bucket_id: BuckId, key_len: usize, salt: u8) -> ObjKey {
-    assert!(key_len > 4, "the counter needs room in front of the filler");
-    let mut matches: u8 = 0;
-    let mut counter: u32 = 0;
-    loop {
-        let mut bytes = vec![0u8; key_len];
-        bytes[..4].copy_from_slice(&counter.to_be_bytes());
-        let obj_id = ObjKey::new(bytes);
-        if BuckId::from_obj_key(bucket_id.level(), &obj_id) == bucket_id {
-            matches += 1;
-            if matches == salt {
-                return obj_id;
-            }
-        }
-        counter = counter
-            .checked_add(1)
-            .expect("some key must hash into the requested bucket");
-    }
-}
-
-/// A 32-byte key that lands in `bucket_id` and sorts strictly after `after`.
-///
-/// The keyset page resumes at `obj_id > after_id`, so pinning "the byte budget
-/// stops the page" needs a row the budget rejected to be followed by a narrower
-/// row that would fit; only a key ordered after the wide one makes skipping it
-/// observable. The search walks counters upward, so the first match is the next
-/// key in `obj_id` order.
-fn narrow_obj_after(bucket_id: BuckId, after: &ObjKey) -> ObjKey {
-    let mut counter: u32 = 0;
-    loop {
-        let mut bytes = [0u8; 32];
-        bytes[..4].copy_from_slice(&counter.to_be_bytes());
-        let obj_id = ObjKey::new(bytes);
-        if BuckId::from_obj_key(bucket_id.level(), &obj_id) == bucket_id && obj_id > *after {
-            return obj_id;
-        }
-        counter = counter.checked_add(1).expect("some key must sort after");
     }
 }
 
@@ -2251,6 +2211,7 @@ where
     )
     .as_u64();
     let bucket_after = store.get_bucket_summary(part.clone(), bucket).await?;
+    let touched_revision = bucket_after.changed_at;
     assert_eq!(bucket_after.id, bucket);
     assert_eq!(bucket_after.len, 1);
     assert_eq!(bucket_after.live_count, 1);
@@ -2294,18 +2255,12 @@ where
     assert_eq!(
         leaf_after,
         LeafBucketPage {
-            entries: vec![BucketObjPageEntry {
-                obj_id: obj.clone(),
-                dead: false,
-                fp: Fingerprint::new(
-                    &seed,
-                    &(
-                        "big-sync-obj-fp-v1",
-                        obj.clone(),
-                        payload("late-payload", 99)
-                    ),
-                ),
-            }],
+            entries: vec![leaf::live_entry(
+                seed,
+                obj.clone(),
+                touched_revision,
+                payload("late-payload", 99),
+            )],
             next_after: None,
             done: true,
         }
@@ -2358,6 +2313,10 @@ where
         std::slice::from_ref(&part),
     )
     .await?;
+    let a2_revision = store
+        .get_bucket_summary(part.clone(), bucket_a)
+        .await?
+        .changed_at;
     seed_live_obj(
         store,
         a1.clone(),
@@ -2365,6 +2324,10 @@ where
         std::slice::from_ref(&part),
     )
     .await?;
+    let a1_revision = store
+        .get_bucket_summary(part.clone(), bucket_a)
+        .await?
+        .changed_at;
     seed_live_obj(
         store,
         a3.clone(),
@@ -2373,6 +2336,10 @@ where
     )
     .await?;
     store.remove_obj_from_part(a3.clone(), part.clone()).await?;
+    let a3_revision = store
+        .get_bucket_summary(part.clone(), bucket_a)
+        .await?
+        .changed_at;
     seed_live_obj(
         store,
         b1.clone(),
@@ -2381,27 +2348,14 @@ where
     )
     .await?;
 
+    let b1_revision = store
+        .get_bucket_summary(part.clone(), bucket_b)
+        .await?
+        .changed_at;
+
     // `unknown` is never granted, so it pins the unknown shape and the refusal
     // shape at once.
-    match store
-        .leaf_buckets(
-            LeafBucketsRequest {
-                part_id: unknown,
-                since: 0,
-                buckets: vec![LeafBucketRequest {
-                    buck_id: bucket_a,
-                    after: None,
-                }],
-                seed,
-                limit_hint: 2,
-            },
-            subscriber.clone(),
-        )
-        .await?
-    {
-        Err(LeafBucketsError::UnkownPart) => {}
-        other => panic!("unexpected leaf_buckets result: {other:?}"),
-    }
+    leaf::assert_unknown_part(store, unknown, bucket_a, seed, subscriber.clone()).await?;
 
     let page = store
         .leaf_buckets(
@@ -2430,19 +2384,8 @@ where
         page_a,
         &LeafBucketPage {
             entries: vec![
-                BucketObjPageEntry {
-                    obj_id: a1.clone(),
-                    dead: false,
-                    fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", a1, payload("leaf-a1", 1))),
-                },
-                BucketObjPageEntry {
-                    obj_id: a2.clone(),
-                    dead: false,
-                    fp: Fingerprint::new(
-                        &seed,
-                        &("big-sync-obj-fp-v1", a2.clone(), payload("leaf-a2", 2))
-                    ),
-                },
+                leaf::live_entry(seed, a1, a1_revision, payload("leaf-a1", 1)),
+                leaf::live_entry(seed, a2.clone(), a2_revision, payload("leaf-a2", 2)),
             ],
             next_after: Some(a2.clone()),
             done: false,
@@ -2452,14 +2395,12 @@ where
     assert_eq!(
         page_b,
         &LeafBucketPage {
-            entries: vec![BucketObjPageEntry {
-                obj_id: b1.clone(),
-                dead: false,
-                fp: Fingerprint::new(
-                    &seed,
-                    &("big-sync-obj-fp-v1", b1.clone(), payload("leaf-b1", 4))
-                ),
-            }],
+            entries: vec![leaf::live_entry(
+                seed,
+                b1.clone(),
+                b1_revision,
+                payload("leaf-b1", 4),
+            )],
             next_after: None,
             done: true,
         }
@@ -2473,6 +2414,10 @@ where
         .set_obj_payload(b1.clone(), payload("leaf-b1-2", 5))
         .await?;
 
+    let b1_updated_revision = store
+        .get_bucket_summary(part.clone(), bucket_b)
+        .await?
+        .changed_at;
     let since_page = store
         .leaf_buckets(
             LeafBucketsRequest {
@@ -2505,11 +2450,12 @@ where
     assert_eq!(
         since_page.bucks.get(&bucket_b).expect(ERROR_IMPOSSIBLE),
         &LeafBucketPage {
-            entries: vec![BucketObjPageEntry {
-                obj_id: b1.clone(),
-                dead: false,
-                fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", b1, payload("leaf-b1-2", 5)),),
-            }],
+            entries: vec![leaf::live_entry(
+                seed,
+                b1,
+                b1_updated_revision,
+                payload("leaf-b1-2", 5),
+            )],
             next_after: None,
             done: true,
         }
@@ -2536,11 +2482,7 @@ where
     assert_eq!(
         page_a_tail,
         LeafBucketPage {
-            entries: vec![BucketObjPageEntry {
-                obj_id: a3.clone(),
-                dead: true,
-                fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", a3, serde_json::Value::Null),),
-            }],
+            entries: vec![leaf::dead_entry(seed, a3, a3_revision)],
             next_after: None,
             done: true,
         }
@@ -2551,32 +2493,19 @@ where
 /// The budget's arithmetic, pinned as the framing it claims to be.
 ///
 /// [`leaf_entry_wire_bytes`] decides where a page stops, so its numbers are load-bearing: a
-/// 32-byte key costs 42 bytes (one length group, the flag, and the fingerprint), and the
-/// length prefix widens at 128 and 16384 bytes.
+/// 32-byte key costs 43 bytes with a one-byte revision; the key's length prefix widens at
+/// 128 and 16384 bytes, and the revision's varint widens independently.
 #[test]
 fn leaf_entry_wire_bytes_matches_the_postcard_framing() {
-    assert_eq!(
-        leaf_entry_wire_bytes(0),
-        10,
-        "a length prefix is paid even for an empty key"
-    );
-    assert_eq!(leaf_entry_wire_bytes(32), 42);
-    assert_eq!(leaf_entry_wire_bytes(127), 137);
-    assert_eq!(
-        leaf_entry_wire_bytes(128),
-        139,
-        "the length prefix widens at 128"
-    );
-    assert_eq!(leaf_entry_wire_bytes(16_384), 16_396, "and again at 16384");
-    assert_eq!(
-        LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(32),
-        1560,
-        "the entry hint of 1024 still binds for 32-byte keys"
-    );
-    assert!(
-        LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(4096) < 1024,
-        "the budget binds for wide keys"
-    );
+    assert_eq!(leaf_entry_wire_bytes(0, 0), 11);
+    assert_eq!(leaf_entry_wire_bytes(32, 1), 43);
+    assert_eq!(leaf_entry_wire_bytes(127, 1), 138);
+    assert_eq!(leaf_entry_wire_bytes(128, 1), 140);
+    assert_eq!(leaf_entry_wire_bytes(16_384, 1), 16_397);
+    assert_eq!(leaf_entry_wire_bytes(32, 128), 44);
+    assert_eq!(leaf_entry_wire_bytes(32, u64::MAX), 52);
+    assert_eq!(LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(32, 1), 1524);
+    assert!(LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(4096, 1) < 1024);
 }
 
 /// A leaf page stops at the byte budget before it stops at the entry hint.
@@ -2600,7 +2529,7 @@ where
     // needs two pages and the cap has to resume rather than drop.
     const WIDE_KEY_LEN: usize = 4096;
     const WIDE_COUNT: u32 = 20;
-    let per_page = LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(WIDE_KEY_LEN);
+    let per_page = LEAF_PAGE_BYTE_BUDGET / leaf_entry_wire_bytes(WIDE_KEY_LEN, 1);
     assert!(
         per_page >= 2,
         "the fixture needs more than one entry per page"
@@ -2649,11 +2578,7 @@ where
             .bucks
             .remove(&bucket)
             .expect(ERROR_IMPOSSIBLE);
-        let encoded: usize = page
-            .entries
-            .iter()
-            .map(|entry| leaf_entry_wire_bytes(entry.obj_id.as_bytes().len()))
-            .sum();
+        let encoded = leaf::encoded_bytes(&page);
         assert!(
             encoded <= LEAF_PAGE_BYTE_BUDGET,
             "every entry here fits the budget, so the page must not exceed it: {encoded} over {} entries",

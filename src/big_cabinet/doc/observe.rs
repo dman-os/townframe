@@ -287,6 +287,7 @@ impl DocsService {
             return Ok(());
         }
         let drawers = predicate_drawers(predicate);
+        let predicate_tags = predicate.tags();
         let mut changed: BTreeMap<DocId, Vec<FrontierEntry<DatumRoute, DatumMembership>>> =
             BTreeMap::new();
         let mut affected: BTreeSet<DocId> = BTreeSet::new();
@@ -303,12 +304,16 @@ impl DocsService {
                         .await?,
                     );
                 }
-            } else {
-                changed
-                    .entry(entry.key.doc_id.clone())
-                    .or_default()
-                    .push(entry);
+                if !Self::selects(selection, &entry.key.datum_key)
+                    && !predicate_tags.contains(entry.key.datum_key.tag())
+                {
+                    continue;
+                }
             }
+            changed
+                .entry(entry.key.doc_id.clone())
+                .or_default()
+                .push(entry);
         }
         let own: BTreeSet<DocId> = changed.keys().cloned().collect();
         let candidates: BTreeSet<DocId> = own.union(&affected).cloned().collect();

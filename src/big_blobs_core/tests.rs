@@ -387,6 +387,7 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
     unary::<PutBlob, BlobsProtocol>();
     unary::<ReadBlob, BlobsProtocol>();
     unary::<StatBlob, BlobsProtocol>();
+    let _: Option<<PutBlob as service_core_rs::Operation>::Output> = None::<BlobInfo>;
     assert_eq!(
         BlobsProtocol::OPERATIONS.unary,
         [PutBlob::XRPC, ReadBlob::XRPC, StatBlob::XRPC]
@@ -474,10 +475,15 @@ fn protocol_requests_results_and_errors_round_trip() {
         capability,
         blob_id,
     });
-    protocol_wire(BlobInfo {
+    let info = BlobInfo {
         blob_id,
         length_octets: u64::MAX,
-    });
+    };
+    assert_eq!(
+        serde_json::to_value(&info).unwrap(),
+        json!({"blobId": blob_id.to_string(), "lengthOctets": u64::MAX})
+    );
+    protocol_wire(info);
     protocol_wire(BlobRange {
         bytes: vec![0, 255],
         length_octets: 123456789,

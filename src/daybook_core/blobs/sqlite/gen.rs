@@ -4,83 +4,35 @@ use crate::sqlite_rs_alias::SqlResult;
 
 pub const MIGRATION_TABLE: &str = "_daybook_core_blobs_migrations";
 
-pub const MIGRATIONS: &[Migration<'static>] = &[Migration {
-    version: 1,
-    name: "001_blob_pins.sql",
-    sql: include_str!("migrations/001_blob_pins.sql"),
-}];
+pub const MIGRATIONS: &[Migration<'static>] = &[
+    Migration { version: 1, name: "001_blob_pins.sql", sql: include_str!("migrations/001_blob_pins.sql") },
+];
 
 pub const COUNT_PLUG_PINS_SQL: &str = include_str!("queries/count_plug_pins.sql");
-pub async fn count_plug_pins(
-    db: &impl crate::sqlite_rs_alias::QueryExecutor,
-    plug_id: String,
-) -> SqlResult<i64> {
-    let set = db
-        .query(
-            COUNT_PLUG_PINS_SQL,
-            &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)],
-        )
-        .await?;
+pub async fn count_plug_pins(db: &impl crate::sqlite_rs_alias::QueryExecutor, plug_id: String) -> SqlResult<i64> {
+    let set = db.query(COUNT_PLUG_PINS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)]).await?;
     set.one()
 }
 
 pub const COUNT_PLUG_PINS_FOR_HASH_SQL: &str = include_str!("queries/count_plug_pins_for_hash.sql");
-pub async fn count_plug_pins_for_hash(
-    db: &impl crate::sqlite_rs_alias::QueryExecutor,
-    blob_hash: String,
-) -> SqlResult<i64> {
-    let set = db
-        .query(
-            COUNT_PLUG_PINS_FOR_HASH_SQL,
-            &[crate::sqlite_rs_alias::IntoValue::into_value(blob_hash)],
-        )
-        .await?;
+pub async fn count_plug_pins_for_hash(db: &impl crate::sqlite_rs_alias::QueryExecutor, blob_hash: String) -> SqlResult<i64> {
+    let set = db.query(COUNT_PLUG_PINS_FOR_HASH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(blob_hash)]).await?;
     set.one()
 }
 
 pub const DELETE_BRANCH_BLOB_PINS_SQL: &str = include_str!("queries/delete_branch_blob_pins.sql");
-pub async fn delete_branch_blob_pins(
-    db: &impl crate::sqlite_rs_alias::Executor,
-    doc_id: String,
-    branch_id: String,
-) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(
-        DELETE_BRANCH_BLOB_PINS_SQL,
-        &[
-            crate::sqlite_rs_alias::IntoValue::into_value(doc_id),
-            crate::sqlite_rs_alias::IntoValue::into_value(branch_id),
-        ],
-    )
-    .await
+pub async fn delete_branch_blob_pins(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, branch_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_BRANCH_BLOB_PINS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(branch_id)]).await
 }
 
-pub const DELETE_BRANCH_CIPHER_PINS_SQL: &str =
-    include_str!("queries/delete_branch_cipher_pins.sql");
-pub async fn delete_branch_cipher_pins(
-    db: &impl crate::sqlite_rs_alias::Executor,
-    doc_id: String,
-    branch_id: String,
-) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(
-        DELETE_BRANCH_CIPHER_PINS_SQL,
-        &[
-            crate::sqlite_rs_alias::IntoValue::into_value(doc_id),
-            crate::sqlite_rs_alias::IntoValue::into_value(branch_id),
-        ],
-    )
-    .await
+pub const DELETE_BRANCH_CIPHER_PINS_SQL: &str = include_str!("queries/delete_branch_cipher_pins.sql");
+pub async fn delete_branch_cipher_pins(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, branch_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_BRANCH_CIPHER_PINS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(branch_id)]).await
 }
 
 pub const DELETE_PLUG_PINS_SQL: &str = include_str!("queries/delete_plug_pins.sql");
-pub async fn delete_plug_pins(
-    db: &impl crate::sqlite_rs_alias::Executor,
-    plug_id: String,
-) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(
-        DELETE_PLUG_PINS_SQL,
-        &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)],
-    )
-    .await
+pub async fn delete_plug_pins(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_PLUG_PINS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)]).await
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -91,17 +43,12 @@ pub struct DesiredBlobPinsRow {
 impl crate::sqlite_rs_alias::FromRow for DesiredBlobPinsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
         row.require_width(2)?;
-        Ok(DesiredBlobPinsRow {
-            blob_hash: row.get::<String>("blob_hash")?,
-            length_octets: row.get::<i64>("length_octets")?,
-        })
+        Ok(DesiredBlobPinsRow { blob_hash: row.get::<String>("blob_hash")?, length_octets: row.get::<i64>("length_octets")? })
     }
 }
 
 pub const DESIRED_BLOB_PINS_SQL: &str = include_str!("queries/desired_blob_pins.sql");
-pub async fn desired_blob_pins(
-    db: &impl crate::sqlite_rs_alias::QueryExecutor,
-) -> SqlResult<Vec<DesiredBlobPinsRow>> {
+pub async fn desired_blob_pins(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<DesiredBlobPinsRow>> {
     let set = db.query(DESIRED_BLOB_PINS_SQL, &[]).await?;
     set.all()
 }
@@ -114,49 +61,23 @@ pub struct DesiredCipherPinsRow {
 impl crate::sqlite_rs_alias::FromRow for DesiredCipherPinsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
         row.require_width(2)?;
-        Ok(DesiredCipherPinsRow {
-            cipher_hash: row.get::<String>("cipher_hash")?,
-            length_octets: row.get::<i64>("length_octets")?,
-        })
+        Ok(DesiredCipherPinsRow { cipher_hash: row.get::<String>("cipher_hash")?, length_octets: row.get::<i64>("length_octets")? })
     }
 }
 
 pub const DESIRED_CIPHER_PINS_SQL: &str = include_str!("queries/desired_cipher_pins.sql");
-pub async fn desired_cipher_pins(
-    db: &impl crate::sqlite_rs_alias::QueryExecutor,
-) -> SqlResult<Vec<DesiredCipherPinsRow>> {
+pub async fn desired_cipher_pins(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<DesiredCipherPinsRow>> {
     let set = db.query(DESIRED_CIPHER_PINS_SQL, &[]).await?;
     set.all()
 }
 
 pub const INSERT_PLUG_PIN_SQL: &str = include_str!("queries/insert_plug_pin.sql");
-pub async fn insert_plug_pin(
-    db: &impl crate::sqlite_rs_alias::Executor,
-    plug_id: String,
-    blob_hash: String,
-    length_octets: i64,
-) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(
-        INSERT_PLUG_PIN_SQL,
-        &[
-            crate::sqlite_rs_alias::IntoValue::into_value(plug_id),
-            crate::sqlite_rs_alias::IntoValue::into_value(blob_hash),
-            crate::sqlite_rs_alias::IntoValue::into_value(length_octets),
-        ],
-    )
-    .await
+pub async fn insert_plug_pin(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, blob_hash: String, length_octets: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(INSERT_PLUG_PIN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(blob_hash), crate::sqlite_rs_alias::IntoValue::into_value(length_octets)]).await
 }
 
 pub const PLUG_PIN_HASHES_SQL: &str = include_str!("queries/plug_pin_hashes.sql");
-pub async fn plug_pin_hashes(
-    db: &impl crate::sqlite_rs_alias::QueryExecutor,
-    plug_id: String,
-) -> SqlResult<Vec<String>> {
-    let set = db
-        .query(
-            PLUG_PIN_HASHES_SQL,
-            &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)],
-        )
-        .await?;
+pub async fn plug_pin_hashes(db: &impl crate::sqlite_rs_alias::QueryExecutor, plug_id: String) -> SqlResult<Vec<String>> {
+    let set = db.query(PLUG_PIN_HASHES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)]).await?;
     set.all()
 }

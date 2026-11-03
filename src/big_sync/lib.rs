@@ -18,6 +18,7 @@ pub mod backend;
 pub mod delta_walker_state;
 pub mod keyed_frontier;
 mod part_store;
+pub mod receive;
 pub mod rpc;
 #[cfg(any(test, feature = "test-support"))]
 pub mod stress_support;

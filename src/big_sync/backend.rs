@@ -6,21 +6,30 @@ use big_sync_core::part_store::ObjPayload;
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
-    /// `parts` carries the part hints that triggered this sync. The backend
-    /// owns local part-membership: adopt the obj into these parts if its
-    /// domain semantics want it re-advertised to other peers, or ignore them.
+    fn replay_receiver(&self) -> Option<&dyn crate::receive::ReplayReceiver> {
+        None
+    }
+
+    /// `parts` maps membership hints to their newest source revisions within `peer_id`
+    /// and this backend's permanently bound storage scope. An empty map is content-only.
+    /// The backend owns local part-membership and decides whether to adopt these parts.
     async fn sync_obj(
         &self,
         peer_id: PeerKey,
         obj_id: ObjKey,
-        parts: Vec<PartKey>,
+        parts: big_sync_core::PartObservations,
         remote_payload: Option<ObjPayload>,
     ) -> Res<crate::SyncTaskRunOutcome>;
 
     /// Backend-owned part-membership eviction. The machine replays removal
     /// requests (subscription `Removed` events, remote tombstones) into this;
     /// the backend decides what eviction means for its domain. Idempotent.
-    async fn remove_obj_from_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()>;
+    async fn remove_obj_from_parts(
+        &self,
+        peer_id: PeerKey,
+        obj_id: ObjKey,
+        parts: big_sync_core::PartObservations,
+    ) -> Res<()>;
 }
 
 pub mod contract {
@@ -163,7 +172,11 @@ pub mod contract {
             .sync_obj(
                 case.peer_id.clone(),
                 case.obj_id.clone(),
-                case.initial_parts.clone(),
+                case.initial_parts
+                    .iter()
+                    .cloned()
+                    .map(|part| (part, 1))
+                    .collect(),
                 case.remote_payload.clone(),
             )
             .await?;

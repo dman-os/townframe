@@ -10,6 +10,7 @@ use super::sqlite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerAccess as Access;
+use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawersError;
 use sqlite_rs::Database;
@@ -31,6 +32,37 @@ pub(crate) struct State {
 pub(crate) enum ScopeTarget<'a> {
     Drawer(&'a DrawerId),
     Doc(&'a DocId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Reach {
+    ordinary: Option<Access>,
+    public: Option<Access>,
+    sensitive: Option<Access>,
+}
+
+impl Reach {
+    pub(crate) fn ordinary(access: Access) -> Self {
+        Self {
+            ordinary: Some(access),
+            public: None,
+            sensitive: None,
+        }
+    }
+
+    pub(crate) fn apply(self, held: Access) -> Option<Access> {
+        [
+            self.ordinary.map(|ceiling| held.min(ceiling)),
+            self.public
+                .map(|ceiling| held.min(ceiling).max(Access::Read)),
+            self.sensitive
+                .map(|ceiling| held.min(ceiling))
+                .filter(|access| *access >= Access::Read),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+    }
 }
 
 fn scoped_roots(drawers: &BTreeMap<DrawerId, Access>) -> String {
@@ -76,6 +108,31 @@ fn id_column(value: &str) -> DocId {
     value
         .parse()
         .expect("an id column holds the text form of a doc id")
+}
+
+/// A drawer's projected `metaDoc` references: per root, keyed by the `kind/name` slot — the
+/// same spelling as the datum key after its tag, so a row and a roster datum name one slot.
+pub(crate) type MetaDocRows = BTreeMap<MetaRoot, BTreeMap<String, DocId>>;
+
+fn slot_name(kind: &str, name: &str) -> String {
+    format!("{kind}/{name}")
+}
+
+fn root_column(value: &str) -> MetaRoot {
+    value
+        .parse()
+        .expect("the root column is constrained to the metadata root vocabulary")
+}
+
+fn meta_doc_rows(rows: impl IntoIterator<Item = sqlite::MetaDocsRow>) -> MetaDocRows {
+    let mut projected = MetaDocRows::new();
+    for row in rows {
+        projected
+            .entry(root_column(&row.root))
+            .or_default()
+            .insert(slot_name(&row.kind, &row.name), id_column(&row.doc_id));
+    }
+    projected
 }
 
 fn drawer_record(drawer_id: &str, descriptor_json: &str) -> DrawerRecord {
@@ -257,17 +314,26 @@ impl State {
     pub(crate) async fn ancestors(
         &self,
         target: ScopeTarget<'_>,
-    ) -> Result<BTreeMap<DrawerId, Access>, DrawersError> {
+    ) -> Result<BTreeMap<DrawerId, Reach>, DrawersError> {
         let (target_id, document) = match target {
             ScopeTarget::Drawer(drawer_id) => (drawer_id, false),
             ScopeTarget::Doc(doc_id) => (doc_id, true),
         };
-        let rows = sqlite::ancestors(&self.sql, target_id.to_string(), document)
+        let rows = sqlite::ancestors(&self.sql, document, target_id.to_string())
             .await
             .map_err(storage)?;
         Ok(rows
             .into_iter()
-            .map(|row| (id_column(&row.drawer_id), access_level(row.level)))
+            .map(|row| {
+                (
+                    id_column(&row.drawer_id),
+                    Reach {
+                        ordinary: row.ordinary.map(access_level),
+                        public: row.public.map(access_level),
+                        sensitive: row.sensitive.map(access_level),
+                    },
+                )
+            })
             .collect())
     }
 
@@ -429,36 +495,16 @@ impl State {
             .collect())
     }
 
-    /// The metadata docs a drawer's doc carries, keyed by kind, as last projected.
+    /// The metadata docs a drawer names on each of its metadata roots, keyed by their
+    /// `kind/name` slot, as last projected.
     pub(crate) async fn meta_docs_of(
         &self,
         drawer: &DrawerId,
-    ) -> Result<BTreeMap<String, DocId>, DrawersError> {
+    ) -> Result<MetaDocRows, DrawersError> {
         let rows = sqlite::meta_docs(&self.sql, drawer.to_string())
             .await
             .map_err(storage)?;
-        Ok(rows
-            .iter()
-            .map(|row| (row.kind.clone(), id_column(&row.doc_id)))
-            .collect())
-    }
-
-    pub(crate) async fn put_meta_doc(
-        &self,
-        drawer: &DrawerId,
-        kind: &str,
-        doc: &DocId,
-    ) -> Result<(), DrawersError> {
-        sqlite::put_meta_doc(
-            &self.sql,
-            drawer.to_string(),
-            kind.to_owned(),
-            doc.to_string(),
-        )
-        .await
-        .map_err(storage)?;
-        self.notify_changed();
-        Ok(())
+        Ok(meta_doc_rows(rows))
     }
 
     /// Replace a drawer's roster rows with what its doc says now: the rescan after a boot or a
@@ -468,7 +514,7 @@ impl State {
         drawer: &DrawerId,
         docs: &BTreeMap<DocId, Access>,
         children: &BTreeMap<DrawerId, Access>,
-        meta_docs: &BTreeMap<String, DocId>,
+        meta_docs: &MetaDocRows,
     ) -> Result<(), DrawersError> {
         let transaction = self.sql.begin_write().await.map_err(storage)?;
         let id = drawer.to_string();
@@ -484,12 +530,11 @@ impl State {
             .into_iter()
             .map(|row| (id_column(&row.child_id), access_column(&row.access)))
             .collect();
-        let stored_meta_docs: BTreeMap<_, _> = sqlite::meta_docs(&transaction, id.clone())
-            .await
-            .map_err(storage)?
-            .into_iter()
-            .map(|row| (row.kind, id_column(&row.doc_id)))
-            .collect();
+        let stored_meta_docs = meta_doc_rows(
+            sqlite::meta_docs(&transaction, id.clone())
+                .await
+                .map_err(storage)?,
+        );
         if &stored_docs == docs && &stored_children == children && &stored_meta_docs == meta_docs {
             transaction.rollback().await.map_err(storage)?;
             return Ok(());
@@ -538,26 +583,35 @@ impl State {
                 query.execute(&transaction).await.map_err(storage)?;
             }
         }
-        let mut entries = meta_docs.iter().peekable();
-        while entries.peek().is_some() {
-            let mut query = Sql::new("INSERT INTO ");
-            query
-                .ident("big_cabinet_drawer_meta_docs")
-                .push(" (drawer_id, kind, doc_id) VALUES ");
-            for (index, (kind, doc_id)) in entries.by_ref().take(256).enumerate() {
-                if index != 0 {
-                    query.push(", ");
-                }
+        for (root, slots) in meta_docs {
+            let mut entries = slots.iter().peekable();
+            while entries.peek().is_some() {
+                let mut query = Sql::new("INSERT INTO ");
                 query
-                    .push("(")
-                    .bind(&id)
-                    .push(", ")
-                    .bind(kind)
-                    .push(", ")
-                    .bind(doc_id.to_string())
-                    .push(")");
+                    .ident("big_cabinet_drawer_meta_docs")
+                    .push(" (drawer_id, root, kind, name, doc_id) VALUES ");
+                for (index, (slot, doc_id)) in entries.by_ref().take(256).enumerate() {
+                    if index != 0 {
+                        query.push(", ");
+                    }
+                    let (kind, name) = slot
+                        .split_once('/')
+                        .expect("a projected meta-doc slot is kind/name");
+                    query
+                        .push("(")
+                        .bind(&id)
+                        .push(", ")
+                        .bind(root.as_str())
+                        .push(", ")
+                        .bind(kind)
+                        .push(", ")
+                        .bind(name)
+                        .push(", ")
+                        .bind(doc_id.to_string())
+                        .push(")");
+                }
+                query.execute(&transaction).await.map_err(storage)?;
             }
-            query.execute(&transaction).await.map_err(storage)?;
         }
         transaction.commit().await.map_err(storage)?;
         self.notify_changed();
@@ -566,265 +620,4 @@ impl State {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use big_cabinet_core::drawer::GroupKey;
-    use sqlite_rs::SqliteRuntime;
-
-    #[tokio::test]
-    async fn roster_batches_rollback_together_and_notify_only_after_commit() {
-        let runtime = SqliteRuntime::new(Default::default());
-        let sql = runtime.ephemeral(&[]).unwrap();
-        let state = State::open(sql.clone()).await.unwrap();
-        let [drawer, old_doc, old_child] = [240_u8, 241, 242].map(|value| DocId::new([value; 32]));
-        let before_docs = BTreeMap::from([(old_doc.clone(), Access::Read)]);
-        let before_children = BTreeMap::from([(old_child.clone(), Access::Write)]);
-        let before_meta = BTreeMap::from([("timeline".to_owned(), DocId::new([243; 32]))]);
-        state
-            .replace_roster(&drawer, &before_docs, &before_children, &before_meta)
-            .await
-            .unwrap();
-        let mut changes = state.subscribe_changes();
-        let snapshot = sql.begin_read().await.unwrap();
-        let docs: BTreeMap<_, _> = (1_u16..=513)
-            .map(|value| {
-                let mut bytes = [0; 32];
-                bytes[..2].copy_from_slice(&value.to_be_bytes());
-                (DocId::new(bytes), Access::Admin)
-            })
-            .collect();
-        let mut children: BTreeMap<_, _> = docs
-            .keys()
-            .take(257)
-            .cloned()
-            .map(|id| (id, Access::Read))
-            .collect();
-        *children.last_entry().unwrap().get_mut() = Access::Relay;
-        let meta = BTreeMap::from([
-            ("timeline".to_owned(), docs.keys().next().unwrap().clone()),
-            ("index".to_owned(), DocId::new([244; 32])),
-        ]);
-        sql.execute_batch(
-            "CREATE TRIGGER fail_roster_child BEFORE INSERT ON big_cabinet_drawer_children
-             WHEN NEW.access = 'Relay'
-             BEGIN SELECT RAISE(ABORT, 'injected roster failure'); END;",
-        )
-        .await
-        .unwrap();
-        let error = state
-            .replace_roster(&drawer, &docs, &children, &meta)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, DrawersError::Storage(ref message) if message.contains("injected roster failure"))
-        );
-        assert!(!changes.has_changed().unwrap());
-        assert_eq!(state.docs_of(&drawer).await.unwrap(), before_docs);
-        assert_eq!(state.children_of(&drawer).await.unwrap(), before_children);
-        assert_eq!(state.meta_docs_of(&drawer).await.unwrap(), before_meta);
-        sql.execute_batch("DROP TRIGGER fail_roster_child")
-            .await
-            .unwrap();
-        state
-            .replace_roster(&drawer, &docs, &children, &meta)
-            .await
-            .unwrap();
-        changes.changed().await.unwrap();
-        assert_eq!(*changes.borrow_and_update(), 2);
-        assert_eq!(state.docs_of(&drawer).await.unwrap(), docs);
-        assert_eq!(state.children_of(&drawer).await.unwrap(), children);
-        assert_eq!(state.meta_docs_of(&drawer).await.unwrap(), meta);
-        assert_eq!(
-            sqlite::doc_entry(&snapshot, drawer.to_string(), old_doc.to_string())
-                .await
-                .unwrap(),
-            Some(Access::Read.as_str().to_owned()),
-        );
-        assert_eq!(
-            sqlite::child_entry(&snapshot, drawer.to_string(), old_child.to_string())
-                .await
-                .unwrap(),
-            Some(Access::Write.as_str().to_owned()),
-        );
-        snapshot.rollback().await.unwrap();
-        state
-            .replace_roster(&drawer, &docs, &children, &meta)
-            .await
-            .unwrap();
-        assert!(!changes.has_changed().unwrap());
-        state
-            .replace_roster(
-                &drawer,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-            )
-            .await
-            .unwrap();
-        assert!(changes.has_changed().unwrap());
-        assert!(state.docs_of(&drawer).await.unwrap().is_empty());
-        assert!(state.children_of(&drawer).await.unwrap().is_empty());
-        assert!(state.meta_docs_of(&drawer).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn migrations_reopen_existing_projection_and_local_drawers() {
-        let runtime = SqliteRuntime::new(Default::default());
-        let sql = runtime.ephemeral(&[]).unwrap();
-        sql.execute_batch(sqlite::MIGRATIONS[0].sql).await.unwrap();
-        let [present_id, originated_id, registry_id, announced_id] =
-            [10_u8, 11, 12, 13].map(|value| DocId::new([value; 32]));
-        let local = LocalDrawers {
-            present_id,
-            originated_id,
-            registry_id,
-        };
-        let descriptor: Drawer = serde_json::from_value(serde_json::json!({
-            "$type": "org.example.daybook.drawer",
-            "layout": {"$type": "org.example.future.layout", "opaque": [1, 2, 3]}
-        }))
-        .unwrap();
-        sqlite::put_drawer(
-            &sql,
-            local.present_id.to_string(),
-            serde_json::to_string(&descriptor).unwrap(),
-        )
-        .await
-        .unwrap();
-        let state = State::open(sql.clone()).await.unwrap();
-        assert_eq!(
-            state
-                .drawer(&local.present_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .descriptor,
-            descriptor
-        );
-        state.set_local(local.clone()).await.unwrap();
-        state
-            .put_child(&local.present_id, &local.originated_id, Access::Read)
-            .await
-            .unwrap();
-        drop(state);
-        let reopened = State::open(sql).await.unwrap();
-        assert_eq!(reopened.local(), local);
-        assert_eq!(
-            reopened.drawers().await.unwrap(),
-            vec![DrawerRecord {
-                drawer_id: local.present_id.clone(),
-                descriptor,
-            }]
-        );
-        let mut expected = vec![local.originated_id.clone(), announced_id.clone()];
-        expected.sort();
-        assert_eq!(
-            reopened
-                .unprojected(&BTreeSet::from([local.present_id.clone(), announced_id]))
-                .await
-                .unwrap(),
-            expected,
-        );
-    }
-
-    #[tokio::test]
-    async fn scoped_sql_terminates_cycles_and_selects_the_strongest_path() {
-        let runtime = SqliteRuntime::new(Default::default());
-        let state = State::open(runtime.ephemeral(&[]).unwrap()).await.unwrap();
-        let [root, left, right, leaf, doc] =
-            [1_u8, 2, 3, 4, 5].map(|value| DocId::new([value; 32]));
-        for id in [&root, &left, &right] {
-            state
-                .put_drawer(
-                    id,
-                    &Drawer::single_group(GroupKey([8; 32]), GroupKey([9; 32])),
-                )
-                .await
-                .unwrap();
-        }
-        state.put_drawer(&leaf, &Drawer::self_doc()).await.unwrap();
-        for (parent, child, access) in [
-            (&root, &left, Access::Read),
-            (&root, &right, Access::Write),
-            (&left, &right, Access::Admin),
-            (&right, &root, Access::Relay),
-            (&right, &leaf, Access::Read),
-        ] {
-            state.put_child(parent, child, access).await.unwrap();
-        }
-        state.put_doc(&right, &doc, Access::Admin).await.unwrap();
-        assert_eq!(
-            state.scoped_docs(&root, Access::Admin).await.unwrap(),
-            BTreeMap::from([
-                (doc.clone(), (Access::Write, Some(right.clone()))),
-                (leaf.clone(), (Access::Read, Some(leaf.clone()))),
-            ]),
-        );
-        assert_eq!(
-            state.ancestors(ScopeTarget::Doc(&doc)).await.unwrap(),
-            BTreeMap::from([
-                (root.clone(), Access::Write),
-                (left.clone(), Access::Admin),
-                (right.clone(), Access::Admin),
-            ]),
-        );
-        assert_eq!(
-            state.ancestors(ScopeTarget::Drawer(&leaf)).await.unwrap(),
-            BTreeMap::from([
-                (root.clone(), Access::Read),
-                (left.clone(), Access::Read),
-                (right.clone(), Access::Read),
-                (leaf.clone(), Access::Admin),
-            ]),
-        );
-        assert_eq!(
-            state.scoped_docs(&root, Access::Relay).await.unwrap(),
-            BTreeMap::from([
-                (doc.clone(), (Access::Relay, Some(right.clone()))),
-                (leaf.clone(), (Access::Relay, Some(leaf.clone()))),
-            ]),
-        );
-        let roots = BTreeMap::from([(root.clone(), Access::Read), (right.clone(), Access::Admin)]);
-        assert_eq!(
-            state.scoped_doc_access(&roots, None).await.unwrap(),
-            BTreeMap::from([(doc.clone(), Access::Admin), (leaf.clone(), Access::Read)]),
-        );
-        assert_eq!(
-            state
-                .scoped_doc_access(&roots, Some(&BTreeSet::from([leaf.clone(), root.clone()])))
-                .await
-                .unwrap(),
-            BTreeMap::from([(leaf.clone(), Access::Read)]),
-        );
-        assert!(
-            state
-                .scoped_doc_access(&roots, Some(&BTreeSet::new()))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        let mut expected = Vec::new();
-        for (drawer, access) in [
-            (&root, Access::Read),
-            (&left, Access::Read),
-            (&right, Access::Admin),
-            (&leaf, Access::Read),
-        ] {
-            expected.push((state.drawer(drawer).await.unwrap().unwrap(), access));
-        }
-        expected.sort_by(|(left, _), (right, _)| left.drawer_id.cmp(&right.drawer_id));
-        assert_eq!(state.scoped_drawers(&roots).await.unwrap(), expected);
-        state.put_drawer(&right, &Drawer::self_doc()).await.unwrap();
-        assert_eq!(
-            state.scoped_docs(&root, Access::Admin).await.unwrap(),
-            BTreeMap::from([(right.clone(), (Access::Write, Some(right)))]),
-        );
-        assert!(
-            state
-                .ancestors(ScopeTarget::Doc(&doc))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
-}
+mod tests;

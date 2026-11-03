@@ -151,6 +151,8 @@ pub use big_cabinet::drawer::big_cabinet_core :: drawer :: LayoutKind
 pub use big_cabinet::drawer::self :: access :: DrawerAccess
 pub use big_cabinet::drawer::self :: access :: DrawerProvider
 pub use big_cabinet::drawer::self :: access :: DrawerWorker
+pub use big_cabinet::drawer::self :: discovery :: DrawerMetadataObservation
+pub use big_cabinet::drawer::self :: discovery :: MetadataRootStatus
 pub use big_cabinet::index :: datum_ref :: DatumRefStore
 pub use big_cabinet::index :: datum_set :: DatumSetStore
 pub use big_cabinet::index::datum_ref :: DatumRefEdge

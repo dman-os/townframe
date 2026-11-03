@@ -1,19 +1,22 @@
 # big_blobs replacement — scope and plan
 
-Status: Draft — scope/plan only; exploratory implementation is paused pending design review
+Status: Active implementation plan; the drawer-native correction phases and their acceptance gates are in big-blobs-drawer-design.md §17
 Owner: operator + big_blobs track
-Updated: 2026-10-30
+Updated: 2026-11-03
 Scope: Replace the blob subsystem in `src/daybook_core/blobs.rs` and its blob-specific index/worker glue with a Cabinet-style `big_blobs` service and workers. This document is the PR plan and design-review record; it is not evidence that the exploratory code in the worktree is complete or accepted.
 
 ## 0. Decision requested
 
-Before implementation resumes, agree on the target shape below, especially:
+The drawer-native metadata and mirroring decisions are accepted under ADR 026's
+2026-11 amendment. The original service/retention review questions below remain a
+record of boundaries to resolve explicitly where still open, not a blanket pause on
+Phase A or permission to override the active §17 handoff:
 
 1. Whether `big_blobs` is a Cabinet-style service crate consumed through `big_node`, with legacy Daybook left running until a later cutover, rather than a wholesale Daybook migration in this PR.
 2. Whether the portable service surface stays deliberately small (`put` / bounded `read` / `stat`) while large transfers, filesystem references, materialization, and sync remain native/embedder concerns.
 3. Whether blob-specific indexing belongs in `big_blobs` as a projection over Cabinet's generic `datum_set`, rather than adding blob semantics back into `big_cabinet`.
-4. How representation retention is owned and released across document references, inventory pins, uploads, and remote sync memberships. The current exploratory code has an unresolved shared `held:`-tag ownership problem here.
-5. Whether pin-only virtual ciphertext must remain servable after the document/key path that originally registered it becomes unavailable, and if so what durable non-secret record makes that possible.
+4. Representation retention is owned by the serialized durable byte-ownership ledger, with independent document, inventory and native-import claims (§4.5), rather than shared `held:` tags.
+5. Pin-only virtual ciphertext remains servable after its source document/key path becomes unavailable: a private local SQL binding retains the accepted key, framing, source and C→P dependency while ownership remains (§4.5). This binding is secret local state, never inventory metadata.
 
 If any of those answers differ, change this plan first; do not let the exploratory implementation silently decide them.
 
@@ -24,9 +27,13 @@ Superseded content was removed from this section. The drawer-native design is ma
 - [ADR 023](../adrs/023-cursor-consumption-is-long-poll.md): cursor consumption is long polling.
 - [ADR 024](../adrs/024-indexes-are-fed-by-the-change-stream.md): indexes are fed only by the change stream; the drawer projection is frontier-fed; datum_ref edges fold into the datum-set worker.
 - [ADR 025](../adrs/025-cabinet-datum-predicates-and-polling.md): the Cabinet datum predicate language and `PollDatums`.
-- [ADR 026](../adrs/026-drawer-native-blobs.md): drawer-native blobs — co-located JWK, per-doc slots, inventories as drawer meta docs, self-doc children, per-drawer partitions, relay sponsorship walk.
+- [ADR 026](../adrs/026-drawer-native-blobs.md): drawer-native blobs — co-located JWK, per-doc slots, inventories as drawer meta docs, self-doc children, inventory-bound partitions, relay sponsorship walk.
 
-Where this plan, the log and an ADR disagree, the ADR wins; the log keeps the discussion trail and the items still open. The work items are consolidated in the log's §14.
+Where this plan, the log and an ADR disagree, the ADR wins, including ADR 026's
+authoritative 2026-11 amendment. The log's §§15–17 record the first-cut critique and
+correction; §17 is the active phased handoff, superseding §14's pre-cut backlog. Phase A
+is generic Cabinet metadata and successor work, not completion of blob phases B–E;
+Phase F requester-aware byte authorization is optional hardening.
 
 ## 1. Objective
 
@@ -45,7 +52,7 @@ Primary design sources:
 
 - [ADR 001 — Blob inventories](../adrs/001-blob-inventories.md): logical plaintext identity is separate from physical representation identity; relays see representation digests only.
 - [ADR 003 — Encrypted blob mirrors and key storage](../adrs/003-cipherblob.md): encryption is a representation concern; RFC 8188 `aes128gcm`; deterministic ciphertext regeneration; virtual ciphertext serving; pins are derived, never independently authored. Its §19 key documents, `keyScope` and `grp:` domains are withdrawn by ADR 026: the JWK is co-located with the cipherBlob in the content doc.
-- [ADR 013 — Keyhive access delta stream](../adrs/013-keyhive-access-delta-stream.md) (**Status: Proposed**): access changes are durable wake-ups; consumers seed from live state before opening streams so archive-floor gaps are safe. Its only consumers are the legacy `daybook_core` permission writer and the paused `big_blobs/permissions.rs`; Cabinet-side admission wakes off the authority stream (ADR 015 §3) instead, merged with the datum frontier as in `doc/observe.rs`.
+- [ADR 013 — Keyhive access delta stream](../adrs/013-keyhive-access-delta-stream.md) (**Status: Proposed**): access changes are durable wake-ups; consumers seed inventory parts from live inventory-document authority before opening streams so archive-floor gaps are safe. The legacy `daybook_core` permission writer and `big_blobs/permissions.rs` consume this stream; Cabinet-side admission wakes off the authority stream (ADR 015 §3) instead, merged with the datum frontier as in `doc/observe.rs`.
 - [ADR 019 — Cabinet drawers](../adrs/019-cabinet-drawers-and-selective-mirroring.md): Cabinet owns generic drawer/document semantics; blob-specific behavior stays out of Cabinet. Amended for meta docs, self-doc children and the publicness contract.
 - [ADR 020 — Documents and datum writes](../adrs/020-documents-repo-and-datum-writes.md): consumers must read through the signed Docs gate at pinned heads; pending/rejected/undecodable states are distinct.
 - [ADR 021 — Datum schema language](../adrs/021-datum-schema-language-and-automerge-codecs.md): datum types state openness explicitly and preserve unknown members.
@@ -92,9 +99,10 @@ Blob-specific legacy index behavior lives in `src/daybook_core/index/facet_set.r
 
 Therefore the blob-specific replacement for the old facet-set behavior should be a `big_blobs` projection that consumes `datum_set` routes for Blob datums, reads values through DocsRepo at the reported heads, extracts `Blob.digest`, and maintains a digest → route lookup. Cabinet should not learn what a Blob is.
 
-### 3.3 Exploratory implementation already in the worktree
+### 3.3 Historical exploratory implementation snapshot
 
-This work exists but is **not accepted and not fully verified**. Treat it as a prototype to review against this plan:
+This subsection records the pre-correction prototype review, not current implementation
+or validation results. It does not establish completion of any §17 gate:
 
 - `src/big_blobs_core/`
   - `Blob`, `BlobPin`, `CipherBlob`, `Jwk`, `Representation`, and typed `Rfc8188EncodingParameters { record_size, padding, extra }` datum declarations.
@@ -114,9 +122,9 @@ This work exists but is **not accepted and not fully verified**. Treat it as a p
   - Creates a dedicated single-group inventory drawer/document and a dedicated `big-blobs-v1` part-store scope.
   - Adds node-level tests for capability scoping/revocation and single-owner filesystem reopen.
 
-Known blockers in the prototype:
+Blockers recorded at that snapshot (not revalidated here):
 
-- Integrated `big_blobs`/`big_node` compilation currently fails (for example, generic type inference in `permissions.rs`); most native blob tests have therefore never executed.
+- Integrated `big_blobs`/`big_node` compilation was reported failing (for example, generic type inference in `permissions.rs`); most native blob tests had therefore never executed.
 - `held:` tags are shared between service uploads and sync imports. Neither side can safely delete the tag when its own reference disappears without an owner-aware retention ledger, and a check-then-delete races with new references.
 - Pin-only virtual representations: keeping `pt:<C>` preserves the plaintext dependency, but after the owning cipher datum/key becomes unavailable there may be no accepted route from which to rebuild the provider's key binding after restart.
 - Inventory permission seeding must happen from live Keyhive state for all known inventory parts before the access stream opens; the prototype only reseeds documents as work runs.
@@ -186,8 +194,8 @@ Worker responsibilities:
 1. **Projection**: maintain digest → routes from accepted Blob datums. Unavailable/pending reads park durably and preserve prior rows; absent/rejected removes exactly that route.
 2. **Document reconciliation**: for each dirty document, read Blob/CipherBlob/JWK/BlobPin datums through DocsRepo; create or reuse deterministic representations; register virtual pairs; report retained pairs, claims, and deferrals.
 3. **Retention**: own the durable (document → representation) ownership ledger and the inventory-effect outbox. Only after ownership commits may inventory pins, part membership, tags, provider registrations, and pair-root ledger rows change.
-4. **Permissions**: per-drawer blob parts. Ciphertext part access = Keyhive Read on the drawer's inventory doc (meta-group members, relays included); plaintext part access = Keyhive Read on the docs group. Both are seeded from live Keyhive state before following the ADR 013 access-delta stream ([ADR 026](../adrs/026-drawer-native-blobs.md) §7).
-5. **Sync backend**: satisfy Big Sync object tasks by downloading missing representation bytes or proving rooted virtual possession; never export plaintext digests/keys to relays and never serve a representation whose authorization has not been established by the caller/admission layer.
+4. **Permissions**: one `inventory_part(inventory_doc)` per inventory, for opaque digest-addressed bytes regardless of representation. Seed each known writer-target or mirrored inventory part from live Keyhive standing on that exact inventory document, including empty inventories, before following ADR 013's access-delta stream. Read+ means Read, Write/Edit, or Admin on that doc. Relay drawer paths obtain Read on public metadata inventories and no sensitive metadata membership; docs-group access never seeds a blob part ([ADR 026](../adrs/026-drawer-native-blobs.md) §7). Removing the drawer-keyed plaintext part is Phase B.
+5. **Sync backend**: download missing inventory-named bytes or prove rooted virtual possession only after inventory-specific admission. Transport does not interpret plaintext versus ciphertext. Stock iroh-blobs GETs are hash-only, not requester-aware inventory authorization; the accepted interim plaintext boundary is Keyhive-gated discovery plus strict non-disclosure of sensitive inventory ids, pins, plaintext digests, part membership, and availability. Exact-inventory byte authorization is deferred Phase F hardening, not an implemented second check.
 
 All five share one durable work queue discipline: source revision + document generation are committed atomically, stale completions cannot erase newer work, and parked work is re-armed by the event that could change its outcome (bytes available, key accepted, policy changed, document edited, restart).
 
@@ -201,7 +209,7 @@ Reference classes that can keep bytes alive:
 
 - document-owned representations (Blob + CipherBlob pairs reconciled from a document);
 - inventory BlobPins (including pins authored by other documents and relay sponsorship);
-- in-flight or not-yet-adopted uploads/downloads (`held:` today);
+- not-yet-adopted native imports, each with its own durable staging identity even when the bytes deduplicate;
 - remote part memberships that caused a local download;
 - pair-root ledger rows (pre-claim window only).
 
@@ -211,7 +219,9 @@ Required properties:
 - Adoption/release are idempotent and ordered: durable ownership is recorded before tags are dropped; release removes tags only when no ownership class remains.
 - Removing a document claim never releases bytes still pinned, uploaded, or remotely retained.
 - Virtual representations need an explicit restart story: either their provider binding can be rebuilt from accepted datums, or they are materialized before the binding source disappears, or the pin is not allowed to keep them alive. Pick one and test it; silently keeping `pt:` is not a complete answer.
-- Orphaned uploads need a policy (adopted by a document, explicitly released, or expired by a stated rule). A permanent leak by default is not acceptable, but neither is deleting bytes a concurrent claim is about to adopt.
+- Native `import_stream` returns `ImportedBlob`. `adopt_import` requires committed document ownership before releasing that import's staging claim; `release_import` abandons only that claim. There is no expiry or Drop-based release. Portable `PutBlob -> BlobInfo` is unchanged and deliberately retains its durable hold: no portable receipt or release protocol is introduced.
+- Publication runs inside the byte owner's serialized callback: commit/apply claims before membership and availability, unpublish before final release, and keep physical proof guards alive through external effects. Accepted operations survive caller cancellation; shutdown closes, drains and joins the owner before closing the store.
+- Virtual installation prepares ciphertext/outboard once, validates the advertised digest, commits the accepted C/P/key/framing/source binding in private local SQL, then installs the prepared outboard and publishes provider/tags. Boot restores retained providers before ownership recovery. Final release removes provider, tags, dependency and provenance; an outboard without physical bytes or a live provider is not availability.
 
 ### 4.6 Node lifecycle
 
@@ -286,12 +296,14 @@ Each phase lands compiling and tested on its own; do not stack unverified phases
 - Exit: ordering tests (doc-before-bytes, bytes-before-doc, key-after-cipher, edit/delete/restart) pass.
 
 ### Phase 5 — Retention, inventory, permissions
-- Owner-aware retention ledger and effects outbox; inventory pin maintenance; part projection; Keyhive permission seeding + delta ingress.
-- Exit: grant/revoke/relay/pin-removal/restart tests pass; no release while any ownership class remains.
+- Follow drawer-design §17 phases B–D: inventory-only parts, durable `(inventory, representation)` state, both arrival orderings, and transitive mirror discovery. Self-doc children use their immediate grouped parents' inventories; standalone companions and self-doc pins are withdrawn.
+- Plaintext inventory discovery is Keyhive-gated through the sensitive root. The final hash fetch relies on non-disclosure of plaintext digests under drawer-design §17.3's accepted interim threat model.
+- Exit: the §17.5–§17.8 verification gates pass, including the real two-node A→B→C ciphertext mirror test; no release occurs while any byte-owning claim remains.
 
 ### Phase 6 — Sync backend
 - Big Sync backend over the retention ledger; verified download completion; virtual possession without export; membership-removal release through the same ledger.
-- Exit: two-node download, corruption/retry, virtual no-export, and membership-removal tests pass.
+- Stock iroh-blobs is storage/transport machinery, not an inventory authorization boundary. The accepted interim boundary is Keyhive-gated discovery plus strict non-disclosure of sensitive inventory ids, pins, and plaintext digests (§17.3).
+- Exit: ciphertext and authorized-plaintext mirror download/corruption/retry/virtual tests pass. Exact-inventory requester-aware byte authorization is a future defense-in-depth phase (§17.9), not a current plaintext feature gate.
 
 ### Phase 7 — Node integration and hardening
 - `big_node` wiring, inventory bootstrap, shutdown ordering, guardrails/API snapshots, formatting, documentation links.
@@ -299,7 +311,7 @@ Each phase lands compiling and tested on its own; do not stack unverified phases
 
 ## 7. Verification matrix
 
-Use the repo's pinned wrapper (`nix develop .#ci-rust --command ./x/agent-build.ts -- …`), prefer nextest, and keep runs focused per phase — no full-workspace suite as a substitute for targeted proof.
+Use the repo's default devshell and pinned wrapper (`nix develop --command ./x/agent-build.ts -- …`), prefer nextest, and keep runs focused per phase — no full-workspace suite as a substitute for targeted proof.
 
 | Area | Required evidence |
 | --- | --- |
@@ -309,20 +321,25 @@ Use the repo's pinned wrapper (`nix develop .#ci-rust --command ./x/agent-build.
 | Projection | Digest from Blob value (not key); parked read preserves rows; rearm on availability/policy/restart; removal only on absent/rejected |
 | Documents | Create/reuse determinism; key at pinned heads; unknown encoding defers before key read; ledger survives success until retention commit |
 | Retention | Multi-owner release ordering; pin-only virtual restart behavior (per §4.5 decision); upload adoption/release; no tag deletion while owned |
-| Permissions | Live seed before stream; grant/revoke/group/Relay updates; denied read clears membership; restart recovery |
-| Sync | Verified download; corrupted download retries/fails closed; virtual representation completes without byte export; membership removal releases through ledger |
+| Permissions | Inventory-only part seeding; grant/revoke/group/Relay updates; no public route to sensitive inventories; restart recovery; both arrival orderings and no cross-inventory unlocking |
+| Sync | Real two-node A→B→C ciphertext coverage; verified download; corruption fails closed; virtual representation completes without export; membership removal releases through ledger; plaintext relies on sensitive-inventory non-disclosure; exact-inventory transfer authorization is deferred hardening |
 | Node | Boot/shutdown ordering; inventory bootstrap idempotence; filesystem reopen with bytes intact |
 
 ## 8. Risks and open questions
 
-1. **Retention ownership (blocking).** Shared `held:` tags cannot be released safely per-subsystem. Needs the §4.5 ledger before sync/service release paths are finalized.
-2. **Pin-only virtual restart (blocking).** What rebuilds a provider binding when the cipher/key document path is gone? Options: rebuild from any accepted claim, materialize on last-claim loss, or refuse pins for virtual-only representations.
-3. **Permission seeding completeness.** Seeding from DrawerService reach must cover every known inventory part, including documents with no current pins, before the access stream opens; otherwise archive-floor gaps can strand stale access rows.
+1. **Retention ownership (resolved for the native stack).** The durable byte owner serializes claims, release and publication (§4.5). Legacy Daybook remains a separate stack until its consumers migrate.
+2. **Pin-only virtual restart (resolved).** Private local SQL provenance restores byte-identical serving before ownership recovery, and final release removes that provenance (§4.5). Source-document availability is not required to keep an independently owned virtual representation servable.
+3. **Permission seeding completeness.** Seed every known writer-target or mirrored inventory part from that inventory document's live Keyhive standing, including inventories with no pins, before opening the access stream. Drawer/docs-group reach is not a substitute; archive-floor gaps must not strand stale access rows.
 4. **Availability truthfulness.** A virtual entry whose provider cannot currently serve must not be announced as completely available to sync peers.
 5. **Portable streaming.** Unary caps push large transfers to native APIs; confirm no planned cross-process consumer needs large portable transfers in this PR.
-6. **Inventory drawer shape.** An inventory is a separate doc owned by the drawer's meta group. The metadata doc carries only a `drawer.metaDoc` reference to it. See [the design log](./big-blobs-drawer-design.md) §4; Cabinet prerequisites are in §12.
+6. **Inventory metadata and self-doc phase boundary.** A grouped drawer has three groups and two metadata roots. A separate inventory doc is referenced by `drawer.metaDoc/blobInventory/<name>` on the selected root and backed by that root group's Admin delegation. Cabinet carries root, kind, name, target doc id, and delegation, with no `MetaRepresentation` or blob-specific admission checks. Writer/mirror policy owns representation; optional inventory config is opaque and representation-independent. `CreateMetaDoc` refuses self-doc drawers: they have no metadata documents, companion inventories, or inventory pins. Every immediate containing grouped drawer inventories its self-doc children's blobs. Parentless self-doc inventory mirroring is outside scope. See [the design log](./big-blobs-drawer-design.md) §§17.1–17.4 and §17.8.
 7. **Legacy coexistence.** Both stacks may root the same bytes during transition. Confirm GC/tag namespaces cannot delete bytes the other stack still owns (`ct:`/`pt:`/`pin:`/`held:` ownership must be unambiguous).
 
 ## 9. Worktree note
 
-The current worktree contains the exploratory implementation described in §3.3 plus this plan. Nothing in §3.3 should be treated as merged, reviewed, or verified beyond the scoped results stated there. Implementation resumes only after §0 is answered; when it does, work proceeds phase-by-phase in §6 and this document gets updated with outcomes and links to the final checks.
+§3.3 records the exploratory prototype, not current acceptance evidence or a claim
+that its historical blockers still reproduce. Continue under ADR 026's 2026-11 amendment
+and the design log's §17 phase order and gates; the older §6 sequence covers the broader
+replacement, not an alternative drawer-native contract. Record unresolved §0/§8 product
+questions rather than inventing compatibility shims, and update outcomes only with the
+exact checks actually run.

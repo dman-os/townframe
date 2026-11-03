@@ -35,7 +35,18 @@ impl Drawer {
             DrawerLayout::SingleGroup(groups) => Some(DrawerGroups {
                 meta_group: groups.meta_group,
                 docs_group: groups.docs_group,
+                sensitive_group: groups.sensitive_group,
             }),
+        }
+    }
+
+    /// The sensitive metadata root a grouped layout names, `None` for the layouts without one.
+    /// The descriptor and this doc are both public discovery facts; only the root's contents
+    /// are withheld from a Relay principal.
+    pub fn sensitive_root(&self) -> Option<DocId> {
+        match &self.layout {
+            DrawerLayout::SingleGroup(groups) => Some(groups.sensitive_root.clone()),
+            DrawerLayout::SelfDoc(_) | DrawerLayout::Unknown(_) => None,
         }
     }
 
@@ -49,11 +60,18 @@ impl Drawer {
         }
     }
 
-    pub fn single_group(meta_group: GroupKey, docs_group: GroupKey) -> Self {
+    pub fn single_group(
+        meta_group: GroupKey,
+        docs_group: GroupKey,
+        sensitive_group: GroupKey,
+        sensitive_root: DocId,
+    ) -> Self {
         Self {
             layout: DrawerLayout::SingleGroup(SingleGroupLayout {
                 meta_group,
                 docs_group,
+                sensitive_group,
+                sensitive_root,
                 extra: Default::default(),
             }),
             extra: Default::default(),
@@ -186,17 +204,25 @@ pub struct SelfDocLayout {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SingleGroupLayout {
-    /// Authority over the descriptor and its canonical roster.
+    /// Authority over the descriptor, which is the public metadata root, and its roster.
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub meta_group: GroupKey,
     /// The collection group included docs delegate access to.
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub docs_group: GroupKey,
+    /// Authority over the sensitive metadata root: its membership is withheld from a Relay
+    /// principal, so plaintext inventories named there reach only Read+.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub sensitive_group: GroupKey,
+    /// The sensitive metadata root doc. Its existence and id are public discovery facts; its
+    /// contents are not. It carries no descriptor, roster, doc entries or child entries.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub sensitive_root: DocId,
     #[serde(flatten)]
     pub extra: crate::datum::Extra,
 }
 
-/// The two Keyhive groups a grouped layout names, as service surfaces carry them.
+/// The three Keyhive groups a grouped layout names, as service surfaces carry them.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +231,51 @@ pub struct DrawerGroups {
     pub meta_group: GroupKey,
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub docs_group: GroupKey,
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub sensitive_group: GroupKey,
+}
+
+/// Which metadata root a `metaDoc` reference is published on, which decides the group whose
+/// delegation admits it: the descriptor-bearing doc (the public metadata root) or the separate
+/// sensitive metadata root the descriptor names.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MetaRoot {
+    Public,
+    Sensitive,
+}
+
+impl MetaRoot {
+    pub const ALL: [MetaRoot; 2] = [Self::Public, Self::Sensitive];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Sensitive => "sensitive",
+        }
+    }
+}
+
+impl fmt::Display for MetaRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+/// `{0}` is not a metadata root (public or sensitive)
+pub struct UnknownMetaRoot(pub String);
+
+impl FromStr for MetaRoot {
+    type Err = UnknownMetaRoot;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|root| root.as_str() == value)
+            .ok_or_else(|| UnknownMetaRoot(value.to_owned()))
+    }
 }
 
 /// `org.example.daybook.drawer.roster/main`: marks the canonical roster on the drawer doc.
@@ -277,12 +348,13 @@ impl DrawerChildEntry {
     }
 }
 
-/// `org.example.daybook.drawer.metaDoc/<kind>`: a fixed slot naming a metadata-class doc
-/// that belongs to the drawer — an inventory, a keys document, a future shard. `kind` is an
-/// open string vocabulary carried in the key slot; Cabinet projects the reference but does
-/// not interpret it ([ADR 019](../../../docs/adrs/019-cabinet-drawers-and-selective-mirroring.md),
-/// [ADR 026](../../../docs/adrs/026-drawer-native-blobs.md)). Concurrent creators write the
-/// same key, so Automerge's last-writer-wins leaves exactly one doc named.
+/// `org.example.daybook.drawer.metaDoc/<kind>/<name>`: a named slot on one metadata root
+/// naming a metadata-class doc that belongs to the drawer — an inventory, a keys document, a
+/// future shard. `kind` is an open string vocabulary and `name` picks one slot inside it, both
+/// carried in the key slot; concurrent creators of one `(kind, name)` write the same key, so
+/// Automerge's last-writer-wins leaves exactly one doc named
+/// ([ADR 019](../../../docs/adrs/019-cabinet-drawers-and-selective-mirroring.md),
+/// [ADR 026](../../../docs/adrs/026-drawer-native-blobs.md)).
 #[macros::datum(authority = Drawer::ID, name = "metaDoc")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +388,21 @@ pub struct KnownDrawerEntry {
     /// explicit `false` means it did and stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<bool>,
+    #[serde(flatten)]
+    pub extra: crate::datum::Extra,
+}
+
+/// `org.example.daybook.drawer.successor/main`: this drawer has been replaced by another.
+/// Fixed singleton on the descriptor-bearing doc — the public metadata root of a grouped
+/// drawer, the content doc of a self-doc drawer. Resolution returns only the new id: no
+/// grant, no roster or child copy, no blob move, no silent mirror-policy retarget.
+#[macros::datum(authority = Drawer::ID, name = "successor")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawerSuccessor {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub drawer_id: DocId,
     #[serde(flatten)]
     pub extra: crate::datum::Extra,
 }
@@ -487,7 +574,8 @@ mod tests {
 
     #[test]
     fn a_single_group_descriptor_is_an_internally_tagged_member() {
-        let drawer = Drawer::single_group(group(1), group(2));
+        let root = DocId::new([9; 32]);
+        let drawer = Drawer::single_group(group(1), group(2), group(3), root.clone());
         let value = serde_json::to_value(&drawer).unwrap();
         assert_eq!(
             value,
@@ -496,10 +584,49 @@ mod tests {
                     "$type": SingleGroupLayout::ID,
                     "metaGroup": group(1).to_string(),
                     "docsGroup": group(2).to_string(),
+                    "sensitiveGroup": group(3).to_string(),
+                    "sensitiveRoot": root.to_string(),
                 }
             }),
         );
         assert_eq!(serde_json::from_value::<Drawer>(value).unwrap(), drawer);
+        let groups = drawer.groups().expect("a grouped drawer states its groups");
+        assert_eq!(groups.sensitive_group, group(3));
+        assert_eq!(drawer.sensitive_root(), Some(root));
+        assert_eq!(Drawer::self_doc().sensitive_root(), None);
+        assert_eq!(Drawer::self_doc().groups(), None);
+    }
+
+    #[test]
+    fn metadata_roots_and_references_carry_no_domain_classification() {
+        for root in MetaRoot::ALL {
+            assert_eq!(root.to_string().parse::<MetaRoot>().unwrap(), root);
+            assert_eq!(serde_json::to_value(root).unwrap(), json!(root.as_str()));
+        }
+        assert!("both".parse::<MetaRoot>().is_err());
+        let entry = DrawerMetaDoc::new(DocId::new([7; 32]));
+        let value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(value, json!({"docId": entry.doc_id.to_string()}));
+        assert_eq!(
+            serde_json::from_value::<DrawerMetaDoc>(value).unwrap(),
+            entry
+        );
+        let value = json!({"docId": entry.doc_id.to_string(), "future": {"policy": 3}});
+        let carried: DrawerMetaDoc = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(carried).unwrap(), value);
+    }
+
+    #[test]
+    fn a_successor_pointer_preserves_unknown_fields() {
+        let drawer_id = DocId::new([8; 32]);
+        let value = json!({
+            "drawerId": drawer_id.to_string(),
+            "future": {"reason": "replacement", "revision": 2},
+        });
+        let pointer: DrawerSuccessor = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(pointer.drawer_id, drawer_id);
+        assert_eq!(serde_json::to_value(pointer).unwrap(), value);
+        assert!(serde_json::from_value::<DrawerSuccessor>(json!({"future": 1})).is_err());
     }
 
     #[test]
@@ -598,6 +725,7 @@ mod tests {
                 Declaration::of::<DrawerChildEntry>().unwrap(),
                 Declaration::of::<DrawerMetaDoc>().unwrap(),
                 Declaration::of::<KnownDrawerEntry>().unwrap(),
+                Declaration::of::<DrawerSuccessor>().unwrap(),
             ])
         }
 
@@ -620,11 +748,12 @@ mod tests {
                     DrawerChildEntry::ID,
                     DrawerMetaDoc::ID,
                     KnownDrawerEntry::ID,
+                    DrawerSuccessor::ID,
                 ]
             );
             let bundle = Bundle::new(&universe, Vec::new());
             let lexicons = bundle.lexicons().unwrap();
-            assert_eq!(lexicons.len(), 8);
+            assert_eq!(lexicons.len(), 9);
             let drawer = &lexicons[0].file;
             assert_eq!(drawer["id"], Drawer::ID);
             let layout = &drawer["defs"]["main"]["properties"]["layout"];
@@ -647,6 +776,18 @@ mod tests {
                 );
                 assert_eq!(access.get("enum"), None, "{}", entry_lex.file);
             }
+            let meta = lexicons
+                .iter()
+                .find(|lex| lex.id == DrawerMetaDoc::ID)
+                .unwrap();
+            assert_eq!(
+                meta.file["defs"]["main"]["properties"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>(),
+                vec!["docId"]
+            );
             // Admission is what the service does with these at boot: each datum's lexicon is
             // checked against its declaration with the others carried, members included.
             for (index, lexicon) in lexicons.iter().enumerate() {

@@ -7,6 +7,7 @@ use big_repo::KeyhiveAccessRevisionStore;
 use big_repo::KeyhiveAccessSelector;
 use big_repo::SharedBigRepo;
 use big_repo::SharedPartStore;
+use big_repo::keyhive_core::access::Access;
 use big_sync::DeltaWalkerStateRepo;
 use big_sync::SqliteDeltaWalkerStateRepo;
 use big_sync_core::PeerKey;
@@ -30,6 +31,7 @@ pub(crate) async fn seed(
             crate::workers::inventory_part(document),
             agents
                 .into_iter()
+                .filter(|(_, access)| *access >= Access::Read)
                 .map(|(id, access)| (PeerKey::new(id.to_bytes()), access))
                 .collect(),
         )
@@ -37,34 +39,40 @@ pub(crate) async fn seed(
     Ok(())
 }
 
-/// Seed the plaintext part of `drawer` from live Keyhive state (ADR 026 §7): its
-/// members are the agents holding access on the drawer's docs group.
-pub(crate) async fn seed_drawer(
+async fn seed_known(
     repo: &SharedBigRepo,
     parts: &SharedPartStore,
-    drawer: &DocId,
-    docs_group: [u8; 32],
+    sql: &sqlite_rs::Database,
 ) -> Res<()> {
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&docs_group)?;
-    let identifier = big_repo::keyhive_core::principal::identifier::Identifier::from(key);
-    let agents = repo.keyhive().agents_for_membered(identifier).await;
-    parts
-        .set_part_members(
-            crate::workers::plaintext_part(drawer),
-            agents
-                .into_iter()
-                .map(|(id, access)| (PeerKey::new(id.to_bytes()), access))
-                .collect(),
+    let inventories = sql
+        .query(
+            "SELECT doc_id FROM big_cabinet_drawer_meta_docs WHERE kind = ?
+             UNION
+             SELECT inventory_id FROM big_blobs_writer_targets
+             UNION
+             SELECT inventory_id FROM big_blobs_writer_effects
+             UNION
+             SELECT inventory_id FROM big_blobs_inventory_registry",
+            (crate::workers::INVENTORY_KIND,),
         )
-        .await?;
+        .await?
+        .all::<String>()?;
+    for inventory in inventories {
+        seed(repo, parts, &inventory.parse()?).await?;
+    }
     Ok(())
 }
 
 pub(crate) async fn run(
     repo: SharedBigRepo,
+    parts: SharedPartStore,
+    sql: sqlite_rs::Database,
     queue: WorkQueue,
+    mirrors: crate::admission::InventoryMirrors,
     shutdown: impl Future<Output = ()>,
 ) -> Res<()> {
+    seed_known(&repo, &parts, &sql).await?;
+    mirrors.refresh_policy().await?;
     let state = SqliteDeltaWalkerStateRepo::new(
         repo.database(),
         "big-blobs-permissions-v1",
@@ -77,6 +85,7 @@ pub(crate) async fn run(
     let resume = durable.max(stream.archived_through().await?);
     if resume > durable {
         queue.rearm().await?;
+        mirrors.refresh_policy().await?;
         let mut tx = state.begin().await?;
         tx.advance_from(durable, resume).await?;
         tx.commit().await?;
@@ -109,12 +118,128 @@ pub(crate) async fn run(
             for delta in entries {
                 match delta.entry.subject {
                     AccessSubject::Document(id) => {
-                        queue.enqueue(&DocId::new(id.to_bytes())).await?
+                        let document = DocId::new(id.to_bytes());
+                        let known = sql.query(
+                            "SELECT 1 FROM big_cabinet_drawer_meta_docs WHERE doc_id = ?1 AND kind = ?2
+                             UNION ALL
+                             SELECT 1 FROM big_blobs_writer_targets WHERE inventory_id = ?1
+                             UNION ALL
+                             SELECT 1 FROM big_blobs_writer_effects WHERE inventory_id = ?1
+                             UNION ALL
+                             SELECT 1 FROM big_blobs_inventory_registry WHERE inventory_id = ?1
+                             LIMIT 1", (document.to_string(), crate::workers::INVENTORY_KIND),
+                        ).await?.all::<i64>()?;
+                        if !known.is_empty() {
+                            seed(&repo, &parts, &document).await?;
+                            queue.rearm().await?;
+                        }
+                        queue.enqueue(&document).await?;
                     }
-                    AccessSubject::Group(_) => queue.rearm().await?,
+                    AccessSubject::Group(_) => {
+                        seed_known(&repo, &parts, &sql).await?;
+                        queue.rearm().await?;
+                    }
                 }
+                mirrors.refresh_policy().await?;
                 walker.ack(delta.key, delta.cursor).await?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use automerge::transaction::Transactable;
+    use big_sync::ReadTarget;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn empty_inventory_seeding_requires_exact_read_standing() -> Res<()> {
+        let runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
+        let mut nodes = Vec::new();
+        for seed in [81, 82] {
+            nodes.push(
+                big_repo::BigRepo::boot(
+                    Arc::clone(&runtime),
+                    big_repo::Config {
+                        node_identity_seed: [seed; 32],
+                        storage: big_repo::StorageConfig::Memory,
+                        scope_key: "inventory-permissions".into(),
+                        hidden_parts: Default::default(),
+                        automerge_frontier_group_scope: Default::default(),
+                        causal_checkpoint_group_scope: Default::default(),
+                        group_part_group_scope: Default::default(),
+                    },
+                )
+                .await?,
+            );
+        }
+        let (reader, reader_stop) = nodes.pop().unwrap();
+        let (owner, owner_stop) = nodes.pop().unwrap();
+        let agent = owner
+            .receive_keyhive_contact_card(&reader.local_keyhive_contact_card())
+            .await?;
+        let mut initial = automerge::Automerge::new();
+        let mut tx = initial.transaction();
+        tx.put(automerge::ROOT, "fixture", true)?;
+        tx.commit();
+        let first = owner.create_doc(initial.clone()).await?;
+        let second = owner.create_doc(initial).await?;
+        let first_id = first.document_id();
+        let second_id = second.document_id();
+        owner
+            .grant_doc_access(first_id.clone(), agent.clone(), Access::Relay)
+            .await?;
+        owner
+            .grant_doc_access(second_id.clone(), agent.clone(), Access::Read)
+            .await?;
+        let parts: SharedPartStore = Arc::new(big_sync::MemoryPartStore::new());
+        let first_part = crate::workers::inventory_part(&first_id);
+        let second_part = crate::workers::inventory_part(&second_id);
+        let peer = reader.local_peer_id();
+        seed(&owner, &parts, &first_id).await?;
+        seed(&owner, &parts, &second_id).await?;
+        assert!(
+            parts
+                .read_denied(ReadTarget::Part(first_part.clone()), peer.clone())
+                .await?
+        );
+        assert!(
+            !parts
+                .read_denied(ReadTarget::Part(second_part.clone()), peer.clone())
+                .await?
+        );
+        assert_eq!(parts.member_count(first_part.clone()).await?, 0);
+        assert_eq!(parts.member_count(second_part.clone()).await?, 0);
+        owner
+            .revoke_doc_access(first_id.clone(), agent.clone())
+            .await?;
+        owner
+            .grant_doc_access(first_id.clone(), agent.clone(), Access::Read)
+            .await?;
+        seed(&owner, &parts, &first_id).await?;
+        assert!(
+            !parts
+                .read_denied(ReadTarget::Part(first_part.clone()), peer.clone())
+                .await?
+        );
+        owner.revoke_doc_access(first_id.clone(), agent).await?;
+        seed(&owner, &parts, &first_id).await?;
+        assert!(
+            parts
+                .read_denied(ReadTarget::Part(first_part), peer.clone())
+                .await?
+        );
+        assert!(
+            !parts
+                .read_denied(ReadTarget::Part(second_part), peer)
+                .await?
+        );
+        drop(first);
+        drop(second);
+        reader_stop.stop().await?;
+        owner_stop.stop().await?;
+        Ok(())
     }
 }

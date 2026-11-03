@@ -1,9 +1,9 @@
 # big_blobs × drawers — design log
 
-Status: Design log; settled decisions are folded into ADRs 023–026 and the amendments listed in §14. Implementation is paused, and nothing here is authorized for code yet.
+Status: Design log. Decisions through §14 are what ADRs 023–026 and the §14 amendments were written from. `afe09255` landed the first drawer-native blob cut; that commit is not a blank check. §15 critiques that cut against later operator direction and authorizes no code. Where this log and an ADR disagree, the ADR wins until it is amended.
 Owner: operator + big_blobs track
-Updated: 2026-10-30
-Scope: Drawer-native blob design, and the Cabinet changes it needs. [big-blobs-replacement-plan.md](./big-blobs-replacement-plan.md) defers to this file for everything drawer-related. Where this log and an ADR disagree, the ADR wins; this log keeps the discussion trail and the items still [open].
+Updated: 2026-11-01
+Scope: Drawer-native blob design, and the Cabinet changes it needs. [big-blobs-replacement-plan.md](./big-blobs-replacement-plan.md) defers to this file for everything drawer-related. Where this log and an ADR disagree, the ADR wins; this log keeps the discussion trail and the items still [open]. The current gap list is §15, not the pre-cut backlog in §14; §16 is the coherent resolution proposal for §15.
 
 ADRs written from this log:
 - [ADR 023](../adrs/023-cursor-consumption-is-long-poll.md): cursor consumption is long polling (§13).
@@ -439,3 +439,394 @@ Work items, in dependency order. Nothing here is authorized for code yet.
 14. `big_node` wiring and lifecycle; delete `daybook_core::blobs`.
 
 **Follow-ups outside this PR:** revisions for `ObserveDocAvailability` / `ObserveCapability`; relay serving of a lone self-doc drawer; plaintext pins for public drawers; relay transitive adoption.
+
+## 15. Critique of the first cut (`afe09255`, 2026-11-01)
+
+Operator direction after the first drawer-native blob cut. This section does not amend [ADR 019](../adrs/019-cabinet-drawers-and-selective-mirroring.md) or [ADR 026](../adrs/026-drawer-native-blobs.md). Where it and an ADR disagree, the ADR still wins for code. Nothing here authorizes an implementation.
+
+The old header said implementation was paused and that nothing was authorized for code. The pause sentence is stale for `afe09255` (per-inventory ciphertext parts, the pin worker, self-doc children). The authorization sentence is not: further code is still not authorized. §14 is the pre-cut backlog, not the current gap list.
+
+### Acceptance bar
+
+- **[settled] Mirror a drawer from another node and get every blob the mirrored inventories name**, including blobs named by child drawers. A local `node.grant` and a SQL CTE are not that test.
+- **[flag] No two-node Keyhive transitivity test exists.** `DRAWERS=3` in `src/big_cabinet/drawer/e2e/model.rs` can form A→B→C, and `effective_bob` walks the child graph, but nothing asserts depth ≥ 2 and nothing asserts that blob bytes arrived because a remote inventory named them. `non_transitive_poll_includes_self_doc_children_but_not_child_drawer_docs` covers the local predicate only.
+
+### Already solved for a ciphertext-only relay (do not re-open)
+
+- Ciphertext objects go into `inventory_part(inventory_doc)`, keyed by the inventory doc id (`src/big_blobs/workers.rs`, `inventory_part`, `distribute_parts`). Membership is seeded from that doc's Keyhive closure (`src/big_blobs/permissions.rs`, `seed`).
+- Pins omit the plaintext digest (ADR 026 §5).
+- A self-doc child is not granted to the parent's meta group (ADR 026 §6, ADR 019 "Self-doc children").
+- A denied read parks and does not shrink retention. On the writer, absence is not deletion.
+
+Big Sync already refuses a fetch when the asker has fetch access on none of the object's parts (`PartScope::FromObject` in `src/big_sync/part_store/sqlite.rs`). `is_fetch_access` treats Relay as fetch (`>= Access::Relay`). That is any-part fetch access, not the serve rule below.
+
+### Parts: one part per inventory, not per drawer
+
+- **[settled] Reject one group part per drawer.** One Big Sync part per inventory. A node chooses which inventories to mirror. Every blob a drawer retains is written into all of that drawer's inventories; the representation differs per inventory (ciphertext in a relay inventory, plaintext in a reader inventory).
+- **[flag] ADR 026 §7 still wins for code, and the cut implements it.** `plaintext_part(drawer)` is keyed by drawer id and seeded from the docs group (`permissions::seed_drawer`, called from `distribute_parts`). That is the rejected group part. The ciphertext side is already per inventory doc, which matches this direction.
+- **[flag] The fixed `metaDoc/blobInventory` slot names only one inventory per drawer.** Multiple inventories need a naming and discovery change. **[open]** Whether that is multiple kinds, keyed slots, or references on separate metadata docs.
+
+### Serve gate
+
+- **[settled] Serve an object only if the asker has Read or stronger on the inventory the request arrived on.** The pin names the representation; the inventory doc is the access object. The gate is access level, not the word `Read`: a writer or admin of that inventory also passes. Not "any part that contains the digest", and not "any inventory that names it".
+- **[flag] Unimplemented.** `permitted_parts` for `PartScope::FromObject` unions every live part of the object the principal can fetch, and Relay counts. A principal who can fetch one part of an object can be served it without a check that the request named the inventory whose part they hold.
+
+### Two metadata groups
+
+- **[settled] Even if a relay obtains the plaintext inventory, it still cannot pull the drawer's docs.** No inventory→docs delegation, and `scoped_docs` must not reach those docs through that inventory doc.
+- **[settled] Therefore a plaintext inventory must not sit in the relay-readable meta group.**
+- **[proposed] Two metadata groups.** The existing meta group stays relay-readable and holds the ciphertext inventory and other public metadata. A second group, not widened from Relay to Read, holds the plaintext inventory and future sensitive metadata.
+- **[open] Where the pointer to the plaintext inventory may live.** It cannot be a `metaDoc` slot on the relay-readable metadata doc. ADR 019 "Publicness" says everything granted Read to the meta group, including every meta doc, is visible to Relay-level participants. A slot on a doc the second group can read is the obvious place; that doc does not exist.
+- **[flag] Conflicts with ADR 019 and with `CreateMetaDoc`, and neither is amended.** There is one meta group. An invite at Relay grants Read on it (`meta_access`). `create_meta_doc` always `grant_doc_access(..., meta, Admin)` (`src/big_cabinet/drawer/create.rs`). ADR 026 §8's relay walk, and §7 of this log, assume that same Read reaches `blobInventory`.
+
+### Self-doc blob mirroring
+
+- **[settled] Mirroring a self-doc drawer's blobs is required.** "Put it in a single-group drawer" (ADR 026 §6, proposed) is not a substitute for the acceptance bar.
+- **[proposed] Working assumption: a single-doc drawer has no Relay-level access.** The operator finds "no Relay on a single-doc drawer" odd. Record it as an assumption, not a rule.
+- **[flag] Do not encode "self-doc forbids Relay" as the serve rule.** The gate is Read or stronger on the naming inventory. Forbidding Relay is only the absence of a relay-readable naming doc. The cut does not mirror a root self-doc's blobs: `src/big_node/blob_boot.rs` creates `blobInventory` only for the boot drawer and configures workers with `drawers: vec![present_id, originated_id]`. A parent's non-transitive poll includes that parent's self-doc children (`poll_drawer`, `transitive: false`). It does not cover a root self-doc that is not one of those two drawers and has no inventory of its own.
+
+### Successor
+
+- **[settled] A successor datum only resolves the new drawer id.** It is not a grant, not a child copy, and not a blob move.
+- **[open] Where that pointer lives.**
+- **[flag] No successor datum exists in drawer code.**
+
+### Pin versus part, both orders
+
+- **[open] The mirror protocol, in both orders:**
+  1. A pin arrives before the object is advertised in a part: park the want. Absence is not deletion.
+  2. An object is seen in a part before any inventory pins it: park it, do not serve it onward, do not delete it. Pull it when a later inventory update names it.
+
+  Removal and not-yet-seen stay distinct.
+- **[proposed] Pending wants and seen-but-unpinned objects are keyed by `(inventory, representation)` and survive restart.** A pin in one inventory must not unlock an object merely because the same digest was seen in another inventory's part.
+- **[flag] Writer `reconcile_parts` is not that protocol.** Unless `preserve`, it removes an object from `inventory_part(document)` when the object drops out of that writer's pin set (`src/big_blobs/workers.rs`). That is the writer's own ledger. A big_sync keyhive-membership retry storm is a different race and is intentional (AGENTS.md); do not "fix" it as if it were this one.
+
+### Still not the acceptance bar
+
+- Workers poll non-transitive membership of the drawers they are handed, plus one `PollDatums` per inventory (`poll_drawer`, `poll_inventory`). They do not walk a remote sponsorship closure.
+- `retention::inventories_for` joins `big_cabinet_drawer_docs` to `big_cabinet_drawer_meta_docs` on kind `blobInventory`. That is the local projection, not a mirrored grant.
+- No sponsorship or relay walk is implemented. §7 and ADR 026 §8 stay proposed.
+- The roster is still `DrawerRoster::inline()`. ADR 019's registry-and-shard design stays deferred.
+- Concurrent-creator retirement and re-seed are specified (ADR 026 §5) and not implemented.
+- No depth ≥ 2 child-chain assertion, as under the acceptance bar.
+
+## 16. Resolution proposal for the first-cut critique (2026-11-01)
+
+Except where a requirement is restated as **[settled]**, this section is **[proposed]**. It resolves the design questions in §15; it does not amend ADR 019 or ADR 026 and does not authorize code. "Read+" below means Read, Edit/Write, or Admin. A representation id is the digest named by a pin.
+
+### 16.1 Metadata roots and named inventories
+
+A grouped drawer has three groups and two metadata roots:
+
+- the existing docs group;
+- the existing meta group, now explicitly the **public metadata group**;
+- a new **sensitive metadata group**;
+- the existing descriptor-bearing drawer doc is the **public metadata root**;
+- a separate **sensitive metadata root doc** holds sensitive metadata references.
+
+The drawer descriptor names the sensitive group and sensitive root. At drawer creation, the sensitive metadata group gets Admin on the sensitive root, analogously to the public metadata group's grant on the public root; principal access is attenuated by membership level. The sensitive root's existence and doc id are public discovery facts; its contents, including plaintext inventory ids, are not. Hiding even the existence of sensitive metadata is not a requirement. The sensitive root has no descriptor, roster, doc entries, or child entries.
+
+Access and delegation follow one table:
+
+| Principal's drawer access | Docs group | Public meta group | Sensitive meta group |
+| --- | --- | --- | --- |
+| Relay | Relay | Read | no membership |
+| Read+ | corresponding level | corresponding level | corresponding level |
+
+Child links apply the same table recursively: parent docs → child docs and parent public meta → child public meta as today, plus parent sensitive meta → child sensitive meta only for Read+. Thus a Relay participant can discover ciphertext inventories transitively without receiving sensitive metadata, while a Read+ participant can discover both.
+
+- Replace the single `metaDoc/blobInventory` slot with fixed **kind-and-name** slots: `org.example.daybook.drawer.metaDoc/blobInventory/<name> { docId }`. Concurrent creators of one `(kind, name)` still write the same key, preserving the LWW winner and loser-retirement design.
+- Ciphertext inventories are canonical on the public root and plaintext inventories on the sensitive root, including additional names. The conventional names are `ciphertext` and `plaintext`; a name is a discovery and selection convention, never an authorization rule.
+- Inventories are opaque pin sets with no representation config. Writer policy chooses the digest to pin; metadata roots and names do not assert or validate representation. Inventories are independently lazy-created; a drawer need not have both conventions.
+- `CreateMetaDoc` requires Write+ on the drawer, takes root, kind, and name, grants the new doc Admin to that root's group, then writes the reference on that same root. Projection admits a grouped-drawer reference only when that root's group has backing Admin delegation, with delegation before publication.
+- The plaintext convention uses sensitive metadata. Deliberately sharing an inventory through public metadata discloses its opaque pins and bytes; a sensitive alias cannot undo that disclosure. Neither metadata roots nor inventories are docEntries. There is no inventory → docs-group delegation. Drawer authority may reach a meta doc for Cabinet operations, but inventory access never creates drawer authority, and `scoped_docs` remains roster/child based.
+- Extend the existing `singleGroup` layout with the sensitive group and root rather than adding a second layout with the same meaning.
+
+### 16.2 Self-doc drawers use their immediate parents' inventories
+
+The standalone companion proposal is withdrawn. A self-doc drawer has no groups, metadata documents, companion inventory, or inventory pins of its own. Its readable content already names its blobs; introducing companion metadata would require content access for discovery or reverse discovery, plus coordinated ACL machinery without a corresponding requirement.
+
+Each immediate containing grouped drawer inventories the self-doc's blobs through its own writer targets. Multiple parents retain independent inventory claims. A self-doc child never enters either parent metadata group, and transitive mirroring covers its blobs through its immediate parent's selected inventory, not through a child inventory.
+
+Inventory-based mirroring of a parentless self-doc is outside this scope. Selecting one as an inventory-mirror root must not report successful empty coverage. The universal inventory Read+ gate is unchanged.
+
+### 16.3 Mirror selection and transitive coverage
+
+**[settled]** Coverage is the union of pins in the selected inventories discovered from the mirrored root, including descendants. Cabinet projections guide discovery; actual access comes from Keyhive delegations.
+
+- A mirror policy selects an inventory name for a root drawer. That name selection is inherited down the official `childEntry` closure unless the node overrides it for a particular drawer. The node therefore chooses which inventory to mirror without mirroring every inventory it can read.
+- Maintain a durable, cycle-safe discovery state keyed by drawer id and inventory id, including `part_id → inventory_id`. Re-evaluate on roster changes, inventory-slot replacement, and Keyhive access revisions.
+- A newly linked child expands coverage under the inherited or overridden selection. Removing the last selected path stops new mirror admission from that inventory; it does not implicitly delete retained bytes or alter shared writer targets.
+- A grouped child with missing metadata, selected inventory, access, pins, or bytes is **pending/incomplete**, never successful empty coverage. A self-doc child requires no child inventory; its coverage is evaluated through the containing parent's selected inventory.
+- Pin maintenance remains non-transitive: each inventory pins its own drawer's docs and self-doc children. Only mirror discovery is transitive.
+
+The acceptance matrix is:
+
+1. **Two-node A → B → C:** grant only the root on the owner, mirror on the other node, and assert actual bytes arrive for pins from root, child, and grandchild inventories without direct child invitations or local standing grants. Run this for both Relay/ciphertext and Read+/plaintext access.
+2. **Dynamic closure:** add a deep child and replace an inventory slot after initial mirroring; new pins arrive. Restart resumes discovery. Unrelated readable inventories are not mirrored.
+3. **Self-doc child:** its blob is named by the parent inventory and arrives; the parent meta group still has no access to the self-doc.
+4. **Parentless self-doc:** no companion metadata or self-doc pins are created. Inventory-mirror coverage reports this root mode as unsupported/incomplete rather than successful empty coverage. Self-doc child coverage uses every immediate containing grouped drawer's own inventory.
+5. **Negative and pending:** missing inventory or bytes reports incomplete. Revocation stops new authorized fetching and is not treated as a byte-deletion signal.
+6. **Both race orders:** for pin-first and object-first, prove same-inventory admission, restart persistence, no cross-inventory unlocking for an identical digest, and no stale announcement after the last applicable claim is deselected, after removal or revocation, or after a late completion. A writer-target claim alone never triggers a mirror fetch.
+7. **Serving isolation:** with the same representation in inventories A and B, Read+ on A does not authorize a request bound to B; unauthorized requests disclose neither availability nor membership. Read+ on a plaintext inventory does not authorize drawer content docs, and Relay cannot read the sensitive root or plaintext inventory.
+8. **Successor:** resolution returns the new id for both layouts; no grant, children, blobs, or mirror selection move implicitly.
+
+### 16.4 Representation distribution and the two orderings
+
+`inventory_part(inventory_doc)` is the only blob-part mapping, for ciphertext and plaintext alike. The drawer-keyed `plaintext_part` and docs-group seeding are withdrawn from this proposal.
+
+Writer-side pin maintenance targets every inventory of the directly containing drawer that the writer is authorized to maintain, independently of local mirror selection. Self-doc children use the parent's writer targets. Every retained representation goes to every writer-target inventory of the corresponding representation. Mirror selection controls only local discovery and admission; it never removes pins or objects from a shared inventory. Different inventories may have different audiences, and global possession of bytes never substitutes for admission into a particular inventory.
+
+Mirror state is durable and keyed by **`(inventory_id, representation_id)`**:
+
+- writer-target and mirror-selection claims;
+- `pin_observed` for this inventory;
+- `object_observed` or admitted for this inventory's part;
+- source/payload hints and fetch/completion state.
+
+Local production counts as producer object admission. **Fetch eligibility** requires a current mirror-selection claim, `pin_observed`, and object observation in that inventory's part; a writer-target claim alone never causes a fetch. **Serve/re-advertise eligibility** requires a current writer-target or mirror-selection claim, `pin_observed`, object admission, and available bytes. Existing local bytes may avoid a download only after the mirror pair becomes fetch-eligible.
+
+1. **Pin first:** record a want. The absent object is pending, not deleted.
+2. **Object first:** record a quarantined candidate. Do not pull, re-advertise, or serve it until a pin in the same inventory arrives. That later pin schedules the fetch only with a current mirror selection, even if the part cursor was already consumed.
+
+An object observed through one inventory never completes a pair for another. Explicit pin or object removal clears only that fact for that pair. Mirror deselection removes fetch eligibility and removes serve/re-advertise eligibility only when no writer-target claim remains. Bare writer-target or mirror-selection claims do not retain bytes. Retention claims come only from local ownership, currently byte-requiring admitted pairs, and quarantined object-observed pairs with local bytes. Deselection or absence of a pin does not delete quarantined bytes. Authoritative object removal clears object-derived retention claims; physical deletion occurs only when no retention claims remain.
+
+- Persist state transitions before acknowledging the inventory or part cursor.
+- On restart, seed every locally maintained or mirrored inventory's ACL before serving, resume its inventory poll and part subscription, and enqueue every fetch-eligible-but-incomplete mirror pair.
+- A late fetch completion rechecks mirror selection, pin, object state, and the authorization under which the fetch was initiated before part membership or announcement. Revocation does not itself authorize physical byte deletion.
+- Denied, pending, undecodable, or incomplete reads preserve prior state. Only a complete authoritative inventory snapshot justifies pin-removal transitions, and only a complete authoritative part snapshot or equivalent authoritative removal event justifies object-removal transitions.
+- Writer targets and mirror selections are separate relations. Writer-target changes drive pin maintenance and producer-side part distribution; mirror deselection changes only local mirror state and never shrinks shared writer targets.
+
+### 16.5 Exact-inventory serving and doc isolation
+
+**[settled]** Serve only when the authenticated asker has Read+ on the exact inventory whose part carried the request. The pin names the representation; the inventory doc is the access object.
+
+- Every blob replay, bucket, summary, and byte request is **part-bound**. Resolve that part through the locally maintained or mirrored inventory-part registry and check Read+ on that exact inventory. Then check that the `(inventory, representation)` pair currently satisfies §16.4's serve/re-advertise rule and that bytes are available.
+- Object-only and multi-part union requests are not valid blob requests. The binding must survive through the byte-fetch provider; a hash-only provider route cannot implement this rule and must not be used as a fallback.
+- A principal whose only grant on the inventory is Relay is denied. A relay participant normally passes for a ciphertext inventory because the public meta group gives it Read on that doc.
+- Check authorization on every request, including after a byte download was initiated by another task. Do not change unrelated document-sync `is_fetcher` semantics globally.
+- An unauthorized request discloses neither object availability nor part membership.
+
+Read+ on a plaintext inventory can authorize its plaintext blobs, but it still grants no drawer content docs. There is no inventory → docs delegation, and exact-document inventory polling stays separate from `InDrawer` content polling.
+
+**[flag]** The current object-only `FromObject`/`AnyOf` union, Relay-inclusive fetch predicate, hash-only byte provider, `sync_obj` download-before-admission, and retention announcement from global digest possession all violate this proposal and must be addressed together when implementation is authorized. The duplicate logic in `big_repo/store/sqlite.rs` is in scope as well as `big_sync/part_store/sqlite.rs`.
+
+### 16.6 Successor pointer
+
+Use one fixed singleton on the **old** descriptor-bearing doc:
+
+```jsonc
+"org.example.daybook.drawer.successor/main": { "drawerId": "zNewDrawer" }
+```
+
+For a grouped drawer that is the public metadata root; for a self-doc drawer it is the content doc. It is neither a child entry nor an inventory/meta-doc slot. Explicit resolution may follow a cycle-checked chain, but only returns the new drawer id. It creates no grant, copies no roster or children, moves no blobs, and never silently retargets an existing mirror policy. Access to the successor is established independently; a user-confirmed mirror migration may be built later as a separate operation.
+
+With this section, §15 has no unaddressed design question. What remains before code is operator approval of these proposals and the corresponding ADR 019/026 amendments.
+
+## 17. Implementation handoff: settled boundaries, phases, and gates
+
+This section is the active implementation scope for the §16 correction. It records the design clarifications made after reviewing the first cut. Implementers should not silently choose a different boundary: either satisfy the gate or amend this section and ADR 019/026 first.
+
+### 17.1 Representation has one owner
+
+An inventory is representation-agnostic: it is a document of `blobPin/<digest> { lengthOctets }` entries and does not declare whether those digests name plaintext or ciphertext. The **metadata class that references it** supplies that meaning:
+
+- a named inventory referenced from the public metadata root has the public audience and is conventionally selected for ciphertext;
+- a named inventory referenced from the sensitive metadata root has the Read+ audience and is conventionally selected for plaintext;
+- the conventional names `ciphertext` and `plaintext` aid selection, but the root — not the spelling and not an inventory-local field — determines the audience class; writer and mirror policy determine which representation is placed there;
+- a missing, denied, or unavailable reference/inventory is pending or incomplete, never an empty usable inventory.
+
+Cabinet owns this generic classification through the root, kind, name, target doc id, and backing delegation. `big_blobs` consumes the class when deciding which representation to pin and distribute. There is no `MetaRepresentation` on `DrawerMetaDoc` and no duplicate inventory config assertion to reconcile. The optional inventory config remains available for future representation-independent policy, but it is not required to state plaintext versus ciphertext.
+
+An authorized public reference and backing delegation are intentional sharing of the target inventory, even when another public or sensitive slot names the same document. Such aliases share one pin set and the inventory's effective Keyhive audience; references do not partition its contents or retained history. Do not reject cross-root aliases, suppress one root's writer claims, or impose an inventory-wide representation class. Each reference keeps independent writer claims, and opaque pins may name intentionally unencrypted or publicly decryptable bytes. Sensitive-only non-disclosure guarantees do not override an explicit authorized public grant.
+
+### 17.2 What “Read+ on the inventory” means
+
+“Read+” means the authenticated peer's **Keyhive standing on the exact inventory document is Read, Write/Edit, or Admin**. It does not mean a portable `big_blobs/read` capability and it does not mean Read on the drawer's content docs.
+
+A drawer-level Relay participant normally gets Read on the public metadata group and therefore Read on a public ciphertext inventory. It passes the ciphertext inventory gate even though its docs-group standing is Relay. It gets no membership in the sensitive metadata group and therefore cannot discover or read a plaintext inventory through the official drawer path. Read+ on an inventory never grants access to drawer content docs because there is no inventory-to-docs delegation.
+
+### 17.3 Stock iroh-blobs cannot perform the exact-inventory check
+
+The current iroh virtual provider is called as `reader_for(hash)`. It receives the digest but no authenticated peer, requested part, inventory id, or capability. It can answer “bytes/not found”, but it cannot decide whether this requester has Read+ on the inventory whose part named the digest. Registering or removing a hash globally is likewise not an audience-specific authorization mechanism.
+
+Big Sync can authorize and filter inventory/part metadata before scheduling a transfer, but that alone does not authorize a direct stock iroh-blobs GET by hash. Therefore exact-inventory authorization cannot be honestly implemented as a check inside `CipherBlobProvider` or as a late hash-only fallback.
+
+The accepted interim boundary is intentionally weaker:
+
+1. Keyhive access controls discovery of inventory documents. Relay participants can read public metadata and ciphertext inventories, but have no route to the sensitive root or plaintext inventories.
+2. A plaintext digest is disclosed through the sensitive inventory only to Read+ participants. The stock hash endpoint does not perform a second inventory authorization check; protection against an unauthorized relay fetching plaintext therefore relies on the relay never learning the plaintext digest through the official protocol. This is explicitly security through obscurity/unguessable-content addressing, accepted for the current phase rather than misdescribed as exact-inventory authorization.
+3. `big_blobs` and Big Sync must still avoid leaking sensitive inventory ids, pins, plaintext digests, part membership, or availability through public metadata, logs, summaries, object-only events, or ciphertext inventory payloads.
+4. A future hardened transport can carry the exact inventory/part identity and recheck Read+ before streaming bytes. That is a defense-in-depth follow-up, not a blocker for the current plaintext inventory implementation under this threat model.
+
+Accordingly §16.5's exact-inventory byte-serving rule is deferred as hardening. Current acceptance is authority-gated inventory discovery plus strict non-disclosure of sensitive inventory contents. Metadata and pin authorization remain real Keyhive checks; only the final hash-based byte request lacks requester-aware authorization.
+
+### 17.4 Phase A — Cabinet metadata roots and successor
+
+Deliver §16.1 and §16.6, with Cabinet kept representation-agnostic.
+
+Required design properties:
+
+- three groups and two roots use the §16.1 access table;
+- Relay gets no sensitive-group route, including transitively;
+- kind-and-name slots are projected per root;
+- delegation precedes reference publication and projection checks the backing delegation;
+- `DrawerMetaDoc` carries no blob-specific representation field; the public/sensitive root is the inventory class;
+- successor resolution is cycle-checked and moves no authority, roster, mirror policy, or blobs;
+- authorize caller Read on each drawer before reading its successor datum. For A→B→C with access only to A, return `SuccessorResolution::AccessRequired { drawer_id: B }`, not B as a terminal successor. A's readable pointer already discloses B; the service must not inspect B, reveal C, or reveal B's participation in a cycle. Cycle errors may mention only drawers already authorized and visited.
+
+Verification gate:
+
+- focused `big_cabinet_core` datum/serde/admission tests;
+- focused `big_cabinet` drawer membership, delegation, lifecycle, projection, and successor tests;
+- tests for Relay versus Read+ on a parent→child→grandchild chain, including absence of sensitive membership for Relay;
+- crash/replay tests for sensitive-root and metadata-doc creation;
+- successor A→B→C tests with access only to A return access-required B without inspecting B or leaking C; replacing B's hidden pointer with a cycle does not change the result. Once B is authorized, traversal may inspect B; cycle errors name only authorized, visited drawers;
+- `cargo clippy --all-targets --all-features -p big_cabinet_core -p big_cabinet`;
+- `cargo x guardrails api --all --check` after intentionally blessing and reviewing the interface break.
+
+### 17.5 Phase B — Inventory-only representation distribution
+
+Deliver §16.4's writer side before remote mirror discovery.
+
+Required design properties:
+
+- `inventory_part(inventory_doc)` is the only blob-part mapping;
+- delete `plaintext_part(drawer)` and docs-group part seeding;
+- writer targets are every directly containing drawer inventory the writer may maintain, grouped by the public/ciphertext or sensitive/plaintext root that references each inventory;
+- self-doc children use the containing drawer's writer targets;
+- writer targets and mirror selections are different durable relations;
+- missing, denied, or unavailable inventory references cause no destructive reconciliation.
+
+Verification gate:
+
+- one drawer with multiple named inventories receives only the configured representation in each;
+- the same digest in two inventories remains two inventory-specific claims;
+- self-doc child distribution uses the parent inventories;
+- removal from one inventory does not remove another inventory's object or pin;
+- restart preserves writer-target effects;
+- focused `big_blobs` nextest and `cargo clippy --all-targets --all-features -p big_blobs`.
+
+### 17.6 Phase C — Durable mirror state and both orderings
+
+Deliver the §16.4 mirror state machine, still without claiming transitive coverage.
+
+Required design properties:
+
+- durable state is keyed by `(inventory_id, representation_id)`;
+- state distinguishes selection, pin observation, object observation/admission, bytes, fetch, and completion;
+- cursor acknowledgement follows the durable state transition;
+- pin-first parks a want; object-first quarantines a candidate;
+- neither ordering fetches or serves until the same-inventory pair is eligible;
+- no digest observed in inventory A unlocks inventory B;
+- restart and late completion re-evaluate current selection, pin, object, and authorization facts;
+- missing/denied/incomplete observations never masquerade as removal.
+
+Verification gate:
+
+- pin-first and object-first tests, each across restart;
+- identical digest in two inventories cannot cross-unlock;
+- deselection, explicit removal, revocation, and late completion leave no stale advertisement;
+- a writer-target claim alone never starts a mirror fetch;
+- retention remains until all actual byte-owning claims are gone.
+
+### 17.7 Phase D — Root selection and transitive coverage
+
+Deliver §16.3 and the primary product acceptance test.
+
+Required design properties:
+
+- a mirror policy selects an inventory name at a root and inherits it through official child entries, with explicit per-drawer override;
+- discovery is durable and cycle-safe, and records `part_id → inventory_id`;
+- discovery reacts to child-link, inventory-slot, and Keyhive-access changes;
+- only mirror discovery is transitive; writer pin maintenance remains per containing drawer;
+- missing metadata, selected inventory, access, pin state, or bytes is surfaced as incomplete rather than successful empty coverage.
+
+Verification gate:
+
+- two real nodes, owner A→B→C, mirror granted only A, and actual root/child/grandchild **ciphertext bytes** arrive without direct child invitations;
+- adding a deep child and replacing a selected inventory after mirroring brings in new bytes;
+- restart resumes discovery without a boot-only full-scan dependency;
+- unrelated readable inventory names are not mirrored;
+- self-doc child bytes arrive through the containing parent's selected inventory;
+- revocation stops new admission without treating retained bytes as an implicit deletion.
+
+This phase is the minimum gate for saying “drawer mirroring gets all ciphertext blobs.” A local SQL reach test is not a substitute.
+
+### 17.8 Phase E — Withdrawn standalone companion proposal
+
+Do not implement self-doc metadata documents, companion inventories, reverse discovery, or self-doc inventory pins. Each immediate containing grouped drawer inventories its self-doc children's blobs. Parentless self-doc inventory mirroring is outside this scope; it must not be reported as successful empty inventory coverage. This replaces the earlier paired-share/backfill/revocation requirement.
+
+### 17.9 Phase F — Optional hardened part-bound transfer
+
+This defense-in-depth phase is not a blocker for plaintext inventory use under §17.3's accepted threat model. It replaces security-through-obscurity at the final hash fetch with requester-aware authorization when the product threat model requires it.
+When implemented, it delivers §16.5 as follows:
+
+Required design properties:
+
+- replay, summary, object request, byte stream, and completion preserve one exact part/inventory binding;
+- the responder resolves the part to an inventory and checks current Read+ standing on that exact inventory;
+- no object-only, `AnyOf`, `FromObject`, or hash-only fallback is valid for this blob path;
+- the byte provider/store remains storage machinery behind the authenticated protocol, not the authorization boundary;
+- direct stock iroh-blobs serving is unavailable to untrusted peers;
+- plaintext inventory access grants no content-doc access.
+
+Verification gate:
+
+- with the same digest in inventories A and B, Read+ only on A cannot request through B;
+- Relay-only on the exact inventory is denied;
+- unauthorized requests reveal neither availability nor part membership;
+- authorization revoked during a transfer causes completion to fail closed;
+- Read+ plaintext transfer works while the same principal still cannot read drawer docs solely through inventory access;
+- focused Big Sync/Big Repo authorization tests plus a real two-node byte-transfer test.
+
+### 17.10 Final integration gate
+
+Before this stack is a dependency for plugs or relay product work:
+
+- ADR 019 and ADR 026 describe the implemented three-group, named-inventory and phased-transfer design; stale “per drawer plaintext part” text is removed;
+- the replacement plan and public API snapshots match the code;
+- the full §16.3 acceptance matrix is accounted for as passing, explicitly gated, or deferred without being claimed complete;
+- targeted nextest and clippy pass for `big_cabinet_core`, `big_cabinet`, `big_blobs_core`, `big_blobs`, `big_sync`, `big_repo`, and `big_node` as affected;
+- run `cargo x guardrails lint`, `cargo x guardrails api --all --check`, and `cargo x guardrails doctor`;
+- run scoped `rustfmt --check` and source-validity checks for changed files in the default devshell, excluding generated SQL bindings; this workstream does not run `nix flake check`;
+- review `cargo x guardrails plan <changed files...>` and run the affected narrow tests rather than substituting a blind full-workspace test;
+- legacy `daybook_core::blobs` ownership is removed only after its remaining consumers have migrated and the new node end-to-end path passes.
+
+### 17.11 Transport identity versus local storage representation
+
+A peer serving a blob does not need to classify its bytes as plaintext or ciphertext. The transport object is an opaque digest plus bytes. Inventory documents are likewise opaque pin sets. Public/sensitive roots control who can discover an inventory; they do not change the blob transport protocol or require a relay to interpret the representation.
+
+Representation matters at the writer and mirroring edges:
+
+- A writer policy decides which digest to pin into each named inventory. By convention the public `ciphertext` selection pins the encrypted representation and the sensitive `plaintext` selection pins the plaintext representation, but the inventory format is identical.
+- A relay or opaque mirror may retain and serve exactly the bytes named by its selected inventory without understanding them.
+- A Read+ node selecting a ciphertext inventory may download ciphertext, decrypt it into locally stored plaintext, and register a virtual ciphertext provider. It then retains one physical plaintext copy while continuing to satisfy requests for the inventory's ciphertext digest by deterministic virtual serving. This is a local disk optimization; it does not rewrite the remote inventory from ciphertext to plaintext and does not require the serving path to know an audience-wide representation class.
+- A node selecting a plaintext inventory may store and serve those bytes directly. Again, the store sees only an opaque digest.
+- Mirror policy must record enough local provenance to rebuild a virtual provider after restart: selected inventory, advertised digest, resulting local plaintext digest, accepted key/framing source, and the retention claims that keep them alive. That provenance is local durable state, not inventory metadata and never goes to a relay.
+- The same digest may appear in several inventories. Admission and retention remain keyed by `(inventory_id, digest)` even though the byte store deduplicates globally by digest.
+
+Tests must describe observable behavior rather than rely on a relay interpreting representation labels: which inventory exposed a digest, which bytes were transferred, whether the authorized reader can reconstruct plaintext, whether virtual serving reproduces the exact advertised digest, and whether restart preserves that ability.
+
+### 17.12 Exact continuation order for implementing agents
+
+An agent resuming this work should read, in order:
+
+1. this document's §§15–17, treating §17 as the active correction when older text conflicts;
+2. `docs/scratch/big-blobs-replacement-plan.md` §§4–8 for service, retention, lifecycle, and verification invariants;
+3. ADR 019 for drawer authority and child delegation, noting that its one-meta-group text must be amended to §16.1's public/sensitive roots;
+4. ADR 026 for encryption and inventory history, noting that its per-drawer plaintext part and unnamed-inventory text are superseded here;
+5. `AGENTS.md` and `CONTRIBUTING.md` for the required targeted build, guardrail, and formatting commands.
+
+Then continue in this order:
+
+1. **Finish Phase A before touching blob distribution.** Remove blob-specific `MetaRepresentation` from Cabinet reference/protocol/state/SQL and tests. Keep `MetaRoot`, kind, name and doc id. Complete three-group/two-root delegation, projection admission, crash replay and successor tests. Amend ADR 019/026 in the same phase so code and accepted docs no longer disagree.
+2. **Phase B: replace both old part mappings.** Delete `plaintext_part(drawer)` and docs-group seeding. Make every target an `inventory_part(inventory_doc)`. Writer policy maps named public/sensitive inventories to the digest it intends to pin; the inventory does not declare or validate representation.
+3. **Phase C: introduce the durable pair state before adding transitive discovery.** Persist `(inventory_id, digest)` selection, pin, object, byte, fetch and completion facts; prove pin-first, object-first, restart and no cross-inventory unlocking. Do not bolt these races onto the existing `reconcile_parts` loop without a durable state transition.
+4. **Phase D: add mirror-root selection and the transitive child walk.** Selection names an inventory convention and inherits through child entries. Prove the two-node A→B→C test with actual bytes before claiming drawer mirroring works.
+5. **Do not add self-doc companions.** Self-doc children use their immediate containing grouped drawers' inventories; parentless self-doc inventory mirroring remains outside scope (§17.8).
+6. **Integrate local virtual serving.** An authorized Read+ mirror of ciphertext may store plaintext and virtually serve the advertised ciphertext digest. Persist enough provenance to restore provider registration after restart and keep both advertised and local digests rooted under the owner-aware retention ledger.
+7. **Do not block the above on Phase F.** Requester-aware exact-inventory byte authorization is deferred hardening under §17.3. Nevertheless, add negative tests proving the official protocol does not disclose sensitive inventory ids or plaintext digests to Relay participants.
+8. **Run each phase's gate before beginning the next.** Report exact commands and results. A phase is not complete merely because a local projection row or unit test exists; use the real multi-node tests named in the gate.
+
+The implementation report after each phase should contain: changed interfaces, durable schema/state transitions, tests added, exact commands run, unresolved product/design questions, and any accepted gate that was not exercised. Agents must report a design conflict rather than silently inventing a compatibility shim or weakening an invariant.

@@ -1,15 +1,33 @@
 # ADR 026: Drawer-native blobs
 
-**Status:** Proposed. The decisions marked *settled* were agreed with the operator
-during design review. The ones marked *proposed* await confirmation before
-implementation. Nothing here is implemented; the exploratory `big_blobs` code in the
-tree predates this ADR and is paused.
+**Status:** Accepted design; implementation is in progress. Sections below preserve the reasoning trail, while the 2026-11 drawer-metadata and mirroring amendment immediately below is authoritative where older single-inventory or per-drawer-part text conflicts.
 
 This ADR supersedes parts of [ADR 001](001-blob-inventories.md),
 [ADR 003](003-cipherblob.md) and [ADR 005](005-relay-sponsorship-retention-admission.md),
 and amends [ADR 019](019-cabinet-drawers-and-selective-mirroring.md). Each of those
 ADRs carries a note naming the sections replaced here. The discussion trail is
 `docs/scratch/big-blobs-drawer-design.md`.
+
+
+## 2026-11 amendment: named inventories, opaque bytes, and two metadata audiences
+
+A grouped drawer has public metadata, docs, and sensitive metadata groups. Its descriptor-bearing doc is the public metadata root; it also names a separate sensitive metadata root. Relay paths receive Read on public metadata, Relay on docs, and no sensitive-metadata membership. Read+ paths receive the corresponding level on all three. Child delegation applies that table transitively.
+
+Inventories are named meta docs, referenced by `drawer.metaDoc/blobInventory/<name>` slots. Public-root inventories are visible to Relay-level participants; sensitive-root inventories are not. Inventories and their transport objects are representation-agnostic: an inventory is only `blobPin/<digest> { lengthOctets }`, and a serving peer handles opaque digest-addressed bytes without deciding whether they are plaintext or ciphertext. Cabinet records root, kind, name, doc id, and backing delegation; it carries no blob-specific `representation` field.
+
+Writer and mirror policy supply representation intent. By convention a public inventory named `ciphertext` receives encrypted-representation digests and a sensitive inventory named `plaintext` receives plaintext digests. The root determines the audience, not the byte format. An opaque relay stores and serves exactly what its selected public inventory names. A Read+ node mirroring ciphertext may decrypt into one locally stored plaintext copy and virtually reproduce the advertised ciphertext digest; that local provenance and restart state are not inventory metadata.
+
+Explicit authorized public sharing of an inventory is intentional disclosure, including when sensitive and public references name the same document. The aliases share one pin set and effective Keyhive audience, not isolated contents or history. Cross-root aliases are permitted and retain independent writer claims; they do not establish an inventory-wide representation restriction. Public inventories may intentionally contain unencrypted or publicly decryptable blobs. Sensitive-only non-disclosure guarantees do not undo an explicit public grant.
+
+Every blob part is keyed by the inventory document: `inventory_part(inventory_doc)`. The earlier drawer-keyed plaintext part and docs-group part seeding are withdrawn. Writer targets and local mirror selections are separate. Mirror state is durable per `(inventory_id, digest)` so pin-first and object-first arrivals, restart, deselection, and identical digests in different inventories cannot cross-unlock or lose work.
+
+Mirror selection starts at a root drawer, selects an inventory name, and inherits through the official child-entry closure unless locally overridden. Each inventory still pins only its directly containing drawer's docs and self-doc children; only discovery is transitive. Success means actual bytes for root, child, and grandchild inventory pins arrive from a root-only grant. Missing metadata, inventory, authority, pins, or bytes is incomplete rather than successful empty coverage.
+
+Self-doc drawers have no groups, metadata documents, companion inventories, or inventory pins of their own. Each immediate containing grouped drawer inventories its self-doc children's blobs, independently of other parents, and never grants either parent metadata group access to the self-doc. The standalone companion proposal is withdrawn; parentless self-doc inventory mirroring is outside this scope.
+
+The current byte transport's virtual provider receives only a hash, not an authenticated requester or inventory. Current plaintext protection therefore consists of Keyhive-gated sensitive-inventory discovery plus strict non-disclosure of sensitive inventory ids, pins, plaintext digests, part membership, and availability to Relay participants. The final hash request is not a second authorization check; this security-through-obscurity boundary is explicitly accepted for this phase. Requester-aware exact-inventory byte authorization is deferred defense-in-depth, not a blocker for plaintext inventories.
+
+The implementation and verification sequence is normative in `docs/scratch/big-blobs-drawer-design.md` §17. In particular, the real two-node A→B→C byte test, both arrival orderings, restart recovery, and sensitive-metadata non-disclosure are acceptance requirements; a local projection/reach test is insufficient.
 
 ## Context
 
@@ -22,10 +40,10 @@ repo-wide Keyhive groups:
   a staging, commit and registration sweep (ADR 003 §19);
 - an account document naming one sponsorship group `S_docs` (ADR 005 §1).
 
-Cabinet drawers (ADR 019) now give every collection a meta group (the descriptor and
-roster) and a docs group (the content). This ADR re-bases blobs on that structure. It
-keeps ADR 001's pin shape, ADR 003's representation format, salt derivation,
-virtual provider and release path, and ADR 005's retention mechanics.
+Cabinet grouped drawers (ADR 019) have public metadata, docs, and sensitive metadata
+groups, with public and sensitive metadata roots. This ADR re-bases blobs on that
+structure. It keeps ADR 001's pin shape, ADR 003's representation format, salt
+derivation, virtual provider and release path, and ADR 005's retention mechanics.
 
 ## Decision
 
@@ -99,153 +117,167 @@ To sponsor or encrypt a doc you cannot write, you branch it and work on the bran
   vocabulary (for example `forkReason: readOnlyOrigin`), so tools can show "your
   writable copy of X". Branching works without it.
 
-### 5. Inventories are drawer meta docs (*settled* shape, *proposed* details)
+### 5. Inventories are named drawer meta docs
 
-The drawer is the sync and collection domain, but a relay still needs a readable list
-of representation digests. Inventories stay, under that name.
+The drawer is the sync and collection domain. Named inventories provide digest lists
+for independently selected audiences; Cabinet's Phase A metadata machinery is generic.
+Blob distribution, mirror state, and transitive discovery have separate Phase B–D gates
+in [the design log](../scratch/big-blobs-drawer-design.md) §17.
 
-- **An inventory is always a separate doc.** The drawer's metadata doc carries only a
-  reference to it, so pin churn never grows the metadata doc's history, which every
-  participant and relay syncs. This follows ADR 019's roster-shard pattern: an extra
-  metadata-class doc that the meta group can read, and that counts for the drawer only
-  through an entry on the metadata doc.
-- **The reference is a fixed slot per kind:** `org.example.daybook.drawer.metaDoc/<kind>
-  { docId }`; for blobs, `metaDoc/blobInventory`. Concurrent creators write the same
-  datum, and Automerge last-writer-wins leaves one value. `kind` is an open string
-  vocabulary; Cabinet stores and projects it without interpreting it, and
-  `big_blobs_core` owns `blobInventory`. The slot is in the `drawer.*` namespace, so
-  only DrawerService writes it.
-- **The inventory doc carries** `org.example.daybook.blobPin/<C> { lengthOctets }`, with
-  ADR 001 §2's shape and strict omissions, and optional config
-  `org.example.daybook.blobs.inventory/main { extra }`. `big_blobs_core` owns both
-  datums.
-- **Creation is a DrawerService op** (name to be fixed, for example
-  `CreateMetaDoc { drawerId, kind, datums }`), because only DrawerService can make a doc
-  metadata-class and then reference it. The order is delegation before entry, as for
-  `docEntry`:
-  1. create the doc;
-  2. `grant_doc_access(doc, metaGroup, Admin)`, as `create_collection` does for the
-     metadata doc;
-  3. write the slot.
+- **An inventory is always a separate doc.** A metadata root carries only its
+  reference, so pin churn does not grow that root's history. A grouped drawer has
+  public metadata, docs, and sensitive metadata groups, with the descriptor-bearing
+  public root and a separate sensitive root. The sensitive root's existence and id are
+  public discovery facts; its contents are not.
+- **References are fixed kind-and-name slots on the selected root:**
+  `org.example.daybook.drawer.metaDoc/<kind>/<name> { docId }`; for blobs,
+  `metaDoc/blobInventory/<name>`. Concurrent creators of one `(root, kind, name)`
+  write the same datum, and Automerge last-writer-wins leaves one value. `kind` and
+  `name` are open string vocabularies; Cabinet stores and projects them without
+  interpreting blob semantics. `big_blobs_core` owns `blobInventory`; DrawerService
+  alone writes references in the `drawer.*` namespace.
+- **The inventory doc carries** `org.example.daybook.blobPin/<digest> { lengthOctets }`,
+  with ADR 001 §2's shape and strict omissions. Optional config
+  `org.example.daybook.blobs.inventory/main { extra }` is opaque to Cabinet and reserved
+  for representation-independent policy. It is not required for discovery or admission
+  and does not declare plaintext versus ciphertext. `big_blobs_core` owns both datums.
+  There is no `MetaRepresentation` on `DrawerMetaDoc`, no inventory-local representation
+  assertion, and no Cabinet representation/root validation. Writer and mirror policy
+  decide which digests to place in each inventory; the root determines audience only.
+- **Creation is a ledgered `CreateMetaDoc` operation** requiring drawer Write+ and
+  selecting root, kind, and name. It creates the target, grants that root's group Admin
+  on it, then publishes the reference on that same root. Delegation precedes publication.
+  Self-doc drawers have no metadata documents (§6). Per
+  [ADR 024](024-indexes-are-fed-by-the-change-stream.md), the projection observes the
+  reference through the change stream rather than an imperative projection write.
+- **Keyhive access comes from the selected root's group.** Relay paths receive Read
+  on public metadata, Relay on docs, and no sensitive-group membership. Read+ paths
+  receive the corresponding level on all three groups, transitively through child links.
+  Conventional public `ciphertext` and sensitive `plaintext` names aid selection;
+  neither the spelling nor the root is a byte-format declaration.
+- **Cabinet reach** uses `big_cabinet_drawer_meta_docs` rows recording drawer, root,
+  kind, name, and target doc id, keyed by `(drawer_id, root, kind, name)`. Projection
+  admits a reference only from its canonical root and only with Admin backing
+  delegation from that root's group. Otherwise a writer could name an arbitrary doc
+  and gain Cabinet reach to it. Inventory access never grants drawer authority.
+- **Neither inventories nor metadata roots are `docEntry`s.** There is no
+  inventory-to-docs-group delegation; `scoped_docs` remains roster/child based.
+- **An inventory pins only its containing drawer's docs and self-doc children.**
+  Grouped children have their own inventories. Writer targets include every inventory
+  of the directly containing drawer the writer is authorized to maintain, independently
+  of local mirror selection. Only mirror discovery is transitive (§8).
 
-  It requires drawer Write, because writers maintain inventories. It refuses self-doc
-  drawers (§6). It is ledgered like `create_collection`. The op does not project
-  anything: the drawer projection picks the slot up from the change stream
-  ([ADR 024](024-indexes-are-fed-by-the-change-stream.md)).
-- **Keyhive access comes from the meta group.** Relay-level principals get Read on the
-  meta group when invited or linked as a child (`meta_access`), so relays read pins.
-  Write participants get Edit, so they write pins.
-- **Cabinet reach** comes from a projected `big_cabinet_drawer_meta_docs (drawer_id,
-  kind, doc_id)` row (primary key `(drawer_id, kind)`, indexed by `doc_id`) and a
-  matching `ancestors.sql` branch at the Admin bound the metadata doc itself gets. The
-  projection admits the row only when Keyhive shows the doc delegated to the drawer's
-  meta group. Otherwise any drawer writer could name an arbitrary doc and gain Cabinet
-  reach to it.
-- **An inventory is not a `docEntry`.** `docEntry`s go into the docs group, which a
-  Relay-level principal holds only as ciphertext, so it could not read the pins.
-  Inventories would also show up as drawer content.
-- **An inventory pins the representations of its drawer's own docs only:** its
-  `docEntry`s and its self-doc children. Single-group children pin theirs in their own
-  inventories, and a relay unions them while walking (§8).
-
-**Concurrent creation** (*proposed*). Every datum key gets an alias in
+**Concurrent creation** (planned cleanup). Every datum key gets an alias in
 `Dmeta.datum_uuids`. A writer reuses the smallest alias it can see and mints one only
-when it sees none (`doc/pipeline.rs` ~167). Two writers that each create
-`metaDoc/blobInventory` without seeing each other leave **two aliases** on the key after
-the merge: durable, signed evidence of the race. The slot's merged value decides the
-winner, and the projection admits only that doc, so the loser never gains Cabinet
-reach. Cleanup:
+when it sees none. Two concurrent creators of the same
+`metaDoc/blobInventory/<name>` slot on the same root leave two aliases after merge.
+The merged value decides the winner; only that target is projected. Cleanup:
 
-1. every writer's pin worker, on seeing the slot's value change, re-adds its whole
-   observed pin set to the winner, as adds only;
-2. the loser's creator, which knows the doc from its op ledger row, revokes the meta
-   group's grant on the loser, dropping it from the drawer's Keyhive closure;
+1. every writer's pin worker re-adds its observed pin set to the winner, as adds only;
+2. the loser's creator uses its ledger row to revoke the selected root group's grant
+   on the loser;
 3. other peers take no destructive action.
 
-Between the merge and the re-seed, a relay may see the winner without the loser's pins.
-Release is reactive (ADR 003 §19), and a missing pin is not an observed removal, so
-nothing held is deleted. Two aliases mean a race only for write-once slots like this
-one. A re-creation after removal reuses the visible alias, and keys rewritten all the
-time (`docEntry/*`) collect aliases under ordinary concurrent writes.
+Between merge and re-seed, missing pins are incomplete coverage, not observed removals
+or permission to delete retained bytes. Alias multiplicity is evidence of concurrent
+creation only for a write-once slot, not for routinely rewritten roster keys.
 
-**Laziness trigger** (*proposed*). A `blobInventory` slot on the metadata doc is what
-makes the drawer's writers maintain cipherBlobs and pins for its Read+ entries.
-Sponsoring a drawer you can write creates the inventory if none exists. Sponsoring a
-drawer you can only read relies on an existing one. Without it, the relay keeps the
-docs but not their blobs, and that is surfaced as a status.
+**Laziness and pin maintenance.** Inventories are independently lazy-created. A writer
+may create a missing target; a read-only sponsor relies on an existing one. A missing,
+denied, or unavailable selected inventory is pending/incomplete, never successful empty
+blob coverage. Writer policy chooses the representation to maintain for each target.
+Several writers may maintain one inventory; a lagging writer must not delete pins for
+state it has not observed. Only authoritative observed removals drive pin removal.
+Identical adds merge by digest; unreadable content contributes no newly derived pins.
 
-**Pin maintenance is delta-driven** (*proposed*). Several writers maintain one
-inventory, and a writer whose view lags must not delete pins for facets it has not
-seen. A pin is removed only on an observed cipherBlob removal or an observed removal
-of the doc from the drawer. Identical concurrent adds merge, because pins are keyed by
-representation digest. Relay-level entries, docs we cannot read, contribute no pins.
+### 6. Self-doc drawers use immediate parents' inventories
 
-### 6. Self-doc drawers: children allowed, never in a meta group, no inventory (*settled*)
+- A self-doc child is never delegated to either parent metadata group. Its descriptor
+  is its content doc, not a metadata-only root. Linking it at `access` delegates only
+  the parent's **docs group** on that doc, at `access`, with no `meta_access` widening
+  of Relay to Read.
+- Each immediate containing grouped drawer's writer targets cover the self-doc's blobs.
+  CipherBlob and JWK slots remain in the child content doc; pins go into every immediate
+  parent's named inventories with independent claims. §4 still applies when the writer
+  cannot write the doc.
+- A self-doc drawer has no groups, metadata documents, companion inventories, or pins of
+  its own. `CreateMetaDoc` refuses it. Readable content already names its blobs; no
+  reverse metadata discovery or paired companion-ACL operation is introduced.
+- The former standalone companion proposal is withdrawn. Inventory-based mirroring of
+  a parentless self-doc is outside scope and cannot report successful empty coverage.
+  Read+ on a naming inventory remains the universal metadata access requirement; the
+  final stock hash fetch has the accepted weaker boundary in §7.
+- The child entry stays `{ access }`, with no duplicated or derived layout. A child
+  always names a drawer whose shape is a fact of its own descriptor; projection checks
+  that its Keyhive delegations match that descriptor.
 
-- A self-doc drawer may be a child drawer, but it is never delegated to any meta group.
-  Its descriptor is its content doc. The meta group is readable by Relay-level
-  participants (§8), and a self-doc doc holds content, not just drawer metadata.
-- Linking a self-doc child at `access` delegates the parent's **docs group** on the
-  child doc at `access`, the same Keyhive shape as a `docEntry`. There is no meta-group
-  delegation and no `meta_access` widening of Relay to Read. Today `AddChild` refuses a
-  self-doc child with `SelfDoc` (`child_delegations` → `groups(child)`); that changes.
-- A self-doc drawer has no meta group, so `CreateMetaDoc` refuses it and it has no
-  inventory. The containing drawer's pin worker treats it as one of the parent's own
-  docs: it maintains the cipherBlob and JWK slots inside that doc and pins them in the
-  **parent's** inventory. §4 still applies: a writer who cannot write the doc branches
-  it.
-- *Proposed:* a relay that sponsors a lone self-doc drawer carries the doc but no blobs.
-  To mirror its blobs, put it in a single-group drawer.
-- The amendments to ADR 019 state the roster side: the child entry stays `{ access }`,
-  with no layout stated and none derived. A child always names a drawer, whose shape is
-  a fact of its own descriptor; the projection only checks that the child's Keyhive
-  delegations match that descriptor.
+### 7. Blob sync partitions are per inventory
 
-### 7. Blob sync partitions are per drawer (*settled*)
+`inventory_part(inventory_doc)` is the only blob-part mapping for all inventories.
+The drawer-keyed `plaintext_part(drawer)` and docs-group part seeding are withdrawn;
+removing those old implementation paths is Phase B, not a second accepted mapping.
+Seed each known writer-target or mirrored inventory part from live Keyhive standing on
+that exact inventory document before following ADR 013's access-delta stream, including
+inventories with no current pins. Read+ means Read, Write/Edit, or Admin on that doc,
+not Read on content docs and not a portable `big_blobs/read` capability. A drawer-level
+Relay normally has Read on a public inventory through public metadata membership.
 
-The second job of ADR 001 inventories, minting a Keyhive group to hold Big Sync blob
-partitions, moves to the drawer's groups. Each drawer with an inventory has its own
-blob partitions:
+Writer targets and mirror selections are separate durable relations. Phase C records
+selection, pin observation, object observation/admission, bytes, and completion per
+`(inventory_id, digest)`. Pin-first parks a want; object-first quarantines a candidate.
+A mirror fetch requires selection, a pin, and object observation in the same inventory's
+part. A writer-target claim alone cannot trigger a fetch, and an identical digest in
+another inventory cannot unlock the pair. Restart and late completion recheck current
+claims and authority before announcement; missing or denied reads are not removals.
 
-- the **ciphertext** part's access is Keyhive Read on the drawer's inventory doc, which
-  means the meta group's members, relays included;
-- the **plaintext** part's access is Keyhive Read on the drawer's docs group, whose
-  readers are entitled to plaintext and sync it between themselves, derived from the
-  drawer's Blob datums.
+Transport handles opaque digest-addressed bytes. Big Sync can authorize inventory/part
+metadata, but the stock iroh-blobs virtual provider is `reader_for(hash)`: it has no
+requester, part, or inventory identity and cannot recheck exact-inventory authority.
+The accepted interim plaintext boundary is Keyhive-gated sensitive-inventory discovery
+and strict non-disclosure of sensitive inventory ids, pins, plaintext digests, part
+membership, and availability to Relay participants. The final hash GET has no second
+authorization check. This security-through-obscurity boundary is explicitly accepted;
+requester-aware exact-inventory byte authorization is optional Phase F hardening, not
+a plaintext-inventory blocker. Group parts and `WorkerGroupScope` do not scope content
+observation; that is §9's predicate.
 
-Both are seeded from live Keyhive state before following the access-delta stream
-(ADR 013). Group parts and `WorkerGroupScope` are not the gate for which docs a worker
-reads; that is §9's predicate.
+### 8. Sponsorship, mirror discovery, and relay visibility
 
-### 8. Sponsorship and relay visibility
-
-- *Settled:* **sponsorship is a private relationship between an account and its
-  relay.** Each account names **one root sponsorship drawer** to its relay, replacing
-  ADR 005's `S_docs` group, and grows its sponsored set by adding child entries. Two
-  collaborators may sponsor the same drawer to different relays without coordinating.
-- *Settled:* **sponsorship is not private in effect.** Once a drawer is on a relay,
-  other full-read participants may fetch from it. Keys travel inside the docs, so they
-  can decrypt.
-- *Proposed:* **the relay walk:**
-  1. start at the root sponsorship drawer's metadata;
-  2. follow child meta groups, which it holds at Read;
-  3. in each drawer, read the metadata doc: descriptor, roster and `metaDoc` slots;
-  4. read the referenced `blobInventory` docs through the same meta-group Read;
-  5. adopt the docs closure with ADR 005's adoption worker, made transitive over child
-     docs groups;
-  6. retain the union of inventory pins.
-
-  Because the relay reads child metadata, it can tie each inventory to its drawer, and
-  dedupe across accounts that sponsor the same drawer, by drawer id and by
-  representation digest.
-- *Proposed:* **publicness contract.** Anything granted Read to a drawer's meta group
-  (descriptor, roster, inventories) is visible to every participant, including
-  Relay-level ones. No private datums (names, descriptions, icons, notes) go on a
-  single-group drawer's metadata doc; private drawer metadata belongs in a `docEntry`. A
-  self-doc drawer has no separate metadata. Whether it is linked as a child or listed
-  as an entry, it is reached only through the parent's docs group, so its content stays
-  ciphertext to Relay-level participants. Only the parent's roster entry is metadata.
-- *Proposed:* only sponsored drawers are visible to a relay.
+- **Sponsorship is a private relationship between an account and its relay.** Each
+  account names one root sponsorship drawer, replacing ADR 005's `S_docs` group, and
+  grows its sponsored set through child entries. Collaborators may sponsor the same
+  drawer to different relays independently. Sponsorship product workflows remain
+  planned; Phase A metadata alone does not implement them.
+- **Sponsorship is not private in effect.** Other authorized readers may fetch retained
+  representations from a relay. Keys remain inside content docs; an opaque relay need
+  not interpret the bytes it stores or serves.
+- **The Phase D mirror walk** selects an inventory name at the root and inherits that
+  selection through the official child-entry closure, with explicit local per-drawer
+  overrides. A Relay path reads descriptor, roster, and named public-root references
+  through each child's public metadata group; it gets no sensitive-group route. Read+
+  paths may discover both roots. Discovery is durable and cycle-safe, reacts to child
+  links, slot replacement, and authority changes, and does not mirror unrelated readable
+  inventories. Each selected inventory pins only its own drawer's docs and self-doc
+  children; adoption of the content-doc closure still follows the docs-group paths.
+  Missing metadata, selected inventory, authority, pins, or bytes is incomplete coverage.
+- **Coverage is the union of selected inventory pins, not a local reach query.** The
+  gate requires two real nodes, owner A→B→C, only A granted to the mirror, and actual
+  root/child/grandchild ciphertext bytes arriving without direct child invitations.
+  Authorized plaintext coverage, both arrival orderings, restart, dynamic closure,
+  self-doc child coverage, and sensitive non-disclosure have their own §17 gates; none is
+  implied by Phase A. Byte storage may deduplicate by digest while admission and claims
+  stay per `(inventory_id, digest)`.
+- **Publicness is per root.** Public descriptor, roster, child architecture, and public
+  meta docs are visible to Relay-level participants. Private names, notes, plaintext
+  pins, and other sensitive state belong on sensitive meta docs, not the public root.
+  Neither metadata root nor an inventory grants content-doc access. A self-doc child is
+  reached through the parent's docs group only; its content stays ciphertext to Relay.
+- **Successor resolution is discovery only.**
+  `org.example.daybook.drawer.successor/main { drawerId }` lives on the old
+  descriptor-bearing doc: public root for a grouped drawer, content doc for a self-doc.
+  Explicit resolution follows a cycle-checked chain and returns the new drawer id. It
+  grants no authority, copies no roster or children, moves no blobs, and never silently
+  retargets mirror selection; successor access is established independently.
 
 ### 9. Workers observe through `PollDatums`
 
@@ -291,9 +323,9 @@ minting the first JWK for one slot concurrently.
 
 ## Open and deferred
 
-- **Public drawers** may want inventories that also pin plaintext representations,
-  so relays can serve public blobs unencrypted. ADR 001 pins allow it by shape.
-  Deferred, along with ADR 001's inline pins in public content docs.
+- **Public-drawer plaintext serving policy and inline pins in public content docs**
+  remain deferred. This does not defer Read+ plaintext inventories under sensitive
+  roots or impose a representation field on the generic pin format.
 - **Shadow mirrors:** give a relay only inventory docs and group ids for a drawer,
   without its full metadata. Recorded, not designed.
 - **Preferring the candidate the relay already holds** when concurrent encryptors
@@ -308,9 +340,10 @@ minting the first JWK for one slot concurrently.
 
 ## Consequences
 
-- Positive: no key docs, keys drawer, staging sweep or `blob_inventories` group. Blob
-  access follows drawer access, and relays need only the meta-group Read they already
-  get.
+- Positive: no key docs, keys drawer, staging sweep or `blob_inventories` group.
+  Inventory discovery follows the selected metadata root's audience; relays get public
+  metadata Read and no sensitive membership. Final stock hash fetches retain the
+  explicitly accepted weaker boundary, pending optional hardening.
 - Positive: read-only docs, branches and multiple audiences all reduce to "one doc, its
   own slots".
 - Cost: Cabinet changes first: meta docs and their projection, self-doc children, the

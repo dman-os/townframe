@@ -23,11 +23,11 @@ use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 use big_repo::SharedPartStore;
-use big_sync_core::ObjKey;
 use big_sync_core::PartKey;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
+use futures::future::BoxFuture;
 use service_utils_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
@@ -39,16 +39,86 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use utils_rs::prelude::Res;
 
+#[cfg(test)]
+mod tests;
+
 /// The `DrawerMetaDoc` kind whose doc carries a drawer's blob pins (ADR 026 §5).
 /// `big_blobs_core` owns the vocabulary; Cabinet only stores the slot.
 pub const INVENTORY_KIND: &str = "blobInventory";
+
+pub type MetadataCapability = Arc<
+    dyn Fn(
+            big_cabinet_core::doc::DocScope,
+        ) -> BoxFuture<'static, Result<CapId, ClientError<DocsError>>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
+pub(crate) struct MetadataCapabilities {
+    mint: MetadataCapability,
+    policy: watch::Receiver<u64>,
+    revision: u64,
+    capabilities: BTreeMap<(DocId, bool), CapId>,
+}
+
+impl MetadataCapabilities {
+    pub(crate) fn new(mint: MetadataCapability, policy: watch::Receiver<u64>) -> Self {
+        Self {
+            mint,
+            policy,
+            revision: 0,
+            capabilities: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) async fn call<T, F: Future<Output = Result<T, ClientError<DocsError>>>>(
+        &mut self,
+        document: &DocId,
+        write: bool,
+        operation: impl FnOnce(CapId) -> F,
+    ) -> Result<T, ClientError<DocsError>> {
+        let key = (document.clone(), write);
+        let revision = *self.policy.borrow();
+        if self.revision != revision {
+            self.revision = revision;
+            self.capabilities.clear();
+        }
+        let capability = if let Some(capability) = self.capabilities.get(&key) {
+            *capability
+        } else {
+            let capability = (self.mint)(big_cabinet_core::doc::DocScope {
+                read: BTreeSet::from([document.clone()]),
+                write: if write {
+                    BTreeSet::from([document.clone()])
+                } else {
+                    BTreeSet::new()
+                },
+                ..Default::default()
+            })
+            .await?;
+            self.capabilities.insert(key.clone(), capability);
+            capability
+        };
+        let result = operation(capability).await;
+        if matches!(
+            result,
+            Err(ClientError::Operation(
+                DocsError::Denied | DocsError::Access(_) | DocsError::AuthorityUnavailable(_)
+            ))
+        ) {
+            self.capabilities.remove(&key);
+        }
+        result
+    }
+}
 
 pub struct WorkerConfig {
     pub sql: Database,
     pub service: Arc<BlobService>,
     pub docs: Client<DocsProtocol>,
     pub capability: CapId,
-    pub inventory: DocId,
+    pub metadata_capability: MetadataCapability,
     /// The drawers whose docs this node maintains blobs for (ADR 026 §9). Each gets its
     /// own `PollDatums` cursor; inventories are discovered per drawer at flush time.
     pub drawers: Vec<DocId>,
@@ -56,29 +126,19 @@ pub struct WorkerConfig {
     pub parts: SharedPartStore,
     pub repo: big_repo::SharedBigRepo,
     pub policy: watch::Receiver<u64>,
+    pub metadata_observer: big_cabinet::drawer::DrawerService,
 }
 
 pub struct BlobWorkers {
     pub projection: Arc<BlobProjection>,
     pub parts: SharedPartStore,
-    pub inventory: DocId,
+    pub mirrors: crate::admission::InventoryMirrors,
 }
 
 pub fn inventory_part(document: &DocId) -> PartKey {
     let digest = blake3::derive_key(
         "townframe.big_blobs.inventory.v1",
         document.to_string().as_bytes(),
-    );
-    PartKey::new(digest)
-}
-
-/// The per-drawer plaintext part (ADR 026 §7): its members are the drawer's docs-group
-/// readers, who are entitled to plaintext, unlike the ciphertext part above whose
-/// members need only Read on the drawer's inventory doc.
-pub fn plaintext_part(drawer: &DocId) -> PartKey {
-    let digest = blake3::derive_key(
-        "townframe.big_blobs.plaintext.v1",
-        drawer.to_string().as_bytes(),
     );
     PartKey::new(digest)
 }
@@ -93,12 +153,16 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
         }
     }
     apply_pins_migration(&config.sql).await?;
+    let metadata = MetadataCapabilities::new(
+        Arc::clone(&config.metadata_capability),
+        config.policy.clone(),
+    );
     let retention = Retention::new(
         config.sql.clone(),
         Arc::clone(&config.service),
         config.docs.clone(),
-        config.capability,
-        config.inventory.clone(),
+        metadata.clone(),
+        Arc::clone(&config.parts),
     )
     .await?;
     let adapter = DocumentBlobs::new(
@@ -108,20 +172,45 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
         Arc::clone(&config.service.provider),
         config.service.roots.clone(),
     );
+    let (mirrors, mirror_stop) = crate::admission::InventoryMirrors::boot(
+        config.sql.clone(),
+        Arc::clone(&config.service),
+        Arc::clone(&config.parts),
+        Arc::clone(&config.repo),
+        queue.clone(),
+    )
+    .await?;
     let workers = BlobWorkers {
         projection: Arc::clone(&projection),
         parts: Arc::clone(&config.parts),
-        inventory: config.inventory.clone(),
+        mirrors: mirrors.clone(),
     };
     let (stop, tasks) = StopToken::new();
+    mirrors.start_discovery(
+        &tasks,
+        config.metadata_observer.clone(),
+        Arc::clone(&config.datum_set),
+        config.sql.clone(),
+        config.policy.clone(),
+    );
     let cancel = tasks.clone();
     let permissions_repo = Arc::clone(&config.repo);
     let permissions_queue = queue.clone();
+    let permissions_parts = Arc::clone(&config.parts);
+    let permissions_sql = config.sql.clone();
+    let permissions_mirrors = mirrors.clone();
     tasks
         .spawn(async move {
-            crate::permissions::run(permissions_repo, permissions_queue, cancel.cancelled())
-                .await
-                .unwrap();
+            crate::permissions::run(
+                permissions_repo,
+                permissions_parts,
+                permissions_sql,
+                permissions_queue,
+                permissions_mirrors,
+                cancel.cancelled(),
+            )
+            .await
+            .unwrap();
         })
         .expect("permission ingress starts before shutdown");
     // One poll cursor per configured drawer (ADR 026 §9): the worker sees exactly the
@@ -133,6 +222,7 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
         let docs = config.docs.clone();
         let capability = config.capability;
         let queue = queue.clone();
+        queue.enqueue(drawer).await?;
         let drawer = drawer.clone();
         tasks
             .spawn(async move {
@@ -141,20 +231,6 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
                     .unwrap();
             })
             .expect("drawer poll starts before shutdown");
-    }
-    {
-        let cancel = tasks.clone();
-        let docs = config.docs.clone();
-        let capability = config.capability;
-        let queue = queue.clone();
-        let inventory = config.inventory.clone();
-        tasks
-            .spawn(async move {
-                poll_inventory(docs, capability, queue, inventory, cancel.cancelled())
-                    .await
-                    .unwrap();
-            })
-            .expect("inventory poll starts before shutdown");
     }
     let cancel = tasks.clone();
     let source = Arc::clone(&config.datum_set);
@@ -169,48 +245,60 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
                 .unwrap();
         })
         .expect("projection starts before shutdown");
-    spawn_worker(&tasks, &config, queue, retention, adapter, projection);
-    Ok((workers, stop))
-}
-
-fn spawn_worker(
-    tasks: &service_utils_rs::Spawner,
-    config: &WorkerConfig,
-    queue: WorkQueue,
-    retention: Retention,
-    adapter: DocumentBlobs,
-    projection: Arc<BlobProjection>,
-) {
-    let config = WorkerParts {
+    let worker = WorkerParts {
         sql: config.sql.clone(),
         service: Arc::clone(&config.service),
         docs: config.docs.clone(),
         capability: config.capability,
-        inventory: config.inventory.clone(),
-        parts: Arc::clone(&config.parts),
-        repo: Arc::clone(&config.repo),
+        metadata,
+        mirrors,
+        metadata_observer: config.metadata_observer,
         policy: config.policy.clone(),
     };
+    spawn_worker(&tasks, worker, queue, retention, adapter, projection);
+    Ok((workers, stop.then(mirror_stop)))
+}
+
+fn spawn_worker(
+    tasks: &service_utils_rs::Spawner,
+    config: WorkerParts,
+    queue: WorkQueue,
+    mut retention: Retention,
+    adapter: DocumentBlobs,
+    projection: Arc<BlobProjection>,
+) {
     let cancel = tasks.clone();
+    let inventory_tasks = tasks.clone();
     tasks
         .spawn(async move {
             let config = &config;
+            let mut metadata = config.metadata.clone();
             let run = async {
+            let mut polled = BTreeSet::new();
             let mut availability = config.service.open_availability(queue.progress("availability").await?).await?;
             let mut policy = config.policy.clone();
+            poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, None).await?;
             loop {
                 if cancel.is_cancelled() { return Ok::<_, utils_rs::prelude::eyre::Report>(()); }
-                retention.flush().await?;
+                for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
                 if let Some((document, generation)) = queue.next().await? {
+                    if let Some(waiting) = enqueue_root_members(config, &queue, &document).await? {
+                        poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
+                        queue.finish(&document, generation, waiting).await?;
+                        continue;
+                    }
                     let context = RequestContext::root();
-                    // Pins live only in inventory docs (ADR 026 §5); a BlobPin datum
-                    // anywhere else authors nothing. The node-local fallback inventory
-                    // counts even before its meta-doc projection lands.
-                    let inventory_doc = document == config.inventory
-                        || retention.is_inventory(&document).await?;
-                    let read = config.docs.call(context.child(), ReadDatums {
-                        capability: config.capability, doc_id: document.clone(), at: At::Current, datums: None, optimistic: false,
-                    }).await;
+                     let inventory_doc = retention.is_inventory(&document).await?
+                         || config.mirrors.admission.inventory(&inventory_part(&document)).await?.is_some();
+                    let read = if inventory_doc {
+                        metadata.call(&document, false, |capability| config.docs.call(context.child(), ReadDatums {
+                            capability, doc_id: document.clone(), at: At::Current, datums: None, optimistic: false,
+                        })).await
+                    } else {
+                        config.docs.call(context.child(), ReadDatums {
+                            capability: config.capability, doc_id: document.clone(), at: At::Current, datums: None, optimistic: false,
+                        }).await
+                    };
                     let (pairs, pins, waiting) = match read {
                         Ok(read) => {
                             let mut pins = BTreeMap::new();
@@ -223,7 +311,7 @@ fn spawn_worker(
                                             let pin: BlobPin = serde_json::from_value(value)?;
                                             if let Ok(id) = pin_id(&key) { pins.insert(id, pin.length_octets); }
                                         }
-                                        DatumRead::Pending { .. } | DatumRead::Undecodable { .. } => pending = true,
+                                        DatumRead::Pending { .. } | DatumRead::Rejected { .. } | DatumRead::Undecodable { .. } => pending = true,
                                         _ => (),
                                     }
                                 }
@@ -232,6 +320,7 @@ fn spawn_worker(
                                 (Vec::new(), pins, pending)
                             } else {
                                 let report = adapter.reconcile(&context, &document).await?;
+
                                 let denied = report.deferred.iter().any(|deferred| matches!(deferred.reason, DeferralReason::Document { error: DocsError::Denied, .. }));
                                 // A doc we cannot currently read must not shrink
                                 // retention (ADR 026 §5): park it and keep every row
@@ -240,7 +329,7 @@ fn spawn_worker(
                                 else { (report.retained, pins, pending || !report.deferred.is_empty()) }
                             }
                         }
-                        Err(ClientError::Operation(DocsError::Denied)) => (Vec::new(), BTreeMap::new(), true),
+                        Err(ClientError::Operation(DocsError::Denied | DocsError::Access(_))) => (Vec::new(), BTreeMap::new(), true),
                         Err(ClientError::Operation(DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_))) => {
                             queue.finish(&document, generation, true).await?;
                             continue;
@@ -248,23 +337,16 @@ fn spawn_worker(
                         Err(error) => return Err(error.into()),
                     };
                     retention.replace(&document, &pairs, pins.clone(), waiting).await?;
-                    retention.flush().await?;
+                    poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
+                    for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
                     if inventory_doc {
-                        reconcile_parts(&config.sql, &config.parts, &document, &pins, waiting).await?;
-                        crate::permissions::seed(&config.repo, &config.parts, &document).await?;
-                    } else if !waiting {
-                        distribute_parts(config, &retention, &document, &pairs).await?;
+                         config.mirrors.reconcile(&document, generation, &pins, !waiting).await?;
                     }
                     if !waiting {
                         for unresolved in config.service.roots.unresolved().await? {
                             if unresolved.claimed_by.as_ref().is_some_and(|(doc, _)| doc == &document.to_string()) {
                                 let id = BlobId::new(*unresolved.cipher_hash.as_bytes());
-                                let claimed = config.sql.query("SELECT 1 FROM big_blobs_retention WHERE digest = ? LIMIT 1", (id.to_string(),)).await?.all::<i64>()?;
-                                if claimed.is_empty() {
-                                    crate::encrypt::drop_pair_tags(config.service.store(), unresolved.cipher_hash).await?;
-                                    config.service.provider.remove(&unresolved.cipher_hash);
-                                }
-                                config.service.roots.clear(unresolved.cipher_hash).await?;
+                                config.service.ownership.resolve_pair(&id).await?;
                             }
                         }
                     }
@@ -277,13 +359,17 @@ fn spawn_worker(
                     read = availability.next(RevisionReadLimits::default()) => {
                         if let RevisionRead::Entries { revision, .. } = read? {
                             queue.ingest("availability", revision, BTreeSet::new(), true).await?;
-                            projection.rearm();
+                             projection.rearm();
+                             config.mirrors.admission.rearm().await?;
+
                         }
                     }
                     changed = policy.changed() => {
                         changed.expect("drawer policy outlives blob workers");
-                        queue.rearm().await?;
-                        projection.rearm();
+                         queue.rearm().await?;
+                         projection.rearm();
+                         config.mirrors.refresh_policy().await?;
+
                     }
                 }
             }
@@ -298,9 +384,9 @@ struct WorkerParts {
     service: Arc<BlobService>,
     docs: Client<DocsProtocol>,
     capability: CapId,
-    inventory: DocId,
-    parts: SharedPartStore,
-    repo: big_repo::SharedBigRepo,
+    metadata: MetadataCapabilities,
+    mirrors: crate::admission::InventoryMirrors,
+    metadata_observer: big_cabinet::drawer::DrawerService,
     policy: watch::Receiver<u64>,
 }
 
@@ -325,7 +411,7 @@ async fn poll_drawer(
     let predicate = Predicate::And {
         clauses: vec![
             Predicate::InDrawer {
-                drawer_id: drawer,
+                drawer_id: drawer.clone(),
                 transitive: false,
                 at_least: big_cabinet_core::drawer::DrawerAccess::Read,
             },
@@ -380,137 +466,220 @@ async fn poll_drawer(
     }
 }
 
-/// Poll one inventory doc for pin changes. Inventories are meta docs, so no drawer
-/// predicate reaches them; they are named directly.
-async fn poll_inventory(
+async fn poll_document(
     docs: Client<DocsProtocol>,
-    capability: CapId,
+    mut metadata: MetadataCapabilities,
     queue: WorkQueue,
-    inventory: DocId,
+    document: DocId,
+    mut policy: watch::Receiver<u64>,
     shutdown: impl Future<Output = ()>,
 ) -> Res<()> {
-    let source = format!("poll-inventory:{inventory}");
+    let source = format!("poll-document:{document}");
     let mut after = queue.progress(&source).await?;
-    let predicate = Predicate::And {
-        clauses: vec![
-            Predicate::IsDoc {
-                doc_id: inventory.clone(),
-            },
-            Predicate::HasTag {
-                tag: DatumTag::new(BlobPin::ID).expect("a blob tag is well formed"),
-            },
-        ],
+    let predicate = Predicate::IsDoc {
+        doc_id: document.clone(),
     };
-    let datums = DatumSelection::Of {
-        tags: BTreeSet::from([DatumTag::new(BlobPin::ID).expect("a blob tag is well formed")]),
-        keys: BTreeSet::new(),
-    };
+    let datums = DatumSelection::All;
     tokio::pin!(shutdown);
     loop {
         let page = tokio::select! {
             biased;
             _ = &mut shutdown => return Ok(()),
-            page = docs.call(RequestContext::root(), big_cabinet_core::doc::PollDatums {
+            page = metadata.call(&document, false, |capability| docs.call(RequestContext::root(), big_cabinet_core::doc::PollDatums {
                 capability,
                 predicate: predicate.clone(),
                 datums: datums.clone(),
                 after,
                 limit: 0,
                 hold_ms: 5_000,
-            }) => page?,
+            })) => page,
         };
-        if !page.events.is_empty() {
-            queue.enqueue(&inventory).await?;
-        }
+        let page = match page {
+            Ok(page) => page,
+            Err(ClientError::Operation(
+                DocsError::Denied
+                | DocsError::DocNotFound
+                | DocsError::Pending { .. }
+                | DocsError::UnknownHeads { .. }
+                | DocsError::AuthorityUnavailable(_)
+                | DocsError::Access(_),
+            )) => {
+                tokio::select! {
+                    _ = &mut shutdown => return Ok(()),
+                    changed = policy.changed() => changed.expect("drawer policy outlives inventory polls"),
+                }
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let documents = if page.events.is_empty() {
+            BTreeSet::new()
+        } else {
+            BTreeSet::from([document.clone()])
+        };
         queue
-            .ingest(&source, page.through, BTreeSet::new(), false)
+            .ingest(&source, page.through, documents, false)
             .await?;
         after = page.through;
     }
 }
 
-/// Put a reconciled doc's representations into the sync parts they belong to
-/// (ADR 026 §7): ciphertext into each containing drawer's inventory part, plaintext
-/// into each containing drawer's plaintext part.
-async fn distribute_parts(
+async fn poll_writer_documents(
+    tasks: &service_utils_rs::Spawner,
     config: &WorkerParts,
-    retention: &Retention,
-    document: &DocId,
-    pairs: &[crate::documents::RetainedRepresentation],
+    queue: &WorkQueue,
+    polled: &mut BTreeSet<DocId>,
+    document: Option<&DocId>,
 ) -> Res<()> {
-    if pairs.is_empty() {
-        return Ok(());
-    }
-    let mut inventories = retention.inventories_for(document).await?;
-    if inventories.is_empty() {
-        inventories.push(config.inventory.clone());
-    }
-    let drawers = config
+    let rows = config
         .sql
         .query(
-            "SELECT drawer_id FROM big_cabinet_drawer_docs WHERE doc_id = ?",
-            (document.to_string(),),
+            "WITH drawers AS (
+                 SELECT drawer_id FROM big_cabinet_drawer_docs WHERE doc_id = ?1
+                 UNION
+                 SELECT links.parent_id
+                   FROM big_cabinet_drawer_children AS links
+                   JOIN big_cabinet_drawers AS child ON child.drawer_id = links.child_id
+                  WHERE links.child_id = ?1 AND json_extract(child.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
+                 UNION
+                 SELECT drawer_id FROM big_blobs_writer_targets WHERE ?1 IS NULL OR doc_id = ?1
+                 UNION
+                 SELECT drawer_id FROM big_cabinet_drawers
+                  WHERE drawer_id = ?1 OR json_extract(descriptor_json, '$.layout.sensitiveRoot') = ?1
+             )
+             SELECT inventory_id
+                  , 1
+               FROM big_blobs_writer_targets
+              WHERE ?1 IS NULL OR doc_id = ?1
+             UNION
+              SELECT inventory_id
+                   , 1
+                FROM big_blobs_writer_effects
+               WHERE ?1 IS NULL
+              UNION
+              SELECT inventory_id
+                   , 1
+                FROM big_blobs_inventory_registry
+               WHERE ?1 IS NULL OR inventory_id = ?1
+              UNION
+             SELECT drawer.drawer_id
+                  , 0
+               FROM drawers
+               JOIN big_cabinet_drawers AS drawer USING (drawer_id)
+              WHERE json_extract(drawer.descriptor_json, '$.layout.sensitiveRoot') IS NOT NULL
+             UNION
+             SELECT json_extract(drawer.descriptor_json, '$.layout.sensitiveRoot')
+                  , 0
+               FROM drawers
+               JOIN big_cabinet_drawers AS drawer USING (drawer_id)
+              WHERE json_extract(drawer.descriptor_json, '$.layout.sensitiveRoot') IS NOT NULL",
+            (document.map(ToString::to_string),),
         )
         .await?
-        .all::<String>()?;
-    for drawer in &drawers {
-        let drawer: DocId = drawer.parse().expect("a drawer id parses");
-        if let Some(groups) = drawer_groups(&config.sql, &drawer).await? {
-            crate::permissions::seed_drawer(
-                &config.repo,
-                &config.parts,
-                &drawer,
-                groups.docs_group.0,
-            )
-            .await?;
+        .all::<(String, bool)>()?;
+    for (document, inventory) in rows {
+        let document: DocId = document.parse()?;
+        if !polled.insert(document.clone()) {
+            continue;
         }
-    }
-    for pair in pairs {
-        let cipher_obj: ObjKey = pair.ciphertext.into();
-        config
-            .parts
-            .set_obj_payload(
-                cipher_obj.clone(),
-                serde_json::json!({"lengthOctets": pair.length_octets}),
-            )
-            .await?;
-        config
-            .parts
-            .add_obj_to_parts(cipher_obj, inventories.iter().map(inventory_part).collect())
-            .await?;
-        let plain_obj: ObjKey = pair.plaintext.into();
-        config
-            .parts
-            .add_obj_to_parts(
-                plain_obj,
-                drawers
-                    .iter()
-                    .map(|drawer| plaintext_part(&drawer.parse().expect("a drawer id parses")))
-                    .collect(),
-            )
-            .await?;
+        if inventory {
+            config.mirrors.refresh_authorization(&document).await?;
+        }
+        let docs = config.docs.clone();
+        let metadata = config.metadata.clone();
+        let queue = queue.clone();
+        let policy = config.policy.clone();
+        let cancel = tasks.clone();
+        if tasks
+            .spawn(async move {
+                poll_document(docs, metadata, queue, document, policy, cancel.cancelled())
+                    .await
+                    .unwrap();
+            })
+            .is_none()
+        {
+            return Ok(());
+        }
     }
     Ok(())
 }
 
-/// The groups the drawer's descriptor states, read from the Cabinet projection the
-/// workers share a database with. `None` for layouts without groups (self-doc).
-async fn drawer_groups(
-    sql: &Database,
-    drawer: &DocId,
-) -> Res<Option<big_cabinet_core::drawer::DrawerGroups>> {
-    let rows = sql
+async fn enqueue_root_members(
+    config: &WorkerParts,
+    queue: &WorkQueue,
+    document: &DocId,
+) -> Res<Option<bool>> {
+    use big_cabinet::drawer::MetadataRootStatus;
+    use big_cabinet_core::drawer::protocol::DrawersError;
+    let sql = &config.sql;
+    let roots = sql
         .query(
-            "SELECT descriptor_json FROM big_cabinet_drawers WHERE drawer_id = ?",
-            (drawer.to_string(),),
+            "SELECT drawer_id FROM big_cabinet_drawers
+          WHERE drawer_id = ?1 OR json_extract(descriptor_json, '$.layout.sensitiveRoot') = ?1",
+            (document.to_string(),),
         )
         .await?
         .all::<String>()?;
-    let Some(json) = rows.into_iter().next() else {
-        return Ok(None);
-    };
-    let descriptor: big_cabinet_core::drawer::Drawer = serde_json::from_str(&json)?;
-    Ok(descriptor.groups())
+    let mut metadata = None;
+    for drawer in roots {
+        let descriptor = sql
+            .query(
+                "SELECT descriptor_json FROM big_cabinet_drawers WHERE drawer_id = ?",
+                (drawer.as_str(),),
+            )
+            .await?
+            .all::<String>()?
+            .remove(0);
+        let descriptor: big_cabinet_core::drawer::Drawer = serde_json::from_str(&descriptor)?;
+        if descriptor.groups().is_none() {
+            continue;
+        }
+        let waiting = metadata.get_or_insert(false);
+        match config
+            .metadata_observer
+            .observe_metadata(&RequestContext::root(), &drawer.parse()?)
+            .await
+        {
+            Ok(observation) => {
+                *waiting |= observation
+                    .roots
+                    .values()
+                    .any(|status| !matches!(status, MetadataRootStatus::Authoritative))
+            }
+            Err(
+                DrawersError::Denied
+                | DrawersError::RosterUnreadable(_)
+                | DrawersError::Docs(
+                    DocsError::Denied
+                    | DocsError::Access(_)
+                    | DocsError::DocNotFound
+                    | DocsError::Pending { .. }
+                    | DocsError::UnknownHeads { .. }
+                    | DocsError::AuthorityUnavailable(_),
+                )
+                | DrawersError::AuthorityUnavailable(_)
+                | DrawersError::DocsUnavailable(_),
+            ) => {
+                *waiting = true;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let members = sql.query(
+            "SELECT doc_id FROM big_cabinet_drawer_docs WHERE drawer_id = ?1
+             UNION
+             SELECT links.child_id
+               FROM big_cabinet_drawer_children AS links
+               JOIN big_cabinet_drawers AS child ON child.drawer_id = links.child_id
+              WHERE links.parent_id = ?1 AND json_extract(child.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
+             UNION
+             SELECT doc_id FROM big_blobs_writer_targets WHERE drawer_id = ?1", (drawer,),
+        ).await?.all::<String>()?;
+        for member in members {
+            queue.enqueue(&member.parse()?).await?;
+        }
+    }
+    Ok(metadata)
 }
 
 /// The per-document pin ledger the worker reconciles against lives beside the blob store's own
@@ -534,54 +703,4 @@ async fn apply_pins_migration(sql: &Database) -> Res<()> {
 
 fn pin_id(key: &DatumKey) -> Res<BlobId> {
     Ok(std::str::from_utf8(key.slot_bytes())?.parse()?)
-}
-
-async fn reconcile_parts(
-    sql: &Database,
-    parts: &SharedPartStore,
-    document: &DocId,
-    pins: &BTreeMap<BlobId, u64>,
-    preserve: bool,
-) -> Res<()> {
-    let previous = sql
-        .query(
-            "SELECT digest FROM big_blobs_document_pins WHERE doc_id = ?",
-            (document.to_string(),),
-        )
-        .await?
-        .all::<String>()?;
-    let part = inventory_part(document);
-    parts.ensure_part(part.clone()).await?;
-    for (id, length) in pins {
-        let obj: ObjKey = (*id).into();
-        parts
-            .set_obj_payload(obj.clone(), serde_json::json!({"lengthOctets": length}))
-            .await?;
-        parts.add_obj_to_parts(obj, vec![part.clone()]).await?;
-    }
-    if !preserve {
-        for digest in previous {
-            let id: BlobId = digest.parse()?;
-            if !pins.contains_key(&id) {
-                parts.remove_obj_from_part(id.into(), part.clone()).await?;
-            }
-        }
-    }
-    let tx = sql.begin_write().await?;
-    if !preserve {
-        tx.execute(
-            "DELETE FROM big_blobs_document_pins WHERE doc_id = ?",
-            (document.to_string(),),
-        )
-        .await?;
-    }
-    for id in pins.keys() {
-        tx.execute(
-            "INSERT OR IGNORE INTO big_blobs_document_pins (doc_id, digest) VALUES (?, ?)",
-            (document.to_string(), id.to_string()),
-        )
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
 }

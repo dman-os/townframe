@@ -47,6 +47,22 @@ pub const PROVIDER_NAME: &str = "daybook-cipherblob-v1";
 pub const TAG_CT_PREFIX: &str = "ct:";
 pub const TAG_PT_PREFIX: &str = "pt:";
 
+pub(super) struct PreparedCiphertext {
+    pub hash: Hash,
+    length: u64,
+    outboard: Vec<u8>,
+}
+
+impl PreparedCiphertext {
+    pub async fn install(self, store: &Store) -> Res<()> {
+        store
+            .blobs()
+            .add_virtual_with_outboard(self.hash, self.length, self.outboard, PROVIDER_NAME)
+            .await?;
+        Ok(())
+    }
+}
+
 fn raw(hash: Hash) -> HashAndFormat {
     HashAndFormat {
         hash,
@@ -208,15 +224,15 @@ pub(crate) async fn add_progress_to_tag(
 /// encrypted, otherwise the resulting ciphertext's `pt:` mapping would lie
 /// about its content.
 ///
-/// Primitive of [`CipherBlobProvider::install`]: it installs the virtual entry
-/// but neither registers a provider nor roots the tags, so a caller that stops
-/// here leaves an entry the store cannot serve.
-pub(crate) async fn install_virtual_encrypted(
+/// Primitive of [`CipherBlobProvider::install`]: it prepares the virtual entry
+/// without installing it, registering a provider, or rooting the tags.
+/// Installation consumes the prepared outboard without another encrypt pass.
+pub(super) async fn prepare_virtual_encrypted(
     store: &Store,
     key: &MasterKey,
     p_hash: Hash,
     encoding: EncodingParams,
-) -> Res<Hash> {
+) -> Res<PreparedCiphertext> {
     use bao_tree::io::mixed::EncodedItem;
     use bao_tree::io::sync::outboard as bao_sync_outboard;
     use futures::StreamExt;
@@ -294,7 +310,7 @@ pub(crate) async fn install_virtual_encrypted(
 
     let (producer_res, consumer_res) = tokio::join!(producer, consumer);
     producer_res?;
-    let (c_root, mut ob) = consumer_res.expect("outboard task panicked")?;
+    let (c_root, ob) = consumer_res.expect("outboard task panicked")?;
     let rebuilt = rebuilt_rx
         .await
         .expect("encrypt producer completed without sending the digest");
@@ -303,13 +319,11 @@ pub(crate) async fn install_virtual_encrypted(
         "stored plaintext {p_hash} changed under us: re-read digest {rebuilt:?} differs"
     );
 
-    ob.root = c_root;
-    let c_hash = Hash::from(c_root);
-    store
-        .blobs()
-        .add_virtual_with_outboard(c_hash, c_len, ob.data, PROVIDER_NAME)
-        .await?;
-    Ok(c_hash)
+    Ok(PreparedCiphertext {
+        hash: Hash::from(c_root),
+        length: c_len,
+        outboard: ob.data,
+    })
 }
 
 /// Fetch-and-decrypt a ciphertext verifiable on this node (stored, or virtual
@@ -355,6 +369,35 @@ mod tests {
     use iroh_blobs::store::virtual_blob::DynVirtualSource;
     use iroh_blobs::store::virtual_blob::Provider;
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepared_outboard_installs_without_rereading_plaintext() -> Res<()> {
+        let (memory, _) = iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+        let source = Store::from(memory);
+        let plain = vec![0x3C; 3 * 4096 + 123];
+        let tag = source.blobs().add_bytes(plain.clone()).temp_tag().await?;
+        let key = MasterKey::random();
+        let encoding = EncodingParams::new(4096, super::super::Padding::Record)?;
+        let expected =
+            super::super::encrypt_with_rs(&key, &plain, encoding.record_size, encoding.padding);
+        let prepared = prepare_virtual_encrypted(&source, &key, tag.hash(), encoding).await?;
+        let cipher = prepared.hash;
+        assert_eq!(cipher, Hash::new(&expected));
+        assert!(!source.blobs().has(cipher).await?);
+        source.shutdown().await?;
+
+        let (memory, _) = iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+        let destination = Store::from(memory);
+        assert!(!destination.blobs().has(tag.hash()).await?);
+        prepared.install(&destination).await?;
+        assert!(matches!(
+            destination.blobs().status(cipher).await?,
+            iroh_blobs::api::proto::BlobStatus::Complete { size } if size == expected.len() as u64
+        ));
+        assert!(destination.sync_reader(cipher).await?.is_none());
+        destination.shutdown().await?;
+        Ok(())
+    }
+
     /// Provider name for the mid-stream-error source below. Deliberately not
     /// [`PROVIDER_NAME`] so this test's entry can never be served by real
     /// cipherblob machinery.
@@ -393,7 +436,7 @@ mod tests {
     /// export fails *mid-stream* (here: a virtual source that errors on the
     /// second leaf read), every exit path from the producer future drops the
     /// writer, the spawned consumer sees EOF and finishes, and
-    /// [`install_virtual_encrypted`] returns the export error promptly. With
+    /// [`prepare_virtual_encrypted`] returns the export error promptly. With
     /// the writer merely borrowed, the consumer parked on it until this
     /// function returned - after the join - and the install hung forever.
     /// The timeout is only a hang tripwire, generously bounded; the
@@ -426,7 +469,7 @@ mod tests {
         let key = MasterKey::random();
         match tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            install_virtual_encrypted(&store, &key, p_hash, EncodingParams::DEFAULT),
+            prepare_virtual_encrypted(&store, &key, p_hash, EncodingParams::DEFAULT),
         )
         .await
         {
@@ -438,7 +481,10 @@ mod tests {
                 err.to_string().contains("export of"),
                 "the failure must be the producer's export bail, not a different error: {err}"
             ),
-            Ok(Ok(c)) => panic!("a mid-stream export failure must not install a ciphertext: {c}"),
+            Ok(Ok(prepared)) => panic!(
+                "a mid-stream export failure must not prepare a ciphertext: {}",
+                prepared.hash
+            ),
         }
         Ok(())
     }

@@ -201,7 +201,7 @@ impl Projection {
                 .ancestors(super::state::ScopeTarget::Drawer(drawer))
                 .await?;
         }
-        bounds.insert(drawer.clone(), Access::Admin);
+        bounds.insert(drawer.clone(), super::state::Reach::ordinary(Access::Admin));
         self.granted(context, actor, bounds).await
     }
 

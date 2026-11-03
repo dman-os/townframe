@@ -48,7 +48,6 @@ pub struct BigNode {
     pub blobs_namespace: Namespace,
     pub blobs: big_blobs::Blobs,
     pub blob_workers: big_blobs::workers::BlobWorkers,
-    pub blob_inventory_drawer: big_cabinet_core::DocId,
     pub indexes: Arc<Indexes>,
     pub drawer_access: Arc<DrawerAccess>,
     pub docs: DocsRepo,
@@ -151,22 +150,7 @@ impl BigNode {
             let (drawers, drawers_stop) =
                 big_cabinet::boot_drawers(DrawerConfig { worker }).await?;
             stop.stages.push(Stage::Service(drawers_stop));
-            // `blob_boot` mints its drawer capabilities as the boot identity, but
-            // `authorize_create` gates drawer creation on a granted `create drawer`
-            // right for that actor (the capability's `Rights::all()` alone is not
-            // enough); grant it once here. The grant persists in SQL and `grant`
-            // is idempotent, so disk reopens neither duplicate nor lose it.
-            drawer_access
-                .grants()
-                .grant(
-                    &RequestContext::root(),
-                    drawers_actor.actor_id,
-                    big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT.into(),
-                    Rights::USE,
-                    None,
-                )
-                .await?;
-            let (blob_workers, blob_inventory_drawer, blob_stop) = blob_boot::boot(
+            let (blob_workers, blob_stop) = blob_boot::boot(
                 config.sql,
                 &blobs,
                 &docs,
@@ -189,7 +173,6 @@ impl BigNode {
                 blobs_namespace,
                 blobs,
                 blob_workers,
-                blob_inventory_drawer,
                 indexes,
                 drawer_access,
                 docs,

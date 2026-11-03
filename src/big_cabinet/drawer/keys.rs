@@ -12,9 +12,11 @@ use big_cabinet_core::drawer::DrawerChildEntry;
 use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::drawer::DrawerMetaDoc;
 use big_cabinet_core::drawer::DrawerRoster;
+use big_cabinet_core::drawer::DrawerSuccessor;
 use big_cabinet_core::drawer::GroupKey;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawersError;
 use big_repo::BigKeyhiveGroup;
 
 pub(crate) fn drawer_key() -> DatumKey {
@@ -30,10 +32,36 @@ pub(crate) fn roster_key() -> DatumKey {
     DatumKey::from_text(DrawerRoster::ID, "main").expect("the roster key is well formed")
 }
 
-/// The fixed slot a single-group drawer's metadata doc carries for one kind of metadata-class
-/// doc. `kind` comes from outside, so an invalid slot is a refusal rather than a panic.
-pub(crate) fn meta_doc_key(kind: &str) -> Result<DatumKey, big_cabinet_core::ReferenceError> {
-    DatumKey::from_text(DrawerMetaDoc::ID, kind)
+/// The fixed singleton successor slot on a descriptor-bearing doc.
+pub(crate) fn successor_key() -> DatumKey {
+    DatumKey::from_text(DrawerSuccessor::ID, "main").expect("the successor key is well formed")
+}
+
+/// The slot a grouped drawer's metadata doc carries one `(kind, name)` reference under:
+/// `metaDoc/<kind>/<name>`. Both parts come from outside, so an empty part, a `/` inside one,
+/// or a dot segment is a refusal rather than a panic — those spellings would make the slot
+/// ambiguous when a projection reads it back.
+pub(crate) fn meta_doc_key(kind: &str, name: &str) -> Result<DatumKey, DrawersError> {
+    let slot = format!("{kind}/{name}");
+    if kind.is_empty() || kind.contains('/') || kind == "." || kind == ".." {
+        return Err(DrawersError::InvalidMetaDocSlot(slot.clone()));
+    }
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(DrawersError::InvalidMetaDocSlot(slot.clone()));
+    }
+    DatumKey::from_text(DrawerMetaDoc::ID, slot.clone())
+        .map_err(|_| DrawersError::InvalidMetaDocSlot(slot))
+}
+
+/// The `(kind, name)` a `metaDoc` key slot names, `None` when the slot is not one this build
+/// can read back into its two parts.
+pub(crate) fn meta_doc_slot(key: &DatumKey) -> Option<(String, String)> {
+    let slot = std::str::from_utf8(key.slot_bytes()).ok()?;
+    let (kind, name) = slot.split_once('/')?;
+    if kind.is_empty() || name.is_empty() || kind.contains('/') || name.contains('/') {
+        return None;
+    }
+    Some((kind.to_owned(), name.to_owned()))
 }
 
 pub(crate) fn doc_entry_key(doc: &DocId) -> DatumKey {

@@ -696,6 +696,20 @@ async fn non_transitive_poll_includes_self_doc_children_but_not_child_drawer_doc
         .await
         .unwrap();
     node.grant(&alice, &parent, &bob, Access::Read).await;
+    for (doc_id, key) in [
+        (&parent, doc_entry_key(&direct)),
+        (&child, doc_entry_key(&in_child)),
+        (&home, doc_entry_key(&self_doc)),
+        (&self_doc, drawer_key()),
+    ] {
+        let expected_heads = heads(&node, &alice, doc_id).await;
+        node.wait_indexed(key.tag().as_str(), |route, membership| {
+            route.doc_id == *doc_id
+                && route.datum_key == key
+                && matches!(membership, DatumMembership::Present { doc_heads, .. } if *doc_heads == expected_heads)
+        })
+        .await;
+    }
 
     // The ADR 026 §9 worker shape, with the harness note tag standing for its datum tags.
     let note_tag = DatumTag::new(NOTE).unwrap();
@@ -745,7 +759,7 @@ async fn non_transitive_poll_includes_self_doc_children_but_not_child_drawer_doc
             break;
         }
     }
-    assert_eq!(entered, BTreeSet::from([direct]));
+    assert_eq!(entered, BTreeSet::from([direct.clone()]));
 
     // Linking a single-group child does not move its docs into a non-transitive poll:
     // neither an enter on link nor a spurious leave on unlink.
@@ -765,7 +779,11 @@ async fn non_transitive_poll_includes_self_doc_children_but_not_child_drawer_doc
         )
         .await
         .unwrap();
-    assert!(poll.next().await.unwrap().is_none());
+    assert_eq!(
+        poll.next().await.unwrap(),
+        None,
+        "grouped child link: parent {parent}, child {child}, direct {direct}, in-child {in_child}, self-doc {self_doc}",
+    );
     // Linking a self-doc child moves exactly its doc in, and unlinking moves it out.
     node.drawers()
         .call(
@@ -796,7 +814,11 @@ async fn non_transitive_poll_includes_self_doc_children_but_not_child_drawer_doc
         )
         .await
         .unwrap();
-    assert!(poll.next().await.unwrap().is_none());
+    assert_eq!(
+        poll.next().await.unwrap(),
+        None,
+        "grouped child unlink: parent {parent}, child {child}, direct {direct}, in-child {in_child}, self-doc {self_doc}",
+    );
     node.drawers()
         .call(
             RequestContext::root(),

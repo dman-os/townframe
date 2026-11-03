@@ -1,16 +1,13 @@
 use super::*;
-use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::DocsError;
+use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::drawer::DrawerAccess as Access;
-use big_cabinet_core::drawer::protocol::CreateDrawer;
-use big_cabinet_core::drawer::protocol::CreateLayout;
-use big_cabinet_core::drawer::protocol::DrawerScope;
-use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use service_utils_rs::Client;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 #[expect(
     clippy::too_many_arguments,
@@ -25,77 +22,15 @@ pub(super) async fn boot(
     repo: &SharedBigRepo,
     datum_set: Arc<big_cabinet::index::DatumSetStore>,
     signer: CapId,
-) -> Res<(
-    big_blobs::workers::BlobWorkers,
-    DocId,
-    service_utils_rs::StopToken,
-)> {
-    let context = RequestContext::root();
-    let drawer_cap = drawers
-        .client
-        .call(
-            context.child(),
-            MintDrawerCapability {
-                authorization: Authorization::identity(signer),
-                scope: DrawerScope {
-                    create: true,
-                    drawers: BTreeMap::new(),
-                },
-                rights: Rights::USE,
-            },
-        )
-        .await?;
-    let drawer = drawers
-        .client
-        .call(
-            context.child(),
-            CreateDrawer {
-                capability: drawer_cap.capability_id,
-                command: "big-blobs-inventory-drawer-v1".to_owned().try_into()?,
-                layout: CreateLayout::SingleGroup,
-            },
-        )
-        .await?;
-    // The node-local inventory is a drawer meta doc (ADR 026 §5): DrawerService
-    // creates it, grants the meta group, and writes the slot; the workers' fallback
-    // pins land there for docs no drawer claims an inventory for.
-    let meta_cap = drawers
-        .client
-        .call(
-            context.child(),
-            MintDrawerCapability {
-                authorization: Authorization::identity(signer),
-                scope: DrawerScope {
-                    create: false,
-                    drawers: BTreeMap::from([(drawer.drawer_id.clone(), Access::Admin)]),
-                },
-                rights: Rights::USE,
-            },
-        )
-        .await?;
-    let inventory = drawers
-        .client
-        .call(
-            context.child(),
-            big_cabinet_core::drawer::protocol::CreateMetaDoc {
-                capability: meta_cap.capability_id,
-                command: "big-blobs-inventory-document-v1".to_owned().try_into()?,
-                drawer_id: drawer.drawer_id.clone(),
-                kind: big_blobs::workers::INVENTORY_KIND.to_owned(),
-            },
-        )
-        .await?;
-    let inventory_doc = inventory.doc_id;
+) -> Res<(big_blobs::workers::BlobWorkers, service_utils_rs::StopToken)> {
     let local = drawers.local();
     let capability = docs
         .client
         .call(
-            context,
+            RequestContext::root(),
             MintDocCapability {
                 authorization: Authorization::identity(signer),
                 scope: DocScope {
-                    read: BTreeSet::from([inventory_doc.clone()]),
-                    write: BTreeSet::from([inventory_doc.clone()]),
                     drawers: BTreeMap::from([
                         (local.present_id.clone(), Access::Read),
                         (local.originated_id.clone(), Access::Write),
@@ -114,12 +49,13 @@ pub(super) async fn boot(
         )
         .await?,
     );
-    let (workers, stop) = big_blobs::workers::boot(big_blobs::workers::WorkerConfig {
+    big_blobs::workers::boot(big_blobs::workers::WorkerConfig {
+        metadata_observer: drawers.metadata_observer(),
+        metadata_capability: metadata_capability(sql.clone(), docs.client.clone(), signer),
         sql,
         service: Arc::clone(&blobs.service),
         docs: docs.client.clone(),
         capability: capability.capability_id,
-        inventory: inventory_doc,
         drawers: vec![local.present_id.clone(), local.originated_id.clone()],
         datum_set,
         parts,
@@ -128,6 +64,52 @@ pub(super) async fn boot(
             .subscribe_changes()
             .expect("drawer access publishes changes"),
     })
-    .await?;
-    Ok((workers, drawer.drawer_id, stop))
+    .await
+}
+
+pub(super) fn metadata_capability(
+    sql: Database,
+    docs: Client<DocsProtocol>,
+    signer: CapId,
+) -> big_blobs::workers::MetadataCapability {
+    Arc::new(move |scope| {
+        let sql = sql.clone();
+        let docs = docs.clone();
+        Box::pin(async move {
+            if !scope.create.is_empty()
+                || !scope.drawers.is_empty()
+                || (scope.read.is_empty() && scope.write.is_empty())
+            {
+                return Err(service_utils_rs::ClientError::Operation(DocsError::Denied));
+            }
+            for document in scope.read.union(&scope.write) {
+                let known = sql.query(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM big_cabinet_drawers
+                          WHERE (drawer_id = ?1 OR json_extract(descriptor_json, '$.layout.sensitiveRoot') = ?1)
+                            AND json_extract(descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
+                         UNION ALL
+                         SELECT 1 FROM big_cabinet_drawer_meta_docs WHERE doc_id = ?1
+                     )",
+                    (document.to_string(),),
+                ).await
+                    .map_err(|error| service_utils_rs::ClientError::Operation(DocsError::Repository(error.to_string())))?
+                    .one::<bool>()
+                    .map_err(|error| service_utils_rs::ClientError::Operation(DocsError::Repository(error.to_string())))?;
+                if !known {
+                    return Err(service_utils_rs::ClientError::Operation(DocsError::Denied));
+                }
+            }
+            docs.call(
+                RequestContext::root(),
+                MintDocCapability {
+                    authorization: Authorization::identity(signer),
+                    scope,
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .map(|issued| issued.capability_id)
+        })
+    })
 }

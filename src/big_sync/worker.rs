@@ -3,7 +3,11 @@ use std::collections::VecDeque;
 use crate::interlude::*;
 
 use crate::SyncBackend;
+use crate::receive::ReceiveRoute;
 use crate::trap;
+
+#[path = "worker_receive.rs"]
+mod receive;
 
 use big_sync_core::BigSyncEvent;
 use big_sync_core::BigSyncMachine;
@@ -493,6 +497,13 @@ pub fn spawn_big_sync_worker_with_options(
     default_sync_mode: Option<SyncMode>,
     scope_key: Arc<str>,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
+    eyre::ensure!(
+        part_store.receive_journal().is_some()
+            || sync_backends
+                .values()
+                .all(|backend| backend.replay_receiver().is_none()),
+        "durable replay receivers require a receive journal in the worker part store"
+    );
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
     let (stats_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -656,8 +667,8 @@ struct BigSyncWorker {
 
     sync_rx: mpsc::Receiver<BigSyncEvent>,
     sync_tx: mpsc::Sender<BigSyncEvent>,
-    task_rx: mpsc::Receiver<MachineTaskMsg>,
-    task_tx: mpsc::Sender<MachineTaskMsg>,
+    task_rx: mpsc::Receiver<(MachineTaskMsg, Vec<ReceiveRoute>)>,
+    task_tx: mpsc::Sender<(MachineTaskMsg, Vec<ReceiveRoute>)>,
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
     subscription_events: tokio::sync::broadcast::Sender<SubscriptionEvent>,
     full_sync_waiters: HashMap<u64, tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>>,
@@ -686,9 +697,7 @@ impl PeerState {
             return Some((backend_id, Vec::new()));
         }
 
-        let mut part_ids: Vec<_> = task.part_hints.iter().cloned().collect();
-        part_ids.sort_unstable();
-        part_ids.dedup();
+        let part_ids: Vec<_> = task.part_observations.keys().cloned().collect();
         let mut backend_id = None;
         for part_id in &part_ids {
             let part_backend_id = self.parts.get(part_id).unwrap_or_else(|| {
@@ -769,6 +778,9 @@ impl BigSyncWorker {
 
     #[tracing::instrument(skip(self, shutdown), fields(worker = %self.label))]
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
+        if let Some(journal) = self.part_store.receive_journal() {
+            crate::receive::drain(journal, &self.sync_backends).await?;
+        }
         loop {
             let next_due = self.next_wake();
             let wake_at =
@@ -782,10 +794,11 @@ impl BigSyncWorker {
                     break;
                 }
                 msg = self.task_rx.recv() => {
-                    let Ok(msg) = msg else {
+                    let Ok((msg, routes)) = msg else {
                         break;
                     };
                     trace!(?msg, "received task msg");
+                    let msg = receive::gate_result(self.part_store.as_ref(), &self.sync_backends, msg, routes).await?;
                     self.machine.handle_task_msg(msg);
                 }
                 evt = self.sync_rx.recv() => {
@@ -1427,14 +1440,16 @@ impl BigSyncWorker {
 
     async fn spawn_machine_task(
         &mut self,
-        task: big_sync_core::MachineTask,
+        mut task: big_sync_core::MachineTask,
         shutdown: Arc<BigRedToken>,
     ) -> Res<()> {
+        let receive_routes = self.prepare_receive_task(&mut task).await?;
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
         tracing::debug!(task_id, "spawn machine task");
         let worker = MachineTaskWorker {
             task,
+            receive_routes,
             worker: self.label,
             part_store: Arc::clone(&self.part_store),
             rpc_clients: Arc::clone(&self.rpc_clients),
@@ -1531,7 +1546,8 @@ struct MachineTaskWorker {
     part_store: SharedPartitionStore,
     rpc_clients: SharedRpcClients,
 
-    bsm_tx: mpsc::Sender<MachineTaskMsg>,
+    bsm_tx: mpsc::Sender<(MachineTaskMsg, Vec<ReceiveRoute>)>,
+    receive_routes: Vec<ReceiveRoute>,
     cancel_token: CancellationToken,
     rng: StdRng,
 
@@ -1555,7 +1571,6 @@ impl MachineTaskWorker {
                 };
                 let tcx = TaskCtx {
                     task_id: self.task.id,
-                    main_tx: self.bsm_tx.clone(),
                     part_store,
                     rng: self.rng,
                     rpc_clients: self
@@ -1580,7 +1595,8 @@ impl MachineTaskWorker {
                         let err = res.expect(ERROR_IMPOSSIBLE);
                         self.shutdown.set_err(err);
                     },
-                    () = self.task.run(tcx) => {
+                    msg = self.task.run(tcx) => {
+                        self.bsm_tx.send((msg, self.receive_routes)).await.expect(ERROR_CHANNEL);
                     }
                 };
             })
@@ -1618,9 +1634,13 @@ impl SyncTaskWorker {
             let SyncTask {
                 id: _task_id,
                 kind,
-                part_hints,
+                mut part_observations,
                 deets,
             } = self.task;
+            let durable_receive = self.backend.replay_receiver().is_some();
+            if durable_receive {
+                part_observations.clear();
+            }
             let SyncTaskDeets {
                 peer_id,
                 obj_id,
@@ -1628,14 +1648,17 @@ impl SyncTaskWorker {
             } = deets;
             let event = match kind {
                 SyncTaskKind::RemoveFromParts => {
-                    let mut parts: Vec<PartKey> = part_hints.iter().cloned().collect();
-                    parts.sort_unstable();
-                    parts.dedup();
-                    match self
-                        .backend
-                        .remove_obj_from_parts(obj_id.clone(), parts)
-                        .await
-                    {
+                    match if durable_receive {
+                        Ok(())
+                    } else {
+                        self.backend
+                            .remove_obj_from_parts(
+                                peer_id.clone(),
+                                obj_id.clone(),
+                                part_observations,
+                            )
+                            .await
+                    } {
                         Ok(()) => {
                             BigSyncEvent::RemoveCompleted(big_sync_core::RemoveCompletedEvent {
                                 task_id: _task_id,
@@ -1652,11 +1675,14 @@ impl SyncTaskWorker {
                     }
                 }
                 SyncTaskKind::Sync => {
-                    let mut parts: Vec<PartKey> = part_hints.iter().cloned().collect();
-                    parts.sort_unstable();
                     let res = self
                         .backend
-                        .sync_obj(peer_id.clone(), obj_id.clone(), parts, remote_payload)
+                        .sync_obj(
+                            peer_id.clone(),
+                            obj_id.clone(),
+                            part_observations,
+                            remote_payload,
+                        )
                         .await;
                     match res {
                         Ok(SyncTaskRunOutcome::Completion(completion)) => {
@@ -1715,8 +1741,92 @@ impl SyncTaskWorker {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn source_revisions_and_peer_reach_both_backend_callbacks() {
+        struct Backend {
+            peer: PeerKey,
+            obj: ObjKey,
+            observations: big_sync_core::PartObservations,
+            calls: std::sync::Mutex<Vec<SyncTaskKind>>,
+        }
+        #[async_trait]
+        impl SyncBackend for Backend {
+            async fn sync_obj(
+                &self,
+                peer_id: PeerKey,
+                obj_id: ObjKey,
+                parts: big_sync_core::PartObservations,
+                remote_payload: Option<crate::ObjPayload>,
+            ) -> Res<SyncTaskRunOutcome> {
+                assert_eq!(peer_id, self.peer);
+                assert_eq!(obj_id, self.obj);
+                assert_eq!(parts, self.observations);
+                assert!(remote_payload.is_none());
+                self.calls.lock().unwrap().push(SyncTaskKind::Sync);
+                Ok(SyncTaskRunOutcome::Completion(
+                    big_sync_core::SyncTaskCompletion {
+                        obj_id,
+                        deets: big_sync_core::SyncCompletionDeets::Noop,
+                    },
+                ))
+            }
+            async fn remove_obj_from_parts(
+                &self,
+                peer_id: PeerKey,
+                obj_id: ObjKey,
+                parts: big_sync_core::PartObservations,
+            ) -> Res<()> {
+                assert_eq!(peer_id, self.peer);
+                assert_eq!(obj_id, self.obj);
+                assert_eq!(parts, self.observations);
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(SyncTaskKind::RemoveFromParts);
+                Ok(())
+            }
+        }
+        let backend = Arc::new(Backend {
+            peer: PeerKey::random(),
+            obj: ObjKey::random(),
+            observations: [(PartKey::random(), 11), (PartKey::random(), 29)].into(),
+            calls: Default::default(),
+        });
+        let (host_tx, host_rx) =
+            mpsc::bounded(2, "SyncTaskWorkerTest".into(), "SyncTaskHostTest".into());
+        for (id, kind) in [(1, SyncTaskKind::Sync), (2, SyncTaskKind::RemoveFromParts)] {
+            SyncTaskWorker {
+                task: SyncTask {
+                    id,
+                    kind,
+                    part_observations: backend.observations.clone(),
+                    deets: SyncTaskDeets {
+                        peer_id: backend.peer.clone(),
+                        obj_id: backend.obj.clone(),
+                        remote_payload: None,
+                    },
+                },
+                worker: "source-revision-test",
+                backend: Arc::<Backend>::clone(&backend),
+                host_tx: host_tx.clone(),
+                cancel_token: CancellationToken::new(),
+            }
+            .run()
+            .await;
+            match host_rx.recv().await.unwrap() {
+                BigSyncEvent::SyncCompleted(event) => assert_eq!(event.task_id, 1),
+                BigSyncEvent::RemoveCompleted(event) => assert_eq!(event.task_id, 2),
+                event => panic!("unexpected completion: {event:?}"),
+            }
+        }
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            [SyncTaskKind::Sync, SyncTaskKind::RemoveFromParts]
+        );
+    }
+
     #[test]
-    fn empty_part_hints_require_an_explicit_peer_object_route() {
+    fn empty_part_observations_require_an_explicit_peer_object_route() {
         let peer_id = PeerKey::random();
         let obj_id = ObjKey::random();
         let peer = PeerState {
@@ -1728,7 +1838,7 @@ mod tests {
         let task = SyncTask {
             id: 1,
             kind: SyncTaskKind::Sync,
-            part_hints: default(),
+            part_observations: default(),
             deets: SyncTaskDeets {
                 peer_id,
                 obj_id,

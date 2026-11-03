@@ -607,6 +607,47 @@ fn a_supplement_vocabulary_restates_the_primary_enum_or_is_refused() {
     assert!(error.contains("contradicts"), "{error}");
 }
 
+/// An `Option<open_string>` field's sidecar is `type: ["string", "null"]` with `knownValues`;
+/// the nullable overlay strips `null` before the vocabulary reaches the primary.
+#[test]
+fn a_nullable_string_vocabulary_supplement_is_admitted_as_a_string_position() {
+    let primary = record(
+        json!({
+            "value": {"type": "string", "knownValues": ["ciphertext", "plaintext"]},
+        }),
+        &["value"],
+        &["value"],
+    );
+    let compiled = Bundle::new(
+        &supplement(json!({
+            "value": {
+                "type": ["string", "null"],
+                "knownValues": ["ciphertext", "plaintext"],
+            },
+        })),
+        Vec::new(),
+    )
+    .validate_lexicon(TAG, &primary, &[])
+    .unwrap();
+    assert!(accepts(&compiled, json!({"value": "plaintext"})));
+    assert!(accepts(&compiled, json!({"value": null})));
+    // Open vocabulary: an unknown spelling still decodes; only `known()` refuses to pair it.
+    assert!(accepts(&compiled, json!({"value": "rot13"})));
+    let error = Bundle::new(
+        &supplement(json!({
+            "value": {
+                "type": ["integer", "null"],
+                "knownValues": ["ciphertext"],
+            },
+        })),
+        Vec::new(),
+    )
+    .validate_lexicon(TAG, &primary, &[])
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("string vocabulary"), "{error}");
+}
+
 #[test]
 fn a_supplement_member_branch_restates_its_discriminant_const() {
     let primary = record(
