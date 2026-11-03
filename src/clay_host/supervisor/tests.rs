@@ -832,3 +832,23 @@ async fn an_activator_is_served_by_the_driver_and_status_never_activates() {
     .await;
     assert_eq!(controls.log(), ["init solo", "close solo"]);
 }
+
+#[tokio::test]
+#[should_panic(expected = "driver ended while a request was outstanding")]
+async fn dropping_a_driver_with_queued_requests_fails_them_instead_of_hanging() {
+    let controls = Controls::default();
+    let supervisor = Supervisor::new(Host::new(), [controls.micro("solo")]);
+    let (solo, activator) = (id("solo"), supervisor.activator());
+    let served = ServedRequests {
+        receiver: supervisor.served.borrow_mut().take(),
+        home: &supervisor.served,
+    };
+    let acquire = activator.acquire(&solo, PRESENTATION);
+    futures::pin_mut!(acquire);
+    // The first poll queues the request; nothing serves it.
+    assert!(futures::poll!(acquire.as_mut()).is_pending());
+    drop(served);
+    // The channel is handed back for a later driver, empty, and the requester is released.
+    assert!(supervisor.served.borrow().is_some());
+    acquire.await.unwrap();
+}

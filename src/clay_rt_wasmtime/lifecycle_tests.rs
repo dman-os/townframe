@@ -1,8 +1,10 @@
+use super::tests::RecordingSink;
 use super::*;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
 use clay_host::LocalFuture;
+use clay_surface::SurfaceTree;
 use std::rc::Rc;
 
 /// The prepared lifecycle fixture, incarnated by this engine.
@@ -36,8 +38,20 @@ impl Incarnations for Wasmtime {
         })
     }
 
-    fn provision(runtime: &WasmRuntime, contract: &str) -> Option<CapabilityPublication> {
-        runtime.provision(contract)
+    fn publications(runtime: &WasmRuntime) -> BTreeMap<String, CapabilityPublication> {
+        runtime.publications()
+    }
+
+    fn mount(runtime: &WasmRuntime, publication: &str) -> Result<Box<dyn std::any::Any>, String> {
+        let sink = Arc::new(RecordingSink::new());
+        let session = runtime
+            .mount(publication, Arc::clone(&sink) as _, &[])
+            .map_err(|error| format!("{error:?}"))?;
+        let rendered = sink.tree(SurfaceTree::text_content);
+        if rendered != "lifecycle provider" {
+            return Err(format!("the guest rendered {rendered:?}"));
+        }
+        Ok(Box::new(session))
     }
 
     fn inspect(runtime: &WasmRuntime) -> GuestResidue {
@@ -111,5 +125,21 @@ async fn leased_provider_closes_when_idle() {
         .run_until(lifecycle_conformance::leased_provider_closes_when_idle(
             engine,
         ))
+        .await;
+}
+
+#[tokio::test]
+async fn lazy_references_activate_retain_and_release() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::lazy_references_activate_retain_and_release(engine))
+        .await;
+}
+
+#[tokio::test]
+async fn undeclared_publications_fail_initialization() {
+    let engine = Wasmtime::load().await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::undeclared_publications_fail_initialization(engine))
         .await;
 }

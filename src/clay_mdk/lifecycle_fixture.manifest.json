@@ -3,8 +3,8 @@
   "id": "dayframe.lifecycle-fixture",
   "package_version": 1,
   "entrypoints": {
-    "initialize": "townframe:dayframe/micro-lifecycle@0.3.0",
-    "presentation": "townframe:dayframe/presentation-events@0.3.0",
+    "initialize": "townframe:dayframe/micro-lifecycle@0.4.0",
+    "presentation": "townframe:dayframe/presentation-events@0.4.0",
     "installer": null
   },
   "provides": [
@@ -12,6 +12,14 @@
       "id": "presentation",
       "contract": {
         "id": "dayframe.lifecycle.presentation",
+        "version": 1
+      },
+      "retention": "strong"
+    },
+    {
+      "id": "echo",
+      "contract": {
+        "id": "dayframe.lifecycle.echo",
         "version": 1
       },
       "retention": "strong"
@@ -25,6 +33,14 @@
         "version": 1
       },
       "necessity": "required"
+    },
+    {
+      "binding": "service",
+      "contract": {
+        "id": "dayframe.lifecycle.echo",
+        "version": 1
+      },
+      "necessity": "optional"
     },
     {
       "binding": "host",

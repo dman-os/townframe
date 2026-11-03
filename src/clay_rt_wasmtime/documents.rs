@@ -24,6 +24,7 @@ pub use clay_guest_session::Operation as WasmOperation;
 pub use clay_guest_session::Watch as WasmDocumentWatch;
 use clay_guest_session::Work;
 use clay_guest_session::capabilities::PublishedCapability;
+use clay_guest_session::capabilities::admit_publications;
 use clay_host::AccessError;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -74,7 +75,7 @@ pub(super) fn deliver(
 
 /// Grant `context` into the guest's resource table, run `micro-lifecycle.initialize`, and take
 /// over what it answered: the guest's `instance-root` and the publication lease of every
-/// provision, keyed by contract.
+/// returned publication, keyed by name and admitted against what the manifest declares.
 pub(super) async fn initialize(
     active: &mut WasmIncarnation,
     context: InitialContext,
@@ -85,6 +86,7 @@ pub(super) async fn initialize(
         collections,
         registrations,
         requirements,
+        publications: declared,
     } = context;
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {
@@ -186,25 +188,18 @@ pub(super) async fn initialize(
                 }
             })
         })?;
-    let mut provisions = BTreeMap::new();
-    for provision in initialized.provisions {
+    let returned = initialized.publications.into_iter().map(|publication| {
         let lease = active
             .store
             .data_mut()
             .table
-            .delete(provision.capability)
-            .expect("a provided capability must be in the host resource table");
-        if provisions
-            .insert(provision.contract.clone(), lease)
-            .is_some()
-        {
-            return Err(ActivationError::Initialization(format!(
-                "guest provided {} twice",
-                provision.contract
-            )));
-        }
-    }
-    Ok((initialized.root, provisions))
+            .delete(publication.capability)
+            .expect("a published capability must be in the host resource table");
+        (publication.name, lease)
+    });
+    let publications = admit_publications(&declared, returned.collect::<Vec<_>>())
+        .map_err(ActivationError::Initialization)?;
+    Ok((initialized.root, publications))
 }
 
 fn access_error(error: AccessError) -> wit::DocumentError {
@@ -441,7 +436,7 @@ mod tests {
             )
             .unwrap();
         let (mut state, mut incoming) =
-            WasmStoreState::new(host.clone(), instance.clone(), Limits::default()).unwrap();
+            WasmStoreState::detached(host.clone(), instance.clone(), Limits::default()).unwrap();
         let access = state.documents.grant(access).unwrap();
         let access = state.table.push(access).unwrap().rep();
         let denied = HostDocumentAccess::mutate(
@@ -589,7 +584,7 @@ mod tests {
                 }],
             )
             .unwrap();
-        let (mut state, mut incoming) = WasmStoreState::new(
+        let (mut state, mut incoming) = WasmStoreState::detached(
             host.clone(),
             instance,
             Limits {
