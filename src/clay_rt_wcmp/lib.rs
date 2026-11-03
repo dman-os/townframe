@@ -16,6 +16,7 @@ use clay_guest_session::DocumentSession;
 use clay_guest_session::Limits as DocumentLimits;
 use clay_guest_session::Work;
 use clay_guest_session::collections::BytesProjection;
+use clay_guest_session::collections::BytesRegistrations;
 use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
 use clay_guest_session::ingress_budget;
@@ -72,6 +73,7 @@ mod bindings {
             "townframe:dayframe/documents.operation": super::documents::WasmOperation,
             "townframe:dayframe/collections.collection-reader": clay_guest_session::collections::CollectionReader,
             "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
+            "townframe:dayframe/collection-registration.registration-writer": clay_guest_session::collections::RegistrationWriter,
         },
     });
 }
@@ -419,6 +421,7 @@ impl WcmpRuntime {
         package: &WcmpPackage,
         configs: BTreeMap<String, DocumentRef>,
         collections: BTreeMap<String, BytesProjection>,
+        registrations: BTreeMap<String, BytesRegistrations>,
     ) -> Result<(Self, impl Future<Output = ()> + 'static), ActivationError> {
         let (mut state, incoming) = package.instantiate_with_incoming(host, instance.clone())?;
         let wake = Arc::new(IncarnationWake::new());
@@ -441,7 +444,7 @@ impl WcmpRuntime {
             wake,
             waker,
         };
-        documents::activate(&mut active, configs, collections).await?;
+        documents::activate(&mut active, configs, collections, registrations).await?;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let incarnation = Rc::new(RefCell::new(Some(active)));
         let driver_incarnation = Rc::clone(&incarnation);

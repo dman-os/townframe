@@ -184,6 +184,12 @@ impl<K: Ord + Clone, V: Clone> Replica<K, V> {
             .collect()
     }
 
+    pub(crate) fn retire_authoritative_removal(&mut self, key: &K, version: Version) {
+        assert!(!self.rows.contains_key(key));
+        assert_eq!(self.tombstones.get(key), Some(&version));
+        self.tombstones.remove(key);
+    }
+
     pub fn version_now(&self) -> Version {
         Version::new(self.incarnation, self.seen)
     }

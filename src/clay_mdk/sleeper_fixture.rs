@@ -7,6 +7,7 @@
 //! and the host must treat it as a trap (withdraw surface, close instance).
 
 use clay_mdk::bindings;
+use clay_mdk::collection_registration;
 use clay_mdk::collections;
 use clay_mdk::document_events;
 use clay_mdk::documents;
@@ -25,9 +26,11 @@ impl micro_lifecycle::Guest for Sleeper {
     async fn activate(
         configs: Vec<documents::DocumentBinding>,
         collections: Vec<collections::CollectionBinding>,
+        registrations: Vec<collection_registration::RegistrationBinding>,
     ) -> Result<(), String> {
         assert!(configs.is_empty());
         assert!(collections.is_empty());
+        assert!(registrations.is_empty());
         Ok(())
     }
 }

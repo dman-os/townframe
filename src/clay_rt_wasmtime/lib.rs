@@ -191,6 +191,7 @@ mod bindings {
             "townframe:dayframe/documents.operation": super::documents::WasmOperation,
             "townframe:dayframe/collections.collection-reader": clay_guest_session::collections::CollectionReader,
             "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
+            "townframe:dayframe/collection-registration.registration-writer": clay_guest_session::collections::RegistrationWriter,
         },
     });
 }
@@ -631,9 +632,10 @@ impl WasmRuntime {
         package: &WasmPackage,
         configs: BTreeMap<String, DocumentRef>,
         collections: BTreeMap<String, clay_guest_session::collections::BytesProjection>,
+        registrations: BTreeMap<String, clay_guest_session::collections::BytesRegistrations>,
     ) -> Result<(Self, impl std::future::Future<Output = ()> + 'static), ActivationError> {
         let (mut active, incoming) = package.instantiate(host, instance.clone()).await?;
-        documents::activate(&mut active, configs, collections).await?;
+        documents::activate(&mut active, configs, collections, registrations).await?;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let fuel = active.fuel_per_call.clone();
         let incarnation = Arc::new(Mutex::new(Some(active)));

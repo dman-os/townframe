@@ -1,4 +1,4 @@
-package townframe:dayframe@0.1.0;
+package townframe:dayframe@0.2.0;
 
 interface presentation {
     type node-id = u32;

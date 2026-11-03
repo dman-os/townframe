@@ -79,8 +79,8 @@ impl<K, V, T> State<K, V, T> {
         }
     }
 
-    fn wake_all(&mut self) -> Notifications {
-        Notifications(std::mem::take(&mut self.waiters))
+    fn wake_all(&mut self) -> PendingNotifications {
+        PendingNotifications(std::mem::take(&mut self.waiters))
     }
 }
 
@@ -152,7 +152,7 @@ impl<K, V, S: Source<K, V>> Projection<K, V, S> {
         self.reset_deferred().dispatch();
     }
 
-    pub(crate) fn reset_deferred(&self) -> Notifications {
+    pub(crate) fn reset_deferred(&self) -> PendingNotifications {
         let mut state = self.lock();
         state.generation = state
             .generation
@@ -192,7 +192,7 @@ impl<K: Ord + Clone, V: Clone, S: Source<K, V>> Projection<K, V, S> {
         self.publish_deferred(changes).dispatch();
     }
 
-    pub(crate) fn publish_deferred(&self, changes: Vec<Change<K, V>>) -> Notifications {
+    pub(crate) fn publish_deferred(&self, changes: Vec<Change<K, V>>) -> PendingNotifications {
         let mut state = self.lock();
         assert_ne!(
             state.status,
@@ -643,12 +643,12 @@ fn check_acquire(status: Status) -> Result<(), AcquireError> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[must_use = "dispatch notifications after releasing authority locks"]
-pub(crate) struct Notifications(BTreeMap<u64, Waker>);
+pub struct PendingNotifications(BTreeMap<u64, Waker>);
 
-impl Notifications {
-    pub(crate) fn dispatch(self) {
+impl PendingNotifications {
+    pub fn dispatch(self) {
         for waiter in self.0.into_values() {
             waiter.wake();
         }

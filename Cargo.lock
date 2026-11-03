@@ -2691,6 +2691,7 @@ dependencies = [
  "tokio",
  "wash-runtime",
  "wasmtime-wasi",
+ "wat",
 ]
 
 [[package]]
