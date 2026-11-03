@@ -341,3 +341,13 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 - Open with the operator: how a writer names an observed tombstone. Readers never see tombstone stamps,
   so the MDK `based_on` default treats a re-creation after a seen delete as concurrent and it loses.
   Proposed (b): writes carry the writer's feed position; the host derives the observed lamport.
+
+## Per-call exports landed (2026-11-04)
+
+- Wasmtime 404cdd21, ADR 024 §7a 13b89a49, WCMP repin 1ebb05a7 (fork 7604dc8: `run_until_stalled`
+  reports `Stalled::{Idle, Yielded}`; a yielded task starved later tasks), WCMP port a34f643e. Both
+  engines run the same 15 conformance scenarios; 294/294 across the clay crates.
+- Open: browser (JSPI) lane untested for per-call exports, and `Resuming` still maps to `Idle`; the
+  fork's own nix lint/test lanes not yet run on 7604dc8; the guest cancel path is unexercised by host
+  tests (no engine can cancel a guest task from the host).
+- C9b (consumer migration, WIT stamps/basis, prefix grants, MDK default) running on `c9a-causal-map`.
