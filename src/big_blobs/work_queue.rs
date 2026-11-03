@@ -5,6 +5,8 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use utils_rs::prelude::Res;
 
+mod sqlite;
+
 #[derive(Clone)]
 pub(crate) struct WorkQueue {
     sql: Database,
@@ -13,25 +15,7 @@ pub(crate) struct WorkQueue {
 
 impl WorkQueue {
     pub async fn new(sql: Database) -> Res<Self> {
-        sql.apply_migrations(
-            "big_blobs_work_migrations",
-            &[sqlite_rs::Migration {
-                version: 1,
-                name: "durable_blob_work",
-                sql: "CREATE TABLE big_blobs_work (
-                       doc_id TEXT PRIMARY KEY NOT NULL
-                     , generation INTEGER NOT NULL
-                     , dirty INTEGER NOT NULL
-                     , waiting INTEGER NOT NULL
-                  ) STRICT;
-                  CREATE INDEX big_blobs_work_dirty ON big_blobs_work (dirty, doc_id);
-                  CREATE TABLE big_blobs_progress (
-                       source TEXT PRIMARY KEY NOT NULL
-                     , revision INTEGER NOT NULL
-                  ) STRICT;",
-            }],
-        )
-        .await?;
+        sql.apply_migrations(sqlite::queries::MIGRATION_TABLE, sqlite::queries::MIGRATIONS).await?;
         Ok(Self {
             sql,
             changed: Arc::new(Notify::new()),
@@ -39,17 +23,11 @@ impl WorkQueue {
     }
 
     pub async fn progress(&self, source: &str) -> Res<u64> {
-        Ok(self
-            .sql
-            .query(
-                "SELECT revision FROM big_blobs_progress WHERE source = ?",
-                (source,),
-            )
+        Ok(sqlite::queries::progress(&self.sql, source.to_owned())
             .await?
-            .all::<u64>()?
             .into_iter()
             .next()
-            .unwrap_or(0))
+            .unwrap_or(0) as u64)
     }
 
     pub async fn ingest(
@@ -60,64 +38,50 @@ impl WorkQueue {
         rearm_waiting: bool,
     ) -> Res<()> {
         let tx = self.sql.begin_write().await?;
-        let previous = tx
-            .query(
-                "SELECT revision FROM big_blobs_progress WHERE source = ?",
-                (source,),
-            )
+        let previous = sqlite::queries::progress(&tx, source.to_owned())
             .await?
-            .all::<u64>()?
             .into_iter()
             .next()
-            .unwrap_or(0);
+            .unwrap_or(0) as u64;
         if revision <= previous {
             tx.rollback().await?;
             return Ok(());
         }
         for document in documents {
-            tx.execute("INSERT INTO big_blobs_work (doc_id, generation, dirty, waiting) VALUES (?, 1, 1, 0)
-                        ON CONFLICT (doc_id) DO UPDATE SET generation = generation + 1, dirty = 1", (document.to_string(),)).await?;
+            sqlite::queries::enqueue(&tx, document.to_string()).await?;
         }
         if rearm_waiting {
-            tx.execute("UPDATE big_blobs_work SET generation = generation + 1, dirty = 1 WHERE waiting = 1", ()).await?;
+            sqlite::queries::rearm_waiting(&tx).await?;
         }
-        tx.execute(
-            "INSERT INTO big_blobs_progress (source, revision) VALUES (?, ?)
-                    ON CONFLICT (source) DO UPDATE SET revision = excluded.revision",
-            (source, i64::try_from(revision)?),
-        )
-        .await?;
+        sqlite::queries::upsert_progress(&tx, source.to_owned(), i64::try_from(revision)?).await?;
         tx.commit().await?;
         self.changed.notify_one();
         Ok(())
     }
 
     pub async fn enqueue(&self, document: &DocId) -> Res<()> {
-        self.sql.execute("INSERT INTO big_blobs_work (doc_id, generation, dirty, waiting) VALUES (?, 1, 1, 0)
-                          ON CONFLICT (doc_id) DO UPDATE SET generation = generation + 1, dirty = 1", (document.to_string(),)).await?;
+        sqlite::queries::enqueue(&self.sql, document.to_string()).await?;
         self.changed.notify_one();
         Ok(())
     }
 
     pub async fn rearm(&self) -> Res<()> {
-        self.sql
-            .execute(
-                "UPDATE big_blobs_work SET generation = generation + 1, dirty = 1",
-                (),
-            )
-            .await?;
+        sqlite::queries::rearm(&self.sql).await?;
         self.changed.notify_one();
         Ok(())
     }
 
     pub async fn next(&self) -> Res<Option<(DocId, u64)>> {
-        self.sql.query("SELECT doc_id, generation FROM big_blobs_work WHERE dirty = 1 ORDER BY doc_id LIMIT 1", ()).await?
-            .all::<(String, u64)>()?.into_iter().next()
-            .map(|(doc, generation)| Ok((doc.parse()?, generation))).transpose()
+        sqlite::queries::next(&self.sql)
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| Ok((row.doc_id.parse()?, row.generation as u64)))
+            .transpose()
     }
 
     pub async fn finish(&self, doc: &DocId, generation: u64, waiting: bool) -> Res<()> {
-        self.sql.execute("UPDATE big_blobs_work SET dirty = 0, waiting = ? WHERE doc_id = ? AND generation = ?", (waiting, doc.to_string(), i64::try_from(generation)?)).await?;
+        sqlite::queries::finish(&self.sql, waiting, doc.to_string(), i64::try_from(generation)?).await?;
         Ok(())
     }
 }
