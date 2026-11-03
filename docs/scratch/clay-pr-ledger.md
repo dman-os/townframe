@@ -284,3 +284,13 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   defaults `based_on` to the writer's replica of that key, so an ordinary write supersedes everything
   its writer has observed. That matches the intuition from non-causal LWW structures, while writes the
   writer never saw are still resolved by (Lamport timestamp, tie-break).
+- WCMP/browser result: per-call callback-ABI async exports work on WCMP wasmi and headless Chromium 156
+  (JSPI engine). Slot 0 is per task (`Thread.context` in `concurrency/thread.rs:41`), overlap of 2 and 50
+  calls works, and sync entry is fine. No blocker found for per-call exports.
+  - Hazards (medium): a continuously self-yielding guest starves host tasks (`run_turn`,
+    `store_context.rs:1097-1205`); wit-bindgen 0.62 yields only via `yield_async` or self-waking futures.
+  - No host-side cancel of an export call: dropping the call future cancels nothing, and `JoinHandle::abort`
+    only drops the host future, so the guest task runs to completion. Same as Wasmtime at that version, per
+    PDD023.
+  - Unproven: a real wit-bindgen + MDK-hook guest (the test was hand-written WAT emulating the protocol), the
+    guest-side TASK_CANCELLED path, stackful/JSPI-blocking guests, non-Chromium browsers.
