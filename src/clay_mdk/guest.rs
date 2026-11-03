@@ -19,6 +19,7 @@ pub use crate::mirror::MirrorStatus;
 pub use crate::mirror::MirrorWatch;
 pub use dom::GuestDom;
 
+use crate::collection_registration;
 use crate::collections;
 use crate::documents;
 use crate::mirror::DocumentMirror;
@@ -98,8 +99,12 @@ macro_rules! export_micro {
             async fn activate(
                 configs: ::std::vec::Vec<$crate::documents::DocumentBinding>,
                 collections: ::std::vec::Vec<$crate::collections::CollectionBinding>,
+                registrations: ::std::vec::Vec<
+                    $crate::collection_registration::RegistrationBinding,
+                >,
             ) -> ::std::result::Result<(), ::std::string::String> {
-                $crate::guest::Runtime::activate($activate, configs, collections).await
+                $crate::guest::Runtime::activate($activate, configs, collections, registrations)
+                    .await
             }
         }
 
@@ -163,9 +168,10 @@ impl Runtime {
         activate: impl FnOnce(&Context) -> Result<(), documents::DocumentError>,
         configs: Vec<documents::DocumentBinding>,
         collections: Vec<collections::CollectionBinding>,
+        registrations: Vec<collection_registration::RegistrationBinding>,
     ) -> Result<(), String> {
         assert!(
-            collections.is_empty(),
+            collections.is_empty() && registrations.is_empty(),
             "guest collection bindings are not supported by the MDK yet"
         );
         let mirror = DocumentMirror::default();

@@ -1,4 +1,4 @@
-package townframe:dayframe@0.1.0;
+package townframe:dayframe@0.2.0;
 
 interface collections {
     record encoded-value {
@@ -74,5 +74,32 @@ interface collections {
     record collection-binding {
         name: string,
         reader: collection-reader,
+    }
+}
+
+@since(version = 0.2.0)
+interface collection-registration {
+    use collections.{encoded-value, version};
+
+    record mutation-accepted {
+        row-version: version,
+    }
+
+    variant mutation-error {
+        conflict(option<version>),
+        revoked,
+        key-too-large,
+        value-too-large,
+        row-limit,
+    }
+
+    resource registration-writer {
+        put: async func(local-key: list<u8>, based-on: option<version>, value: encoded-value) -> result<mutation-accepted, mutation-error>;
+        remove: async func(local-key: list<u8>, based-on: option<version>) -> result<option<mutation-accepted>, mutation-error>;
+    }
+
+    record registration-binding {
+        name: string,
+        writer: registration-writer,
     }
 }

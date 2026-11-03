@@ -84,6 +84,7 @@ impl WasmMicro {
             package,
             context.configs().clone(),
             BTreeMap::new(),
+            BTreeMap::new(),
         )
         .await
         .map_err(|error| match error {

@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 use wash_runtime::wasmtime;
 use wasmtime::Engine;
 use wasmtime::Store;
+use wasmtime::component::Accessor;
 use wasmtime::component::Component;
 use wasmtime::component::HasSelf;
 use wasmtime::component::Linker;
@@ -69,6 +70,8 @@ use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
 use dioxus_native_dom::DioxusState;
 use host_bindings::exports::townframe::dayframe::presentation_events::Event;
+use host_bindings::townframe::dayframe::collection_registration;
+use host_bindings::townframe::dayframe::collections;
 use host_bindings::townframe::dayframe::documents;
 use host_bindings::townframe::dayframe::presentation::*;
 use host_bindings::townframe::dayframe::presentation::{self};
@@ -276,10 +279,14 @@ impl TestHost {
     ) -> wasmtime::Result<host_bindings::MicroClient> {
         let guest =
             host_bindings::MicroClient::instantiate_async(&mut *store, component, linker).await?;
-        guest
-            .townframe_dayframe_micro_lifecycle()
-            .call_activate(store, &[])
-            .await?
+        let lifecycle = guest.townframe_dayframe_micro_lifecycle();
+        store
+            .run_concurrent(async |accessor| {
+                lifecycle
+                    .call_activate(accessor, Vec::new(), Vec::new(), Vec::new())
+                    .await
+            })
+            .await??
             .map_err(wasmtime::Error::msg)?;
         Ok(guest)
     }
@@ -436,6 +443,85 @@ impl TestHost {
                 },
             ))
         })
+    }
+}
+
+impl collections::Host for TestHost {}
+
+impl collections::HostCollectionReader for TestHost {
+    fn drop(&mut self, reader: Resource<collections::CollectionReader>) -> wasmtime::Result<()> {
+        self.table.delete(reader)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> collections::HostCollectionReaderWithStore<T> for HasSelf<TestHost> {
+    async fn acquire(
+        _accessor: &Accessor<T, Self>,
+        _reader: Resource<collections::CollectionReader>,
+        _selector: Vec<u8>,
+        _resume: Option<Vec<u8>>,
+    ) -> wasmtime::Result<Result<Resource<collections::ProjectionLease>, collections::AcquireError>>
+    {
+        wasmtime::bail!("test host grants no collection readers")
+    }
+}
+
+impl collections::HostProjectionLease for TestHost {
+    fn drop(&mut self, lease: Resource<collections::ProjectionLease>) -> wasmtime::Result<()> {
+        self.table.delete(lease)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> collections::HostProjectionLeaseWithStore<T> for HasSelf<TestHost> {
+    async fn read(
+        _accessor: &Accessor<T, Self>,
+        _lease: Resource<collections::ProjectionLease>,
+        _committed: Option<Vec<u8>>,
+        _limits: collections::ReadLimits,
+    ) -> wasmtime::Result<Result<collections::Page, collections::ReadError>> {
+        wasmtime::bail!("test host grants no projection leases")
+    }
+}
+
+impl collection_registration::Host for TestHost {}
+
+impl collection_registration::HostRegistrationWriter for TestHost {
+    fn drop(
+        &mut self,
+        writer: Resource<collection_registration::RegistrationWriter>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(writer)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> collection_registration::HostRegistrationWriterWithStore<T> for HasSelf<TestHost> {
+    async fn put(
+        _accessor: &Accessor<T, Self>,
+        _writer: Resource<collection_registration::RegistrationWriter>,
+        _local_key: Vec<u8>,
+        _based_on: Option<collections::Version>,
+        _value: collections::EncodedValue,
+    ) -> wasmtime::Result<
+        Result<collection_registration::MutationAccepted, collection_registration::MutationError>,
+    > {
+        wasmtime::bail!("test host grants no registration writers")
+    }
+
+    async fn remove(
+        _accessor: &Accessor<T, Self>,
+        _writer: Resource<collection_registration::RegistrationWriter>,
+        _local_key: Vec<u8>,
+        _based_on: Option<collections::Version>,
+    ) -> wasmtime::Result<
+        Result<
+            Option<collection_registration::MutationAccepted>,
+            collection_registration::MutationError,
+        >,
+    > {
+        wasmtime::bail!("test host grants no registration writers")
     }
 }
 
