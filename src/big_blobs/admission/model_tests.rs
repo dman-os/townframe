@@ -356,7 +356,10 @@ async fn run_script(script: Vec<Command>) {
                     .expect("select inventory");
             }
 
-            Command::Authorize { inventory, readable } => {
+            Command::Authorize {
+                inventory,
+                readable,
+            } => {
                 apply_authorize(&admission, &mut model, inventory, readable).await;
             }
             Command::Pins {

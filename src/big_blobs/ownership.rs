@@ -310,7 +310,6 @@ impl State {
             tx: self.sql.begin_write().await?,
             store: self.store.clone(),
             tags: Vec::new(),
-
         })
     }
 
@@ -346,7 +345,6 @@ impl State {
     }
 
     async fn apply_pending(&self) -> Res<()> {
-
         let pending = sqlite::queries::pending_effects(&self.sql).await?;
         let mut effects = Vec::with_capacity(pending.len());
         for digest in pending {
@@ -399,7 +397,6 @@ impl State {
             }
             if !retained && !preclaim && !pin {
                 sqlite::queries::delete_dependency(&tx, digest.clone()).await?;
-
             }
             if !pinned {
                 sqlite::queries::delete_pin_root(&tx, digest.clone()).await?;
@@ -503,8 +500,7 @@ impl OwnershipTransaction {
             sqlite::queries::insert_owner(&self.tx, owner.to_owned(), id.to_string()).await?;
 
             if owner.starts_with("document:retention:") || owner.starts_with("writer:retention:") {
-
-                    sqlite::queries::insert_pin_root(&self.tx, id.to_string()).await?;
+                sqlite::queries::insert_pin_root(&self.tx, id.to_string()).await?;
             }
             self.dirty(id).await?;
         }
@@ -538,12 +534,8 @@ impl OwnershipTransaction {
         for digest in previous {
             let id: BlobId = digest.parse()?;
             if !retained.contains(&id) {
-                sqlite::queries::delete_owner_digest(
-                    &self.tx,
-                    owner.to_owned(),
-                    digest.clone(),
-                )
-                .await?;
+                sqlite::queries::delete_owner_digest(&self.tx, owner.to_owned(), digest.clone())
+                    .await?;
                 self.dirty(&id).await?;
             }
         }
@@ -562,12 +554,8 @@ impl OwnershipTransaction {
             "reconciliation prefix must end at an owner boundary"
         );
 
-        let existing = sqlite::queries::reconcile_owners(
-            &self.tx,
-            id.to_string(),
-            prefix.to_owned(),
-        )
-        .await?;
+        let existing =
+            sqlite::queries::reconcile_owners(&self.tx, id.to_string(), prefix.to_owned()).await?;
         for owner in owners {
             eyre::ensure!(
                 owner.starts_with(prefix),
@@ -577,12 +565,8 @@ impl OwnershipTransaction {
         }
         for owner in existing {
             if !owners.contains(&owner) {
-                sqlite::queries::delete_owner_digest(
-                    &self.tx,
-                    owner.clone(),
-                    id.to_string(),
-                )
-                .await?;
+                sqlite::queries::delete_owner_digest(&self.tx, owner.clone(), id.to_string())
+                    .await?;
 
                 self.dirty(id).await?;
             }

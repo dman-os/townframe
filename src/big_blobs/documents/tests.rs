@@ -815,7 +815,6 @@ async fn typed_encoding_parameters_preserve_extensions_and_reconstruct_both_padd
             typed.encoding_parameters.padding,
             match padding {
                 Padding::Padme => "padme",
-
             }
         );
         assert_eq!(serde_json::to_value(typed)?, cipher);

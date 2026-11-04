@@ -402,7 +402,6 @@ async fn invite(owner: &BigNode, reader: &BigNode, root: &DocId, access: Access)
         .unwrap();
 }
 
-
 struct SelectionFixture {
     owner: BigNode,
     owner_stop: StopToken,
@@ -575,10 +574,13 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
 async fn selected_inventory_replacement_excludes_unrelated_and_self_doc() {
     let mut fixture = selection_fixture().await;
     let unrelated = collection(&fixture.owner, "unrelated").await;
-    let unused = blobs::inventory(&fixture.owner, &fixture.b, MetaRoot::Public, "not-selected").await;
+    let unused =
+        blobs::inventory(&fixture.owner, &fixture.b, MetaRoot::Public, "not-selected").await;
     let hidden = populated(&fixture.owner, &unrelated, "ciphertext", MetaRoot::Public).await;
     let self_digest = self_doc(&fixture.owner, &fixture.a, &fixture.expected[0].0).await;
-    fixture.expected.push((fixture.expected[0].0.clone(), self_digest));
+    fixture
+        .expected
+        .push((fixture.expected[0].0.clone(), self_digest));
     fixture.connection.sync_keyhive_with_peer().await.unwrap();
     fixture.accepted.sync_keyhive_with_peer().await.unwrap();
     wait_bytes(&fixture.reader, &fixture.expected[3].0, self_digest).await;

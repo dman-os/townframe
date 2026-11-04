@@ -6,9 +6,9 @@ use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::DocsMessage;
 use futures::future::BoxFuture;
 use service_utils_rs::InlineRoute;
+use sqlite_rs::Sql;
 use sqlite_rs::SqliteRuntime;
 use std::collections::BTreeMap;
-use sqlite_rs::Sql;
 use std::collections::VecDeque;
 use tokio::sync::oneshot;
 
