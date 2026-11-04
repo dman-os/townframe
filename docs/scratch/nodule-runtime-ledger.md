@@ -250,9 +250,14 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs: P1, P2, P3a done. P3b (importers) is next, on a fresh agent.
+- big_plugs: P1–P3 done (OCI import deferred). P4 (shared request shape for nodules) is next.
 ## Done
 
+- 2026-11-04: P3b importers (OCI deferred).
+  - One micro per plug. `big_plugs::import::micro_pair` maps Clay `id` to the plug name under the node DID and `package_version` n to `n.0.0`, with the component as artifact `component` (`application/wasm`). Contribution schema is `org.example.clay.micro.manifest` (pending Clay confirmation).
+  - `ImportPlugDocument{doc_id, source_drawer}` uses `AddDoc` at Write, with handles retracted after. The registry actor must already reach the source drawer through an ordinary operator delegation.
+  - Plug names allow `.` (manager decision; npm precedent; not leading, trailing or doubled).
+  - **OCI deferred (manager decision):** `cargo x plug build-oci` and the old importer carry the old daybook `PlugManifest` (no DID, semver, contributions or signature), and nothing emits new envelopes yet. Shape when built, per the OCI 1.1 artifact convention: a config blob `application/vnd.townframe.plug.envelope.v1+json` holding the signed envelope, with layers as artifacts titled by artifact key and verified by digest.
 - 2026-11-04: P3a signatures and accept rules.
   - `Plug.signature {alg: ed25519, value: multibase}` over `SIGNING_DOMAIN || revision`. `revision()` excludes the signature.
   - did:key-only verification; other DID methods fail closed.
