@@ -12,36 +12,48 @@
 //! Incarnation-owned work (the collection mirrors, [`Context::spawn`]) runs as local tasks, so
 //! a supervisor driving native micros runs inside a `tokio::task::LocalSet`.
 
-mod collections;
 mod declared;
 
 pub use clay_docs::DocumentService;
 pub use clay_host::CollectionRegistry;
-pub use collections::Attachment;
-pub use collections::Collection;
-pub use collections::Registration;
-pub use collections::Row;
 pub use declared::DeclaredRows;
 pub use declared::declared_rows;
 pub use declared::manifest_scope;
 pub use declared::runtime_scope;
 
+use clay_collection::ReadError;
+use clay_collection::ReadLimits;
 use clay_dioxus::NativeComponents;
 use clay_docs::DocumentRef;
+use clay_guest_session::capabilities::CallError;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::capabilities::GuestCall;
+use clay_guest_session::capabilities::GuestCallTarget;
+use clay_guest_session::collections::ReadFailure;
 use clay_host::Instance;
+use clay_host::RendererRegistry;
 
+use crate::Attachment;
 use crate::Capability;
+use crate::Collection;
 use crate::CollectionAccess;
 use crate::Config;
 use crate::Context;
 use crate::Error;
+use crate::Publication;
+use crate::context::Backend;
+use crate::context::RawHandler;
+use crate::context::Shared;
 use crate::manifest::ContractIdentity;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
 use crate::manifest::PublicationDeclaration;
 use crate::manifest::PublicationKind;
+use crate::rows::Feed;
+use crate::rows::Minter;
+use crate::rows::Stored;
+use crate::rows::stored_page;
 use clay_guest_session::capabilities::CapabilityLimits;
 use clay_guest_session::capabilities::CapabilitySession;
 use clay_guest_session::capabilities::DeclaredPublication;
@@ -59,11 +71,16 @@ use clay_host::Initialized;
 use clay_host::LocalFuture;
 use clay_host::MicroId;
 use clay_host::Root;
+use dioxus_core::Element;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 
 /// What a composition root hands every micro it links: the component registry its
 /// presentations publish through (native components render into it, and a guest engine attaches
@@ -193,36 +210,45 @@ pub(crate) struct CollectionSlot {
     pub(crate) writer: Option<Rc<RegistrationWriter>>,
 }
 
-/// The in-process backend's state behind one [`Context`]: everything `activate` may use, granted
-/// before it runs. Built by [`factory`].
+/// The in-process backend's state behind one [`Context`]: everything `activate` may use that
+/// is not shared with the guest backend, granted before it runs. Built by [`factory`].
 pub(crate) struct Activation {
     pub(crate) instance: Instance,
     pub(crate) components: NativeComponents,
-    pub(crate) configs: BTreeMap<String, Config>,
-    /// Every requirement the manifest declares; an optional one nothing resolved holds `None`.
-    pub(crate) requirements: BTreeMap<String, Option<Capability>>,
     /// Every collection request the manifest declares; one configuration left unbound is `None`.
-    pub(crate) collections: BTreeMap<String, Option<CollectionSlot>>,
-    pub(crate) declared: BTreeMap<String, DeclaredPublication>,
+    collections: BTreeMap<String, Option<CollectionSlot>>,
+    declared: BTreeMap<String, DeclaredPublication>,
     pub(crate) capabilities: CapabilitySession,
     /// Staged by `activate`; `None` once admission took them, after which publishing is a
     /// programming error.
-    pub(crate) published: RefCell<Option<Vec<(String, PublishedCapability)>>>,
-    pub(crate) tasks: Rc<RefCell<Tasks>>,
+    published: RefCell<Option<Vec<(String, PublishedCapability)>>>,
+    tasks: Rc<RefCell<Tasks>>,
 }
 
 impl Activation {
-    pub(crate) fn collection_slot(&self, binding: &str) -> Option<&CollectionSlot> {
+    fn collection_slot(&self, binding: &str) -> Option<&CollectionSlot> {
         self.collections
             .get(binding)
             .unwrap_or_else(|| panic!("the manifest declares no collection request {binding:?}"))
             .as_ref()
     }
 
-    pub(crate) fn declared_call(
-        &self,
-        name: &str,
-    ) -> clay_guest_session::capabilities::ContractIdentity {
+    pub(crate) fn collection_reader(&self, binding: &str) -> Option<CollectionReader> {
+        Some(self.collection_slot(binding)?.reader.clone())
+    }
+
+    /// The writer of the collection bound to `binding`, or `None` when it is unbound. Panics
+    /// when the manifest's request for it is read-only.
+    pub(crate) fn registration_writer(&self, binding: &str) -> Option<Rc<RegistrationWriter>> {
+        let slot = self.collection_slot(binding)?;
+        Some(
+            slot.writer
+                .clone()
+                .unwrap_or_else(|| panic!("collection request {binding:?} is read-only")),
+        )
+    }
+
+    fn declared_call(&self, name: &str) -> clay_guest_session::capabilities::ContractIdentity {
         match self.declared.get(name) {
             Some(DeclaredPublication {
                 kind: clay_guest_session::capabilities::PublicationKind::Call,
@@ -232,10 +258,10 @@ impl Activation {
         }
     }
 
-    pub(crate) fn stage(
+    fn stage(
         &self,
         published: Result<PublishedCapability, CapabilityFailure>,
-    ) -> Result<CapabilityPublication, Error> {
+    ) -> Result<Publication, Error> {
         let published = published?;
         let publication = published.publication();
         self.published
@@ -243,7 +269,144 @@ impl Activation {
             .as_mut()
             .expect("publications are staged only while activate runs")
             .push((publication.name().to_owned(), published));
-        Ok(publication)
+        Ok(Publication::in_process(publication))
+    }
+
+    pub(crate) fn publish_component(
+        &self,
+        name: &str,
+        render: Rc<dyn Fn() -> Element>,
+    ) -> Result<Publication, Error> {
+        let component = self.components.publish(&self.instance, move || render())?;
+        self.stage(self.capabilities.publish_component(name, component))
+    }
+
+    /// Stage the call publication `name`. The publication's target must be `Send + Sync` and the
+    /// handler is neither, so the target only queues the request; the loop below runs handlers
+    /// on the local executor, exactly as an engine's driver serves a guest's
+    /// `micro-lifecycle.call`.
+    pub(crate) fn publish_call(
+        this: &Rc<Self>,
+        name: &str,
+        handler: RawHandler,
+    ) -> Result<Publication, Error> {
+        let contract = this.declared_call(name);
+        let (queue, mut inbox) = mpsc::unbounded_channel::<GuestCall>();
+        let target = Arc::new(GuestCallTarget::new(name.to_owned(), queue));
+        this.spawn(Box::pin(async move {
+            let mut running = JoinSet::new();
+            loop {
+                tokio::select! {
+                    call = inbox.recv() => {
+                        let Some(GuestCall { request, reply, .. }) = call else {
+                            return;
+                        };
+                        let handler = Rc::clone(&handler);
+                        running.spawn_local(async move {
+                            let outcome = handler(request)
+                                .await
+                                .map_err(|error| CallError::Provider(error.to_string()));
+                            // A caller that stopped waiting dropped its receiver, which is how a
+                            // cancelled call is told apart from a served one: nothing to answer.
+                            reply.send(outcome).ok();
+                        });
+                    }
+                    Some(finished) = running.join_next(), if !running.is_empty() => {
+                        if let Err(error) = finished {
+                            // A panicked handler is a programming error, raised at the close.
+                            std::panic::resume_unwind(error.into_panic());
+                        }
+                    }
+                }
+            }
+        }));
+        this.stage(this.capabilities.publish_call(name, contract, target))
+    }
+
+    /// Run `future` as incarnation-owned local work: dropped when the instance closes, with a
+    /// panic raised at the close.
+    pub(crate) fn spawn(&self, future: Pin<Box<dyn Future<Output = ()>>>) {
+        self.tasks
+            .borrow_mut()
+            .push(tokio::task::spawn_local(future));
+    }
+}
+
+/// Keep the in-process mirror of the collection `reader` names current: long-poll the
+/// projection lease and fold each page into the [`Feed`]'s mirror. Runs until the incarnation
+/// closes.
+pub(crate) async fn feed(reader: CollectionReader, feed: Feed) {
+    loop {
+        // The empty selector is the whole collection.
+        let lease = reader
+            .acquire(Vec::new(), None)
+            .expect("a granted reader acquires its collection");
+        feed.mirror.borrow_mut().begin_lease(None);
+        loop {
+            let ticket = feed.mirror.borrow_mut().begin_read();
+            // No timeout: a caught-up lease parks until a change or revocation.
+            let read = lease
+                .read(
+                    ticket.committed().cloned(),
+                    ReadLimits::default(),
+                    std::future::pending(),
+                )
+                .await;
+            match read {
+                Ok(page) => {
+                    assert!(
+                        feed.mirror
+                            .borrow_mut()
+                            .apply(&ticket, &stored_page(page, Stored::InProcess))
+                    );
+                    feed.applied();
+                }
+                Err(ReadFailure::Read(ReadError::ResetRequired)) => {
+                    feed.mirror.borrow_mut().clear();
+                    feed.applied();
+                    break;
+                }
+                // The incarnation closed: nothing is left to mirror.
+                Err(ReadFailure::Read(ReadError::Revoked)) => return,
+                Err(ReadFailure::Read(ReadError::SourceUnavailable)) => {
+                    unimplemented!("registration sources are always available")
+                }
+                Err(failure @ (ReadFailure::Busy | ReadFailure::PageLimit)) => {
+                    panic!("mirror read failed: {failure:?}")
+                }
+            }
+        }
+    }
+}
+
+impl<K: serde::de::DeserializeOwned, V: serde::de::DeserializeOwned> Collection<K, V> {
+    /// Mirror `collection` for a participant that is not a micro, such as a shell: `instance`
+    /// is the participant's own instance and `activator` is what its rows' lazy references
+    /// activate through. Returns the mirror and the feed loop, which the caller must drive
+    /// until `instance` closes.
+    pub fn observe(
+        host: &Host,
+        instance: &Instance,
+        activator: Activator<CapabilityPublication>,
+        collection: &BytesRegistrations,
+    ) -> Result<(Self, impl Future<Output = ()> + 'static + use<K, V>), Error> {
+        let capabilities =
+            CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
+        capabilities.attach_activator(activator);
+        let sessions =
+            CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
+        let reader = sessions.grant(collection.projection())?;
+        Ok(Self::start(reader, capabilities))
+    }
+
+    /// Start mirroring `reader`. Returns the mirror and the loop that feeds it, which the
+    /// caller owns and must drive until the incarnation closes.
+    pub(crate) fn start(
+        reader: CollectionReader,
+        capabilities: CapabilitySession,
+    ) -> (Self, impl Future<Output = ()> + 'static + use<K, V>) {
+        let (collection, state) = Self::new(Minter::InProcess(capabilities));
+        (collection, feed(reader, state))
     }
 }
 
@@ -318,7 +481,7 @@ impl Factory<CapabilityPublication> for NativeFactory {
                 CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
             let configs = grant_configs(&resources.documents, &host, &instance, &manifest)?
                 .into_iter()
-                .map(|(binding, document)| (binding, Config::new(document)))
+                .map(|(binding, document)| (binding, Config::in_process(document)))
                 .collect();
             let requirements = manifest
                 .requires
@@ -329,7 +492,7 @@ impl Factory<CapabilityPublication> for NativeFactory {
                         .map(|publication| {
                             capabilities
                                 .mint(publication)
-                                .map(Capability::new)
+                                .map(Capability::in_process)
                                 .map_err(|failure| {
                                     format!("requirement {}: {failure:?}", required.binding)
                                 })
@@ -377,22 +540,24 @@ impl Factory<CapabilityPublication> for NativeFactory {
                     Ok((request.binding.clone(), slot))
                 })
                 .collect::<Result<_, String>>()?;
-            let context = Context(Rc::new(Activation {
+            let activation = Rc::new(Activation {
                 instance,
                 components: resources.components.clone(),
-                configs,
-                requirements,
                 collections,
                 declared: declared.clone(),
                 capabilities,
                 published: RefCell::new(Some(Vec::new())),
                 tasks: Rc::default(),
+            });
+            let context = Context(Rc::new(Shared {
+                configs,
+                requirements,
+                backend: Backend::InProcess(Rc::clone(&activation)),
             }));
-            activate(context.clone())
+            activate(context)
                 .await
                 .map_err(|error| format!("activation refused: {error}"))?;
-            let published = context
-                .0
+            let published = activation
                 .published
                 .borrow_mut()
                 .take()
@@ -405,7 +570,7 @@ impl Factory<CapabilityPublication> for NativeFactory {
             Ok(Initialized {
                 root: Box::new(NativeRoot {
                     leases,
-                    tasks: Rc::clone(&context.0.tasks),
+                    tasks: Rc::clone(&activation.tasks),
                 }),
                 publications,
             })
@@ -508,5 +673,102 @@ impl ContractIdentity {
             self.name.clone(),
             self.version,
         )
+    }
+}
+
+// The authoring vocabulary's view of the host's results. Each is a runtime condition an author
+// may handle (see [`Error`]).
+
+impl From<clay_host::AccessError> for Error {
+    fn from(error: clay_host::AccessError) -> Self {
+        match error {
+            clay_host::AccessError::Denied => Self::Denied,
+            clay_host::AccessError::Revoked => Self::Revoked,
+        }
+    }
+}
+
+impl From<clay_docs::DocumentError> for Error {
+    fn from(error: clay_docs::DocumentError) -> Self {
+        match error {
+            clay_docs::DocumentError::Access(error) => error.into(),
+            clay_docs::DocumentError::SubscriptionLagged => Self::Lagged,
+        }
+    }
+}
+
+impl From<CapabilityFailure> for Error {
+    fn from(failure: CapabilityFailure) -> Self {
+        match failure {
+            CapabilityFailure::Revoked => Self::Revoked,
+            CapabilityFailure::Unavailable => Self::Unavailable,
+            CapabilityFailure::ContractMismatch => Self::Denied,
+            CapabilityFailure::LimitExceeded => Self::Limit,
+        }
+    }
+}
+
+impl From<clay_guest_session::collections::WriteFailure> for Error {
+    fn from(failure: clay_guest_session::collections::WriteFailure) -> Self {
+        use clay_guest_session::collections::WriteFailure;
+        match failure {
+            WriteFailure::Conflict { current } => Self::Conflict(current),
+            WriteFailure::Revoked => Self::Revoked,
+            WriteFailure::RowLimit | WriteFailure::CapabilityLimit => Self::Limit,
+            WriteFailure::KeyTooLarge | WriteFailure::ValueTooLarge => {
+                Self::Rejected("row exceeds the collection's size limits".into())
+            }
+            WriteFailure::InvalidAttachment => {
+                Self::Rejected("row names an attachment it does not carry".into())
+            }
+        }
+    }
+}
+
+impl From<CallError> for Error {
+    fn from(error: CallError) -> Self {
+        match error {
+            CallError::Capability(failure) => failure.into(),
+            CallError::Provider(message) => Self::Rejected(message),
+        }
+    }
+}
+
+impl From<clay_guest_session::capabilities::RefStatus> for crate::RefStatus {
+    fn from(status: clay_guest_session::capabilities::RefStatus) -> Self {
+        use clay_guest_session::capabilities::RefStatus;
+        match status {
+            RefStatus::Live => Self::Live,
+            RefStatus::Dormant => Self::Dormant,
+            RefStatus::Disabled => Self::Disabled,
+            RefStatus::Faulted => Self::Faulted,
+            RefStatus::Unavailable => Self::Unavailable,
+            RefStatus::Revoked => Self::Revoked,
+        }
+    }
+}
+
+impl From<clay_docs::OperationReceipt> for crate::OperationReceipt {
+    fn from(receipt: clay_docs::OperationReceipt) -> Self {
+        use clay_docs::OperationError;
+        use clay_docs::OperationStatus;
+        Self {
+            id: receipt.id,
+            revision: receipt.revision,
+            status: match receipt.status {
+                OperationStatus::LocallyApplied => crate::OperationStatus::LocallyApplied,
+                OperationStatus::Accepted => crate::OperationStatus::Accepted,
+                OperationStatus::RolledBack(OperationError::Rejected { message }) => {
+                    crate::OperationStatus::RolledBack(crate::OperationError::Rejected { message })
+                }
+                OperationStatus::RolledBack(OperationError::Transport {
+                    message,
+                    outcome_unknown,
+                }) => crate::OperationStatus::RolledBack(crate::OperationError::Transport {
+                    message,
+                    outcome_unknown,
+                }),
+            },
+        }
     }
 }

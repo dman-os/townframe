@@ -38,14 +38,22 @@ async fn counter_package() -> WasmPackage {
 /// configuration document with the given `(read, write)` access.
 /// A context whose manifest declares the presentation publication `view`.
 fn declaring_view() -> InitialContext {
+    let presentation = || DeclaredPublication {
+        kind: clay_guest_session::capabilities::PublicationKind::Presentation,
+        contract: ContractIdentity::presentation_component(),
+    };
     InitialContext {
-        publications: BTreeMap::from([(
-            "view".to_owned(),
-            DeclaredPublication {
-                kind: clay_guest_session::capabilities::PublicationKind::Presentation,
-                contract: ContractIdentity::presentation_component(),
-            },
-        )]),
+        publications: BTreeMap::from([
+            ("view".to_owned(), presentation()),
+            ("badge".to_owned(), presentation()),
+            (
+                "count".to_owned(),
+                DeclaredPublication {
+                    kind: clay_guest_session::capabilities::PublicationKind::Call,
+                    contract: ContractIdentity::new("dayframe.counter", "count", (1, 0, 0)),
+                },
+            ),
+        ]),
         ..InitialContext::default()
     }
 }
@@ -56,11 +64,28 @@ fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
         id: MicroId::new("test.wasm"),
         package_version: 1,
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: view.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
+        // The counter also publishes a badge presentation and a `count` call.
+        publications: vec![
+            PublicationDeclaration {
+                name: view.into(),
+                kind: PublicationKind::Presentation,
+                contract: None,
+            },
+            PublicationDeclaration {
+                name: "badge".into(),
+                kind: PublicationKind::Presentation,
+                contract: None,
+            },
+            PublicationDeclaration {
+                name: "count".into(),
+                kind: PublicationKind::Call,
+                contract: Some(crate::ContractIdentity::new(
+                    "dayframe.counter",
+                    "count",
+                    (1, 0, 0),
+                )),
+            },
+        ],
         requires: vec![],
         configuration_requests: config
             .map(|(read, write)| ConfigurationRequest {
@@ -347,7 +372,7 @@ async fn manifest_read_only_grant_cannot_be_escalated_by_guest_mutation() {
         click(&mut dom, &mut tree);
         assert_eq!(
             tree.text_content(),
-            "0Pending counter writes: 0Write failed: DocumentError::DeniedRefresh counter"
+            "0Pending counter writes: 0Write failed: capability deniedRefresh counter"
         );
         assert_eq!(rig.supervisor.state(&rig.id), MicroState::Active);
         drop(dom);
@@ -365,12 +390,18 @@ async fn guest_activation_failure_faults_the_micro_and_publishes_nothing() {
         rig.seed();
         let error = rig.view().await.err().unwrap();
         assert!(
-            matches!(&error, StartError::Faulted(message) if message.contains("DocumentError::Denied")),
+            matches!(&error, StartError::Faulted(message) if message.contains("capability denied")),
             "{error:?}"
         );
-        assert!(matches!(rig.supervisor.state(&rig.id), MicroState::Faulted(_)));
+        assert!(matches!(
+            rig.supervisor.state(&rig.id),
+            MicroState::Faulted(_)
+        ));
         // Demand does not retry a fault.
-        assert!(matches!(rig.view().await.err(), Some(StartError::Faulted(_))));
+        assert!(matches!(
+            rig.view().await.err(),
+            Some(StartError::Faulted(_))
+        ));
         rig.host.close();
     })
     .await;

@@ -4110,6 +4110,7 @@ dependencies = [
  "ciborium",
  "clay_dioxus",
  "clay_docs",
+ "clay_guest_session",
  "clay_host",
  "clay_mdk",
  "clay_store",
@@ -9219,7 +9220,6 @@ dependencies = [
  "clay_mdk",
  "dioxus",
  "micro_counter_manifest",
- "serde_json",
 ]
 
 [[package]]

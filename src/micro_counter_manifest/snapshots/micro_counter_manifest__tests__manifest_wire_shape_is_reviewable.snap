@@ -13,6 +13,18 @@ publications:
   - name: view
     kind: presentation
     contract: ~
+  - name: badge
+    kind: presentation
+    contract: ~
+  - name: count
+    kind: call
+    contract:
+      namespace: dayframe.counter
+      name: count
+      version:
+        - 1
+        - 0
+        - 0
 requires: []
 configuration_requests:
   - binding: counter

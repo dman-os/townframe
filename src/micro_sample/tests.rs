@@ -1,5 +1,6 @@
 use super::*;
 use clay_dioxus::NativeComponents;
+use clay_guest_session::capabilities::RowAttachment;
 use clay_guest_session::collections::bytes_registrations;
 use clay_host::CollectionContract;
 use clay_host::ConfiguredMicro;
