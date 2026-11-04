@@ -40,7 +40,6 @@ members = [
   "./src/clay_docs",
   "./src/clay_collection",
   "./src/clay_store",
-  "./src/clay_micro_core",
   "./src/clay_dioxus",
   "./src/clay_mdk",
   "./src/clay_rt_wasmtime",
@@ -112,7 +111,6 @@ clay_collection = { path = "./src/clay_collection" }
 clay_store = { path = "./src/clay_store" }
 clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }
-clay_micro_core = { path = "./src/clay_micro_core" }
 clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
