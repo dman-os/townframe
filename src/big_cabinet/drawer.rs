@@ -35,6 +35,7 @@ mod known;
 mod ledger;
 mod list;
 mod list_docs;
+mod mirror;
 mod principal;
 mod remove_child;
 mod remove_doc;
@@ -53,6 +54,7 @@ pub use self::access::DrawerProvider;
 pub use self::access::DrawerWorker;
 pub use self::discovery::DrawerMetadataObservation;
 pub use self::discovery::MetadataRootStatus;
+pub use self::mirror::Mirrored;
 pub use big_cabinet_core::drawer::Drawer;
 pub use big_cabinet_core::drawer::DrawerLayout;
 pub use big_cabinet_core::drawer::LayoutKind;
@@ -221,6 +223,7 @@ impl std::ops::Deref for Core {
 }
 
 /// The booted service.
+#[derive(Clone)]
 pub struct Drawers {
     pub host: Arc<Host<DrawersHandler>>,
     pub client: Client<DrawersProtocol>,

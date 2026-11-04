@@ -244,7 +244,7 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - One node key serves as both the keyhive identity and the Iroh endpoint key.
   - A peers service accepts and identifies peers, registers them with the RPC services, calls `set_peer` on the doc and blob workers, and dials and reconnects.
   - Who to dial, whom to accept and which partitions to sync are an embedder-supplied peer policy, because relays mirror by sponsorship.
-  - The default policy is the ADR 019 cabinet query (mirroring policy ∩ the keyhive-access partitions from `big_repo`). That query is not implemented yet.
+  - The default policy is the ADR 019 cabinet query (mirroring policy ∩ the keyhive-access partitions from `big_repo`), implemented in N4 as `Drawers::mirrored` plus `big_repo::groups_with_member`.
 - **D20.** `big_node` e2e is the system test arena: harness, ladder, scale, seeded stress and nodules across nodes, driven through clients like a high-level user. The progress repo is out of scope.
 
 ### D22. HTTP-shaped calls (operator, 2026-11-04)
@@ -282,7 +282,8 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - A repo database may be shared by nodes with distinct scope keys. This exposed that the keyhive admission consumers' walker state and retention-reader ids had no scope; the scope key is now part of their namespace.
   - The node's own `sql` is not scoped (authority, blobs, cabinet, plugs, nodules tables): one per node. Open: namespacing the authority wrapping key and scoping those tables, if hosting wants one database for many nodes.
   - Test: `big_node` e2e `many_nodes` boots 20 nodes, stops them, reboots the durable ones and asserts no databases, temp dirs, sockets or tasks remain.
-- **N4. Peers and networking.**
+- **N4 (done). Peers and networking.** Delivered as `big_node::peers`; `node_identity_seed` already was the Iroh secret key bytes, so "one key" is a derivation (`SecretKey::from_bytes(seed)`) plus a boot assertion, not a config change. The cabinet query is `Drawers::mirrored` (mirror intent only); `big_node` bounds it with `big_repo::groups_with_member` (keyhive access). Open: BigRepo has no keyhive-change signal, so an incomplete access answer is re-asked on the sweep tick; `PartSynced` events are not reliably emitted by the worker (tests wait on `DocSynced`); simultaneous mutual dials are not tie-broken (as in `IrohSyncRepo`).
+- **N4 spec.**
   - Use one node key for keyhive and Iroh.
   - Move the Iroh endpoint attachment (from the test-only `big_node/e2e/blob_discovery/network.rs` and `big_cabinet/peer_net.rs`) into `big_node`.
   - Add a peers service successor to `IrohSyncRepo`: accept, identify, register, `set_peer`, dial, reconnect with backoff.

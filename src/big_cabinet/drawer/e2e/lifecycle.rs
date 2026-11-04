@@ -424,6 +424,48 @@ async fn a_removal_interrupted_after_its_roster_write_is_finished_at_boot() {
     node.stop().await;
 }
 
+/// ADR 019 Boundaries: the mirror query is the node's own policy, keyed on the `mirror` intent
+/// alone. A mirrored grouped drawer yields its three groups and its descriptor doc; a remembered
+/// drawer that is not mirrored, and a drawer nobody remembered, yield nothing; a mirrored drawer
+/// whose descriptor this node does not carry yields only the doc to fetch it by.
+#[tokio::test]
+async fn the_mirror_query_names_what_the_mirror_intent_wants() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let mirrored = node.collection(&alice, "mirrored").await;
+    let remembered = node.collection(&alice, "remembered").await;
+    let _unknown = node.collection(&alice, "unknown").await;
+    let absent = DrawerId::new([7; 32]);
+    let context = RequestContext::root();
+    let drawers = node.drawers.as_ref().unwrap();
+    assert_eq!(
+        drawers.mirrored(&context).await.unwrap(),
+        Mirrored::default()
+    );
+
+    node.remember(&node.drawers_actor, &mirrored, true).await;
+    node.remember(&node.drawers_actor, &remembered, false).await;
+    node.remember(&node.drawers_actor, &absent, true).await;
+    let (meta, docs, sensitive) = groups_of(&node.view(&alice, &mirrored).await.unwrap());
+    assert_eq!(
+        drawers.mirrored(&context).await.unwrap(),
+        Mirrored {
+            groups: [meta, docs, sensitive].into(),
+            docs: [mirrored.clone(), absent].into(),
+        }
+    );
+
+    node.forget(&node.drawers_actor, &mirrored).await;
+    assert_eq!(
+        drawers.mirrored(&context).await.unwrap(),
+        Mirrored {
+            groups: Default::default(),
+            docs: [DrawerId::new([7; 32])].into(),
+        }
+    );
+    node.stop().await;
+}
+
 #[tokio::test]
 async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
     let mut node = Node::boot().await;

@@ -32,7 +32,9 @@ mod blobs;
 mod dispatch;
 mod listeners;
 mod many_nodes;
+mod network;
 mod nodule_wasm;
+mod peers;
 mod plugs;
 
 const NOTE: &str = "org.example.note";
@@ -89,6 +91,7 @@ fn config(secrets: Arc<SecretStore>, sql: Database, storage: big_repo::Storage) 
             ..Default::default()
         },
         listeners: Default::default(),
+        peers: None,
     }
 }
 

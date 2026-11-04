@@ -1462,3 +1462,29 @@ fn enqueue_member(
 
 #[cfg(test)]
 mod tests;
+
+/// Of `groups`, the ones `peer` is a member of (at any access, relay included), by this node's
+/// Keyhive view. A group's big_sync part is readable by exactly its members, so this is "which of
+/// these parts may `peer` have": the keyhive-access half of a sync policy. A group this node knows
+/// nothing of has no members here and is not in the answer.
+pub async fn groups_with_member(
+    keyhive: &BigKeyhiveHandle,
+    peer: &PeerKey,
+    groups: &[[u8; 32]],
+) -> Res<Vec<[u8; 32]>> {
+    let agent = Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32()?)
+            .map_err(|_| ferr!("peer id is not a valid Ed25519 point"))?,
+    );
+    let mut readable = Vec::new();
+    for &group in groups {
+        let group_id = Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(&group)
+                .map_err(|_| ferr!("group id is not a valid Ed25519 point"))?,
+        );
+        if keyhive.agent_access_on(&agent, group_id).await.is_some() {
+            readable.push(group);
+        }
+    }
+    Ok(readable)
+}

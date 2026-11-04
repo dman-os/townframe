@@ -181,6 +181,7 @@ pub use big_cabinet::drawer::self :: access :: DrawerProvider
 pub use big_cabinet::drawer::self :: access :: DrawerWorker
 pub use big_cabinet::drawer::self :: discovery :: DrawerMetadataObservation
 pub use big_cabinet::drawer::self :: discovery :: MetadataRootStatus
+pub use big_cabinet::drawer::self :: mirror :: Mirrored
 pub use big_cabinet::index :: datum_ref :: DatumRefStore
 pub use big_cabinet::index :: datum_set :: DatumSetStore
 pub use big_cabinet::index::datum_ref :: DatumRefEdge

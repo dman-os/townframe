@@ -130,6 +130,7 @@ pub use keyhive::BigKeyhiveAgent;
 pub use keyhive::BigKeyhiveAuthority;
 pub use keyhive::BigKeyhiveGroup;
 pub use keyhive::BigKeyhiveHandle;
+pub use keyhive::groups_with_member;
 pub use keyhive_core;
 
 pub use changes::BigRepoAccess;

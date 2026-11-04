@@ -106,6 +106,7 @@ impl DrawerService {
         // A remembered drawer enters the known set of records when this node carries its
         // descriptor; remembering alone never creates one.
         drop(core.ensure_drawer(context, &params.drawer_id).await?);
+        core.state.notify_changed();
         Ok(())
     }
 
@@ -132,6 +133,7 @@ impl DrawerService {
             std::collections::BTreeSet::from([known_entry_key(&params.drawer_id)]),
         )
         .await?;
+        core.state.notify_changed();
         Ok(())
     }
 

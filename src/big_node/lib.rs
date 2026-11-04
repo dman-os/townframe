@@ -2,6 +2,7 @@
 
 mod blob_boot;
 mod listeners;
+pub mod peers;
 
 use listeners::Listener;
 pub use listeners::Listeners;
@@ -82,6 +83,10 @@ pub struct Config {
     pub nodule_operations: DispatchScope,
     /// The attachments that serve the node's router. Empty is a complete node.
     pub listeners: Listeners,
+    /// The network attachment: the Iroh endpoint, the peers service and the peer policy. `None`
+    /// is a complete node that talks to no other node. The endpoint is keyed by
+    /// `repo.node_identity_seed`, the same key as the node's keyhive identity.
+    pub peers: Option<peers::PeersConfig>,
 }
 
 /// The storage bindings of "a node in a directory", for embedders that want exactly that. It is
@@ -152,11 +157,45 @@ pub struct BigNode {
     pub registry_drawer: DrawerId,
     /// What the node listens on, as bound (a TCP port of `0` in the config is resolved here).
     pub listeners: Listeners,
+    /// The network attachment, when the config asked for one.
+    pub peers: Option<peers::Peers>,
+}
+
+/// What the config attaches to a booted node, taken before the config is consumed.
+struct Attachments {
+    listeners: Listeners,
+    peers: Option<peers::PeersConfig>,
+    /// The key the peers service's endpoint is built from: the node's keyhive identity.
+    identity: [u8; 32],
+}
+
+impl Attachments {
+    fn of(config: &Config) -> Self {
+        Self {
+            listeners: config.listeners.clone(),
+            peers: config.peers.clone(),
+            identity: config.repo.node_identity_seed,
+        }
+    }
 }
 
 impl BigNode {
+    /// Registers the built-in providers and starts the attachments the config asks for. They come
+    /// last in boot, so they stop first: nothing is served or dialed from a node whose services
+    /// are coming down. Each is pushed as soon as it runs, so a later one failing to start still
+    /// stops the earlier ones.
+    async fn attach(&mut self, attachments: Attachments, stop: &mut StopToken) -> Res<()> {
+        stop.stages.push(self.register_built_ins());
+        self.listeners = attach_listeners(self, attachments.listeners, stop).await?;
+        if let Some(config) = attachments.peers {
+            self.peers = Some(attach_peers(self, config, attachments.identity, stop).await?);
+        }
+        Ok(())
+    }
+
     pub async fn boot(config: Config) -> Res<(Self, StopToken)> {
         let mut stop = StopToken::default();
+        let attachments = Attachments::of(&config);
         // Boxed: booting every service inline makes this future large enough (in debug builds)
         // that a caller awaiting it, such as a test that reboots a node, overflows its stack.
         let boot: Res<Self> = Box::pin(async {
@@ -276,7 +315,7 @@ impl BigNode {
             )
             .await?;
             stop.stages.push(Stage::Service(nodules_stop));
-            let node = Self {
+            let mut node = Self {
                 repo,
                 authority,
                 docs_actor,
@@ -300,10 +339,9 @@ impl BigNode {
                 plugs,
                 registry_drawer,
                 listeners: Listeners::default(),
+                peers: None,
             };
-            stop.stages.push(node.register_built_ins());
-            let mut node = node;
-            node.listeners = attach_listeners(&node, config.listeners, &mut stop).await?;
+            node.attach(attachments, &mut stop).await?;
             Ok(node)
         })
         .await;
@@ -459,6 +497,29 @@ async fn attach_listeners(
         bound.tcp = Some(address);
     }
     Ok(bound)
+}
+
+/// Starts the peers service. It is the last attachment, so it stops first: no connection is
+/// served or opened from a node whose services are coming down.
+async fn attach_peers(
+    node: &BigNode,
+    config: peers::PeersConfig,
+    identity: [u8; 32],
+    stop: &mut StopToken,
+) -> Res<peers::Peers> {
+    let (peers, peers_stop) = peers::boot(
+        peers::Node {
+            repo: &node.repo,
+            drawers: &node.drawers,
+            blobs: &node.blobs,
+            blob_workers: &node.blob_workers,
+        },
+        config,
+        identity,
+    )
+    .await?;
+    stop.stages.push(Stage::Peers(peers_stop));
+    Ok(peers)
 }
 
 /// Opens the subsystem actor at `path` under the node root, and its namespace.
@@ -618,6 +679,8 @@ enum Stage {
     },
     /// A listener serving the router; stopping closes it and removes its socket file.
     Listener(Listener),
+    /// The network attachment; stopping closes its connections, workers, router and endpoint.
+    Peers(peers::PeersStop),
     /// The built-in providers registered in dispatch's router; stopping unbinds them.
     BuiltIns {
         router: Arc<big_dispatch::Router>,
@@ -636,6 +699,7 @@ impl Stage {
                 drop(worker);
             }
             Self::Listener(listener) => return listener.stop().await,
+            Self::Peers(peers) => return peers.stop().await,
             Self::BuiltIns {
                 router,
                 provider_ids,

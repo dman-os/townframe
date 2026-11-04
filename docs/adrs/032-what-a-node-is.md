@@ -112,7 +112,7 @@ Networking defines who the node is to others, so `big_node` owns it. It is the s
 - `big_repo` projects keyhive access into sync partitions: what a peer may have.
 - The cabinet answers which drawer partitions are worth syncing with a given peer: this node's mirroring policy intersected with that access.
 
-That per-peer cabinet query is assigned by ADR 019 but not yet implemented. A relay's policy replaces the mirroring half with sponsorship, and the access half still bounds it.
+That per-peer cabinet query is `Drawers::mirrored` (the `mirror` intent of the known-drawers registry); the node intersects it with `big_repo::groups_with_member`. A relay's policy replaces the mirroring half with sponsorship, and the access half still bounds it.
 
 **Configuration.** Node configuration is `big_node`'s:
 - the identity;

@@ -1,5 +1,3 @@
-mod network;
-use self::network::Network;
 use super::*;
 use big_blobs::Coverage;
 use big_blobs::InventorySelection;
@@ -14,7 +12,7 @@ use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::protocol::*;
 use utils_rs::prelude::tracing;
 
-async fn collection(node: &BigNode, name: &str) -> DocId {
+pub(super) async fn collection(node: &BigNode, name: &str) -> DocId {
     node.drawer_access
         .grants()
         .grant(
@@ -378,7 +376,7 @@ async fn verified(node: &BigNode, inventory: &DocId, digest: BlobId) {
     );
 }
 
-async fn invite(owner: &BigNode, reader: &BigNode, root: &DocId, access: Access) {
+pub(super) async fn invite(owner: &BigNode, reader: &BigNode, root: &DocId, access: Access) {
     owner
         .repo
         .receive_keyhive_contact_card(&reader.repo.local_keyhive_contact_card())
@@ -410,10 +408,7 @@ struct SelectionFixture {
     reader_secrets: Arc<SecretStore>,
     runtime: Arc<SqliteRuntime>,
     dir: tempfile::TempDir,
-    owner_net: Network,
-    reader_net: Network,
-    connection: big_repo::BigRepoConnection,
-    accepted: big_repo::BigRepoConnection,
+    link: network::Link,
     a: DocId,
     b: DocId,
     c: DocId,
@@ -431,6 +426,7 @@ async fn selection_fixture() -> SelectionFixture {
         big_repo::Storage::memory(&runtime).unwrap(),
     );
     owner_cfg.repo.node_identity_seed = [141; 32];
+    owner_cfg.peers = network::peers();
     let (owner, owner_stop) = BigNode::boot(owner_cfg).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let reader_sql = runtime.database(
@@ -444,6 +440,7 @@ async fn selection_fixture() -> SelectionFixture {
         big_repo::Storage::in_directory(&runtime, &dir.path().join("repo"), None).unwrap(),
     );
     reader_cfg.repo.node_identity_seed = [142; 32];
+    reader_cfg.peers = network::peers();
     reader_cfg.blob_storage = big_blobs::Storage::filesystem(dir.path().join("blobs"))
         .await
         .unwrap();
@@ -457,13 +454,9 @@ async fn selection_fixture() -> SelectionFixture {
     for drawer in [&a, &b, &c] {
         expected.push(populated(&owner, drawer, "ciphertext", MetaRoot::Public).await);
     }
-    let owner_net = Network::boot(&owner, 141).await;
-    let mut reader_net = Network::boot(&reader, 142).await;
-    let (connection, accepted) =
-        Network::link((&owner, &owner_net), (&reader, &mut reader_net)).await;
+    let link = network::link(&owner, &reader).await;
     invite(&owner, &reader, &a, Access::Read).await;
-    connection.sync_keyhive_with_peer().await.unwrap();
-    accepted.sync_keyhive_with_peer().await.unwrap();
+    link.sync_keyhive(&owner, &reader).await;
     reader.repo.wait_for_keyhive_reconciliation().await.unwrap();
     reader
         .blob_workers
@@ -489,10 +482,7 @@ async fn selection_fixture() -> SelectionFixture {
         reader_secrets,
         runtime,
         dir,
-        owner_net,
-        reader_net,
-        connection,
-        accepted,
+        link,
         a,
         b,
         c,
@@ -506,8 +496,10 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
     let d = collection(&fixture.owner, "D").await;
     let deep = populated(&fixture.owner, &d, "ciphertext", MetaRoot::Public).await;
     child(&fixture.owner, &fixture.c, &d).await;
-    fixture.connection.sync_keyhive_with_peer().await.unwrap();
-    fixture.accepted.sync_keyhive_with_peer().await.unwrap();
+    fixture
+        .link
+        .sync_keyhive(&fixture.owner, &fixture.reader)
+        .await;
     wait_bytes(&fixture.reader, &deep.0, deep.1).await;
     fixture.expected.push(deep);
     complete(&fixture.reader, &fixture.a).await;
@@ -523,17 +515,10 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
         reader_secrets,
         runtime,
         dir,
-        owner_net,
-        reader_net,
-        connection,
-        accepted,
         a,
         expected,
         ..
     } = fixture;
-    connection.stop().await.unwrap();
-    accepted.stop().await.unwrap();
-    reader_net.stop().await;
     shutdown(reader, reader_stop).await;
     let reader_sql = runtime.database(
         dir.path().join("reader.sqlite"),
@@ -546,23 +531,17 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
         big_repo::Storage::in_directory(&runtime, &dir.path().join("repo"), None).unwrap(),
     );
     reader_cfg.repo.node_identity_seed = [142; 32];
+    reader_cfg.peers = network::peers();
     reader_cfg.blob_storage = big_blobs::Storage::filesystem(dir.path().join("blobs"))
         .await
         .unwrap();
     let (reader, reader_stop) = BigNode::boot(reader_cfg).await.unwrap();
-    let mut reader_net = Network::boot(&reader, 142).await;
-    let (connection, accepted) =
-        Network::link((&owner, &owner_net), (&reader, &mut reader_net)).await;
-    connection.sync_keyhive_with_peer().await.unwrap();
-    accepted.sync_keyhive_with_peer().await.unwrap();
+    let link = network::link(&owner, &reader).await;
+    link.sync_keyhive(&owner, &reader).await;
     complete(&reader, &a).await;
     for (inventory, digest) in &expected {
         verified(&reader, inventory, *digest).await;
     }
-    connection.stop().await.unwrap();
-    accepted.stop().await.unwrap();
-    reader_net.stop().await;
-    owner_net.stop().await;
     shutdown(reader, reader_stop).await;
     shutdown(owner, owner_stop).await;
 }
@@ -578,8 +557,10 @@ async fn selected_inventory_replacement_excludes_unrelated_and_self_doc() {
     fixture
         .expected
         .push((fixture.expected[0].0.clone(), self_digest));
-    fixture.connection.sync_keyhive_with_peer().await.unwrap();
-    fixture.accepted.sync_keyhive_with_peer().await.unwrap();
+    fixture
+        .link
+        .sync_keyhive(&fixture.owner, &fixture.reader)
+        .await;
     wait_bytes(&fixture.reader, &fixture.expected[3].0, self_digest).await;
     complete(&fixture.reader, &fixture.a).await;
     for (inventory, digest) in &fixture.expected {
@@ -605,10 +586,6 @@ async fn selected_inventory_replacement_excludes_unrelated_and_self_doc() {
             .unwrap(),
         0
     );
-    fixture.connection.stop().await.unwrap();
-    fixture.accepted.stop().await.unwrap();
-    fixture.reader_net.stop().await;
-    fixture.owner_net.stop().await;
     shutdown(fixture.reader, fixture.reader_stop).await;
     shutdown(fixture.owner, fixture.owner_stop).await;
 }
@@ -618,8 +595,10 @@ async fn selected_inventory_replacement_removes_old_inventory() {
     let mut fixture = selection_fixture().await;
     let replacement = populated(&fixture.owner, &fixture.c, "replacement", MetaRoot::Public).await;
     replace_slot(&fixture.owner, &fixture.c, &replacement.0).await;
-    fixture.connection.sync_keyhive_with_peer().await.unwrap();
-    fixture.accepted.sync_keyhive_with_peer().await.unwrap();
+    fixture
+        .link
+        .sync_keyhive(&fixture.owner, &fixture.reader)
+        .await;
     wait_bytes(&fixture.reader, &replacement.0, replacement.1).await;
     let old = std::mem::replace(&mut fixture.expected[2], replacement);
     complete(&fixture.reader, &fixture.a).await;
@@ -639,10 +618,6 @@ async fn selected_inventory_replacement_removes_old_inventory() {
     for (inventory, digest) in &fixture.expected {
         verified(&fixture.reader, inventory, *digest).await;
     }
-    fixture.connection.stop().await.unwrap();
-    fixture.accepted.stop().await.unwrap();
-    fixture.reader_net.stop().await;
-    fixture.owner_net.stop().await;
     shutdown(fixture.reader, fixture.reader_stop).await;
     shutdown(fixture.owner, fixture.owner_stop).await;
 }
@@ -658,6 +633,7 @@ async fn transitive_matrix(access: Access, root: MetaRoot, name: &str) {
         big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [146; 32];
+    cfg.peers = network::peers();
     let (owner, owner_stop) = BigNode::boot(cfg).await.unwrap();
     let mut cfg = config(
         Arc::clone(&reader_secrets),
@@ -665,6 +641,7 @@ async fn transitive_matrix(access: Access, root: MetaRoot, name: &str) {
         big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [147; 32];
+    cfg.peers = network::peers();
     let (reader, reader_stop) = BigNode::boot(cfg).await.unwrap();
     let a = collection(&owner, "matrix-A").await;
     let b = collection(&owner, "matrix-B").await;
@@ -675,13 +652,9 @@ async fn transitive_matrix(access: Access, root: MetaRoot, name: &str) {
     for drawer in [&a, &b, &c] {
         expected.push(populated(&owner, drawer, name, root).await);
     }
-    let owner_net = Network::boot(&owner, 146).await;
-    let mut reader_net = Network::boot(&reader, 147).await;
-    let (connection, accepted) =
-        Network::link((&owner, &owner_net), (&reader, &mut reader_net)).await;
+    let link = network::link(&owner, &reader).await;
     invite(&owner, &reader, &a, access).await;
-    connection.sync_keyhive_with_peer().await.unwrap();
-    accepted.sync_keyhive_with_peer().await.unwrap();
+    link.sync_keyhive(&owner, &reader).await;
     reader.repo.wait_for_keyhive_reconciliation().await.unwrap();
     reader
         .blob_workers
@@ -699,10 +672,6 @@ async fn transitive_matrix(access: Access, root: MetaRoot, name: &str) {
     for (inventory, digest) in expected {
         verified(&reader, &inventory, digest).await;
     }
-    connection.stop().await.unwrap();
-    accepted.stop().await.unwrap();
-    reader_net.stop().await;
-    owner_net.stop().await;
     shutdown(reader, reader_stop).await;
     shutdown(owner, owner_stop).await;
 }
@@ -729,6 +698,7 @@ async fn relay_discovers_only_public_inventory_and_revocation_preserves_retained
         big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [143; 32];
+    cfg.peers = network::peers();
     let (owner, owner_stop) = BigNode::boot(cfg).await.unwrap();
     let mut cfg = config(
         Arc::clone(&relay_secrets),
@@ -736,17 +706,14 @@ async fn relay_discovers_only_public_inventory_and_revocation_preserves_retained
         big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [144; 32];
+    cfg.peers = network::peers();
     let (relay, relay_stop) = BigNode::boot(cfg).await.unwrap();
     let root = collection(&owner, "relay-root").await;
     let public = populated(&owner, &root, "ciphertext", MetaRoot::Public).await;
     let sensitive = populated(&owner, &root, "plaintext", MetaRoot::Sensitive).await;
-    let owner_net = Network::boot(&owner, 143).await;
-    let mut relay_net = Network::boot(&relay, 144).await;
-    let (connection, accepted) =
-        Network::link((&owner, &owner_net), (&relay, &mut relay_net)).await;
+    let link = network::link(&owner, &relay).await;
     invite(&owner, &relay, &root, Access::Relay).await;
-    connection.sync_keyhive_with_peer().await.unwrap();
-    accepted.sync_keyhive_with_peer().await.unwrap();
+    link.sync_keyhive(&owner, &relay).await;
     relay.repo.wait_for_keyhive_reconciliation().await.unwrap();
     relay
         .blob_workers
@@ -802,13 +769,11 @@ async fn relay_discovers_only_public_inventory_and_revocation_preserves_retained
         big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [145; 32];
+    cfg.peers = network::peers();
     let (read, read_stop) = BigNode::boot(cfg).await.unwrap();
-    let mut read_net = Network::boot(&read, 145).await;
-    let (read_connection, read_accepted) =
-        Network::link((&owner, &owner_net), (&read, &mut read_net)).await;
+    let read_link = network::link(&owner, &read).await;
     invite(&owner, &read, &root, Access::Read).await;
-    read_connection.sync_keyhive_with_peer().await.unwrap();
-    read_accepted.sync_keyhive_with_peer().await.unwrap();
+    read_link.sync_keyhive(&owner, &read).await;
     read.repo.wait_for_keyhive_reconciliation().await.unwrap();
     read.blob_workers
         .mirrors
@@ -838,8 +803,7 @@ async fn relay_discovers_only_public_inventory_and_revocation_preserves_retained
         )
         .await
         .unwrap();
-    connection.sync_keyhive_with_peer().await.unwrap();
-    accepted.sync_keyhive_with_peer().await.unwrap();
+    link.sync_keyhive(&owner, &relay).await;
     relay.repo.wait_for_keyhive_reconciliation().await.unwrap();
     let mut changes = relay.blob_workers.mirrors.subscribe_changes();
     loop {
@@ -865,13 +829,6 @@ async fn relay_discovers_only_public_inventory_and_revocation_preserves_retained
     }
     assert!(relay.blobs.service.stat(&public.1).await.unwrap().is_some());
     drop(changes);
-    read_connection.stop().await.unwrap();
-    read_accepted.stop().await.unwrap();
-    read_net.stop().await;
-    connection.stop().await.unwrap();
-    accepted.stop().await.unwrap();
-    relay_net.stop().await;
-    owner_net.stop().await;
     shutdown(read, read_stop).await;
     shutdown(relay, relay_stop).await;
     shutdown(owner, owner_stop).await;
