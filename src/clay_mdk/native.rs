@@ -25,6 +25,7 @@ use clay_collection::Nsid;
 use clay_collection::ReadError;
 use clay_collection::ReadLimits;
 use clay_dioxus::NativeComponents;
+use clay_dioxus::RenderGuard;
 use clay_docs::DocumentRef;
 use clay_guest_session::capabilities::CallError;
 use clay_guest_session::capabilities::CapabilityFailure;
@@ -215,6 +216,9 @@ pub(crate) struct Activation {
     /// programming error.
     published: RefCell<Option<Vec<(String, PublishedCapability)>>>,
     tasks: Rc<RefCell<Tasks>>,
+    /// The renderers of the components published so far; the root takes them when admission
+    /// succeeds, and a failed activation drops them with this value.
+    views: RefCell<Vec<RenderGuard>>,
     /// The call handlers running right now, which the engine-conformance run reads the way it
     /// reads a guest engine's count.
     calls: InFlightCalls,
@@ -272,7 +276,10 @@ impl Activation {
         name: &str,
         render: Rc<dyn Fn() -> Element>,
     ) -> Result<(), Error> {
-        let component = self.components.publish(&self.instance, move || render())?;
+        let (component, view) = self
+            .components
+            .publish(&self.instance, move || render())?;
+        self.views.borrow_mut().push(view);
         self.stage(self.capabilities.publish_component(name, component))
     }
 
@@ -455,6 +462,7 @@ impl Granted {
             capabilities,
             published: RefCell::new(Some(Vec::new())),
             tasks: Rc::default(),
+            views: RefCell::default(),
             calls,
         });
         let context = Context(Rc::new(Shared {
@@ -477,6 +485,7 @@ impl Granted {
             .collect();
         Ok(Initialized {
             root: Box::new(NativeRoot {
+                views: activation.views.take(),
                 leases,
                 tasks: Rc::clone(&activation.tasks),
             }),
@@ -524,8 +533,9 @@ pub fn factory<Fut: Future<Output = Result<(), Error>> + 'static>(
     })
 }
 
-/// Owns an incarnation's publication leases and tasks until the supervisor closes it.
+/// Owns an incarnation's tasks, views and publication leases until the supervisor closes it.
 struct NativeRoot {
+    views: Vec<RenderGuard>,
     leases: BTreeMap<String, PublishedCapability>,
     tasks: Rc<RefCell<Tasks>>,
 }
@@ -539,15 +549,23 @@ impl Root for NativeRoot {
     /// once each future is gone. The supervisor calls this while the incarnation's configured
     /// providers and leases are still held, so those drops can still use the dependencies they
     /// were made to release (a `Drop` that reads a proxy it owns finds the provider live), and
-    /// nothing is revoked yet. Then the publication leases, so callers stop reaching handlers
-    /// that no longer exist; the supervisor revokes the publications and tears the incarnation
+    /// nothing is revoked yet. Then the views: each guard removes its component's render closure
+    /// from the registry and drops what the closure captured (a proxy, a collection handle, a
+    /// guard) right here, with the same providers still live, exactly as a guest's presentations
+    /// drop inside `Runtime::close`. Then the publication leases, so callers stop reaching
+    /// handlers that no longer exist; the supervisor revokes the publications and tears the incarnation
     /// scope down after this returns.
     fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
         Box::pin(async move {
-            let Self { leases, tasks } = *self;
+            let Self {
+                views,
+                leases,
+                tasks,
+            } = *self;
             // Taken out of the shared cell: the tasks themselves may still hold the context.
             let tasks = std::mem::take(&mut *tasks.borrow_mut());
             tasks.close().await;
+            drop(views);
             drop(leases);
             Ok(())
         })
