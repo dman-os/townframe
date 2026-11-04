@@ -7,10 +7,6 @@ pub mod log;
 pub mod reduce;
 pub mod state;
 
-/// Default retention window (24 hours) for compact terminal receipts when a
-/// caller does not specify one per submission.
-pub const DEFAULT_RETENTION_MS: u64 = 86_400_000;
-
 /// Finite bounds on the retry loop. `None` means unbounded, preserving the
 /// behaviour of jobs submitted before budgets existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

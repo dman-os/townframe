@@ -15,7 +15,7 @@ use wflow_wdk::Json;
 use super::*;
 use crate::local_native_host::LocalNativeHost;
 
-mod cleanup;
+mod lifecycle;
 
 /// Counts the atomic commits a runtime issues, including the epoch bump of
 /// `Journal::open`, so tests can pin the per-transition commit cost and wait
@@ -91,9 +91,7 @@ fn transition_key(transition: &authority::Transition) -> &str {
         | T::WaitResolved { key, .. }
         | T::RetryScheduled { key, .. }
         | T::Faulted { key, .. }
-        | T::CleanupStarted { key, .. }
-        | T::MessageAccepted { key, .. }
-        | T::Expired { key, .. } => key,
+        | T::MessageAccepted { key, .. } => key,
     }
 }
 
@@ -308,7 +306,7 @@ async fn warm_job_commits_once_per_transition_and_survives_restart() {
 }
 
 #[tokio::test]
-async fn restart_replays_durable_steps_and_reruns_only_the_interrupted_one() {
+async fn restart_replays_durable_steps_and_reruns_only_the_incomplete_one() {
     let store = MemoryStore::default();
     let probe = Arc::new(Probe::default());
 
@@ -374,81 +372,6 @@ async fn failures_retry_transients_and_commit_terminal_errors() {
 }
 
 #[tokio::test]
-async fn retry_budget_exhaustion_settles_with_a_classified_failure() {
-    let store = MemoryStore::default();
-    // No durable step and no boundary: every invocation fails transiently at
-    // the top level, so the retry budget is the only thing that can settle
-    // the job. A committed step would reset `retry_attempts` and defeat the
-    // budget. Exhausting the forward budget enters cleanup, but a body that
-    // never reaches a boundary cannot be interrupted there and has no defers
-    // to run, so it runs again and exhausts the cleanup budget the same way.
-    let runs = Arc::new(AtomicU64::new(0));
-    let host = LocalNativeHost::new();
-    {
-        let runs = Arc::clone(&runs);
-        host.register_typed("doomed", move |_cx, (): ()| {
-            let runs = Arc::clone(&runs);
-            Box::pin(async move {
-                runs.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(JobErrorX::Transient(ferr!("doomed")))
-            })
-        });
-    }
-
-    let (runtime, commits) = start(&store, &host).await;
-    runtime
-        .submit(
-            Submission::new("job", "doomed", "null")
-                .policy(RetryPolicy::Immediate)
-                .budget(RetryBudget {
-                    max_retries: Some(1),
-                    max_restarts: None,
-                }),
-        )
-        .await
-        .unwrap();
-
-    let Some(Err(types::JobError::Terminal(err))) = runtime.await_result("job").await else {
-        panic!("expected the exhausted budget to settle terminally");
-    };
-    // The durable envelope classifies the failure and carries the last error.
-    assert!(err.contains("RetriesExhausted"), "{err}");
-    assert!(err.contains("doomed"), "{err}");
-    // The initial run plus exactly one retry.
-    // The initial run plus one retry per phase: forward, then cleanup.
-    assert_eq!(runs.load(Ordering::SeqCst), 4);
-    // Epoch bump, Submitted, Granted gen1, RetryScheduled, Granted gen2,
-    // CleanupStarted, Granted gen3, RetryScheduled, Granted gen4, Completed.
-    // The rejected cleanup retry commits nothing of its own.
-    assert_eq!(*commits.borrow(), 10);
-    let transitions = transitions(&runtime, "job").await;
-    let retries = transitions
-        .iter()
-        .filter(|transition| matches!(transition, authority::Transition::RetryScheduled { .. }))
-        .count();
-    assert_eq!(retries, 2, "only the accepted retries are durable");
-    let cleanup = transitions
-        .iter()
-        .find_map(|transition| match transition {
-            authority::Transition::CleanupStarted { cleanup, .. } => Some(cleanup),
-            _ => None,
-        })
-        .expect("the exhausted forward budget enters cleanup");
-    assert!(
-        matches!(
-            cleanup.cause,
-            CleanupCause::RetriesExhausted {
-                retries: 1,
-                max_retries: 1,
-                ..
-            }
-        ),
-        "{cleanup:?}"
-    );
-    runtime.stop().await;
-}
-
-#[tokio::test]
 async fn restart_keeps_durable_retry_deadline() {
     let store = MemoryStore::default();
     // One durable effect step, then a top-level transient failure on the first
@@ -489,14 +412,6 @@ async fn restart_keeps_durable_retry_deadline() {
     // Epoch bump, Submitted, Granted, StepCommitted, RetryScheduled. A fixed
     // delay keeps the retry from firing while the runtime is still up.
     committed(&mut commits, 5).await;
-    // The job is parked on its durable retry, holding no lease to revoke.
-    assert!(
-        matches!(
-            runtime.revoke("job").await,
-            Err(RevokeError::RetryPending { .. })
-        ),
-        "a retry-parked job revokes as RetryPending"
-    );
     runtime.stop().await;
 
     // The deadline is durable: the restart re-arms it from the journal rather
@@ -701,141 +616,6 @@ async fn receive_survives_restart_and_a_message_racing_the_replay() {
 }
 
 #[tokio::test]
-async fn revoke_recovers_in_flight_job_and_fences_stale_lease_from_continuing() {
-    struct NotifyOnDrop(Arc<Notify>);
-    impl Drop for NotifyOnDrop {
-        fn drop(&mut self) {
-            self.0.notify_one();
-        }
-    }
-
-    let store = MemoryStore::default();
-    let probe = Arc::new(Probe::default());
-    let host = host(&probe);
-
-    let step0_runs = Arc::new(AtomicU64::new(0));
-    let step1_runs = Arc::new(AtomicU64::new(0));
-    let step2_runs = Arc::new(AtomicU64::new(0));
-    let stale_continued_runs = Arc::new(AtomicU64::new(0));
-    let stale_gate = Arc::new(Gate::default());
-    let fresh_gate = Arc::new(Gate::default());
-    let stale_fenced = Arc::new(Notify::new());
-    stale_gate.close();
-    fresh_gate.close();
-
-    {
-        let step0_runs = Arc::clone(&step0_runs);
-        let step1_runs = Arc::clone(&step1_runs);
-        let step2_runs = Arc::clone(&step2_runs);
-        let stale_continued_runs = Arc::clone(&stale_continued_runs);
-        let stale_gate = Arc::clone(&stale_gate);
-        let fresh_gate = Arc::clone(&fresh_gate);
-        let stale_fenced = Arc::clone(&stale_fenced);
-        host.register_typed("revocable", move |cx, (): ()| {
-            let step0_runs = Arc::clone(&step0_runs);
-            let step1_runs = Arc::clone(&step1_runs);
-            let step2_runs = Arc::clone(&step2_runs);
-            let stale_continued_runs = Arc::clone(&stale_continued_runs);
-            let stale_gate = Arc::clone(&stale_gate);
-            let fresh_gate = Arc::clone(&fresh_gate);
-            let stale_fenced = Arc::clone(&stale_fenced);
-            Box::pin(async move {
-                let first: u64 = cx
-                    .effect(|| async move {
-                        step0_runs.fetch_add(1, Ordering::SeqCst);
-                        Ok(Json(1))
-                    })
-                    .await?;
-                let attempt = Arc::new(AtomicU64::new(0));
-                let attempt_in_step = Arc::clone(&attempt);
-                let fenced_guard = std::rc::Rc::new(std::cell::RefCell::new(None));
-                let fenced_in_step = std::rc::Rc::clone(&fenced_guard);
-                let second: u64 = cx
-                    .effect(|| async move {
-                        let run = step1_runs.fetch_add(1, Ordering::SeqCst);
-                        attempt_in_step.store(run, Ordering::SeqCst);
-                        if run == 0 {
-                            *fenced_in_step.borrow_mut() =
-                                Some(NotifyOnDrop(Arc::clone(&stale_fenced)));
-                            stale_gate.pass().await;
-                            Ok(Json(10))
-                        } else {
-                            fresh_gate.pass().await;
-                            Ok(Json(20))
-                        }
-                    })
-                    .await?;
-                let _keep_until_done = fenced_guard;
-                let third: u64 = cx
-                    .effect(|| async move {
-                        if attempt.load(Ordering::SeqCst) == 0 {
-                            stale_continued_runs.fetch_add(1, Ordering::SeqCst);
-                        }
-                        step2_runs.fetch_add(1, Ordering::SeqCst);
-                        Ok(Json(300))
-                    })
-                    .await?;
-                Ok(first + second + third)
-            })
-        });
-    }
-
-    let (runtime, mut commits) = start(&store, &host).await;
-    assert_eq!(
-        runtime.revoke("missing").await,
-        Err(RevokeError::UnknownJob)
-    );
-
-    runtime
-        .submit(Submission::new("job", "revocable", "null"))
-        .await
-        .unwrap();
-    stale_gate.entered.notified().await;
-
-    // Revoke lease 1 while its step 1 effect is still in flight; the runtime
-    // immediately grants lease 2, which replays step 0 without re-running it.
-    let ack = runtime.revoke("job").await.unwrap();
-    assert_eq!(ack.disposition, authority::Disposition::Park);
-    fresh_gate.entered.notified().await;
-    assert_eq!(step0_runs.load(Ordering::SeqCst), 1);
-
-    // Let the revoked lease finish step 1 first: the authority rejects its
-    // `CommitStep` with `StaleLease` and drops the session without resuming it.
-    let fenced = stale_fenced.notified();
-    tokio::pin!(fenced);
-    fenced.as_mut().enable();
-    stale_gate.open();
-    fenced.await;
-    fresh_gate.open();
-
-    assert_eq!(runtime.await_result("job").await, Some(ok(321)));
-    assert_eq!(step0_runs.load(Ordering::SeqCst), 1);
-    assert_eq!(step1_runs.load(Ordering::SeqCst), 2);
-    assert_eq!(step2_runs.load(Ordering::SeqCst), 1);
-    assert_eq!(stale_continued_runs.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        runtime.revoke("job").await,
-        Err(RevokeError::AlreadyTerminal)
-    );
-
-    // Also verify revoking a job parked on a durable wait removes the stale
-    // waiting session and lets the re-granted session re-attach and complete.
-    let before_waiter = *commits.borrow();
-    runtime
-        .submit(Submission::new("waiter", "inbox", "null"))
-        .await
-        .unwrap();
-    // Submitted, Granted, step 0 Effect, WaitStarted.
-    committed(&mut commits, before_waiter + 4).await;
-    let waiter_ack = runtime.revoke("waiter").await.unwrap();
-    assert_eq!(waiter_ack.disposition, authority::Disposition::Park);
-    runtime.send_message("waiter", "m1", "7").await.unwrap();
-    runtime.send_message("waiter", "m2", "8").await.unwrap();
-    assert_eq!(runtime.await_result("waiter").await, Some(ok(78)));
-    runtime.stop().await;
-}
-
-#[tokio::test]
 async fn nondeterministic_replay_across_restart_and_wait_resolution_fails_terminally() {
     let store = MemoryStore::default();
     let probe = Arc::new(Probe::default());
@@ -917,148 +697,5 @@ async fn nondeterministic_replay_across_restart_and_wait_resolution_fails_termin
     // as the explicit `ReplayDiverged` class rather than a generic string.
     assert!(err.contains("ReplayDiverged"), "{err}");
     assert!(err.contains("durably Recv"), "{err}");
-    runtime.stop().await;
-}
-
-#[tokio::test]
-async fn job_handle_retention_expiry_key_reuse_and_compaction() {
-    let store = MemoryStore::default();
-    let probe = Arc::new(Probe::default());
-    let (runtime, mut commits) = start(&store, &host(&probe)).await;
-
-    // 1. JobHandle race-free await_result (both while active and after settlement)
-    // and receipt inspection.
-    probe.inbox_effect_gate.close();
-    let (first_ack, gated_handle) = runtime
-        .submit_handle(Submission::new("reusable", "inbox", "null").retention_ms(60_000))
-        .await
-        .unwrap();
-    assert_eq!(first_ack.disposition, authority::Disposition::Admitted);
-    assert_eq!(gated_handle.key(), "reusable");
-    assert_eq!(gated_handle.get_result().await.unwrap(), None);
-    assert_eq!(runtime.expire("reusable").await, Err(ExpireError::Active));
-
-    probe.inbox_effect_gate.entered.notified().await;
-    runtime.send_message("reusable", "m1", "1").await.unwrap();
-    runtime.send_message("reusable", "m2", "2").await.unwrap();
-    let waiter = {
-        let handle = gated_handle.clone();
-        tokio::spawn(async move { handle.await_result().await })
-    };
-    probe.inbox_effect_gate.open();
-    assert_eq!(waiter.await.unwrap(), Some(ok(12)));
-    // Calling await_result after settlement reads the durable receipt directly.
-    assert_eq!(gated_handle.await_result().await, Some(ok(12)));
-    assert_eq!(gated_handle.get_result().await.unwrap(), Some(ok(12)));
-    let receipt = gated_handle
-        .receipt()
-        .await
-        .unwrap()
-        .expect("durable receipt");
-    assert_eq!(receipt.incarnation, 1);
-    assert_eq!(receipt.steps, 3);
-    assert_eq!(receipt.retention_ms, 60_000);
-
-    // Early expire before the retention deadline is rejected with RetentionPending.
-    assert_eq!(
-        runtime.expire("reusable").await,
-        Err(ExpireError::RetentionPending {
-            expires_at_ms: receipt.outcome.expires_at_ms(),
-        })
-    );
-
-    // 2. Zero-retention job expires via the deadline wheel after await_result
-    // reads its durable receipt, and the key can then be reused with a fresh
-    // job incarnation.
-    probe.inbox_effect_gate.close();
-    let (_, short_handle) = runtime
-        .submit_handle(Submission::new("ephemeral", "inbox", "null").retention_ms(0))
-        .await
-        .unwrap();
-    probe.inbox_effect_gate.entered.notified().await;
-    runtime.send_message("ephemeral", "m1", "3").await.unwrap();
-    runtime.send_message("ephemeral", "m2", "0").await.unwrap();
-    let short_waiter = {
-        let handle = short_handle.clone();
-        tokio::spawn(async move { handle.await_result().await })
-    };
-    probe.inbox_effect_gate.open();
-    assert_eq!(short_waiter.await.unwrap(), Some(ok(30)));
-    while runtime.receipt("ephemeral").await.unwrap().is_some() {
-        commits.changed().await.unwrap();
-    }
-    assert_eq!(runtime.receipt("ephemeral").await.unwrap(), None);
-    assert_eq!(runtime.get_result("ephemeral").await.unwrap(), None);
-    assert_eq!(
-        runtime.expire("ephemeral").await,
-        Err(ExpireError::UnknownJob)
-    );
-
-    // Re-submitting the expired key with a different payload is admitted under
-    // a bumped incarnation (incarnation 3, since reusable=1, ephemeral=2).
-    let (_, reused_handle) = runtime
-        .submit_handle(Submission::new("ephemeral", "steps", "3").retention_ms(60_000))
-        .await
-        .unwrap();
-    assert_eq!(reused_handle.await_result().await, Some(ok(6)));
-    let reused_receipt = reused_handle
-        .receipt()
-        .await
-        .unwrap()
-        .expect("reused receipt");
-    assert_eq!(reused_receipt.incarnation, 3);
-
-    // 3. Compact publishes an active-only snapshot + compact receipts and
-    // reclaims log entries through the cut; recovery from the compacted store
-    // preserves retained receipts and resumes active jobs.
-    probe.inbox_effect_gate.close();
-    runtime
-        .submit(Submission::new("active_across_compact", "inbox", "null"))
-        .await
-        .unwrap();
-    probe.inbox_effect_gate.entered.notified().await;
-    runtime
-        .send_message("active_across_compact", "m1", "2")
-        .await
-        .unwrap();
-    runtime
-        .send_message("active_across_compact", "m2", "1")
-        .await
-        .unwrap();
-
-    let cut = runtime.compact().await.unwrap();
-    assert!(cut > 0);
-    // Log entries through `cut` are reclaimed; reading from 1 is rejected.
-    assert!(
-        runtime
-            .reader
-            .read(1, NonZeroUsize::new(1).unwrap())
-            .await
-            .is_err()
-    );
-    let published = runtime
-        .reader
-        .snapshot()
-        .await
-        .unwrap()
-        .expect("published snapshot");
-    assert_eq!(published.cut, cut);
-    assert_eq!(published.compacted_through, cut);
-    let snap: authority::Snapshot = serde_json::from_slice(&published.value).unwrap();
-    assert!(snap.jobs.contains_key("active_across_compact"));
-    assert!(!snap.jobs.contains_key("reusable"));
-    assert!(snap.receipts.contains_key("reusable"));
-    assert!(snap.receipts.contains_key("ephemeral"));
-
-    runtime.stop().await;
-
-    probe.inbox_effect_gate.open();
-    let (runtime, _) = start(&store, &host(&probe)).await;
-    assert_eq!(
-        runtime.await_result("active_across_compact").await,
-        Some(ok(21))
-    );
-    assert_eq!(runtime.get_result("reusable").await.unwrap(), Some(ok(12)));
-    assert_eq!(runtime.get_result("ephemeral").await.unwrap(), Some(ok(6)));
     runtime.stop().await;
 }
