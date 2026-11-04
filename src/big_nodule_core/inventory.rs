@@ -36,8 +36,9 @@ pub enum ArtifactState {
 
 /// Whether an [`InstalledNodule`] can serve its handler, and if not the first reason in priority
 /// order: refused configuration, then disabled, then missing handler artifact bytes, then the
-/// absence of a handler executor. [`Self::Ready`] is the executor's word that the handler can be
-/// called now.
+/// absence of a handler executor, then initialization. [`Self::Ready`] is the executor's word
+/// that the handler can be called now and the node's word that every initializer of this
+/// revision and start has succeeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Readiness {
@@ -46,6 +47,12 @@ pub enum Readiness {
     Disabled,
     ArtifactsUnavailable,
     ExecutorUnavailable,
+    /// The handler is hosted but an initializer of this revision and start is still running or
+    /// waiting on the provider of a foreign operation. Retryable: callers are not queued.
+    Initializing,
+    /// An initializer failed; the record carries the error. It runs again on the next reconcile
+    /// of the node (boot, config change, enable).
+    InitFailed,
 }
 
 impl Readiness {

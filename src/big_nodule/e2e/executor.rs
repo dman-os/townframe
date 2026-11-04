@@ -53,9 +53,9 @@ const PHOTOS: &str = "@example/photos";
 /// once ready, and logs each workload it starts or stops. Like any executor it treats `ensure`
 /// for a revision it already hosts as a lookup, since the reconciler calls it on every
 /// reconcile (a config mutation reconciles once itself and once more on the watch event).
-struct FakeExecutor {
+pub(super) struct FakeExecutor {
     state: Mutex<FakeState>,
-    provider: Arc<Echo>,
+    provider: Arc<dyn Provider>,
     /// How many times `ensure` has answered ready, for a test to wait on without polling.
     ready_answers: watch::Sender<usize>,
 }
@@ -72,9 +72,18 @@ struct FakeState {
 
 impl FakeExecutor {
     fn new() -> Arc<Self> {
+        Self::hosting(Arc::<Echo>::default(), false)
+    }
+
+    /// An executor whose hosted handlers are `provider`, answering `ensure` ready from the
+    /// start when `ready` (otherwise once [`Self::arrive`] says the bytes did).
+    pub(super) fn hosting(provider: Arc<dyn Provider>, ready: bool) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::default(),
-            provider: Arc::default(),
+            state: Mutex::new(FakeState {
+                ready,
+                ..FakeState::default()
+            }),
+            provider,
             ready_answers: watch::channel(0).0,
         })
     }
@@ -84,7 +93,7 @@ impl FakeExecutor {
     }
 
     fn provider(&self) -> Arc<dyn Provider> {
-        Arc::clone(&self.provider) as Arc<dyn Provider>
+        Arc::clone(&self.provider)
     }
 
     /// The bytes arrived: flip to ready and ask the state actor to ensure `plug_id` again, then

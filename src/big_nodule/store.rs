@@ -4,7 +4,9 @@
 //! Portable desired configuration (`NoduleInstall`, `NoduleSettings`, `NoduleGrants`) lives in the
 //! node's config drawer document; SQLite stores only the host's `(plug_id, nodule_id, actor_uuid)`
 //! identity binding, the `(plug_id, drawer_id) -> access` grants this service has applied, and the
-//! `plug_id -> (scope, capability)` dispatch capability minted from each nodule's operation grants.
+//! `plug_id -> (scope, capability)` dispatch capability minted from each nodule's operation grants,
+//! and the `(plug_id, init key) -> revision` a [`Once`](big_nodule_core::RunMode::Once)
+//! initializer last succeeded at on this node.
 
 use crate::sqlite;
 use big_cabinet_core::authority::CapId;
@@ -14,6 +16,7 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_nodule_core::dispatch::DispatchScope;
 use big_nodule_core::protocol::NodulesError;
 use big_plugs_core::PlugId;
+use big_plugs_core::Revision;
 use sqlite_rs::Database;
 
 #[derive(Debug, Clone)]
@@ -36,6 +39,15 @@ pub(crate) struct AppliedOperationsRow {
     pub(crate) plug_id: PlugId,
     pub(crate) scope: DispatchScope,
     pub(crate) capability_id: CapId,
+}
+
+/// The revision a `Once` initializer last succeeded at. Done-ness is per revision (a new one
+/// runs it again), so one row per initializer is enough and a superseded revision's is replaced.
+#[derive(Debug, Clone)]
+pub(crate) struct InitDoneRow {
+    pub(crate) plug_id: PlugId,
+    pub(crate) init_key: String,
+    pub(crate) revision: Revision,
 }
 
 fn storage(error: impl std::fmt::Display) -> NodulesError {
@@ -233,6 +245,61 @@ pub(crate) async fn delete_applied_operations(
 ) -> Result<(), NodulesError> {
     let transaction = database.begin_write().await.map_err(storage)?;
     sqlite::delete_applied_operations(&transaction, plug_id.to_string())
+        .await
+        .map_err(storage)?;
+    transaction.commit().await.map_err(storage)
+}
+
+pub(crate) async fn init_done(database: &Database) -> Result<Vec<InitDoneRow>, NodulesError> {
+    let transaction = database.begin_read().await.map_err(storage)?;
+    let rows = sqlite::init_done(&transaction).await.map_err(storage)?;
+    rows.into_iter()
+        .map(|row| {
+            let plug_id: PlugId = row.plug_id.parse().map_err(|error| {
+                storage(format!(
+                    "init done plug_id `{}` is invalid: {error}",
+                    row.plug_id
+                ))
+            })?;
+            let revision: Revision = row.revision.parse().map_err(|error| {
+                storage(format!(
+                    "init done revision `{}` for `{}` is invalid: {error}",
+                    row.revision, row.plug_id
+                ))
+            })?;
+            Ok(InitDoneRow {
+                plug_id,
+                init_key: row.init_key,
+                revision,
+            })
+        })
+        .collect()
+}
+
+pub(crate) async fn upsert_init_done(
+    database: &Database,
+    plug_id: &PlugId,
+    init_key: &str,
+    revision: Revision,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::upsert_init_done(
+        &transaction,
+        plug_id.to_string(),
+        init_key.to_owned(),
+        revision.to_string(),
+    )
+    .await
+    .map_err(storage)?;
+    transaction.commit().await.map_err(storage)
+}
+
+pub(crate) async fn delete_init_done(
+    database: &Database,
+    plug_id: &PlugId,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::delete_init_done(&transaction, plug_id.to_string())
         .await
         .map_err(storage)?;
     transaction.commit().await.map_err(storage)

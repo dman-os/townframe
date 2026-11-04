@@ -25,3 +25,4 @@ features = []
 [migrations]
 "src/big_nodule/sqlite/migrations/001_nodules.sql" = "b99ddcfccf6d768e19aef25787791ea83f539a93b14b45427eea4ec4564f02d6"
 "src/big_nodule/sqlite/migrations/002_applied_operations.sql" = "e2ae6d0b46b07e812265ba344f11d8cd0a1dff9e9b113f795b64f74e5a0ff35b"
+"src/big_nodule/sqlite/migrations/003_init_done.sql" = "83f5b4769acfac69f4f82ca3048afd376f85baa7822aee33cbd94f48181cd042"

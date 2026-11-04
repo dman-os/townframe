@@ -7,6 +7,9 @@
 //! `parent_path`, and applies or revokes service-owned local drawer grants within the nodules
 //! actor's delegated authority.
 
+use crate::dispatch::Caller;
+use crate::dispatch::Provider;
+use crate::dispatch::ProviderError;
 use crate::dispatch::ProviderKind;
 use crate::dispatch::ProviderState;
 use crate::dispatch::Router;
@@ -37,12 +40,15 @@ use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_nodule_core::Nodule;
+use big_nodule_core::RunMode;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
 use big_nodule_core::dispatch::DispatchError;
 use big_nodule_core::dispatch::DispatchProtocol;
 use big_nodule_core::dispatch::DispatchScope;
+use big_nodule_core::dispatch::InvocationContext;
+use big_nodule_core::dispatch::Invoke;
 use big_nodule_core::dispatch::MintDispatchCapability;
 use big_nodule_core::inventory::ArtifactState;
 use big_nodule_core::inventory::InstalledNodule;
@@ -50,6 +56,7 @@ use big_nodule_core::inventory::InventoryError;
 use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::NoduleActor;
 use big_nodule_core::protocol::NoduleGrantStatus;
+use big_nodule_core::protocol::NoduleInitStatus;
 use big_nodule_core::protocol::NoduleOperationGrantStatus;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NoduleScope;
@@ -63,6 +70,7 @@ use serde_json::Value;
 use service_utils_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
+use service_utils_rs::Spawner;
 use service_utils_rs::StopToken;
 use sqlite_rs::Database;
 use std::collections::BTreeMap;
@@ -139,6 +147,109 @@ pub(crate) enum Command {
     },
 }
 
+/// What caused a reconcile, which decides what it re-runs: a failed initializer is retried by
+/// every trigger but its own result, or a failing one would be retried in a tight loop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// The service starting: applied grants are re-granted, every nodule's start begins.
+    Boot,
+    /// A config change, an executor signal, or a dead capability.
+    Change,
+    /// An initializer finished.
+    InitResult,
+}
+
+/// One nodule's initializers in its current start: one per (plug, revision, start), replaced
+/// whole when the nodule is disabled, retired, refused, uninstalled or moves to another revision.
+struct InitRun {
+    /// Names this run. An invocation's result carries the epoch of the run that spawned it and is
+    /// dropped when the plug's run has since been replaced, so a superseded start or revision
+    /// never marks anything done.
+    epoch: u64,
+    revision: Revision,
+    /// Initializers satisfied for this run: succeeded in it, or `Once` ones that succeeded at
+    /// this revision on an earlier start (read from SQLite when the run begins).
+    done: BTreeSet<String>,
+    /// The key of the invocation in flight. Initializers run one at a time, in declaration order.
+    running: Option<String>,
+    /// Invocations of the first unsatisfied initializer (see [`NoduleInitStatus::attempts`]).
+    attempts: u32,
+    /// The last failure of that initializer.
+    error: Option<String>,
+    /// The last invocation failed (or a dependency cycle was found) and nothing has retried it.
+    failed: bool,
+    /// The provider id whose not-ready operation the next initializer is waiting on, if it is
+    /// waiting on a nodule: what dependency cycles are found along.
+    blocked_on: Option<String>,
+}
+
+/// How one initializer invocation reaches its target.
+enum InitRoute {
+    /// The nodule's own hosted handler, called by the runtime as the nodule service.
+    Local {
+        provider: Arc<dyn Provider>,
+        caller: Caller,
+    },
+    /// Through dispatch, as the nodule's actor presenting this authorization.
+    Dispatch(Authorization),
+}
+
+impl InitRoute {
+    /// Calls `target` and reduces the outcome to what a record reports.
+    async fn invoke(
+        self,
+        dispatch: &Client<DispatchProtocol>,
+        target: &str,
+        context: InvocationContext,
+    ) -> Result<(), String> {
+        let input = serde_json::json!({});
+        match self {
+            Self::Local { provider, caller } => provider
+                .call(&caller, target, &context, input)
+                .await
+                .map(drop)
+                .map_err(|error| match error {
+                    ProviderError::InvalidInput(reason) => {
+                        format!("`{target}` refused the input: {reason}")
+                    }
+                    ProviderError::Failed { status, body } => {
+                        format!("`{target}` failed with status {status}: {body}")
+                    }
+                }),
+            Self::Dispatch(authorization) => dispatch
+                .call(
+                    RequestContext::root(),
+                    Invoke {
+                        authorization,
+                        operation: target.to_owned(),
+                        input,
+                        context,
+                    },
+                )
+                .await
+                .map(drop)
+                .map_err(|error| match error {
+                    ClientError::Operation(error) => format!("`{target}`: {error}"),
+                    // Dispatch outlives the nodule service, and shutdown cancels the task
+                    // that makes this call first.
+                    ClientError::Transport { message, .. } => {
+                        panic!("dispatch transport failed during an initializer: {message}")
+                    }
+                }),
+        }
+    }
+}
+
+/// An initializer invocation's outcome on its way back to the state actor.
+struct InitFinished {
+    plug_id: PlugId,
+    epoch: u64,
+    key: String,
+    /// Whether the initializer is `Once`, whose success is persisted.
+    once: bool,
+    outcome: Result<(), String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct Handle {
     commands: mpsc::Sender<Command>,
@@ -171,6 +282,14 @@ pub(crate) struct State {
     /// Plugs whose executor asked to be ensured again. The state actor constructs it and
     /// outlives nothing that holds a handle to it in a way that matters (see [`ReensureQueue`]).
     reensure: Arc<ReensureQueue>,
+    /// Initializer runs by plug.
+    inits: BTreeMap<PlugId, InitRun>,
+    /// The revision each `Once` initializer last succeeded at on this node.
+    init_done: BTreeMap<PlugId, BTreeMap<String, Revision>>,
+    next_epoch: u64,
+    /// Where initializer invocations run, and where their results come back to.
+    tasks: Spawner,
+    init_results: mpsc::Sender<InitFinished>,
 }
 
 fn nodule_actor(actor: &Actor) -> NoduleActor {
@@ -211,6 +330,14 @@ impl State {
             .map(|row| (row.plug_id, (row.scope, row.capability_id)))
             .collect();
 
+        let mut init_done: BTreeMap<PlugId, BTreeMap<String, Revision>> = BTreeMap::new();
+        for row in store::init_done(&stores.sql).await? {
+            init_done
+                .entry(row.plug_id)
+                .or_default()
+                .insert(row.init_key, row.revision);
+        }
+
         let mut watch = stores
             .datum_store
             .watch()
@@ -221,6 +348,11 @@ impl State {
             .snapshot()
             .await
             .map_err(crate::store_error)?;
+
+        let (commands, mut inbox) = mpsc::channel(64);
+        let (init_results, mut finished_inits) = mpsc::channel(16);
+        let (stop, tasks) = StopToken::new();
+        let cancellation = tasks.clone();
 
         let mut state = Self {
             stores,
@@ -234,6 +366,11 @@ impl State {
             admission_cache: Arc::default(),
             hosted: BTreeMap::new(),
             reensure: Arc::default(),
+            inits: BTreeMap::new(),
+            init_done,
+            next_epoch: 0,
+            tasks: tasks.clone(),
+            init_results,
         };
         let context = RequestContext::root();
         for (plug_id, (nodule_id, expected_actor_id)) in state.persisted_actors.clone() {
@@ -246,11 +383,13 @@ impl State {
             }
             state.actors.insert(plug_id, actor);
         }
-        state.reconcile(&context, initial, true).await?;
+        // The boot reconcile may already have started initializers; a failure here must not
+        // leave them running behind a service that never came up.
+        if let Err(err) = state.reconcile(&context, initial, Trigger::Boot).await {
+            stop.stop().await;
+            return Err(err);
+        }
 
-        let (commands, mut inbox) = mpsc::channel(64);
-        let (stop, tasks) = StopToken::new();
-        let cancellation = tasks.clone();
         // The loop's failures are programming or lifecycle errors, not per-nodule outcomes
         // (those live in the records `reconcile` builds), so the task unwraps its result: the
         // process panic handler then brings everything down instead of leaving a dead actor
@@ -265,15 +404,25 @@ impl State {
                     // plugs it is still hosting matter: a request from a retired or upgraded-away
                     // workload names nothing to redo.
                     plugs = reensure.requested() => {
-                        if plugs.iter().any(|plug_id| state.hosted.contains_key(plug_id)) {
+                        if plugs.iter().any(|plug_id| {
+                            state.hosted.contains_key(plug_id) || state.inits.contains_key(plug_id)
+                        }) {
                             let snapshot = state
                                 .stores
                                 .datum_store
                                 .snapshot()
                                 .await
                                 .map_err(crate::store_error)?;
-                            drop(state.reconcile(&RequestContext::root(), snapshot, false).await?);
+                            drop(
+                                state
+                                    .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
+                                    .await?,
+                            );
                         }
+                    },
+                    // The state actor holds a sender, so this channel outlives the loop.
+                    finished = finished_inits.recv() => {
+                        state.init_finished(finished.expect(ERROR_CHANNEL)).await?;
                     },
                     command = inbox.recv() => match command {
                         Some(command) => state.run(command).await,
@@ -288,7 +437,11 @@ impl State {
                         // a change from elsewhere, such as a synced config edit, has others.
                         Some(Ok(snapshot)) => {
                             if snapshot.heads != state.observed_heads {
-                                drop(state.reconcile(&RequestContext::root(), snapshot, false).await?);
+                                drop(
+                                    state
+                                        .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
+                                        .await?,
+                                );
                             }
                         }
                         Some(Err(err)) => return Err(crate::store_error(err)),
@@ -404,7 +557,7 @@ impl State {
             .snapshot()
             .await
             .map_err(crate::store_error)?;
-        drop(self.reconcile(context, snapshot, false).await?);
+        drop(self.reconcile(context, snapshot, Trigger::Change).await?);
         Ok(())
     }
 
@@ -552,7 +705,7 @@ impl State {
             .snapshot()
             .await
             .map_err(crate::store_error)?;
-        let revoke_errors = self.reconcile(context, snapshot, false).await?;
+        let revoke_errors = self.reconcile(context, snapshot, Trigger::Change).await?;
         if let Some(err) = revoke_errors.get(plug_id) {
             return Err(err.clone());
         }
@@ -579,7 +732,7 @@ impl State {
             || has_unapplied
             || self.any_applied_grant_dead(context).await?
         {
-            drop(self.reconcile(context, snapshot, false).await?);
+            drop(self.reconcile(context, snapshot, Trigger::Change).await?);
         }
         Ok(())
     }
@@ -629,7 +782,7 @@ impl State {
         &mut self,
         context: &RequestContext,
         snapshot: StoreSnapshot<NoduleConfig>,
-        on_boot: bool,
+        trigger: Trigger,
     ) -> Res<BTreeMap<PlugId, NodulesError>> {
         let mut resolved = snapshot.value.resolve(&self.admission_cache);
         for (plug_id, (saved_nodule_id, _)) in &self.persisted_actors {
@@ -702,8 +855,7 @@ impl State {
                     config,
                     reason,
                 } => {
-                    self.stores.dispatch.unbind(&plug_id.to_string());
-                    self.retire(&plug_id).await;
+                    self.withdraw(&plug_id).await;
                     let error = match revoke_errors.get(&plug_id) {
                         Some(revoke_err) => format!("{reason}; {revoke_err}"),
                         None => reason,
@@ -722,6 +874,7 @@ impl State {
                             artifacts: BTreeMap::new(),
                             drawers: BTreeMap::new(),
                             operations: None,
+                            init: None,
                             observed_heads: snapshot.heads.clone(),
                             applied_heads: self.applied_heads.get(&plug_id).cloned(),
                             error: Some(error),
@@ -737,7 +890,7 @@ impl State {
                         .reconcile_admitted(
                             context,
                             &snapshot.heads,
-                            on_boot,
+                            trigger,
                             installed,
                             desired_grants,
                             desired_operations,
@@ -756,12 +909,22 @@ impl State {
             .cloned()
             .collect();
         for plug_id in removed {
-            self.stores.dispatch.unbind(&plug_id.to_string());
-            self.retire(&plug_id).await;
+            self.withdraw(&plug_id).await;
+            if self.init_done.remove(&plug_id).is_some() {
+                store::delete_init_done(&self.stores.sql, &plug_id).await?;
+            }
         }
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
+    }
+
+    /// Ends a nodule's start: stops routing to it, retires its workload and abandons its
+    /// initializer run, so a result still in flight finds no run and is dropped.
+    async fn withdraw(&mut self, plug_id: &PlugId) {
+        self.stores.dispatch.unbind(&plug_id.to_string());
+        self.retire(plug_id).await;
+        self.inits.remove(plug_id);
     }
 
     /// Stops the executor hosting `plug_id`, if it was. Dispatch must already have stopped
@@ -784,6 +947,10 @@ impl State {
     /// artifacts marked available unless the executor lacks their bytes. Otherwise it is
     /// registered not ready with the readiness the inventory alone can tell.
     ///
+    /// A nodule the executor hosts is registered ready only once its initializers have all
+    /// succeeded in this start and revision ([`Self::advance_inits`]); until then it is
+    /// registered `Initializing` or `InitFailed`, and callers get the retryable not-ready answer.
+    ///
     /// Registering is a no-op when nothing changed and `ensure` is idempotent, so every
     /// reconcile may call this.
     async fn serve(
@@ -791,9 +958,19 @@ impl State {
         installed: &mut InstalledNodule,
         actor: &Actor,
         capability: Option<CapId>,
+        trigger: Trigger,
     ) -> Readiness {
         let plug_id = installed.plug_id.clone();
         let provider_id = plug_id.to_string();
+        // Another revision is another run: abandon the old one now, so none of its results can
+        // land even while the new revision's handler is not hosted yet.
+        if self
+            .inits
+            .get(&plug_id)
+            .is_some_and(|run| run.revision != installed.revision)
+        {
+            self.inits.remove(&plug_id);
+        }
         let hosting = match (&self.stores.executor, &installed.nodule.handler) {
             (Some(executor), Some(handler)) if installed.enabled => {
                 Some((Arc::clone(executor), handler.artifact.clone()))
@@ -801,17 +978,21 @@ impl State {
             _ => None,
         };
         if !installed.enabled {
-            self.stores.dispatch.unbind(&provider_id);
-            self.retire(&plug_id).await;
+            self.withdraw(&plug_id).await;
             return Readiness::Disabled;
         }
         let Some((executor, artifact_key)) = hosting else {
             self.retire(&plug_id).await;
             let readiness = installed.readiness();
             if readiness.is_ready() {
-                // No handler: it implements nothing, so there is no provider to register.
+                // No handler: it implements nothing, so there is no provider to register. It
+                // can still have initializers, which then target foreign operations only
+                // (a local target needs a handler), so they need no provider of its own.
                 self.stores.dispatch.unbind(&provider_id);
-                return readiness;
+                return self
+                    .advance_inits(installed, actor, capability, None, trigger)
+                    .await
+                    .unwrap_or(readiness);
             }
             self.stores.dispatch.register(
                 &provider_id,
@@ -847,10 +1028,24 @@ impl State {
         };
         self.hosted.insert(plug_id, installed.revision);
         let state = match executor.ensure(&spec).await {
-            Hosted::Ready(provider) => ProviderState::Ready(ProviderKind::Executor {
-                kind: executor.kind(),
-                provider,
-            }),
+            // The runtime calls a local initializer on the provider directly, so the provider is
+            // used here even while dispatch still answers not ready.
+            Hosted::Ready(provider) => match self
+                .advance_inits(
+                    installed,
+                    actor,
+                    capability,
+                    Some(Arc::clone(&provider)),
+                    trigger,
+                )
+                .await
+            {
+                None => ProviderState::Ready(ProviderKind::Executor {
+                    kind: executor.kind(),
+                    provider,
+                }),
+                Some(pending) => ProviderState::NotReady(pending),
+            },
             Hosted::NotReady(readiness) => {
                 assert!(
                     !readiness.is_ready(),
@@ -871,6 +1066,266 @@ impl State {
             state.clone(),
         );
         state.readiness()
+    }
+
+    /// Moves the nodule's initializers along and returns `None` when every one has succeeded in
+    /// this start and revision, otherwise the readiness it is held at.
+    ///
+    /// They run one at a time in declaration order. Each invocation is a task off this actor
+    /// (the actor never awaits a handler) whose result returns as an [`InitFinished`] message; a
+    /// failed one stays failed until a reconcile other than its own result's retries it, with no
+    /// backoff yet. `provider` is the hosted handler, which a local target is called on directly
+    /// (the host running its own lifecycle hook, as the nodule service); a foreign target goes
+    /// through dispatch as the nodule's actor under its operations handle, so it needs a grant
+    /// like any other call of the nodule's.
+    async fn advance_inits(
+        &mut self,
+        installed: &InstalledNodule,
+        actor: &Actor,
+        capability: Option<CapId>,
+        provider: Option<Arc<dyn Provider>>,
+        trigger: Trigger,
+    ) -> Option<Readiness> {
+        let plug_id = &installed.plug_id;
+        let inits = &installed.nodule.initialization;
+        if inits.is_empty() {
+            return None;
+        }
+        if !self.inits.contains_key(plug_id) {
+            let done = inits
+                .iter()
+                .filter(|init| {
+                    init.mode == RunMode::Once
+                        && self
+                            .init_done
+                            .get(plug_id)
+                            .and_then(|keys| keys.get(&init.key))
+                            == Some(&installed.revision)
+                })
+                .map(|init| init.key.clone())
+                .collect();
+            self.next_epoch += 1;
+            self.inits.insert(
+                plug_id.clone(),
+                InitRun {
+                    epoch: self.next_epoch,
+                    revision: installed.revision,
+                    done,
+                    running: None,
+                    attempts: 0,
+                    error: None,
+                    failed: false,
+                    blocked_on: None,
+                },
+            );
+        }
+        let run = self.inits.get_mut(plug_id).expect("run inserted above");
+        let init = inits.iter().find(|init| !run.done.contains(&init.key))?;
+        if run.running.is_some() {
+            return Some(Readiness::Initializing);
+        }
+        if run.failed && trigger == Trigger::InitResult {
+            return Some(Readiness::InitFailed);
+        }
+
+        let route = if installed.admitted.operations.contains_key(&init.target) {
+            InitRoute::Local {
+                provider: provider.expect(
+                    "a local initializer target means the nodule has a handler, and its \
+                     initializers only run once it is hosted",
+                ),
+                caller: Caller {
+                    authorization: Authorization::identity(self.stores.parent.capability),
+                    actor: self.stores.parent.actor_id,
+                    scope: None,
+                },
+            }
+        } else {
+            // A foreign operation. Wait for its provider rather than fail the first call: it
+            // may be a nodule that is itself still initializing, or not installed yet. Only a
+            // provider that is ready is invoked, so a denial or a failure is the call's own.
+            let waiting_on = match self.stores.dispatch.resolve(&init.target) {
+                Ok(entry) if matches!(entry.state, ProviderState::Ready(_)) => None,
+                Ok(entry) => Some(Some(entry.provider_id.clone())),
+                Err(_) => Some(None),
+            };
+            if let Some(provider_id) = waiting_on {
+                let run = self.inits.get_mut(plug_id).expect("run present");
+                run.failed = false;
+                run.blocked_on = provider_id;
+                if self.in_dependency_cycle(plug_id) {
+                    let run = self.inits.get_mut(plug_id).expect("run present");
+                    run.failed = true;
+                    run.error = Some(format!(
+                        "initializer `{}` waits for `{}`, whose provider waits for this nodule \
+                         (dependency cycle)",
+                        init.key, init.target
+                    ));
+                    return Some(Readiness::InitFailed);
+                }
+                return Some(Readiness::Initializing);
+            }
+            InitRoute::Dispatch(match capability {
+                Some(authority) => Authorization {
+                    authority,
+                    signer: actor.capability,
+                },
+                // No operations grant: dispatch refuses an identity that is not the operator's.
+                None => Authorization::identity(actor.capability),
+            })
+        };
+
+        let run = self.inits.get_mut(plug_id).expect("run present");
+        run.attempts += 1;
+        run.failed = false;
+        run.blocked_on = None;
+        run.running = Some(init.key.clone());
+        let context = InvocationContext {
+            deadline_unix_ms: None,
+            idempotency_key: Some(format!(
+                "nodule/{plug_id}/{}/{}",
+                installed.revision, init.key
+            )),
+        };
+        let finished = InitFinished {
+            plug_id: plug_id.clone(),
+            epoch: run.epoch,
+            key: init.key.clone(),
+            once: init.mode == RunMode::Once,
+            outcome: Ok(()),
+        };
+        let target = init.target.clone();
+        let dispatch_client = self.stores.dispatch_client.clone();
+        let invocation = async move {
+            InitFinished {
+                outcome: route.invoke(&dispatch_client, &target, context).await,
+                ..finished
+            }
+        };
+        self.spawn_init(invocation);
+        Some(Readiness::Initializing)
+    }
+
+    /// Runs an invocation off the actor and sends its result back. Shutdown cancels the
+    /// invocation rather than waiting for a handler, and the actor stops reading results once it
+    /// is cancelled, so a send can only fail after that.
+    fn spawn_init(&self, invocation: impl Future<Output = InitFinished> + Send + 'static) {
+        let results = self.init_results.clone();
+        let cancel = self.tasks.clone();
+        let task = async move {
+            let finished = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                finished = invocation => finished,
+            };
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {}
+                sent = results.send(finished) => sent.expect(ERROR_ACTOR),
+            }
+        };
+        // `None` means shutdown already closed the service: the run stays as it is and the
+        // process is going away.
+        drop(self.tasks.spawn(task));
+    }
+
+    /// What the record reports of the nodule's initializers: nothing until one was invoked, and
+    /// nothing again once the one that was failing has succeeded.
+    fn init_status(&self, plug_id: &PlugId) -> Option<NoduleInitStatus> {
+        self.inits
+            .get(plug_id)
+            .filter(|run| run.attempts > 0 || run.error.is_some())
+            .map(|run| NoduleInitStatus {
+                attempts: run.attempts,
+                error: run.error.clone(),
+            })
+    }
+
+    /// Whether following who each blocked nodule waits on, from `plug_id`'s own blocked
+    /// initializer, comes back to `plug_id`.
+    fn in_dependency_cycle(&self, plug_id: &PlugId) -> bool {
+        let own = plug_id.to_string();
+        let waits: BTreeMap<String, &str> = self
+            .inits
+            .iter()
+            .filter_map(|(plug, run)| Some((plug.to_string(), run.blocked_on.as_deref()?)))
+            .collect();
+        let mut at = waits.get(&own).copied();
+        // More hops than waiting nodules means a cycle that does not include this one.
+        for _ in 0..=waits.len() {
+            match at {
+                Some(provider_id) if provider_id == own => return true,
+                Some(provider_id) => at = waits.get(provider_id).copied(),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// Applies an initializer's result, then reconciles so the router and the records show it
+    /// and the next initializer starts. A result whose run was replaced meanwhile is dropped.
+    async fn init_finished(&mut self, finished: InitFinished) -> Res<()> {
+        let Some(run) = self.inits.get_mut(&finished.plug_id) else {
+            return Ok(());
+        };
+        if run.epoch != finished.epoch {
+            return Ok(());
+        }
+        assert_eq!(
+            run.running.take().as_deref(),
+            Some(finished.key.as_str()),
+            "a result names the invocation in flight"
+        );
+        match finished.outcome {
+            Ok(()) => {
+                run.attempts = 0;
+                run.error = None;
+                run.done.insert(finished.key.clone());
+                if finished.once {
+                    let revision = run.revision;
+                    store::upsert_init_done(
+                        &self.stores.sql,
+                        &finished.plug_id,
+                        &finished.key,
+                        revision,
+                    )
+                    .await?;
+                    self.init_done
+                        .entry(finished.plug_id.clone())
+                        .or_default()
+                        .insert(finished.key, revision);
+                }
+            }
+            Err(error) => {
+                run.failed = true;
+                run.error = Some(error);
+            }
+        }
+        let snapshot = self
+            .stores
+            .datum_store
+            .snapshot()
+            .await
+            .map_err(crate::store_error)?;
+        drop(
+            self.reconcile(&RequestContext::root(), snapshot, Trigger::InitResult)
+                .await?,
+        );
+        // Nodules waiting on this one's operations can go now that it is registered ready: ask
+        // for a reconcile for each rather than depend on where they sort among the plugs.
+        let provider_id = finished.plug_id.to_string();
+        let ready = self
+            .records
+            .get(&finished.plug_id)
+            .is_some_and(|record| record.readiness.is_ready());
+        if ready {
+            for (plug_id, run) in &self.inits {
+                if run.blocked_on.as_deref() == Some(provider_id.as_str()) {
+                    self.reensure.handle(plug_id.clone()).request();
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn ensure_nodule_actor(
@@ -903,7 +1358,7 @@ impl State {
         &mut self,
         context: &RequestContext,
         heads: &[ChangeHash],
-        on_boot: bool,
+        trigger: Trigger,
         mut installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
         desired_operations: DispatchScope,
@@ -923,7 +1378,9 @@ impl State {
         let (capability, operations_error) = self
             .apply_operations(context, &plug_id, &actor, &effective_operations)
             .await?;
-        let readiness = self.serve(&mut installed, &actor, capability).await;
+        let readiness = self
+            .serve(&mut installed, &actor, capability, trigger)
+            .await;
 
         let mut apply_errors = Vec::new();
         if let Some(error) = &operations_error {
@@ -937,6 +1394,11 @@ impl State {
         }
 
         let mut drawer_statuses = BTreeMap::new();
+        let granted = |desired| NoduleGrantStatus {
+            desired,
+            granted: true,
+            error: None,
+        };
         for (drawer_id, desired_access) in &desired_grants {
             let existing = self
                 .applied_grants
@@ -948,7 +1410,7 @@ impl State {
             {
                 let live = self.stores.is_cap_live(context, cap_id).await?;
                 if live {
-                    if on_boot {
+                    if trigger == Trigger::Boot {
                         if self
                             .stores
                             .grant_with_cap(
@@ -961,26 +1423,12 @@ impl State {
                             .await
                             .is_ok()
                         {
-                            drawer_statuses.insert(
-                                drawer_id.clone(),
-                                NoduleGrantStatus {
-                                    desired: *desired_access,
-                                    granted: true,
-                                    error: None,
-                                },
-                            );
+                            drawer_statuses.insert(drawer_id.clone(), granted(*desired_access));
                             continue;
                         }
                         drop(self.stores.retract_grant_cap(context, cap_id).await);
                     } else {
-                        drawer_statuses.insert(
-                            drawer_id.clone(),
-                            NoduleGrantStatus {
-                                desired: *desired_access,
-                                granted: true,
-                                error: None,
-                            },
-                        );
+                        drawer_statuses.insert(drawer_id.clone(), granted(*desired_access));
                         continue;
                     }
                 }
@@ -1007,14 +1455,7 @@ impl State {
                         .entry(plug_id.clone())
                         .or_default()
                         .insert(drawer_id.clone(), (*desired_access, cap_id));
-                    drawer_statuses.insert(
-                        drawer_id.clone(),
-                        NoduleGrantStatus {
-                            desired: *desired_access,
-                            granted: true,
-                            error: None,
-                        },
-                    );
+                    drawer_statuses.insert(drawer_id.clone(), granted(*desired_access));
                 }
                 Err(NodulesError::Storage(err)) => return Err(NodulesError::Storage(err)),
                 Err(err) => {
@@ -1061,6 +1502,7 @@ impl State {
                     error: operations_error,
                 }
             }),
+            init: self.init_status(&plug_id),
             observed_heads: heads.to_vec(),
             applied_heads: self.applied_heads.get(&plug_id).cloned(),
             error,

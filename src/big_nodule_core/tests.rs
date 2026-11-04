@@ -105,6 +105,7 @@ fn photos() -> Nodule {
         extra: Default::default(),
     });
     nodule.initialization.push(Initializer {
+        key: "import".into(),
         target: "org.example.photos.import".into(),
         mode: RunMode::Once,
         extra: Default::default(),
@@ -368,6 +369,28 @@ fn initializers_and_store_sources_name_implemented_or_required_operations() {
     let mut unknown_mode = photos();
     unknown_mode.initialization[0].mode = RunMode::Unknown("hourly".into());
     refuse(unknown_mode, "no `hourly` run mode");
+}
+
+#[test]
+fn initializer_keys_are_present_and_unique() {
+    let mut empty_key = photos();
+    empty_key.initialization[0].key = String::new();
+    refuse(empty_key, "a key is not empty");
+
+    let mut repeated = photos();
+    let mut again = repeated.initialization[0].clone();
+    again.mode = RunMode::EveryStart;
+    repeated.initialization.push(again);
+    refuse(repeated, "`import` is declared twice");
+
+    // The key is a required field of the description, so a datum without one never parses.
+    let mut value = serde_json::to_value(photos()).unwrap();
+    value["initialization"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("key");
+    let error = serde_json::from_value::<Nodule>(value).unwrap_err();
+    assert!(error.to_string().contains("key"), "{error}");
 }
 
 #[test]

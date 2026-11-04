@@ -7,6 +7,7 @@ pub const MIGRATION_TABLE: &str = "_big_nodule_migrations";
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_nodules.sql", sql: include_str!("migrations/001_nodules.sql") },
     Migration { version: 2, name: "002_applied_operations.sql", sql: include_str!("migrations/002_applied_operations.sql") },
+    Migration { version: 3, name: "003_init_done.sql", sql: include_str!("migrations/003_init_done.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,6 +78,30 @@ pub async fn delete_applied_operations(db: &impl crate::sqlite_rs_alias::Executo
     db.execute(DELETE_APPLIED_OPERATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)]).await
 }
 
+pub const DELETE_INIT_DONE_SQL: &str = include_str!("queries/delete_init_done.sql");
+pub async fn delete_init_done(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_INIT_DONE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)]).await
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InitDoneRow {
+    pub plug_id: String,
+    pub init_key: String,
+    pub revision: String,
+}
+impl crate::sqlite_rs_alias::FromRow for InitDoneRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(3)?;
+        Ok(InitDoneRow { plug_id: row.get::<String>("plug_id")?, init_key: row.get::<String>("init_key")?, revision: row.get::<String>("revision")? })
+    }
+}
+
+pub const INIT_DONE_SQL: &str = include_str!("queries/init_done.sql");
+pub async fn init_done(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<InitDoneRow>> {
+    let set = db.query(INIT_DONE_SQL, &[]).await?;
+    set.all()
+}
+
 pub const UPSERT_ACTOR_SQL: &str = include_str!("queries/upsert_actor.sql");
 pub async fn upsert_actor(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, nodule_id: String, actor_uuid: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_ACTOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(nodule_id), crate::sqlite_rs_alias::IntoValue::into_value(actor_uuid)]).await
@@ -90,4 +115,9 @@ pub async fn upsert_applied_grant(db: &impl crate::sqlite_rs_alias::Executor, pl
 pub const UPSERT_APPLIED_OPERATIONS_SQL: &str = include_str!("queries/upsert_applied_operations.sql");
 pub async fn upsert_applied_operations(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, scope: String, capability_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_APPLIED_OPERATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(scope), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
+}
+
+pub const UPSERT_INIT_DONE_SQL: &str = include_str!("queries/upsert_init_done.sql");
+pub async fn upsert_init_done(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, init_key: String, revision: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_INIT_DONE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(init_key), crate::sqlite_rs_alias::IntoValue::into_value(revision)]).await
 }

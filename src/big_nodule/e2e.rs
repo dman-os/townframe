@@ -92,6 +92,7 @@ use std::sync::Arc;
 
 mod dispatch;
 mod executor;
+mod init;
 
 const NODULES_PATH: &str = "nodules";
 const NOTE: &str = "org.example.note";

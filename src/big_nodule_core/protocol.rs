@@ -157,6 +157,19 @@ pub struct NoduleOperationGrantStatus {
     pub error: Option<String>,
 }
 
+/// How a nodule's initializers have fared in its current start (see [`NoduleRecord::init`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoduleInitStatus {
+    /// Invocations made of the initializer that has not succeeded yet, since the previous one
+    /// succeeded (or since the start began). A wait for a foreign provider is not an attempt.
+    pub attempts: u32,
+    /// The last failure of that initializer, kept while it is retried and dropped once it
+    /// succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// One installed nodule as the management surface reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,6 +194,9 @@ pub struct NoduleRecord {
     /// Absent when the nodule has no operation grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operations: Option<NoduleOperationGrantStatus>,
+    /// Absent until an initializer of the current start has been invoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init: Option<NoduleInitStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observed_heads: Vec<ChangeHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -126,23 +126,31 @@ pub enum StoreMode {
     Unknown(String),
 }
 
-/// An operation the runtime invokes on the nodule's behalf when it is enabled. Registration is
-/// intent; whether it ran is the task layer's record, not this description's.
+/// An operation the runtime invokes on the nodule's behalf each time it starts. Registration is
+/// intent; whether it ran is the node's record (`NoduleRecord::init`), not this description's.
 #[macros::datum]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Initializer {
+    /// Names this initializer within the nodule: unique and not empty. A node records that a
+    /// [`RunMode::Once`] initializer ran under this key and the plug revision, and derives the
+    /// idempotency key of each invocation from it, so renaming one makes it a new initializer.
+    pub key: String,
     pub target: String,
     pub mode: RunMode,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
+/// When an initializer runs on a node. Initializers must be idempotent either way: the node
+/// has no synced record of what ran, so a mirrored node or a new revision runs them again.
 #[macros::datum(open_string)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RunMode {
+    /// Once per node per plug revision: not again on restart or re-enable, again on a new revision.
     Once,
+    /// Each time the nodule starts: node boot, and enabling it.
     EveryStart,
     #[datum(other)]
     Unknown(String),
@@ -538,9 +546,12 @@ impl<'a> Admission<'a> {
         Ok(())
     }
 
-    /// Initializers: each invokes an implemented or required query or procedure, in a run mode
-    /// this build has.
+    /// Initializers: each has a unique key and invokes an implemented or required query or
+    /// procedure, in a run mode this build has.
     fn initializers(&self, implemented: &Implemented) -> Result<()> {
+        keyed(&self.nodule.initialization, "initialization", |init| {
+            &init.key
+        })?;
         for (index, initializer) in self.nodule.initialization.iter().enumerate() {
             let path = format!("initialization[{index}]");
             self.invocation_target(&initializer.target, implemented, &format!("{path}.target"))?;

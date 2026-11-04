@@ -321,7 +321,7 @@ NoduleDescription
   handler: the one XRPC handler component (artifact key) serving /xrpc/<nsid>
   implements: operation NSIDs declared in this nodule's Lexicons that the handler serves
   revisioned_stores: key, selector/entry schemas, frontier/retention mode, source (an implemented operation)
-  initialization: target operation NSID, run mode
+  initialization: key (unique), target operation NSID, run mode
   private_state: named SQLite/KV state declarations
   -- bindings, carried opaquely (an open map keyed by section tag) --
   commands: key, target operation NSID, optional stateless view key
