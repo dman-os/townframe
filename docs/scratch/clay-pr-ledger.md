@@ -550,3 +550,17 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   contributions target a binding, micro id = installed-as plug id, writer identity = (replica,
   micro id), BLAKE3 digests, grants re-checked against the granted request set. Envelope Rust
   type names arrive from the peer before C7.
+
+## Lazy activation responsiveness (2026-11-04, user; deferred)
+
+- Approved now: slots retry when their micro becomes available (or restarts) instead of staying
+  "unavailable". Lands after C6c.
+- Deferred by user decision ("cut with what we have"): a responsiveness/utilization policy for lazy
+  activation. Candidates recorded for later:
+  - Intent prewarm: hover/focus/visibility of a lazy endpoint takes a short warm lease so the
+    micro is initialized before the click (prefetch-on-hover, like link prefetching).
+  - Keep-warm budget: idle close is delayed by a TTL and bounded by an LRU/memory budget across
+    incarnations, rather than closing as soon as the last lease drops.
+  - Immediate feedback: a lazy action renders a pending state at once and queues the call until
+    the incarnation is ready, so nothing feels dead while initializing.
+  - Measure first: activation latency per engine (Wasmtime, browser) before choosing budgets.
