@@ -657,15 +657,15 @@ Built:
 - lazy activation attachments, named publication slots and leased/retained redemption;
 - resource-driven idle `Closing` sequencing and async `instance-root.close()` on Wasmtime and WCMP;
 - the context-centered MDK surface; and
-- reachability from eager roots through requirements, plus idle eviction, fault retention,
-  broker revocation and staged provisions.
+- reachability from eager roots through requirements and incarnation-held leases (a leased holder
+  names its incarnation), with an unreachable strongly connected group closing together, and
+  activation demands that would wait on their own staged outcome failing as a cycle; plus idle
+  eviction, fault retention, broker revocation and staged provisions.
 
 Not built:
 
 - manifest admission from the `big_plugs_core` envelope (a stand-in sidecar and local namespace
   stand for it) and the installer/uninstall flow around it;
-- holder identity on lazy retention, so a cycle of retained leases between incarnations is
-  not computed unreachable (validation 8);
 - schema validation of collection keys and values (limits, attachment indices and selector
   ceilings are enforced; Lexicon validation is not); and
 - a native micro run through the engine conformance battery.
