@@ -10,13 +10,16 @@ use clay_collection::ReadLimits;
 use clay_collection::RegistrationCollection;
 use clay_collection::RegistrationDispatch;
 use clay_collection::RegistrationScope;
-use clay_collection::RegistrationScopeId;
 use clay_collection::Source;
-use clay_collection::Version;
+use clay_collection::Stamp;
+use clay_collection::Stamped;
+use clay_collection::WriteBasis;
+use clay_collection::WriterId;
 use clay_host::AccessError;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_host::Lifecycle;
+use clay_host::MicroId;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -190,18 +193,21 @@ pub fn attachment_indices(body: &[u8]) -> Option<Vec<usize>> {
     Some(scanner.indices)
 }
 
-pub type BytesProjection = Projection<Bytes, CollectionValue, BytesSource>;
-pub type BytesPage = Page<Bytes, CollectionValue>;
-pub type BytesScope = RegistrationScope<Bytes, CollectionValue, Bytes, BytesSource>;
+/// Readers see each row with the stamp of the write that produced it, so a guest can pass
+/// the stamp back as a [`WriteBasis`].
+pub type BytesProjection = Projection<Bytes, Stamped<Option<CollectionValue>>, BytesSource>;
+type BytesLease = ProjectionLease<Bytes, Stamped<Option<CollectionValue>>, BytesSource>;
+pub type BytesPage = Page<Bytes, Stamped<Option<CollectionValue>>>;
+pub type BytesScope = RegistrationScope<Bytes, CollectionValue, BytesSource>;
 
-type BytesDispatch = RegistrationDispatch<Bytes, CollectionValue, Bytes, BytesSource>;
+type BytesDispatch = RegistrationDispatch<Bytes, CollectionValue, BytesSource>;
 
-pub type BytesRegistrations = RegistrationCollection<Bytes, CollectionValue, Bytes, BytesSource>;
+pub type BytesRegistrations = RegistrationCollection<Bytes, CollectionValue, BytesSource>;
 
 #[derive(Clone, Debug)]
 pub struct BytesSource;
 
-impl Source<Bytes, CollectionValue> for BytesSource {
+impl Source<Bytes, Stamped<Option<CollectionValue>>> for BytesSource {
     type Selector = Bytes;
     type Interest = ();
 
@@ -209,7 +215,12 @@ impl Source<Bytes, CollectionValue> for BytesSource {
         Ok((selector, ()))
     }
 
-    fn matches(&self, _selector: &Bytes, _key: &Bytes, _value: &CollectionValue) -> bool {
+    fn matches(
+        &self,
+        _selector: &Bytes,
+        _key: &Bytes,
+        _value: &Stamped<Option<CollectionValue>>,
+    ) -> bool {
         true
     }
 }
@@ -218,41 +229,20 @@ pub fn bytes_registrations(
     replay_capacity: NonZeroUsize,
     runtime_epoch: [u64; 2],
 ) -> BytesRegistrations {
-    RegistrationCollection::with_source(BytesSource, replay_capacity, runtime_epoch, physical_key)
+    RegistrationCollection::with_source(BytesSource, replay_capacity, runtime_epoch)
 }
 
-fn physical_key(scope: RegistrationScopeId, local_key: &Bytes) -> Bytes {
-    encode_physical_key(scope.get(), local_key)
-}
-
-/// `[scope, local_key]` as deterministic CBOR: a two-element array of an unsigned integer and a
-/// byte string.
-fn encode_physical_key(scope: u64, local_key: &Bytes) -> Bytes {
-    fn head(out: &mut Bytes, major: u8, value: u64) {
-        let major = major << 5;
-        match value {
-            0..24 => out.push(major | value as u8),
-            24..=0xff => out.extend([major | 24, value as u8]),
-            0x100..=0xffff => {
-                out.push(major | 25);
-                out.extend((value as u16).to_be_bytes());
-            }
-            0x1_0000..=0xffff_ffff => {
-                out.push(major | 26);
-                out.extend((value as u32).to_be_bytes());
-            }
-            _ => {
-                out.push(major | 27);
-                out.extend(value.to_be_bytes());
-            }
-        }
-    }
-    let mut key = Vec::with_capacity(local_key.len() + 19);
-    head(&mut key, 4, 2);
-    head(&mut key, 0, scope);
-    head(&mut key, 2, local_key.len() as u64);
-    key.extend_from_slice(local_key);
-    key
+/// What a micro's registration binding is allowed to write into one collection: the
+/// collection, the micro whose identity stamps its writes, and the key prefixes it may
+/// write (ADR 024 §13). An empty prefix grants every key. Enforced here, in the session,
+/// not in `clay_collection`.
+#[derive(Clone)]
+pub struct RegistrationGrant {
+    pub registrations: BytesRegistrations,
+    /// Singleton micros are their own stable writer identity: it breaks ties between
+    /// concurrent writes and survives restarts.
+    pub micro: MicroId,
+    pub prefixes: Vec<Bytes>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -440,12 +430,18 @@ impl CollectionSession {
 
     pub fn grant_writer(
         &self,
-        registrations: &BytesRegistrations,
+        grant: RegistrationGrant,
     ) -> Result<RegistrationWriter, AccessError> {
+        let RegistrationGrant {
+            registrations,
+            micro,
+            prefixes,
+        } = grant;
         let permit = self.state.admit(Budget::Writers)?;
+        let writer_id = WriterId::new(micro.as_str());
         // Every grant mints a staged scope (ADR 024 §5): rows written while the incarnation is
         // still initializing must not reach readers unless initialization commits.
-        let scope = registrations.create_staged_scope();
+        let scope = registrations.create_staged_scope(writer_id.clone());
         let writer = scope.writer().expect("a freshly minted scope is open");
         // Teardown covers an incarnation that is closed without ever committing (failed
         // initialization) as well as one that closed after cleanup. It owns the scopes, so a
@@ -455,7 +451,7 @@ impl CollectionSession {
             .host
             .own(&self.state.instance, Box::new(move || teardown.close()))?;
         self.state.scopes.0.lock().unwrap().push(OwnedScope {
-            registrations: registrations.clone(),
+            registrations,
             scope,
         });
         let outward = Arc::clone(&self.state.scopes);
@@ -475,6 +471,8 @@ impl CollectionSession {
         }
         Ok(RegistrationWriter {
             writer,
+            prefixes,
+            stamp_bytes: STAMP_LAMPORT_BYTES + writer_id.as_bytes().len(),
             _permit: permit,
         })
     }
@@ -484,19 +482,30 @@ impl CollectionSession {
     }
 }
 
-type SubstrateWriter =
-    clay_collection::RegistrationWriter<Bytes, CollectionValue, Bytes, BytesSource>;
+type SubstrateWriter = clay_collection::RegistrationWriter<Bytes, CollectionValue, BytesSource>;
+
+/// Page-accounting charge for the lamport of a row's stamp; the stamp's writer id is
+/// charged by its length.
+const STAMP_LAMPORT_BYTES: usize = 8;
 
 /// Mutation authority over one scope. Dropping it releases the authority only; the scope, and
 /// its rows, belong to the incarnation and are withdrawn when it closes.
 pub struct RegistrationWriter {
     writer: SubstrateWriter,
+    /// Key prefixes this writer may write; see [`RegistrationGrant`].
+    prefixes: Vec<Bytes>,
+    /// What each row's stamp adds to a page, fixed by the writer identity.
+    stamp_bytes: usize,
     _permit: Permit,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WriteFailure {
-    Conflict { current: Option<Version> },
+    Conflict {
+        current: Option<Stamp>,
+    },
+    /// The key lies outside the writer's granted key prefixes.
+    Forbidden,
     Revoked,
     KeyTooLarge,
     ValueTooLarge,
@@ -515,23 +524,16 @@ impl From<MutationError> for WriteFailure {
 }
 
 impl RegistrationWriter {
-    const MAX_PHYSICAL_KEY_OVERHEAD: usize = 1 + 9 + 9;
-
-    pub fn put(
-        &self,
-        key: Bytes,
-        based_on: Option<Version>,
-        value: Bytes,
-    ) -> Result<Version, WriteFailure> {
-        self.put_value(key, based_on, CollectionValue::plain(value))
+    pub fn put(&self, key: Bytes, basis: WriteBasis, value: Bytes) -> Result<Stamp, WriteFailure> {
+        self.put_value(key, basis, CollectionValue::plain(value))
     }
 
     pub fn put_value(
         &self,
         key: Bytes,
-        based_on: Option<Version>,
+        basis: WriteBasis,
         value: CollectionValue,
-    ) -> Result<Version, WriteFailure> {
+    ) -> Result<Stamp, WriteFailure> {
         let limits = self.admit(&key)?;
         if value.capabilities.len() > limits.capabilities_per_value {
             return Err(WriteFailure::CapabilityLimit);
@@ -547,45 +549,21 @@ impl RegistrationWriter {
         if value.body.len() > limits.value_bytes
             || key
                 .len()
-                .saturating_add(Self::MAX_PHYSICAL_KEY_OVERHEAD)
+                .saturating_add(self.stamp_bytes)
                 .saturating_add(value.byte_len())
                 > limits.page_bytes.saturating_sub(limits.cursor_bytes)
         {
             return Err(WriteFailure::ValueTooLarge);
         }
-        if based_on.is_none()
-            && self.writer.version(&key).is_none()
-            && self.writer.row_count()
-                >= limits.rows_per_writer.min(
-                    limits.page_bytes.saturating_sub(limits.cursor_bytes)
-                        / limits
-                            .key_bytes
-                            .saturating_add(Self::MAX_PHYSICAL_KEY_OVERHEAD),
-                )
-        {
-            return Err(WriteFailure::RowLimit);
-        }
-        Ok(self.writer.put(key, based_on, value)?.dispatch())
+        self.admit_claim(&key, limits)?;
+        Ok(self.writer.put(key, basis, value)?.dispatch())
     }
 
-    pub fn remove(
-        &self,
-        key: Bytes,
-        based_on: Option<Version>,
-    ) -> Result<Option<Version>, WriteFailure> {
-        self.admit(&key)?;
-        Ok(self.writer.remove(key, based_on)?.dispatch())
-    }
-
-    /// Withdraw every row this writer's scope holds, in one projection transaction.
-    pub fn clear(&self) -> Result<(), WriteFailure> {
-        let state = &self._permit.0;
-        state
-            .host
-            .check(&state.instance)
-            .map_err(|_| WriteFailure::Revoked)?;
-        self.writer.clear()?.dispatch();
-        Ok(())
+    /// Delete writes a tombstone, which holds a row of this writer's budget like a value does.
+    pub fn delete(&self, key: Bytes, basis: WriteBasis) -> Result<Stamp, WriteFailure> {
+        let limits = self.admit(&key)?;
+        self.admit_claim(&key, limits)?;
+        Ok(self.writer.delete(key, basis)?.dispatch())
     }
 
     fn admit(&self, key: &Bytes) -> Result<CollectionLimits, WriteFailure> {
@@ -594,10 +572,26 @@ impl RegistrationWriter {
             .host
             .check(&state.instance)
             .map_err(|_| WriteFailure::Revoked)?;
+        if !self.prefixes.iter().any(|prefix| key.starts_with(prefix)) {
+            return Err(WriteFailure::Forbidden);
+        }
         if key.len() > state.limits.key_bytes {
             return Err(WriteFailure::KeyTooLarge);
         }
         Ok(state.limits)
+    }
+
+    /// Refuse a write that would claim a key beyond the writer's row budget: the configured
+    /// cap, or what one page can carry at the largest key.
+    fn admit_claim(&self, key: &Bytes, limits: CollectionLimits) -> Result<(), WriteFailure> {
+        let page_rows = limits.page_bytes.saturating_sub(limits.cursor_bytes)
+            / limits.key_bytes.saturating_add(self.stamp_bytes);
+        if !self.writer.holds(key)
+            && self.writer.held_keys() >= limits.rows_per_writer.min(page_rows)
+        {
+            return Err(WriteFailure::RowLimit);
+        }
+        Ok(())
     }
 }
 
@@ -654,7 +648,7 @@ pub struct ProjectionReader {
 }
 
 struct LeaseState {
-    lease: Mutex<Option<ProjectionLease<Bytes, CollectionValue, BytesSource>>>,
+    lease: Mutex<Option<BytesLease>>,
     cancelled: watch::Receiver<bool>,
     cancel: Mutex<Option<watch::Sender<bool>>>,
     _permit: Permit,
@@ -771,10 +765,27 @@ fn page_bytes(page: &BytesPage) -> usize {
                     value,
                     write_context,
                     ..
-                } => key.len() + value.byte_len() + write_context.as_ref().map_or(0, Vec::len),
+                } => {
+                    key.len()
+                        + value.value.as_ref().map_or(0, CollectionValue::byte_len)
+                        + STAMP_LAMPORT_BYTES
+                        + value.stamp.writer.as_bytes().len()
+                        + write_context.as_ref().map_or(0, Vec::len)
+                }
                 Change::Remove { key, .. } => key.len(),
             })
             .sum::<usize>()
+}
+
+/// A grant of every key for the session tests; production mint sites pass the manifest's
+/// prefixes.
+#[cfg(test)]
+fn full_grant(registrations: &BytesRegistrations, micro: &str) -> RegistrationGrant {
+    RegistrationGrant {
+        registrations: registrations.clone(),
+        micro: MicroId::new(micro),
+        prefixes: vec![Vec::new()],
+    }
 }
 
 #[cfg(test)]

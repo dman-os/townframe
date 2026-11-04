@@ -116,12 +116,8 @@ pub(super) async fn initialize(
         collection_bindings.push(super::collections::wit::CollectionBinding { name, reader });
     }
     let mut registration_bindings = Vec::with_capacity(registrations.len());
-    for (name, registrations) in registrations {
-        let writer = active
-            .store
-            .data()
-            .collections
-            .grant_writer(&registrations)?;
+    for (name, grant) in registrations {
+        let writer = active.store.data().collections.grant_writer(grant)?;
         let writer = active
             .store
             .data_mut()

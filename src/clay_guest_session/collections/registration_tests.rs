@@ -30,24 +30,6 @@ fn session(limits: CollectionLimits) -> (CollectionSession, Host, Instance) {
 }
 
 #[test]
-fn physical_keys_are_deterministic_cbor_writer_and_byte_string_pairs() {
-    assert_eq!(
-        encode_physical_key(1, &b"x".to_vec()),
-        [0x82, 0x01, 0x41, b'x']
-    );
-    let local = vec![7; 24];
-    let mut expected = vec![0x82, 0x19, 0x01, 0x2c, 0x58, 24];
-    expected.extend(&local);
-    assert_eq!(encode_physical_key(300, &local), expected);
-    assert_eq!(
-        encode_physical_key(u64::MAX, &Vec::new()),
-        [
-            0x82, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x40
-        ]
-    );
-}
-
-#[test]
 fn key_value_and_row_limits_refuse_before_the_collection_changes() {
     let (session, _, _) = session(CollectionLimits {
         key_bytes: 2,
@@ -56,39 +38,86 @@ fn key_value_and_row_limits_refuse_before_the_collection_changes() {
         ..CollectionLimits::default()
     });
     let registrations = registrations();
-    let writer = session.grant_writer(&registrations).unwrap();
+    let writer = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
     assert_eq!(
-        writer.put(vec![0; 3], None, vec![0]),
+        writer.put(vec![0; 3], WriteBasis::Concurrent, vec![0]),
         Err(WriteFailure::KeyTooLarge)
     );
     assert_eq!(
-        writer.put(vec![0], None, vec![0; 4]),
+        writer.put(vec![0], WriteBasis::Concurrent, vec![0; 4]),
         Err(WriteFailure::ValueTooLarge)
     );
     assert_eq!(
-        writer.remove(vec![0; 3], None),
+        writer.delete(vec![0; 3], WriteBasis::Concurrent),
         Err(WriteFailure::KeyTooLarge)
     );
     assert!(registrations.snapshot().is_empty());
 
-    let version = writer.put(vec![1], None, vec![1]).unwrap();
+    let stamp = writer
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
+        .unwrap();
     assert_eq!(
-        writer.put(vec![2], None, vec![2]),
+        writer.put(vec![2], WriteBasis::Concurrent, vec![2]),
         Err(WriteFailure::RowLimit)
     );
+    // A tombstone holds a row of the writer's budget like a value does.
     assert_eq!(
-        writer.put(vec![2], Some(version), vec![2]),
-        Err(WriteFailure::Conflict { current: None })
+        writer.delete(vec![2], WriteBasis::Concurrent),
+        Err(WriteFailure::RowLimit)
     );
-    let replaced = writer.put(vec![1], Some(version), vec![3]).unwrap();
+    let replaced = writer
+        .put(vec![1], WriteBasis::Observed(stamp), vec![3])
+        .unwrap();
+    assert_eq!(replaced.lamport, 2);
     assert_eq!(
         registrations
             .snapshot()
             .into_values()
-            .map(|entry| (entry.version, entry.value.body))
+            .map(|entry| (entry.stamp, entry.value.unwrap().body))
             .collect::<Vec<_>>(),
         [(replaced, vec![3])]
     );
+}
+
+#[test]
+fn writes_outside_the_granted_key_prefixes_are_forbidden() {
+    let (session, _, _) = session(CollectionLimits::default());
+    let registrations = registrations();
+    let writer = session
+        .grant_writer(RegistrationGrant {
+            registrations: registrations.clone(),
+            micro: MicroId::new("w"),
+            prefixes: vec![b"ab".to_vec(), b"c".to_vec()],
+        })
+        .unwrap();
+    writer
+        .put(b"abz".to_vec(), WriteBasis::Concurrent, vec![1])
+        .unwrap();
+    writer
+        .put(b"c".to_vec(), WriteBasis::Concurrent, vec![2])
+        .unwrap();
+    writer
+        .delete(b"cc".to_vec(), WriteBasis::Concurrent)
+        .unwrap();
+    for outside in [&b"a"[..], b"b", b"x", b"", b"ba"] {
+        assert_eq!(
+            writer.put(outside.to_vec(), WriteBasis::Concurrent, vec![0]),
+            Err(WriteFailure::Forbidden),
+            "put {outside:?}"
+        );
+        assert_eq!(
+            writer.delete(outside.to_vec(), WriteBasis::Concurrent),
+            Err(WriteFailure::Forbidden),
+            "delete {outside:?}"
+        );
+    }
+    assert_eq!(
+        registrations.snapshot().into_keys().collect::<Vec<_>>(),
+        [b"abz".to_vec(), b"c".to_vec(), b"cc".to_vec()]
+    );
+    assert!(registrations.get(&b"cc".to_vec()).unwrap().value.is_none());
 }
 
 #[tokio::test]
@@ -102,14 +131,18 @@ async fn admitted_rows_fit_an_atomic_withdrawal_page() {
     };
     let (session, host, instance) = session(limits);
     let registrations = registrations();
-    let writer = session.grant_writer(&registrations).unwrap();
-    let capacity = (limits.page_bytes - limits.cursor_bytes)
-        / (limits.key_bytes + RegistrationWriter::MAX_PHYSICAL_KEY_OVERHEAD);
+    let writer = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
+    let capacity =
+        (limits.page_bytes - limits.cursor_bytes) / (limits.key_bytes + writer.stamp_bytes);
     for index in 0..capacity {
-        writer.put(vec![index as u8; 64], None, vec![1]).unwrap();
+        writer
+            .put(vec![index as u8; 64], WriteBasis::Concurrent, vec![1])
+            .unwrap();
     }
     assert_eq!(
-        writer.put(vec![capacity as u8; 64], None, vec![1]),
+        writer.put(vec![capacity as u8; 64], WriteBasis::Concurrent, vec![1]),
         Err(WriteFailure::RowLimit)
     );
     // The reader lives on another incarnation: its own instance is about to close.
@@ -162,20 +195,28 @@ fn a_put_must_fit_the_projection_page_even_when_the_value_limit_is_larger() {
         ..CollectionLimits::default()
     });
     let registrations = registrations();
-    let writer = session.grant_writer(&registrations).unwrap();
+    let writer = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
     assert_eq!(
-        writer.put(vec![1], None, vec![1; 128]),
+        writer.put(vec![1], WriteBasis::Concurrent, vec![1; 128]),
         Err(WriteFailure::ValueTooLarge)
     );
     assert!(registrations.snapshot().is_empty());
-    writer.put(vec![1], None, vec![1]).unwrap();
+    writer
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
+        .unwrap();
 }
 
 #[tokio::test]
 async fn put_notification_can_close_the_writers_instance_synchronously() {
     let (session, host, instance) = session(CollectionLimits::default());
     let registrations = registrations();
-    let writer = Arc::new(session.grant_writer(&registrations).unwrap());
+    let writer = Arc::new(
+        session
+            .grant_writer(full_grant(&registrations, "w"))
+            .unwrap(),
+    );
     let mut lease = registrations
         .projection()
         .acquire(Vec::new(), None)
@@ -186,7 +227,7 @@ async fn put_notification_can_close_the_writers_instance_synchronously() {
         move || {
             host.close_instance(&instance).unwrap();
             assert_eq!(
-                observed.put(vec![2], None, vec![2]),
+                observed.put(vec![2], WriteBasis::Concurrent, vec![2]),
                 Err(WriteFailure::Revoked)
             );
         },
@@ -199,7 +240,9 @@ async fn put_notification_can_close_the_writers_instance_synchronously() {
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
-    let accepted = writer.put(vec![1], None, vec![1]).unwrap();
+    let accepted = writer
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
+        .unwrap();
     let Poll::Ready(Ok(page)) = pending
         .as_mut()
         .poll(&mut Context::from_waker(Waker::noop()))
@@ -208,7 +251,7 @@ async fn put_notification_can_close_the_writers_instance_synchronously() {
     };
     assert_eq!(page.transactions.len(), 2);
     assert!(
-        matches!(&page.transactions[0].changes[..], [Change::Upsert { row_version, .. }] if *row_version == accepted)
+        matches!(&page.transactions[0].changes[..], [Change::Upsert { value, .. }] if value.stamp == accepted)
     );
     assert!(matches!(
         &page.transactions[1].changes[..],
@@ -221,8 +264,14 @@ async fn put_notification_can_close_the_writers_instance_synchronously() {
 async fn remove_notification_can_mutate_the_same_writer_synchronously() {
     let (session, _, _) = session(CollectionLimits::default());
     let registrations = registrations();
-    let writer = Arc::new(session.grant_writer(&registrations).unwrap());
-    let version = writer.put(vec![1], None, vec![1]).unwrap();
+    let writer = Arc::new(
+        session
+            .grant_writer(full_grant(&registrations, "w"))
+            .unwrap(),
+    );
+    let stamp = writer
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
+        .unwrap();
     let mut lease = registrations
         .projection()
         .acquire(Vec::new(), None)
@@ -231,7 +280,9 @@ async fn remove_notification_can_mutate_the_same_writer_synchronously() {
     let observed = Arc::clone(&writer);
     let waker = Waker::from(Arc::new(OnceOnWake(Mutex::new(Some(Box::new(
         move || {
-            observed.put(vec![1], None, vec![2]).unwrap();
+            observed
+                .put(vec![1], WriteBasis::Concurrent, vec![2])
+                .unwrap();
         },
     ))))));
     let pending = lease.read(Some(bootstrap.through), ReadLimits::default());
@@ -242,7 +293,8 @@ async fn remove_notification_can_mutate_the_same_writer_synchronously() {
             .poll(&mut Context::from_waker(&waker))
             .is_pending()
     );
-    let removed = writer.remove(vec![1], Some(version)).unwrap().unwrap();
+    let tombstone = writer.delete(vec![1], WriteBasis::Observed(stamp)).unwrap();
+    assert_eq!(tombstone.lamport, 2);
     let Poll::Ready(Ok(page)) = pending
         .as_mut()
         .poll(&mut Context::from_waker(Waker::noop()))
@@ -250,17 +302,19 @@ async fn remove_notification_can_mutate_the_same_writer_synchronously() {
         panic!("removal and reentrant put must be published");
     };
     assert_eq!(page.transactions.len(), 2);
+    // The deletion replicates as a tombstone row carrying its stamp.
+    assert!(matches!(
+        &page.transactions[0].changes[..],
+        [Change::Upsert { value, .. }] if value.stamp == tombstone && value.value.is_none()
+    ));
     assert!(
-        matches!(&page.transactions[0].changes[..], [Change::Remove { row_version, .. }] if *row_version == removed)
-    );
-    assert!(
-        matches!(&page.transactions[1].changes[..], [Change::Upsert { value, .. }] if value.body == vec![2])
+        matches!(&page.transactions[1].changes[..], [Change::Upsert { value, .. }] if value.value.as_ref().unwrap().body == vec![2])
     );
     assert_eq!(
         registrations
             .snapshot()
             .into_values()
-            .map(|row| row.value.body)
+            .map(|row| row.value.unwrap().body)
             .collect::<Vec<_>>(),
         [vec![2]]
     );
@@ -273,19 +327,25 @@ fn writer_budget_admits_up_to_the_limit_and_drops_release_it() {
         ..CollectionLimits::default()
     });
     let registrations = registrations();
-    let first = session.grant_writer(&registrations).unwrap();
-    let _second = session.grant_writer(&registrations).unwrap();
+    let first = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
+    let _second = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
     assert_eq!(
-        session.grant_writer(&registrations).err(),
+        session.grant_writer(full_grant(&registrations, "w")).err(),
         Some(AccessError::Denied)
     );
     assert_eq!(session.writer_count(), 2);
-    first.put(vec![1], None, vec![1]).unwrap();
+    first.put(vec![1], WriteBasis::Concurrent, vec![1]).unwrap();
     drop(first);
     assert_eq!(session.writer_count(), 1);
     // Dropping a writer releases authority only; its rows belong to the incarnation's scope.
     assert_eq!(registrations.snapshot().len(), 1);
-    let _third = session.grant_writer(&registrations).unwrap();
+    let _third = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
     assert_eq!(session.writer_count(), 2);
 }
 
@@ -298,11 +358,23 @@ async fn instance_close_withdraws_its_writers_rows_in_one_transaction_and_wakes_
         host.start("bystander"),
         CollectionLimits::default(),
     );
-    let doomed = session.grant_writer(&registrations).unwrap();
-    let bystander = other.grant_writer(&registrations).unwrap();
-    doomed.put(vec![1], None, vec![1]).unwrap();
-    doomed.put(vec![2], None, vec![2]).unwrap();
-    bystander.put(vec![1], None, vec![9]).unwrap();
+    let doomed = session
+        .grant_writer(full_grant(&registrations, "doomed"))
+        .unwrap();
+    let bystander = other
+        .grant_writer(full_grant(&registrations, "bystander"))
+        .unwrap();
+    // Both write key 1 at lamport 1; "doomed" outranks "bystander", so the bystander's
+    // value is a hidden candidate until the doomed scope retracts.
+    doomed
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
+        .unwrap();
+    doomed
+        .put(vec![2], WriteBasis::Concurrent, vec![2])
+        .unwrap();
+    bystander
+        .put(vec![1], WriteBasis::Concurrent, vec![9])
+        .unwrap();
 
     let lease = other
         .grant(registrations.projection())
@@ -313,7 +385,7 @@ async fn instance_close_withdraws_its_writers_rows_in_one_transaction_and_wakes_
         .read(None, ReadLimits::default(), std::future::pending())
         .await
         .unwrap();
-    assert_eq!(bootstrap.transactions.len(), 3);
+    assert_eq!(bootstrap.transactions.len(), 2);
     let parked = lease.read(
         Some(bootstrap.through),
         ReadLimits::default(),
@@ -327,28 +399,30 @@ async fn instance_close_withdraws_its_writers_rows_in_one_transaction_and_wakes_
         panic!("closing the writer's instance must wake the parked reader");
     };
     assert_eq!(page.transactions.len(), 1);
-    assert_eq!(
-        page.transactions[0]
-            .changes
-            .iter()
-            .filter(|change| matches!(change, Change::Remove { .. }))
-            .count(),
-        2
-    );
+    // The doomed key 2 disappears and key 1 reveals the bystander's value, in one transaction.
+    assert!(matches!(
+        &page.transactions[0].changes[..],
+        [
+            Change::Upsert { key: revealed, value, .. },
+            Change::Remove { key: removed, .. },
+        ] if revealed == &vec![1] && value.value.as_ref().unwrap().body == vec![9] && removed == &vec![2]
+    ));
     assert_eq!(
         registrations
             .snapshot()
             .into_values()
-            .map(|entry| entry.value.body)
+            .map(|entry| entry.value.unwrap().body)
             .collect::<Vec<_>>(),
         [vec![9]]
     );
     assert_eq!(
-        doomed.put(vec![3], None, vec![3]),
+        doomed.put(vec![3], WriteBasis::Concurrent, vec![3]),
         Err(WriteFailure::Revoked)
     );
     assert_eq!(
-        session.grant_writer(&registrations).err(),
+        session
+            .grant_writer(full_grant(&registrations, "doomed"))
+            .err(),
         Some(AccessError::Revoked)
     );
     drop(doomed);
