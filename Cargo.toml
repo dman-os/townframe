@@ -48,6 +48,8 @@ members = [
   "./src/clay_guest_session",
   "./src/micro_settings_manifest",
   "./src/micro_settings",
+  "./src/micro_toolbar_manifest",
+  "./src/micro_toolbar",
   "./src/micro_sample",
   "./src/micro_counter",
   "./src/micro_collection_probe",
@@ -123,6 +125,8 @@ clay_guest_session = { path = "./src/clay_guest_session" }
 clay_mdk = { path = "./src/clay_mdk", default-features = false }
 micro_settings_manifest = { path = "./src/micro_settings_manifest" }
 micro_settings = { path = "./src/micro_settings" }
+micro_toolbar_manifest = { path = "./src/micro_toolbar_manifest" }
+micro_toolbar = { path = "./src/micro_toolbar" }
 micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
