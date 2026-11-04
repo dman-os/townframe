@@ -350,42 +350,8 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
             .unwrap();
         let counter_id = clay_host::MicroId::new(MicroId::local("slot.counter").as_str());
         let consumer_id = clay_host::MicroId::new(MicroId::local("slot.consumer").as_str());
-        let call = |name: &str, contract: &str| PublicationDeclaration {
-            name: name.into(),
-            kind: PublicationKind::Call,
-            contract: Some(Nsid::literal(contract)),
-        };
-        let presentation = |name: &str| PublicationDeclaration {
-            name: name.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        };
-        // The declaration of `src/clay_mdk/context_fixture.rs`.
-        let consumer_manifest = MicroManifest {
-            entrypoints: Entrypoints::micro_client(),
-            publications: vec![
-                call("rows", "org.example.clay.test.context.rows"),
-                call("attach", "org.example.clay.test.context.attach"),
-                call("follow", "org.example.clay.test.context.follow"),
-                call("hold", "org.example.clay.test.context.hold"),
-                call("release", "org.example.clay.test.context.release"),
-                presentation("detail"),
-                presentation("slot"),
-            ],
-            requires: vec![],
-            configuration_requests: vec![],
-            collection_contracts: vec![],
-            collection_requests: vec![crate::Request {
-                binding: "feed".into(),
-                contract: feed.clone(),
-                access: Some(crate::Access::Write),
-                necessity: crate::Necessity::Required,
-                resolution: crate::BindingResolution::Configured,
-                min_revision: None,
-            }],
-            contributions: vec![],
-            extra: BTreeMap::new(),
-        };
+        // The declaration of the guest component this test loads (`context_micro.rs`).
+        let consumer_manifest = crate::context_micro::manifest();
         let counter_package = counter_package().await;
         let consumer_package = super::component_package("context")
             .await

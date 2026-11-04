@@ -401,6 +401,72 @@ impl<K: serde::de::DeserializeOwned, V: serde::de::DeserializeOwned> Collection<
     }
 }
 
+/// Everything an incarnation is granted before its `activate` runs. The supervisor's
+/// [`factory`] derives it from the composition's resources and the micro's manifest; any other
+/// host of a native micro (the conformance run) derives it from its own grants and hands it to
+/// [`Self::activate`], which is the one place an in-process incarnation is assembled.
+pub(crate) struct Granted {
+    pub(crate) instance: Instance,
+    pub(crate) components: NativeComponents,
+    pub(crate) capabilities: CapabilitySession,
+    pub(crate) configs: BTreeMap<String, Config>,
+    pub(crate) requirements: BTreeMap<String, Option<Capability>>,
+    pub(crate) collections: BTreeMap<String, Option<CollectionSlot>>,
+    pub(crate) declared: BTreeMap<String, DeclaredPublication>,
+}
+
+impl Granted {
+    /// Run `activate` over the grants, then admit what it staged against the declarations.
+    pub(crate) async fn activate(
+        self,
+        activate: &dyn Fn(Context) -> LocalFuture<'static, Result<(), Error>>,
+    ) -> Result<Initialized<CapabilityPublication>, String> {
+        let Self {
+            instance,
+            components,
+            capabilities,
+            configs,
+            requirements,
+            collections,
+            declared,
+        } = self;
+        let activation = Rc::new(Activation {
+            instance,
+            components,
+            collections,
+            declared: declared.clone(),
+            capabilities,
+            published: RefCell::new(Some(Vec::new())),
+            tasks: Rc::default(),
+        });
+        let context = Context(Rc::new(Shared {
+            configs,
+            requirements,
+            backend: Backend::InProcess(Rc::clone(&activation)),
+        }));
+        activate(context)
+            .await
+            .map_err(|error| format!("activation refused: {error}"))?;
+        let published = activation
+            .published
+            .borrow_mut()
+            .take()
+            .expect("admission is the only taker of staged publications");
+        let leases = admit_publications(&declared, published)?;
+        let publications = leases
+            .iter()
+            .map(|(name, lease)| (name.clone(), lease.publication()))
+            .collect();
+        Ok(Initialized {
+            root: Box::new(NativeRoot {
+                leases,
+                tasks: Rc::clone(&activation.tasks),
+            }),
+            publications,
+        })
+    }
+}
+
 type Activate = Rc<dyn Fn(Context) -> LocalFuture<'static, Result<(), Error>>>;
 
 struct NativeFactory {
@@ -486,24 +552,7 @@ impl Factory<CapabilityPublication> for NativeFactory {
                 .into_iter()
                 .map(|(binding, document)| (binding, Config::in_process(document)))
                 .collect();
-            let requirements = manifest
-                .requires
-                .iter()
-                .map(|required| {
-                    let resolved = requirements
-                        .get(&required.binding)
-                        .map(|publication| {
-                            capabilities
-                                .mint(publication)
-                                .map(Capability::in_process)
-                                .map_err(|failure| {
-                                    format!("requirement {}: {failure:?}", required.binding)
-                                })
-                        })
-                        .transpose()?;
-                    Ok((required.binding.clone(), resolved))
-                })
-                .collect::<Result<_, String>>()?;
+            let requirements = resolve_requirements(&capabilities, &manifest, &requirements)?;
             // Grant every resolved collection request up front so the accessors cannot fail
             // mid-activation. A bound collection that is not declared is a configuration
             // fault, reported as a failed initialization like the guest engine's.
@@ -543,42 +592,44 @@ impl Factory<CapabilityPublication> for NativeFactory {
                     Ok((request.binding.clone(), slot))
                 })
                 .collect::<Result<_, String>>()?;
-            let activation = Rc::new(Activation {
+            Granted {
                 instance,
                 components: resources.components.clone(),
-                collections,
-                declared: declared.clone(),
                 capabilities,
-                published: RefCell::new(Some(Vec::new())),
-                tasks: Rc::default(),
-            });
-            let context = Context(Rc::new(Shared {
                 configs,
                 requirements,
-                backend: Backend::InProcess(Rc::clone(&activation)),
-            }));
-            activate(context)
-                .await
-                .map_err(|error| format!("activation refused: {error}"))?;
-            let published = activation
-                .published
-                .borrow_mut()
-                .take()
-                .expect("admission is the only taker of staged publications");
-            let leases = admit_publications(&declared, published)?;
-            let publications = leases
-                .iter()
-                .map(|(name, lease)| (name.clone(), lease.publication()))
-                .collect();
-            Ok(Initialized {
-                root: Box::new(NativeRoot {
-                    leases,
-                    tasks: Rc::clone(&activation.tasks),
-                }),
-                publications,
-            })
+                collections,
+                declared,
+            }
+            .activate(activate.as_ref())
+            .await
         })
     }
+}
+
+/// Mint the capability each of the manifest's requirements resolved to; an optional one nothing
+/// resolved is `None`.
+pub(crate) fn resolve_requirements(
+    capabilities: &CapabilitySession,
+    manifest: &MicroManifest,
+    resolved: &BTreeMap<String, CapabilityPublication>,
+) -> Result<BTreeMap<String, Option<Capability>>, String> {
+    manifest
+        .requires
+        .iter()
+        .map(|required| {
+            let minted = resolved
+                .get(&required.binding)
+                .map(|publication| {
+                    capabilities
+                        .mint(publication)
+                        .map(Capability::in_process)
+                        .map_err(|failure| format!("requirement {}: {failure:?}", required.binding))
+                })
+                .transpose()?;
+            Ok((required.binding.clone(), minted))
+        })
+        .collect()
 }
 
 /// Grant the configuration documents a manifest requests, keyed by binding (ADR 015 §7). The
@@ -641,6 +692,8 @@ pub(crate) fn routine_facets(
         .collect()
 }
 
+#[cfg(all(test, feature = "view"))]
+mod conformance_tests;
 #[cfg(test)]
 mod tests;
 

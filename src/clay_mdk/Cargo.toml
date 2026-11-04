@@ -53,6 +53,8 @@ clay_rt_wasmtime = { workspace = true, optional = true }
 ciborium.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The engine-conformance scenarios, which the in-process run (`native::conformance_tests`) joins.
+clay_guest_session = { workspace = true, features = ["test-utils"] }
 clay_surface = { workspace = true }
 insta.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
