@@ -2,6 +2,7 @@ use super::WcmpPackage;
 use super::WcmpRuntime;
 use super::tests::RecordingSink;
 use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
@@ -37,7 +38,7 @@ impl Wasmi {
 /// What the incarnation's store holds, with the call tasks the host still has in it.
 fn residue_of(state: &clay_rt_wcmp::test_utils::WcmpStoreState) -> GuestResidue {
     GuestResidue {
-        calls: state.calls_in_flight(),
+        calls: state.calls_in_flight().count(),
         ..GuestResidue::of(
             state.table.is_empty(),
             &state.capabilities,
@@ -79,6 +80,10 @@ impl Incarnations for Wasmi {
             return Err(format!("the guest rendered {rendered:?}"));
         }
         Ok(Box::new(session))
+    }
+
+    fn calls_in_flight(runtime: &WcmpRuntime) -> InFlightCalls {
+        clay_rt_wcmp::test_utils::inspect(runtime, |state| state.calls_in_flight().clone())
     }
 
     fn inspect(runtime: &WcmpRuntime) -> GuestResidue {

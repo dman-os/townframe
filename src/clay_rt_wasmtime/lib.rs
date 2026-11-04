@@ -21,6 +21,7 @@ use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::GuestCall;
 use clay_guest_session::capabilities::InFlightCall;
+use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
@@ -52,7 +53,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
@@ -702,7 +702,7 @@ impl WasmPackage {
                 waker,
                 root: None,
                 publications: BTreeMap::new(),
-                calls_in_flight: Arc::new(AtomicUsize::new(0)),
+                calls_in_flight: InFlightCalls::default(),
             },
             incoming,
             incoming_calls,
@@ -723,7 +723,7 @@ struct WasmIncarnation {
     publications: BTreeMap<String, PublishedCapability>,
     /// How many [`GuestCallTask`]s are in the store: calls whose handler has not returned,
     /// including those whose caller already gave up.
-    calls_in_flight: Arc<AtomicUsize>,
+    calls_in_flight: InFlightCalls,
 }
 
 impl WasmIncarnation {
@@ -767,7 +767,7 @@ impl WasmIncarnation {
             publication,
             request,
             reply,
-            _in_flight: InFlightCall::start(&self.calls_in_flight),
+            _in_flight: self.calls_in_flight.start(),
         })?;
         Ok(())
     }

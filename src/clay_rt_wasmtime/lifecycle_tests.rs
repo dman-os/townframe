@@ -1,5 +1,6 @@
 use super::tests::RecordingSink;
 use super::*;
+use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
@@ -30,7 +31,7 @@ impl Wasmtime {
 fn residue_of(active: &WasmIncarnation) -> GuestResidue {
     let state = active.store.data();
     GuestResidue {
-        calls: active.calls_in_flight.load(Ordering::Acquire),
+        calls: active.calls_in_flight.count(),
         ..GuestResidue::of(
             state.table.is_empty(),
             &state.capabilities,
@@ -71,6 +72,11 @@ impl Incarnations for Wasmtime {
             return Err(format!("the guest rendered {rendered:?}"));
         }
         Ok(Box::new(session))
+    }
+
+    fn calls_in_flight(runtime: &WasmRuntime) -> InFlightCalls {
+        let active = runtime.incarnation.lock().unwrap();
+        active.as_ref().unwrap().calls_in_flight.clone()
     }
 
     fn inspect(runtime: &WasmRuntime) -> GuestResidue {

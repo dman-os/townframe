@@ -3,11 +3,11 @@ use clay_collection::Stamped;
 use clay_dioxus::NativeComponents;
 use clay_guest_session::capabilities::RowAttachment;
 use clay_host::StartError;
+use clay_mdk::host::factory;
 use clay_mdk::Capability;
 use clay_mdk::Error;
-use clay_mdk::host::factory;
-use micro_settings_manifest::SECTIONS;
 use micro_settings_manifest::Section;
+use micro_settings_manifest::SECTIONS;
 use std::cell::RefCell;
 use std::future::Future;
 
@@ -140,10 +140,16 @@ async fn memory_runtime(counter: InstalledMicro) -> CompositionRuntime {
         .expect("a memory store does not fail")
 }
 
-async fn settle(done: impl Fn() -> bool) {
-    while !done() {
-        tokio::task::yield_now().await;
-    }
+/// Wait until `done` holds, woken by the supervisor's change ticks: every state `done` reads
+/// is a micro's recorded state, which ticks after the mirror it reads was updated. The receiver
+/// is taken before the first check, so a change between the two cannot be missed.
+async fn settle(runtime: &CompositionRuntime, done: impl Fn() -> bool) {
+    runtime
+        .supervisor
+        .changes()
+        .wait_for(|_| done())
+        .await
+        .unwrap();
 }
 
 /// Serve `runtime` beside `scenario`, then shut it down in order. The scenario runs in its own
@@ -199,13 +205,11 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         [RowAttachment::Endpoint(endpoint)] if endpoint.micro == supervised(COUNTER) && endpoint.publication == "view"
     ));
     // The sample writes its row at runtime, so nothing exists for it yet.
-    assert!(
-        runtime
-            .collection(&sections())
-            .unwrap()
-            .get(&cbor_key(micro_sample::ID))
-            .is_none()
-    );
+    assert!(runtime
+        .collection(&sections())
+        .unwrap()
+        .get(&cbor_key(micro_sample::ID))
+        .is_none());
     runtime.host.close();
 }
 
@@ -213,7 +217,7 @@ async fn manifest_rows_are_installed_before_anything_runs() {
 async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
     let runtime = memory_runtime(stub_counter()).await;
     served(&runtime, async {
-        settle(|| {
+        settle(&runtime, || {
             runtime.state(&id("dayframe.settings")) == MicroState::Active
                 && runtime.state(&id(micro_sample::ID)) == MicroState::Active
         })
@@ -247,7 +251,7 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
             .unwrap();
         assert_eq!(runtime.state(&id(COUNTER)), MicroState::Active);
         drop(detail);
-        settle(|| runtime.state(&id(COUNTER)) == MicroState::Idle).await;
+        settle(&runtime, || runtime.state(&id(COUNTER)) == MicroState::Idle).await;
         // The runtime-written sample row is bound, so it needs no activation to mount.
         let sample = rows.iter().find(|row| row.key == micro_sample::ID).unwrap();
         assert!(sample.attachments[0].redeem_presentation().await.is_ok());
@@ -584,14 +588,14 @@ async fn the_install_datum_drives_the_supervisor() {
     .await;
     served(&runtime, async {
         let sample = id(micro_sample::ID);
-        settle(|| runtime.state(&sample) == MicroState::Active).await;
+        settle(&runtime, || runtime.state(&sample) == MicroState::Active).await;
         assert_eq!(runtime.state(&id(COUNTER)), MicroState::Disabled);
         runtime.set_enabled(&sample, false).await;
-        settle(|| runtime.state(&sample) == MicroState::Disabled).await;
+        settle(&runtime, || runtime.state(&sample) == MicroState::Disabled).await;
         runtime.set_enabled(&sample, true).await;
-        settle(|| runtime.state(&sample) == MicroState::Idle).await;
+        settle(&runtime, || runtime.state(&sample) == MicroState::Idle).await;
         runtime.set_enabled(&id(COUNTER), true).await;
-        settle(|| runtime.state(&id(COUNTER)) == MicroState::Idle).await;
+        settle(&runtime, || runtime.state(&id(COUNTER)) == MicroState::Idle).await;
         assert_eq!(
             install_datum_of(&runtime, COUNTER).unwrap()["enabled"],
             true
@@ -613,9 +617,9 @@ async fn a_disabled_micro_stays_disabled_across_a_reboot() {
     let first = boot().await;
     let sample = id(micro_sample::ID);
     served(&first, async {
-        settle(|| first.state(&sample) == MicroState::Active).await;
+        settle(&first, || first.state(&sample) == MicroState::Active).await;
         first.set_enabled(&sample, false).await;
-        settle(|| first.state(&sample) == MicroState::Disabled).await;
+        settle(&first, || first.state(&sample) == MicroState::Disabled).await;
     })
     .await;
 
@@ -737,10 +741,7 @@ async fn probe_runtime(
 
 /// Wait for the supervisor to record `state` for `micro`, woken by its change ticks.
 async fn reaches(runtime: &CompositionRuntime, micro: &MicroId, state: MicroState) {
-    let mut changes = runtime.supervisor.changes();
-    while runtime.state(micro) != state {
-        changes.changed().await.unwrap();
-    }
+    settle(runtime, || runtime.state(micro) == state).await;
 }
 
 async fn activations(seen: &mut watch::Receiver<Vec<bool>>, count: usize) -> Vec<bool> {
@@ -1209,7 +1210,7 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
         assert_eq!(activations.get(), 1);
         // Nothing holds the counter once the call returned, so idle shutdown follows, and the
         // increment outlives the incarnation that made it.
-        settle(|| runtime.state(&id(COUNTER)) == MicroState::Idle).await;
+        settle(&runtime, || runtime.state(&id(COUNTER)) == MicroState::Idle).await;
         assert_eq!(
             call_publication::<(), u64>(&runtime, COUNTER, micro_counter_manifest::COUNT, &())
                 .await,
@@ -1466,7 +1467,7 @@ async fn the_editor_calls_only_the_providers_whose_trigger_matches() {
 
         // Both providers' calls ended, so both go idle before the focus scenario starts.
         for provider in ["tests.alpha", "tests.beta"] {
-            settle(|| runtime.state(&id(provider)) == MicroState::Idle).await;
+            settle(runtime, || runtime.state(&id(provider)) == MicroState::Idle).await;
         }
 
         // Focus: the editor retains the matching provider's call, which starts it once and
@@ -1496,7 +1497,10 @@ async fn the_editor_calls_only_the_providers_whose_trigger_matches() {
         // Blur drops the bindings, so the provider goes idle and the next completion starts it
         // again.
         call_publication::<_, ()>(runtime, "tests.editor", "blur", &()).await;
-        settle(|| runtime.state(&id("tests.alpha")) == MicroState::Idle).await;
+        settle(runtime, || {
+            runtime.state(&id("tests.alpha")) == MicroState::Idle
+        })
+        .await;
         assert_eq!(complete(runtime, "a.again").await, ["alpha:a.again"]);
         assert_eq!(
             (alpha_served.activations.get(), alpha_served.calls.get()),
