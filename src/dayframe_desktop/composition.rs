@@ -20,32 +20,28 @@ fn native_micros() -> Vec<InstalledMicro> {
         InstalledMicro {
             eager: true,
             locked: true,
-            ..InstalledMicro::new(
-                micro_settings_manifest::manifest(),
-                |resources, bindings| {
-                    factory(
-                        resources,
-                        micro_settings_manifest::manifest(),
-                        bindings,
-                        micro_settings::activate,
-                    )
-                },
-            )
+            ..InstalledMicro::new(micro_settings_manifest::sidecar(), |resources, bindings| {
+                factory(
+                    resources,
+                    clay_mdk::MicroId::new(micro_settings_manifest::ID),
+                    micro_settings_manifest::manifest(),
+                    bindings,
+                    micro_settings::activate,
+                )
+            })
         },
         InstalledMicro {
             eager: true,
             enabled_on_admission: true,
-            ..InstalledMicro::new(
-                micro_sample::manifest(),
-                |resources, bindings| {
-                    factory(
-                        resources,
-                        micro_sample::manifest(),
-                        bindings,
-                        micro_sample::activate,
-                    )
-                },
-            )
+            ..InstalledMicro::new(micro_sample::sidecar(), |resources, bindings| {
+                factory(
+                    resources,
+                    clay_mdk::MicroId::new(micro_sample::ID),
+                    micro_sample::manifest(),
+                    bindings,
+                    micro_sample::activate,
+                )
+            })
         },
     ]
 }
@@ -144,13 +140,15 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
         });
         match package {
             Ok(package) => {
-                let manifest = package.manifest().clone();
+                let sidecar = package.sidecar().clone();
                 let bytes = package.bytes().to_vec();
                 installed.push(InstalledMicro::new(
-                    manifest.clone(),
+                    sidecar.clone(),
                     move |resources, bindings| {
-                        clay_mdk::host::wasm_factory(resources,
-                            manifest,
+                        clay_mdk::host::wasm_factory(
+                            resources,
+                            sidecar.id,
+                            sidecar.manifest,
                             bindings,
                             move || {
                                 let bytes = bytes.clone();

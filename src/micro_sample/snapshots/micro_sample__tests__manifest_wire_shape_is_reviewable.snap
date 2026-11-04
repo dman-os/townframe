@@ -1,10 +1,10 @@
 ---
 source: src/micro_sample/tests.rs
-expression: manifest()
+expression: sidecar()
 ---
-schema: 1
 id: dayframe.sample
 package_version: 1
+authority: org.example.dayframe.sample
 entrypoints:
   initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
   presentation: "townframe:dayframe/presentation-events@0.4.0"
@@ -17,8 +17,7 @@ requires: []
 configuration_requests:
   - binding: sample
     facets:
-      - owner_plug_id: ~
-        tag: org.dayframe.sample.config
+      - tag: org.example.dayframe.sample.config
         key_id: main
         read: true
         write: true
@@ -27,7 +26,7 @@ configuration_requests:
 collection_contracts: []
 collection_requests:
   - binding: sections
-    contract: settings.sections
+    contract: org.example.dayframe.settings.sections
     access: write
     necessity: required
     resolution: configured

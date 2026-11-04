@@ -3,14 +3,18 @@ use clay_collection::Stamped;
 use clay_dioxus::NativeComponents;
 use clay_guest_session::capabilities::RowAttachment;
 use clay_host::StartError;
-use clay_mdk::host::factory;
 use clay_mdk::Capability;
 use clay_mdk::Error;
-use micro_settings_manifest::Section;
+use clay_mdk::host::factory;
 use micro_settings_manifest::SECTIONS;
+use micro_settings_manifest::Section;
 use std::future::Future;
 
 const COUNTER: &str = micro_counter_manifest::ID;
+
+fn sections() -> Nsid {
+    Nsid::literal(SECTIONS)
+}
 
 fn id(micro: &str) -> MicroId {
     MicroId::new(micro)
@@ -28,24 +32,23 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
     let settings = InstalledMicro {
         eager: true,
         locked: true,
-        ..InstalledMicro::new(
-            micro_settings_manifest::manifest(),
-            |resources, bindings| {
-                factory(
-                    resources,
-                    micro_settings_manifest::manifest(),
-                    bindings,
-                    micro_settings::activate,
-                )
-            },
-        )
+        ..InstalledMicro::new(micro_settings_manifest::sidecar(), |resources, bindings| {
+            factory(
+                resources,
+                clay_mdk::MicroId::new(micro_settings_manifest::ID),
+                micro_settings_manifest::manifest(),
+                bindings,
+                micro_settings::activate,
+            )
+        })
     };
     let sample = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
-        ..InstalledMicro::new(micro_sample::manifest(), |resources, bindings| {
+        ..InstalledMicro::new(micro_sample::sidecar(), |resources, bindings| {
             factory(
                 resources,
+                clay_mdk::MicroId::new(micro_sample::ID),
                 micro_sample::manifest(),
                 bindings,
                 micro_sample::activate,
@@ -59,9 +62,10 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
 fn stub_counter() -> InstalledMicro {
     InstalledMicro {
         enabled_on_admission: true,
-        ..InstalledMicro::new(micro_counter_manifest::manifest(), |resources, bindings| {
+        ..InstalledMicro::new(micro_counter_manifest::sidecar(), |resources, bindings| {
             factory(
                 resources,
+                clay_mdk::MicroId::new(COUNTER),
                 micro_counter_manifest::manifest(),
                 bindings,
                 |context| async move {
@@ -99,7 +103,7 @@ fn unfetchable_counter(attempts: Rc<std::cell::Cell<usize>>) -> InstalledMicro {
     InstalledMicro {
         enabled_on_admission: true,
         ..InstalledMicro::new(
-            micro_counter_manifest::manifest(),
+            micro_counter_manifest::sidecar(),
             move |_resources, _bindings| {
                 Rc::new(Unfetchable {
                     attempts: Rc::clone(&attempts),
@@ -150,7 +154,7 @@ fn section_refs(
         &runtime.host,
         &runtime.shell,
         runtime.supervisor.activator(),
-        &runtime.collection(SECTIONS).unwrap(),
+        &runtime.collection(&sections()).unwrap(),
     )
     .unwrap()
 }
@@ -163,7 +167,7 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         assert_eq!(runtime.state(micro), MicroState::Idle, "{micro}");
     }
     let Stamped { value, .. } = runtime
-        .collection(SECTIONS)
+        .collection(&sections())
         .unwrap()
         .get(&cbor_key(COUNTER))
         .unwrap();
@@ -175,11 +179,13 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         [RowAttachment::Endpoint(endpoint)] if endpoint.micro == id(COUNTER) && endpoint.publication == "view"
     ));
     // The sample writes its row at runtime, so nothing exists for it yet.
-    assert!(runtime
-        .collection(SECTIONS)
-        .unwrap()
-        .get(&cbor_key(micro_sample::ID))
-        .is_none());
+    assert!(
+        runtime
+            .collection(&sections())
+            .unwrap()
+            .get(&cbor_key(micro_sample::ID))
+            .is_none()
+    );
     runtime.host.close();
 }
 
@@ -294,16 +300,49 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
     .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn a_manifest_contributing_to_an_undeclared_collection_is_an_installation_error() {
-    let mut manifest = micro_counter_manifest::manifest();
-    manifest.contributions[0].collection = "nobody.declared.this".into();
-    let counter = InstalledMicro::new(manifest, |_resources, _bindings| {
+/// A package the admission gate refuses is dropped whole with one installation error naming
+/// the defect: nothing it declares reaches the registry and nothing of it is configured.
+async fn refused(mutate: impl FnOnce(&mut clay_mdk::Sidecar)) -> (CompositionRuntime, String) {
+    let mut sidecar = micro_counter_manifest::sidecar();
+    mutate(&mut sidecar);
+    let counter = InstalledMicro::new(sidecar, |_resources, _bindings| {
         Rc::new(Unfetchable::default())
     });
     let runtime = memory_runtime(counter).await;
     assert_eq!(runtime.installation_errors.len(), 1);
-    assert!(runtime.installation_errors[0].contains("nobody.declared.this"));
+    let error = runtime.installation_errors[0].clone();
+    assert!(!runtime.micros().contains(&id(COUNTER)));
+    (runtime, error)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_contribution_naming_an_unknown_binding_is_an_installation_error() {
+    let (runtime, error) = refused(|sidecar| {
+        sidecar.manifest.contributions[0].binding = "nobody.declared.this".into()
+    })
+    .await;
+    assert!(error.contains("undeclared collection binding"), "{error}");
+    runtime.host.close();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_contribution_through_a_read_only_binding_is_an_installation_error() {
+    let (runtime, error) = refused(|sidecar| {
+        sidecar.manifest.collection_requests[0].access = Some(clay_mdk::Access::Read)
+    })
+    .await;
+    assert!(error.contains("does not request write access"), "{error}");
+    runtime.host.close();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_declaration_outside_the_packages_authority_is_an_installation_error() {
+    let (runtime, error) = refused(|sidecar| {
+        sidecar.manifest.publications[2].contract =
+            Some(Nsid::literal("org.example.dayframe.settings.hijack"))
+    })
+    .await;
+    assert!(error.contains("outside the package's authority"), "{error}");
     runtime.host.close();
 }
 
@@ -328,11 +367,11 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
             ))
             .await
             .unwrap();
-            let mut manifest = micro_counter_manifest::manifest();
-            manifest.contributions[0].payload["title"] = title.into();
+            let mut sidecar = micro_counter_manifest::sidecar();
+            sidecar.manifest.contributions[0].payload["title"] = title.into();
             let runtime = CompositionRuntime::new(
                 Arc::new(store),
-                catalog(InstalledMicro::new(manifest, |_resources, _bindings| {
+                catalog(InstalledMicro::new(sidecar, |_resources, _bindings| {
                     Rc::new(Unfetchable::default())
                 })),
             )
@@ -340,7 +379,7 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
             .unwrap();
             assert!(runtime.installation_errors.is_empty());
             let row = runtime
-                .collection(SECTIONS)
+                .collection(&sections())
                 .unwrap()
                 .get(&cbor_key(COUNTER))
                 .expect("the manifest row is installed at boot");
@@ -378,7 +417,7 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
         CompositionRuntime::new(
             Arc::clone(&store),
             catalog(InstalledMicro::new(
-                micro_counter_manifest::manifest(),
+                micro_counter_manifest::sidecar(),
                 |_, _| Rc::new(Unfetchable::default()),
             )),
         )
@@ -443,11 +482,11 @@ fn install_datum_of(runtime: &CompositionRuntime, micro: &str) -> Option<serde_j
 #[tokio::test(flavor = "current_thread")]
 async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
     let package = InstalledMicro::new(
-        micro_counter_manifest::manifest(),
+        micro_counter_manifest::sidecar(),
         |_resources, _bindings| Rc::new(Unfetchable::default()),
     );
     let runtime = memory_runtime(package).await;
-    let version = micro_counter_manifest::manifest().package_version;
+    let version = micro_counter_manifest::PACKAGE_VERSION;
     assert_eq!(
         install_datum_of(&runtime, COUNTER),
         Some(serde_json::json!({ "enabled": false, "package_version": version }))
@@ -468,7 +507,7 @@ async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
 #[tokio::test(flavor = "current_thread")]
 async fn the_install_datum_drives_the_supervisor() {
     let runtime = memory_runtime(InstalledMicro::new(
-        micro_counter_manifest::manifest(),
+        micro_counter_manifest::sidecar(),
         |_resources, _bindings| Rc::new(Unfetchable::default()),
     ))
     .await;
@@ -522,54 +561,58 @@ async fn a_disabled_micro_stays_disabled_across_a_reboot() {
 
 // ── collection binding resolution (ADR 031 §11) ──────────────────────────────────────────────
 
-const ROWS: &str = "tests.rows";
-const MISSING: &str = "tests.missing";
+const ROWS: &str = "org.example.test.rows";
+const MISSING: &str = "org.example.test.missing";
 const BOOK: &str = "book";
 const PROBE: &str = "tests.probe";
 
-fn probe_manifest(
+/// A test package holding the `org.example.test` authority, which every contract the probes
+/// declare lies under.
+fn probe_sidecar(
     micro: &str,
     contracts: &[&str],
-    requests: Vec<clay_mdk::CollectionRequest>,
-) -> clay_mdk::MicroManifest {
-    clay_mdk::MicroManifest {
-        schema: clay_mdk::MANIFEST_SCHEMA,
-        id: clay_mdk::MicroId::new(micro),
-        package_version: 1,
-        entrypoints: clay_mdk::Entrypoints::micro_client(),
-        publications: vec![],
-        requires: vec![],
-        configuration_requests: vec![],
-        collection_contracts: contracts
-            .iter()
-            .map(|contract| clay_mdk::CollectionContract {
-                id: (*contract).into(),
-                selector_schema: "dayframe.collection.whole".into(),
-                key_schema: "text".into(),
-                value_schema: "text".into(),
-                write_context_schema: None,
-                offered: vec![clay_mdk::CollectionCapability::Read],
-            })
-            .collect(),
-        collection_requests: requests,
-        contributions: vec![],
-        extra: BTreeMap::new(),
-    }
+    requests: Vec<clay_mdk::Request>,
+) -> clay_mdk::Sidecar {
+    clay_mdk::Sidecar::new(
+        micro,
+        1,
+        clay_mdk::MicroManifest {
+            entrypoints: clay_mdk::Entrypoints::micro_client(),
+            publications: vec![],
+            requires: vec![],
+            configuration_requests: vec![],
+            collection_contracts: contracts
+                .iter()
+                .map(|contract| clay_mdk::CollectionContract {
+                    id: Nsid::literal(contract),
+                    selector_schema: Nsid::literal("org.example.test.selector"),
+                    key_schema: Nsid::literal("org.example.test.key"),
+                    value_schema: Nsid::literal("org.example.test.value"),
+                    write_context_schema: None,
+                    offered: vec![clay_mdk::CollectionCapability::Read],
+                })
+                .collect(),
+            collection_requests: requests,
+            contributions: vec![],
+            extra: BTreeMap::new(),
+        },
+    )
+    .with_authority("org.example.test")
 }
 
 /// Declares the `tests.rows` collection and nothing else.
 fn rows_owner() -> InstalledMicro {
-    InstalledMicro::new(
-        probe_manifest("tests.owner", &[ROWS], vec![]),
-        |resources, bindings| {
-            factory(
-                resources,
-                probe_manifest("tests.owner", &[ROWS], vec![]),
-                bindings,
-                |_| async { Ok(()) },
-            )
-        },
-    )
+    let sidecar = probe_sidecar("tests.owner", &[ROWS], vec![]);
+    let manifest = sidecar.manifest.clone();
+    InstalledMicro::new(sidecar, |resources, bindings| {
+        factory(
+            resources,
+            clay_mdk::MicroId::new("tests.owner"),
+            manifest,
+            bindings,
+            |_| async { Ok(()) },
+        )
+    })
 }
 
 /// An eager micro requesting `BOOK` of `contract`; each activation reports whether the binding
@@ -578,27 +621,35 @@ fn probe(
     contract: &str,
     necessity: clay_mdk::Necessity,
 ) -> (InstalledMicro, watch::Receiver<Vec<bool>>) {
-    let manifest = probe_manifest(
+    let sidecar = probe_sidecar(
         PROBE,
         &[],
-        vec![clay_mdk::CollectionRequest {
+        vec![clay_mdk::Request {
             binding: BOOK.into(),
-            contract: contract.into(),
-            access: clay_mdk::CollectionAccess::Read,
+            contract: Nsid::literal(contract),
+            access: Some(clay_mdk::Access::Read),
             necessity,
             resolution: clay_mdk::BindingResolution::Configured,
+            min_revision: None,
         }],
     );
+    let manifest = sidecar.manifest.clone();
     let (activations, seen) = watch::channel(Vec::new());
     let micro = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
-        ..InstalledMicro::new(manifest.clone(), move |resources, bindings| {
-            factory(resources, manifest, bindings, move |context| {
-                let bound = context.collection::<String, String>(BOOK).is_some();
-                activations.send_modify(|seen| seen.push(bound));
-                async { Ok(()) }
-            })
+        ..InstalledMicro::new(sidecar, move |resources, bindings| {
+            factory(
+                resources,
+                clay_mdk::MicroId::new(PROBE),
+                manifest,
+                bindings,
+                move |context| {
+                    let bound = context.collection::<String, String>(BOOK).is_some();
+                    activations.send_modify(|seen| seen.push(bound));
+                    async { Ok(()) }
+                },
+            )
         })
     };
     (micro, seen)

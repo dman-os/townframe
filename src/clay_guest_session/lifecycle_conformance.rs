@@ -57,13 +57,14 @@ use crate::capabilities::CapabilityLimits;
 use crate::capabilities::CapabilityPublication;
 use crate::capabilities::CapabilityRef;
 use crate::capabilities::CapabilitySession;
-use crate::capabilities::ContractIdentity;
 use crate::capabilities::DeclaredPublication;
 use crate::capabilities::PublicationEndpoint;
 use crate::capabilities::PublicationKind;
 use crate::capabilities::PublishedCapability;
 use crate::capabilities::RefStatus;
 use crate::capabilities::RowAttachment;
+use crate::capabilities::presentation_component;
+use clay_collection::Nsid;
 
 /// The manifest's names (`provides[].id`) for the fixture's two publications: a presentation
 /// and an `echo` call whose handler answers `echo:` plus the request.
@@ -73,12 +74,12 @@ const ECHO: &str = "echo";
 /// `relay:` plus the peer's answer; the request `trap` traps the guest.
 const RELAY: &str = "relay";
 
-fn echo_contract() -> ContractIdentity {
-    ContractIdentity::new("dayframe.lifecycle", ECHO, (1, 0, 0))
+fn echo_contract() -> Nsid {
+    Nsid::literal("org.example.clay.test.lifecycle.echo")
 }
 
-fn relay_contract() -> ContractIdentity {
-    ContractIdentity::new("dayframe.lifecycle", RELAY, (1, 0, 0))
+fn relay_contract() -> Nsid {
+    Nsid::literal("org.example.clay.test.lifecycle.relay")
 }
 
 /// What the fixture's manifest declares it publishes (the manifest vocabulary has no kind yet,
@@ -89,7 +90,7 @@ fn declared_publications() -> BTreeMap<String, DeclaredPublication> {
             PUBLICATION.to_owned(),
             DeclaredPublication {
                 kind: PublicationKind::Presentation,
-                contract: ContractIdentity::presentation_component(),
+                contract: presentation_component(),
             },
         ),
         (
@@ -273,11 +274,11 @@ pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine
     let harness = Harness::new(engine);
     let supervisor = harness.supervisor("provider");
     let provider_id = MicroId::new("provider");
-    let lazy = |publication: &str, contract: ContractIdentity| {
+    let lazy = |publication: &str, contract: Nsid| {
         harness.lazy_ref(&supervisor, provider_id.as_str(), publication, contract)
     };
     let echo = lazy(ECHO, echo_contract());
-    let view = lazy(PUBLICATION, ContractIdentity::presentation_component());
+    let view = lazy(PUBLICATION, presentation_component());
     let closed = |closes: usize| {
         let mut expected = Vec::new();
         for _ in 0..closes {
@@ -365,7 +366,7 @@ pub async fn undeclared_publications_fail_initialization<E: Incarnations>(engine
     wrong_kind.get_mut(ECHO).unwrap().kind = PublicationKind::Presentation;
     let mut wrong_contract = declared.clone();
     wrong_contract.get_mut(ECHO).unwrap().contract =
-        ContractIdentity::new("dayframe.lifecycle", ECHO, (2, 0, 0));
+        Nsid::literal("org.example.clay.test.lifecycle.echoV2");
     let mut undeclared = declared;
     undeclared.remove(ECHO);
     for (publications, refusal) in [
@@ -1115,7 +1116,7 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
     .unwrap();
     let instance = host.create("context").unwrap();
     host.begin_initialization(&instance).unwrap();
-    let rows_contract = ContractIdentity::new("dayframe.context", "rows", (1, 0, 0));
+    let rows_contract = Nsid::literal("org.example.clay.test.context.rows");
     // The guest's mirror mints a reference for each attachment of the rows it sees, its own
     // late row's endpoint included, and a lazy reference needs the supervisor's demand handle.
     // No micro is configured, so nothing can be activated through it.
@@ -1145,18 +1146,14 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
                         "attach".to_owned(),
                         DeclaredPublication {
                             kind: PublicationKind::Call,
-                            contract: ContractIdentity::new(
-                                "dayframe.context",
-                                "attach",
-                                (1, 0, 0),
-                            ),
+                            contract: Nsid::literal("org.example.clay.test.context.attach"),
                         },
                     ),
                     (
                         "detail".to_owned(),
                         DeclaredPublication {
                             kind: PublicationKind::Presentation,
-                            contract: ContractIdentity::presentation_component(),
+                            contract: presentation_component(),
                         },
                     ),
                 ]),
@@ -1254,7 +1251,7 @@ async fn attach_own_publication(attach: &CapabilityRef, registrations: &BytesReg
         [RowAttachment::Endpoint(PublicationEndpoint {
             micro: MicroId::new("context"),
             publication: "detail".into(),
-            contract: ContractIdentity::presentation_component(),
+            contract: presentation_component(),
         })]
     );
     assert!(matches!(
@@ -1410,7 +1407,7 @@ impl<E: Incarnations> Harness<E> {
         supervisor: &Supervisor<CapabilityPublication>,
         micro: &str,
         publication: &str,
-        contract: ContractIdentity,
+        contract: Nsid,
     ) -> CapabilityRef {
         // The observer's instance, with this scenario's supervisor behind its lazy references.
         let session = CapabilitySession::new(
@@ -1435,7 +1432,7 @@ impl<E: Incarnations> Harness<E> {
             .observer
             .publish_call(
                 "peer",
-                ContractIdentity::new("dayframe.lifecycle", "peer", (1, 0, 0)),
+                Nsid::literal("org.example.clay.test.lifecycle.peer"),
                 target,
             )
             .unwrap()

@@ -372,11 +372,7 @@ fn endpoint_row() -> CollectionValue {
         attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
             micro: MicroId::new("counter"),
             publication: "settings-view".to_owned(),
-            contract: ContractIdentity::new(
-                "townframe:dayframe",
-                "presentation-component",
-                (0, 4, 0),
-            ),
+            contract: crate::capabilities::presentation_component(),
         })],
     }
 }

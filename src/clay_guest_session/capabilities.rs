@@ -11,6 +11,7 @@
 //! duration of one `call`, and for the lifetime of a retained [`CallBinding`] or
 //! [`PresentationComponent`]. Requests and responses are opaque bytes (CBOR by convention).
 
+use clay_collection::Nsid;
 use clay_host::AccessError;
 use clay_host::Activator;
 use clay_host::ComponentRef;
@@ -33,33 +34,14 @@ use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-/// A publication's contract (ADR 031 §5). Owned because contracts arrive from manifests at
-/// runtime; for a Call it names the request and response Lexicons. Every Presentation
-/// publication has the one [`ContractIdentity::presentation_component`] contract, and a Call
-/// can never have it, so a contract alone tells a redeemer which kind to expect.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractIdentity {
-    pub namespace: String,
-    pub name: String,
-    pub version: (u32, u32, u32),
-}
-
-impl ContractIdentity {
-    pub fn new(
-        namespace: impl Into<String>,
-        name: impl Into<String>,
-        version: (u32, u32, u32),
-    ) -> Self {
-        Self {
-            namespace: namespace.into(),
-            name: name.into(),
-            version,
-        }
-    }
-
-    pub fn presentation_component() -> Self {
-        Self::new("townframe:dayframe", "presentation-component", (0, 4, 0))
-    }
+/// The one contract every Presentation publication has (ADR 031 §5): the shared
+/// presentation-component contract the runtime itself defines. A Call can never have it, so a
+/// contract alone tells a redeemer which kind to expect.
+pub fn presentation_component() -> Nsid {
+    static CONTRACT: OnceLock<Nsid> = OnceLock::new();
+    CONTRACT
+        .get_or_init(|| Nsid::literal("org.example.clay.presentationComponent"))
+        .clone()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,7 +168,7 @@ impl Drop for InFlightCall {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredPublication {
     pub kind: PublicationKind,
-    pub contract: ContractIdentity,
+    pub contract: Nsid,
 }
 
 /// Check what an incarnation's `initialize` returned against what its manifest declares, and
@@ -232,7 +214,7 @@ pub fn admit_publications(
 pub struct PublicationEndpoint {
     pub micro: MicroId,
     pub publication: String,
-    pub contract: ContractIdentity,
+    pub contract: Nsid,
 }
 
 /// What one collection-value attachment slot holds. A bound attachment names a live
@@ -271,7 +253,7 @@ enum Behavior {
 struct PublicationInner {
     id: u64,
     name: String,
-    contract: ContractIdentity,
+    contract: Nsid,
     behavior: Behavior,
     host: Host,
     /// The publishing incarnation. Until it commits initialization the publication is staged
@@ -334,7 +316,7 @@ impl CapabilityPublication {
     pub fn id(&self) -> u64 {
         self.inner.id
     }
-    pub fn contract(&self) -> &ContractIdentity {
+    pub fn contract(&self) -> &Nsid {
         &self.inner.contract
     }
     pub fn name(&self) -> &str {
@@ -537,7 +519,7 @@ impl CapabilitySession {
     ) -> Result<PublishedCapability, CapabilityFailure> {
         self.publish(
             name,
-            ContractIdentity::presentation_component(),
+            presentation_component(),
             Behavior::Presentation(component),
         )
     }
@@ -547,10 +529,10 @@ impl CapabilitySession {
     pub fn publish_call(
         &self,
         name: &str,
-        contract: ContractIdentity,
+        contract: Nsid,
         target: Arc<dyn CallTarget>,
     ) -> Result<PublishedCapability, CapabilityFailure> {
-        if contract == ContractIdentity::presentation_component() {
+        if contract == presentation_component() {
             return Err(CapabilityFailure::ContractMismatch);
         }
         self.publish(name, contract, Behavior::Call(target))
@@ -559,7 +541,7 @@ impl CapabilitySession {
     fn publish(
         &self,
         name: &str,
-        contract: ContractIdentity,
+        contract: Nsid,
         behavior: Behavior,
     ) -> Result<PublishedCapability, CapabilityFailure> {
         self.state.check()?;
@@ -767,7 +749,7 @@ impl CapabilityRef {
             }
             Target::Bound(publication) => Ok((publication.clone(), None)),
             Target::Lazy(endpoint, _)
-                if (endpoint.contract == ContractIdentity::presentation_component())
+                if (endpoint.contract == presentation_component())
                     != (kind == PublicationKind::Presentation) =>
             {
                 Err(CapabilityFailure::ContractMismatch)

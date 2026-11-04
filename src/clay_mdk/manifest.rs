@@ -11,13 +11,17 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+pub use clay_collection::Nsid;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Version of the manifest vocabulary itself, written into [`MicroManifest::schema`].
-pub const MANIFEST_SCHEMA: u32 = 1;
+/// The NSID of the manifest format (ADR 028 §4): the `schema` of a plug's micro contribution
+/// (`org.example.daybook.plug.micro`). A manifest carries no version of its own: a breaking
+/// change to the format is a new NSID.
+pub const MANIFEST_NSID: &str = "org.example.clay.micro.manifest";
 
-/// Stable provider identity used by configuration and composition persistence.
+/// Stable provider identity used by configuration and composition persistence. Owned by the
+/// package envelope, not by the manifest (see [`Sidecar`]).
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MicroId(String);
@@ -29,30 +33,6 @@ impl MicroId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-/// A contract a publication serves or a requirement consumes: for a Call, the request and
-/// response Lexicons. This is the manifest's wire vocabulary; the in-process backend converts
-/// it field for field into the capability bank's contract when it admits publications.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub struct ContractIdentity {
-    pub namespace: String,
-    pub name: String,
-    pub version: (u32, u32, u32),
-}
-
-impl ContractIdentity {
-    pub fn new(
-        namespace: impl Into<String>,
-        name: impl Into<String>,
-        version: (u32, u32, u32),
-    ) -> Self {
-        Self {
-            namespace: namespace.into(),
-            name: name.into(),
-            version,
-        }
     }
 }
 
@@ -151,22 +131,23 @@ open_vocabulary! {
 }
 
 open_vocabulary! {
-    /// What a micro asks to do with a collection bound to a [`CollectionRequest`]. Writing
-    /// implies reading, so there is no separate write-only access.
-    CollectionAccess {
+    /// What a micro asks to do with the data a [`Request`] binds: the open vocabulary of data
+    /// contracts (ADR 028 §4; other contract kinds may add members). Writing implies reading,
+    /// so there is no separate write-only access.
+    Access {
         Read => "read",
         Write => "write",
     }
 }
 
 open_vocabulary! {
-    /// Who decides what a [`CollectionRequest`] binds to.
+    /// Who decides what a [`Request`] binds to.
     BindingResolution {
         /// Configuration, with the host's defaults when it says nothing (ADR 031 §11).
         Configured => "configured",
         /// Chosen by the user while the micro runs (a powerbox-style grant). Declared only:
         /// no host issues these yet, and the host never defaults them.
-        AtRuntime => "at-runtime",
+        AtRuntime => "atRuntime",
     }
 }
 
@@ -182,45 +163,50 @@ open_vocabulary! {
 
 /// A named publication this package can serve once initialized (ADR 031 §5, §8). `initialize`
 /// returns publications by `name`, and what it returns is admitted against this declaration.
-/// A `Call` names the contract of its request and response Lexicons; a `Presentation` has the
-/// one presentation-component contract, so it declares none.
+/// A `Call` names the contract (an NSID) of its request and response Lexicons; a `Presentation`
+/// has the one presentation-component contract, so it declares none.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PublicationDeclaration {
     pub name: String,
     pub kind: PublicationKind,
-    pub contract: Option<ContractIdentity>,
+    pub contract: Option<Nsid>,
 }
 
-/// A contract this package consumes. `binding` is the local name configuration routes to a
-/// concrete supplier and `initial-context.require(binding)` resolves; declaring it grants no
-/// authority.
+/// One thing this package asks for, in the one request shape every plug kind shares (ADR 028
+/// §4): `{binding, contract, access?, necessity, resolution, minRevision?}`. `contract` is the
+/// NSID of what is wanted (a collection contract, or the contract of a call or presentation
+/// another micro publishes) and never a concrete supplier: configuration resolves `binding`,
+/// the plug-local name code uses, to one. Declaring a request grants no authority.
+///
+/// The wire shape mirrors `big_plugs_core::request::Request` member for member (camelCase,
+/// open `access`/`necessity`/`resolution` strings), and this type is replaced by it once that
+/// crate is reachable from this branch.
+///
+/// Both [`MicroManifest::requires`] and [`MicroManifest::collection_requests`] hold this
+/// shape; they differ in `access`, which is absent for a requirement (the grant is "may call"
+/// or "may mount") and required for a collection request (`read` or `write`).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RequiredContract {
+#[serde(rename_all = "camelCase")]
+pub struct Request {
     pub binding: String,
-    pub contract: ContractIdentity,
-    pub necessity: Necessity,
-}
-
-/// A collection this package asks to use under a local binding name (ADR 031 §11). It names
-/// the collection *contract* it can work with, never a concrete collection: configuration
-/// resolves the binding to one, and a micro's code only ever names the binding. Declaring it
-/// grants no authority; `contract` is a [`CollectionContract::id`].
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CollectionRequest {
-    pub binding: String,
-    pub contract: String,
-    pub access: CollectionAccess,
+    pub contract: Nsid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
     /// A required binding that resolves to nothing keeps the micro from starting.
     pub necessity: Necessity,
     pub resolution: BindingResolution,
+    /// The least Lexicon `revision` of `contract` the package needs (ADR 028 §4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_revision: Option<u32>,
 }
 
 /// One requested facet access right (manifest-as-allowlist, ADR 015 §8). Neutral data; the
-/// native backend lowers it into the node seam's `RoutineFacetAccess` vocabulary (D6).
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// native backend lowers it into the node seam's `RoutineFacetAccess` vocabulary (D6). The
+/// request names the facet's datum by NSID `tag` and never the plug or document that holds it:
+/// configuration picks the document, so a substituted plug keeps working (ADR 028 §4).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FacetAccess {
-    pub owner_plug_id: Option<String>,
-    pub tag: String,
+    pub tag: Nsid,
     pub key_id: Option<String>,
     pub read: bool,
     pub write: bool,
@@ -237,16 +223,17 @@ pub struct ConfigurationRequest {
     pub facets: Vec<FacetAccess>,
 }
 
-/// A collection shape this package can serve or exposes. Selector, key, value, and write
-/// context are contract-specific CBOR named by schema id; host and guest libraries interpret
-/// them, the manifest only names them.
+/// A collection shape this package can serve or exposes. `id` is the contract's NSID, which
+/// [`Request::contract`] names. Selector, key, value, and write context are contract-specific
+/// CBOR named by schema NSID; host and guest libraries interpret them, the manifest only names
+/// them.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CollectionContract {
-    pub id: String,
-    pub selector_schema: String,
-    pub key_schema: String,
-    pub value_schema: String,
-    pub write_context_schema: Option<String>,
+    pub id: Nsid,
+    pub selector_schema: Nsid,
+    pub key_schema: Nsid,
+    pub value_schema: Nsid,
+    pub write_context_schema: Option<Nsid>,
     pub offered: Vec<CollectionCapability>,
 }
 
@@ -262,12 +249,15 @@ pub struct AttachmentDeclaration {
 
 /// A row this package declares into a collection (ADR 031 §3, §7). Installation admits it and
 /// writes it into the package's manifest installation scope, so it is visible while the
-/// package is inactive. `collection` names the collection contract, `key` the row's key and
-/// `payload` the static row body, which the collection's own contract interprets.
+/// package is inactive. `binding` names one of the manifest's own
+/// [`MicroManifest::collection_requests`] with `write` access, and the row lands in whichever
+/// collection configuration resolved that binding to (a package never names a concrete
+/// collection, ADR 028 §4). `key` is the row's key and `payload` the static row body, which
+/// the collection's own contract interprets.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContributionDeclaration {
     pub id: String,
-    pub collection: String,
+    pub binding: String,
     pub key: String,
     pub payload: serde_json::Value,
     pub attachments: Vec<AttachmentDeclaration>,
@@ -276,30 +266,99 @@ pub struct ContributionDeclaration {
 /// A package's full static declaration: what it can provide, require, request, serve,
 /// contribute, and how it would like to be activated by default. It describes possibilities
 /// only — configured instance identity, enablement, concrete suppliers, granted documents,
-/// target acceptance, and live rows are configuration or runtime facts (ADR 030 §15).
+/// target acceptance, and live rows are configuration or runtime facts (ADR 030 §15). The
+/// package's own identity and version are not here: the plug envelope owns them (ADR 028), and
+/// the format identity is the [`MANIFEST_NSID`] the contribution is filed under.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MicroManifest {
-    pub schema: u32,
-    pub id: MicroId,
-    pub package_version: u32,
     pub entrypoints: Entrypoints,
     pub publications: Vec<PublicationDeclaration>,
-    pub requires: Vec<RequiredContract>,
+    pub requires: Vec<Request>,
     pub configuration_requests: Vec<ConfigurationRequest>,
     pub collection_contracts: Vec<CollectionContract>,
-    pub collection_requests: Vec<CollectionRequest>,
+    pub collection_requests: Vec<Request>,
     pub contributions: Vec<ContributionDeclaration>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// A manifest with the identity its plug envelope will own, in the standalone on-disk form: the
+/// `<name>.manifest.json` sidecar, flat JSON of the manifest's members plus `id`,
+/// `package_version` and `authority`. `big_plugs`' micro importer reads exactly this (`id` becomes the plug
+/// name, `package_version` the semver), and the loader splits it back into the identity and the
+/// manifest the plug's micro section carries. STAND-IN until the envelope delivers both.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Sidecar {
+    pub id: MicroId,
+    pub package_version: u32,
+    /// The reverse-DNS NSID prefix the plug holds (the envelope's `authority`, ADR 028 §5). The
+    /// package may declare only NSIDs under it; everything else must be a request. `None`
+    /// holds no prefix, so such a package declares no NSID at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+    #[serde(flatten)]
+    pub manifest: MicroManifest,
+}
+
+impl Sidecar {
+    pub fn new(id: impl Into<String>, package_version: u32, manifest: MicroManifest) -> Self {
+        Self {
+            id: MicroId::new(id),
+            package_version,
+            authority: None,
+            manifest,
+        }
+    }
+
+    pub fn with_authority(mut self, authority: impl Into<String>) -> Self {
+        self.authority = Some(authority.into());
+        self
+    }
+
+    /// [`MicroManifest::validate`] plus the authority rule: every NSID the package declares
+    /// (its collection contracts and their schemas, and the contract of each call it
+    /// publishes) lies under its authority. What a package merely requests (collection
+    /// requests, requirements, facet tags) may name anyone's NSIDs; runtime-defined NSIDs
+    /// (`org.example.clay.*`) are only ever requested, never declared.
+    pub fn validate(&self) -> Result<(), String> {
+        self.manifest.validate()?;
+        let owned = |nsid: &Nsid, what: &str| match &self.authority {
+            Some(authority) if nsid.is_under(authority) => Ok(()),
+            Some(authority) => Err(format!(
+                "{what} {nsid} is outside the package's authority {authority}"
+            )),
+            None => Err(format!(
+                "{what} {nsid} is declared by a package with no authority"
+            )),
+        };
+        for contract in &self.manifest.collection_contracts {
+            owned(&contract.id, "collection contract")?;
+            owned(&contract.selector_schema, "selector schema")?;
+            owned(&contract.key_schema, "key schema")?;
+            owned(&contract.value_schema, "value schema")?;
+            if let Some(schema) = &contract.write_context_schema {
+                owned(schema, "write-context schema")?;
+            }
+        }
+        for publication in &self.manifest.publications {
+            if let (PublicationKind::Call, Some(contract)) =
+                (&publication.kind, &publication.contract)
+            {
+                owned(contract, "call contract")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl MicroManifest {
-    /// Check the manifest's internal references, which serde alone cannot: the schema is the
-    /// one this build reads, every named member is unique within its list, a `call`
-    /// publication names its contract and a `presentation` publication names none, and every
-    /// contribution attachment names one of the manifest's own publications. Unknown
-    /// publication kinds pass: hosts carry them without serving them. The error names the
-    /// offending member.
+    /// Check the manifest's internal references, which serde alone cannot: every named member
+    /// is unique within its list, a `call` publication names its contract and a
+    /// `presentation` publication names none, a requirement declares no access and a
+    /// collection request declares one, every contribution targets a `write` collection
+    /// request by binding, and every contribution attachment names one of the manifest's own
+    /// publications. Unknown publication kinds pass: hosts carry them without serving them. The
+    /// error names the offending member.
     pub fn validate(&self) -> Result<(), String> {
         fn unique<'a>(member: &str, ids: impl Iterator<Item = &'a str>) -> Result<(), String> {
             let mut seen = BTreeSet::new();
@@ -311,12 +370,6 @@ impl MicroManifest {
             Ok(())
         }
 
-        if self.schema != MANIFEST_SCHEMA {
-            return Err(format!(
-                "manifest declares schema {}, this build reads schema {MANIFEST_SCHEMA}",
-                self.schema
-            ));
-        }
         unique(
             "publications name",
             self.publications.iter().map(|it| it.name.as_str()),
@@ -363,7 +416,40 @@ impl MicroManifest {
                 _ => {}
             }
         }
+        for required in &self.requires {
+            if required.access.is_some() {
+                return Err(format!(
+                    "requirement {:?} declares an access; a requirement's grant is \
+                     \"may call\" or \"may mount\"",
+                    required.binding
+                ));
+            }
+        }
+        for request in &self.collection_requests {
+            if request.access.is_none() {
+                return Err(format!(
+                    "collection request {:?} declares no access",
+                    request.binding
+                ));
+            }
+        }
         for contribution in &self.contributions {
+            let Some(request) = self
+                .collection_requests
+                .iter()
+                .find(|request| request.binding == contribution.binding)
+            else {
+                return Err(format!(
+                    "contribution {:?} targets undeclared collection binding {:?}",
+                    contribution.id, contribution.binding
+                ));
+            };
+            if request.access != Some(Access::Write) {
+                return Err(format!(
+                    "contribution {:?} targets binding {:?}, which does not request write access",
+                    contribution.id, contribution.binding
+                ));
+            }
             for attachment in &contribution.attachments {
                 if !self
                     .publications

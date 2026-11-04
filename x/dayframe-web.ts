@@ -78,13 +78,13 @@ await Deno.mkdir(site.join("packages").toString(), { recursive: true });
   const counterBytes = await Deno.readFile(
     `${packageDirectory}/counter.component.wasm`,
   );
-  const manifest = JSON.parse(
+  const sidecar = JSON.parse(
     await Deno.readTextFile(`${packageDirectory}/counter.manifest.json`),
   );
   const index = [{
     location: "packages/counter.component.wasm",
     digest: await sha256Hex(counterBytes),
-    manifest,
+    sidecar,
   }];
   await Deno.writeFile(
     site.join("packages/counter.component.wasm").toString(),

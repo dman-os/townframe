@@ -2,17 +2,17 @@ use super::*;
 use crate::ConfigurationRequest;
 use crate::Entrypoints;
 use crate::FacetAccess;
-use crate::MANIFEST_SCHEMA;
 use crate::MicroId;
 use crate::PublicationDeclaration;
 use crate::PublicationKind;
+use clay_collection::Nsid;
 use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
 use clay_dioxus::SurfaceWriter;
 use clay_docs::DocumentService;
 use clay_guest_session::InitialContext;
-use clay_guest_session::capabilities::ContractIdentity;
 use clay_guest_session::capabilities::DeclaredPublication;
+use clay_guest_session::capabilities::presentation_component;
 use clay_host::AccessError;
 use clay_host::CollectionRegistry;
 use clay_host::ConfiguredMicro;
@@ -40,7 +40,7 @@ async fn counter_package() -> WasmPackage {
 fn declaring_view() -> InitialContext {
     let presentation = || DeclaredPublication {
         kind: clay_guest_session::capabilities::PublicationKind::Presentation,
-        contract: ContractIdentity::presentation_component(),
+        contract: presentation_component(),
     };
     InitialContext {
         publications: BTreeMap::from([
@@ -50,7 +50,7 @@ fn declaring_view() -> InitialContext {
                 "count".to_owned(),
                 DeclaredPublication {
                     kind: clay_guest_session::capabilities::PublicationKind::Call,
-                    contract: ContractIdentity::new("dayframe.counter", "count", (1, 0, 0)),
+                    contract: Nsid::literal("org.example.dayframe.counter.count"),
                 },
             ),
         ]),
@@ -60,9 +60,6 @@ fn declaring_view() -> InitialContext {
 
 fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
     MicroManifest {
-        schema: MANIFEST_SCHEMA,
-        id: MicroId::new("test.wasm"),
-        package_version: 1,
         entrypoints: Entrypoints::micro_client(),
         // The counter also publishes a badge presentation and a `count` call.
         publications: vec![
@@ -79,11 +76,7 @@ fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
             PublicationDeclaration {
                 name: "count".into(),
                 kind: PublicationKind::Call,
-                contract: Some(crate::ContractIdentity::new(
-                    "dayframe.counter",
-                    "count",
-                    (1, 0, 0),
-                )),
+                contract: Some(Nsid::literal("org.example.dayframe.counter.count")),
             },
         ],
         requires: vec![],
@@ -91,11 +84,12 @@ fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
             .map(|(read, write)| ConfigurationRequest {
                 binding: "counter".into(),
                 facets: vec![FacetAccess {
-                    tag: "org.dayframe.counter.config".into(),
+                    tag: Nsid::literal("org.example.dayframe.counter.config"),
                     key_id: Some("count".into()),
                     read,
                     write,
-                    ..Default::default()
+                    create: false,
+                    delete: false,
                 }],
             })
             .into_iter()
@@ -134,6 +128,7 @@ impl Rig {
             unresolved_bindings: Vec::new(),
             factory: factory(
                 resources.clone(),
+                MicroId::new("test.wasm"),
                 declared,
                 CollectionBindings::default(),
                 move || {
@@ -183,7 +178,7 @@ impl Rig {
             clay_docs::FacetRoute {
                 document: "counter-config".into(),
                 branch: "main".into(),
-                tag: "org.dayframe.counter.config".into(),
+                tag: "org.example.dayframe.counter.config".into(),
                 key_id: "count".into(),
             },
             serde_json::json!(0),

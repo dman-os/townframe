@@ -1,10 +1,10 @@
 ---
 source: src/micro_settings_manifest/lib.rs
-expression: manifest()
+expression: sidecar()
 ---
-schema: 1
 id: dayframe.settings
 package_version: 1
+authority: org.example.dayframe.settings
 entrypoints:
   initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
   presentation: "townframe:dayframe/presentation-events@0.4.0"
@@ -17,31 +17,35 @@ requires: []
 configuration_requests:
   - binding: settings
     facets:
-      - owner_plug_id: ~
-        tag: org.dayframe.settings.config
+      - tag: org.example.dayframe.settings.config
         key_id: main
         read: true
         write: true
         create: false
         delete: false
 collection_contracts:
-  - id: settings.sections
-    selector_schema: dayframe.collection.whole
-    key_schema: dayframe.settings.section-key
-    value_schema: dayframe.settings.section
+  - id: org.example.dayframe.settings.sections
+    selector_schema: org.example.dayframe.settings.sectionSelector
+    key_schema: org.example.dayframe.settings.sectionKey
+    value_schema: org.example.dayframe.settings.section
     write_context_schema: ~
     offered:
       - read
       - register
 collection_requests:
   - binding: sections
-    contract: settings.sections
+    contract: org.example.dayframe.settings.sections
     access: read
+    necessity: required
+    resolution: configured
+  - binding: roots
+    contract: org.example.clay.shell.roots
+    access: write
     necessity: required
     resolution: configured
 contributions:
   - id: root
-    collection: shell.roots
+    binding: roots
     key: dayframe.settings
     payload:
       content:

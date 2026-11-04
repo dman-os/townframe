@@ -11,7 +11,7 @@ use clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG;
 use clay_guest_session::collections::CollectionValue;
 use clay_host::MicroId;
 
-use crate::manifest::MicroManifest;
+use crate::manifest::Sidecar;
 
 /// The installation scope that holds `micro`'s manifest-declared rows.
 pub fn manifest_scope(micro: &MicroId) -> Vec<u8> {
@@ -24,19 +24,22 @@ pub fn runtime_scope(micro: &MicroId) -> Vec<u8> {
     format!("{micro}/runtime").into_bytes()
 }
 
-/// Rows keyed by collection id, then by encoded key, ready for
+/// Rows keyed by the contributing request's binding, then by encoded key. The composition
+/// resolves each binding to a collection and installs the rows with
 /// `RegistrationCollection::install` into [`manifest_scope`].
 pub type DeclaredRows = BTreeMap<String, BTreeMap<Vec<u8>, Option<CollectionValue>>>;
 
-/// The rows `manifest` declares. A key is the CBOR text of the declared key. The payload is
+/// The rows `sidecar` declares, grouped by binding (validation guarantees each
+/// names a collection request with write access). A key is the CBOR text of the declared key. The payload is
 /// the row body as JSON; the one-member object `{"$attachment": n}` stands for the reserved
 /// attachment tag over index `n` (JSON has no tags). Each declared attachment becomes the
 /// endpoint of one of the package's own publications, so the stored row never retains the
 /// provider (ADR 031 §7).
-pub fn declared_rows(manifest: &MicroManifest) -> Result<DeclaredRows, String> {
-    manifest.validate()?;
-    let micro = MicroId::new(manifest.id.as_str());
-    let mut collections = DeclaredRows::new();
+pub fn declared_rows(sidecar: &Sidecar) -> Result<DeclaredRows, String> {
+    sidecar.validate()?;
+    let micro = &MicroId::new(sidecar.id.as_str());
+    let manifest = &sidecar.manifest;
+    let mut bindings = DeclaredRows::new();
     for contribution in &manifest.contributions {
         let mut attachments = vec![None; contribution.attachments.len()];
         for attachment in &contribution.attachments {
@@ -91,20 +94,18 @@ pub fn declared_rows(manifest: &MicroManifest) -> Result<DeclaredRows, String> {
         let mut key = Vec::new();
         ciborium::into_writer(&contribution.key, &mut key)
             .expect("CBOR encoding of an in-memory value");
-        let rows = collections
-            .entry(contribution.collection.clone())
-            .or_default();
+        let rows = bindings.entry(contribution.binding.clone()).or_default();
         if rows
             .insert(key, Some(CollectionValue { body, attachments }))
             .is_some()
         {
             return Err(format!(
-                "contribution {:?} duplicates key {:?} of {}",
-                contribution.id, contribution.key, contribution.collection
+                "contribution {:?} duplicates key {:?} of binding {}",
+                contribution.id, contribution.key, contribution.binding
             ));
         }
     }
-    Ok(collections)
+    Ok(bindings)
 }
 
 /// A JSON payload as CBOR, with `{"$attachment": n}` as the attachment tag.

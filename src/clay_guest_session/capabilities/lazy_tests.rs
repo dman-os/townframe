@@ -35,8 +35,8 @@ impl Script {
 }
 
 /// The provider's `echo` call contract: a manifest-declared identity, not a bank constant.
-fn echo_contract() -> ContractIdentity {
-    ContractIdentity::new("townframe:dayframe", "echo", (0, 4, 0))
+fn echo_contract() -> Nsid {
+    Nsid::literal("org.example.clay.test.echo")
 }
 
 struct Provider(Arc<Script>);
@@ -149,7 +149,7 @@ impl World {
         &self,
         recipient: &CapabilitySession,
         publication: &str,
-        contract: ContractIdentity,
+        contract: Nsid,
     ) -> CapabilityRef {
         recipient
             .mint_lazy(&PublicationEndpoint {
@@ -268,11 +268,7 @@ async fn retained_proxies_keep_the_provider_live_until_dropped() {
     let world = World::new();
     let recipient = world.recipient("recipient");
     let echo = world.lazy(&recipient, "echo", echo_contract());
-    let view = world.lazy(
-        &recipient,
-        "view",
-        ContractIdentity::presentation_component(),
-    );
+    let view = world.lazy(&recipient, "view", presentation_component());
     world
         .driven(async {
             let binding = echo.retain_call().await.unwrap();

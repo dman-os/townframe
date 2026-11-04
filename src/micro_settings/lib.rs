@@ -102,6 +102,7 @@ mod tests {
     use clay_host::Host;
     use clay_host::MicroId;
     use clay_host::Supervisor;
+    use clay_mdk::Nsid;
     use clay_mdk::host::BoundCollection;
     use clay_mdk::host::CollectionBindings;
     use clay_mdk::host::CollectionRegistry;
@@ -135,9 +136,9 @@ mod tests {
                     .collections
                     .declare(
                         CollectionContract {
-                            id: contract::SECTIONS.into(),
-                            key_schema: contract::SECTION_KEY_SCHEMA.into(),
-                            value_schema: contract::SECTION_VALUE_SCHEMA.into(),
+                            id: Nsid::literal(contract::SECTIONS),
+                            key_schema: Nsid::literal(contract::SECTION_KEY_SCHEMA),
+                            value_schema: Nsid::literal(contract::SECTION_VALUE_SCHEMA),
                         },
                         bytes_registrations(NonZeroUsize::new(8).unwrap(), [0, 0]),
                     )
@@ -155,10 +156,11 @@ mod tests {
                     unresolved_bindings: Vec::new(),
                     factory: factory(
                         resources,
+                        clay_mdk::MicroId::new(contract::ID),
                         contract::manifest(),
                         CollectionBindings::new([(
                             contract::SECTIONS_BINDING.to_owned(),
-                            BoundCollection::read(contract::SECTIONS),
+                            BoundCollection::read(Nsid::literal(contract::SECTIONS)),
                         )]),
                         activate,
                     ),

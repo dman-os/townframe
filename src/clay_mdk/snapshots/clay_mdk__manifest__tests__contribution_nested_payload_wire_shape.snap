@@ -4,7 +4,7 @@ expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
 ---
 {
   "id": "toolbar-button",
-  "collection": "dayframe.shelf",
+  "binding": "tally-book",
   "key": "counter",
   "payload": {
     "badges": [

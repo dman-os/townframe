@@ -3,9 +3,6 @@ source: src/clay_mdk/manifest_tests.rs
 expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
 ---
 {
-  "schema": 1,
-  "id": "dayframe.counter",
-  "package_version": 1,
   "entrypoints": {
     "initialize": "townframe:dayframe/micro-lifecycle@0.4.0",
     "presentation": "townframe:dayframe/presentation-events@0.4.0",
@@ -20,30 +17,16 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
     {
       "name": "increment",
       "kind": "call",
-      "contract": {
-        "namespace": "dayframe.counter",
-        "name": "increment",
-        "version": [
-          1,
-          0,
-          0
-        ]
-      }
+      "contract": "org.example.test.counter.increment"
     }
   ],
   "requires": [
     {
       "binding": "shelf",
-      "contract": {
-        "namespace": "dayframe",
-        "name": "shelf",
-        "version": [
-          1,
-          0,
-          0
-        ]
-      },
-      "necessity": "optional"
+      "contract": "org.example.test.shelf",
+      "necessity": "optional",
+      "resolution": "configured",
+      "minRevision": 2
     }
   ],
   "configuration_requests": [
@@ -51,8 +34,7 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
       "binding": "counter",
       "facets": [
         {
-          "owner_plug_id": null,
-          "tag": "org.dayframe.counter.config",
+          "tag": "org.example.test.counter.config",
           "key_id": "count",
           "read": true,
           "write": false,
@@ -64,10 +46,10 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
   ],
   "collection_contracts": [
     {
-      "id": "tallies",
-      "selector_schema": "dayframe.counter.tally-selector",
-      "key_schema": "dayframe.counter.tally-key",
-      "value_schema": "dayframe.counter.tally",
+      "id": "org.example.test.counter.tallies",
+      "selector_schema": "org.example.test.counter.tallySelector",
+      "key_schema": "org.example.test.counter.tallyKey",
+      "value_schema": "org.example.test.counter.tally",
       "write_context_schema": null,
       "offered": [
         "read",
@@ -78,7 +60,7 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
   "collection_requests": [
     {
       "binding": "tally-book",
-      "contract": "tallies",
+      "contract": "org.example.test.counter.tallies",
       "access": "write",
       "necessity": "required",
       "resolution": "configured"
@@ -87,7 +69,7 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
   "contributions": [
     {
       "id": "toolbar-button",
-      "collection": "dayframe.shelf",
+      "binding": "tally-book",
       "key": "counter",
       "payload": {
         "badges": [

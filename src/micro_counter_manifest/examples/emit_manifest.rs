@@ -9,7 +9,7 @@ fn main() {
         .expect("usage: emit_manifest <output path>");
     std::fs::write(
         path,
-        serde_json::to_vec(&micro_counter_manifest::manifest()).unwrap(),
+        serde_json::to_vec(&micro_counter_manifest::sidecar()).unwrap(),
     )
     .unwrap();
 }

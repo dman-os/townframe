@@ -21,6 +21,7 @@ pub use declared::declared_rows;
 pub use declared::manifest_scope;
 pub use declared::runtime_scope;
 
+use clay_collection::Nsid;
 use clay_collection::ReadError;
 use clay_collection::ReadLimits;
 use clay_dioxus::NativeComponents;
@@ -34,17 +35,16 @@ use clay_guest_session::collections::ReadFailure;
 use clay_host::Instance;
 use clay_host::RendererRegistry;
 
+use crate::Access;
 use crate::Attachment;
 use crate::Capability;
 use crate::Collection;
-use crate::CollectionAccess;
 use crate::Config;
 use crate::Context;
 use crate::Error;
 use crate::context::Backend;
 use crate::context::RawHandler;
 use crate::context::Shared;
-use crate::manifest::ContractIdentity;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
 use crate::manifest::PublicationDeclaration;
@@ -111,24 +111,18 @@ impl Resources {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundCollection {
     /// The declared collection's id.
-    pub id: String,
+    pub id: Nsid,
     /// Whether the micro may also register rows; a writable binding is always readable.
     pub write: bool,
 }
 
 impl BoundCollection {
-    pub fn read(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            write: false,
-        }
+    pub fn read(id: Nsid) -> Self {
+        Self { id, write: false }
     }
 
-    pub fn write(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            write: true,
-        }
+    pub fn write(id: Nsid) -> Self {
+        Self { id, write: true }
     }
 }
 
@@ -159,9 +153,9 @@ impl CollectionBindings {
 /// The declared registration collection a shell reads its roots from: micros register a
 /// [`RootRow`] (usually as a manifest-declared row) and the shell redeems the presentation each
 /// one attaches.
-pub const SHELL_ROOTS: &str = "shell.roots";
+pub const SHELL_ROOTS: &str = "org.example.clay.shell.roots";
 
-/// One `shell.roots` row, keyed by the registering micro's id: a title and the root
+/// One [`SHELL_ROOTS`] row, keyed by the registering micro's id: a title and the root
 /// presentation (an attachment of the row).
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RootRow {
@@ -247,7 +241,7 @@ impl Activation {
         )
     }
 
-    fn declared_call(&self, name: &str) -> clay_guest_session::capabilities::ContractIdentity {
+    fn declared_call(&self, name: &str) -> Nsid {
         match self.declared.get(name) {
             Some(DeclaredPublication {
                 kind: clay_guest_session::capabilities::PublicationKind::Call,
@@ -413,16 +407,19 @@ type Activate = Rc<dyn Fn(Context) -> LocalFuture<'static, Result<(), Error>>>;
 
 struct NativeFactory {
     resources: Resources,
+    micro: MicroId,
     manifest: MicroManifest,
     declared: BTreeMap<String, DeclaredPublication>,
     bindings: CollectionBindings,
     activate: Activate,
 }
 
-/// Turn a native micro (manifest + `activate` function) into a supervisor factory. The
-/// composition root calls this; micro crates never build factories themselves.
+/// Turn a native micro (identity + manifest + `activate` function) into a supervisor factory.
+/// The identity is the package envelope's, not the manifest's. The composition root calls this;
+/// micro crates never build factories themselves.
 pub fn factory<Fut: Future<Output = Result<(), Error>> + 'static>(
     resources: Resources,
+    micro: crate::MicroId,
     manifest: MicroManifest,
     bindings: CollectionBindings,
     activate: impl Fn(Context) -> Fut + 'static,
@@ -430,6 +427,7 @@ pub fn factory<Fut: Future<Output = Result<(), Error>> + 'static>(
     let declared = declared_publications(&manifest);
     Rc::new(NativeFactory {
         resources,
+        micro: MicroId::new(micro.as_str()),
         manifest,
         declared,
         bindings,
@@ -467,12 +465,12 @@ impl Factory<CapabilityPublication> for NativeFactory {
         activator: Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
         let resources = self.resources.clone();
+        let micro = self.micro.clone();
         let manifest = self.manifest.clone();
         let declared = self.declared.clone();
         let bindings = self.bindings.snapshot();
         let activate = Rc::clone(&self.activate);
         Box::pin(async move {
-            let micro = MicroId::new(manifest.id.as_str());
             let capabilities =
                 CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
             capabilities.attach_activator(activator);
@@ -520,7 +518,7 @@ impl Factory<CapabilityPublication> for NativeFactory {
                                         .grant(collection.projection())
                                         .map_err(|error| error.to_string())
                                 })?;
-                            let writer = (bound.write && request.access == CollectionAccess::Write)
+                            let writer = (bound.write && request.access == Some(Access::Write))
                                 .then(|| {
                                     resources
                                         .collections
@@ -589,16 +587,15 @@ pub(crate) fn grant_configs(
 ) -> Result<BTreeMap<String, DocumentRef>, String> {
     let mut configs = BTreeMap::new();
     for request in &manifest.configuration_requests {
-        configs.extend(
-            documents
-                .grant_config(
-                    host,
-                    instance,
-                    &request.binding,
-                    routine_facets(&request.facets),
-                )
-                .map_err(|error| format!("config {}: {error}", request.binding))?,
-        );
+        let document = documents
+            .grant_config(
+                host,
+                instance,
+                &request.binding,
+                routine_facets(&request.facets),
+            )
+            .map_err(|error| format!("config {}: {error}", request.binding))?;
+        configs.insert(request.binding.clone(), document);
     }
     Ok(configs)
 }
@@ -627,8 +624,9 @@ pub(crate) fn routine_facets(
     facets
         .iter()
         .map(|facet| daybook_types::manifest::RoutineFacetAccess {
-            owner_plug_id: facet.owner_plug_id.clone(),
-            tag: facet.tag.clone().into(),
+            // A manifest request never names the plug that owns the document (ADR 028 §4).
+            owner_plug_id: None,
+            tag: facet.tag.as_str().into(),
             key_id: facet.key_id.clone(),
             read: facet.read,
             write: facet.write,
@@ -647,32 +645,18 @@ mod tests;
 /// manifest, which gives every Call a contract.
 pub(crate) fn admitted_publication(
     publication: &PublicationDeclaration,
-) -> Option<(
-    clay_guest_session::capabilities::PublicationKind,
-    clay_guest_session::capabilities::ContractIdentity,
-)> {
+) -> Option<(clay_guest_session::capabilities::PublicationKind, Nsid)> {
     use clay_guest_session::capabilities::PublicationKind as Kind;
     match (&publication.kind, &publication.contract) {
         (PublicationKind::Presentation, _) => Some((
             Kind::Presentation,
-            clay_guest_session::capabilities::ContractIdentity::presentation_component(),
+            clay_guest_session::capabilities::presentation_component(),
         )),
-        (PublicationKind::Call, Some(contract)) => Some((Kind::Call, contract.admitted())),
+        (PublicationKind::Call, Some(contract)) => Some((Kind::Call, contract.clone())),
         (PublicationKind::Call, None) => {
             unreachable!("a validated manifest gives every call a contract")
         }
         (PublicationKind::Other(_), _) => None,
-    }
-}
-
-impl ContractIdentity {
-    /// The capability bank's form of this manifest contract; the fields carry over unchanged.
-    pub(crate) fn admitted(&self) -> clay_guest_session::capabilities::ContractIdentity {
-        clay_guest_session::capabilities::ContractIdentity::new(
-            self.namespace.clone(),
-            self.name.clone(),
-            self.version,
-        )
     }
 }
 

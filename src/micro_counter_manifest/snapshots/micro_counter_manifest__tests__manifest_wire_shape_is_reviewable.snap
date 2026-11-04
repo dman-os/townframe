@@ -1,10 +1,10 @@
 ---
 source: src/micro_counter_manifest/lib.rs
-expression: manifest()
+expression: sidecar()
 ---
-schema: 1
 id: dayframe.counter
 package_version: 1
+authority: org.example.dayframe.counter
 entrypoints:
   initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
   presentation: "townframe:dayframe/presentation-events@0.4.0"
@@ -18,29 +18,27 @@ publications:
     contract: ~
   - name: count
     kind: call
-    contract:
-      namespace: dayframe.counter
-      name: count
-      version:
-        - 1
-        - 0
-        - 0
+    contract: org.example.dayframe.counter.count
 requires: []
 configuration_requests:
   - binding: counter
     facets:
-      - owner_plug_id: ~
-        tag: org.dayframe.counter.config
+      - tag: org.example.dayframe.counter.config
         key_id: count
         read: true
         write: true
         create: false
         delete: false
 collection_contracts: []
-collection_requests: []
+collection_requests:
+  - binding: sections
+    contract: org.example.dayframe.settings.sections
+    access: write
+    necessity: optional
+    resolution: configured
 contributions:
   - id: settings-section
-    collection: settings.sections
+    binding: sections
     key: dayframe.counter
     payload:
       detail:

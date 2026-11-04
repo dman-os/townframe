@@ -40,6 +40,9 @@ use std::rc::Rc;
 const PRESENTATION: &str = "presentation";
 const ECHO: &str = "echo";
 const RELAY: &str = "relay";
+/// The contracts the checked-in sidecar manifest declares for the two calls.
+const ECHO_CONTRACT: &str = "org.example.clay.test.lifecycle.echo";
+const RELAY_CONTRACT: &str = "org.example.clay.test.lifecycle.relay";
 
 thread_local! {
     static ROLE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -266,27 +269,13 @@ fn publish_all() -> Result<Vec<micro_lifecycle::NamedPublication>, Initializatio
         },
         micro_lifecycle::NamedPublication {
             name: RELAY.into(),
-            capability: capability_bank::publish_call(
-                RELAY,
-                &capability_bank::Contract {
-                    namespace: "dayframe.lifecycle".into(),
-                    name: RELAY.into(),
-                    version: (1, 0, 0),
-                },
-            )
-            .map_err(|error| unavailable(RELAY, error))?,
+            capability: capability_bank::publish_call(RELAY, RELAY_CONTRACT)
+                .map_err(|error| unavailable(RELAY, error))?,
         },
         micro_lifecycle::NamedPublication {
             name: ECHO.into(),
-            capability: capability_bank::publish_call(
-                ECHO,
-                &capability_bank::Contract {
-                    namespace: "dayframe.lifecycle".into(),
-                    name: ECHO.into(),
-                    version: (1, 0, 0),
-                },
-            )
-            .map_err(|error| unavailable(ECHO, error))?,
+            capability: capability_bank::publish_call(ECHO, ECHO_CONTRACT)
+                .map_err(|error| unavailable(ECHO, error))?,
         },
     ])
 }
