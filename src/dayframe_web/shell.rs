@@ -72,7 +72,7 @@ fn native_micros() -> Vec<InstalledMicro> {
             locked: true,
             ..InstalledMicro::new(
                 micro_settings_manifest::manifest(),
-                |resources, _components, bindings| {
+                |resources, bindings| {
                     factory(
                         resources,
                         micro_settings_manifest::manifest(),
@@ -87,7 +87,7 @@ fn native_micros() -> Vec<InstalledMicro> {
             enabled_on_admission: true,
             ..InstalledMicro::new(
                 micro_sample::manifest(),
-                |resources, _components, bindings| {
+                |resources, bindings| {
                     factory(
                         resources,
                         micro_sample::manifest(),
@@ -117,10 +117,8 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                     let manifest = entry.manifest.clone();
                     installed.push(InstalledMicro::new(
                         manifest.clone(),
-                        move |resources, components, bindings| {
-                            clay_mdk::host::wcmp_factory(
-                                resources,
-                                components,
+                        move |resources, bindings| {
+                            clay_mdk::host::wcmp_factory(resources,
                                 manifest,
                                 bindings,
                                 move || indexed_package(entry.clone()),

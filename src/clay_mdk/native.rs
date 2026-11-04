@@ -26,12 +26,11 @@ pub use declared::declared_rows;
 pub use declared::manifest_scope;
 pub use declared::runtime_scope;
 
+use clay_dioxus::NativeComponents;
 use clay_docs::DocumentRef;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityPublication;
-use clay_host::AccessError;
 use clay_host::Instance;
-use clay_host::RendererRegistry;
 
 use crate::Capability;
 use crate::CollectionAccess;
@@ -60,38 +59,32 @@ use clay_host::Initialized;
 use clay_host::LocalFuture;
 use clay_host::MicroId;
 use clay_host::Root;
-use dioxus_core::Element;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::rc::Rc;
 use tokio::task::JoinHandle;
 
-/// What a composition root hands every native micro it links: the publisher its components
-/// render through, the document service its configuration is granted from, and the declared
-/// collections it may bind. The renderer registry is erased at construction: the authoring
-/// surface is Dioxus `Element` on every backend, so a registry only has to accept `Element`
-/// render factories.
+/// What a composition root hands every micro it links: the component registry its
+/// presentations publish through (native components render into it, and a guest engine attaches
+/// its wire surfaces to it), the document service its configuration is granted from, and the
+/// declared collections it may bind. The registry is the concrete Dioxus one: it is the only
+/// renderer there is, and a guest's surface can only attach to a registry that owns surfaces.
 #[derive(Clone)]
 pub struct Resources {
-    publisher: Publisher,
+    pub components: NativeComponents,
     pub documents: DocumentService,
     pub collections: CollectionRegistry<BytesRegistrations>,
 }
 
-/// Publish one render factory as a component owned by an instance, through whichever
-/// [`RendererRegistry`] the composition installed.
-pub(crate) type Publisher =
-    Rc<dyn Fn(&Instance, Rc<dyn Fn() -> Element>) -> Result<clay_host::ComponentRef, AccessError>>;
-
 impl Resources {
-    pub fn new<R: RendererRegistry<Render = Element> + 'static>(
-        registry: R,
+    pub fn new(
+        components: NativeComponents,
         documents: DocumentService,
         collections: CollectionRegistry<BytesRegistrations>,
     ) -> Self {
         Self {
-            publisher: Rc::new(move |owner, render| registry.publish(owner, move || render())),
+            components,
             documents,
             collections,
         }
@@ -204,7 +197,7 @@ pub(crate) struct CollectionSlot {
 /// before it runs. Built by [`factory`].
 pub(crate) struct Activation {
     pub(crate) instance: Instance,
-    pub(crate) publisher: Publisher,
+    pub(crate) components: NativeComponents,
     pub(crate) configs: BTreeMap<String, Config>,
     /// Every requirement the manifest declares; an optional one nothing resolved holds `None`.
     pub(crate) requirements: BTreeMap<String, Option<Capability>>,
@@ -386,7 +379,7 @@ impl Factory<CapabilityPublication> for NativeFactory {
                 .collect::<Result<_, String>>()?;
             let context = Context(Rc::new(Activation {
                 instance,
-                publisher: Rc::clone(&resources.publisher),
+                components: resources.components.clone(),
                 configs,
                 requirements,
                 collections,

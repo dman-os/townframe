@@ -7,6 +7,7 @@ use crate::MicroId;
 use crate::PublicationDeclaration;
 use crate::PublicationKind;
 use clay_dioxus::ComponentMount;
+use clay_dioxus::NativeComponents;
 use clay_dioxus::SurfaceWriter;
 use clay_docs::DocumentService;
 use clay_guest_session::InitialContext;
@@ -108,7 +109,6 @@ impl Rig {
             unresolved_bindings: Vec::new(),
             factory: factory(
                 resources.clone(),
-                components.clone(),
                 declared,
                 CollectionBindings::default(),
                 move || {

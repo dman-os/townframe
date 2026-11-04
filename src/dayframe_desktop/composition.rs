@@ -22,7 +22,7 @@ fn native_micros() -> Vec<InstalledMicro> {
             locked: true,
             ..InstalledMicro::new(
                 micro_settings_manifest::manifest(),
-                |resources, _components, bindings| {
+                |resources, bindings| {
                     factory(
                         resources,
                         micro_settings_manifest::manifest(),
@@ -37,7 +37,7 @@ fn native_micros() -> Vec<InstalledMicro> {
             enabled_on_admission: true,
             ..InstalledMicro::new(
                 micro_sample::manifest(),
-                |resources, _components, bindings| {
+                |resources, bindings| {
                     factory(
                         resources,
                         micro_sample::manifest(),
@@ -148,10 +148,8 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
                 let bytes = package.bytes().to_vec();
                 installed.push(InstalledMicro::new(
                     manifest.clone(),
-                    move |resources, components, bindings| {
-                        clay_mdk::host::wasm_factory(
-                            resources,
-                            components,
+                    move |resources, bindings| {
+                        clay_mdk::host::wasm_factory(resources,
                             manifest,
                             bindings,
                             move || {

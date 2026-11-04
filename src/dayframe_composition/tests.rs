@@ -28,7 +28,7 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
         locked: true,
         ..InstalledMicro::new(
             micro_settings_manifest::manifest(),
-            |resources, _components, bindings| {
+            |resources, bindings| {
                 factory(
                     resources,
                     micro_settings_manifest::manifest(),
@@ -43,7 +43,7 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
         enabled_on_admission: true,
         ..InstalledMicro::new(
             micro_sample::manifest(),
-            |resources, _components, bindings| {
+            |resources, bindings| {
                 factory(
                     resources,
                     micro_sample::manifest(),
@@ -62,7 +62,7 @@ fn stub_counter() -> InstalledMicro {
         enabled_on_admission: true,
         ..InstalledMicro::new(
             micro_counter_manifest::manifest(),
-            |resources, _components, bindings| {
+            |resources, bindings| {
                 factory(
                     resources,
                     micro_counter_manifest::manifest(),
@@ -99,7 +99,7 @@ fn unfetchable_counter() -> InstalledMicro {
         enabled_on_admission: true,
         ..InstalledMicro::new(
             micro_counter_manifest::manifest(),
-            |_resources, _components, _bindings| Rc::new(Unfetchable),
+            |_resources, _bindings| Rc::new(Unfetchable),
         )
     }
 }
@@ -295,7 +295,7 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
 async fn a_manifest_contributing_to_an_undeclared_collection_is_an_installation_error() {
     let mut manifest = micro_counter_manifest::manifest();
     manifest.contributions[0].collection = "nobody.declared.this".into();
-    let counter = InstalledMicro::new(manifest, |_resources, _components, _bindings| {
+    let counter = InstalledMicro::new(manifest, |_resources, _bindings| {
         Rc::new(Unfetchable)
     });
     let runtime = memory_runtime(counter).await;
@@ -331,7 +331,7 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
                 Arc::new(store),
                 catalog(InstalledMicro::new(
                     manifest,
-                    |_resources, _components, _bindings| Rc::new(Unfetchable),
+                    |_resources, _bindings| Rc::new(Unfetchable),
                 )),
             )
             .await
@@ -377,7 +377,7 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
             Arc::clone(&store),
             catalog(InstalledMicro::new(
                 micro_counter_manifest::manifest(),
-                |_, _, _| Rc::new(Unfetchable),
+                |_, _| Rc::new(Unfetchable),
             )),
         )
         .await
@@ -442,7 +442,7 @@ fn install_datum_of(runtime: &CompositionRuntime, micro: &str) -> Option<serde_j
 async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
     let package = InstalledMicro::new(
         micro_counter_manifest::manifest(),
-        |_resources, _components, _bindings| Rc::new(Unfetchable),
+        |_resources, _bindings| Rc::new(Unfetchable),
     );
     let runtime = memory_runtime(package).await;
     let version = micro_counter_manifest::manifest().package_version;
@@ -467,7 +467,7 @@ async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
 async fn the_install_datum_drives_the_supervisor() {
     let runtime = memory_runtime(InstalledMicro::new(
         micro_counter_manifest::manifest(),
-        |_resources, _components, _bindings| Rc::new(Unfetchable),
+        |_resources, _bindings| Rc::new(Unfetchable),
     ))
     .await;
     served(&runtime, async {
@@ -559,7 +559,7 @@ fn probe_manifest(
 fn rows_owner() -> InstalledMicro {
     InstalledMicro::new(
         probe_manifest("tests.owner", &[ROWS], vec![]),
-        |resources, _components, bindings| {
+        |resources, bindings| {
             factory(
                 resources,
                 probe_manifest("tests.owner", &[ROWS], vec![]),
@@ -591,7 +591,7 @@ fn probe(
     let micro = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
-        ..InstalledMicro::new(manifest.clone(), move |resources, _components, bindings| {
+        ..InstalledMicro::new(manifest.clone(), move |resources, bindings| {
             factory(resources, manifest, bindings, move |context| {
                 let bound = context.collection::<String, String>(BOOK).is_some();
                 activations.send_modify(|seen| seen.push(bound));

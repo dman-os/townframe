@@ -13,6 +13,7 @@ use crate::native::Activation;
 use clay_docs::DocumentRef;
 use clay_docs::Freshness;
 use clay_guest_session::capabilities::CallError;
+use clay_host::RendererRegistry;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityRef;
 use clay_guest_session::capabilities::GuestCall;
@@ -322,7 +323,7 @@ impl Context {
         name: &str,
         render: impl Fn() -> Element + 'static,
     ) -> Result<Publication, Error> {
-        let component = (self.0.publisher)(&self.0.instance, Rc::new(render))?;
+        let component = self.0.components.publish(&self.0.instance, render)?;
         self.0
             .stage(self.0.capabilities.publish_component(name, component))
     }

@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use clay_dioxus::NativeComponents;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::DeclaredPublication;
@@ -71,7 +70,6 @@ type PackageFuture<E> = LocalFuture<'static, Result<<E as Engine>::Package, Stri
 
 struct GuestFactory<E: Engine> {
     resources: Resources,
-    components: NativeComponents,
     manifest: MicroManifest,
     declared: BTreeMap<String, DeclaredPublication>,
     bindings: CollectionBindings,
@@ -80,7 +78,6 @@ struct GuestFactory<E: Engine> {
 
 pub(crate) fn factory<E: Engine>(
     resources: Resources,
-    components: NativeComponents,
     manifest: MicroManifest,
     bindings: CollectionBindings,
     package: PackageSource<E>,
@@ -88,7 +85,6 @@ pub(crate) fn factory<E: Engine>(
     let declared = declared_publications(&manifest);
     Rc::new(GuestFactory::<E> {
         resources,
-        components,
         manifest,
         declared,
         bindings,
@@ -125,7 +121,6 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
         activator: Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
         let resources = self.resources.clone();
-        let components = self.components.clone();
         let manifest = self.manifest.clone();
         let declared = self.declared.clone();
         let bindings = self.bindings.snapshot();
@@ -176,7 +171,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                     .expect("a presentation publication has a component");
                 let mounted = runtime.clone();
                 let name = name.clone();
-                components.attach_surface(&instance, component, move |_mount, writer| {
+                resources.components.attach_surface(&instance, component, move |_mount, writer| {
                     E::mount(&mounted, &name, Arc::new(writer))
                 });
             }
