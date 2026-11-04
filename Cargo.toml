@@ -286,7 +286,9 @@ wasmtime = "48.0.7"
 # two deps do not disagree on the p1/p2 (wiggle) surface; `p3` is what links the
 # WASI 0.3 imports a wasm32-wasip3 component brings in.
 wasmtime-wasi = { version = "48.0.7", default-features = false, features = ["p3"] }
-wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "1bcaebaeba509b8a59fd239e668abe6f02596794", default-features = false }
+# Our fork's `townframe-changes`: upstream 1bcaebae plus the in-process
+# `Ingress::dispatch_request` the nodule Wasm executor (`big_nodule_wasm`) calls.
+wash-runtime = { git = "https://github.com/dman-os/wasmCloud", rev = "e7648c6e939c50ba1be8d9c138ef6da3305a672e", default-features = false }
 wasmtime-wasi-http = { version = "48.0.7", default-features = false }
 wit-bindgen = "0.62.0"
 wstd = "0.6.8"
@@ -332,19 +334,6 @@ blitz-dom = "=0.3.0-beta.4"
 ui = { path = "./src/ui" }
 # xilem = { path = "../xilem/xilem/" }
 #
-
-# wash-runtime from the local `../wasmCloud` checkout at the tip of its jj bookmark
-# `townframe-changes` (e7648c6e, colocated git), which adds the in-process
-# `Ingress::dispatch_request` the nodule Wasm executor (`big_nodule_wasm`) calls. wash-runtime is
-# the only crate this workspace takes from that git source. It is a `file://` git source rather
-# than `path = "../wasmCloud/crates/wash-runtime"` on purpose: cargo applies `--cap-lints allow`
-# to git dependencies but not path ones, and wash-runtime trips the deny-by-default
-# `recursion_depth_exceeding_limit` on our nightly, so a path dependency does not compile.
-# Drop this block when the operator pushes `townframe-changes` and the `wash-runtime` rev above
-# is repinned to its commit (.agents/skills/fork-pinning-and-upstream-sync); CI cannot resolve a
-# checkout outside the repository.
-[patch."https://github.com/wasmCloud/wasmCloud"]
-wash-runtime = { git = "file:///run/media/asdf/p3N/repos/wasmCloud", rev = "e7648c6e939c50ba1be8d9c138ef6da3305a672e" }
 
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
