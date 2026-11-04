@@ -23,11 +23,17 @@ fn upsert(
     key: &[u8],
     value: &[u8],
     write_context: Option<Vec<u8>>,
-) -> Change<Bytes, CollectionValue> {
+) -> Change<Bytes, Stamped<Option<CollectionValue>>> {
     Change::Upsert {
         key: key.to_vec(),
         row_version: Version::new(1, 1),
-        value: CollectionValue::plain(value.to_vec()),
+        value: Stamped {
+            stamp: Stamp {
+                lamport: 1,
+                writer: WriterId::new("test"),
+            },
+            value: Some(CollectionValue::plain(value.to_vec())),
+        },
         evidence: RowEvidence::Authoritative,
         write_context,
     }

@@ -55,13 +55,19 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
     let capabilities =
         CapabilitySession::new(host.clone(), provider.clone(), CapabilityLimits::default());
     let published = capabilities.publish_presentation("view").unwrap();
-    let first = collections.grant_writer(&shelf).unwrap();
-    let second = collections.grant_writer(&shelf).unwrap();
-    let elsewhere = collections.grant_writer(&menu).unwrap();
-    let version = first
+    let first = collections
+        .grant_writer(full_grant(&shelf, "provider"))
+        .unwrap();
+    let second = collections
+        .grant_writer(full_grant(&shelf, "provider"))
+        .unwrap();
+    let elsewhere = collections
+        .grant_writer(full_grant(&menu, "provider"))
+        .unwrap();
+    let stamp = first
         .put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue {
                 body: tagged_body(),
                 capabilities: vec![published.publication()],
@@ -70,13 +76,17 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
         .unwrap();
     // Compare-and-set works against staged rows exactly as against published ones.
     assert_eq!(
-        first.put(vec![1], None, vec![7]),
+        first.put(vec![1], WriteBasis::CompareAndSet(None), vec![7]),
         Err(WriteFailure::Conflict {
-            current: Some(version)
+            current: Some(stamp)
         })
     );
-    second.put(vec![2], None, vec![2]).unwrap();
-    elsewhere.put(vec![3], None, vec![3]).unwrap();
+    second
+        .put(vec![2], WriteBasis::Concurrent, vec![2])
+        .unwrap();
+    elsewhere
+        .put(vec![3], WriteBasis::Concurrent, vec![3])
+        .unwrap();
 
     let parked = lease.read(Some(through), ReadLimits::default(), std::future::pending());
     let mut parked = std::pin::pin!(parked);
@@ -107,7 +117,14 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
         .changes
         .iter()
         .find_map(|change| match change {
-            Change::Upsert { value, .. } if !value.capabilities.is_empty() => Some(value),
+            Change::Upsert { value, .. }
+                if value
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| !value.capabilities.is_empty()) =>
+            {
+                value.value.as_ref()
+            }
             _ => None,
         })
         .unwrap();
@@ -123,8 +140,10 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
     assert_eq!(menu.snapshot().len(), 1);
 
     // Once committed, a newly granted writer publishes directly.
-    let late = collections.grant_writer(&menu).unwrap();
-    late.put(vec![4], None, vec![4]).unwrap();
+    let late = collections
+        .grant_writer(full_grant(&menu, "provider"))
+        .unwrap();
+    late.put(vec![4], WriteBasis::Concurrent, vec![4]).unwrap();
     assert_eq!(menu.snapshot().len(), 2);
 }
 
@@ -150,11 +169,13 @@ async fn failed_initialization_exposes_no_rows_or_capabilities() {
             let capabilities =
                 CapabilitySession::new(host.clone(), provider, CapabilityLimits::default());
             let published = capabilities.publish_presentation("view").unwrap();
-            let writer = collections.grant_writer(&shelf).unwrap();
+            let writer = collections
+                .grant_writer(full_grant(&shelf, "provider"))
+                .unwrap();
             writer
                 .put_value(
                     vec![1],
-                    None,
+                    WriteBasis::Concurrent,
                     CollectionValue {
                         body: tagged_body(),
                         capabilities: vec![published.publication()],
@@ -183,7 +204,7 @@ async fn failed_initialization_exposes_no_rows_or_capabilities() {
     assert!(futures::poll!(parked.as_mut()).is_pending());
     assert!(shelf.snapshot().is_empty());
     assert_eq!(
-        writer.put(vec![2], None, vec![2]),
+        writer.put(vec![2], WriteBasis::Concurrent, vec![2]),
         Err(WriteFailure::Revoked)
     );
     assert_eq!(
@@ -207,8 +228,12 @@ async fn closing_keeps_rows_through_cleanup_and_teardown_withdraws_them() {
     let provider = host.start("provider");
     let collections =
         CollectionSession::new(host.clone(), provider.clone(), CollectionLimits::default());
-    let writer = collections.grant_writer(&shelf).unwrap();
-    writer.put(vec![1], None, vec![1]).unwrap();
+    let writer = collections
+        .grant_writer(full_grant(&shelf, "provider"))
+        .unwrap();
+    writer
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
+        .unwrap();
     assert_eq!(shelf.snapshot().len(), 1);
     // Registered after the writer, so teardown runs it first: cleanup still sees the rows.
     let observed = shelf.clone();
@@ -223,11 +248,13 @@ async fn closing_keeps_rows_through_cleanup_and_teardown_withdraws_them() {
     // teardown (ADR 024 §6).
     assert_eq!(shelf.snapshot().len(), 1);
     assert_eq!(host.check(&provider), Ok(()));
-    writer.put(vec![2], None, vec![2]).unwrap();
+    writer
+        .put(vec![2], WriteBasis::Concurrent, vec![2])
+        .unwrap();
     host.close_instance(&provider).unwrap();
     assert!(shelf.snapshot().is_empty());
     assert_eq!(
-        writer.put(vec![3], None, vec![3]),
+        writer.put(vec![3], WriteBasis::Concurrent, vec![3]),
         Err(WriteFailure::Revoked)
     );
     drop(writer);

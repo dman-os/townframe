@@ -1,5 +1,6 @@
 use super::WcmpPackage;
 use super::WcmpRuntime;
+use clay_collection::WriteBasis;
 use clay_guest_session::Limits as DocumentLimits;
 use clay_host::ComponentRef;
 use clay_host::Host;
@@ -356,11 +357,16 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
         key: &str,
         value: &str,
         sequence: u64,
-    ) -> Change<Vec<u8>, clay_guest_session::collections::CollectionValue> {
+    ) -> Change<
+        Vec<u8>,
+        clay_collection::Stamped<Option<clay_guest_session::collections::CollectionValue>>,
+    > {
         Change::Upsert {
             key: cbor(key),
             row_version: Version::new(1, sequence),
-            value: clay_guest_session::collections::CollectionValue::plain(cbor(value)),
+            value: stamped(clay_guest_session::collections::CollectionValue::plain(
+                cbor(value),
+            )),
             evidence: RowEvidence::Authoritative,
             write_context: None,
         }
@@ -492,9 +498,10 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
         package.as_shared(),
         InitialContext {
             collections: [("rows".into(), registrations.projection())].into(),
+            // Manifest admission (C5) will narrow these to the micro's declared prefixes.
             registrations: [
-                ("a".into(), registrations.clone()),
-                ("b".into(), registrations.clone()),
+                ("a".into(), full_grant(&registrations, "probe")),
+                ("b".into(), full_grant(&registrations, "probe")),
             ]
             .into(),
             ..InitialContext::default()
@@ -521,7 +528,7 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
 
         command(5);
         let text = writer
-            .wait_for(|text| text.contains("scenario=done") && text.contains("rows=3"))
+            .wait_for(|text| text.contains("scenario=done") && text.contains("rows=2"))
             .await;
         let log = text
             .lines()
@@ -532,35 +539,36 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
             [
                 "a-put-x=ok@1",
                 "b-put-x=ok@2",
-                "a-blind-put-x=conflict@1",
-                "a-cas-put-x=ok@3",
-                "a-stale-remove-x=conflict@3",
-                "b-put-with-a-version-x=conflict@2",
-                "a-put-y=ok@4",
-                "b-remove-y=absent",
-                "b-remove-with-a-version-y=conflict@none",
+                "a-stale-cas-x=conflict@2",
+                "a-put-x-again=ok@3",
+                "b-delete-y=ok@1",
+                // Blind: concurrent writes lose to the tombstone they never saw.
+                "a-blind-put-y=ok@1",
+                // Default basis: the replica holds the tombstone's stamp, so the write wins.
+                "a-recreate-y=ok@2",
                 "a-put-big-key=key-too-large",
                 "a-put-big-value-y=value-too-large",
-                "b-remove-x=ok@5",
-                "b-put-x-again=ok@6",
+                "b-delete-x=ok@4",
+                "b-put-x-again=ok@5",
             ],
             "{text}"
         );
         assert!(
-            text.contains("\n1:x=a2\n1:y=a3\n2:x=b2\n"),
-            "both writers hold rows under the same local key: {text}"
+            text.contains("\nx=b2\ny=a3\n"),
+            "both writers contest the same logical keys: {text}"
         );
         let writes = lease
             .read(Some(bootstrap.through), ReadLimits::default())
             .await
             .unwrap();
-        assert_eq!(removals(&writes), [0, 0, 0, 0, 1, 0]);
+        // Tombstones replicate as rows, so no write publishes a removal.
+        assert_eq!(removals(&writes), [0, 0, 0, 0, 0, 0, 0]);
 
         command(6);
         let text = writer
             .wait_for(|text| text.contains("a-writer-drop=ok"))
             .await;
-        assert!(text.contains("\n1:x=a2\n1:y=a3\n2:x=b2\n"), "{text}");
+        assert!(text.contains("\nx=b2\ny=a3\n"), "{text}");
         let unchanged = lease
             .read(Some(writes.through.clone()), ReadLimits::default())
             .complete_timeout()
@@ -572,7 +580,8 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
             .read(Some(writes.through), ReadLimits::default())
             .await
             .unwrap();
-        assert_eq!(removals(&revoked), [3]);
+        // Closing the owner retracts both scopes: x and y have no candidates left.
+        assert_eq!(removals(&revoked), [2]);
         assert!(registrations.snapshot().is_empty());
         drop(session);
         host.close();
@@ -597,7 +606,8 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
         package.as_shared(),
         InitialContext {
             collections: [("rows".into(), registrations.projection())].into(),
-            registrations: [("cap".into(), registrations.clone())].into(),
+            // Manifest admission (C5) will narrow this to the micro's declared prefixes.
+            registrations: [("cap".into(), full_grant(&registrations, "probe"))].into(),
             ..InitialContext::default()
         },
     )
@@ -630,7 +640,13 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
             "a tagged body without attachments conveys no authority: {text}"
         );
         assert!(text.contains("cap@0"), "{text}");
-        let stored = registrations.snapshot().into_values().next().unwrap().value;
+        let stored = registrations
+            .snapshot()
+            .into_values()
+            .next()
+            .unwrap()
+            .value
+            .unwrap();
         assert_eq!(stored.capabilities.len(), 1);
 
         command(7);
@@ -647,7 +663,7 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
             text.contains("cap-proxy=revoked"),
             "provider closure leaves the retained proxy inert but droppable: {text}"
         );
-        assert!(registrations.snapshot().is_empty());
+        assert!(bodies(&registrations).is_empty());
         drop(session);
         host.close();
     };
@@ -712,8 +728,43 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
     host.close();
 }
 
+/// Every registration test grants every key; real mint sites pass the manifest's prefixes.
+fn full_grant(
+    registrations: &clay_guest_session::collections::BytesRegistrations,
+    micro: &str,
+) -> clay_guest_session::collections::RegistrationGrant {
+    clay_guest_session::collections::RegistrationGrant {
+        registrations: registrations.clone(),
+        micro: clay_host::MicroId::new(micro),
+        prefixes: vec![Vec::new()],
+    }
+}
+
+/// The bodies of the registrations' live rows; tombstones are skipped.
+fn bodies(registrations: &clay_guest_session::collections::BytesRegistrations) -> Vec<Vec<u8>> {
+    registrations
+        .snapshot()
+        .into_values()
+        .filter_map(|row| Some(row.value?.body))
+        .collect()
+}
+
+/// A projected row as a fixed writer's first write.
+fn stamped(
+    value: clay_guest_session::collections::CollectionValue,
+) -> clay_collection::Stamped<Option<clay_guest_session::collections::CollectionValue>> {
+    clay_collection::Stamped {
+        stamp: clay_collection::Stamp {
+            lamport: 1,
+            writer: clay_collection::WriterId::new("test"),
+        },
+        value: Some(value),
+    }
+}
+
 #[test]
 fn registration_writer_resources_release_budget_and_reuse_table_slots() {
+    use clay_collection::WriteBasis;
     use clay_guest_session::collections::CollectionLimits;
     use clay_guest_session::collections::CollectionSession;
     use clay_guest_session::collections::RegistrationWriter;
@@ -735,28 +786,41 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
     state.table.set_max_capacity(limits.writers);
     let first = state
         .table
-        .push(state.collections.grant_writer(&registrations).unwrap())
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
         .unwrap();
     let other = state
         .table
-        .push(state.collections.grant_writer(&registrations).unwrap())
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
         .unwrap();
     assert_eq!(state.collections.writer_count(), limits.writers);
     assert_eq!(
-        state.collections.grant_writer(&registrations).err(),
+        state
+            .collections
+            .grant_writer(full_grant(&registrations, "writer"))
+            .err(),
         Some(clay_host::AccessError::Denied)
     );
-    let first_version = state
+    let first_stamp = state
         .table
         .get(&first)
         .unwrap()
-        .put(vec![1], None, vec![1])
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
         .unwrap();
-    let other_version = state
+    let other_stamp = state
         .table
         .get(&other)
         .unwrap()
-        .put(vec![1], None, vec![2])
+        .put(vec![2], WriteBasis::Concurrent, vec![2])
         .unwrap();
     let first_rep = first.rep();
     let engine = wcmp::Engine::with_backend(wcmp_wasm_core_wasmi::Wasmi::new()).unwrap();
@@ -782,18 +846,16 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
             .is_err()
     );
     assert_eq!(store.data().collections.writer_count(), 1);
-    assert_eq!(
-        registrations
-            .snapshot()
-            .into_values()
-            .map(|entry| entry.value.body)
-            .collect::<Vec<_>>(),
-        [vec![1], vec![2]]
-    );
+    assert_eq!(bodies(&registrations), [vec![1], vec![2]]);
     let state = store.data_mut();
     let replacement = state
         .table
-        .push(state.collections.grant_writer(&registrations).unwrap())
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
         .unwrap();
     assert_eq!(replacement.rep(), first_rep);
     assert_eq!(state.collections.writer_count(), limits.writers);
@@ -809,28 +871,23 @@ fn registration_writer_resources_release_budget_and_reuse_table_slots() {
         .unwrap();
     let state = store.data_mut();
     let writer = state.table.get(&replacement).unwrap();
+    // The replacement scope holds nothing, but the dropped writer's row is still visible.
     assert_eq!(
-        writer.put(vec![1], Some(first_version), vec![3]),
-        Err(WriteFailure::Conflict { current: None })
+        writer.put(vec![1], WriteBasis::CompareAndSet(None), vec![3]),
+        Err(WriteFailure::Conflict {
+            current: Some(first_stamp.clone())
+        })
     );
-    writer.put(vec![1], None, vec![3]).unwrap();
-    assert!(
-        state
-            .table
-            .get(&other)
-            .unwrap()
-            .remove(vec![1], Some(other_version))
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(
-        registrations
-            .snapshot()
-            .into_values()
-            .map(|entry| entry.value.body)
-            .collect::<Vec<_>>(),
-        [vec![1], vec![3]]
-    );
+    writer
+        .put(vec![1], WriteBasis::Observed(first_stamp), vec![3])
+        .unwrap();
+    state
+        .table
+        .get(&other)
+        .unwrap()
+        .delete(vec![2], WriteBasis::Observed(other_stamp))
+        .unwrap();
+    assert_eq!(bodies(&registrations), [vec![3]]);
     drop(state.table.delete(replacement).unwrap());
     drop(state.table.delete(other).unwrap());
     assert_eq!(state.collections.writer_count(), 0);
@@ -854,18 +911,26 @@ fn registration_writer_table_capacity_failure_releases_its_permit() {
     state.table.set_max_capacity(1);
     let first = state
         .table
-        .push(state.collections.grant_writer(&registrations).unwrap())
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
         .unwrap();
     state
         .table
         .get(&first)
         .unwrap()
-        .put(vec![1], None, vec![1])
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
         .unwrap();
     assert!(matches!(
-        state
-            .table
-            .push(state.collections.grant_writer(&registrations).unwrap()),
+        state.table.push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap()
+        ),
         Err(ResourceTableError::Full)
     ));
     assert_eq!(state.collections.writer_count(), 1);
@@ -876,7 +941,12 @@ fn registration_writer_table_capacity_failure_releases_its_permit() {
     assert_eq!(registrations.snapshot().len(), 1);
     let replacement = state
         .table
-        .push(state.collections.grant_writer(&registrations).unwrap())
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
         .unwrap();
     assert_eq!(replacement.rep(), first_rep);
     assert_eq!(state.collections.writer_count(), 1);
@@ -907,30 +977,39 @@ fn registration_writer_table_entries_revoke_without_affecting_other_instances() 
         WcmpStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let writer = state
         .table
-        .push(state.collections.grant_writer(&registrations).unwrap())
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
         .unwrap();
     let other = state
         .table
-        .push(other_session.grant_writer(&registrations).unwrap())
+        .push(
+            other_session
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
         .unwrap();
     let accepted = state
         .table
         .get(&writer)
         .unwrap()
-        .put(vec![1], None, vec![1])
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
         .unwrap();
     let other_accepted = state
         .table
         .get(&other)
         .unwrap()
-        .put(vec![1], None, vec![7])
+        .put(vec![1], WriteBasis::Concurrent, vec![7])
         .unwrap();
     host.close_instance(&owner).unwrap();
     assert_eq!(
         registrations
             .snapshot()
             .into_values()
-            .map(|entry| entry.value.body)
+            .filter_map(|entry| Some(entry.value?.body))
             .collect::<Vec<_>>(),
         [vec![7]]
     );
@@ -939,7 +1018,7 @@ fn registration_writer_table_entries_revoke_without_affecting_other_instances() 
             .table
             .get(&writer)
             .unwrap()
-            .put(vec![1], None, vec![2]),
+            .put(vec![1], WriteBasis::Concurrent, vec![2]),
         Err(WriteFailure::Revoked)
     );
     assert_eq!(
@@ -947,12 +1026,15 @@ fn registration_writer_table_entries_revoke_without_affecting_other_instances() 
             .table
             .get(&writer)
             .unwrap()
-            .remove(vec![1], Some(accepted)),
+            .delete(vec![1], WriteBasis::Observed(accepted)),
         Err(WriteFailure::Revoked)
     );
     assert_eq!(state.collections.writer_count(), 1);
     assert_eq!(
-        state.collections.grant_writer(&registrations).err(),
+        state
+            .collections
+            .grant_writer(full_grant(&registrations, "writer"))
+            .err(),
         Some(clay_host::AccessError::Revoked)
     );
     let writer_rep = writer.rep();
@@ -968,28 +1050,25 @@ fn registration_writer_table_entries_revoke_without_affecting_other_instances() 
         .table
         .get(&other)
         .unwrap()
-        .put(vec![1], Some(other_accepted), vec![9])
+        .put(vec![1], WriteBasis::Observed(other_accepted), vec![9])
         .unwrap();
     assert_eq!(
         registrations
             .snapshot()
             .into_values()
-            .map(|entry| entry.value.body)
+            .filter_map(|entry| Some(entry.value?.body))
             .collect::<Vec<_>>(),
         [vec![9]]
     );
-    assert!(
-        state
-            .table
-            .get(&other)
-            .unwrap()
-            .remove(vec![1], Some(updated))
-            .unwrap()
-            .is_some()
-    );
+    state
+        .table
+        .get(&other)
+        .unwrap()
+        .delete(vec![1], WriteBasis::Observed(updated))
+        .unwrap();
     drop(state.table.delete(other).unwrap());
     assert_eq!(other_session.writer_count(), 0);
-    assert!(registrations.snapshot().is_empty());
+    assert!(bodies(&registrations).is_empty());
     assert!(state.table.is_empty());
     host.close();
 }
@@ -1174,7 +1253,7 @@ async fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers
     .unwrap();
     let granted = writer_state
         .collections
-        .grant_writer(&registrations)
+        .grant_writer(full_grant(&registrations, "writer"))
         .unwrap();
     let writer = writer_state.table.push(granted).unwrap();
     writer_state
@@ -1183,14 +1262,20 @@ async fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers
         .unwrap()
         .put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 0],
                 capabilities: vec![lease.publication()],
             },
         )
         .unwrap();
-    let stored = registrations.snapshot().into_values().next().unwrap().value;
+    let stored = registrations
+        .snapshot()
+        .into_values()
+        .next()
+        .unwrap()
+        .value
+        .unwrap();
     assert_eq!(stored.body, vec![0xd9, 0xa7, 0xf8, 0]);
     assert_eq!(stored.capabilities.len(), 1);
     assert_eq!(stored.capabilities[0], lease.publication());
@@ -1339,7 +1424,7 @@ async fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_leas
     .unwrap();
     let granted = writer_state
         .collections
-        .grant_writer(&registrations)
+        .grant_writer(full_grant(&registrations, "writer"))
         .unwrap();
     let writer = writer_state.table.push(granted).unwrap();
     let version = writer_state
@@ -1348,14 +1433,20 @@ async fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_leas
         .unwrap()
         .put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 0],
                 capabilities: vec![lease.publication()],
             },
         )
         .unwrap();
-    let stored = registrations.snapshot().into_values().next().unwrap().value;
+    let stored = registrations
+        .snapshot()
+        .into_values()
+        .next()
+        .unwrap()
+        .value
+        .unwrap();
 
     let (mut reader, _reader_incoming) = WcmpStoreState::detached(
         host.clone(),
@@ -1382,18 +1473,19 @@ async fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_leas
         .table
         .get(&writer)
         .unwrap()
-        .put_value(vec![1], Some(version), CollectionValue::plain(vec![0x80]))
+        .put_value(
+            vec![1],
+            WriteBasis::Observed(version),
+            CollectionValue::plain(vec![0x80]),
+        )
         .unwrap();
-    assert!(
-        writer_state
-            .table
-            .get(&writer)
-            .unwrap()
-            .remove(vec![1], Some(version))
-            .unwrap()
-            .is_some()
-    );
-    assert!(registrations.snapshot().is_empty());
+    writer_state
+        .table
+        .get(&writer)
+        .unwrap()
+        .delete(vec![1], WriteBasis::Observed(version))
+        .unwrap();
+    assert!(bodies(&registrations).is_empty());
     assert_eq!(
         reader.table.get(&proxy).unwrap().component().unwrap(),
         component,
@@ -1466,14 +1558,17 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
         DocumentLimits::default(),
     )
     .unwrap();
-    let granted = state.collections.grant_writer(&registrations).unwrap();
+    let granted = state
+        .collections
+        .grant_writer(full_grant(&registrations, "writer"))
+        .unwrap();
     let writer = state.table.push(granted).unwrap();
     let writer = state.table.get(&writer).unwrap();
 
     assert_eq!(
         writer.put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue::plain(vec![0xd9, 0xa7, 0xf8, 0])
         ),
         Err(WriteFailure::InvalidAttachment)
@@ -1481,7 +1576,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
     assert_eq!(
         writer.put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 0],
                 capabilities: Vec::new(),
@@ -1492,7 +1587,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
     assert_eq!(
         writer.put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 1],
                 capabilities: vec![lease.publication()],
@@ -1512,14 +1607,20 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
     let version = writer
         .put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 0],
                 capabilities: vec![lease.publication()],
             },
         )
         .unwrap();
-    let stored = registrations.snapshot().into_values().next().unwrap().value;
+    let stored = registrations
+        .snapshot()
+        .into_values()
+        .next()
+        .unwrap()
+        .value
+        .unwrap();
     assert_eq!(stored.body, vec![0xd9, 0xa7, 0xf8, 0]);
     assert_eq!(stored.capabilities.len(), 1);
     assert_eq!(stored.capabilities[0].id(), lease.publication().id());
@@ -1527,8 +1628,10 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
         stored.capabilities[0].contract(),
         &clay_guest_session::capabilities::ContractIdentity::presentation_component()
     );
-    assert!(writer.remove(vec![1], Some(version)).unwrap().is_some());
-    assert!(registrations.snapshot().is_empty());
+    writer
+        .delete(vec![1], WriteBasis::Observed(version))
+        .unwrap();
+    assert!(bodies(&registrations).is_empty());
     drop(lease);
     host.close();
 }

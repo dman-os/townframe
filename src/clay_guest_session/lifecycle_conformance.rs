@@ -25,6 +25,7 @@ use std::sync::OnceLock;
 
 use crate::collections::BytesRegistrations;
 use crate::collections::CollectionSession;
+use crate::collections::RegistrationGrant;
 use crate::collections::bytes_registrations;
 use clay_collection::Change;
 use clay_collection::ReadLimits;
@@ -463,6 +464,49 @@ pub async fn failing_provider_publishes_nothing<E: Incarnations>(engine: E) {
     harness.finish(supervisor).await;
 }
 
+/// What an incarnation's registrations publish: staged scopes commit as one transaction of
+/// the net rows; active scopes publish each visible change as its own transaction, with b's
+/// delete of y as a tombstone row, not a removal. Returns the newest row version per key.
+fn assert_registration_publication(
+    initial_state: Lifecycle,
+    published: &crate::collections::BytesPage,
+    rows: &BTreeMap<Vec<u8>, clay_collection::Stamped<Option<crate::collections::CollectionValue>>>,
+) -> BTreeMap<Vec<u8>, clay_collection::Version> {
+    if initial_state == Lifecycle::Initializing {
+        assert_eq!(published.transactions.len(), 1);
+        assert_eq!(published.transactions[0].changes.len(), 2);
+        assert!(published.transactions[0].changes.iter().all(|change| {
+            matches!(change, Change::Upsert { key, value, .. } if rows.get(key) == Some(value))
+        }));
+    } else {
+        // a-x, a-y, b-x over a-x, b's tombstone of y, then a's supersession of it.
+        assert_eq!(
+            published
+                .transactions
+                .iter()
+                .map(|transaction| transaction.changes.len())
+                .collect::<Vec<_>>(),
+            [1, 1, 1, 1, 1]
+        );
+        assert!(matches!(
+            published.transactions[3].changes[..],
+            [Change::Upsert {
+                value: clay_collection::Stamped { value: None, .. },
+                ..
+            }]
+        ));
+    }
+    let mut versions = BTreeMap::new();
+    for change in published
+        .transactions
+        .iter()
+        .flat_map(|transaction| &transaction.changes)
+    {
+        versions.insert(change.key().clone(), change.row_version());
+    }
+    versions
+}
+
 pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
     let engine = Rc::new(engine);
     for initial_state in [Lifecycle::Initializing, Lifecycle::Active] {
@@ -478,7 +522,11 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
         let mut through = bootstrap.through;
         let mut incarnations = Vec::new();
         let mut owned_rows = Vec::new();
+        let mut published_versions = Vec::new();
         for name in ["first", "other"] {
+            // Each incarnation writes under its own key prefix, and the fixture asserts that a
+            // key outside it is refused.
+            let prefix = format!("{name}/").into_bytes();
             let instance = host.create(name).unwrap();
             host.begin_initialization(&instance).unwrap();
             if initial_state == Lifecycle::Active {
@@ -489,7 +537,12 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
                 .initialize(
                     host.clone(),
                     instance.clone(),
-                    registration_context("registrations", &registrations),
+                    registration_context(
+                        "registrations",
+                        &registrations,
+                        &MicroId::new(name),
+                        &prefix,
+                    ),
                 )
                 .await
                 .unwrap();
@@ -512,50 +565,25 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
             let mut values = rows
                 .values()
                 .map(|entry| {
-                    assert!(entry.value.capabilities.is_empty());
-                    ciborium::from_reader::<String, _>(entry.value.body.as_slice()).unwrap()
+                    let value = entry
+                        .value
+                        .as_ref()
+                        .expect("the fixture leaves no tombstone winner");
+                    assert!(value.capabilities.is_empty());
+                    assert_eq!(entry.stamp.writer.as_bytes(), name.as_bytes());
+                    ciborium::from_reader::<String, _>(value.body.as_slice()).unwrap()
                 })
                 .collect::<Vec<_>>();
             values.sort();
-            assert_eq!(values, ["a-x", "a-y", "b-x"]);
+            // `a` wrote x and y; `b` superseded x and tombstoned y, then `a` superseded the
+            // tombstone: the visible rows are b's x and a's y.
+            assert_eq!(values, ["a-y", "b-x"]);
             let published = observer
                 .read(Some(through), ReadLimits::default())
                 .await
                 .unwrap();
-            if initial_state == Lifecycle::Initializing {
-                assert_eq!(published.transactions.len(), 1);
-                assert_eq!(published.transactions[0].changes.len(), 3);
-                assert!(published.transactions[0].changes.iter().all(|change| {
-                    matches!(change, Change::Upsert { key, value, row_version, .. }
-                        if rows.get(key).is_some_and(|entry| entry.value == *value && entry.version == *row_version))
-                }));
-            } else {
-                assert_eq!(
-                    published
-                        .transactions
-                        .iter()
-                        .map(|transaction| transaction.changes.len())
-                        .collect::<Vec<_>>(),
-                    [1, 1, 1, 1, 1, 2, 1, 1]
-                );
-                let cleared = &published.transactions[5].changes;
-                let cleared_keys = cleared
-                    .iter()
-                    .map(|change| {
-                        assert!(matches!(change, Change::Remove { .. }));
-                        change.key().clone()
-                    })
-                    .collect::<BTreeSet<_>>();
-                let first_scope = rows
-                    .iter()
-                    .filter_map(|(key, entry)| {
-                        let value: String =
-                            ciborium::from_reader(entry.value.body.as_slice()).unwrap();
-                        value.starts_with("a-").then_some(key.clone())
-                    })
-                    .collect::<BTreeSet<_>>();
-                assert_eq!(cleared_keys, first_scope);
-            }
+            let versions = assert_registration_publication(initial_state, &published, &rows);
+            published_versions.push(versions);
             through = published.through;
             incarnations.push((instance, runtime, driver));
             owned_rows.push(rows);
@@ -565,9 +593,10 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
             (other, other_runtime, other_driver),
         ]: [_; 2] = incarnations.try_into().ok().unwrap();
         let [first_rows, other_rows]: [_; 2] = owned_rows.try_into().unwrap();
-        assert_eq!(registrations.snapshot().len(), 6);
+        let [first_versions, _]: [_; 2] = published_versions.try_into().unwrap();
+        assert_eq!(registrations.snapshot().len(), 4);
         assert!(host.begin_close(&first).unwrap());
-        assert_eq!(registrations.snapshot().len(), 6);
+        assert_eq!(registrations.snapshot().len(), 4);
         let closing = observer
             .read(Some(through.clone()), ReadLimits::default())
             .complete_timeout()
@@ -577,7 +606,7 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
         closed.unwrap();
         assert_eq!(residue, GuestResidue::NONE);
         drop(driver);
-        assert_eq!(registrations.snapshot().len(), 6);
+        assert_eq!(registrations.snapshot().len(), 4);
         host.close_instance(&first).unwrap();
         let removed = observer
             .read(
@@ -598,7 +627,7 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
                 let Change::Remove { key, row_version } = change else {
                     panic!("incarnation closure published an upsert");
                 };
-                assert!(*row_version > first_rows[key].version);
+                assert!(*row_version > first_versions[key]);
                 key.clone()
             })
             .collect::<BTreeSet<_>>();
@@ -637,7 +666,12 @@ pub async fn failed_registration_initialization_publishes_nothing<E: Incarnation
         .initialize(
             host.clone(),
             instance.clone(),
-            registration_context("failing-registrations", &registrations),
+            registration_context(
+                "failing-registrations",
+                &registrations,
+                &MicroId::new("failing"),
+                b"failing/",
+            ),
         )
         .await;
     assert_eq!(
@@ -1046,15 +1080,28 @@ pub async fn dropped_call_finishes_in_the_guest_without_leaks<E: Incarnations>(e
     harness.finish(supervisor).await;
 }
 
-fn registration_context(role: &str, registrations: &BytesRegistrations) -> InitialContext {
+/// The fixture's `registrations` roles take `[role, key-prefix]` arguments and bind `a` and
+/// `b` to `micro`'s grant of exactly that prefix.
+fn registration_context(
+    role: &str,
+    registrations: &BytesRegistrations,
+    micro: &MicroId,
+    prefix: &[u8],
+) -> InitialContext {
     let mut arguments = Vec::new();
-    ciborium::into_writer(role, &mut arguments).unwrap();
+    let arguments_value = ciborium::Value::Array(vec![
+        ciborium::Value::Text(role.to_owned()),
+        ciborium::Value::Bytes(prefix.to_vec()),
+    ]);
+    ciborium::into_writer(&arguments_value, &mut arguments).unwrap();
+    let grant = || RegistrationGrant {
+        registrations: registrations.clone(),
+        micro: micro.clone(),
+        prefixes: vec![prefix.to_vec()],
+    };
     InitialContext {
         arguments,
-        registrations: BTreeMap::from([
-            ("a".to_owned(), registrations.clone()),
-            ("b".to_owned(), registrations.clone()),
-        ]),
+        registrations: BTreeMap::from([("a".to_owned(), grant()), ("b".to_owned(), grant())]),
         ..InitialContext::default()
     }
 }
