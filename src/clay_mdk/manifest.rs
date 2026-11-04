@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde::Serialize;
 
+pub use clay_guest_session::capabilities::ContractIdentity;
+
 /// Version of the manifest vocabulary itself, written into [`MicroManifest::schema`].
 pub const MANIFEST_SCHEMA: u32 = 1;
 
@@ -30,13 +32,6 @@ impl MicroId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-/// A contract identity plus its compatibility version.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub struct ContractRef {
-    pub id: String,
-    pub version: u32,
 }
 
 /// A fully qualified WIT interface, e.g. `townframe:dayframe/micro-lifecycle@0.4.0`.
@@ -151,7 +146,7 @@ open_vocabulary! {
 pub struct PublicationDeclaration {
     pub name: String,
     pub kind: PublicationKind,
-    pub contract: Option<ContractRef>,
+    pub contract: Option<ContractIdentity>,
 }
 
 /// A contract this package consumes. `binding` is the local name configuration routes to a
@@ -160,7 +155,7 @@ pub struct PublicationDeclaration {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RequiredContract {
     pub binding: String,
-    pub contract: ContractRef,
+    pub contract: ContractIdentity,
     pub necessity: Necessity,
 }
 

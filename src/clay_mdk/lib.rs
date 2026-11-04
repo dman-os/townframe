@@ -324,7 +324,7 @@ pub use manifest::AttachmentDeclaration;
 pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
 pub use manifest::ConfigurationRequest;
-pub use manifest::ContractRef;
+pub use manifest::ContractIdentity;
 pub use manifest::ContributionDeclaration;
 pub use manifest::Entrypoints;
 pub use manifest::FacetAccess;

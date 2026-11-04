@@ -37,7 +37,7 @@ use tokio::sync::oneshot;
 /// runtime; for a Call it names the request and response Lexicons. Every Presentation
 /// publication has the one [`ContractIdentity::presentation_component`] contract, and a Call
 /// can never have it, so a contract alone tells a redeemer which kind to expect.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ContractIdentity {
     pub namespace: String,
     pub name: String,

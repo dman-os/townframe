@@ -21,8 +21,13 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
       "name": "increment",
       "kind": "call",
       "contract": {
-        "id": "dayframe.counter.increment",
-        "version": 1
+        "namespace": "dayframe.counter",
+        "name": "increment",
+        "version": [
+          1,
+          0,
+          0
+        ]
       }
     }
   ],
@@ -30,8 +35,13 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
     {
       "binding": "shelf",
       "contract": {
-        "id": "dayframe.shelf",
-        "version": 1
+        "namespace": "dayframe",
+        "name": "shelf",
+        "version": [
+          1,
+          0,
+          0
+        ]
       },
       "necessity": "optional"
     }

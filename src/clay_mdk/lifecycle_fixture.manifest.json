@@ -17,16 +17,26 @@
       "name": "echo",
       "kind": "call",
       "contract": {
-        "id": "dayframe.lifecycle.echo",
-        "version": 1
+        "namespace": "dayframe.lifecycle",
+        "name": "echo",
+        "version": [
+          1,
+          0,
+          0
+        ]
       }
     },
     {
       "name": "relay",
       "kind": "call",
       "contract": {
-        "id": "dayframe.lifecycle.relay",
-        "version": 1
+        "namespace": "dayframe.lifecycle",
+        "name": "relay",
+        "version": [
+          1,
+          0,
+          0
+        ]
       }
     }
   ],
@@ -34,32 +44,52 @@
     {
       "binding": "presentation",
       "contract": {
-        "id": "dayframe.lifecycle.presentation",
-        "version": 1
+        "namespace": "dayframe.lifecycle",
+        "name": "presentation",
+        "version": [
+          1,
+          0,
+          0
+        ]
       },
       "necessity": "required"
     },
     {
       "binding": "service",
       "contract": {
-        "id": "dayframe.lifecycle.echo",
-        "version": 1
+        "namespace": "dayframe.lifecycle",
+        "name": "echo",
+        "version": [
+          1,
+          0,
+          0
+        ]
       },
       "necessity": "optional"
     },
     {
       "binding": "peer",
       "contract": {
-        "id": "dayframe.lifecycle.echo",
-        "version": 1
+        "namespace": "dayframe.lifecycle",
+        "name": "echo",
+        "version": [
+          1,
+          0,
+          0
+        ]
       },
       "necessity": "optional"
     },
     {
       "binding": "host",
       "contract": {
-        "id": "dayframe.lifecycle.host",
-        "version": 1
+        "namespace": "dayframe.lifecycle",
+        "name": "host",
+        "version": [
+          1,
+          0,
+          0
+        ]
       },
       "necessity": "optional"
     }
