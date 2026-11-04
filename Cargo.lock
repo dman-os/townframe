@@ -4130,6 +4130,7 @@ dependencies = [
  "dioxus-native",
  "dioxus-native-dom",
  "micro_counter_manifest",
+ "micro_layout_manifest",
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
@@ -9244,8 +9245,29 @@ version = "0.1.0"
 dependencies = [
  "clay_mdk",
  "insta",
+ "micro_layout_manifest",
  "micro_settings_manifest",
  "micro_toolbar_manifest",
+ "serde_json",
+]
+
+[[package]]
+name = "micro_layout"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "dioxus",
+ "micro_layout_manifest",
+]
+
+[[package]]
+name = "micro_layout_manifest"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clay_mdk",
+ "insta",
+ "serde",
  "serde_json",
 ]
 
@@ -9260,6 +9282,7 @@ dependencies = [
  "clay_mdk",
  "dioxus",
  "insta",
+ "micro_layout_manifest",
  "micro_settings_manifest",
  "serde",
  "serde_json",

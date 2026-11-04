@@ -42,6 +42,10 @@ collection_requests:
     contract: org.example.dayframe.toolbar.buttons
     access: write
     necessity: optional
+  - binding: panels
+    contract: org.example.dayframe.layout.panels
+    access: write
+    necessity: optional
 contributions:
   - id: settings-section
     binding: sections
@@ -64,3 +68,13 @@ contributions:
     attachments:
       - index: 0
         publication: increment
+  - id: layout-panel
+    binding: panels
+    key: dayframe.counter
+    payload:
+      content:
+        $attachment: 0
+      title: Counter (Wasm)
+    attachments:
+      - index: 0
+        publication: view

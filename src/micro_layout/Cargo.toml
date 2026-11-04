@@ -1,0 +1,21 @@
+[package]
+name = "micro_layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+micro_layout_manifest = { workspace = true }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+
+# One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
+# other target links the in-process backend.
+[target.'cfg(target_os = "wasi")'.dependencies]
+clay_mdk = { workspace = true, features = ["guest"] }
+
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+clay_mdk = { workspace = true, features = ["in_process", "view"] }

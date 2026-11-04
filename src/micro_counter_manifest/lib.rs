@@ -3,8 +3,9 @@
 //! Settings section row it declares into the `settings.sections` collection, whose attachment
 //! is a lazy endpoint to the counter's own presentation, and the Increment button row it
 //! declares into the `toolbar.buttons` collection, whose attachment is a lazy endpoint to the
-//! counter's `increment` call. The wasm guest reads only the constants; the composition root
-//! reads `manifest()`.
+//! counter's `increment` call, and the panel row it declares into the `layout.panels` collection,
+//! whose attachment is a lazy endpoint to the counter's `view`. The wasm guest reads only the
+//! constants; the composition root reads `manifest()`.
 use clay_mdk::Access;
 use clay_mdk::AttachmentDeclaration;
 use clay_mdk::BindingResolution;
@@ -19,6 +20,7 @@ use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
 use clay_mdk::Sidecar;
+use micro_layout_manifest::PANELS;
 use micro_settings_manifest::SECTIONS;
 use micro_toolbar_manifest::ACTION_CONTRACT;
 use micro_toolbar_manifest::BUTTONS;
@@ -45,6 +47,8 @@ pub const SECTIONS_BINDING: &str = "sections";
 pub const INCREMENT: &str = "increment";
 /// The local binding name under which the counter contributes its toolbar button.
 pub const TOOLBAR_BINDING: &str = "toolbar";
+/// The local binding name under which the counter contributes its layout panel.
+pub const PANELS_BINDING: &str = "panels";
 
 pub fn manifest() -> MicroManifest {
     MicroManifest {
@@ -101,6 +105,14 @@ pub fn manifest() -> MicroManifest {
                 resolution: BindingResolution::Configured,
                 min_revision: None,
             },
+            Request {
+                binding: PANELS_BINDING.into(),
+                contract: Nsid::literal(PANELS),
+                access: Some(Access::Write),
+                necessity: Necessity::Optional,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
         ],
         contributions: vec![
             ContributionDeclaration {
@@ -128,6 +140,19 @@ pub fn manifest() -> MicroManifest {
                 attachments: vec![AttachmentDeclaration {
                     index: 0,
                     publication: INCREMENT.into(),
+                }],
+            },
+            ContributionDeclaration {
+                id: "layout-panel".into(),
+                binding: PANELS_BINDING.into(),
+                key: ID.into(),
+                payload: serde_json::json!({
+                    "title": "Counter (Wasm)",
+                    "content": { "$attachment": 0 },
+                }),
+                attachments: vec![AttachmentDeclaration {
+                    index: 0,
+                    publication: VIEW.into(),
                 }],
             },
         ],

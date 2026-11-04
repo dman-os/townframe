@@ -26,6 +26,8 @@ use dioxus_html::SerializedHtmlEventConverter;
 use dioxus_html::SerializedMouseData;
 use dioxus_native_dom::DioxusState;
 
+mod layout;
+
 struct HeadlessDom {
     dom: VirtualDom,
     document: BaseDocument,

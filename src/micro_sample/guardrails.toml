@@ -6,6 +6,7 @@ allowed_dependencies = [
     "clay_guest_session",
     "clay_host",
     "clay_mdk",
+    "micro_layout_manifest",
     "micro_settings_manifest",
 ]
 allow_external_api_types = false
