@@ -179,6 +179,20 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - **Import sources:** author-published documents (primary), OCI, and Clay's local wasm + manifest pair.
 - **The registry drawer is not node-local.** It is an ordinary drawer that can be shared and synced across nodes (unlike config, D8). Sharing it activates nothing: each node remains its own arbiter of which versions it accepts, and enablement stays in each node's own runtime drawers.
 
+### D12. Malleable plugs: lineage, forks, substitution (DRAFT, pending operator; manager + Clay agent, 2026-11-04)
+Goal (operator): malleable, not an app store. Anyone may modify any plug or publish new ones at the drop of a hat, but nobody can masquerade as an official upgrade. No global authority; provenance must work over documents, branches and OCI.
+- **Lineage = (plug id, publisher).** The publisher is a **keyhive principal or group**, not a raw key (Clay agent). That gives multiple maintainers, rotation (Android APK v3 has rotation proofs; here it's group membership) and revocation. Each version is signed over its content digest. Documents carry this through keyhive authorship, OCI through an attached signature, so provenance is substrate-independent. This supersedes D11's "provenance = the author's document".
+- **Upgrade rule (Android/Sandstorm):** a node accepts a version as an upgrade of an installed lineage only if the same publisher signed it.
+- **Soft fork = substitution (Cargo `[patch]`, Nix overlays, npm `overrides`):** same plug id and NSIDs, a different publisher, and `basedOn: upstream@version`. A node-local choice "plug X follows lineage L"; dependents are unchanged. One lineage per plug id per node (prefix uniqueness).
+- **Hard fork = new plug id:** it coexists with upstream, must rename its NSIDs, and needs explicit rebinding. That is the cost of coexisting vs substituting.
+- **Schemas (AT Protocol implement-vs-own):** a fork may implement upstream NSIDs unchanged. Changing a schema means a new NSID under its own prefix.
+- **Edits as branches:** a modification may be an Automerge branch of the upstream plug document, signed by the modifier: a new lineage with a visible ancestor (Patchwork / git fork).
+- **Dev loop:** the local wasm + manifest pair imports as a lineage published by the node's own principal, so a dev build never auto-replaces upstream.
+- **Grants never widen silently (Clay agent):** across a lineage switch or an upgrade, requests not covered by existing grants come up unresolved. That includes a binding kept under the same name but widened (read→write, or a changed contract). Runtimes compare the granted *request set*, not binding names. Enablement survives an explicit substitution, but not an automatic upgrade that widens requests. This applies to nodules and micros alike.
+- **Install datums record the lineage** `{publisher, plug doc ref / digest, version}` next to `enabled`, so effective state is auditable.
+- Clay-side, not ours: causal-map `WriterId` should become (replica identity, micro id); lineage makes cross-node collisions likelier.
+- Open: plug ids free-form vs tied to an authority (AT Protocol NSID↔domain).
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
