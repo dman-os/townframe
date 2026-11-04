@@ -63,6 +63,7 @@ use crate::capabilities::PublicationEndpoint;
 use crate::capabilities::PublicationKind;
 use crate::capabilities::PublishedCapability;
 use crate::capabilities::RefStatus;
+use crate::capabilities::RowAttachment;
 
 /// The manifest's names (`provides[].id`) for the fixture's two publications: a presentation
 /// and an `echo` call whose handler answers `echo:` plus the request.
@@ -1115,6 +1116,10 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
     let instance = host.create("context").unwrap();
     host.begin_initialization(&instance).unwrap();
     let rows_contract = ContractIdentity::new("dayframe.context", "rows", (1, 0, 0));
+    // The guest's mirror mints a reference for each attachment of the rows it sees, its own
+    // late row's endpoint included, and a lazy reference needs the supervisor's demand handle.
+    // No micro is configured, so nothing can be activated through it.
+    let supervisor = clay_host::Supervisor::<CapabilityPublication>::new(host.clone(), []);
     let (runtime, driver) = Rc::new(engine)
         .initialize(
             host.clone(),
@@ -1128,13 +1133,35 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
                         micro: MicroId::new("context"),
                     },
                 )]),
-                publications: BTreeMap::from([(
-                    "rows".to_owned(),
-                    DeclaredPublication {
-                        kind: PublicationKind::Call,
-                        contract: rows_contract,
-                    },
-                )]),
+                publications: BTreeMap::from([
+                    (
+                        "rows".to_owned(),
+                        DeclaredPublication {
+                            kind: PublicationKind::Call,
+                            contract: rows_contract,
+                        },
+                    ),
+                    (
+                        "attach".to_owned(),
+                        DeclaredPublication {
+                            kind: PublicationKind::Call,
+                            contract: ContractIdentity::new(
+                                "dayframe.context",
+                                "attach",
+                                (1, 0, 0),
+                            ),
+                        },
+                    ),
+                    (
+                        "detail".to_owned(),
+                        DeclaredPublication {
+                            kind: PublicationKind::Presentation,
+                            contract: ContractIdentity::presentation_component(),
+                        },
+                    ),
+                ]),
+                micro: Some(MicroId::new("context")),
+                activator: Some(supervisor.activator()),
                 ..InitialContext::default()
             },
         )
@@ -1184,6 +1211,11 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
         ]
     );
 
+    let attach = E::publications(&runtime)
+        .remove("attach")
+        .expect("the guest publishes `attach`");
+    attach_own_publication(&recipient.mint(&attach).unwrap(), &registrations).await;
+
     assert!(host.begin_close(&instance).unwrap());
     let (closed, residue) = E::close(runtime).await;
     closed.unwrap();
@@ -1197,6 +1229,38 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
     );
     host.close_instance(&recipient_instance).unwrap();
     host.close();
+}
+
+/// A row written by a call, after `initialize` returned its publication handles to the host,
+/// still attaches the guest's own declared presentation: the host stores its endpoint. A name
+/// the manifest does not declare is an invalid attachment.
+async fn attach_own_publication(attach: &CapabilityRef, registrations: &BytesRegistrations) {
+    let attach_call = |name: &str| {
+        let mut request = Vec::new();
+        ciborium::into_writer(name, &mut request).unwrap();
+        attach.call(request)
+    };
+    attach_call("detail").await.unwrap();
+    let late = registrations
+        .snapshot()
+        .into_iter()
+        .find(|(key, _)| ciborium::from_reader::<String, _>(key.as_slice()).unwrap() == "late")
+        .expect("the guest wrote its late row")
+        .1
+        .value
+        .unwrap();
+    assert_eq!(
+        late.attachments,
+        [RowAttachment::Endpoint(PublicationEndpoint {
+            micro: MicroId::new("context"),
+            publication: "detail".into(),
+            contract: ContractIdentity::presentation_component(),
+        })]
+    );
+    assert!(matches!(
+        attach_call("nope").await,
+        Err(CallError::Provider(message)) if message.contains("attachment")
+    ));
 }
 
 fn registration_context(

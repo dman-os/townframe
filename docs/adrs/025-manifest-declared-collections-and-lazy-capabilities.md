@@ -187,6 +187,8 @@ LazyEndpoint {
 
 The endpoint names neither a package revision nor an entrypoint. The installed revision of `micro_id` is resolved at activation. Upgrading a package rewrites its installation scope transactionally, and an endpoint whose publication disappears reports `Unavailable`. Generation and enablement identities may exist inside the service. They are not part of the endpoint or the configuration surface.
 
+A micro that writes a row at runtime attaches one of its own publications by name. The host checks the name against the publications the writer's manifest declares (`invalid-attachment` otherwise) and stores the endpoint `(micro_id, name, declared contract)`, the same value a manifest-declared row stores. The write needs no live publication or handle from `initialize`, so a row can be written at any time, from a task or a call handler as much as from `activate`. A writer forwarding a reference it holds attaches that reference instead, which stays in memory and is never stored durably.
+
 When projecting the row to an authorized reader, Clay mints a recipient-local lazy `capability-ref` for each endpoint and places it in the row's attachment table. Copying the CBOR body conveys no authority. Uninstalling the owning package removes its durable scope, which removes the rows and revokes the references minted from them.
 
 ### 8. Initialization returns publications; there are no slots to poll

@@ -400,17 +400,20 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Registrat
         let body = encode(value);
         match &*self.writer {
             #[cfg(feature = "in_process")]
-            Writer::InProcess(writer) => Ok(writer.put_value(
-                key,
-                basis,
-                clay_guest_session::collections::CollectionValue {
-                    body,
-                    attachments: attachments
-                        .into_iter()
-                        .map(RowAttachment::into_in_process)
-                        .collect(),
-                },
-            )?),
+            Writer::InProcess(writer) => {
+                let Minter::InProcess(capabilities) = &*self.collection.minter else {
+                    unreachable!("an in-process writer belongs to an in-process collection")
+                };
+                let attachments = attachments
+                    .into_iter()
+                    .map(|attachment| attachment.into_in_process(capabilities))
+                    .collect::<Result<_, _>>()?;
+                Ok(writer.put_value(
+                    key,
+                    basis,
+                    clay_guest_session::collections::CollectionValue { body, attachments },
+                )?)
+            }
             #[cfg(feature = "guest")]
             Writer::Guest(writer) => crate::guest::put(writer, key, basis, body, attachments).await,
         }

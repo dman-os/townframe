@@ -87,10 +87,18 @@ pub(super) async fn initialize(
         registrations,
         requirements,
         publications: declared,
+        micro,
         activator,
     } = context;
     if let Some(activator) = activator {
         active.store.data().capabilities.attach_activator(activator);
+    }
+    if let Some(micro) = &micro {
+        active
+            .store
+            .data()
+            .capabilities
+            .attach_own(micro, &declared);
     }
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {

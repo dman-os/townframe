@@ -89,7 +89,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         .config(CONFIG_NAME)
         .expect("manifest declares the sample configuration binding")
         .facet::<SampleConfig>(CONFIG_TAG, CONFIG_KEY)?;
-    let detail = context.publish_component(DETAIL, move || {
+    context.publish_component(DETAIL, move || {
         dioxus::prelude::rsx! { view::SampleDetail { config: config.clone() } }
     })?;
     context
@@ -101,7 +101,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
                 title: "Sample micro".into(),
                 detail: Attachment::at(0),
             },
-            vec![RowAttachment::Bound(detail)],
+            vec![RowAttachment::own(DETAIL)],
         )
         .await?;
     Ok(())

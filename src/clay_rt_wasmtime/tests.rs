@@ -520,9 +520,9 @@ async fn registration_writer_adapter_revokes_without_affecting_other_instances()
                     Resource::new_borrow(rep),
                     vec![1],
                     basis,
-                    registration_wit::EncodedValue {
+                    registration_wit::WrittenValue {
                         body: vec![body],
-                        capabilities: Vec::new(),
+                        attachments: Vec::new(),
                     },
                 )
                 .await
@@ -841,9 +841,9 @@ async fn registration_writer_surfaces_invalid_attachment_for_fabricated_capabili
                 Resource::new_borrow(writer_rep),
                 vec![1],
                 registration_wit::WriteBasis::Concurrent,
-                registration_wit::EncodedValue {
+                registration_wit::WrittenValue {
                     body: vec![0xd9, 0xa7, 0xf8, 0],
-                    capabilities: Vec::new(),
+                    attachments: Vec::new(),
                 },
             )
             .await
@@ -864,9 +864,13 @@ async fn registration_writer_surfaces_invalid_attachment_for_fabricated_capabili
                 Resource::new_borrow(writer_rep),
                 vec![1],
                 registration_wit::WriteBasis::Concurrent,
-                registration_wit::EncodedValue {
+                registration_wit::WrittenValue {
                     body: vec![0xd9, 0xa7, 0xf8, 0],
-                    capabilities: vec![Resource::<CapabilityRef>::new_own(reference_rep)],
+                    attachments: vec![registration_wit::RowAttachment::Reference(Resource::<
+                        CapabilityRef,
+                    >::new_own(
+                        reference_rep
+                    ))],
                 },
             )
             .await

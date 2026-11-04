@@ -463,9 +463,9 @@ async fn replica_holds(state: &Rc<RefCell<State>>, key: &[u8], stamp: &collectio
 /// Two scopes of one micro write the same keys. Their default bases come from the replica,
 /// so each ordinary write supersedes what the probe has seen, deletions included.
 async fn write_scenario(state: Rc<RefCell<State>>) {
-    let value = |body: &str| collections::EncodedValue {
+    let value = |body: &str| collection_registration::WrittenValue {
         body: encode(body),
-        capabilities: Vec::new(),
+        attachments: Vec::new(),
     };
     let (a, b) = {
         let state = state.borrow();
@@ -525,9 +525,9 @@ async fn write_scenario(state: Rc<RefCell<State>>) {
 
     let (outcome, _) = accepted(a.put(vec![0; 1025], value("big-key")).await);
     log(format!("a-put-big-key={outcome}"));
-    let big = collections::EncodedValue {
+    let big = collection_registration::WrittenValue {
         body: vec![0; 64 * 1024 + 1],
-        capabilities: Vec::new(),
+        attachments: Vec::new(),
     };
     let (outcome, _) = accepted(a.put(y.clone(), big).await);
     log(format!("a-put-big-value-y={outcome}"));
@@ -568,9 +568,9 @@ async fn cap_write_scenario(state: Rc<RefCell<State>>) {
         writer
             .put(
                 encode("cap"),
-                collections::EncodedValue {
+                collection_registration::WrittenValue {
                     body: cap_tagged_body(),
-                    capabilities: Vec::new(),
+                    attachments: Vec::new(),
                 },
             )
             .await,
@@ -590,9 +590,9 @@ async fn cap_write_scenario(state: Rc<RefCell<State>>) {
         writer
             .put(
                 encode("cap"),
-                collections::EncodedValue {
+                collection_registration::WrittenValue {
                     body: cap_tagged_body(),
-                    capabilities: vec![reference],
+                    attachments: vec![collection_registration::RowAttachment::Reference(reference)],
                 },
             )
             .await,

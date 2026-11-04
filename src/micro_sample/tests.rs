@@ -77,10 +77,12 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
             let section: Section = ciborium::from_reader(row.body.as_slice()).unwrap();
             assert_eq!(section.title, "Sample micro");
             assert_eq!(section.detail, Attachment::at(0));
-            let [RowAttachment::Bound(detail)] = row.attachments.as_slice() else {
-                panic!("the runtime row attaches its live presentation");
+            // The row persists where to find the presentation, never a live reference.
+            let [RowAttachment::Endpoint(detail)] = row.attachments.as_slice() else {
+                panic!("the runtime row attaches its presentation's endpoint");
             };
-            assert_eq!(detail.name(), DETAIL);
+            assert_eq!(detail.micro, id);
+            assert_eq!(detail.publication, DETAIL);
 
             supervisor.disable(&id).await.unwrap();
             assert_eq!(supervisor.state(&id), MicroState::Disabled);

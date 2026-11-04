@@ -540,6 +540,100 @@ async fn a_published_call_serves_typed_requests_and_reports_handler_rejections()
     .await;
 }
 
+/// A row may attach one of its writer's own declared publications at any time: the host stores
+/// the endpoint, so no handle from `activate` is needed and a reader redeems the row's
+/// reference like a manifest row's. A name the manifest does not declare fails the write.
+#[tokio::test(flavor = "current_thread")]
+async fn a_row_written_after_activate_attaches_the_writers_own_declared_publication() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let writer = rig.micro(
+            "native.late",
+            Spec {
+                publications: vec![presentation("detail"), call("attach")],
+                ..writes_rows()
+            },
+            |context| async move {
+                let rows = context
+                    .registration::<String, String>(ROWS_BINDING)
+                    .unwrap();
+                context.publish_component("detail", blank)?;
+                // The handler runs long after `activate` returned and its staged handles moved.
+                context.publish_call("attach", move |publication: String| {
+                    let rows = rows.clone();
+                    async move {
+                        rows.put(
+                            &"late".to_owned(),
+                            &"Late".to_owned(),
+                            vec![crate::RowAttachment::own(publication)],
+                        )
+                        .await?;
+                        Ok(())
+                    }
+                })?;
+                Ok(())
+            },
+        );
+        let watched = Rc::new(RefCell::new(None::<Collection<String, String>>));
+        let attach = Rc::new(RefCell::new(None::<Capability>));
+        let reader = rig.micro(
+            "native.reader",
+            Spec {
+                eager: true,
+                requires: vec![required("attach", Necessity::Required)],
+                requirements: BTreeMap::from([(
+                    "attach".to_owned(),
+                    provides("native.late", "attach"),
+                )]),
+                ..reads_rows()
+            },
+            {
+                let watched = Rc::clone(&watched);
+                let attach = Rc::clone(&attach);
+                move |context| {
+                    let watched = Rc::clone(&watched);
+                    let attach = Rc::clone(&attach);
+                    async move {
+                        *watched.borrow_mut() = context.collection(ROWS_BINDING);
+                        *attach.borrow_mut() = context.require("attach").cloned();
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let supervisor = Rc::new(Supervisor::new(rig.host.clone(), [writer, reader]));
+        // Redeeming a reference is served by the supervisor's driver.
+        let driver = tokio::task::spawn_local({
+            let supervisor = Rc::clone(&supervisor);
+            async move { supervisor.drive().await }
+        });
+        assert!(supervisor.reconcile().await.is_empty());
+        let attach = attach.borrow().clone().unwrap();
+        assert_eq!(
+            attach.call::<String, ()>(&"detail".to_owned()).await,
+            Ok(())
+        );
+        let mut watch = watched.borrow().clone().unwrap();
+        while watch.rows().unwrap().is_empty() {
+            watch.changed().await.unwrap();
+        }
+        let rows = watch.rows().unwrap();
+        let detail = rows[0].attachments[0].redeem_presentation().await.unwrap();
+        assert!(detail.component().is_ok());
+        drop(detail);
+        // Neither an undeclared name nor a declared call attaches as a presentation row.
+        assert!(matches!(
+            attach.call::<String, ()>(&"nope".to_owned()).await,
+            Err(Error::Rejected(message)) if message.contains("attachment")
+        ));
+        drop((attach, rows, watch));
+        driver.abort();
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
 #[test]
 fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
     let manifest = MicroManifest {

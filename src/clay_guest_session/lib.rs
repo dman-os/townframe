@@ -53,6 +53,11 @@ pub struct InitialContext {
     /// The publications the package's manifest declares, by name. What `initialize` returns is
     /// admitted against this (see [`capabilities::admit_publications`]).
     pub publications: BTreeMap<String, capabilities::DeclaredPublication>,
+    /// The micro this incarnation belongs to; with `publications` it lets a row the guest
+    /// writes attach one of its own publications by name (see
+    /// [`capabilities::CapabilitySession::own_endpoint`]). `None` where no micro identity
+    /// exists (engine tests), and every such attachment is then invalid.
+    pub micro: Option<clay_host::MicroId>,
     /// The supervisor's demand handle, behind the lazy references this incarnation mints from
     /// stored endpoints (see [`capabilities::CapabilitySession::mint_lazy`]). `None` where no
     /// supervisor runs (engine tests); minting a lazy reference then crashes.
