@@ -401,6 +401,12 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Registrat
         match &*self.writer {
             #[cfg(feature = "in_process")]
             Writer::InProcess(writer) => {
+                // With only the in-process backend compiled, `Minter` has one variant and the
+                // pattern cannot fail; with both backends it can, if the halves were mismatched.
+                #[cfg_attr(
+                    not(feature = "guest"),
+                    expect(irrefutable_let_patterns, reason = "single-backend build")
+                )]
                 let Minter::InProcess(capabilities) = &*self.collection.minter else {
                     unreachable!("an in-process writer belongs to an in-process collection")
                 };
