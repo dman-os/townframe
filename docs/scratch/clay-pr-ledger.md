@@ -35,7 +35,7 @@ decided, what is running, what is open. Update it whenever a checkpoint lands or
 | C0 | Recover gen-34 B (`9f19a2fb`, scope-owned registration rows) | was broken; completed by C1 |
 | C1 | Collapse `_deferred` (dispatch carries output `T`); migrate `clay_guest_session` + engines onto scopes | committed `e22f80b0`; 191/191 (clay_collection, clay_guest_session, clay_rt_wasmtime, clay_rt_wcmp_wasmi), clippy clean. Scopes close at teardown **after** `instance-root.close()` (ADR 024 §6), not at Closing |
 | C2 | Lifecycle core: evolve `clay_host::Supervisor` (see "Two controllers" below) | committed `b2f380df` (134/134, guardrails clean) |
-| C2b | Move MDK + shells (`dayframe_composition`, desktop, web) onto the Supervisor; delete `clay_micro_core::micros` composition/broker | after C2 |
+| C2b | Move MDK + shells (`dayframe_composition`, desktop, web) onto the Supervisor; delete `clay_micro_core` | committed (see "C2b done"); web Playwright spec updated, not yet run |
 | C3a | Host side, no WIT: `Send` activation bridge in `clay_host`; bank refs Bound/Lazy; Call + Presentation publication kinds; in-process tests | committed `a7df27a1` (92/92 host side; 7 engine tests stubbed until C3b/C3c) |
 | C3b | WIT reshape + Wasmtime adapter + lifecycle fixture (call + presentation publications, lazy consumer); owned `ContractIdentity` + per-call contract; drain queued activations when `drive` drops | committed `27a07a83` (123/123; 6 wcmp_wasmi tests stubbed until C3c) |
 | C3d | Calls as store tasks (lock per burst); serialized per incarnation; waits-for graph refuses cycles (`call-cycle`); forced close mid-call skips guest close | committed `9e87066b` (129/129, 20x loop clean). Fallback baseline; superseded by C3e if the stream spike passes |
@@ -379,3 +379,19 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 - The fork's devshell is broken since 687e486 (wasm-bindgen pinned to 0.2.127 with no
   `wasmBindgenHashes."0.2.127"` entry in flake.nix). Bootstrapping the hashes builds wasm-bindgen-cli
   through Nix and filled `/` (/tmp) on this machine. Deferred; 7604dc8 verified with plain cargo test only.
+
+## C2b done (2026-11-04)
+
+- Row attachments are bound publications or endpoints `(micro, publication, contract)`; durable rows
+  store endpoints only; readers mint lazy refs through the session's `Activator`, which
+  `Factory::initialize` now receives. Manifest contracts are `ContractIdentity` (namespace, name,
+  version); `ContractRef` is gone.
+- Manifest rows become installable via `native::declared_rows` (JSON payload, `{"$attachment": n}`
+  stands for the attachment tag; attachments become endpoints to the package's own publications).
+  The shell installs them into `<micro>/manifest`; `<micro>/runtime` is reserved for runtime writes.
+- Shell: `dayframe_composition::CompositionRuntime` (catalog = manifest, eager, locked, requirements,
+  factory), `shell.roots` collection, `serve()` runs `drive()` + eager start + ordered shutdown inside
+  a `LocalSet`. Lifecycle panel keeps enable/disable/retry. Dropped: eager/enable toggles,
+  preference-driven startup, accept/reject controls, the Wasm fuel-trap e2e flow.
+- `clay_micro_core` deleted. `dayframe_web` still needs `--config resolver.feature-unification="selected"`
+  for the wasm32 lane: `utils_rs` dev-deps pull tokio `full`/`net` into the unified graph.
