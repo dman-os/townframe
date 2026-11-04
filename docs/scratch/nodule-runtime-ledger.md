@@ -250,9 +250,10 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs: P1–P4 done. P4b (`Plug.authority`) is running on the P4 agent; then P5 (resolution and lockfile).
+- big_plugs: P1–P4b done. P5 (enable-time resolution and lockfile) is next, on a fresh agent.
 ## Done
 
+- 2026-11-04: P4b `Plug.authority`. An optional NSID authority prefix on the envelope (absent = holds nothing, so only vendor and request). Held = declared under the authority. Foreign Lexicons, refs, stores and init targets must be requested or implemented. Equal or nested enabled authorities conflict (trie). `Nodule::admit(authority)`. Verified 425/425 including big_cabinet_core.
 - 2026-11-04: P4 shared request shape, `6431c8aa`.
   - `big_plugs_core::request::Request{binding, contract, access, necessity, resolution, minRevision}`. An unknown necessity counts as required. `access: None` means an operation call.
   - `Nodule.id` removed. Actor path segment = `<name>-<blake3(plug id)[..32 hex]>`. Migration 004 breaks pre-existing dev nodes (accepted: unreleased).
