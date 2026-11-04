@@ -75,6 +75,7 @@ fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
             .into_iter()
             .collect(),
         collection_contracts: vec![],
+        collection_requests: vec![],
         contributions: vec![],
         extra: BTreeMap::new(),
     }
@@ -102,6 +103,7 @@ impl Rig {
             eager: false,
             enabled: true,
             requirements: BTreeMap::new(),
+            unresolved_bindings: Vec::new(),
             factory: factory(
                 resources.clone(),
                 declared,

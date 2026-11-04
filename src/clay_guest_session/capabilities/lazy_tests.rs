@@ -124,6 +124,7 @@ impl World {
             eager: false,
             enabled: true,
             requirements: BTreeMap::new(),
+            unresolved_bindings: Vec::new(),
             factory: Rc::new(Provider(Arc::clone(&script))),
         };
         Self {

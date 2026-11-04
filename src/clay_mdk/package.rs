@@ -77,6 +77,7 @@ mod tests {
             requires: vec![],
             configuration_requests: vec![],
             collection_contracts: vec![],
+            collection_requests: vec![],
             contributions: vec![],
             extra: Default::default(),
         }

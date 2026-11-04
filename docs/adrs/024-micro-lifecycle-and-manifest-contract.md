@@ -470,6 +470,7 @@ MicroManifest {
     requires: [RequiredContract],
     configuration_requests: [ConfigurationRequest],
     collection_contracts: [CollectionContract],
+    collection_requests: [CollectionRequest],
     contributions: [ContributionDeclaration],
 }
 ```
@@ -519,6 +520,14 @@ CollectionContract {
     offered_capabilities: Read | Register | DomainCommands,
     backing: Volatile | Durable | Materialized,
 }
+
+CollectionRequest {
+    binding,                     // unique local name; the only name guest code uses
+    contract,                    // CollectionContract id
+    access: Read | Write,        // write implies read
+    necessity: Required | Optional,
+    resolution: Configured | AtRuntime,
+}
 ```
 
 A contract has no writer policy: retention belongs to the writer's scope (ADR 025 §4), and write
@@ -527,8 +536,9 @@ so a micro can supersede another's row. Authority will be scoped by the collecti
 once it exists (guest and host run the same query engine), and the grant will be the query.
 
 These are requested/declared shapes, not grants. Configuration chooses concrete
-documents, suppliers, and allowed access. Collection query IRs remain contract-specific
-CBOR interpreted by host and guest libraries.
+documents, suppliers, and the concrete collection each collection request binds to (ADR 025 §11
+specifies resolution, defaults, and the unconfigured lifecycle state). Collection query IRs
+remain contract-specific CBOR interpreted by host and guest libraries.
 
 ### 14. Contributions are durable collection rows with lazy endpoints
 

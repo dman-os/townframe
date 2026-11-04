@@ -7,8 +7,11 @@
 //! exist while it is stopped declares the row in its manifest, which stores an endpoint to its
 //! own presentation; a micro that only contributes while running writes the row at runtime with
 //! a bound reference. Settings treats both alike.
+use clay_mdk::BindingResolution;
+use clay_mdk::CollectionAccess;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionContract;
+use clay_mdk::CollectionRequest;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::ContributionDeclaration;
 use clay_mdk::Entrypoints;
@@ -16,6 +19,7 @@ use clay_mdk::FacetAccess;
 use clay_mdk::MANIFEST_SCHEMA;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
+use clay_mdk::Necessity;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::native::Attachment;
@@ -31,6 +35,8 @@ pub const CONFIG_KEY: &str = "main";
 pub const VIEW: &str = "view";
 /// The id of the declared collection Settings reads its sections from.
 pub const SECTIONS: &str = "settings.sections";
+/// The local binding name under which Settings reads its sections collection.
+pub const SECTIONS_BINDING: &str = "sections";
 /// Schema ids of [`SECTIONS`] keys (the contributing micro's id, text) and values
 /// ([`Section`]).
 pub const SECTION_KEY_SCHEMA: &str = "dayframe.settings.section-key";
@@ -75,6 +81,15 @@ pub fn manifest() -> MicroManifest {
             value_schema: SECTION_VALUE_SCHEMA.into(),
             write_context_schema: None,
             offered: vec![CollectionCapability::Read, CollectionCapability::Register],
+        }],
+        // Settings reads sections through a binding configuration resolves; with one declared
+        // `settings.sections` collection the default binds it.
+        collection_requests: vec![CollectionRequest {
+            binding: SECTIONS_BINDING.into(),
+            contract: SECTIONS.into(),
+            access: CollectionAccess::Read,
+            necessity: Necessity::Required,
+            resolution: BindingResolution::Configured,
         }],
         contributions: vec![ContributionDeclaration {
             id: "root".into(),

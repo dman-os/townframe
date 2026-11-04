@@ -75,6 +75,15 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
       ]
     }
   ],
+  "collection_requests": [
+    {
+      "binding": "tally-book",
+      "contract": "tallies",
+      "access": "write",
+      "necessity": "required",
+      "resolution": "configured"
+    }
+  ],
   "contributions": [
     {
       "id": "toolbar-button",

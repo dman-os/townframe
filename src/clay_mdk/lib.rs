@@ -321,8 +321,11 @@ pub extern "C" fn __wasilibc_task_hook(hook: i32, prev_context_0: i32, hook_stac
 
 mod manifest;
 pub use manifest::AttachmentDeclaration;
+pub use manifest::BindingResolution;
+pub use manifest::CollectionAccess;
 pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
+pub use manifest::CollectionRequest;
 pub use manifest::ConfigurationRequest;
 pub use manifest::ContractIdentity;
 pub use manifest::ContributionDeclaration;

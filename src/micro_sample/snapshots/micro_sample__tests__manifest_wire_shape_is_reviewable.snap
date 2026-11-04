@@ -25,4 +25,10 @@ configuration_requests:
         create: false
         delete: false
 collection_contracts: []
+collection_requests:
+  - binding: sections
+    contract: settings.sections
+    access: write
+    necessity: required
+    resolution: configured
 contributions: []

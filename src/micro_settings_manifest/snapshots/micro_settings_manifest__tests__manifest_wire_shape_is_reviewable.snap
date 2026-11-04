@@ -33,6 +33,12 @@ collection_contracts:
     offered:
       - read
       - register
+collection_requests:
+  - binding: sections
+    contract: settings.sections
+    access: read
+    necessity: required
+    resolution: configured
 contributions:
   - id: root
     collection: shell.roots

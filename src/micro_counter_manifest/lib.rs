@@ -44,6 +44,7 @@ pub fn manifest() -> MicroManifest {
             }],
         }],
         collection_contracts: vec![],
+        collection_requests: vec![],
         contributions: vec![ContributionDeclaration {
             id: "settings-section".into(),
             collection: "settings.sections".into(),

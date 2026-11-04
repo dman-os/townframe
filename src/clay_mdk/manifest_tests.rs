@@ -51,6 +51,13 @@ fn canonical_manifest() -> MicroManifest {
             write_context_schema: None,
             offered: vec![CollectionCapability::Read, CollectionCapability::Register],
         }],
+        collection_requests: vec![CollectionRequest {
+            binding: "tally-book".into(),
+            contract: "tallies".into(),
+            access: CollectionAccess::Write,
+            necessity: Necessity::Required,
+            resolution: BindingResolution::Configured,
+        }],
         contributions: vec![nested_contribution()],
         extra: BTreeMap::new(),
     }
@@ -99,6 +106,8 @@ fn unknown_members_round_trip_unchanged() {
     wire["publications"][1]["kind"] = serde_json::json!("stream");
     wire["requires"][0]["necessity"] = serde_json::json!("eventual");
     wire["collection_contracts"][0]["offered"][1] = serde_json::json!("stream");
+    wire["collection_requests"][0]["access"] = serde_json::json!("append");
+    wire["collection_requests"][0]["resolution"] = serde_json::json!("negotiated");
 
     let manifest: MicroManifest = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(
@@ -123,6 +132,14 @@ fn unknown_members_round_trip_unchanged() {
             CollectionCapability::Read,
             CollectionCapability::Other("stream".into())
         ]
+    );
+    assert_eq!(
+        manifest.collection_requests[0].access,
+        CollectionAccess::Other("append".into())
+    );
+    assert_eq!(
+        manifest.collection_requests[0].resolution,
+        BindingResolution::Other("negotiated".into())
     );
     assert_eq!(serde_json::to_value(&manifest).unwrap(), wire);
 }
@@ -169,6 +186,14 @@ fn validate_rejects_incoherent_manifests() {
                     .push(manifest.collection_contracts[0].clone())
             },
             "duplicate collection_contracts id \"tallies\"",
+        ),
+        (
+            |manifest| {
+                manifest
+                    .collection_requests
+                    .push(manifest.collection_requests[0].clone())
+            },
+            "duplicate collection_requests binding \"tally-book\"",
         ),
         (
             |manifest| manifest.contributions.push(nested_contribution()),

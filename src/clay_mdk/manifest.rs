@@ -151,6 +151,26 @@ open_vocabulary! {
 }
 
 open_vocabulary! {
+    /// What a micro asks to do with a collection bound to a [`CollectionRequest`]. Writing
+    /// implies reading, so there is no separate write-only access.
+    CollectionAccess {
+        Read => "read",
+        Write => "write",
+    }
+}
+
+open_vocabulary! {
+    /// Who decides what a [`CollectionRequest`] binds to.
+    BindingResolution {
+        /// Configuration, with the host's defaults when it says nothing (ADR 025 §11).
+        Configured => "configured",
+        /// Chosen by the user while the micro runs (a powerbox-style grant). Declared only:
+        /// no host issues these yet, and the host never defaults them.
+        AtRuntime => "at-runtime",
+    }
+}
+
+open_vocabulary! {
     /// One capability a collection contract offers its consumers (ADR 024 §8).
     CollectionCapability {
         Read => "read",
@@ -179,6 +199,20 @@ pub struct RequiredContract {
     pub binding: String,
     pub contract: ContractIdentity,
     pub necessity: Necessity,
+}
+
+/// A collection this package asks to use under a local binding name (ADR 025 §11). It names
+/// the collection *contract* it can work with, never a concrete collection: configuration
+/// resolves the binding to one, and a micro's code only ever names the binding. Declaring it
+/// grants no authority; `contract` is a [`CollectionContract::id`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CollectionRequest {
+    pub binding: String,
+    pub contract: String,
+    pub access: CollectionAccess,
+    /// A required binding that resolves to nothing keeps the micro from starting.
+    pub necessity: Necessity,
+    pub resolution: BindingResolution,
 }
 
 /// One requested facet access right (manifest-as-allowlist, ADR 015 §8). Neutral data; the
@@ -253,6 +287,7 @@ pub struct MicroManifest {
     pub requires: Vec<RequiredContract>,
     pub configuration_requests: Vec<ConfigurationRequest>,
     pub collection_contracts: Vec<CollectionContract>,
+    pub collection_requests: Vec<CollectionRequest>,
     pub contributions: Vec<ContributionDeclaration>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -299,6 +334,12 @@ impl MicroManifest {
         unique(
             "collection_contracts id",
             self.collection_contracts.iter().map(|it| it.id.as_str()),
+        )?;
+        unique(
+            "collection_requests binding",
+            self.collection_requests
+                .iter()
+                .map(|it| it.binding.as_str()),
         )?;
         unique(
             "contributions id",

@@ -1159,6 +1159,7 @@ impl<E: Incarnations> Harness<E> {
             eager: false,
             enabled: true,
             requirements: BTreeMap::new(),
+            unresolved_bindings: Vec::new(),
             factory: self.factory("provider", provider_role, None),
         };
         let consumer = ConfiguredMicro {
@@ -1181,6 +1182,7 @@ impl<E: Incarnations> Harness<E> {
                     },
                 ),
             ]),
+            unresolved_bindings: Vec::new(),
             factory: self.factory("consumer", "consumer", None),
         };
         Supervisor::new(self.host.clone(), [provider, consumer])
@@ -1214,6 +1216,7 @@ impl<E: Incarnations> Harness<E> {
                 eager: false,
                 enabled: true,
                 requirements: BTreeMap::new(),
+                unresolved_bindings: Vec::new(),
                 factory: self.factory(identity, "provider", Some(peer)),
             }),
         )
