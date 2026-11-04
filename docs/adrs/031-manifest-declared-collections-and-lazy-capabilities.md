@@ -1,6 +1,6 @@
 # ADR 031: Manifest-declared collections and lazy capabilities
 
-**Status:** Proposed. The collection and capability waists exist; manifest admission, durable registration scopes, lazy activation references, and the Clay enablement service do not.
+**Status:** Proposed. The collection and capability waists, manifest admission from a package sidecar, durable registration scopes, lazy activation references and the Clay enablement service are implemented; admission from the `big_plugs_core` envelope and schema validation of collection rows are not. The validation list below is tracked in `docs/scratch/clay-pr-ledger.md` ("Validation matrix").
 
 **Builds on:** ADR 017's leased projection protocol, ADR 029's capability bank, ADR 030's micro lifecycle, and the plug envelope/catalog work in `big_plugs_core`.
 
