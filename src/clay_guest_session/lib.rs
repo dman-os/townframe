@@ -48,7 +48,7 @@ pub struct InitialContext {
     pub arguments: Vec<u8>,
     pub configs: BTreeMap<String, DocumentRef>,
     pub collections: BTreeMap<String, collections::BytesProjection>,
-    pub registrations: BTreeMap<String, collections::RegistrationGrant>,
+    pub registrations: BTreeMap<String, clay_host::Grant<collections::BytesRegistrations>>,
     pub requirements: BTreeMap<String, capabilities::CapabilityPublication>,
     /// The publications the package's manifest declares, by name. What `initialize` returns is
     /// admitted against this (see [`capabilities::admit_publications`]).

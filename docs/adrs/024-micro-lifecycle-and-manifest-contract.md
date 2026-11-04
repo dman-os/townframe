@@ -391,9 +391,11 @@ interface collection-registration {
 ```
 
 `registration-writer` writes into a host-assigned registration scope with the causal-map rules of
-ADR 017 §9; `mutation-error` adds `conflict(option<stamp>)` for a failed compare-and-set and
-`forbidden` for a key outside the binding's prefix grant. Dropping the handle releases mutation
-authority only. The host retracts incarnation-scope contributions when the instance closes and
+ADR 017 §9; `mutation-error` adds `conflict(option<stamp>)` for a failed compare-and-set. There is no
+key-level write authorization yet: any micro bound to a collection with Register may write any key,
+so a micro can supersede another's row; authority will be scoped by the collection query language
+once it exists (guest and host run the same query engine), and the grant will be the query.
+Dropping the handle releases mutation authority only. The host retracts incarnation-scope contributions when the instance closes and
 installation-scope contributions when the owning plug is uninstalled, as specified by ADR 025.
 Documents retain their domain command interface and heads-based settlement rather than
 being forced through either generic writer.
@@ -519,7 +521,9 @@ CollectionContract {
 ```
 
 A contract has no writer policy: retention belongs to the writer's scope (ADR 025 §4), and write
-authority is a key-prefix grant on each registration binding, which configuration narrows.
+authority is not key-scoped yet: any micro bound to a collection with Register may write any key,
+so a micro can supersede another's row. Authority will be scoped by the collection query language
+once it exists (guest and host run the same query engine), and the grant will be the query.
 
 These are requested/declared shapes, not grants. Configuration chooses concrete
 documents, suppliers, and allowed access. Collection query IRs remain contract-specific

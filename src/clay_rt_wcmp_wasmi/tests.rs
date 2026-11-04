@@ -506,7 +506,6 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
         package.as_shared(),
         InitialContext {
             collections: [("rows".into(), registrations.projection())].into(),
-            // Manifest admission (C5) will narrow these to the micro's declared prefixes.
             registrations: [
                 ("a".into(), full_grant(&registrations, "probe")),
                 ("b".into(), full_grant(&registrations, "probe")),
@@ -614,7 +613,6 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
         package.as_shared(),
         InitialContext {
             collections: [("rows".into(), registrations.projection())].into(),
-            // Manifest admission (C5) will narrow this to the micro's declared prefixes.
             registrations: [("cap".into(), full_grant(&registrations, "probe"))].into(),
             ..InitialContext::default()
         },
@@ -736,15 +734,14 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
     host.close();
 }
 
-/// Every registration test grants every key; real mint sites pass the manifest's prefixes.
+/// A grant of `micro` over `registrations`.
 fn full_grant(
     registrations: &clay_guest_session::collections::BytesRegistrations,
     micro: &str,
-) -> clay_guest_session::collections::RegistrationGrant {
-    clay_guest_session::collections::RegistrationGrant {
-        registrations: registrations.clone(),
+) -> clay_host::Grant<clay_guest_session::collections::BytesRegistrations> {
+    clay_host::Grant {
+        collection: registrations.clone(),
         micro: clay_host::MicroId::new(micro),
-        prefixes: vec![Vec::new()],
     }
 }
 

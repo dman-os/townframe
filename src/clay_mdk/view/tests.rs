@@ -5,7 +5,6 @@ use clay_guest_session::capabilities::CapabilityLimits;
 use clay_guest_session::capabilities::CapabilitySession;
 use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
-use clay_guest_session::collections::RegistrationGrant;
 use clay_guest_session::collections::bytes_registrations;
 use clay_host::Host;
 use clay_host::MicroId;
@@ -56,10 +55,9 @@ async fn rows_hook_rerenders_on_each_change_and_hides_tombstones() {
             let capabilities =
                 CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
             let writer = sessions
-                .grant_writer(RegistrationGrant {
-                    registrations: registrations.clone(),
+                .grant_writer(clay_host::Grant {
+                    collection: registrations.clone(),
                     micro: MicroId::new("writer"),
-                    prefixes: vec![Vec::new()],
                 })
                 .unwrap();
             let reader = sessions.grant(registrations.projection()).unwrap();

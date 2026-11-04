@@ -166,7 +166,6 @@ fn write_failure_to_wire(failure: WriteFailure) -> registration_wit::MutationErr
         WriteFailure::Conflict { current } => {
             registration_wit::MutationError::Conflict(current.map(stamp_to_wire))
         }
-        WriteFailure::Forbidden => registration_wit::MutationError::Forbidden,
         WriteFailure::Revoked => registration_wit::MutationError::Revoked,
         WriteFailure::KeyTooLarge => registration_wit::MutationError::KeyTooLarge,
         WriteFailure::ValueTooLarge => registration_wit::MutationError::ValueTooLarge,

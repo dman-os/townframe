@@ -12,7 +12,6 @@ use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
 use clay_guest_session::collections::BytesProjection;
-use clay_guest_session::collections::RegistrationGrant;
 use clay_host::Activator;
 use clay_host::ComponentRef;
 use clay_host::Factory;
@@ -156,7 +155,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                     resources
                         .collections
                         .grant(id, &micro)
-                        .map(|grant| (id.clone(), RegistrationGrant::from(grant)))
+                        .map(|grant| (id.clone(), grant))
                         .map_err(|error| error.to_string())
                 })
                 .collect::<Result<_, _>>()?;

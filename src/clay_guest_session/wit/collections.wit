@@ -109,8 +109,6 @@ interface collection-registration {
     variant mutation-error {
         /// The visible row's stamp, or `none` if the key is absent.
         conflict(option<stamp>),
-        /// The key lies outside the key prefixes this binding may write.
-        forbidden,
         revoked,
         key-too-large,
         value-too-large,

@@ -946,7 +946,6 @@ fn declared_collections_outlive_grants_and_issue_full_prefix_authority() {
     let micro = MicroId::new("dayframe.counter");
     let grant = registry.grant("settings.sections", &micro).unwrap();
     assert_eq!(grant.micro, micro);
-    assert_eq!(grant.prefixes, vec![Vec::<u8>::new()]);
     assert!(Arc::ptr_eq(&grant.collection, &collection));
     // The registry is shared and independent of any grant holder.
     drop(grant);
