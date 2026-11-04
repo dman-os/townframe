@@ -25,7 +25,7 @@ let
     hash = "sha256-/BLs3nfUuYeGhBmiA/Fa0mzOyKibMHdnG9rU/6ZU6ZM=";
   };
 in
-assert pkgs.quint-cli.version == quintVersion;
+assert pkgs.quint."quint-cli".version == quintVersion;
 pkgs.stdenvNoCC.mkDerivation {
   pname = "quint";
   version = quintVersion;
@@ -37,7 +37,7 @@ pkgs.stdenvNoCC.mkDerivation {
 
     mkdir -p $out/bin
     makeWrapper ${pkgs.nodejs_24}/bin/node $out/bin/quint \
-      --add-flags "${pkgs.quint-cli}/share/quint/dist/src/cli.js" \
+      --add-flags "${pkgs.quint."quint-cli"}/share/quint/dist/src/cli.js" \
       --set QUINT_HOME "$out/share/quint" \
       --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.openjdk21 ]}
 
