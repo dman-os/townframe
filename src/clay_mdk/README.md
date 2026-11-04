@@ -34,8 +34,11 @@ the micro's own requirement bindings — and activation defaults (registration t
 or live state, and carries unknown members so newer manifests round-trip through older tooling.
 `MicroManifest::validate` checks what serde cannot — the schema this build reads, unique ids and
 bindings, contributions aimed at declared requirement bindings, and activation defaults naming a
-declared contribution through its own binding and contract — and `Package::from_bytes` rejects a
-package whose manifest fails it.
+declared contribution through its own binding and contract — and `Package::new` / `Package::from_json`
+reject a package whose manifest fails it. A package is currently a stand-in pair of sibling files,
+`<name>.component.wasm` plus `<name>.manifest.json` (the serialized manifest, emitted by the
+`emit_manifest` example of the micro's `_manifest` crate); the manifest is not embedded in the Wasm.
+Package delivery belongs to `big_plugs`, which will replace this pairing.
 Contracts that accept contributions implement `Contributable`; a payload that violates the
 contract is rejected with `AccessError::Denied`, never trusted (payloads may arrive over the
 wire).

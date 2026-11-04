@@ -72,13 +72,17 @@ for (const name in components) {
   console.log(`${variable}=${artifact}`);
 }
 
-// The counter is also a self-describing package: the desktop shell scans a package
-// directory (and reads each manifest statically from the component bytes), so prepare
-// that directory beside the raw fixtures.
+// The counter is also a package: the desktop shell scans a package directory for
+// `<name>.manifest.json` sidecars paired with `<name>.component.wasm`, so prepare that
+// directory beside the raw fixtures. STAND-IN until `big_plugs` delivers manifests; the
+// sidecar is emitted from the counter's manifest crate.
 const packagesDirectory = directory.join("packages");
 await Deno.mkdir(packagesDirectory.toString(), { recursive: true });
 await $`cp ${directory.join("counter.component.wasm")} ${
   packagesDirectory.join("counter.component.wasm")
+}`;
+await $`cargo run --locked -q -p micro_counter_manifest --example emit_manifest -- ${
+  packagesDirectory.join("counter.manifest.json")
 }`;
 componentEnv["DAYFRAME_PACKAGE_DIR"] = packagesDirectory.toString();
 console.log(`DAYFRAME_PACKAGE_DIR=${packagesDirectory}`);

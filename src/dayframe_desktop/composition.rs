@@ -9,6 +9,7 @@ use clay_mdk::native::CollectionBindings;
 use clay_store::OrderedStore;
 use dayframe_composition::InstalledMicro;
 use micro_settings_manifest::SECTIONS;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -95,8 +96,16 @@ pub async fn open_store() -> Result<clay_store::SqliteStore, String> {
         .map_err(|error| format!("cannot open the store at {}: {error}", path.display()))
 }
 
+/// `<name>` of a `<name>.manifest.json` path.
+fn manifest_package_name(path: &Path) -> Option<&str> {
+    path.file_name()?.to_str()?.strip_suffix(".manifest.json")
+}
+
 /// Read every package in the package directory. A missing directory installs nothing; an
-/// unreadable or manifest-less entry is reported per entry and never stops the shell.
+/// unreadable or unpaired entry is reported per entry and never stops the shell.
+///
+/// STAND-IN until `big_plugs` delivers manifests: a package is the sibling files
+/// `<name>.manifest.json` and `<name>.component.wasm`, discovered by the manifest.
 fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
     let Some(directory) = package_directory() else {
         return (Vec::new(), Vec::new());
@@ -116,18 +125,24 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
     };
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file())
+        .filter(|path| path.is_file() && manifest_package_name(path).is_some())
         .collect();
     paths.sort();
     let mut installed = Vec::new();
     let mut errors = Vec::new();
     for path in paths {
-        let package = std::fs::read(&path)
-            .map_err(|error| format!("cannot read {}: {error}", path.display()))
-            .and_then(|bytes| {
-                clay_mdk::package::Package::from_bytes(bytes)
-                    .map_err(|error| format!("{}: {error}", path.display()))
-            });
+        let component = path.with_file_name(format!(
+            "{}.component.wasm",
+            manifest_package_name(&path).expect("filtered to manifest files")
+        ));
+        let read = |path: &Path| {
+            std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+        };
+        let package = read(&path).and_then(|json| {
+            let bytes = read(&component)?;
+            clay_mdk::package::Package::from_json(&json, bytes)
+                .map_err(|error| format!("{}: {error}", path.display()))
+        });
         match package {
             Ok(package) => {
                 let manifest = package.manifest().clone();
