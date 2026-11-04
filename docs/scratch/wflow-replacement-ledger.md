@@ -347,3 +347,27 @@ The audit and target architecture are complete enough to resume implementation. 
 - [ ] Benchmarks only after semantics and architecture settle.
 - [ ] Delete legacy engine and compatibility entry points.
 - [ ] Update public API snapshots and downstream callers at the end of the PR.
+
+## 7. Fleet delivery ledger
+
+This is the manager-owned source of truth for delegated delivery. Children may report evidence, but only the manager changes lane state or accepts a handoff.
+
+Implementation topology: **multi-seam**. Authority policy, portable WDK/WIT, runtime lifecycle, persistence maintenance, formal model, and production cutover are independently testable contracts. Each mutation lane receives an isolated worktree and exclusive files; integration is a separate lane after component handoffs.
+
+Verification policy for the implementation waves: workers run only narrow compile/tests needed to avoid handing off obviously broken code. Broad clippy, conformance, fault matrices, formal checks, and benchmarks are deliberately deferred to the integration/verification waves.
+
+| Lane | Exact decision/deliverable | Claimed contract/files | Isolation | State | Next gate / handoff |
+|---|---|---|---|---|---|
+| A-policy | Remove cleanup/defer and receipt expiry/key reuse from durable authority semantics | `wflow_core/partition/authority*`, authority tests | managed worktree after scout | Scouting | compile `wflow_core`; committed handoff |
+| B-sdk | Remove compensation from programming API; define leaf protocol and minimal replacement WIT | `wflow_wdk*`, replacement WIT/bindings; no authority/runtime edits | managed worktree after scout | Scouting | compile WDK crates; committed handoff |
+| C-runtime | Specify async activation/session-loss/cancel lifecycle and finite defaults | `wflow_tokio/authority_runtime*`, host/session traits | managed worktree after A/B contracts | Scouting | compile `wflow_tokio`; committed handoff |
+| D-storage | Implement bounded automatic snapshot/compaction policy | atomic journal/storage and authority runtime maintenance seam | managed worktree after scout; ownership refined before mutation | Scouting | focused storage tests; committed handoff |
+| E-formal | Remove rejected actions and align model vocabulary with accepted authority | Quint/formal/conformance model files | managed worktree after A contract | Pending | bounded model checks later; committed handoff |
+| F-cutover | Integrate component handoffs, switch production facade/caller, delete legacy engine | `wflow`, `daybook_core`, legacy modules/hosts/tests | integration worktree only | Pending | targeted build, then review wave |
+| V-review | Fresh-context review of integrated diff | read-only whole diff | no mutation | Pending | blockers disposition |
+| V-verify | Clippy, focused tests, fault/recovery matrix, native/Wasm conformance, formal checks, guardrails | integrated tree | one verification owner | Pending | evidence ledger |
+| V-bench | Phase-5 benchmark and closeout | integrated tree | verification owner | Frozen | starts only after architecture/semantics integrated |
+
+### Fleet events
+
+- 2026-11-04: Audit accepted; baseline commit `967e24bd`. First scouting wave commissioned on the exact source seams above.
