@@ -31,6 +31,7 @@ pub struct LocalDrawers {
     pub present_id: DrawerId,
     pub originated_id: DrawerId,
     pub registry_id: DrawerId,
+    pub config_id: DrawerId,
 }
 
 impl LocalDrawers {

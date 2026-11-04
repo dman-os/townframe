@@ -71,7 +71,9 @@ pub type ActorPublicKey = [u8; 32];
 const NODE_SERVICE: &str = "big_cabinet.authority";
 const WRAPPING_KEY: &str = "wrapping";
 
-pub(crate) enum DomainAuthority<S> {
+/// Who a domain operation acts as: an actor presenting its own identity capability, or a
+/// handle the domain minted that carries a scope of its own.
+pub enum DomainAuthority<S> {
     Identity(Uuid7),
     Scoped(S),
 }

@@ -134,22 +134,27 @@ impl State {
         let mut present = None;
         let mut originated = None;
         let mut registry = None;
+        let mut config = None;
         for row in rows {
             let id = id_column(&row.drawer_id);
             match row.role.as_str() {
                 "present" => present = Some(id),
                 "originated" => originated = Some(id),
                 "registry" => registry = Some(id),
+                "config" => config = Some(id),
                 role => unreachable!("the role column is constrained: {role}"),
             }
         }
-        match (present, originated, registry) {
-            (Some(present), Some(originated), Some(registry)) => Ok(Some(LocalDrawers {
-                present_id: present,
-                originated_id: originated,
-                registry_id: registry,
-            })),
-            (None, None, None) => Ok(None),
+        match (present, originated, registry, config) {
+            (Some(present), Some(originated), Some(registry), Some(config)) => {
+                Ok(Some(LocalDrawers {
+                    present_id: present,
+                    originated_id: originated,
+                    registry_id: registry,
+                    config_id: config,
+                }))
+            }
+            (None, None, None, None) => Ok(None),
             _ => unreachable!("the local drawers are written together"),
         }
     }
@@ -160,6 +165,7 @@ impl State {
             ("present", &local.present_id),
             ("originated", &local.originated_id),
             ("registry", &local.registry_id),
+            ("config", &local.config_id),
         ] {
             sqlite::set_local(&transaction, role.to_owned(), id.to_string())
                 .await
@@ -596,12 +602,18 @@ mod tests {
         let runtime = SqliteRuntime::new(Default::default());
         let sql = runtime.ephemeral(&[]).unwrap();
         sql.execute_batch(sqlite::MIGRATIONS[0].sql).await.unwrap();
-        let [present_id, originated_id, registry_id, announced_id] =
-            [10_u8, 11, 12, 13].map(|value| DocId::new([value; 32]));
+        let [
+            present_id,
+            originated_id,
+            registry_id,
+            config_id,
+            announced_id,
+        ] = [10_u8, 11, 12, 13, 14].map(|value| DocId::new([value; 32]));
         let local = LocalDrawers {
             present_id,
             originated_id,
             registry_id,
+            config_id,
         };
         let descriptor: Drawer = serde_json::from_value(serde_json::json!({
             "$type": "org.example.daybook.drawer",

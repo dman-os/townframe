@@ -192,6 +192,7 @@ async fn shutdown(node: BigNode, stop: StopToken) {
     let repo = Arc::downgrade(&node.repo);
     let docs = Arc::downgrade(&node.docs.host);
     let drawers = Arc::downgrade(&node.drawers.host);
+    let nodules = Arc::downgrade(&node.nodules.host);
     let policy = Arc::downgrade(&node.drawer_access);
     let authority = Arc::downgrade(&node.authority.host);
     let authority_service = Arc::downgrade(&node.authority.service);
@@ -201,6 +202,7 @@ async fn shutdown(node: BigNode, stop: StopToken) {
     stop.stop().await.unwrap();
     assert_eq!(indexes.live_tasks(), 0);
     drop(indexes);
+    assert!(nodules.upgrade().is_none());
     assert!(docs.upgrade().is_none());
     assert!(drawers.upgrade().is_none());
     assert!(policy.upgrade().is_none());

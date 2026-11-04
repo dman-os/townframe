@@ -327,6 +327,94 @@ fn native_supplements_round_trip_through_transactions_without_datetime_precision
 }
 
 #[test]
+fn integer_supplements_restate_bounds_and_reject_malformed_annotations() {
+    let primary = record(
+        json!({"value": {"type": "integer", "minimum": -7, "maximum": 11}}),
+        &["value"],
+        &[],
+    );
+    let valid = supplement(
+        json!({"value": {"type": "integer", "format": "int32", "minimum": -7, "maximum": 11}}),
+    );
+    let compiled = Bundle::new(&valid, Vec::new())
+        .validate_lexicon(TAG, &primary, &[])
+        .unwrap();
+    assert!(accepts(&compiled, json!({"value": -7})));
+    assert!(accepts(&compiled, json!({"value": 11})));
+    assert!(!accepts(&compiled, json!({"value": -8})));
+    assert!(!accepts(&compiled, json!({"value": 12})));
+    for annotation in [
+        json!({"type": "integer", "minimum": -8}),
+        json!({"type": "integer", "maximum": 10}),
+        json!({"type": "integer", "minimum": 12, "maximum": 11}),
+        json!({"type": "integer", "minimum": 0.5}),
+        json!({"type": "integer", "maximum": u64::MAX}),
+        json!({"type": "integer", "minimum": "0"}),
+        json!({"type": "integer", "format": "uint64"}),
+        json!({"type": "integer", "format": "int256"}),
+        json!({"type": "string", "format": "int32"}),
+        json!({"type": "string", "minimum": 0}),
+        json!({"type": "integer", "exclusiveMinimum": -7}),
+    ] {
+        let universe = supplement(json!({"value": annotation}));
+        assert!(
+            Bundle::new(&universe, Vec::new())
+                .validate_lexicon(TAG, &primary, &[])
+                .is_err(),
+            "{annotation}"
+        );
+    }
+    let unbounded = record(json!({"value": {"type": "integer"}}), &["value"], &[]);
+    assert!(
+        Bundle::new(&valid, Vec::new())
+            .validate_lexicon(TAG, &unbounded, &[])
+            .is_err()
+    );
+}
+
+#[test]
+fn unused_integer_supplements_are_checked_at_admission() {
+    let primary = record(json!({}), &[], &[]);
+    for annotation in [
+        json!({"type": "string", "format": "int32"}),
+        json!({"type": "boolean", "maximum": 2}),
+        json!({"type": "integer", "minimum": false}),
+        json!({"type": "integer", "maximum": u64::MAX}),
+        json!({"type": "integer", "minimum": 2, "maximum": 1}),
+    ] {
+        let mut universe = supplement(json!({}));
+        universe.types.push(crate::datum::TypeDecl {
+            name: "Unused".to_owned(),
+            schema: schemars::Schema::try_from(annotation.clone()).unwrap(),
+        });
+        assert!(
+            Bundle::new(&universe, Vec::new())
+                .validate_lexicon(TAG, &primary, &[])
+                .is_err(),
+            "{annotation}"
+        );
+    }
+}
+
+#[test]
+fn typed_integer_maps_enforce_bounds_and_the_signed_lexicon_range() {
+    let primary = record(json!({"map": {"type": "unknown"}}), &["map"], &[]);
+    for mapping in [
+        json!({"type": "object", "additionalProperties": {"type": "integer", "format": "uint8", "minimum": 0, "maximum": 255}}),
+        json!({"type": "object", "patternProperties": {"^[a-z]+$": {"type": "integer", "format": "uint8", "minimum": 0, "maximum": 255}}, "additionalProperties": false}),
+    ] {
+        let universe = supplement(json!({"map": mapping}));
+        let compiled = Bundle::new(&universe, Vec::new())
+            .validate_lexicon(TAG, &primary, &[])
+            .unwrap();
+        assert!(accepts(&compiled, json!({"map": {"min": 0, "max": 255}})));
+        for value in [json!(-1), json!(256), json!(u64::MAX), json!(0.5)] {
+            assert!(!accepts(&compiled, json!({"map": {"value": value}})));
+        }
+    }
+}
+
+#[test]
 fn a_supplement_vocabulary_restates_the_primary_enum_or_is_refused() {
     let primary = record(
         json!({"value": {"type": "string", "enum": ["a", "b"]}}),
@@ -429,6 +517,47 @@ fn a_supplement_member_branch_restates_its_discriminant_const() {
         error.contains("const") || error.contains("absent from the primary union"),
         "{error}"
     );
+}
+
+#[test]
+fn integer_union_supplements_cannot_replace_carried_primary_bounds() {
+    let mut primary = record(
+        json!({"member": {"type": "union", "refs": ["#member"]}}),
+        &["member"],
+        &[],
+    );
+    primary["defs"]["member"] = json!({"type": "object", "required": ["count"], "properties": {"count": {"type": "integer", "minimum": 0, "maximum": 9}}});
+    let tag = format!("{TAG}#member");
+    for maximum in [9, 10] {
+        let member = json!({"type": "object", "required": ["$type", "count"], "properties": {
+            "$type": {"type": "string", "const": tag},
+            "count": {"type": "integer", "format": "uint8", "minimum": 0, "maximum": maximum}
+        }});
+        let mut universe = supplement(json!({"member": {"oneOf": [member]}}));
+        universe.types.push(crate::datum::TypeDecl {
+            name: "Member".to_owned(),
+            schema: schemars::Schema::try_from(member).unwrap(),
+        });
+        let result = Bundle::new(&universe, Vec::new()).validate_lexicon(TAG, &primary, &[]);
+        if maximum == 9 {
+            let compiled = result.unwrap();
+            for count in [0, 9] {
+                assert!(accepts(
+                    &compiled,
+                    json!({"member": {"$type": tag, "count": count}})
+                ));
+            }
+            for count in [-1, 10] {
+                assert!(!accepts(
+                    &compiled,
+                    json!({"member": {"$type": tag, "count": count}})
+                ));
+            }
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("contradicts"), "{error}");
+        }
+    }
 }
 
 #[test]

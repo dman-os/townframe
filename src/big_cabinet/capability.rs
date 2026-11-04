@@ -34,22 +34,22 @@ struct BoundScope<S> {
     originating_actor: Option<Uuid7>,
 }
 
-pub(crate) struct Invocation<S> {
-    pub(crate) authority: DomainAuthority<S>,
-    pub(crate) signer: Actor,
-    pub(crate) rights: Rights,
-    pub(crate) originating_actor: Option<Uuid7>,
+pub struct Invocation<S> {
+    pub authority: DomainAuthority<S>,
+    pub signer: Actor,
+    pub rights: Rights,
+    pub originating_actor: Option<Uuid7>,
 }
 
 #[derive(Clone)]
-pub(crate) struct DomainCapabilities {
+pub struct DomainCapabilities {
     authority: Client<AuthorityProtocol>,
     namespace: Namespace,
     prefix: &'static str,
 }
 
 impl DomainCapabilities {
-    pub(crate) fn new(
+    pub fn new(
         authority: Client<AuthorityProtocol>,
         namespace: Namespace,
         prefix: &'static str,
@@ -61,7 +61,7 @@ impl DomainCapabilities {
         }
     }
 
-    pub(crate) fn stop_token(&self) -> StopToken {
+    pub fn stop_token(&self) -> StopToken {
         let (stop, tasks) = StopToken::new();
         let cancellation = tasks.clone();
         let authority = self.authority.clone();
@@ -119,7 +119,7 @@ impl DomainCapabilities {
         })
     }
 
-    pub(crate) async fn resolve<S: DeserializeOwned>(
+    pub async fn resolve<S: DeserializeOwned>(
         &self,
         context: &RequestContext,
         capability: CapId,
@@ -131,7 +131,7 @@ impl DomainCapabilities {
         self.scoped(context, cap).await
     }
 
-    pub(crate) async fn source<S: DeserializeOwned>(
+    pub async fn source<S: DeserializeOwned>(
         &self,
         context: &RequestContext,
         authorization: Authorization,
@@ -169,7 +169,7 @@ impl DomainCapabilities {
         }
     }
 
-    pub(crate) async fn mint<S: Serialize>(
+    pub async fn mint<S: Serialize>(
         &self,
         context: &RequestContext,
         source: CapId,
@@ -208,11 +208,7 @@ impl DomainCapabilities {
 
     /// Retract a handle this domain minted. The handle is its own `via`, so this needs no
     /// more authority than holding it.
-    pub(crate) async fn retract(
-        &self,
-        context: &RequestContext,
-        capability: CapId,
-    ) -> Result<(), Error> {
+    pub async fn retract(&self, context: &RequestContext, capability: CapId) -> Result<(), Error> {
         self.authority
             .call(
                 context.child(),

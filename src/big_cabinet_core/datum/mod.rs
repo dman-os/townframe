@@ -9,7 +9,9 @@
 //! The `datum` macro in the `macros` crate does the refusing, because refusing means reading the
 //! item's attributes and a derive cannot do that.
 
+mod grammar;
 mod member;
+pub mod operation;
 mod shape;
 mod value;
 
@@ -32,6 +34,8 @@ mod e2e;
 /// For the `datum` macro, which joins a const authority to a member's name at compile time.
 #[doc(hidden)]
 pub use const_format;
+pub use grammar::GrammarError;
+pub use grammar::parse_ref;
 pub use member::DatumMember;
 pub use member::is_nsid;
 pub use member::str_eq;
@@ -40,6 +44,8 @@ pub use shape::Openness;
 pub use shape::Shape;
 pub use shape::Tagging;
 pub use value::Extra;
+pub use value::validate_object_schema;
+pub use value::validate_object_value;
 pub use wire::KnownString;
 pub use wire::Member;
 pub use wire::UnionLayout;

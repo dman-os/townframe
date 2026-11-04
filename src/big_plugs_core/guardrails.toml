@@ -1,0 +1,13 @@
+version = 1
+role = "domain"
+dependency_reason = "The plug catalog's package envelope is a Cabinet datum: it reuses the datum declaration macro, open-object conventions, and the shared hash encodings, and knows nothing about nodule or micro runtimes."
+allowed_dependencies = ["big_cabinet_core", "macros", "utils_rs"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = ["schemars"]
+
+[builds.native]
+features = ["schemars"]

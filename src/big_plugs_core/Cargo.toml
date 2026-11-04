@@ -1,0 +1,30 @@
+[package]
+name = "big_plugs_core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "big_plugs_core"
+path = "lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+schemars = ["dep:schemars", "big_cabinet_core/schemars"]
+
+[dependencies]
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
+macros = { path = "../macros" }
+utils_rs = { workspace = true, features = ["hash"] }
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+json-canon = "0.1.3"
+# `Extra` and carried contribution descriptions keep the member order a peer sent.
+indexmap = { version = "2", features = ["serde"] }
+schemars = { version = "1.2", features = ["indexmap2"], optional = true }

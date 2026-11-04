@@ -12,6 +12,7 @@ path = "lib.rs"
 [dependencies]
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }
+big_nodule.workspace = true
 big_repo.workspace = true
 secrets_rs.workspace = true
 service_utils_rs.workspace = true

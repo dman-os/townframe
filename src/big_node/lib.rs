@@ -9,9 +9,16 @@ use big_cabinet::SchemaRepo;
 use big_cabinet::drawer::access::DrawerWorker;
 use big_cabinet::index::Indexes;
 use big_cabinet_core::authority::Actor;
+use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::drawer::DrawerAccess as EntryAccess;
+use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::GrantDrawer;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_nodule::Nodules;
+use big_nodule::NodulesConfig;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::SharedBigRepo;
@@ -20,6 +27,7 @@ use secrets_rs::SecretStore;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;
 use sqlite_rs::SqliteRuntime;
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -41,10 +49,12 @@ pub struct BigNode {
     pub docs_namespace: Namespace,
     pub drawers_actor: Actor,
     pub drawers_namespace: Namespace,
+    pub nodules_actor: Actor,
     pub indexes: Arc<Indexes>,
     pub drawer_access: Arc<DrawerAccess>,
     pub docs: DocsRepo,
     pub drawers: Drawers,
+    pub nodules: Nodules,
 }
 
 impl BigNode {
@@ -66,6 +76,7 @@ impl BigNode {
             };
             let docs_actor = open("documents").await?;
             let drawers_actor = open("drawers").await?;
+            let nodules_actor = open("nodules").await?;
             let docs_namespace = authority
                 .service
                 .open_namespace(docs_actor.actor_id)
@@ -74,12 +85,17 @@ impl BigNode {
                 .service
                 .open_namespace(drawers_actor.actor_id)
                 .await?;
+            let nodules_namespace = authority
+                .service
+                .open_namespace(nodules_actor.actor_id)
+                .await?;
 
             let (repo, repo_stop) = BigRepo::boot(config.sqlite_runtime, config.repo).await?;
             stop.stages.push(Stage::Repo(repo_stop));
+            let schemas = Arc::new(config.schemas.with_group(big_nodule::schema_group())?);
             let (indexes, index_stop) = Indexes::boot(
                 Arc::clone(&repo),
-                Arc::clone(&config.schemas),
+                Arc::clone(&schemas),
                 config.sql.clone(),
                 config.index_concurrency,
             )
@@ -97,13 +113,13 @@ impl BigNode {
             stop.stages.push(Stage::Service(policy_stop));
             let (docs, docs_stop) = big_cabinet::doc::prepare(DocsConfig {
                 big_repo: Arc::clone(&repo),
-                schema_repo: config.schemas,
+                schema_repo: schemas,
                 authority: authority.client.clone(),
                 issuer: docs_actor.capability,
                 namespace: docs_namespace,
                 node_issuer: authority.node_issuer.clone(),
                 access: Arc::clone(&drawer_access) as Arc<dyn DocAccess>,
-                sql: config.sql,
+                sql: config.sql.clone(),
                 datum_set: Some(Arc::clone(&indexes.datum_set)),
                 datum_ref: Some(Arc::clone(&indexes.datum_ref)),
             })
@@ -125,6 +141,46 @@ impl BigNode {
             let (drawers, drawers_stop) =
                 big_cabinet::boot_drawers(DrawerConfig { worker }).await?;
             stop.stages.push(Stage::Service(drawers_stop));
+            let config_drawer = drawers.local().config_id.clone();
+            let config_drawer_cap = drawers
+                .client
+                .call(
+                    RequestContext::root(),
+                    MintDrawerCapability {
+                        authorization: Authorization::identity(drawers_actor.capability),
+                        scope: DrawerScope {
+                            drawers: BTreeMap::from([(config_drawer.clone(), EntryAccess::Admin)]),
+                            create: false,
+                        },
+                        rights: Rights::USE | Rights::DELEGATE,
+                    },
+                )
+                .await?;
+            drawers
+                .client
+                .call(
+                    RequestContext::root(),
+                    GrantDrawer {
+                        capability: config_drawer_cap.capability_id,
+                        drawer_id: config_drawer.clone(),
+                        subject_id: nodules_actor.actor_id,
+                        access: EntryAccess::Admin,
+                    },
+                )
+                .await?;
+            let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
+                authority: authority.client.clone(),
+                docs: docs.client.clone(),
+                drawers: drawers.client.clone(),
+                config_drawer,
+                actor: nodules_actor.clone(),
+                actor_path: "nodules".into(),
+                namespace: nodules_namespace,
+                operator: authority.service.operator_uuid(),
+                sql: config.sql,
+            })
+            .await?;
+            stop.stages.push(Stage::Service(nodules_stop));
             Ok(Self {
                 repo,
                 authority,
@@ -132,10 +188,12 @@ impl BigNode {
                 docs_namespace,
                 drawers_actor,
                 drawers_namespace,
+                nodules_actor,
                 indexes,
                 drawer_access,
                 docs,
                 drawers,
+                nodules,
             })
         }
         .await;

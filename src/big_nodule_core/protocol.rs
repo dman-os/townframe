@@ -1,0 +1,234 @@
+//! The nodule management protocol (ADR 023 §4, §6): the wire contract between the node-side
+//! nodule service and whoever administers it.
+//!
+//! Every operation names its caller by an [`Authorization`]: either the operator's own identity
+//! capability, or a handle this domain minted through [`MintNoduleCapability`] that carries a
+//! [`NoduleScope`]. Identity is not access by itself: an arbitrary actor presenting its identity
+//! is refused, only the operator's identity and scoped handles narrowed from it administer
+//! nodules. Nothing here executes a routine; a record reports readiness so a caller can see that
+//! execution is unavailable rather than be told a dispatch succeeded.
+
+use crate::inventory::ArtifactState;
+use crate::inventory::InventoryError;
+use crate::inventory::Readiness;
+use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::Rights;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::doc::ChangeHash;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_plugs_core::Plug;
+use big_plugs_core::PlugId;
+use big_plugs_core::Revision;
+use big_plugs_core::Version;
+use indexmap::IndexMap;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use service_core_rs::ContextError;
+use service_core_rs::Operation;
+use service_core_rs::XrpcOperation;
+use service_core_rs::declare_service_protocol;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+
+/// What a minted management handle may do. `admit` covers installing and upgrading any package;
+/// `plugs` names the installed packages whose enablement and settings the holder may read and
+/// change. The operator's identity holds both without a scope.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NoduleScope {
+    #[serde(default)]
+    pub admit: bool,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub plugs: BTreeSet<PlugId>,
+}
+
+impl NoduleScope {
+    pub fn covers(&self, other: &Self) -> bool {
+        (self.admit || !other.admit) && other.plugs.is_subset(&self.plugs)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MintNoduleCapability {
+    pub authorization: Authorization,
+    pub scope: NoduleScope,
+    pub rights: Rights,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdmitNodule {
+    pub authorization: Authorization,
+    pub plug: Plug,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigureNodule {
+    pub authorization: Authorization,
+    pub plug_id: PlugId,
+    pub settings: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetNoduleEnabled {
+    pub authorization: Authorization,
+    pub plug_id: PlugId,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetNoduleDrawerGrants {
+    pub authorization: Authorization,
+    pub plug_id: PlugId,
+    pub drawers: BTreeMap<DrawerId, DrawerAccess>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallNodule {
+    pub authorization: Authorization,
+    pub plug_id: PlugId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetNodule {
+    pub authorization: Authorization,
+    pub plug_id: PlugId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListNodules {
+    pub authorization: Authorization,
+}
+
+/// The durable actor an installed nodule acts as. Its capability is not here: the service holds
+/// it, and a caller that could read it could sign as the nodule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoduleActor {
+    pub actor_id: Uuid7,
+    pub url: String,
+    pub public_key: MultibaseKey,
+}
+
+/// Desired and effective state of one local drawer grant binding for a nodule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoduleGrantStatus {
+    pub desired: DrawerAccess,
+    pub granted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One installed nodule as the management surface reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoduleRecord {
+    pub plug_id: PlugId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<Version>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<NoduleActor>,
+    pub enabled: bool,
+    pub readiness: Readiness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<IndexMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifacts: BTreeMap<String, ArtifactState>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub drawers: BTreeMap<DrawerId, NoduleGrantStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_heads: Vec<ChangeHash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_heads: Option<Vec<ChangeHash>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum NodulesError {
+    #[error("request context failed: {0}")]
+    Context(#[from] ContextError),
+    #[error("the presented capability does not permit this operation")]
+    Denied,
+    #[error("authority failed: {0}")]
+    Authority(AuthorityServiceError),
+    #[error("authority transport failed: {0}")]
+    AuthorityUnavailable(String),
+    #[error("nodule state failed: {0}")]
+    Storage(String),
+    #[error("the package was refused: {0}")]
+    Rejected(String),
+    #[error("nodule for plug `{0}` is not installed")]
+    UnknownPlug(PlugId),
+    #[error("nodule for plug `{0}` declares no config schema")]
+    NoConfigSchema(PlugId),
+}
+
+/// Inventory refusals cross the wire as text: the caller gets the reason, not the
+/// inventory's error tree, except the two it can act on by naming a different plug.
+impl From<InventoryError> for NodulesError {
+    fn from(error: InventoryError) -> Self {
+        match error {
+            InventoryError::UnknownPlug(id) => NodulesError::UnknownPlug(id),
+            InventoryError::NoConfigSchema(id) => NodulesError::NoConfigSchema(id),
+            other => NodulesError::Rejected(other.to_string()),
+        }
+    }
+}
+
+macro_rules! operations {
+    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
+        impl Operation for $request {
+            type Output = $output;
+            type Error = NodulesError;
+            const XRPC: XrpcOperation =
+                XrpcOperation::$kind(concat!("org.example.daybook.nodules.", $nsid))
+                    .with_schemas(stringify!($output), stringify!(NodulesError));
+        }
+    )*};
+}
+operations! {
+    MintNoduleCapability => Capability, procedure, "mintNoduleCapability";
+    AdmitNodule => NoduleRecord, procedure, "admitNodule";
+    ConfigureNodule => NoduleRecord, procedure, "configureNodule";
+    SetNoduleEnabled => NoduleRecord, procedure, "setNoduleEnabled";
+    SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants";
+    UninstallNodule => (), procedure, "uninstallNodule";
+    GetNodule => NoduleRecord, query, "getNodule";
+    ListNodules => Vec<NoduleRecord>, query, "listNodules";
+}
+
+declare_service_protocol! {
+    pub enum NodulesProtocol => NodulesMessage {
+        unary {
+            MintNoduleCapability(MintNoduleCapability),
+            AdmitNodule(AdmitNodule),
+            ConfigureNodule(ConfigureNodule),
+            SetNoduleEnabled(SetNoduleEnabled),
+            SetNoduleDrawerGrants(SetNoduleDrawerGrants),
+            UninstallNodule(UninstallNodule),
+            GetNodule(GetNodule),
+            ListNodules(ListNodules)
+        }
+        stream {}
+    }
+}

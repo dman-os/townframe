@@ -10,7 +10,8 @@
 use sqlite_rs as sqlite_rs_alias;
 
 pub mod authority;
-mod capability;
+pub mod capability;
+pub mod datum_store;
 pub mod doc;
 pub mod drawer;
 pub mod grants;
@@ -24,6 +25,11 @@ pub use authority::AuthorityError;
 pub use authority::AuthorityHandler;
 pub use authority::AuthorityService;
 pub use authority::boot;
+pub use big_cabinet_core::doc::DatumPatch;
+pub use big_cabinet_core::doc::DatumStore;
+pub use big_cabinet_core::doc::StoreError;
+pub use big_cabinet_core::doc::StoreSnapshot;
+pub use datum_store::DatumStoreHandle;
 pub use doc::DocAccess;
 pub use doc::DocsConfig;
 pub use doc::DocsHandler;

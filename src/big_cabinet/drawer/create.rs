@@ -360,63 +360,71 @@ impl DrawerService {
                     .drawer_id,
             );
         }
-        // The registry is a fresh self-doc drawer: a metadata doc that is its own drawer, its
-        // known entries are bookkeeping datums on it, and a foreign layout arriving from a
-        // peer is carried rather than operated, as anywhere else.
-        let command = CommandId::try_from("local drawer registry".to_owned())
-            .expect("the registry command is within bounds");
-        let receipt = self
-            .core
-            .as_signer(
-                &context,
-                self.core.issuer,
-                DocScope {
-                    create: [METADATA_PLACEMENT.into()].into(),
-                    ..Default::default()
-                },
-                |capability| {
-                    let (command, context) = (&command, &context);
-                    async move {
-                        self.core
-                            .docs()
-                            .call(
-                                context.child(),
-                                CreateDoc {
-                                    capability,
-                                    command: command.clone(),
-                                    placement: METADATA_PLACEMENT.into(),
-                                    datums: BTreeMap::from([(
-                                        drawer_key(),
-                                        datum_value(&Drawer::self_doc()),
-                                    )]),
-                                },
-                            )
-                            .await
-                            .map_err(docs_error)
-                    }
-                },
-            )
-            .await?;
-        self.core
-            .state
-            .put_drawer(&receipt.doc_id, &Drawer::self_doc())
-            .await?;
-        self.core
-            .grant(
-                &context,
-                actor,
-                drawer_object(Access::Admin, &receipt.doc_id),
-                None,
-            )
-            .await?;
+        // The registry and node config drawers are fresh self-doc drawers: metadata docs that are
+        // their own drawers, whose entries are bookkeeping/config datums on them, and a foreign
+        // layout arriving from a peer is carried rather than operated, as anywhere else.
+        let mut self_docs = Vec::with_capacity(2);
+        for command in ["local drawer registry", "local drawer config"] {
+            let command = CommandId::try_from(command.to_owned())
+                .expect("the local self-doc drawer commands are within bounds");
+            let receipt = self
+                .core
+                .as_signer(
+                    &context,
+                    self.core.issuer,
+                    DocScope {
+                        create: [METADATA_PLACEMENT.into()].into(),
+                        ..Default::default()
+                    },
+                    |capability| {
+                        let (command, context) = (&command, &context);
+                        async move {
+                            self.core
+                                .docs()
+                                .call(
+                                    context.child(),
+                                    CreateDoc {
+                                        capability,
+                                        command: command.clone(),
+                                        placement: METADATA_PLACEMENT.into(),
+                                        datums: BTreeMap::from([(
+                                            drawer_key(),
+                                            datum_value(&Drawer::self_doc()),
+                                        )]),
+                                    },
+                                )
+                                .await
+                                .map_err(docs_error)
+                        }
+                    },
+                )
+                .await?;
+            self.core
+                .state
+                .put_drawer(&receipt.doc_id, &Drawer::self_doc())
+                .await?;
+            self.core
+                .grant(
+                    &context,
+                    actor,
+                    drawer_object(Access::Admin, &receipt.doc_id),
+                    None,
+                )
+                .await?;
+            self_docs.push(receipt.doc_id);
+        }
         let [present, originated]: [DrawerId; 2] =
             created.try_into().expect("two local drawers were created");
+        let [registry_id, config_id]: [DrawerId; 2] = self_docs
+            .try_into()
+            .expect("two local self-doc drawers were created");
         self.core
             .state
             .set_local(LocalDrawers {
                 present_id: present,
                 originated_id: originated,
-                registry_id: receipt.doc_id,
+                registry_id,
+                config_id,
             })
             .await
     }

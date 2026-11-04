@@ -1490,6 +1490,7 @@ version = "0.1.0"
 dependencies = [
  "big_cabinet",
  "big_cabinet_core",
+ "big_nodule",
  "big_repo",
  "big_sync_core",
  "futures",
@@ -1500,6 +1501,64 @@ dependencies = [
  "sqlite_rs",
  "tempfile",
  "tokio",
+ "utils_rs",
+]
+
+[[package]]
+name = "big_nodule"
+version = "0.1.0"
+dependencies = [
+ "automerge",
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_nodule_core",
+ "big_plugs_core",
+ "big_repo",
+ "futures",
+ "indexmap 2.14.2",
+ "irpc",
+ "keyring-core",
+ "secrets_rs",
+ "serde",
+ "serde_json",
+ "service_utils_rs",
+ "sqlite_rs",
+ "thiserror 2.0.21",
+ "tokio",
+ "utils_rs",
+]
+
+[[package]]
+name = "big_nodule_core"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "big_plugs_core",
+ "indexmap 2.14.2",
+ "irpc",
+ "macros",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "big_plugs_core"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "blake3",
+ "indexmap 2.14.2",
+ "json-canon",
+ "macros",
+ "schemars 1.2.3",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
  "utils_rs",
 ]
 

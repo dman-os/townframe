@@ -207,70 +207,96 @@ impl SchemaRepo {
     pub fn open<'a>(
         groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
     ) -> Result<Self, SchemaRepoError> {
-        let mut known: BTreeMap<String, SchemaHandle> = core_schemas()
+        let known: BTreeMap<String, SchemaHandle> = core_schemas()
             .map(|handle| (handle.datum_tag().to_owned(), handle))
             .collect();
+        let mut repo = Self { known };
         let empty = Universe::default();
         for group in groups {
-            let mut tags = std::collections::BTreeSet::new();
-            for registration in &group.registrations {
-                if !tags.insert(&registration.datum_tag)
-                    || known.contains_key(&registration.datum_tag)
-                {
-                    return Err(SchemaRepoError::DuplicateDatumTag(
-                        registration.datum_tag.clone(),
-                    ));
-                }
-            }
-            let sidecar = group
-                .sidecar
-                .as_ref()
-                .map(OwnedSidecar::from_bundle)
-                .transpose()?
-                .map(Arc::new);
-            let borrowed = sidecar.as_ref().map_or_else(
-                || Bundle::new(&empty, Vec::new()),
-                |sidecar| sidecar.borrowed(),
-            );
-            for registration in &group.registrations {
-                let tag = &registration.datum_tag;
-                if tag.is_empty() {
-                    return Err(SchemaRepoError::EmptyDatumTag);
-                }
-                if known.contains_key(tag) {
-                    return Err(SchemaRepoError::DuplicateDatumTag(tag.clone()));
-                }
-                let carried: Vec<_> = group
-                    .carried_lexicons
-                    .iter()
-                    .chain(
-                        group
-                            .registrations
-                            .iter()
-                            .filter(|other| !std::ptr::eq(*other, registration))
-                            .map(|other| &other.lexicon),
-                    )
-                    .collect();
-                let compiled = borrowed
-                    .validate_lexicon(tag, &registration.lexicon, &carried)
-                    .map_err(|source| SchemaRepoError::Admission {
-                        tag: tag.clone(),
-                        source: Box::new(source),
-                    })?;
-                known.insert(
-                    tag.clone(),
-                    SchemaHandle {
-                        inner: Arc::new(KnownSchema {
-                            datum_tag: tag.clone(),
-                            lexicon: registration.lexicon.clone(),
-                            sidecar: sidecar.clone(),
-                            compiled,
-                        }),
-                    },
-                );
+            repo.insert_group(group, &empty)?;
+        }
+        Ok(repo)
+    }
+
+    pub fn with_group(&self, group: SchemaRegistrationGroup<'_>) -> Result<Self, SchemaRepoError> {
+        let mut repo = Self {
+            known: self.known.clone(),
+        };
+        if group
+            .registrations
+            .iter()
+            .all(|reg| repo.known.contains_key(&reg.datum_tag))
+        {
+            return Ok(repo);
+        }
+        let empty = Universe::default();
+        repo.insert_group(group, &empty)?;
+        Ok(repo)
+    }
+
+    fn insert_group(
+        &mut self,
+        group: SchemaRegistrationGroup<'_>,
+        empty: &Universe,
+    ) -> Result<(), SchemaRepoError> {
+        let mut tags = std::collections::BTreeSet::new();
+        for registration in &group.registrations {
+            if !tags.insert(&registration.datum_tag)
+                || self.known.contains_key(&registration.datum_tag)
+            {
+                return Err(SchemaRepoError::DuplicateDatumTag(
+                    registration.datum_tag.clone(),
+                ));
             }
         }
-        Ok(Self { known })
+        let sidecar = group
+            .sidecar
+            .as_ref()
+            .map(OwnedSidecar::from_bundle)
+            .transpose()?
+            .map(Arc::new);
+        let borrowed = sidecar.as_ref().map_or_else(
+            || Bundle::new(empty, Vec::new()),
+            |sidecar| sidecar.borrowed(),
+        );
+        for registration in &group.registrations {
+            let tag = &registration.datum_tag;
+            if tag.is_empty() {
+                return Err(SchemaRepoError::EmptyDatumTag);
+            }
+            if self.known.contains_key(tag) {
+                return Err(SchemaRepoError::DuplicateDatumTag(tag.clone()));
+            }
+            let carried: Vec<_> = group
+                .carried_lexicons
+                .iter()
+                .chain(
+                    group
+                        .registrations
+                        .iter()
+                        .filter(|other| !std::ptr::eq(*other, registration))
+                        .map(|other| &other.lexicon),
+                )
+                .collect();
+            let compiled = borrowed
+                .validate_lexicon(tag, &registration.lexicon, &carried)
+                .map_err(|source| SchemaRepoError::Admission {
+                    tag: tag.clone(),
+                    source: Box::new(source),
+                })?;
+            self.known.insert(
+                tag.clone(),
+                SchemaHandle {
+                    inner: Arc::new(KnownSchema {
+                        datum_tag: tag.clone(),
+                        lexicon: registration.lexicon.clone(),
+                        sidecar: sidecar.clone(),
+                        compiled,
+                    }),
+                },
+            );
+        }
+        Ok(())
     }
 
     pub fn resolve_for_read(&self, datum_tag: &str) -> Option<SchemaHandle> {

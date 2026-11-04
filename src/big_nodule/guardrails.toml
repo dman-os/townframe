@@ -1,0 +1,25 @@
+version = 1
+role = "runtime"
+dependency_reason = "The nodule service hosts the standalone nodule inventory behind the authority's capability model: it admits catalogued packages, provisions each nodule's durable actor from the authority service, and persists management state in SQLite."
+allowed_dependencies = [
+    "big_cabinet",
+    "big_cabinet_core",
+    "big_nodule_core",
+    "big_plugs_core",
+    "big_repo",
+    "secrets_rs",
+    "service_utils_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
+
+[migrations]
+"src/big_nodule/sqlite/migrations/001_nodules.sql" = "b99ddcfccf6d768e19aef25787791ea83f539a93b14b45427eea4ec4564f02d6"

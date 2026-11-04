@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 
+mod integers;
 mod string_vocabulary;
 
 #[macros::datum(authority = "org.example.daybook")]
