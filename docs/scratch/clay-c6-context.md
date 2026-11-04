@@ -483,3 +483,30 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   Playwright specs.
 - **Env note.** Per-crate nextest runs need the `DAYFRAME_*_COMPONENT` variables `x/check-dayframe.ts` prints (without them three
   `clay_mdk` blitz/store tests fail in 0.03 s); the full gate sets them itself.
+
+## C7e notes (2026-11-04): retained cycles and activation cycles (ADR 030 #8 dynamic half)
+
+- **Holder.** `Lease` carries `Holder::{External, Incarnation(scope id)}` and counts per holder in `Leases` (a `Mutex<BTreeMap>`, one
+  `Arc` per incarnation). `Activator` carries the holder; `Supervisor::activator()` is External, the factory's activator is minted in
+  `start_visiting` per incarnation. No WIT change, no capability-layer change: the session's activator is the one the factory was handed,
+  so `retain_call`/`redeem_presentation` leases are incarnation-held already.
+- **Reachability.** `Supervisor::unreachable_group(start)` searches backwards from the provider over retainers (lease holders and
+  configured consumers). Roots: eager, an External lease, a retainer that is Starting/Initializing/Closing or no longer supervised.
+  Result is `start` plus the unreachable nodes it reaches forward (its SCC); `close_unreachable` closes them with `join_all`, so
+  members' guest closes overlap and see peers revoked. Triggered only by a lease edge hitting zero (`Idle` queue) and by `release`
+  after a close; never on reads. `Node::is_idle` is gone; `Host::is_bound` stays (tests and the conformance harness use it).
+- **Behaviour change to know.** A non-eager micro that nothing leases and no reachable micro requires is now unreachable. In production
+  non-eager micros start only through `acquire` (a lease) or as providers, so this is only visible to tests that called the private
+  `Supervisor::start`; two supervisor tests now make their consumers eager. Starting consumers now count as retaining their configured
+  providers (previously only bindings, which exist after initialization began).
+- **Activation cycles.** `Inner::waits` (waiter -> targets, RAII `Waiting` guard) records configured provider starts and demands made
+  by an initializing incarnation. `start_visiting` takes the waiter and, before awaiting a pending activation, fails with
+  `StartError::Cycle(target)` if the target (through pending activations) waits on the waiter. Edges are recorded before any await,
+  so of two demands racing into each other the second sees the first. The demanding side gets the error (`Unavailable` in the guest);
+  the supervisor state is restored by the existing Cycle path (node back to Idle).
+- **Tests.** supervisor: mutual retention (stays live while an external lease reaches either; one close each), three-member group
+  (close gate on `a` makes `b`, `c` finish first; `a` sees `b` Closed, no fault), A->B->A init cycle (+ restart afterwards), self
+  demand, configured provider demanding its starting consumer. `lazy_tests`: two real `CapabilitySession`s retaining each other with
+  `retain_call`. Fake factory gained `demands`, `retain`, held leases (cleared in root close). Note the Script holds a handle on held
+  leases, so the root must clear them explicitly.
+- **Not built.** Guest-level conformance scenario (see ledger gap detail): needs a supervised two-guest rig and a fixture rebuild.
