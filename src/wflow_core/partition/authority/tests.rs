@@ -1,4 +1,6 @@
 use super::*;
+use wflow_wdk::StepKind;
+use wflow_wdk::types::RetryPolicy;
 
 mod cancellation;
 

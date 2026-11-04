@@ -11,6 +11,8 @@ use quint_connect::switch;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use wflow_wdk::StepKind;
+use wflow_wdk::types::RetryPolicy;
 
 mod model;
 use model::*;

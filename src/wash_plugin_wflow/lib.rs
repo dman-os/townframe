@@ -702,16 +702,12 @@ impl WflowPlugin {
                 types::JobError::Transient(err) => Err(job_events::JobError::Transient {
                     error_json: err.error_json.into(),
                     retry_policy: err.retry_policy.map(|policy| match policy {
-                        types::RetryPolicy::Immediate => {
-                            wflow_core::partition::RetryPolicy::Immediate
-                        }
-                        types::RetryPolicy::Fixed(fixed) => {
-                            wflow_core::partition::RetryPolicy::Fixed {
-                                delay_ms: fixed.delay_ms,
-                            }
-                        }
+                        types::RetryPolicy::Immediate => wflow_wdk::types::RetryPolicy::Immediate,
+                        types::RetryPolicy::Fixed(fixed) => wflow_wdk::types::RetryPolicy::Fixed {
+                            delay_ms: fixed.delay_ms,
+                        },
                         types::RetryPolicy::CappedExponential(exp) => {
-                            wflow_core::partition::RetryPolicy::CappedExponential {
+                            wflow_wdk::types::RetryPolicy::CappedExponential {
                                 base_ms: exp.base_ms,
                                 cap_ms: exp.cap_ms,
                             }

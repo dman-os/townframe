@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
-use super::RetryPolicy;
 use crate::r#gen::metastore::WflowMeta;
+use wflow_wdk::types::RetryPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobInitEvent {

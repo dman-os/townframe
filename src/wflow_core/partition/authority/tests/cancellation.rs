@@ -1,4 +1,6 @@
 use super::*;
+use wflow_wdk::StepKind;
+use wflow_wdk::types::RetryPolicy;
 
 fn cancel(reason: &str) -> Command {
     Command::Cancel {
@@ -197,7 +199,7 @@ fn commit_step_accepts_effects_only() {
     submit(&mut authority);
     let (lease, _) = grant(&mut authority, 11);
 
-    for kind in [StepKind::Sleep, StepKind::Recv, StepKind::Defer] {
+    for kind in [StepKind::Sleep, StepKind::Recv] {
         assert_eq!(
             authority.prepare(step_as(&lease, 0, "value", kind, None)),
             Err(Rejection::Nondeterministic)

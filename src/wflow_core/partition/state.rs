@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 
 use crate::r#gen::metastore::WflowMeta;
-use crate::partition::RetryPolicy;
 use crate::partition::job_events::*;
+use wflow_wdk::types::RetryPolicy;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PartitionJobsState {

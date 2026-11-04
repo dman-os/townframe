@@ -1,9 +1,7 @@
 use super::*;
-use crate::StepKind;
 use crate::kvstore::atomic::MemoryStore;
 use crate::kvstore::atomic::MemoryWriter;
 use crate::partition::RetryBudget;
-use crate::partition::RetryPolicy;
 use crate::partition::authority::Authority;
 use crate::partition::authority::Command;
 use crate::partition::authority::Decision;
@@ -12,6 +10,8 @@ use crate::partition::authority::Intent;
 use crate::partition::authority::Transition;
 use futures::FutureExt;
 use futures::channel::oneshot;
+use wflow_wdk::StepKind;
+use wflow_wdk::types::RetryPolicy;
 
 const LIMIT: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 

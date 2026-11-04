@@ -2,10 +2,12 @@ use crate::interlude::*;
 
 use super::JobFailure;
 use super::RetryBudget;
-use super::RetryPolicy;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
+use wflow_wdk::StepId;
+use wflow_wdk::StepKind;
+use wflow_wdk::types::RetryPolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lease {
@@ -17,11 +19,9 @@ pub struct Lease {
     pub position: u64,
 }
 
-pub use crate::StepKind;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
-    pub id: crate::StepId,
+    pub id: StepId,
     pub kind: StepKind,
     /// The boundary name the workflow chose for this step, when it named one.
     /// Replay must reproduce it, so a re-run that renames a step diverges.

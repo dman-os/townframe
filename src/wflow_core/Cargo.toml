@@ -21,6 +21,7 @@ path = "lib.rs"
 #
 # internal
 utils_rs.workspace = true
+wflow_wdk.workspace = true
 
 #
 # encoding

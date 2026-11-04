@@ -3,6 +3,7 @@
 //! projections of the Rust state onto them.
 
 use super::*;
+use wflow_wdk::StepKind;
 pub(super) fn step_name(name: &Option<String>) -> String {
     name.clone().unwrap_or_default()
 }

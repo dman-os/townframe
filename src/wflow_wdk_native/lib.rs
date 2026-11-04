@@ -138,18 +138,6 @@ fn legacy_attempts_from_job_state(journal: &state::JobState) -> Vec<u64> {
         .collect()
 }
 
-fn retry_policy_to_legacy(policy: types::RetryPolicy) -> wflow_core::partition::RetryPolicy {
-    match policy {
-        types::RetryPolicy::Immediate => wflow_core::partition::RetryPolicy::Immediate,
-        types::RetryPolicy::Fixed { delay_ms } => {
-            wflow_core::partition::RetryPolicy::Fixed { delay_ms }
-        }
-        types::RetryPolicy::CappedExponential { base_ms, cap_ms } => {
-            wflow_core::partition::RetryPolicy::CappedExponential { base_ms, cap_ms }
-        }
-    }
-}
-
 impl ActiveJobShared {
     fn validate_and_record_meta(
         &self,
@@ -822,7 +810,7 @@ impl NativeHostDriver {
             SessionYield::Complete(Err(err)) => match err {
                 types::JobError::Transient(err) => Err(job_events::JobError::Transient {
                     error_json: err.error_json.into(),
-                    retry_policy: err.retry_policy.map(retry_policy_to_legacy),
+                    retry_policy: err.retry_policy,
                 }
                 .into()),
                 types::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {

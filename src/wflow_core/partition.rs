@@ -11,36 +11,6 @@ pub mod state;
 /// caller does not specify one per submission.
 pub const DEFAULT_RETENTION_MS: u64 = 86_400_000;
 
-/// How a failed job run is rescheduled by the authority.
-///
-/// The delay is a pure function of the retry attempt count so every host
-/// computes the same schedule; the scheduler owns the clock and the optional
-/// jitter on top of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RetryPolicy {
-    /// Re-run as soon as a worker is available; no deadline is armed.
-    Immediate,
-    /// Re-run after a constant delay.
-    Fixed { delay_ms: u64 },
-    /// Re-run after `base_ms` doubled per attempt, never exceeding `cap_ms`.
-    CappedExponential { base_ms: u64, cap_ms: u64 },
-}
-
-impl RetryPolicy {
-    /// The delay before the retry following `attempts` failures. The exponent
-    /// is clamped so absurd attempt counts saturate instead of overflowing.
-    pub fn delay_ms(&self, attempts: u64) -> u64 {
-        match self {
-            Self::Immediate => 0,
-            Self::Fixed { delay_ms } => *delay_ms,
-            Self::CappedExponential { base_ms, cap_ms } => {
-                let exponent = attempts.min(63);
-                (*cap_ms).min((*base_ms).saturating_mul(1u64 << exponent))
-            }
-        }
-    }
-}
-
 /// Finite bounds on the retry loop. `None` means unbounded, preserving the
 /// behaviour of jobs submitted before budgets existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

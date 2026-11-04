@@ -18358,6 +18358,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "utils_rs",
+ "wflow_wdk",
 ]
 
 [[package]]
@@ -18388,7 +18389,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "utils_rs",
- "wflow_core",
 ]
 
 [[package]]

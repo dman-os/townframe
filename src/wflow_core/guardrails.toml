@@ -1,7 +1,7 @@
 version = 1
 role = "domain"
 dependency_reason = "initial guardrail baseline"
-allowed_dependencies = ["utils_rs"]
+allowed_dependencies = ["utils_rs", "wflow_wdk"]
 allow_external_api_types = false
 
 [[exemptions]]

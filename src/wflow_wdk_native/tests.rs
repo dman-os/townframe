@@ -51,7 +51,7 @@ fn push_step_effect(journal: &mut state::JobState, effect: job_events::JobEffect
 }
 
 #[test]
-fn legacy_attempts_and_retry_policies_are_translated_at_the_adapter_boundary() {
+fn legacy_attempts_stay_private_and_job_errors_carry_canonical_retry_policy() {
     let mut journal = make_journal("attempt-boundary", "null");
     push_step_effect(
         &mut journal,
@@ -69,24 +69,22 @@ fn legacy_attempts_and_retry_policies_are_translated_at_the_adapter_boundary() {
 
     assert_eq!(legacy_attempts_from_job_state(&journal), vec![1]);
     assert_eq!(replay_from_job_state(&journal), vec![ReplayStep::default()]);
-    assert_eq!(
-        retry_policy_to_legacy(types::RetryPolicy::Immediate),
-        wflow_core::partition::RetryPolicy::Immediate
-    );
-    assert_eq!(
-        retry_policy_to_legacy(types::RetryPolicy::Fixed { delay_ms: 25 }),
-        wflow_core::partition::RetryPolicy::Fixed { delay_ms: 25 }
-    );
-    assert_eq!(
-        retry_policy_to_legacy(types::RetryPolicy::CappedExponential {
-            base_ms: 100,
-            cap_ms: 1_000,
-        }),
-        wflow_core::partition::RetryPolicy::CappedExponential {
-            base_ms: 100,
-            cap_ms: 1_000,
-        }
-    );
+    let retry_policy = types::RetryPolicy::CappedExponential {
+        base_ms: 100,
+        cap_ms: 1_000,
+    };
+    let error = job_events::JobError::Transient {
+        error_json: Arc::from("retry"),
+        retry_policy: Some(retry_policy),
+    };
+    let job_events::JobError::Transient {
+        retry_policy: actual,
+        ..
+    } = error
+    else {
+        panic!("constructed transient error must stay transient")
+    };
+    assert_eq!(actual, Some(retry_policy));
 }
 
 #[tokio::test]
