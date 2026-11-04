@@ -194,6 +194,17 @@ Goal (operator): malleable, not an app store. Anyone may modify any plug or publ
 - **Dev loop:** a local build publishes under the node's own `did:key` namespace and is used in place of upstream via substitution.
 - Clay-side: `WriterId` → (replica, micro id).
 
+### D13. Dependencies by what you use (operator-approved direction, 2026-11-04; details in progress)
+- **Depend on NSIDs, not plugs (OSGi `Import-Package` over `Require-Bundle`; Debian `Provides:`).** Manifest requests name operation, datum, collection and contract NSIDs. Any enabled provider satisfies them (upstream, substituting fork, reimplementation).
+- **Compatibility lives in the NSID (AT Protocol):** a breaking change means a new NSID; within an NSID, only compatible growth. A feature dependency is `{nsid, minRevision}`, using the Lexicon `revision` integer.
+- **Plugs vendor the Lexicons they depend on,** not just the names (Protobuf/gRPC consumers carry .proto copies). This makes an incompatible view of an NSID detectable at catalog/registry time. AT Protocol Lexicon resolution (`_lexicon` DNS → DID → published Lexicon) becomes the arbiter later; we bootstrap on AT Protocol.
+- **Resolution is recorded at enable time** in the runtime install datum, like a lockfile: NSID → provider plug id@version + schema revision. A provider change is a grant change and is re-consented.
+- **Strictness is at the NSID level:** every NSID a plug touches outside its own prefix must appear in its manifest requests, or admission refuses.
+- **Plug-to-plug dependencies are a delivery hint only** ("also fetch did:x/photos ^1.2"), for the future fetch layer.
+- **Non-NSID dependencies must resolve through the substitution table,** never by digest. A digest pin appears only in lockfile/install datums. Open list with the Clay agent: byte-level artifact reuse (plug id + artifact key), WIT interface imports (a second interface namespace), Clay-specific references.
+- **NSIDs without a domain:** see the open question to the operator (unverified local NSIDs; hosted per-user namespaces like Maven Central's verified `io.github.<user>`).
+- An ADR is to be written from D10–D13: plug identity, naming, dependencies and malleability.
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
