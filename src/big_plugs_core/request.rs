@@ -45,8 +45,9 @@ pub struct Request {
 
 /// Whether a plug can run without the request being granted.
 #[macros::datum(open_string)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Necessity {
+    #[default]
     Required,
     Optional,
     #[datum(other)]
@@ -55,26 +56,15 @@ pub enum Necessity {
 
 /// How the request gets bound.
 #[macros::datum(open_string)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Resolution {
     /// Configuration binds it, with defaults derived from the manifest.
+    #[default]
     Configured,
     /// Bound later by the user's consent through a picker, issuing the same handle.
     AtRuntime,
     #[datum(other)]
     Unknown(String),
-}
-
-impl Default for Necessity {
-    fn default() -> Self {
-        Self::Required
-    }
-}
-
-impl Default for Resolution {
-    fn default() -> Self {
-        Self::Configured
-    }
 }
 
 impl Resolution {
