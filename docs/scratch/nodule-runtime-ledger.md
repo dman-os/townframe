@@ -147,7 +147,7 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- Next: the small 2a and 2b follow-ups (handler-less `Ready`, double reconcile), then init as a lifecycle binding (to-do 9).
+- Next: init as a lifecycle binding (to-do 9).
 ## Done
 
 - 2026-11-04: Slice 2c (D2e) plus gRPC deadline fail-fast.
@@ -292,8 +292,8 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 - **[design, operator] The config drawer isn't blob-portable yet.** It's a parentless self-doc drawer, and ADR 026 gives such drawers no inventories, so no inventory pin is published and a mirror can't discover or fetch artifact bytes. Retention is local only. This undercuts D2d's "portable" rationale until big_blobs supports pins or inventories for self-doc drawers (or the config drawer gets a parent).
 - [2b] Handler bytes must already be in the local blob store before the workers can encrypt and retain them. The install path (operator `PutBlob`/import, or OCI import) must put them there.
 - [blobs] Removing a `Blob` datum leaves its worker-written cipherBlob/jwk datums in the doc. Retention is released, but the datums linger. That's big_blobs worker cleanup.
-- [perf] Every config mutation reconciles twice: in `mutate_config` and again on the watch event. Skip the watch-triggered reconcile when the snapshot heads equal the applied heads.
-- [fix] A handler-less enabled nodule reports `ExecutorUnavailable` even with an executor configured. It hosts nothing, so it should be `Ready`.
+- Done (2026-11-04): the watch reconcile is skipped at already-applied heads. Trade-off: a failed grant apply at unchanged heads is retried only by `refresh_if_needed` and the dead-cap check, not by the watch. Its test uses 200 `yield_now`s to settle, which can only false-pass, never flake; there is no "watch event handled" signal to wait on.
+- Done (2026-11-04): a handler-less enabled nodule is `Ready` and registers nothing.
 - [main] `src/big_node/e2e/blobs/metadata.rs` isn't referenced by any `mod`, so it's dead test code from main.
 
 ## Deferred
