@@ -145,6 +145,17 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - **Open:** where to cut big_plugs from the schema service. `SchemaRepo` (`big_cabinet/schema.rs`) knows only identifiers and shapes, is fixed at open, and has no live registration. Plugs bring schemas.
 - Next big work: finish big_plugs (delivery: import into big_blobs, plug store, dependencies, schemas), coordinated with the Clay agent (`../townframe-p3N-4`, session `townframe-p3n-4-9c`).
 
+### D9. Clay agent's needs from big_plugs (2026-11-04, from `townframe-p3n-4-9c`)
+- **Plug store API Clay needs:** list installed plugs that carry a `micro` section; get that section plus the component bytes by digest; watch install, upgrade and remove. "Current installed revision per plug" suffices; no version history.
+- **Enablement, bindings and grants stay in each runtime's own desired-state datums** (Clay: `clay.micro.install/<micro>`, `clay.micro.bindings/<micro>`; nodules: `nodule.install/<plug>`), per ADR 025 §12. Share the request/grant/necessity *types* across kinds, not the datums. The audit reads every kind's grant datums plus the envelope requests.
+- **`MicroManifest`** (`clay_mdk/manifest.rs:247`) becomes the plug's `micro` section verbatim; the sidecar JSON is its standalone form. The envelope should own id, version and artifacts, and Clay will drop its `id`/`package_version`.
+- **Clay names things with `ContractIdentity{namespace, name, version: semver}`, not NSIDs**, and schema refs are bare strings. It is willing to rename to NSIDs resolving against plug-declared Lexicons.
+- **Micros calling nodule operations is not designed in Clay yet.** Both agents recommend: a micro `requires` entry may name a nodule operation NSID, the grant is minted like a nodule's operation grant, and it surfaces as the same call handle as a micro Call. This needs operator sign-off.
+- **Schema gap:** Clay needs Lexicons looked up by **schema id (NSID)**, not by datum tag: collection key/value/selector schemas and call request/response schemas are not datum tags. The registry must grow at runtime as plugs are imported. Clay doesn't validate against Lexicons yet, so nothing blocks it now.
+- **Digest mismatch:** the Clay stand-in uses SHA-256 of the component bytes; the envelope and big_blobs use BLAKE3. Align on BLAKE3.
+- Stand-in loader: `clay_mdk::package` (`<name>.component.wasm` + `<name>.manifest.json`). Our importer treats it as a local source, and Clay deletes its loader afterwards.
+- Read first: ADR 025 §5–§7, §11, §12; ADR 024 §11–§15 (in `../townframe-p3N-4`).
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
