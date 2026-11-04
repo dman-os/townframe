@@ -334,6 +334,14 @@ impl CapabilityPublication {
             Behavior::Presentation(_) => PublicationKind::Presentation,
         }
     }
+    /// The host component reference a presentation publication renders as, or `None` for a
+    /// call. A renderer attaches its mount factory to it (see `clay_dioxus`).
+    pub fn component(&self) -> Option<ComponentRef> {
+        match self.inner.behavior {
+            Behavior::Presentation(component) => Some(component),
+            Behavior::Call(_) => None,
+        }
+    }
     pub fn is_revoked(&self) -> bool {
         self.inner.revoked.load(Ordering::Acquire)
             || matches!(&self.inner.behavior, Behavior::Presentation(component)

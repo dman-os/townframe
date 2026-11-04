@@ -39,6 +39,7 @@ clay_guest_session = { workspace = true, optional = true }
 ciborium = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "rt"], optional = true }
 clay_dioxus = { workspace = true, optional = true }
+clay_surface = { workspace = true, optional = true }
 clay_rt_wcmp = { workspace = true, optional = true }
 daybook_types = { workspace = true, default-features = false, features = ["manifest"], optional = true }
 wasmparser = { version = "0.262", optional = true }
@@ -81,10 +82,10 @@ in_process = ["dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:c
 view = ["in_process", "dep:clay_dioxus", "dep:dioxus"]
 # Wasm provider assembly for composition roots that link the Wasmtime engine. Renderer-bound by
 # nature: a guest renders into a wire surface, and projecting one is the adapter's job.
-wasmtime = ["view", "dep:clay_rt_wasmtime"]
+wasmtime = ["view", "dep:clay_rt_wasmtime", "dep:clay_surface"]
 # `wcmp` provider assembly for composition roots that link the browser (or Wasmi) engine.
 # Same provision id as `wasmtime`, different engine; no instruction-fuel control (ADR 018 §5).
-wcmp = ["view", "dep:clay_rt_wcmp"]
+wcmp = ["view", "dep:clay_rt_wcmp", "dep:clay_surface"]
 # Static package reading: manifest extraction and digest from component bytes, no engine.
 package = ["dep:wasmparser", "dep:sha2"]
 # The Dioxus guest VirtualDom adapter (GuestDom, WireMutations).

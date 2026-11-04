@@ -95,6 +95,21 @@ fn mouse_data_json() -> String {
     .to_string()
 }
 
+/// The counter publishes its presentation as `view`, which its manifest has to declare.
+fn counter_context() -> InitialContext {
+    InitialContext {
+        publications: std::collections::BTreeMap::from([(
+            "view".to_owned(),
+            clay_guest_session::capabilities::DeclaredPublication {
+                kind: clay_guest_session::capabilities::PublicationKind::Presentation,
+                contract:
+                    clay_guest_session::capabilities::ContractIdentity::presentation_component(),
+            },
+        )]),
+        ..InitialContext::default()
+    }
+}
+
 #[tokio::test]
 async fn counter_activates_and_mount_dispatch_unmount_complete_on_first_poll() {
     let package = WcmpPackage::from_env("counter")
@@ -102,14 +117,10 @@ async fn counter_activates_and_mount_dispatch_unmount_complete_on_first_poll() {
         .expect("prepared counter component is valid");
     let host = Host::new();
     let owner = host.start("counter");
-    let (runtime, _driver) = WcmpRuntime::initialize(
-        &host,
-        owner.clone(),
-        package.as_shared(),
-        InitialContext::default(),
-    )
-    .await
-    .unwrap();
+    let (runtime, _driver) =
+        WcmpRuntime::initialize(&host, owner.clone(), package.as_shared(), counter_context())
+            .await
+            .unwrap();
 
     let sink = Arc::new(RecordingSink::new());
     let session = runtime
@@ -225,14 +236,10 @@ async fn close_before_mount_revokes_the_incarnation() {
         .expect("prepared counter component is valid");
     let host = Host::new();
     let owner = host.start("close-before-mount");
-    let (runtime, driver) = WcmpRuntime::initialize(
-        &host,
-        owner.clone(),
-        package.as_shared(),
-        InitialContext::default(),
-    )
-    .await
-    .unwrap();
+    let (runtime, driver) =
+        WcmpRuntime::initialize(&host, owner.clone(), package.as_shared(), counter_context())
+            .await
+            .unwrap();
     host.close_instance(&owner).unwrap();
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     assert_eq!(
@@ -296,7 +303,7 @@ async fn document_driver_delivers_neutral_updates() {
         package.as_shared(),
         InitialContext {
             configs: [("counter".into(), document)].into(),
-            ..InitialContext::default()
+            ..counter_context()
         },
     )
     .await

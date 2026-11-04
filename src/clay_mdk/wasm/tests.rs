@@ -1,38 +1,31 @@
 use super::*;
 use crate::ConfigurationRequest;
-use crate::ContractRef;
-use crate::ContributionDeclaration;
 use crate::Entrypoints;
 use crate::FacetAccess;
 use crate::MANIFEST_SCHEMA;
 use crate::MicroId;
-use crate::Necessity;
-use crate::ProvidedContract;
-use crate::Provision;
-use crate::RequiredContract;
-use crate::Retention;
-use crate::native::Collection;
-use crate::native::Contributable;
-use crate::native::output;
+use crate::PublicationDeclaration;
+use crate::PublicationKind;
 use clay_dioxus::ComponentMount;
 use clay_dioxus::SurfaceWriter;
+use clay_docs::DocumentService;
+use clay_guest_session::InitialContext;
+use clay_guest_session::capabilities::ContractIdentity;
+use clay_guest_session::capabilities::DeclaredPublication;
 use clay_host::AccessError;
-use clay_host::Host;
-use clay_micro_core::micros::MicroId as ComposeMicroId;
-use clay_micro_core::micros::composition::ConfiguredMicro;
-use clay_micro_core::micros::composition::Enablement;
-use clay_micro_core::micros::composition::InstanceState;
+use clay_host::CollectionRegistry;
+use clay_host::ConfiguredMicro;
+use clay_host::Lease;
+use clay_host::MicroState;
+use clay_host::StartError;
+use clay_host::Supervisor;
+use clay_rt_wasmtime::WasmRuntime;
 use clay_surface::SurfaceTree;
 use dioxus::prelude::*;
 use dioxus_core::RenderTargetId;
 use dioxus_core::VirtualDom;
 use dioxus_html::EventData;
 use dioxus_html::SerializedMouseData;
-use std::sync::Mutex;
-
-/// The composition runtime with the Dioxus registry installed: what these tests compose into and
-/// what [`provider`] assembles for.
-type ApplicationRuntime = clay_micro_core::application::ApplicationRuntime<NativeComponents>;
 
 async fn counter_package() -> WasmPackage {
     super::component_package("counter")
@@ -40,141 +33,130 @@ async fn counter_package() -> WasmPackage {
         .expect("prepared counter component is valid")
 }
 
-/// A native contract that accepts declared contributions: the composition-side half every
-/// wasm contribution needs. It shelves each contributor's surface in a host collection (so
-/// withdrawal is observable) and records who contributed what (so routing is observable).
-#[derive(Clone)]
-struct Shelf {
-    entries: Collection<ComponentRef>,
-    seen: Arc<Mutex<Vec<(Instance, ComponentRef)>>>,
-}
-
-impl Provision for Shelf {
-    const ID: &'static str = "test.shelf";
-}
-
-impl Contributable for Shelf {
-    fn contribute(
-        &self,
-        contributor: &Instance,
-        payload: &serde_json::Value,
-        surface: ComponentRef,
-    ) -> Result<(), AccessError> {
-        if payload["reject"].as_bool().unwrap() {
-            return Err(AccessError::Denied);
-        }
-        self.entries.writer(contributor)?.insert(surface)?;
-        self.seen
-            .lock()
-            .unwrap()
-            .push((contributor.clone(), surface));
-        Ok(())
+/// The counter's manifest, publishing its presentation as `view`, optionally requesting its
+/// configuration document with the given `(read, write)` access.
+/// A context whose manifest declares the presentation publication `view`.
+fn declaring_view() -> InitialContext {
+    InitialContext {
+        publications: BTreeMap::from([(
+            "view".to_owned(),
+            DeclaredPublication {
+                kind: clay_guest_session::capabilities::PublicationKind::Presentation,
+                contract: ContractIdentity::presentation_component(),
+            },
+        )]),
+        ..InitialContext::default()
     }
 }
 
-fn shelf_provider(app: &ApplicationRuntime) -> MicroFactory {
-    crate::native::provider(
-        app,
-        MicroManifest {
-            id: MicroId::new("test.shelf"),
-            provides: vec![ProvidedContract {
-                id: "shelf".into(),
-                contract: ContractRef::of::<Shelf>(),
-                retention: Retention::Strong,
-            }],
-            requires: vec![],
-            ..manifest()
-        },
-        |context| {
-            context.publish_contributable(Shelf {
-                entries: context.collection()?,
-                seen: Arc::default(),
-            });
-            Ok(())
-        },
-    )
-}
-
-fn contribution(reject: bool) -> ContributionDeclaration {
-    ContributionDeclaration {
-        id: if reject { "rejected" } else { "accepted" }.into(),
-        target_binding: "shelf".into(),
-        extension_contract: ContractRef::of::<Shelf>(),
-        payload: serde_json::json!({ "reject": reject }),
-        capability_slots: vec![],
-    }
-}
-
-fn manifest() -> MicroManifest {
+fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
     MicroManifest {
         schema: MANIFEST_SCHEMA,
         id: MicroId::new("test.wasm"),
         package_version: 1,
         entrypoints: Entrypoints::micro_client(),
-        provides: vec![ProvidedContract {
-            id: "controller".into(),
-            contract: ContractRef {
-                id: WasmMicro::ID.into(),
-                version: 1,
-            },
-            retention: Retention::Strong,
+        publications: vec![PublicationDeclaration {
+            name: view.into(),
+            kind: PublicationKind::Presentation,
+            contract: None,
         }],
-        requires: vec![RequiredContract {
-            binding: "shelf".into(),
-            contract: ContractRef::of::<Shelf>(),
-            necessity: Necessity::Required,
-        }],
-        configuration_requests: vec![],
+        requires: vec![],
+        configuration_requests: config
+            .map(|(read, write)| ConfigurationRequest {
+                binding: "counter".into(),
+                facets: vec![FacetAccess {
+                    tag: "org.dayframe.counter.config".into(),
+                    key_id: Some("count".into()),
+                    read,
+                    write,
+                    ..Default::default()
+                }],
+            })
+            .into_iter()
+            .collect(),
         collection_contracts: vec![],
         contributions: vec![],
-        activation_defaults: vec![],
         extra: BTreeMap::new(),
     }
 }
 
-/// A runtime with the shelf registered and the counter provider for `declared` beside it.
-fn composed(declared: MicroManifest) -> ApplicationRuntime {
-    let mut app = ApplicationRuntime::new();
-    app.register_provider(shelf_provider(&app)).unwrap();
-    let counter = provider(&app, declared, || super::component_package("counter"));
-    app.register_provider(counter).unwrap();
-    app
+struct Rig {
+    host: Host,
+    resources: Resources<NativeComponents>,
+    supervisor: Supervisor<clay_guest_session::capabilities::CapabilityPublication>,
+    id: clay_host::MicroId,
 }
 
-fn configuration() -> BTreeMap<String, ConfiguredMicro> {
-    BTreeMap::from([
-        (
-            "shelf".into(),
-            ConfiguredMicro {
-                provider: ComposeMicroId::new("test.shelf"),
-                enablement: Enablement::Enabled,
-                eager: true,
-                bindings: BTreeMap::new(),
-            },
-        ),
-        (
-            "counter".into(),
-            ConfiguredMicro {
-                provider: ComposeMicroId::new("test.wasm"),
-                enablement: Enablement::Enabled,
-                eager: true,
-                bindings: BTreeMap::from([(Shelf::ID.into(), "shelf".into())]),
-            },
-        ),
-    ])
-}
+impl Rig {
+    async fn start(declared: MicroManifest) -> Self {
+        let host = Host::new();
+        let resources = Resources {
+            registry: NativeComponents::new(&host),
+            documents: DocumentService::new(16),
+            collections: CollectionRegistry::default(),
+        };
+        let package = counter_package().await;
+        let id = clay_host::MicroId::new("test.wasm");
+        let micro = ConfiguredMicro {
+            identity: id.clone(),
+            eager: false,
+            requirements: BTreeMap::new(),
+            factory: factory(
+                resources.clone(),
+                declared,
+                CollectionBindings::default(),
+                move || {
+                    let package = package.clone();
+                    async move { Ok(package) }
+                },
+            ),
+        };
+        let supervisor = Supervisor::new(host.clone(), [micro]);
+        Self {
+            host,
+            resources,
+            supervisor,
+            id,
+        }
+    }
 
-fn shelved(app: &ApplicationRuntime) -> (Vec<ComponentRef>, Vec<(Instance, ComponentRef)>) {
-    let shelf = output::<Shelf, _>(app, "shelf").unwrap();
-    let entries = shelf
-        .entries
-        .reader(&app.root())
-        .snapshot()
-        .unwrap()
-        .into_values()
-        .collect();
-    let seen = shelf.seen.lock().unwrap().clone();
-    (entries, seen)
+    async fn view(
+        &self,
+    ) -> Result<Lease<clay_guest_session::capabilities::CapabilityPublication>, StartError> {
+        self.supervisor.acquire(&self.id, "view").await
+    }
+
+    /// Mount the leased presentation the way a shell does, through the renderer registry.
+    fn mounted(
+        &self,
+        view: &Lease<clay_guest_session::capabilities::CapabilityPublication>,
+    ) -> (VirtualDom, SurfaceTree) {
+        let mut dom = VirtualDom::new_with_props(
+            mount_host_app,
+            MountProps {
+                components: self.resources.registry.clone(),
+                owner: self.host.start("viewer"),
+                reference: view.component().expect("a presentation has a component"),
+            },
+        );
+        let mut tree = SurfaceTree::new();
+        dom.rebuild(&mut tree);
+        (dom, tree)
+    }
+
+    fn seed(&self) {
+        let documents = self.resources.documents.mock_documents();
+        documents.bind_config("counter".into(), "counter-config".into(), "main".into());
+        documents.seed(
+            clay_docs::FacetRoute {
+                document: "counter-config".into(),
+                branch: "main".into(),
+                tag: "org.dayframe.counter.config".into(),
+                key_id: "count".into(),
+            },
+            serde_json::json!(0),
+        );
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -188,20 +170,6 @@ fn mount_host_app(props: MountProps) -> Element {
     rsx! { div {
         ComponentMount { components: props.components, owner: props.owner, reference: props.reference }
     } }
-}
-
-fn mounted(app: &ApplicationRuntime, micro: &WasmMicro) -> (VirtualDom, SurfaceTree) {
-    let mut dom = VirtualDom::new_with_props(
-        mount_host_app,
-        MountProps {
-            components: app.renderer(),
-            owner: app.root(),
-            reference: micro.surface().host(),
-        },
-    );
-    let mut tree = SurfaceTree::new();
-    dom.rebuild(&mut tree);
-    (dom, tree)
 }
 
 fn click(dom: &mut VirtualDom, tree: &mut SurfaceTree) {
@@ -218,6 +186,10 @@ fn click(dom: &mut VirtualDom, tree: &mut SurfaceTree) {
     dom.render_immediate(tree);
 }
 
+async fn in_local_set<T>(future: impl Future<Output = T>) -> T {
+    tokio::task::LocalSet::new().run_until(future).await
+}
+
 #[tokio::test]
 async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdrawal() {
     let host = Host::new();
@@ -229,13 +201,13 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
         &host,
         child.clone(),
         &counter_package().await,
-        InitialContext::default(),
+        declaring_view(),
     )
     .await
     .unwrap();
     let child_reference = native
         .publish_surface(&child, move |_, writer| {
-            counter.mount(Arc::new(writer), &[])
+            counter.mount("view", Arc::new(writer), &[])
         })
         .unwrap();
     let package = super::component_package("slots")
@@ -251,14 +223,14 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
     let placement = host.publish_component(&viewer).unwrap();
     let probe = SurfaceWriter::new(Arc::new(host.mount(&viewer, placement).unwrap()));
     assert!(matches!(
-        runtime.mount(Arc::new(probe.clone()), &[foreign_reference]),
+        runtime.mount("layout", Arc::new(probe.clone()), &[foreign_reference]),
         Err(clay_surface::PresentationError::InvalidBatch(_))
     ));
     assert!(probe.is_live());
     let layout_runtime = runtime.clone();
     let reference = native
         .publish_surface(&layout, move |_, writer| {
-            layout_runtime.mount(Arc::new(writer), &[child_reference])
+            layout_runtime.mount("layout", Arc::new(writer), &[child_reference])
         })
         .unwrap();
     let mut dom = VirtualDom::new_with_props(
@@ -276,7 +248,7 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
     assert_eq!(tree.text_content(), "before1after");
     host.close_instance(&child).unwrap();
     assert!(matches!(
-        runtime.mount(Arc::new(probe), &[child_reference]),
+        runtime.mount("layout", Arc::new(probe), &[child_reference]),
         Err(clay_surface::PresentationError::Revoked)
     ));
     dom.wait_for_work().await;
@@ -289,148 +261,110 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
 }
 
 #[tokio::test]
-async fn wasm_provider_mounts_surface_and_updates_on_click() {
-    let app = composed(manifest());
-    let states = app.configure(&configuration()).await.unwrap();
-    assert_eq!(states["counter"], InstanceState::Active);
-    let micro = app.output::<WasmMicro>("counter").unwrap();
-    let (mut dom, mut tree) = mounted(&app, &micro);
-    assert_eq!(tree.text_content(), "0");
-    click(&mut dom, &mut tree);
-    assert_eq!(tree.text_content(), "1");
-    app.host().close();
+async fn wasm_provider_mounts_its_presentation_and_updates_on_click() {
+    in_local_set(async {
+        let rig = Rig::start(manifest("view", None)).await;
+        let view = rig.view().await.unwrap();
+        let (mut dom, mut tree) = rig.mounted(&view);
+        assert_eq!(tree.text_content(), "0");
+        click(&mut dom, &mut tree);
+        assert_eq!(tree.text_content(), "1");
+        drop(dom);
+        drop(view);
+        rig.supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
 }
 
 #[tokio::test]
-async fn wasm_guest_trap_or_disablement_closes_instance_and_withdraws_owned_entries() {
-    let mut declared = manifest();
-    declared.contributions = vec![contribution(false)];
-    let app = composed(declared);
-    let mut config = configuration();
-    app.configure(&config).await.unwrap();
-    let first = app.output::<WasmMicro>("counter").unwrap();
-    assert_eq!(shelved(&app).0, vec![first.surface()]);
-    let (mut dom, mut tree) = mounted(&app, &first);
-    assert_eq!(tree.text_content(), "0");
-    first.exhaust_fuel();
-    click(&mut dom, &mut tree);
-    assert_eq!(app.host().check(&first.instance), Err(AccessError::Revoked));
-    assert!(shelved(&app).0.is_empty());
-    assert_eq!(
-        app.configure(&config).await.unwrap()["counter"],
-        InstanceState::Faulted
-    );
-    config.get_mut("counter").unwrap().enablement = Enablement::Disabled;
-    assert_eq!(
-        app.configure(&config).await.unwrap()["counter"],
-        InstanceState::Disabled
-    );
-    config.get_mut("counter").unwrap().enablement = Enablement::Enabled;
-    assert_eq!(
-        app.configure(&config).await.unwrap()["counter"],
-        InstanceState::Active
-    );
-    let second = app.output::<WasmMicro>("counter").unwrap();
-    assert!(second.instance != first.instance);
-    assert_eq!(shelved(&app).0, vec![second.surface()]);
-    app.host().close();
+async fn disabling_revokes_the_presentation_and_a_fresh_incarnation_replaces_it() {
+    in_local_set(async {
+        let rig = Rig::start(manifest("view", None)).await;
+        let first = rig.view().await.unwrap();
+        let first_instance = rig.supervisor.instance(&rig.id).unwrap();
+        let first_component = first.component().unwrap();
+        assert_eq!(rig.supervisor.state(&rig.id), MicroState::Active);
+        rig.supervisor.disable(&rig.id).await.unwrap();
+        assert!(first.is_revoked());
+        assert_eq!(rig.host.check(&first_instance), Err(AccessError::Revoked));
+        assert!(matches!(
+            rig.host.mount(&rig.host.start("late"), first_component),
+            Err(AccessError::Revoked)
+        ));
+        assert!(matches!(
+            rig.view().await.err(),
+            Some(StartError::Disabled(_))
+        ));
+        rig.supervisor.enable(&rig.id);
+        let second = rig.view().await.unwrap();
+        assert_ne!(rig.supervisor.instance(&rig.id).unwrap(), first_instance);
+        let (mut dom, mut tree) = rig.mounted(&second);
+        assert_eq!(tree.text_content(), "0");
+        click(&mut dom, &mut tree);
+        assert_eq!(tree.text_content(), "1");
+        drop(dom);
+        drop((first, second));
+        rig.supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
 }
 
 #[tokio::test]
-async fn failed_contribution_rolls_back_surfaces_entries_and_publications() {
-    let mut declared = manifest();
-    declared.contributions = vec![contribution(false), contribution(true)];
-    let app = composed(declared);
-    let states = app.configure(&configuration()).await.unwrap();
-    assert!(matches!(states["counter"], InstanceState::Failed(_)));
-    let (entries, seen) = shelved(&app);
-    let [(instance, detail)] = seen.as_slice() else {
-        panic!("exactly the accepted contribution reached the shelf: {seen:?}");
-    };
-    let detail = *detail;
-    assert_eq!(app.host().check(instance), Err(AccessError::Revoked));
-    assert!(entries.is_empty());
-    assert!(matches!(
-        app.host().mount(&app.root(), detail.host()),
-        Err(AccessError::Revoked)
-    ));
-    assert!(matches!(
-        app.output::<WasmMicro>("counter"),
-        Err(AccessError::Revoked)
-    ));
-    app.host().close();
-}
-
-fn configuration_request(read: bool, write: bool) -> ConfigurationRequest {
-    ConfigurationRequest {
-        binding: "counter".into(),
-        facets: vec![FacetAccess {
-            tag: "org.dayframe.counter.config".into(),
-            key_id: Some("count".into()),
-            read,
-            write,
-            ..Default::default()
-        }],
-    }
-}
-
-fn seed(app: &ApplicationRuntime) {
-    let documents = app.mock_documents();
-    documents.bind_config("counter".into(), "counter-config".into(), "main".into());
-    documents.seed(
-        clay_docs::FacetRoute {
-            document: "counter-config".into(),
-            branch: "main".into(),
-            tag: "org.dayframe.counter.config".into(),
-            key_id: "count".into(),
-        },
-        serde_json::json!(0),
-    );
+async fn a_guest_publication_its_manifest_does_not_declare_fails_initialization() {
+    in_local_set(async {
+        let rig = Rig::start(manifest("other", None)).await;
+        let error = rig.view().await.err().unwrap();
+        assert!(
+            matches!(&error, StartError::Faulted(message)
+                if message.contains("guest published \"view\", which its manifest does not declare")),
+            "{error:?}"
+        );
+        rig.host.close();
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn manifest_read_only_grant_cannot_be_escalated_by_guest_mutation() {
-    let mut declared = manifest();
-    declared.configuration_requests = vec![configuration_request(true, false)];
-    let app = composed(declared);
-    seed(&app);
-    assert_eq!(
-        app.configure(&configuration()).await.unwrap()["counter"],
-        InstanceState::Active
-    );
-    let micro = app.output::<WasmMicro>("counter").unwrap();
-    let (mut dom, mut tree) = mounted(&app, &micro);
-    assert_eq!(
-        tree.text_content(),
-        "0Pending counter writes: 0Refresh counter"
-    );
-    click(&mut dom, &mut tree);
-    assert_eq!(
-        tree.text_content(),
-        "0Pending counter writes: 0Write failed: DocumentError::DeniedRefresh counter"
-    );
-    assert!(app.host().check(&micro.instance).is_ok());
-    app.host().close();
+    in_local_set(async {
+        let rig = Rig::start(manifest("view", Some((true, false)))).await;
+        rig.seed();
+        let view = rig.view().await.unwrap();
+        let (mut dom, mut tree) = rig.mounted(&view);
+        assert_eq!(
+            tree.text_content(),
+            "0Pending counter writes: 0Refresh counter"
+        );
+        click(&mut dom, &mut tree);
+        assert_eq!(
+            tree.text_content(),
+            "0Pending counter writes: 0Write failed: DocumentError::DeniedRefresh counter"
+        );
+        assert_eq!(rig.supervisor.state(&rig.id), MicroState::Active);
+        drop(dom);
+        drop(view);
+        rig.supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
 }
 
 #[tokio::test]
-async fn guest_activation_failure_does_not_run_contributions_or_publish_a_controller() {
-    let mut declared = manifest();
-    declared.configuration_requests = vec![configuration_request(false, true)];
-    declared.contributions = vec![contribution(false)];
-    let app = composed(declared);
-    seed(&app);
-    let states = app.configure(&configuration()).await.unwrap();
-    assert_eq!(
-        states["counter"],
-        InstanceState::Failed(clay_micro_core::micros::MicroRegistryError::Initialization(
-            "DocumentError::Denied".into(),
-        ),)
-    );
-    assert!(shelved(&app).1.is_empty());
-    assert!(matches!(
-        app.output::<WasmMicro>("counter"),
-        Err(AccessError::Revoked)
-    ));
-    app.host().close();
+async fn guest_activation_failure_faults_the_micro_and_publishes_nothing() {
+    in_local_set(async {
+        let rig = Rig::start(manifest("view", Some((false, true)))).await;
+        rig.seed();
+        let error = rig.view().await.err().unwrap();
+        assert!(
+            matches!(&error, StartError::Faulted(message) if message.contains("DocumentError::Denied")),
+            "{error:?}"
+        );
+        assert!(matches!(rig.supervisor.state(&rig.id), MicroState::Faulted(_)));
+        // Demand does not retry a fault.
+        assert!(matches!(rig.view().await.err(), Some(StartError::Faulted(_))));
+        rig.host.close();
+    })
+    .await;
 }

@@ -53,6 +53,7 @@ mod host_bindings {
             "townframe:dayframe/presentation.surface": super::Surface,
             "townframe:dayframe/presentation.mount-point": super::Placement,
             "townframe:dayframe/presentation.component-ref": super::ComponentRef,
+            "townframe:dayframe/capability-bank.published-capability": super::TestPublished,
         },
     });
 }
@@ -601,7 +602,8 @@ impl capability_bank::Host for TestHost {
     ) -> wasmtime::Result<
         Result<Resource<capability_bank::PublishedCapability>, capability_bank::CapabilityError>,
     > {
-        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+        // The rig has no capability bank; the guest only needs a lease to hand back.
+        Ok(Ok(self.table.push(TestPublished)?))
     }
 
     fn publish_call(
@@ -718,6 +720,9 @@ impl capability_bank::HostPublishedCapability for TestHost {
 }
 
 pub struct ComponentRef;
+
+/// A stand-in publication lease: the rig's guests publish a presentation and never redeem it.
+pub struct TestPublished;
 
 impl presentation::Host for TestHost {}
 
@@ -1193,8 +1198,7 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
         .push(Placement::synthetic(Arc::new(AtomicBool::new(false))))?;
     assert!(matches!(
         events
-            .call_mount(&mut store,
-            "view", Resource::new_borrow(denied.rep()), &[])
+            .call_mount(&mut store, "view", Resource::new_borrow(denied.rep()), &[])
             .await?,
         Err(PresentationError::Revoked)
     ));
@@ -1204,8 +1208,12 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
         .table
         .push(Placement::synthetic(first_lifetime.clone()))?;
     let surface = events
-        .call_mount(&mut store,
-            "view", Resource::new_borrow(placement.rep()), &[])
+        .call_mount(
+            &mut store,
+            "view",
+            Resource::new_borrow(placement.rep()),
+            &[],
+        )
         .await?
         .unwrap();
     let expected_batches = expected_counter_batches(4);
@@ -1306,8 +1314,12 @@ async fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
             .push(Placement::synthetic(alive.clone()))?;
         let surface = guest
             .townframe_dayframe_presentation_events()
-            .call_mount(&mut store,
-            "view", Resource::new_borrow(placement.rep()), &[])
+            .call_mount(
+                &mut store,
+                "view",
+                Resource::new_borrow(placement.rep()),
+                &[],
+            )
             .await?
             .unwrap();
         Ok::<_, wasmtime::Error>((store, guest, surface))
@@ -1448,8 +1460,12 @@ async fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime:
     let events = guest.townframe_dayframe_presentation_events();
     let placement = rig.grant();
     let _surface = events
-        .call_mount(&mut rig.store,
-            "view", Resource::new_borrow(placement.rep()), &[])
+        .call_mount(
+            &mut rig.store,
+            "view",
+            Resource::new_borrow(placement.rep()),
+            &[],
+        )
         .await?
         .unwrap();
 
@@ -1677,7 +1693,7 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
         events
             .call_mount(
                 &mut rig.store,
-            "view",
+                "view",
                 Resource::new_borrow(first_placement.rep()),
                 &[]
             )

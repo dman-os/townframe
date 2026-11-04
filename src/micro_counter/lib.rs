@@ -14,6 +14,7 @@ use dioxus::prelude::*;
 use micro_counter_manifest::CONFIG_KEY;
 use micro_counter_manifest::CONFIG_NAME;
 use micro_counter_manifest::CONFIG_TAG;
+use micro_counter_manifest::VIEW;
 
 /// Bind the counter's configuration facet when the composition granted one — the counter also
 /// runs standalone, counting in memory, when it did not — and publish the view over it.
@@ -22,7 +23,7 @@ fn activate(context: &Context) -> Result<(), DocumentError> {
         Some(config) => Some(config.facet::<u64>(CONFIG_TAG, CONFIG_KEY)?),
         None => None,
     };
-    context.publish_component(move || counter(count.clone()));
+    context.publish_component(VIEW, move || counter(count.clone()));
     Ok(())
 }
 

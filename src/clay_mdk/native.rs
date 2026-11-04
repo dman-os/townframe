@@ -198,7 +198,13 @@ impl<R: RendererRegistry> Context<R> {
         &self,
         id: &str,
     ) -> Result<CollectionWatch<K, V>, AccessError> {
-        if !self.bindings.read.iter().chain(&self.bindings.write).any(|bound| bound == id) {
+        if !self
+            .bindings
+            .read
+            .iter()
+            .chain(&self.bindings.write)
+            .any(|bound| bound == id)
+        {
             return Err(AccessError::Denied);
         }
         let projection = self
@@ -312,20 +318,7 @@ impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFac
                 CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
             let sessions =
                 CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
-            let mut configs = BTreeMap::new();
-            for request in &manifest.configuration_requests {
-                configs.extend(
-                    resources
-                        .documents
-                        .grant_config(
-                            &host,
-                            &instance,
-                            &request.binding,
-                            routine_facets(&request.facets),
-                        )
-                        .map_err(|error| format!("config {}: {error}", request.binding))?,
-                );
-            }
+            let configs = grant_configs(&resources.documents, &host, &instance, &manifest)?;
             let requirements = requirements
                 .iter()
                 .map(|(binding, publication)| {
@@ -366,6 +359,31 @@ impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFac
             })
         })
     }
+}
+
+/// Grant the configuration documents a manifest requests, keyed by binding (ADR 015 §7). The
+/// manifest's ACL is validated by the caller's admission; the document service enforces the
+/// resolved routes.
+pub(crate) fn grant_configs(
+    documents: &DocumentService,
+    host: &Host,
+    instance: &Instance,
+    manifest: &MicroManifest,
+) -> Result<BTreeMap<String, DocumentRef>, String> {
+    let mut configs = BTreeMap::new();
+    for request in &manifest.configuration_requests {
+        configs.extend(
+            documents
+                .grant_config(
+                    host,
+                    instance,
+                    &request.binding,
+                    routine_facets(&request.facets),
+                )
+                .map_err(|error| format!("config {}: {error}", request.binding))?,
+        );
+    }
+    Ok(configs)
 }
 
 /// The publications a manifest declares, in the session's terms. A kind this build does not

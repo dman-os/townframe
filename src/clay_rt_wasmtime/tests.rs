@@ -77,6 +77,21 @@ async fn redeem(
         .unwrap()
 }
 
+/// The counter publishes its presentation as `view`, which its manifest has to declare.
+fn counter_context() -> InitialContext {
+    InitialContext {
+        publications: BTreeMap::from([(
+            "view".to_owned(),
+            clay_guest_session::capabilities::DeclaredPublication {
+                kind: clay_guest_session::capabilities::PublicationKind::Presentation,
+                contract:
+                    clay_guest_session::capabilities::ContractIdentity::presentation_component(),
+            },
+        )]),
+        ..InitialContext::default()
+    }
+}
+
 async fn counter_package() -> WasmPackage {
     WasmPackage::from_env("counter")
         .await
@@ -1088,7 +1103,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
         &host,
         owner.clone(),
         &counter_package().await,
-        InitialContext::default(),
+        counter_context(),
     )
     .await
     .unwrap();
@@ -1251,7 +1266,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
         &counter_package().await,
         InitialContext {
             configs: [("counter".into(), document)].into(),
-            ..InitialContext::default()
+            ..counter_context()
         },
     )
     .await
