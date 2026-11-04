@@ -24,6 +24,20 @@
 //! call `echo` answers its request, and the `feed` row keyed `init`, if one exists when `activate`
 //! runs, is a call the micro makes before it finishes initializing, so an `init` row attaching a
 //! peer's `echo` makes this micro's activation wait on the peer's.
+//!
+//! The lifecycle scenarios (`lifecycle_conformance::provider_consumer_graph` and the rest) pick
+//! this micro's role from what it is granted, never from arguments:
+//!
+//! * the optional requirements `presentation` and `service` make it a consumer: it redeems the
+//!   presentation and calls the service's `echo` while activating, and keeps the redeemed proxy
+//!   in a [`Held`] owned by a task of its incarnation, whose `Drop` runs when the incarnation
+//!   closes (ADR 030 §6). There is no close hook: cleanup is RAII on what the incarnation owns;
+//! * the optional requirement `peer` is what its `relay` call forwards to (`relay:` plus the
+//!   peer's answer);
+//! * a `feed` row keyed `reject` makes `activate` fail after everything was published, which
+//!   the host must discard;
+//! * a `feed` row keyed `name` prefixes the keys this incarnation writes (`<name>/guest`), so
+//!   several incarnations of the micro can share one collection and be told apart.
 use clay_mdk::Access;
 use clay_mdk::BindingResolution;
 use clay_mdk::CallBinding;
@@ -35,8 +49,10 @@ use clay_mdk::Error;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
+use clay_mdk::PresentationComponent;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
+use clay_mdk::Registration;
 use clay_mdk::Request;
 use clay_mdk::RowAttachment;
 use clay_mdk::hooks::PresentationSlot;
@@ -83,6 +99,11 @@ pub fn manifest() -> MicroManifest {
                 contract: Some(Nsid::literal("org.example.clay.test.context.echo")),
             },
             PublicationDeclaration {
+                name: "relay".into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal("org.example.clay.test.context.relay")),
+            },
+            PublicationDeclaration {
                 name: "probe".into(),
                 kind: PublicationKind::Call,
                 contract: Some(Nsid::literal("org.example.clay.test.context.probe")),
@@ -98,7 +119,16 @@ pub fn manifest() -> MicroManifest {
                 contract: None,
             },
         ],
-        requires: vec![],
+        requires: ["presentation", "service", "peer"]
+            .map(|binding| Request {
+                binding: binding.into(),
+                contract: Nsid::literal(&format!("org.example.clay.test.context.{binding}")),
+                access: None,
+                necessity: Necessity::Optional,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            })
+            .into(),
         configuration_requests: vec![],
         collection_contracts: vec![],
         collection_requests: vec![Request {
@@ -127,43 +157,24 @@ async fn attachment_of(
     }
 }
 
-pub async fn activate(context: Context) -> Result<(), Error> {
-    let feed = context
-        .registration::<String, String>("feed")
-        .expect("the feed collection is bound");
-    feed.collection().bootstrapped().await;
-    let seen = feed
-        .collection()
-        .rows()?
-        .iter()
-        .map(|row| format!("{}={}", row.key, row.value))
-        .collect::<Vec<_>>()
-        .join(",");
-    feed.put(&"guest".to_owned(), &seen, Vec::new()).await?;
-    let collection = feed.collection().clone();
-    // An `init` row is a call this activation makes and waits for: through a lazy reference it
-    // demands the peer's activation, which is how two micros come to wait on each other.
-    let init = collection
-        .rows()?
-        .iter()
-        .find(|row| row.key == "init")
-        .map(|row| row.attachments[0].clone());
-    if let Some(peer) = init {
-        peer.call::<String, String>(&"init".to_owned()).await?;
+/// A redeemed presentation the incarnation keeps for as long as it lives. Dropping it, which
+/// the incarnation's close does while its dependencies are still retained (ADR 030 §6), finds
+/// the provider's presentation still mountable: the sync `component()` is the observable the
+/// host-side scenarios rely on, because a drop that ran after the provider was revoked fails
+/// it, and a drop cannot return an error, so the failure is a crash.
+struct Held(PresentationComponent);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0
+            .component()
+            .expect("the provider was withdrawn before its consumer closed");
     }
-    context.publish_call("echo", |request: String| async move { Ok(request) })?;
-    context.publish_component("detail", dioxus_core::VNode::empty)?;
-    context.publish_component("slot", {
-        let collection = collection.clone();
-        move || {
-            let rows = use_rows(&collection);
-            rsx! {
-                for row in rows.iter().filter(|row| row.key == VIEW) {
-                    PresentationSlot { key: "{row.key}", reference: row.attachments[0].clone() }
-                }
-            }
-        }
-    })?;
+}
+
+/// The call `follow`: redeems the attachment of the `feed` row it is named, reporting each step
+/// as a `progress/<n>` row (see the module docs).
+fn publish_follow(context: &Context, feed: &Registration<String, String>) -> Result<(), Error> {
     context.publish_call("follow", {
         let feed = feed.clone();
         move |key: String| {
@@ -205,6 +216,14 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             }
         }
     })?;
+    Ok(())
+}
+
+/// The calls `hold`, `probe` and `release` over the attachments of `collection`'s rows.
+fn publish_retention(
+    context: &Context,
+    collection: &Collection<String, String>,
+) -> Result<(), Error> {
     // `hold` retains the call the row `key` attaches and calls it twice (an echo), keeping the
     // binding until `release`, so a host can see the provider live past the call that took it
     // and then idle once the binding is dropped.
@@ -254,6 +273,81 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         held.borrow_mut().take();
         async { Ok(()) }
     })?;
+    Ok(())
+}
+
+pub async fn activate(context: Context) -> Result<(), Error> {
+    let feed = context
+        .registration::<String, String>("feed")
+        .expect("the feed collection is bound");
+    feed.collection().bootstrapped().await;
+    let rows = feed.collection().rows()?;
+    let seen = rows
+        .iter()
+        .map(|row| format!("{}={}", row.key, row.value))
+        .collect::<Vec<_>>()
+        .join(",");
+    let guest = rows
+        .iter()
+        .find(|row| row.key == "name")
+        .map_or_else(|| "guest".to_owned(), |row| format!("{}/guest", row.value));
+    feed.put(&guest, &seen, Vec::new()).await?;
+    let reject = rows.iter().any(|row| row.key == "reject");
+    // A consumer redeems its provider's presentation before it finishes initializing, and
+    // calls the service if it has one; a failure refuses the activation.
+    if let Some(presentation) = context.require("presentation") {
+        let proxy = presentation.redeem_presentation().await?;
+        proxy.component()?;
+        if let Some(service) = context.require("service") {
+            let answer: String = service.call(&"ping".to_owned()).await?;
+            if answer != "ping" {
+                return Err(Error::Rejected(format!("service answered {answer:?}")));
+            }
+        }
+        // Owned by a task of the incarnation: closing drops the task and with it the proxy.
+        context.spawn(async move {
+            let _held = Held(proxy);
+            std::future::pending::<()>().await;
+        });
+    }
+    let collection = feed.collection().clone();
+    // An `init` row is a call this activation makes and waits for: through a lazy reference it
+    // demands the peer's activation, which is how two micros come to wait on each other.
+    let init = collection
+        .rows()?
+        .iter()
+        .find(|row| row.key == "init")
+        .map(|row| row.attachments[0].clone());
+    if let Some(peer) = init {
+        peer.call::<String, String>(&"init".to_owned()).await?;
+    }
+    context.publish_call("echo", |request: String| async move { Ok(request) })?;
+    // `relay` forwards its request to the `peer` requirement and answers `relay:` plus the
+    // peer's answer; a handler in flight holds its own share of the reference.
+    let peer = context.require("peer").cloned();
+    context.publish_call("relay", move |request: String| {
+        let peer = peer.clone();
+        async move {
+            let peer = peer
+                .ok_or_else(|| Error::Rejected("the relay has no peer requirement".to_owned()))?;
+            let answer: String = peer.call(&request).await?;
+            Ok(format!("relay:{answer}"))
+        }
+    })?;
+    context.publish_component("detail", dioxus_core::VNode::empty)?;
+    context.publish_component("slot", {
+        let collection = collection.clone();
+        move || {
+            let rows = use_rows(&collection);
+            rsx! {
+                for row in rows.iter().filter(|row| row.key == VIEW) {
+                    PresentationSlot { key: "{row.key}", reference: row.attachments[0].clone() }
+                }
+            }
+        }
+    })?;
+    publish_follow(&context, &feed)?;
+    publish_retention(&context, &collection)?;
     // Runs long after `initialize` returned, when no handle to `detail` exists any more.
     context.publish_call("attach", move |publication: String| {
         let feed = feed.clone();
@@ -269,11 +363,12 @@ pub async fn activate(context: Context) -> Result<(), Error> {
     })?;
     context.publish_call("rows", move |(): ()| {
         let mut collection = collection.clone();
+        let guest = guest.clone();
         async move {
             loop {
                 let rows = collection.rows()?;
                 // Our own row arrives through the same feed once the host commits it.
-                if rows.iter().any(|row| row.key == "guest") {
+                if rows.iter().any(|row| row.key == guest) {
                     return Ok(rows
                         .iter()
                         .map(|row| (row.key.clone(), row.value.clone()))
@@ -283,5 +378,11 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             }
         }
     })?;
+    // After everything was published: the host discards what a refused activation staged.
+    if reject {
+        return Err(Error::Rejected(
+            "failing provider rejects its initialization".to_owned(),
+        ));
+    }
     Ok(())
 }

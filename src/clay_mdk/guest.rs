@@ -409,9 +409,15 @@ impl Runtime {
         })
     }
 
-    /// End the incarnation: stop its tasks, then drop every view, handler and binding so the
-    /// store holds nothing the host still tracks. Clearing the maps also breaks the cycle
-    /// through captured contexts (runtime -> view -> context -> runtime).
+    /// End the incarnation (ADR 030 §6), with no close hook for author code: cleanup is the
+    /// `Drop` of values the micro owns, and closing is dropping them in this order. The host
+    /// calls this while the incarnation's dependencies are retained, so a drop may still use
+    /// what it holds from them, and it revokes publications and the scope only after this
+    /// returns. First the tasks stop and resolve once each has dropped its future, which drops
+    /// whatever the task owned (a redeemed proxy, a binding, a lease). Then the views, call
+    /// handlers and collection bindings are dropped, and with them what each captured. Clearing
+    /// the maps also breaks the cycle through captured contexts (runtime -> view -> context ->
+    /// runtime), which is what finally releases the requirement references the contexts hold.
     async fn close() {
         let runtime = Self::current();
         runtime.tasks.close().await;

@@ -1,7 +1,7 @@
 {
   "id": "dayframe.lifecycle-fixture",
   "package_version": 1,
-  "authority": "org.example.clay.test.lifecycle",
+  "authority": "org.example.clay.test.context",
   "entrypoints": {
     "initialize": "townframe:dayframe/micro-lifecycle@0.4.0",
     "presentation": "townframe:dayframe/presentation-events@0.4.0",
@@ -9,65 +9,30 @@
   },
   "publications": [
     {
-      "name": "presentation",
+      "name": "detail",
       "kind": "presentation",
       "contract": null
     },
     {
       "name": "echo",
       "kind": "call",
-      "contract": "org.example.clay.test.lifecycle.echo"
+      "contract": "org.example.clay.test.context.echo"
     },
     {
       "name": "relay",
       "kind": "call",
-      "contract": "org.example.clay.test.lifecycle.relay"
+      "contract": "org.example.clay.test.context.relay"
     }
   ],
   "requires": [
     {
-      "binding": "presentation",
-      "contract": "org.example.clay.test.lifecycle.presentation"
-    },
-    {
-      "binding": "service",
-      "contract": "org.example.clay.test.lifecycle.echo",
-      "necessity": "optional"
-    },
-    {
       "binding": "peer",
-      "contract": "org.example.clay.test.lifecycle.echo",
-      "necessity": "optional"
-    },
-    {
-      "binding": "host",
-      "contract": "org.example.clay.test.lifecycle.host",
+      "contract": "org.example.clay.test.context.peer",
       "necessity": "optional"
     }
   ],
   "configuration_requests": [],
   "collection_contracts": [],
-  "collection_requests": [
-    {
-      "binding": "host-rows",
-      "contract": "org.example.clay.test.lifecycle.hostRows",
-      "access": "write"
-    }
-  ],
-  "contributions": [
-    {
-      "id": "serve-host",
-      "key": "serve-host",
-      "payload": {
-        "title": "Lifecycle fixture"
-      },
-      "attachments": [
-        {
-          "index": 0,
-          "publication": "presentation"
-        }
-      ],
-      "binding": "host-rows"
-    }
-  ]
+  "collection_requests": [],
+  "contributions": []
 }
