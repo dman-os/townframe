@@ -100,6 +100,7 @@ impl Controls {
         ConfiguredMicro {
             identity: id(identity),
             eager: false,
+            enabled: true,
             requirements: BTreeMap::new(),
             factory: Rc::new(Fake {
                 name: identity.to_owned(),
@@ -308,6 +309,22 @@ async fn an_eager_root_survives_lease_churn() {
     .await;
     assert_eq!(supervisor.state(&root), MicroState::Active);
     assert_eq!(controls.log(), ["init root"]);
+}
+
+#[tokio::test]
+async fn an_eager_micro_configured_disabled_is_never_started_until_enabled() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let mut root = eager(controls.micro("root"));
+    root.enabled = false;
+    let supervisor = Supervisor::new(host.clone(), [root]);
+    let root = id("root");
+    assert_eq!(supervisor.state(&root), MicroState::Disabled);
+    assert!(supervisor.reconcile().await.is_empty());
+    assert_eq!(supervisor.state(&root), MicroState::Disabled);
+    assert!(controls.log().is_empty());
+    supervisor.enable(&root);
+    assert_eq!(supervisor.state(&root), MicroState::Idle);
 }
 
 #[tokio::test]

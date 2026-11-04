@@ -41,6 +41,7 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
     };
     let sample = InstalledMicro {
         eager: true,
+        enabled_on_admission: true,
         ..InstalledMicro::new(micro_sample::manifest(), |resources| {
             factory(
                 resources,
@@ -58,19 +59,22 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
 
 /// A counter that publishes its declared view without any engine.
 fn stub_counter() -> InstalledMicro {
-    InstalledMicro::new(micro_counter_manifest::manifest(), |resources| {
-        factory(
-            resources,
-            micro_counter_manifest::manifest(),
-            CollectionBindings::default(),
-            |context| {
-                context.publish_component(micro_counter_manifest::VIEW, || {
-                    rsx! { p { "stub counter" } }
-                })?;
-                Ok(())
-            },
-        )
-    })
+    InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(micro_counter_manifest::manifest(), |resources| {
+            factory(
+                resources,
+                micro_counter_manifest::manifest(),
+                CollectionBindings::default(),
+                |context| {
+                    context.publish_component(micro_counter_manifest::VIEW, || {
+                        rsx! { p { "stub counter" } }
+                    })?;
+                    Ok(())
+                },
+            )
+        })
+    }
 }
 
 /// A counter whose guest cannot be produced (fetch, compile, missing artifact).
@@ -89,9 +93,12 @@ impl Factory<CapabilityPublication> for Unfetchable {
 }
 
 fn unfetchable_counter() -> InstalledMicro {
-    InstalledMicro::new(micro_counter_manifest::manifest(), |_resources| {
-        Rc::new(Unfetchable)
-    })
+    InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(micro_counter_manifest::manifest(), |_resources| {
+            Rc::new(Unfetchable)
+        })
+    }
 }
 
 /// The catalog over a fresh in-memory store.
@@ -411,5 +418,93 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
         mirror.current().unwrap().facets.get(&route),
         Some(&FacetValue::Present(serde_json::json!("from boot one")))
     );
+    second.host.close();
+}
+
+fn install_datum_of(runtime: &CompositionRuntime, micro: &str) -> Option<serde_json::Value> {
+    runtime
+        .documents()
+        .mock_documents()
+        .get(&install_route(&id(micro)))
+}
+
+// A micro nobody enabled is admitted disabled (an incoming package), a built-in the launcher
+// links is admitted enabled, and the locked root has no datum at all.
+#[tokio::test(flavor = "current_thread")]
+async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
+    let package = InstalledMicro::new(micro_counter_manifest::manifest(), |_resources| {
+        Rc::new(Unfetchable)
+    });
+    let runtime = memory_runtime(package).await;
+    let version = micro_counter_manifest::manifest().package_version;
+    assert_eq!(
+        install_datum_of(&runtime, COUNTER),
+        Some(serde_json::json!({ "enabled": false, "package_version": version }))
+    );
+    assert_eq!(
+        install_datum_of(&runtime, micro_sample::ID).unwrap()["enabled"],
+        true
+    );
+    assert_eq!(install_datum_of(&runtime, "dayframe.settings"), None);
+    assert_eq!(runtime.state(&id(COUNTER)), MicroState::Disabled);
+    assert_eq!(runtime.state(&id(micro_sample::ID)), MicroState::Idle);
+    assert_eq!(runtime.state(&id("dayframe.settings")), MicroState::Idle);
+    runtime.host.close();
+}
+
+// Writing the datum is the only control: the reconciler applies it to the supervisor, and an
+// eager micro that was admitted disabled is never started by the boot reconcile.
+#[tokio::test(flavor = "current_thread")]
+async fn the_install_datum_drives_the_supervisor() {
+    let runtime = memory_runtime(InstalledMicro::new(
+        micro_counter_manifest::manifest(),
+        |_resources| Rc::new(Unfetchable),
+    ))
+    .await;
+    served(&runtime, async {
+        let sample = id(micro_sample::ID);
+        settle(|| runtime.state(&sample) == MicroState::Active).await;
+        assert_eq!(runtime.state(&id(COUNTER)), MicroState::Disabled);
+        runtime.set_enabled(&sample, false);
+        settle(|| runtime.state(&sample) == MicroState::Disabled).await;
+        runtime.set_enabled(&sample, true);
+        settle(|| runtime.state(&sample) == MicroState::Idle).await;
+        runtime.set_enabled(&id(COUNTER), true);
+        settle(|| runtime.state(&id(COUNTER)) == MicroState::Idle).await;
+        assert_eq!(
+            install_datum_of(&runtime, COUNTER).unwrap()["enabled"],
+            true
+        );
+    })
+    .await;
+}
+
+// The flag outlives the boot: an admitted-enabled built-in that was disabled stays disabled
+// after a restart over the same store, because the stored datum beats the admission default.
+#[tokio::test(flavor = "current_thread")]
+async fn a_disabled_micro_stays_disabled_across_a_reboot() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let boot = || async {
+        CompositionRuntime::new(Arc::clone(&store), catalog(stub_counter()))
+            .await
+            .unwrap()
+    };
+    let first = boot().await;
+    let sample = id(micro_sample::ID);
+    served(&first, async {
+        settle(|| first.state(&sample) == MicroState::Active).await;
+        first.set_enabled(&sample, false);
+        settle(|| first.state(&sample) == MicroState::Disabled).await;
+    })
+    .await;
+
+    let second = boot().await;
+    assert_eq!(second.state(&sample), MicroState::Disabled);
+    assert_eq!(
+        install_datum_of(&second, micro_sample::ID).unwrap()["enabled"],
+        false
+    );
+    assert_eq!(install_datum_of(&second, "dayframe.settings"), None);
+    assert_eq!(second.state(&id("dayframe.settings")), MicroState::Idle);
     second.host.close();
 }

@@ -435,3 +435,24 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   observe it.
 - Plan: C5a prefix removal → C5b durable mock document source → C5c install datum + reconcile into
   the supervisor, lifecycle panel writes the datum → C5d reload e2e.
+
+## C5c: persisted enablement (2026-11-04)
+
+- Desired state is a document: `dayframe.installs` (branch `main`), tag `clay.micro.install`,
+  key_id = micro id, value `{ "enabled": bool, "package_version": u32 }`. Shape follows
+  big_nodule's `NoduleInstall`; `package_version` is recorded, nothing gates on it yet.
+- `InstalledMicro.enabled_on_admission` (false in `new`): launchers set it true for the native
+  built-ins (Sample on desktop and web); discovered packages (desktop component files, web
+  package index) are admitted disabled. Admission runs in `CompositionRuntime::new`: an existing
+  datum wins (only `package_version` is refreshed), locked micros get no datum and are always
+  enabled. It writes through `MockDocuments::external_change` (host-side, while the node is mocked).
+- `clay_host::ConfiguredMicro.enabled`: a disabled micro starts in `Disabled`, and
+  `Supervisor::reconcile` skips disabled roots, so eager + disabled is never started.
+- `reconcile_installs` (spawned in `serve()`'s LocalSet, aborted on shutdown before the supervisor
+  closes): watches the document through the shell instance and applies `enable` / `disable`;
+  close errors go to `CompositionRuntime::lifecycle_failures()` for the lifecycle panel.
+- The panel's Enable/Disable calls `CompositionRuntime::set_enabled` (writes the datum); Retry
+  stays a direct supervisor call. `MockDocuments::get` is the new host-side source read.
+- Tests: composition admission / datum-drives-supervisor / reboot-stays-disabled, clay_host
+  eager-disabled, desktop tests enable the counter via the datum, web `counter.spec.ts` enables
+  first and adds the reload check (not run here).

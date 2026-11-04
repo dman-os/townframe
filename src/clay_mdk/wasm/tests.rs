@@ -100,6 +100,7 @@ impl Rig {
         let micro = ConfiguredMicro {
             identity: id.clone(),
             eager: false,
+            enabled: true,
             requirements: BTreeMap::new(),
             factory: factory(
                 resources.clone(),

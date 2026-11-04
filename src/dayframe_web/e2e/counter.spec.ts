@@ -18,6 +18,14 @@ test("the composed wcmp counter mounts and dispatches clicks in the browser", as
     name: "Open Counter (Wasm) settings",
   });
   await expect(openCounter).toBeVisible({ timeout: 60_000 });
+
+  // A package from the index is admitted disabled: enable it through the lifecycle panel,
+  // which writes its install datum, before its section can start the guest.
+  await page.getByText("Micro lifecycle controls").click();
+  await page.getByRole("button", { name: "Enable dayframe.counter micro" }).click();
+  await expect(
+    page.getByRole("button", { name: "Disable dayframe.counter micro" }),
+  ).toBeVisible();
   await openCounter.click();
 
   const counter = page.getByRole("button", { name: "Increment Wasm counter" });
@@ -37,5 +45,30 @@ test("the composed wcmp counter mounts and dispatches clicks in the browser", as
   await page.getByRole("button", { name: "Open Sample micro settings" }).click();
   await openCounter.click();
   await expect(counter).toBeVisible({ timeout: 60_000 });
+  expect(failures).toEqual([]);
+});
+
+// The install datum lives in the durable document store (IndexedDB), so a disabled micro is
+// still disabled after the page reloads.
+test("a disabled counter stays disabled across a reload", async ({ page }) => {
+  const failures: string[] = [];
+  page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
+  page.on("console", (message) => {
+    if (message.type() === "error") failures.push(`console: ${message.text()}`);
+  });
+
+  await page.goto("/");
+  await page.getByText("Micro lifecycle controls").click();
+  await page.getByRole("button", { name: "Enable dayframe.counter micro" }).click();
+  await page.getByRole("button", { name: "Disable dayframe.counter micro" }).click();
+  await expect(
+    page.getByRole("button", { name: "Enable dayframe.counter micro" }),
+  ).toBeVisible();
+
+  await page.reload();
+  await page.getByText("Micro lifecycle controls").click();
+  await expect(
+    page.getByRole("button", { name: "Enable dayframe.counter micro" }),
+  ).toBeVisible({ timeout: 60_000 });
   expect(failures).toEqual([]);
 });

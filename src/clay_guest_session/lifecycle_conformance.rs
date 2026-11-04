@@ -1157,12 +1157,14 @@ impl<E: Incarnations> Harness<E> {
         let provider = ConfiguredMicro {
             identity: MicroId::new("provider"),
             eager: false,
+            enabled: true,
             requirements: BTreeMap::new(),
             factory: self.factory("provider", provider_role, None),
         };
         let consumer = ConfiguredMicro {
             identity: MicroId::new("consumer"),
             eager: true,
+            enabled: true,
             requirements: BTreeMap::from([
                 (
                     "presentation".to_owned(),
@@ -1210,6 +1212,7 @@ impl<E: Incarnations> Harness<E> {
             relays.into_iter().map(|(identity, peer)| ConfiguredMicro {
                 identity: MicroId::new(identity),
                 eager: false,
+                enabled: true,
                 requirements: BTreeMap::new(),
                 factory: self.factory(identity, "provider", Some(peer)),
             }),

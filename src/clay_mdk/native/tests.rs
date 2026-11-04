@@ -93,6 +93,7 @@ impl Rig {
         ConfiguredMicro {
             identity: clay_host::MicroId::new(id),
             eager,
+            enabled: true,
             requirements,
             factory: factory(self.resources.clone(), manifest, bindings, activate),
         }

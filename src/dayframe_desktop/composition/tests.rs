@@ -40,9 +40,10 @@ async fn desktop_runtime_installs_the_counter_section_from_its_package_manifest(
         [RowAttachment::Endpoint(endpoint)]
             if endpoint.micro.as_str() == micro_counter_manifest::ID
     ));
+    // A discovered package is admitted disabled; nothing auto-enables it.
     assert_eq!(
         runtime.state(&MicroId::new(micro_counter_manifest::ID)),
-        MicroState::Idle
+        MicroState::Disabled
     );
     runtime.host().close();
 }
@@ -55,6 +56,9 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
         .await
         .unwrap();
     let counter = MicroId::new(micro_counter_manifest::ID);
+    // Packages are admitted disabled; enable through the install datum, which the reconciler
+    // applies once the composition serves.
+    runtime.set_enabled(&counter, true);
     tokio::task::LocalSet::new()
         .run_until(async {
             let serving = runtime.serve();
