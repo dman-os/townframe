@@ -1082,3 +1082,34 @@ async fn a_source_write_after_closing_persistence_panics() {
     service.close_persistence();
     service.mock_documents().seed(route("a", "x"), json!(1));
 }
+
+#[tokio::test]
+async fn persisted_resolves_once_earlier_changes_reach_the_store() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    // Nothing queued yet: already persisted, without the persist future running.
+    service.persisted().await;
+    service
+        .mock_documents()
+        .external_change(route("a", "one"), Some(json!(1)));
+    let first = service.persisted();
+    service
+        .mock_documents()
+        .external_change(route("a", "two"), Some(json!(2)));
+    let both = service.persisted();
+    let mut persist = Box::pin(persist);
+    let mut first = Box::pin(first);
+    let mut both = Box::pin(both);
+    // Not applied until the persist future runs.
+    assert_pending(first.as_mut());
+    assert_pending(both.as_mut());
+    assert_pending(persist.as_mut());
+    // One drain applied both queued changes; each acknowledgement then resolves.
+    first.await;
+    both.await;
+    assert_eq!(store.scan_prefix(b"").await.unwrap().len(), 2);
+    // Volatile services have nothing to wait for.
+    DocumentService::new(4).persisted().await;
+}

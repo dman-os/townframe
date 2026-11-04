@@ -4090,6 +4090,7 @@ dependencies = [
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "serde",
  "serde_json",
  "sqlite_rs",
  "tempfile",

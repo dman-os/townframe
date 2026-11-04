@@ -16,6 +16,7 @@ clay_mdk = { workspace = true, features = ["in_process", "view"] }
 clay_store = { workspace = true }
 daybook_types = { workspace = true, default-features = false, features = ["manifest"] }
 dioxus = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 

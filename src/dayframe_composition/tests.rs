@@ -465,11 +465,11 @@ async fn the_install_datum_drives_the_supervisor() {
         let sample = id(micro_sample::ID);
         settle(|| runtime.state(&sample) == MicroState::Active).await;
         assert_eq!(runtime.state(&id(COUNTER)), MicroState::Disabled);
-        runtime.set_enabled(&sample, false);
+        runtime.set_enabled(&sample, false).await;
         settle(|| runtime.state(&sample) == MicroState::Disabled).await;
-        runtime.set_enabled(&sample, true);
+        runtime.set_enabled(&sample, true).await;
         settle(|| runtime.state(&sample) == MicroState::Idle).await;
-        runtime.set_enabled(&id(COUNTER), true);
+        runtime.set_enabled(&id(COUNTER), true).await;
         settle(|| runtime.state(&id(COUNTER)) == MicroState::Idle).await;
         assert_eq!(
             install_datum_of(&runtime, COUNTER).unwrap()["enabled"],
@@ -493,7 +493,7 @@ async fn a_disabled_micro_stays_disabled_across_a_reboot() {
     let sample = id(micro_sample::ID);
     served(&first, async {
         settle(|| first.state(&sample) == MicroState::Active).await;
-        first.set_enabled(&sample, false);
+        first.set_enabled(&sample, false).await;
         settle(|| first.state(&sample) == MicroState::Disabled).await;
     })
     .await;
