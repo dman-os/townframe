@@ -85,10 +85,14 @@ Two parts of the code are not routed:
 | Path | Transport | Who the caller is |
 |---|---|---|
 | In process | `Direct` / `Irpc` client | Whatever capability the holder was given |
-| Unix socket | XRPC over UDS | A handshake with a node-issued token, which yields the capability that token was minted for (normally the operator's). A connection without one gets nothing. |
+| Unix socket | XRPC over UDS | The kernel's peer credentials. A connection from the node owner's uid acts as the operator; any other uid is refused. A client may present a node-issued token to narrow itself to that token's capability. |
 | Network | XRPC over TCP or Iroh | A capability presented per call, as dispatch admits today |
 
-The UDS handshake follows ssh-agent and Docker in using a socket as the local trust boundary, but it does not rely on socket file permissions alone. The token is what is checked.
+The Unix socket follows the standard local-daemon pattern (PostgreSQL `peer` auth, D-Bus `EXTERNAL`, systemd, ssh-agent, Docker):
+- **Location.** The socket lives in a directory only the owner can enter (mode `0700`, under `$XDG_RUNTIME_DIR`).
+- **Identity.** On accept, the node reads the caller's uid from the kernel: `SO_PEERCRED` on Linux, `getpeereid`/`LOCAL_PEERCRED` on macOS and the BSDs. It admits only the uid that owns the node. The kernel vouches for the uid, so the local user needs no secret.
+- **Narrowing.** Tokens are for narrowing, not for admission: a CLI or sandboxed app given a scoped capability presents its token, in the way X11's MIT-MAGIC-COOKIE or D-Bus's cookie mechanism carry an explicit credential.
+- **Windows** has `AF_UNIX` but no peer credentials, so there the token is required.
 
 ### 6. The standard service set
 
