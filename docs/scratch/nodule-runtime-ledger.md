@@ -247,6 +247,17 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - The default policy is the ADR 019 cabinet query (mirroring policy ∩ the keyhive-access partitions from `big_repo`). That query is not implemented yet.
 - **D20.** `big_node` e2e is the system test arena: harness, ladder, scale, seeded stress and nodules across nodes, driven through clients like a high-level user. The progress repo is out of scope.
 
+### D22. HTTP-shaped calls (operator, 2026-11-04)
+- The caller's credential is a header and request context, never a body field: one credential per call, admitted by dispatch and passed through to the service (slice N2b).
+- Narrowing tokens: the operator mints them through the router. They are mostly transient; persisted ones go in a 0600 file under the user's config dir (like gh or kubectl).
+- UDS peer pid: credentials are an internal request extension, never a header a client could forge. If a hop ever needs headers, apply the reverse-proxy rule: strip client-supplied copies, then set them. Tokens minted over a UDS connection may be bound to that peer (holder binding, like `bound_signer`); pid binding uses pidfd, not raw pid, because of pid reuse.
+- Platforms: CLI users are Linux; GUIs use the in-process path. Peer credentials stay behind `cfg(unix)` (Android has `SO_PEERCRED`). Windows later, over TCP with a token. Keep transports behind the acceptor abstraction, not Linux-specific code.
+- Candidate HTTP-shaped moves (not decided):
+  - `traceparent` (W3C) for `TraceContext`;
+  - a deadline header for the call budget (gRPC's `grpc-timeout` is the precedent);
+  - `If-Match` with doc heads or revisions for optimistic writes;
+  - `Prefer: wait=<s>` (RFC 7240) for the ADR 023 long-polls.
+
 ### Plan N (the node PR, branch `feat/big-node`)
 - **N1 (done).** `big_dispatch` and `big_dispatch_core` own the router, admission and providers. `Readiness` and `authority_owns` moved with them. One `ServiceProvider` adapter (via `Protocol::visit_unary`) registers authority, docs, drawers, blobs, plugs and nodules as `builtin:<service>`. Callers hold two capabilities (a dispatch handle plus the in-request `Authorization`); the dispatch caller's identity does not flow into services yet. Subscriptions are not routed through dispatch. Follow-up: the invoke/mint/`Echo` test helpers are duplicated in `big_dispatch/e2e.rs` and `big_nodule/e2e/dispatch.rs`.
 - **N1. `big_dispatch` crate.** Move the router, admission and provider registry out of `big_nodule`. Register docs, drawers, blobs, authority, plugs and nodule-management operations as built-in providers. `big_nodule` registers its Wasm providers into it. Tests: a built-in operation and a nodule operation are reached through the one router with the same admission.
