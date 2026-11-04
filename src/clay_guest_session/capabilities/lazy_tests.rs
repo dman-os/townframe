@@ -435,7 +435,16 @@ struct Peers {
 }
 
 struct Peer(&'static str, Rc<Peers>);
-struct PeerRoot(&'static str, Rc<Peers>, Vec<PublishedCapability>);
+/// The last field keeps the incarnation's publication leases until the root drops.
+struct PeerRoot(
+    &'static str,
+    Rc<Peers>,
+    #[expect(
+        dead_code,
+        reason = "held for its drop: the leases end with the incarnation"
+    )]
+    Vec<PublishedCapability>,
+);
 
 impl Factory<CapabilityPublication> for Peer {
     fn initialize(
