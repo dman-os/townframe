@@ -61,7 +61,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                                 match sample_for_toggle.write(next) {
                                     Ok(operation) => {
                                          track(operation);
-                                         status.set("Optimistic edit is visible. Accept or reject it below.".into());
+                                         status.set("Optimistic edit is visible.".into());
                                      },
                                     Err(error) => status.set(error.to_string()),
                                 }

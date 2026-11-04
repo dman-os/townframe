@@ -1,18 +1,16 @@
-//! Settings presentation consumes its own typed collection and host-mediated component mounts.
+//! Settings presentation: the sections collection's rows, ordered and filtered by the viewer's
+//! preferences, with the selected section's presentation mounted from its row attachment.
 use crate::SettingsMicro;
-use clay_mdk::native::Query;
-use clay_mdk::view::ComponentSlot;
-use clay_mdk::view::use_collection;
+use clay_mdk::native::Row;
+use clay_mdk::view::AttachedRef;
+use clay_mdk::view::PresentationSlot;
+use clay_mdk::view::use_rows;
 use dioxus::prelude::*;
+use micro_settings_manifest::Section;
 
-#[derive(Props, Clone)]
+#[derive(Props, Clone, PartialEq)]
 pub struct SettingsViewProps {
     pub micro: SettingsMicro,
-}
-impl PartialEq for SettingsViewProps {
-    fn eq(&self, other: &Self) -> bool {
-        self.micro.instance == other.micro.instance
-    }
 }
 
 #[expect(non_snake_case, reason = "Dioxus component naming")]
@@ -24,19 +22,6 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
         async move {
             loop {
                 snapshot.set(changes.borrow_and_update().clone());
-                if changes.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    let mut catalog = use_signal(|| props.micro.declarations.borrow().clone());
-    let declarations = props.micro.declarations.clone();
-    use_future(move || {
-        let mut changes = declarations.clone();
-        async move {
-            loop {
-                catalog.set(changes.borrow_and_update().clone());
                 if changes.changed().await.is_err() {
                     break;
                 }
@@ -67,48 +52,42 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
                 Err(problem) => error.set(Some(problem.to_string())),
             }
         };
-    let sections = use_collection(&props.micro.sections);
-    let mut rows = sections.query(&Query::new());
-    rows.retain(|(_, section)| {
-        preferences
-            .as_ref()
-            .is_some_and(|config| !config.hidden.contains(&section.contributor))
-    });
-    if let Some(config) = &preferences {
-        rows.sort_by(|(_, left), (_, right)| {
-            (config.rank(&left.contributor), &left.contributor)
-                .cmp(&(config.rank(&right.contributor), &right.contributor))
-        });
-    }
-    let mut selected = use_signal(|| rows.first().map(|(_, section)| section.contributor.clone()));
-    let active = selected()
-        .and_then(|name| rows.iter().find(|(_, section)| section.contributor == name))
-        .or_else(|| rows.first());
-    let current = active.map(|(_, section)| section);
-    let active_id = active.map(|(id, _)| *id);
-    let mut available = catalog();
+
+    let mut available: Vec<Row<String, Section>> = use_rows(&props.micro.sections);
     if let Some(config) = &preferences {
         available.sort_by(|left, right| {
-            (config.rank(&left.instance), &left.instance)
-                .cmp(&(config.rank(&right.instance), &right.instance))
+            (config.rank(&left.key), &left.key).cmp(&(config.rank(&right.key), &right.key))
         });
     }
+    let shown: Vec<&Row<String, Section>> = available
+        .iter()
+        .filter(|row| {
+            preferences
+                .as_ref()
+                .is_some_and(|config| !config.hidden.contains(&row.key))
+        })
+        .collect();
+    let mut selected = use_signal(|| None::<String>);
+    let active = selected()
+        .and_then(|name| shown.iter().find(|row| row.key == name).copied())
+        .or_else(|| shown.first().copied());
+    let active_key = active.map(|row| row.key.clone());
     rsx! {
         section { class: "flex flex-col gap-4", "aria-label": "Settings",
             h2 { class: "text-xl font-semibold", "Settings" }
             details { class: "rounded-md border border-border p-4",
                 summary { "Choose settings sections" }
                 if preferences.is_none() { p { role: "status", "Settings preferences are loading." } }
-                for row in available {
+                for row in &available {
                     {
-                        let title = serde_json::from_value::<crate::contract::DeclaredSection>(row.payload).unwrap().title;
-                        let hidden = preferences.as_ref().is_some_and(|config| config.hidden.contains(&row.instance));
+                        let title = row.value.title.clone();
+                        let hidden = preferences.as_ref().is_some_and(|config| config.hidden.contains(&row.key));
                         let toggle_micro = props.micro.clone();
                         let order_micro = props.micro.clone();
-                        let toggle_name = row.instance.clone();
-                        let order_name = row.instance.clone();
+                        let toggle_name = row.key.clone();
+                        let order_name = row.key.clone();
                         rsx! {
-                            div { key: "{row.instance}", class: "mt-4 flex flex-wrap gap-2",
+                            div { key: "{row.key}", class: "mt-4 flex flex-wrap gap-2",
                                 button {
                                     class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                                     disabled: preferences.is_none(),
@@ -138,25 +117,30 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
             }
             div { class: "flex flex-wrap gap-6",
                 nav { class: "flex flex-col gap-2", "aria-label": "Settings sections",
-                    for (id, section) in &rows {
+                    for row in &shown {
                         {
-                            let id = *id;
-                            let name = section.contributor.clone();
+                            let name = row.key.clone();
+                            let pressed = active_key.as_deref() == Some(row.key.as_str());
                             rsx! {
-                                button { key: "{id}", class: "rounded-md border border-border px-4 py-2 text-left focus-visible:outline", "aria-label": "Open {section.title} settings", "aria-pressed": active_id == Some(id), onclick: move |_| selected.set(Some(name.clone())),
-                                    if active_id == Some(id) { "▸ " }
-                                    "{section.title}"
+                                button { key: "{row.key}", class: "rounded-md border border-border px-4 py-2 text-left focus-visible:outline", "aria-label": "Open {row.value.title} settings", "aria-pressed": pressed, onclick: move |_| selected.set(Some(name.clone())),
+                                    if pressed { "▸ " }
+                                    "{row.value.title}"
                                 }
                             }
                         }
                     }
-                    if rows.is_empty() { p { "No settings sections are available." } }
+                    if shown.is_empty() { p { "No settings sections are available." } }
                 }
                 div { class: "min-w-0 flex-1",
-                    if let Some(section) = current {
-                        div { key: "{active_id.unwrap()}",
-                            h3 { class: "mb-4 text-lg font-semibold", "{section.title}" }
-                            ComponentSlot { owner: props.micro.instance.clone(), reference: section.detail }
+                    if let Some(row) = active {
+                        div { key: "{row.key}",
+                            h3 { class: "mb-4 text-lg font-semibold", "{row.value.title}" }
+                            PresentationSlot {
+                                owner: props.micro.instance.clone(),
+                                reference: AttachedRef::new(
+                                    row.attachments[row.value.detail.index()].share(),
+                                ),
+                            }
                         }
                     } else { p { "Select a section." } }
                 }

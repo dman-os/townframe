@@ -11,5 +11,9 @@ clay_mdk = { workspace = true, features = ["in_process", "view"] }
 micro_settings_manifest = { workspace = true }
 dioxus.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
-tokio = { workspace = true, features = ["sync", "macros"] }
+
+[dev-dependencies]
+clay_dioxus = { workspace = true }
+clay_guest_session = { workspace = true }
+clay_host = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

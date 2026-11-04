@@ -1,32 +1,25 @@
-//! Public Settings contribution contract. Consumers do not depend on the Settings controller.
+//! The Settings contract (ADR 015 §9): the identity and manifest of the Settings micro, and the
+//! `settings.sections` collection other micros register their sections into. Consumers depend on
+//! this crate and never on the Settings micro itself.
 //!
-//! This crate is the Settings micro's manifest surface (ADR 015 §9): the shared contract types,
-//! the micro manifest declaration, and provision identity, in the `micro_<name>_manifest`
-//! pattern the plug crates established (`plug_<name>_manifest` holds shared types and tests;
-//! the micro crate itself compiles to wasm where applicable). Manifest data is written in Rust
-//! so compatibility is type-checked; an OCI packaging step remains future work (ADR 015
-//! Deferred). Contract types are *intended* as portable MDK vocabulary with no host or
-//! composition crate types crossing the boundary (ADR 015 §Boundary correction) — **not yet
-//! true**: this crate still imports `clay_mdk::native::{AccessError, Collection, …}`, so a
-//! guest cannot implement or consume its typed provisions. Porting the contents to isomorphic
-//! vocabulary is workstream W5 (finding F6, `docs/scratch/clay-architecture-critique.md`).
-use clay_mdk::ComponentRef;
+//! A section row is keyed by the contributing micro's id (CBOR text) and holds a [`Section`]: a
+//! title, and an attachment for the section's detail presentation. A micro whose section should
+//! exist while it is stopped declares the row in its manifest, which stores an endpoint to its
+//! own presentation; a micro that only contributes while running writes the row at runtime with
+//! a bound reference. Settings treats both alike.
+use clay_mdk::CollectionCapability;
+use clay_mdk::CollectionContract;
 use clay_mdk::ConfigurationRequest;
-use clay_mdk::ContractRef;
+use clay_mdk::ContributionDeclaration;
 use clay_mdk::Entrypoints;
 use clay_mdk::FacetAccess;
 use clay_mdk::MANIFEST_SCHEMA;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
-use clay_mdk::ProvidedContract;
-use clay_mdk::Provision;
-use clay_mdk::Retention;
-use clay_mdk::native::AccessError;
-use clay_mdk::native::Collection;
-use clay_mdk::native::CollectionWriter;
-use clay_mdk::native::Contributable;
-use clay_mdk::native::Entry;
-use clay_mdk::native::Instance;
+use clay_mdk::PublicationDeclaration;
+use clay_mdk::PublicationKind;
+use clay_mdk::native::Attachment;
+use clay_mdk::native::SHELL_ROOTS;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -34,103 +27,36 @@ pub const ID: &str = "dayframe.settings";
 pub const CONFIG_NAME: &str = "settings";
 pub const CONFIG_TAG: &str = "org.dayframe.settings.config";
 pub const CONFIG_KEY: &str = "main";
+/// The Settings presentation, which the shell mounts as a root.
+pub const VIEW: &str = "view";
+/// The id of the declared collection Settings reads its sections from.
+pub const SECTIONS: &str = "settings.sections";
+/// Schema ids of [`SECTIONS`] keys (the contributing micro's id, text) and values
+/// ([`Section`]).
+pub const SECTION_KEY_SCHEMA: &str = "dayframe.settings.section-key";
+pub const SECTION_VALUE_SCHEMA: &str = "dayframe.settings.section";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SettingsSection {
-    pub contributor: String,
+/// One Settings section: its title, and the presentation published for its detail, as an
+/// attachment of the row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Section {
     pub title: String,
-    pub detail: ComponentRef,
+    pub detail: Attachment,
 }
 
-/// The payload a declared contribution to [`SettingsSections`] carries (see
-/// [`clay_mdk::ContributionDeclaration`]): everything of a section except the detail component, which is
-/// the contributor's published surface.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeclaredSection {
-    pub title: String,
-}
-
-/// Live provider output retained by trusted binding machinery, never handed to a contributor.
-/// Binding produces a writer owned by the consumer; the host collection enforces withdrawal when
-/// either the consumer or the provider closes.
-#[derive(Clone)]
-pub struct SettingsSections {
-    collection: Collection<SettingsSection>,
-}
-
-impl Provision for SettingsSections {
-    const ID: &'static str = "settings.sections";
-}
-
-impl Contributable for SettingsSections {
-    fn contribute(
-        &self,
-        contributor: &Instance,
-        payload: &serde_json::Value,
-        surface: ComponentRef,
-    ) -> Result<(), AccessError> {
-        // The payload arrives as manifest-declared data, possibly delivered over the wire:
-        // reject a shape violation as a denied contribution instead of trusting the caller.
-        let Ok(DeclaredSection { title }) = serde_json::from_value(payload.clone()) else {
-            return Err(AccessError::Denied);
-        };
-        self.bind(contributor)?.insert(SettingsSection {
-            contributor: contributor.name.clone(),
-            title,
-            detail: surface,
-        })?;
-        Ok(())
-    }
-}
-
-impl SettingsSections {
-    pub fn new(collection: Collection<SettingsSection>) -> Self {
-        Self { collection }
-    }
-
-    pub fn bind(&self, consumer: &Instance) -> Result<SettingsContribution, AccessError> {
-        Ok(SettingsContribution {
-            sections: self.collection.writer(consumer)?,
-        })
-    }
-}
-
-/// Consumer-bound authority to insert and update only its own Settings entries.
-#[derive(Clone)]
-pub struct SettingsContribution {
-    sections: CollectionWriter<SettingsSection>,
-}
-
-impl SettingsContribution {
-    pub fn insert(&self, section: SettingsSection) -> Result<Entry<SettingsSection>, AccessError> {
-        self.sections.insert(section)
-    }
-}
-
-/// The Settings micro's package declaration: it provides the sections collection and the
-/// controller provision, and requires nothing.
+/// The Settings micro's package declaration: it declares the sections collection, publishes its
+/// view, and registers that view as a shell root.
 pub fn manifest() -> MicroManifest {
     MicroManifest {
         schema: MANIFEST_SCHEMA,
         id: MicroId::new(ID),
         package_version: 1,
         entrypoints: Entrypoints::micro_client(),
-        provides: vec![
-            ProvidedContract {
-                id: "sections".into(),
-                contract: ContractRef::of::<SettingsSections>(),
-                retention: Retention::Strong,
-            },
-            ProvidedContract {
-                id: "controller".into(),
-                contract: ContractRef {
-                    id: "settings.controller".into(),
-                    version: 1,
-                },
-                retention: Retention::Strong,
-            },
-        ],
+        publications: vec![PublicationDeclaration {
+            name: VIEW.into(),
+            kind: PublicationKind::Presentation,
+            contract: None,
+        }],
         requires: vec![],
         configuration_requests: vec![ConfigurationRequest {
             binding: CONFIG_NAME.into(),
@@ -142,9 +68,27 @@ pub fn manifest() -> MicroManifest {
                 ..Default::default()
             }],
         }],
-        collection_contracts: vec![],
-        contributions: vec![],
-        activation_defaults: vec![],
+        collection_contracts: vec![CollectionContract {
+            id: SECTIONS.into(),
+            selector_schema: "dayframe.collection.whole".into(),
+            key_schema: SECTION_KEY_SCHEMA.into(),
+            value_schema: SECTION_VALUE_SCHEMA.into(),
+            write_context_schema: None,
+            offered: vec![CollectionCapability::Read, CollectionCapability::Register],
+        }],
+        contributions: vec![ContributionDeclaration {
+            id: "root".into(),
+            collection: SHELL_ROOTS.into(),
+            key: ID.into(),
+            payload: serde_json::json!({
+                "title": "Settings",
+                "content": { "$attachment": 0 },
+            }),
+            attachments: vec![clay_mdk::AttachmentDeclaration {
+                index: 0,
+                publication: VIEW.into(),
+            }],
+        }],
         extra: Default::default(),
     }
 }
@@ -152,174 +96,34 @@ pub fn manifest() -> MicroManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clay_host::Host;
-    use clay_host::HostedCollection;
+    use clay_mdk::native::declared_rows;
 
-    // ── manifest and contract wire shapes: the manifest is wire data (ADR 024 §11) and
-    //    `DeclaredSection` is the contribution payload acceptor; both snapshots follow the
-    //    current shape so drift is a reviewable diff ────────────────────────────────────
-
+    // The manifest is wire data (ADR 024 §11); the snapshot follows the current shape so drift
+    // is a reviewable diff.
     #[test]
     fn manifest_wire_shape_is_reviewable() {
         insta::assert_yaml_snapshot!(manifest());
     }
 
     #[test]
-    fn declared_section_wire_shape_is_reviewable() {
-        insta::assert_yaml_snapshot!(
-            serde_json::to_value(DeclaredSection {
+    fn section_row_wire_shape_is_reviewable() {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &Section {
                 title: "Counter (Wasm)".into(),
-            })
-            .unwrap()
-        );
+                detail: Attachment::at(0),
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        insta::assert_snapshot!(hex);
     }
 
-    // ── payload acceptance boundary: `contribute` receives manifest-declared data that may
-    //    have crossed the wire, so any shape violation is a denied contribution ────────────
-
     #[test]
-    fn contribution_payload_must_match_declared_section_wire_shape() {
-        let host = Host::new();
-        let provider = host.start("settings");
-        let consumer = host.start("consumer");
-        let collection = Collection::from_host(HostedCollection::new(&host, &provider));
-        let reader = collection.host().reader(&provider);
-        let output = SettingsSections::new(collection);
-        let detail = ComponentRef::from_host(host.publish_component(&consumer).unwrap());
-
-        let malformed = output
-            .contribute(&consumer, &serde_json::json!({"wrong": "shape"}), detail)
-            .unwrap_err();
-        assert_eq!(malformed, AccessError::Denied);
-        let extra_field = output
-            .contribute(
-                &consumer,
-                &serde_json::json!({"title": "Tolerant", "unexpected": 1}),
-                detail,
-            )
-            .unwrap_err();
-        assert_eq!(extra_field, AccessError::Denied);
-        for payload in [
-            serde_json::json!({}),
-            serde_json::json!({"title": 1}),
-            serde_json::json!({"title": null}),
-            serde_json::json!({"title": ["section"]}),
-            serde_json::json!({"title": {"nested": true}}),
-            serde_json::json!(null),
-            serde_json::json!("title"),
-        ] {
-            assert_eq!(
-                output.contribute(&consumer, &payload, detail),
-                Err(AccessError::Denied),
-                "payload {payload} must be denied"
-            );
-        }
-        assert!(
-            reader.snapshot().unwrap().is_empty(),
-            "denied payloads must not land in the collection"
-        );
-
-        output
-            .contribute(&consumer, &serde_json::json!({"title": "Accepted"}), detail)
-            .unwrap();
-        assert_eq!(
-            reader
-                .snapshot()
-                .unwrap()
-                .into_values()
-                .map(|section| section.title)
-                .collect::<Vec<_>>(),
-            vec!["Accepted"]
-        );
-        host.close();
-    }
-
-    // ── consumer binding: each consumer gets an independent writer scoped to its own
-    //    instance; closing the consumer or the provider revokes exactly that authority ──────
-
-    #[test]
-    fn output_binds_independent_consumers_and_cannot_outlive_provider() {
-        let host = Host::new();
-        let provider = host.start("settings");
-        let first = host.start("first");
-        let second = host.start("second");
-        let collection = Collection::from_host(HostedCollection::new(&host, &provider));
-        let output = SettingsSections::new(collection.clone());
-        let reader = collection.host().reader(&provider);
-        let first_grant = output.bind(&first).unwrap();
-        let second_grant = output.bind(&second).unwrap();
-        let detail = ComponentRef::from_host(host.publish_component(&first).unwrap());
-        let first_entry = first_grant
-            .insert(SettingsSection {
-                contributor: first.name.clone(),
-                title: "First".into(),
-                detail,
-            })
-            .unwrap();
-        let second_detail = ComponentRef::from_host(host.publish_component(&second).unwrap());
-        let second_entry = second_grant
-            .insert(SettingsSection {
-                contributor: second.name.clone(),
-                title: "Second".into(),
-                detail: second_detail,
-            })
-            .unwrap();
-        host.close_instance(&first).unwrap();
-        assert!(matches!(output.bind(&first), Err(AccessError::Revoked)));
-        assert_eq!(reader.snapshot().unwrap().len(), 1);
-        assert_eq!(
-            reader.snapshot().unwrap().into_values().collect::<Vec<_>>(),
-            vec![SettingsSection {
-                contributor: second.name.clone(),
-                title: "Second".into(),
-                detail: second_detail
-            }]
-        );
-        second_entry
-            .update(SettingsSection {
-                contributor: second.name.clone(),
-                title: "Updated".into(),
-                detail: second_detail,
-            })
-            .unwrap();
-        assert_eq!(
-            first_entry.update(SettingsSection {
-                contributor: first.name.clone(),
-                title: "Stale".into(),
-                detail
-            }),
-            Err(AccessError::Revoked)
-        );
-        host.close_instance(&provider).unwrap();
-        assert!(matches!(
-            second_grant.insert(SettingsSection {
-                contributor: first.name.clone(),
-                title: "Stale".into(),
-                detail
-            }),
-            Err(AccessError::Revoked)
-        ));
-        let late = host.start("late");
-        assert!(matches!(output.bind(&late), Err(AccessError::Revoked)));
-        host.close();
-    }
-
-    // ── host scoping: a consumer token minted by another host carries no authority here ──────
-
-    #[test]
-    fn bind_denies_consumers_from_a_foreign_host() {
-        let host = Host::new();
-        let provider = host.start("settings");
-        let collection = Collection::from_host(HostedCollection::new(&host, &provider));
-        let output = SettingsSections::new(collection);
-        let foreign = Host::new();
-        let foreign_consumer = foreign.start("foreign");
-        assert!(matches!(
-            output.bind(&foreign_consumer),
-            Err(AccessError::Denied)
-        ));
-        assert_eq!(foreign.check(&foreign_consumer), Ok(()));
-        foreign.close();
-        host.close();
+    fn the_manifest_declares_a_settings_root_row() {
+        manifest().validate().unwrap();
+        let rows = declared_rows(&manifest()).unwrap();
+        assert_eq!(rows.keys().collect::<Vec<_>>(), [SHELL_ROOTS]);
     }
 }

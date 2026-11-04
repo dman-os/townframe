@@ -1,287 +1,88 @@
 use super::*;
 use clay_dioxus::NativeComponents;
-use clay_mdk::native::FacetRoute;
-use clay_mdk::native::output;
-use clay_mdk::native::provider;
-use clay_micro_core::application::ApplicationRuntime;
-use clay_micro_core::micros::MicroId;
-use clay_micro_core::micros::composition::ConfiguredMicro;
-use clay_micro_core::micros::composition::Enablement;
-use clay_micro_core::micros::composition::InstanceState;
-use micro_settings::SettingsMicro;
+use clay_guest_session::collections::bytes_registrations;
+use clay_host::CollectionContract;
+use clay_host::ConfiguredMicro;
+use clay_host::Host;
+use clay_host::MicroState;
+use clay_host::Supervisor;
+use clay_mdk::native::CollectionBindings;
+use clay_mdk::native::CollectionRegistry;
+use clay_mdk::native::RendererRegistry;
+use clay_mdk::native::Resources;
+use clay_mdk::native::factory;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 
-type Application = ApplicationRuntime<NativeComponents>;
-
-// ── manifest wire shape: the manifest is wire data (ADR 015 §9); the snapshot follows
-//    the current shape so identity, requirement, ACL, or provision drift is a reviewable diff ──
-
+// The manifest is wire data (ADR 015 §9); the snapshot follows the current shape so identity,
+// publication, or ACL drift is a reviewable diff.
 #[test]
 fn manifest_wire_shape_is_reviewable() {
     insta::assert_yaml_snapshot!(manifest());
 }
 
-fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
-}
+#[tokio::test(flavor = "current_thread")]
+async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let host = Host::new();
+            let resources = Resources {
+                registry: NativeComponents::for_host(&host),
+                documents: DocumentService::new(16),
+                collections: CollectionRegistry::default(),
+            };
+            let sections = bytes_registrations(NonZeroUsize::new(64).unwrap(), [0, 0]);
+            resources
+                .collections
+                .declare(
+                    CollectionContract {
+                        id: SECTIONS.into(),
+                        key_schema: micro_settings_manifest::SECTION_KEY_SCHEMA.into(),
+                        value_schema: micro_settings_manifest::SECTION_VALUE_SCHEMA.into(),
+                    },
+                    sections.clone(),
+                )
+                .unwrap();
+            resources.documents.mock_documents().bind_config(
+                CONFIG_NAME.into(),
+                "sample-config".into(),
+                "main".into(),
+            );
+            seed_mock_defaults(&resources.documents);
+            let sample = ConfiguredMicro {
+                identity: clay_host::MicroId::new(ID),
+                eager: true,
+                requirements: BTreeMap::new(),
+                factory: factory(
+                    resources,
+                    manifest(),
+                    CollectionBindings {
+                        read: vec![],
+                        write: vec![SECTIONS.into()],
+                    },
+                    activate,
+                ),
+            };
+            let supervisor = Supervisor::new(host.clone(), [sample]);
+            let id = clay_host::MicroId::new(ID);
+            let mut key = Vec::new();
+            ciborium::into_writer(ID, &mut key).unwrap();
 
-#[test]
-fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller() {
-    let mut application = Application::new();
-    assert!(application.roots().snapshot().unwrap().is_empty());
-    let settings_provider = provider(
-        &application,
-        micro_settings_manifest::manifest(),
-        micro_settings::activate,
-    );
-    application.register_provider(settings_provider).unwrap();
-    let sample_provider = provider(&application, manifest(), activate);
-    application.register_provider(sample_provider).unwrap();
-    let host = application.host();
-    let documents = application.documents();
-    documents.mock_documents().bind_config(
-        micro_settings_manifest::CONFIG_NAME.into(),
-        "settings-config".into(),
-        "main".into(),
-    );
-    documents
-        .mock_documents()
-        .bind_config("sample".into(), "configuration".into(), "main".into());
-    documents.mock_documents().seed(
-        FacetRoute {
-            document: "configuration".into(),
-            branch: "main".into(),
-            tag: CONFIG_TAG.into(),
-            key_id: CONFIG_KEY.into(),
-        },
-        serde_json::to_value(SampleConfig {
-            enabled: true,
-            greeting: "Bound by configuration".into(),
+            assert!(sections.get(&key).is_none());
+            assert!(supervisor.reconcile().await.is_empty());
+            let row = sections.get(&key).unwrap().value.unwrap();
+            let section: Section = ciborium::from_reader(row.body.as_slice()).unwrap();
+            assert_eq!(section.title, "Sample micro");
+            assert_eq!(section.detail, Attachment::at(0));
+            let [RowAttachment::Bound(detail)] = row.attachments.as_slice() else {
+                panic!("the runtime row attaches its live presentation");
+            };
+            assert_eq!(detail.name(), DETAIL);
+
+            supervisor.disable(&id).await.unwrap();
+            assert_eq!(supervisor.state(&id), MicroState::Disabled);
+            assert!(sections.get(&key).is_none());
+            host.close();
         })
-        .unwrap(),
-    );
-    let mut configuration = BTreeMap::from([
-        (
-            "first".into(),
-            ConfiguredMicro {
-                provider: MicroId::new(micro_settings_manifest::ID),
-                enablement: Enablement::Enabled,
-                eager: true,
-                bindings: BTreeMap::new(),
-            },
-        ),
-        (
-            "second".into(),
-            ConfiguredMicro {
-                provider: MicroId::new(micro_settings_manifest::ID),
-                enablement: Enablement::Enabled,
-                eager: true,
-                bindings: BTreeMap::new(),
-            },
-        ),
-        (
-            "sample".into(),
-            ConfiguredMicro {
-                provider: MicroId::new(ID),
-                enablement: Enablement::Enabled,
-                eager: true,
-                bindings: BTreeMap::from([("settings.sections".into(), "second".into())]),
-            },
-        ),
-    ]);
-    assert_eq!(
-        block_on(application.configure(&configuration)).unwrap(),
-        BTreeMap::from([
-            ("first".into(), InstanceState::Active),
-            ("second".into(), InstanceState::Active),
-            ("sample".into(), InstanceState::Active),
-        ])
-    );
-    let first = output::<SettingsMicro, _>(&application, "first")
-        .unwrap()
-        .instance;
-    let sample = output::<SampleMicro, _>(&application, "sample")
-        .unwrap()
-        .instance;
-    let first_settings = output::<SettingsMicro, _>(&application, "first").unwrap();
-    let second_settings = output::<SettingsMicro, _>(&application, "second").unwrap();
-    assert!(first_settings.sections.snapshot().unwrap().is_empty());
-    assert_eq!(second_settings.sections.snapshot().unwrap().len(), 1);
-    configuration.get_mut("second").unwrap().enablement = Enablement::Disabled;
-    assert_eq!(
-        block_on(application.configure(&configuration)).unwrap(),
-        BTreeMap::from([
-            ("first".into(), InstanceState::Active),
-            ("second".into(), InstanceState::Disabled),
-            (
-                "sample".into(),
-                InstanceState::Blocked {
-                    requirements: vec!["settings.sections".into()]
-                }
-            ),
-        ])
-    );
-    assert_eq!(host.check(&sample), Err(AccessError::Revoked));
-    assert!(matches!(
-        output::<SampleMicro, _>(&application, "sample"),
-        Err(AccessError::Revoked)
-    ));
-    assert_eq!(host.check(&first), Ok(()));
-    assert_eq!(application.roots().snapshot().unwrap().len(), 1);
-    configuration.get_mut("second").unwrap().enablement = Enablement::Enabled;
-    assert_eq!(
-        block_on(application.configure(&configuration)).unwrap(),
-        BTreeMap::from([
-            ("first".into(), InstanceState::Active),
-            ("second".into(), InstanceState::Active),
-            ("sample".into(), InstanceState::Active),
-        ])
-    );
-    assert!(
-        output::<SettingsMicro, _>(&application, "first")
-            .unwrap()
-            .instance
-            == first
-    );
-    assert!(
-        output::<SettingsMicro, _>(&application, "second")
-            .unwrap()
-            .instance
-            != second_settings.instance
-    );
-    assert!(
-        output::<SampleMicro, _>(&application, "sample")
-            .unwrap()
-            .instance
-            != sample
-    );
-    assert_eq!(
-        output::<SettingsMicro, _>(&application, "second")
-            .unwrap()
-            .sections
-            .snapshot()
-            .unwrap()
-            .len(),
-        1
-    );
-    let sample = output::<SampleMicro, _>(&application, "sample").unwrap();
-    application.host().close_instance(&sample.instance).unwrap();
-    assert_eq!(sample.watch().current().unwrap_err(), AccessError::Revoked);
-    assert!(
-        output::<SettingsMicro, _>(&application, "second")
-            .unwrap()
-            .sections
-            .snapshot()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(host.check(&first), Ok(()));
-    assert_eq!(application.roots().snapshot().unwrap().len(), 2);
-    host.close();
-}
-
-#[test]
-fn sample_micro_distinguishes_loading_absent_present_and_refreshing() {
-    let mut application = Application::new();
-    let settings_provider = provider(
-        &application,
-        micro_settings_manifest::manifest(),
-        micro_settings::activate,
-    );
-    application.register_provider(settings_provider).unwrap();
-    let sample_provider = provider(&application, manifest(), activate);
-    application.register_provider(sample_provider).unwrap();
-
-    let documents = application.documents();
-    documents.mock_documents().bind_config(
-        micro_settings_manifest::CONFIG_NAME.into(),
-        "settings-config".into(),
-        "main".into(),
-    );
-    documents
-        .mock_documents()
-        .bind_config("sample".into(), "configuration".into(), "main".into());
-    documents.mock_documents().hold_refreshes(true);
-
-    let configuration = BTreeMap::from([
-        (
-            "settings".into(),
-            ConfiguredMicro {
-                provider: MicroId::new(micro_settings_manifest::ID),
-                enablement: Enablement::Enabled,
-                eager: true,
-                bindings: BTreeMap::new(),
-            },
-        ),
-        (
-            "sample".into(),
-            ConfiguredMicro {
-                provider: MicroId::new(ID),
-                enablement: Enablement::Enabled,
-                eager: true,
-                bindings: BTreeMap::from([("settings.sections".into(), "settings".into())]),
-            },
-        ),
-    ]);
-    assert_eq!(
-        block_on(application.configure(&configuration)).unwrap(),
-        BTreeMap::from([
-            ("settings".into(), InstanceState::Active),
-            ("sample".into(), InstanceState::Active),
-        ])
-    );
-
-    let sample = output::<SampleMicro, _>(&application, "sample").unwrap();
-    let loading = sample.watch().current().unwrap();
-    assert_eq!(
-        sample.state(&loading),
-        clay_mdk::native::FacetValue::Loading
-    );
-    assert_eq!(loading.freshness, clay_mdk::native::Freshness::Refreshing);
-
-    documents.mock_documents().complete_refreshes();
-    let absent = sample.watch().current().unwrap();
-    assert_eq!(sample.state(&absent), clay_mdk::native::FacetValue::Absent);
-    assert_eq!(absent.freshness, clay_mdk::native::Freshness::Current);
-
-    documents.mock_documents().seed(
-        FacetRoute {
-            document: "configuration".into(),
-            branch: "main".into(),
-            tag: CONFIG_TAG.into(),
-            key_id: CONFIG_KEY.into(),
-        },
-        serde_json::to_value(SampleConfig {
-            enabled: true,
-            greeting: "Now present".into(),
-        })
-        .unwrap(),
-    );
-    sample.watch().refresh().unwrap();
-    let refreshing = sample.watch().current().unwrap();
-    assert_eq!(
-        sample.state(&refreshing),
-        clay_mdk::native::FacetValue::Absent
-    );
-    assert_eq!(
-        refreshing.freshness,
-        clay_mdk::native::Freshness::Refreshing
-    );
-
-    documents.mock_documents().complete_refreshes();
-    let present = sample.watch().current().unwrap();
-    assert_eq!(
-        sample.state(&present),
-        clay_mdk::native::FacetValue::Present(SampleConfig {
-            enabled: true,
-            greeting: "Now present".into(),
-        })
-    );
-    assert_eq!(present.freshness, clay_mdk::native::Freshness::Current);
-
-    application.host().close();
+        .await;
 }

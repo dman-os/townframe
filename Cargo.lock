@@ -9244,12 +9244,13 @@ dependencies = [
 name = "micro_sample"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "clay_dioxus",
+ "clay_guest_session",
+ "clay_host",
  "clay_mdk",
- "clay_micro_core",
  "dioxus",
  "insta",
- "micro_settings",
  "micro_settings_manifest",
  "serde",
  "serde_json",
@@ -9260,11 +9261,13 @@ dependencies = [
 name = "micro_settings"
 version = "0.1.0"
 dependencies = [
+ "clay_dioxus",
+ "clay_guest_session",
+ "clay_host",
  "clay_mdk",
  "dioxus",
  "micro_settings_manifest",
  "serde",
- "serde_json",
  "tokio",
 ]
 
@@ -9272,7 +9275,7 @@ dependencies = [
 name = "micro_settings_manifest"
 version = "0.1.0"
 dependencies = [
- "clay_host",
+ "ciborium",
  "clay_mdk",
  "insta",
  "serde",

@@ -48,7 +48,10 @@ pub fn manifest() -> MicroManifest {
             id: "settings-section".into(),
             collection: "settings.sections".into(),
             key: ID.into(),
-            payload: serde_json::json!({ "title": "Counter (Wasm)" }),
+            payload: serde_json::json!({
+                "title": "Counter (Wasm)",
+                "detail": { "$attachment": 0 },
+            }),
             attachments: vec![AttachmentDeclaration {
                 index: 0,
                 publication: VIEW.into(),

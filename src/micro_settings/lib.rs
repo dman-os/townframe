@@ -4,28 +4,24 @@
 mod view;
 pub use view::SettingsView;
 
-use clay_mdk::Provision;
 use clay_mdk::native::AccessError;
-use clay_mdk::native::CollectionReader;
+use clay_mdk::native::CollectionWatch;
 use clay_mdk::native::Context;
-use clay_mdk::native::Instance;
-use clay_mdk::native::RendererRegistry;
-use contract::SettingsSection;
-use contract::SettingsSections;
-use dioxus::prelude::Element;
-pub use micro_settings_manifest as contract;
-
-use clay_mdk::native::Declaration;
 use clay_mdk::native::DocumentSnapshot;
 use clay_mdk::native::Facet;
 use clay_mdk::native::FacetValue;
+use clay_mdk::native::Instance;
 use clay_mdk::native::Operation;
+use clay_mdk::native::RendererRegistry;
+use contract::Section;
+use dioxus::prelude::Element;
+pub use micro_settings_manifest as contract;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use tokio::sync::watch;
 
+/// The viewer's own preferences, kept in its configuration document: which sections are hidden
+/// and which come first, by contributing micro id.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SettingsConfig {
     #[serde(default)]
@@ -35,20 +31,21 @@ pub struct SettingsConfig {
 }
 
 impl SettingsConfig {
-    pub fn rank(&self, instance: &str) -> usize {
+    pub fn rank(&self, micro: &str) -> usize {
         self.order
             .iter()
-            .position(|name| name == instance)
+            .position(|name| name == micro)
             .unwrap_or(usize::MAX)
     }
 }
 
+/// What the Settings view reads: the sections collection, its preferences, and the instance
+/// that mounts section presentations.
 #[derive(Clone)]
 pub struct SettingsMicro {
     pub instance: Instance,
-    pub sections: CollectionReader<SettingsSection>,
+    pub sections: CollectionWatch<String, Section>,
     pub config: Facet<SettingsConfig>,
-    pub declarations: watch::Receiver<Vec<Declaration>>,
 }
 
 impl PartialEq for SettingsMicro {
@@ -75,69 +72,104 @@ impl SettingsMicro {
     }
 }
 
-impl Provision for SettingsMicro {
-    const ID: &'static str = "settings.controller";
-}
-
-/// Settings requires storage for its own vocabulary and a granted root-presentation writer.
-/// The activation context supplies both; the micro never assembles its own grants.
+/// Settings reads the declared sections collection (its configuration binds it) and publishes
+/// its view, which the shell mounts as a root.
 pub fn activate<R: RendererRegistry<Render = Element>>(
     context: &Context<R>,
 ) -> Result<(), AccessError> {
-    let instance = context.instance();
-    let sections = context.collection::<SettingsSection>()?;
-    let config = context
-        .config(contract::CONFIG_NAME)
-        .expect("manifest declares Settings configuration")
-        .facet::<SettingsConfig>(contract::CONFIG_TAG.into(), contract::CONFIG_KEY.into())?;
-    let broker = context.broker();
-    let mut declarations = broker.watch(SettingsSections::ID)?;
-    let (catalog, catalog_watch) = watch::channel(declarations.current()?);
     let micro = SettingsMicro {
-        sections: sections.reader(&instance),
-        instance: instance.clone(),
-        config,
-        declarations: catalog_watch,
+        instance: context.instance(),
+        sections: context.collection(contract::SECTIONS)?,
+        config: context
+            .config(contract::CONFIG_NAME)
+            .expect("manifest declares Settings configuration")
+            .facet::<SettingsConfig>(contract::CONFIG_TAG.into(), contract::CONFIG_KEY.into())?,
     };
-    let mut config_changes = micro.config.watch.subscribe()?;
-    let selection = micro.clone();
-    let apply = move |snapshot: &DocumentSnapshot, rows: &[Declaration]| {
-        let accepted = selection
-            .preferences(snapshot)
-            .map(|config| {
-                rows.iter()
-                    .filter(|row| !config.hidden.contains(&row.instance))
-                    .map(|row| (row.instance.clone(), row.contract.clone()))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        broker.accept(accepted)
-    };
-    apply(&config_changes.borrow_and_update(), &catalog.borrow())?;
-    context.own_future(async move {
-        loop {
-            tokio::select! {
-                result = config_changes.changed() => result.unwrap(),
-                result = declarations.next() => { result.unwrap(); }
-            }
-            let rows = declarations.current().unwrap();
-            apply(&config_changes.borrow_and_update(), &rows).unwrap();
-            catalog.send_if_modified(|current| {
-                if *current == rows {
-                    return false;
-                }
-                *current = rows;
-                true
-            });
-        }
-    })?;
-    let presentation = micro.clone();
-    let root = context.publish_component(move || {
+    context.publish_component(contract::VIEW, move || {
         use dioxus::prelude::*;
-        rsx! { SettingsView { micro: presentation.clone() } }
+        rsx! { SettingsView { micro: micro.clone() } }
     })?;
-    context.mount_root("Settings", root)?;
-    context.publish_contributable(SettingsSections::new(sections));
-    context.publish(micro);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clay_dioxus::NativeComponents;
+    use clay_guest_session::collections::bytes_registrations;
+    use clay_host::CollectionContract;
+    use clay_host::ConfiguredMicro;
+    use clay_host::Host;
+    use clay_host::MicroId;
+    use clay_host::Supervisor;
+    use clay_mdk::native::CollectionBindings;
+    use clay_mdk::native::CollectionRegistry;
+    use clay_mdk::native::DocumentService;
+    use clay_mdk::native::Resources;
+    use clay_mdk::native::factory;
+    use std::collections::BTreeMap;
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn preferences_rank_ordered_micros_before_the_rest() {
+        let config = SettingsConfig {
+            hidden: BTreeSet::new(),
+            order: vec!["b".into(), "a".into()],
+        };
+        assert!(config.rank("b") < config.rank("a"));
+        assert!(config.rank("a") < config.rank("unlisted"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn activation_publishes_the_declared_view() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let host = Host::new();
+                let resources = Resources {
+                    registry: NativeComponents::new(&host),
+                    documents: DocumentService::new(16),
+                    collections: CollectionRegistry::default(),
+                };
+                resources
+                    .collections
+                    .declare(
+                        CollectionContract {
+                            id: contract::SECTIONS.into(),
+                            key_schema: contract::SECTION_KEY_SCHEMA.into(),
+                            value_schema: contract::SECTION_VALUE_SCHEMA.into(),
+                        },
+                        bytes_registrations(NonZeroUsize::new(8).unwrap(), [0, 0]),
+                    )
+                    .unwrap();
+                resources.documents.mock_documents().bind_config(
+                    contract::CONFIG_NAME.into(),
+                    "settings-config".into(),
+                    "main".into(),
+                );
+                let settings = ConfiguredMicro {
+                    identity: MicroId::new(contract::ID),
+                    eager: false,
+                    requirements: BTreeMap::new(),
+                    factory: factory(
+                        resources,
+                        contract::manifest(),
+                        CollectionBindings {
+                            read: vec![contract::SECTIONS.into()],
+                            write: vec![],
+                        },
+                        activate,
+                    ),
+                };
+                let supervisor = Supervisor::new(host.clone(), [settings]);
+                let view = supervisor
+                    .acquire(&MicroId::new(contract::ID), contract::VIEW)
+                    .await
+                    .unwrap();
+                assert!(view.component().is_some());
+                drop(view);
+                supervisor.shutdown().await.unwrap();
+                host.close();
+            })
+            .await;
+    }
 }
