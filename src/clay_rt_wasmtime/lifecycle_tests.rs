@@ -2,6 +2,7 @@ use super::tests::RecordingSink;
 use super::*;
 use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::lifecycle_conformance;
+use clay_guest_session::lifecycle_conformance::GuestIncarnations;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
 use clay_host::LocalFuture;
@@ -62,6 +63,22 @@ impl Incarnations for Wasmtime {
         runtime.publications()
     }
 
+    fn inspect(runtime: &WasmRuntime) -> GuestResidue {
+        let active = runtime.incarnation.lock().unwrap();
+        residue_of(active.as_ref().unwrap())
+    }
+
+    fn close(runtime: WasmRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
+        Box::pin(async move {
+            let taken = runtime.incarnation.lock().unwrap().take();
+            let mut active = taken.expect("only a live incarnation is closed");
+            let closed = active.close().await;
+            (closed, residue_of(&active))
+        })
+    }
+}
+
+impl GuestIncarnations for Wasmtime {
     fn mount(runtime: &WasmRuntime, publication: &str) -> Result<Box<dyn std::any::Any>, String> {
         let sink = Arc::new(RecordingSink::new());
         let session = runtime
@@ -77,20 +94,6 @@ impl Incarnations for Wasmtime {
     fn calls_in_flight(runtime: &WasmRuntime) -> InFlightCalls {
         let active = runtime.incarnation.lock().unwrap();
         active.as_ref().unwrap().calls_in_flight.clone()
-    }
-
-    fn inspect(runtime: &WasmRuntime) -> GuestResidue {
-        let active = runtime.incarnation.lock().unwrap();
-        residue_of(active.as_ref().unwrap())
-    }
-
-    fn close(runtime: WasmRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
-        Box::pin(async move {
-            let taken = runtime.incarnation.lock().unwrap().take();
-            let mut active = taken.expect("only a live incarnation is closed");
-            let closed = active.close().await;
-            (closed, residue_of(&active))
-        })
     }
 }
 

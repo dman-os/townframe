@@ -4,6 +4,7 @@ use super::tests::RecordingSink;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::lifecycle_conformance;
+use clay_guest_session::lifecycle_conformance::GuestIncarnations;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
 use clay_host::Host;
@@ -70,6 +71,16 @@ impl Incarnations for Wasmi {
         runtime.publications()
     }
 
+    fn inspect(runtime: &WcmpRuntime) -> GuestResidue {
+        clay_rt_wcmp::test_utils::inspect(runtime, residue_of)
+    }
+
+    fn close(runtime: WcmpRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
+        Box::pin(async move { close_inspecting(&runtime, residue_of).await })
+    }
+}
+
+impl GuestIncarnations for Wasmi {
     fn mount(runtime: &WcmpRuntime, publication: &str) -> Result<Box<dyn std::any::Any>, String> {
         let sink = Arc::new(RecordingSink::new());
         let session = runtime
@@ -84,14 +95,6 @@ impl Incarnations for Wasmi {
 
     fn calls_in_flight(runtime: &WcmpRuntime) -> InFlightCalls {
         clay_rt_wcmp::test_utils::inspect(runtime, |state| state.calls_in_flight().clone())
-    }
-
-    fn inspect(runtime: &WcmpRuntime) -> GuestResidue {
-        clay_rt_wcmp::test_utils::inspect(runtime, residue_of)
-    }
-
-    fn close(runtime: WcmpRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
-        Box::pin(async move { close_inspecting(&runtime, residue_of).await })
     }
 }
 
