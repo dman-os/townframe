@@ -107,6 +107,7 @@ mod tests {
     use clay_mdk::host::CollectionBindings;
     use clay_mdk::host::CollectionRegistry;
     use clay_mdk::host::DocumentService;
+    use clay_mdk::host::ReplicaId;
     use clay_mdk::host::Resources;
     use clay_mdk::host::factory;
     use std::collections::BTreeMap;
@@ -130,7 +131,7 @@ mod tests {
                 let resources = Resources::new(
                     NativeComponents::new(&host),
                     DocumentService::new(16),
-                    CollectionRegistry::default(),
+                    CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
                 );
                 resources
                     .collections
@@ -149,14 +150,14 @@ mod tests {
                     "main".into(),
                 );
                 let settings = ConfiguredMicro {
-                    identity: MicroId::new(contract::ID),
+                    identity: MicroId::from(&clay_mdk::MicroId::local(contract::ID)),
                     eager: false,
                     enabled: true,
                     requirements: BTreeMap::new(),
                     unresolved_bindings: Vec::new(),
                     factory: factory(
                         resources,
-                        clay_mdk::MicroId::new(contract::ID),
+                        clay_mdk::MicroId::local(contract::ID),
                         contract::manifest(),
                         CollectionBindings::new([(
                             contract::SECTIONS_BINDING.to_owned(),
@@ -167,7 +168,10 @@ mod tests {
                 };
                 let supervisor = Supervisor::new(host.clone(), [settings]);
                 let view = supervisor
-                    .acquire(&MicroId::new(contract::ID), contract::VIEW)
+                    .acquire(
+                        &MicroId::from(&clay_mdk::MicroId::local(contract::ID)),
+                        contract::VIEW,
+                    )
                     .await
                     .unwrap();
                 assert!(view.component().is_some());

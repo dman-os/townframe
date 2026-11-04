@@ -10,6 +10,7 @@ use clay_host::Supervisor;
 use clay_mdk::host::BoundCollection;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::CollectionRegistry;
+use clay_mdk::host::ReplicaId;
 use clay_mdk::host::Resources;
 use clay_mdk::host::factory;
 use std::collections::BTreeMap;
@@ -30,7 +31,7 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
             let resources = Resources::new(
                 NativeComponents::new(&host),
                 DocumentService::new(16),
-                CollectionRegistry::default(),
+                CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
             );
             let sections = bytes_registrations(NonZeroUsize::new(64).unwrap(), [0, 0]);
             resources
@@ -51,14 +52,14 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
             );
             seed_mock_defaults(&resources.documents);
             let sample = ConfiguredMicro {
-                identity: clay_host::MicroId::new(ID),
+                identity: clay_host::MicroId::from(&clay_mdk::MicroId::local(ID)),
                 eager: true,
                 enabled: true,
                 requirements: BTreeMap::new(),
                 unresolved_bindings: Vec::new(),
                 factory: factory(
                     resources,
-                    clay_mdk::MicroId::new(ID),
+                    clay_mdk::MicroId::local(ID),
                     manifest(),
                     CollectionBindings::new([(
                         SECTIONS_BINDING.to_owned(),
@@ -68,7 +69,7 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
                 ),
             };
             let supervisor = Supervisor::new(host.clone(), [sample]);
-            let id = clay_host::MicroId::new(ID);
+            let id = clay_host::MicroId::from(&clay_mdk::MicroId::local(ID));
             let mut key = Vec::new();
             ciborium::into_writer(ID, &mut key).unwrap();
 

@@ -28,7 +28,6 @@ expression: "serde_json::to_string_pretty(&canonical_sidecar()).unwrap()"
       "binding": "shelf",
       "contract": "org.example.test.shelf",
       "necessity": "optional",
-      "resolution": "configured",
       "minRevision": 2
     }
   ],
@@ -64,9 +63,7 @@ expression: "serde_json::to_string_pretty(&canonical_sidecar()).unwrap()"
     {
       "binding": "tally-book",
       "contract": "org.example.test.counter.tallies",
-      "access": "write",
-      "necessity": "required",
-      "resolution": "configured"
+      "access": "write"
     }
   ],
   "contributions": [

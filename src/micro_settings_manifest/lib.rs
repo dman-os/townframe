@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn the_manifest_declares_a_settings_root_row() {
         sidecar().validate().unwrap();
-        let rows = declared_rows(&sidecar()).unwrap();
+        let rows = declared_rows(&clay_mdk::MicroId::local(ID), &sidecar()).unwrap();
         assert_eq!(rows.keys().collect::<Vec<_>>(), [ROOTS_BINDING]);
     }
 }

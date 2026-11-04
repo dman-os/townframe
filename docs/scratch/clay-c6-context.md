@@ -261,3 +261,39 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
 - **Not done (C6d-2):** micro id = installed-as PlugId, writer = (replica, micro id), BLAKE3, grant re-check.
 - **Persisted-data breaks (pre-release, not migrated):** durable collections are keyed by the NSID text now, endpoint
   rows have a new CBOR shape, and a stored binding datum must hold NSIDs.
+
+## C6d-2 notes (2026-11-04): runtime identity aligned to ADR 028
+
+- **Request defaults.** `necessity` defaults to `required`, `resolution` to `configured`, both skipped on serialize at the
+  default (`skip_serializing_if = is_default`), matching `big_plugs_core::request::Request`. Fixture JSON and snapshots omit them.
+- **Micro id = installed-as plug id.** `clay_mdk::MicroId` is `<did>/<name>`, validated at construction and
+  deserialization (DID syntax and plug-name grammar copied from `big_plugs_core::PlugId`: dots allowed, never leading, trailing
+  or doubled; the unit tests pin it). `MicroId::parse/installed/local`, `.namespace()/.name()`. `Sidecar.id` is now the bare plug
+  *name* (a `String`, checked in `Sidecar::validate`), so the sidecar JSON still reads as `big_plugs`' importer expects.
+  `Package::new(namespace, sidecar, bytes)` / `from_json(namespace, ..)` build the id (`Package::id()`).
+  Stand-in namespace `clay_mdk::LOCAL_NAMESPACE = "did:example:clay-local"`: `did:example` is the W3C documentation method, valid
+  DID syntax that can never be a real publisher, so a stand-in id cannot be mistaken for a real one. Replaced by the node DID once
+  Clay runs on the node.
+- **Plumbing.** `InstalledMicro::new(id, sidecar, factory)` and the factory closure receives the id first
+  (`|id, resources, bindings|`), so a factory cannot be built under another id than the catalog's. The supervisor keeps its opaque
+  `clay_host::MicroId` (`From<&clay_mdk::MicroId>`, text identical); `CompositionRuntime`'s public API uses the validated one.
+  `declared_rows(micro, sidecar)` takes the id. UI labels use `MicroId::name()` ("Enable dayframe.counter micro"), never the DID;
+  the Playwright spec needs no change. Row keys a manifest chooses (the counter's settings row key `dayframe.counter`) are not
+  micro ids and stay as they were.
+- **Writer identity.** `clay_collection::ReplicaId` (16 bytes) and `WriterId::new(&replica, micro)`: bytes are the replica then the
+  micro id's UTF-8, so bytewise order is (replica, micro) and `Stamp` orders (lamport, replica, micro). `WriterId::from_encoded`
+  reads a stored/wire identity. `CollectionRegistry::new(replica)` (no `Default`); `Grant` carries the `writer`;
+  `registry.writer(&micro)` for the durable install. The replica is generated once (getrandom) and stored by the composition in the
+  `replica` subspace under key `id`; `CompositionRuntime::replica()`. Persisted-data break (pre-release, not migrated): stored
+  rows' writers are the old micro-id bytes, a store from before this change keeps stale stamps, and a pre-existing binding datum
+  (`binding -> collection`) no longer decodes.
+- **BLAKE3.** `Package::digest` is hex BLAKE3 (`blake3` replaces `sha2` in `clay_mdk`'s `package` feature); `x/dayframe-web.ts` computes
+  it with `jsr:@std/crypto@1.0.5` (Deno's WebCrypto lacks BLAKE3; verified equal to `b3sum`).
+- **Grants.** The bindings datum maps a binding to `{collection, contract, access}` (`BindingGrant`) or `null`. `resolve` honors a grant
+  only while it covers the current request (same contract; same access or write covering read). A widened request is unresolved
+  (`Unconfigured`), never changing enablement; no recorded grant still takes the default. `set_binding` records the request's current
+  contract and access (the runtime keeps each micro's collection requests for it).
+- **Schemas.** `Sidecar::validate` lets a declared contract's selector/key/value/write-context schema lie outside the authority when
+  some `requires` or `collection_requests` entry's `contract` names it.
+- **Environment hazard seen.** The root filesystem filled during this item (the wasmtime component cache at `~/.cache/dayframe` is
+  ~870 MB and grows); runs here used `XDG_CACHE_HOME` and `TMPDIR` on the big drive.

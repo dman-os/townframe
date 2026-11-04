@@ -13,7 +13,7 @@ use ui::ThemeRoot;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
-/// One entry of `packages/index.json`: where the component lives, the SHA-256 the shell
+/// One entry of `packages/index.json`: where the component lives, the BLAKE3 digest the shell
 /// must verify after fetching, and the package's sidecar JSON (identity, authority, manifest).
 /// STAND-IN until `big_plugs` delivers manifests.
 #[derive(Clone, Deserialize)]
@@ -49,7 +49,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// of the shell keeps running.
 async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpPackage, String> {
     let bytes = fetch_bytes(&entry.location).await?;
-    let package = clay_mdk::package::Package::new(entry.sidecar, bytes)?;
+    let package = clay_mdk::package::Package::new(clay_mdk::LOCAL_NAMESPACE, entry.sidecar, bytes)?;
     if package.digest() != entry.digest {
         return Err(format!(
             "package at {} hashes to {} but the index pins {}",
@@ -70,28 +70,36 @@ fn native_micros() -> Vec<InstalledMicro> {
         InstalledMicro {
             eager: true,
             locked: true,
-            ..InstalledMicro::new(micro_settings_manifest::sidecar(), |resources, bindings| {
-                factory(
-                    resources,
-                    clay_mdk::MicroId::new(micro_settings_manifest::ID),
-                    micro_settings_manifest::manifest(),
-                    bindings,
-                    micro_settings::activate,
-                )
-            })
+            ..InstalledMicro::new(
+                clay_mdk::MicroId::local(micro_settings_manifest::ID),
+                micro_settings_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_settings_manifest::manifest(),
+                        bindings,
+                        micro_settings::activate,
+                    )
+                },
+            )
         },
         InstalledMicro {
             eager: true,
             enabled_on_admission: true,
-            ..InstalledMicro::new(micro_sample::sidecar(), |resources, bindings| {
-                factory(
-                    resources,
-                    clay_mdk::MicroId::new(micro_sample::ID),
-                    micro_sample::manifest(),
-                    bindings,
-                    micro_sample::activate,
-                )
-            })
+            ..InstalledMicro::new(
+                clay_mdk::MicroId::local(micro_sample::ID),
+                micro_sample::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_sample::manifest(),
+                        bindings,
+                        micro_sample::activate,
+                    )
+                },
+            )
         },
     ]
 }
@@ -110,13 +118,27 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
         Ok(bytes) => match serde_json::from_slice::<Vec<PackageIndexEntry>>(&bytes) {
             Ok(entries) => {
                 for entry in entries {
+                    // Stand-in namespace until the node's DID installs packages (see
+                    // `clay_mdk::LOCAL_NAMESPACE`); a name that is not a plug name is this
+                    // entry's installation error.
+                    let id = match clay_mdk::MicroId::installed(
+                        clay_mdk::LOCAL_NAMESPACE,
+                        &entry.sidecar.id,
+                    ) {
+                        Ok(id) => id,
+                        Err(error) => {
+                            errors.push(format!("{}: {error}", entry.location));
+                            continue;
+                        }
+                    };
                     let sidecar = entry.sidecar.clone();
                     installed.push(InstalledMicro::new(
+                        id,
                         sidecar.clone(),
-                        move |resources, bindings| {
+                        move |id, resources, bindings| {
                             clay_mdk::host::wcmp_factory(
                                 resources,
-                                sidecar.id,
+                                id,
                                 sidecar.manifest,
                                 bindings,
                                 move || indexed_package(entry.clone()),

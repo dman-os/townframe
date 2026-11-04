@@ -2643,6 +2643,7 @@ dependencies = [
 name = "clay_mdk"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "blitz-dom",
  "ciborium",
  "clay_collection",
@@ -2661,7 +2662,6 @@ dependencies = [
  "insta",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "wash-runtime",
@@ -4089,6 +4089,7 @@ dependencies = [
  "dioxus",
  "dioxus-core",
  "dioxus-html",
+ "getrandom 0.4.3",
  "micro_counter_manifest",
  "micro_sample",
  "micro_settings",

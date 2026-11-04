@@ -20,20 +20,151 @@ use serde::Serialize;
 /// change to the format is a new NSID.
 pub const MANIFEST_NSID: &str = "org.example.clay.micro.manifest";
 
-/// Stable provider identity used by configuration and composition persistence. Owned by the
-/// package envelope, not by the manifest (see [`Sidecar`]).
+/// The namespace the stand-in loaders and native built-ins install micros under, until Clay runs
+/// on the node and the node's own DID takes its place (`big_plugs`' importer maps a sidecar
+/// `id` to `<node did>/<id>`). `did:example` is the DID method the W3C reserves for
+/// documentation: syntactically a DID, so it passes the same validation as a real namespace,
+/// yet it can never name a real publisher, so a stand-in id cannot be mistaken for one.
+pub const LOCAL_NAMESPACE: &str = "did:example:clay-local";
+
+/// Stable provider identity used by configuration and composition persistence: the plug id the
+/// micro is installed *as* (ADR 028 §2), text form `<namespace>/<name>` with a DID namespace
+/// and a plug name that may contain dots (`did:example:clay-local/dayframe.counter`). The slot
+/// is the id, so a fork substituted into it keeps it. Owned by the package envelope, not by
+/// the manifest (see [`Sidecar`]). The text form is validated at construction, deserialization
+/// included, so a held `MicroId` always splits into a DID and a name.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct MicroId(String);
+#[serde(try_from = "String", into = "String")]
+pub struct MicroId {
+    text: String,
+    /// Byte offset of the `/` that ends the namespace. A DID never contains `/`, so the first
+    /// one is the separator.
+    separator: usize,
+}
 
 impl MicroId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+    /// Parse the text form `<did>/<name>`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let (namespace, name) = text
+            .split_once('/')
+            .ok_or_else(|| format!("micro id {text:?} is not `<did>/<name>`"))?;
+        Self::installed(namespace, name)
+    }
+
+    /// The id of the plug named `name` installed under the DID `namespace`.
+    pub fn installed(namespace: &str, name: &str) -> Result<Self, String> {
+        if !is_did(namespace) {
+            return Err(format!("micro id namespace {namespace:?} is not a DID"));
+        }
+        if !is_plug_name(name) {
+            return Err(format!(
+                "micro id name {name:?} is not a plug name: lowercase ascii letters, digits, \
+                 `-`, `_` and `.`, starting with a letter, at most 64 bytes, with no leading, \
+                 trailing or doubled dot"
+            ));
+        }
+        Ok(Self {
+            text: format!("{namespace}/{name}"),
+            separator: namespace.len(),
+        })
+    }
+
+    /// A built-in micro's id under [`LOCAL_NAMESPACE`]. Built-in names are compile-time
+    /// constants, so an invalid one is a programming error.
+    pub fn local(name: &str) -> Self {
+        Self::installed(LOCAL_NAMESPACE, name).expect("a built-in micro's name is a plug name")
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.text
     }
+
+    /// The DID the micro is installed under.
+    pub fn namespace(&self) -> &str {
+        &self.text[..self.separator]
+    }
+
+    /// The plug name: the human-readable part, what a UI shows.
+    pub fn name(&self) -> &str {
+        &self.text[self.separator + 1..]
+    }
+}
+
+impl TryFrom<String> for MicroId {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, String> {
+        Self::parse(&text)
+    }
+}
+
+impl From<MicroId> for String {
+    fn from(id: MicroId) -> Self {
+        id.text
+    }
+}
+
+impl std::fmt::Display for MicroId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+/// W3C DID Core syntax, as `big_plugs_core::PlugId` checks its namespace: `did:` method
+/// (`1*(a-z / 0-9)`) `:` a non-empty method-specific id of `ALPHA / DIGIT / . - _ :` and
+/// uppercase-hex `%` escapes that does not end in `:`. Whether the method is known is a
+/// resolution concern, not a syntax one.
+fn is_did(did: &str) -> bool {
+    let Some((method, id)) = did
+        .strip_prefix("did:")
+        .and_then(|rest| rest.split_once(':'))
+    else {
+        return false;
+    };
+    if method.is_empty()
+        || !method
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let bytes = id.as_bytes();
+    if bytes.is_empty() || bytes.last() == Some(&b':') || did.len() > 512 {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':') => {
+                index += 1;
+            }
+            b'%' => {
+                let is_escape = bytes.get(index + 1..index + 3).is_some_and(|hex| {
+                    hex.iter()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
+                });
+                if !is_escape {
+                    return false;
+                }
+                index += 3;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// A plug name, as `big_plugs_core::PlugId` checks it.
+fn is_plug_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_lowercase()
+        && bytes.last() != Some(&b'.')
+        && !name.contains("..")
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
 }
 
 /// A fully qualified WIT interface, e.g. `townframe:dayframe/micro-lifecycle@0.4.0`.
@@ -151,6 +282,26 @@ open_vocabulary! {
     }
 }
 
+impl Default for Necessity {
+    /// Omitted means `required`, the safe reading, as in `big_plugs_core::request`.
+    fn default() -> Self {
+        Self::Required
+    }
+}
+
+impl Default for BindingResolution {
+    /// Omitted means `configured`, the common case, as in `big_plugs_core::request`.
+    fn default() -> Self {
+        Self::Configured
+    }
+}
+
+/// `skip_serializing_if` for [`Request`]'s defaulted members: a default stays off the wire so
+/// the canonical form of a manifest is minimal and deterministic, exactly as in `big_plugs`.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
 open_vocabulary! {
     /// One capability a collection contract offers its consumers (ADR 030 §8).
     CollectionCapability {
@@ -192,8 +343,12 @@ pub struct Request {
     pub contract: Nsid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
-    /// A required binding that resolves to nothing keeps the micro from starting.
+    /// A required binding that resolves to nothing keeps the micro from starting. Omitted
+    /// means `required`.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub necessity: Necessity,
+    /// Omitted means `configured`.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub resolution: BindingResolution,
     /// The least Lexicon `revision` of `contract` the package needs (ADR 028 §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,7 +444,10 @@ pub struct MicroManifest {
 /// manifest the plug's micro section carries. STAND-IN until the envelope delivers both.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sidecar {
-    pub id: MicroId,
+    /// The plug name (`dayframe.counter`), not a full [`MicroId`]: the namespace is whoever
+    /// installs the package (`big_plugs`' importer prefixes the node DID), so the same sidecar
+    /// installs under any namespace. [`Sidecar::validate`] checks it is a plug name.
+    pub id: String,
     pub package_version: u32,
     /// The reverse-DNS NSID prefix the plug holds (the envelope's `authority`, ADR 028 §5). The
     /// package may declare only NSIDs under it; everything else must be a request. `None`
@@ -303,7 +461,7 @@ pub struct Sidecar {
 impl Sidecar {
     pub fn new(id: impl Into<String>, package_version: u32, manifest: MicroManifest) -> Self {
         Self {
-            id: MicroId::new(id),
+            id: id.into(),
             package_version,
             authority: None,
             manifest,
@@ -316,11 +474,17 @@ impl Sidecar {
     }
 
     /// [`MicroManifest::validate`] plus the authority rule: every NSID the package declares
-    /// (its collection contracts and their schemas, and the contract of each call it
-    /// publishes) lies under its authority. What a package merely requests (collection
-    /// requests, requirements, facet tags) may name anyone's NSIDs; runtime-defined NSIDs
+    /// lies under its authority, namely its collection contracts and the contract of each call
+    /// it publishes. A declared contract's selector, key, value and write-context schemas may
+    /// instead be outside the authority when the package requests them (ADR 028 §4: anything
+    /// outside the authority must be requested, whatever refers to it), i.e. a request's
+    /// `contract` names the schema. What a package merely requests (collection requests,
+    /// requirements, facet tags) may name anyone's NSIDs; runtime-defined NSIDs
     /// (`org.example.clay.*`) are only ever requested, never declared.
     pub fn validate(&self) -> Result<(), String> {
+        if !is_plug_name(&self.id) {
+            return Err(format!("package id {:?} is not a plug name", self.id));
+        }
         self.manifest.validate()?;
         let owned = |nsid: &Nsid, what: &str| match &self.authority {
             Some(authority) if nsid.is_under(authority) => Ok(()),
@@ -331,13 +495,22 @@ impl Sidecar {
                 "{what} {nsid} is declared by a package with no authority"
             )),
         };
+        let manifest = &self.manifest;
+        let owned_or_requested = |nsid: &Nsid, what: &str| {
+            let requested = manifest
+                .requires
+                .iter()
+                .chain(&manifest.collection_requests)
+                .any(|request| request.contract == *nsid);
+            if requested { Ok(()) } else { owned(nsid, what) }
+        };
         for contract in &self.manifest.collection_contracts {
             owned(&contract.id, "collection contract")?;
-            owned(&contract.selector_schema, "selector schema")?;
-            owned(&contract.key_schema, "key schema")?;
-            owned(&contract.value_schema, "value schema")?;
+            owned_or_requested(&contract.selector_schema, "selector schema")?;
+            owned_or_requested(&contract.key_schema, "key schema")?;
+            owned_or_requested(&contract.value_schema, "value schema")?;
             if let Some(schema) = &contract.write_context_schema {
-                owned(schema, "write-context schema")?;
+                owned_or_requested(schema, "write-context schema")?;
             }
         }
         for publication in &self.manifest.publications {

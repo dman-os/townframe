@@ -16,30 +16,31 @@ mod bindings;
 use bindings::BindingsDatum;
 use bindings::DeclaredCollections;
 use bindings::Resolution;
-use clay_dioxus::NativeComponents;
+use clay_collection::ReplicaId;
 use clay_dioxus::use_component_recovery;
+use clay_dioxus::NativeComponents;
 use clay_docs::DocumentGrant;
 use clay_docs::DocumentWatch;
 use clay_docs::FacetRoute;
 use clay_docs::FacetSelection;
 use clay_docs::FacetValue;
 use clay_docs::WatchSelection;
-use clay_guest_session::collections::BytesRegistrations;
 use clay_guest_session::collections::durable_bytes_registrations;
+use clay_guest_session::collections::BytesRegistrations;
 use clay_host::CollectionContract;
 use clay_host::ConfiguredMicro;
 use clay_host::Factory;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_host::LocalFuture;
-use clay_host::MicroId;
+use clay_host::MicroId as SupervisorId;
 use clay_host::MicroState;
 use clay_host::Requirement;
 use clay_host::Supervisor;
-use clay_mdk::Collection;
-use clay_mdk::Nsid;
-use clay_mdk::hooks::PresentationSlot;
 use clay_mdk::hooks::use_rows;
+use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::host::declared_rows;
+use clay_mdk::host::manifest_scope;
 use clay_mdk::host::CapabilityPublication;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::CollectionRegistry;
@@ -47,8 +48,10 @@ use clay_mdk::host::DocumentService;
 use clay_mdk::host::Resources;
 use clay_mdk::host::RootRow;
 use clay_mdk::host::SHELL_ROOTS;
-use clay_mdk::host::declared_rows;
-use clay_mdk::host::manifest_scope;
+use clay_mdk::Collection;
+use clay_mdk::MicroId;
+use clay_mdk::Nsid;
+use clay_store::BatchOp;
 use clay_store::OrderedStore;
 use clay_store::StoreError;
 use dioxus::prelude::*;
@@ -61,8 +64,8 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
-use tokio::sync::Notify;
 use tokio::sync::watch;
+use tokio::sync::Notify;
 
 /// One installed micro in the launcher-supplied catalog: its self-describing sidecar (package
 /// identity, authority and manifest), its
@@ -71,6 +74,10 @@ use tokio::sync::watch;
 /// fetched, a native built-in the launcher links) stays in the launcher; this crate sees only
 /// the catalog.
 pub struct InstalledMicro {
+    /// The id the micro is installed as (ADR 028 §2): the key of its install and binding
+    /// datums, its registration scopes and its endpoints. The sidecar's `id` is only the
+    /// plug *name* part of it.
+    pub id: MicroId,
     pub sidecar: clay_mdk::Sidecar,
     /// Started at boot rather than on first use.
     pub eager: bool,
@@ -83,24 +90,28 @@ pub struct InstalledMicro {
     pub locked: bool,
     /// Local requirement binding -> the provider's publication that satisfies it.
     pub requirements: BTreeMap<String, Requirement>,
-    /// Builds the supervisor factory from the root's resources and the micro's collection
+    /// Builds the supervisor factory from the micro's installed id (so a factory cannot be
+    /// built under another id than the one the catalog keys the micro by), the root's resources and the micro's collection
     /// bindings. The bindings handle is the composition's: it resolves the manifest's
     /// collection requests from configuration and the factory reads it at each `initialize`.
     pub factory: FactoryBuilder,
 }
 
 /// See [`InstalledMicro::factory`].
-pub type FactoryBuilder =
-    Box<dyn FnOnce(Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>>;
+pub type FactoryBuilder = Box<
+    dyn FnOnce(MicroId, Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>,
+>;
 
 impl InstalledMicro {
     /// An on-demand, unlocked micro with no requirements, admitted disabled.
     pub fn new(
+        id: MicroId,
         sidecar: clay_mdk::Sidecar,
-        factory: impl FnOnce(Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>
-        + 'static,
+        factory: impl FnOnce(MicroId, Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>
+            + 'static,
     ) -> Self {
         Self {
+            id,
             sidecar,
             eager: false,
             enabled_on_admission: false,
@@ -159,7 +170,7 @@ fn admit_installs(
     let installs = documents.mock_documents();
     let mut enabled_at_boot = BTreeMap::new();
     for micro in installed.iter().filter(|micro| !micro.locked) {
-        let identity = MicroId::new(micro.sidecar.id.as_str());
+        let identity = micro.id.clone();
         let route = install_route(&identity);
         let version = micro.sidecar.package_version;
         let enabled = match installs.get(&route) {
@@ -221,7 +232,7 @@ fn watch_installs(documents: &DocumentService, host: &Host, shell: &Instance) ->
 
 /// A micro as the install-document reconciler tracks it.
 struct ManagedMicro {
-    id: MicroId,
+    id: SupervisorId,
     manifest: clay_mdk::MicroManifest,
     /// Shared with the micro's factory.
     bindings: CollectionBindings,
@@ -313,6 +324,9 @@ pub struct CompositionRuntime {
     documents: DocumentService,
     collections: CollectionRegistry<BytesRegistrations>,
     micros: Vec<MicroId>,
+    replica: ReplicaId,
+    /// Each micro's collection requests, which a configuration grants (`set_binding`).
+    collection_requests: Rc<BTreeMap<MicroId, Vec<clay_mdk::Request>>>,
     locked: BTreeSet<MicroId>,
     /// The shell's own instance: it mounts roots and owns the references minted from rows.
     shell: Instance,
@@ -353,6 +367,27 @@ async fn declare<St: OrderedStore + Send + Sync + 'static>(
         .map(|()| registrations))
 }
 
+/// The replica identity of this store: read from the `replica` subspace, or generated once and
+/// stored there on the store's first boot, so it is the same on every later boot. It is the
+/// replica half of every writer identity (`clay_collection::WriterId`), and so of every stamp
+/// durable rows carry; changing it between boots would give unchanged rows a new writer and
+/// break reinstall's keep-the-stamp rule. It lives in a subspace of its own, beside `documents`
+/// and `collections`, as one 16-byte value under the key `id`.
+async fn load_replica<St: OrderedStore>(store: &St) -> Result<ReplicaId, StoreError> {
+    const KEY: &[u8] = b"id";
+    if let Some(stored) = store.get(KEY).await? {
+        let bytes = <[u8; ReplicaId::LEN]>::try_from(stored.as_slice())
+            .expect("the replica id is stored as exactly ReplicaId::LEN bytes");
+        return Ok(ReplicaId::from_bytes(bytes));
+    }
+    let mut bytes = [0; ReplicaId::LEN];
+    getrandom::fill(&mut bytes).expect("the platform entropy source is available");
+    store
+        .apply(vec![BatchOp::Put(KEY.to_vec(), bytes.to_vec())])
+        .await?;
+    Ok(ReplicaId::from_bytes(bytes))
+}
+
 /// Install every manifest-declared row into the manifest installation scope of the collection
 /// its contribution's binding resolved to. A binding configuration left unbound has nowhere to
 /// put its rows: that is a configuration decision, not a defect, so those rows are skipped.
@@ -363,8 +398,8 @@ async fn install_declared_rows(
     errors: &mut Vec<String>,
 ) -> Result<(), StoreError> {
     for (micro, resolution) in installed.iter().zip(resolutions) {
-        let id = MicroId::new(micro.sidecar.id.as_str());
-        let rows = match declared_rows(&micro.sidecar) {
+        let id = &micro.id;
+        let rows = match declared_rows(id, &micro.sidecar) {
             Ok(rows) => rows,
             Err(error) => {
                 errors.push(format!("{id}: {error}"));
@@ -380,9 +415,9 @@ async fn install_declared_rows(
                 .expect("a resolved binding names a declared collection");
             target
                 .install(
-                    &manifest_scope(&id),
+                    &manifest_scope(&SupervisorId::from(id)),
                     clay_collection::Retention::Installation,
-                    clay_collection::WriterId::new(id.as_str()),
+                    collections.writer(&SupervisorId::from(id)),
                     rows,
                 )
                 .await?
@@ -415,8 +450,9 @@ impl CompositionRuntime {
         let (documents, persist_documents) =
             DocumentService::durable(Arc::new(Arc::clone(&store).subspace("documents")), 16)
                 .await?;
+        let replica = load_replica(&Arc::clone(&store).subspace("replica")).await?;
         let store = Arc::new(store.subspace("collections"));
-        let collections = CollectionRegistry::default();
+        let collections = CollectionRegistry::new(replica);
         let mut errors = Vec::new();
         // Admission gate: a package whose sidecar is incoherent or declares an NSID outside its
         // authority (ADR 028 §5) is refused whole, before anything it names is declared.
@@ -425,7 +461,7 @@ impl CompositionRuntime {
             .filter(|micro| match micro.sidecar.validate() {
                 Ok(()) => true,
                 Err(error) => {
-                    errors.push(format!("{}: {error}", micro.sidecar.id.as_str()));
+                    errors.push(format!("{}: {error}", micro.id));
                     false
                 }
             })
@@ -467,7 +503,7 @@ impl CompositionRuntime {
                 .await?;
                 match declared {
                     Ok(_) => declared_collections.declare(&contract.id, &contract.id),
-                    Err(error) => errors.push(format!("{}: {error}", micro.sidecar.id.as_str())),
+                    Err(error) => errors.push(format!("{}: {error}", micro.id)),
                 }
             }
         }
@@ -478,12 +514,12 @@ impl CompositionRuntime {
         let resolutions: Vec<Resolution> = installed
             .iter()
             .map(|micro| {
-                let identity = MicroId::new(micro.sidecar.id.as_str());
+                let identity = &micro.id;
                 bindings::resolve(
                     &micro.sidecar.manifest,
                     documents
                         .mock_documents()
-                        .get(&bindings::bindings_route(&identity))
+                        .get(&bindings::bindings_route(identity))
                         .map(BindingsDatum::decode)
                         .as_ref(),
                     &declared_collections,
@@ -496,12 +532,17 @@ impl CompositionRuntime {
 
         let resources = Resources::new(components.clone(), documents.clone(), collections.clone());
         let mut micros = Vec::new();
+        let mut collection_requests = BTreeMap::new();
         let mut managed = Vec::new();
         let mut locked = BTreeSet::new();
         let mut configured = Vec::new();
         for (micro, resolution) in installed.into_iter().zip(resolutions) {
-            let identity = MicroId::new(micro.sidecar.id.as_str());
+            let identity = micro.id.clone();
             micros.push(identity.clone());
+            collection_requests.insert(
+                identity.clone(),
+                micro.sidecar.manifest.collection_requests.clone(),
+            );
             if micro.locked {
                 locked.insert(identity.clone());
             }
@@ -509,14 +550,14 @@ impl CompositionRuntime {
             configured.push(ConfiguredMicro {
                 // Locked micros have no datum and are always enabled.
                 enabled: enabled_at_boot.get(&identity).copied().unwrap_or(true),
-                identity: identity.clone(),
+                identity: SupervisorId::from(&identity),
                 eager: micro.eager,
                 requirements: micro.requirements,
                 unresolved_bindings: resolution.unresolved.clone(),
-                factory: (micro.factory)(resources.clone(), bindings.clone()),
+                factory: (micro.factory)(identity.clone(), resources.clone(), bindings.clone()),
             });
             managed.push(ManagedMicro {
-                id: identity,
+                id: SupervisorId::from(&identity),
                 manifest: micro.sidecar.manifest,
                 bindings,
                 applied: resolution,
@@ -543,6 +584,8 @@ impl CompositionRuntime {
             documents,
             collections,
             micros,
+            replica,
+            collection_requests: Rc::new(collection_requests),
             locked,
             shell,
             roots,
@@ -636,6 +679,11 @@ impl CompositionRuntime {
         self.collections.collection(id)
     }
 
+    /// This store's replica identity (see [`load_replica`]).
+    pub fn replica(&self) -> &ReplicaId {
+        &self.replica
+    }
+
     /// The installed micros, in catalog order.
     pub fn micros(&self) -> &[MicroId] {
         &self.micros
@@ -663,7 +711,9 @@ impl CompositionRuntime {
     }
 
     /// Configure `binding` of `micro` to the declared collection `collection`, or with `None`
-    /// leave it deliberately unbound; both override the manifest's default. The write happens
+    /// leave it deliberately unbound; both override the manifest's default. Binding records the
+    /// grant: the contract and access the micro's request asks for right now, which a later
+    /// package version must not widen without being configured again (ADR 028 §3). The write happens
     /// when this is called and the returned future resolves once it is stored (like
     /// [`Self::set_enabled`]). The supervisor follows through the reconciler: the micro is
     /// restarted with the new resolution, not rebound in place. The micro must be installed.
@@ -673,10 +723,15 @@ impl CompositionRuntime {
         binding: &str,
         collection: Option<&Nsid>,
     ) -> impl Future<Output = ()> + use<> {
+        let grant = collection.map(|collection| {
+            let request = self.collection_requests[micro]
+                .iter()
+                .find(|request| request.binding == binding)
+                .unwrap_or_else(|| panic!("{micro} requests no collection binding {binding:?}"));
+            bindings::BindingGrant::of(request, collection.clone())
+        });
         self.edit_bindings(micro, |datum| {
-            datum
-                .bindings
-                .insert(binding.to_owned(), collection.cloned());
+            datum.bindings.insert(binding.to_owned(), grant);
         });
         self.documents.persisted()
     }
@@ -720,7 +775,7 @@ impl CompositionRuntime {
     }
 
     pub fn state(&self, micro: &MicroId) -> MicroState {
-        self.supervisor.state(micro)
+        self.supervisor.state(&SupervisorId::from(micro))
     }
 
     pub fn is_locked(&self, micro: &MicroId) -> bool {
@@ -814,9 +869,9 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                                 state => format!("{state:?}"),
                             };
                             if shell.is_locked(micro) {
-                                format!("{micro} runtime (locked): {state}")
+                                format!("{} runtime (locked): {state}", micro.name())
                             } else {
-                                format!("{micro} runtime: {state}")
+                                format!("{} runtime: {state}", micro.name())
                             }
                         }
                     }
@@ -831,14 +886,16 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                                 // The label follows what the user asked for, not the supervisor's
                                 // state, which lags it while a close is in flight.
                                 let wanted = shell.is_enabled(&micro);
+                                // Labels show the plug name, never the namespace DID.
+                                let name = micro.name().to_owned();
                                 let label = if wanted {
-                                    format!("Disable {micro} micro")
+                                    format!("Disable {name} micro")
                                 } else {
-                                    format!("Enable {micro} micro")
+                                    format!("Enable {name} micro")
                                 };
                                 let busy = toggling.read().contains(&micro);
                                 let retry = matches!(state, MicroState::Faulted(_)).then(|| {
-                                    (Rc::clone(&shell.supervisor), micro.clone())
+                                    (Rc::clone(&shell.supervisor), SupervisorId::from(&micro))
                                 });
                                 rsx! {
                                     button {
@@ -861,9 +918,9 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                                         button {
                                             key: "retry-{micro}",
                                             class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                                            "aria-label": "Retry {micro} micro",
+                                            "aria-label": "Retry {name} micro",
                                             onclick: move |_| supervisor.retry(&micro),
-                                            "Retry {micro} micro"
+                                            "Retry {name} micro"
                                         }
                                     }
                                 }

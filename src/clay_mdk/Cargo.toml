@@ -49,7 +49,7 @@ clay_dioxus = { workspace = true, optional = true }
 clay_surface = { workspace = true, optional = true }
 clay_rt_wcmp = { workspace = true, optional = true }
 daybook_types = { workspace = true, default-features = false, features = ["manifest"], optional = true }
-sha2 = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clay_rt_wasmtime = { workspace = true, optional = true }
@@ -92,7 +92,7 @@ wasmtime = ["view", "dep:clay_rt_wasmtime", "dep:clay_surface"]
 # Same provision id as `wasmtime`, different engine; no instruction-fuel control (ADR 018 §5).
 wcmp = ["view", "dep:clay_rt_wcmp", "dep:clay_surface"]
 # Static package pairing: sidecar manifest plus component digest, no engine.
-package = ["dep:sha2"]
+package = ["dep:blake3"]
 # The guest backend: the same `Context` authoring surface over the WIT imports a wasm micro is
 # linked against, the Dioxus guest VirtualDom adapter (GuestDom, WireMutations), and the
 # `export_micro!` entry point.

@@ -7,8 +7,8 @@ use blitz_dom::DocumentConfig;
 use blitz_dom::LocalName;
 use blitz_dom::NodeId;
 use blitz_dom::QualName;
-use clay_host::MicroId;
 use clay_host::MicroState;
+use clay_mdk::MicroId;
 use dioxus::prelude::*;
 use dioxus_core::ElementId;
 use dioxus_core::RenderTargetId;
@@ -217,7 +217,7 @@ impl Shell {
         // enable it the way a user does, through its install datum. The reconciler applies the
         // datum when the shell starts serving.
         // Before serving, nothing drives the persister, so the acknowledgement is dropped.
-        drop(runtime.set_enabled(&MicroId::new(micro_counter_manifest::ID), true));
+        drop(runtime.set_enabled(&MicroId::local(micro_counter_manifest::ID), true));
         let mut ui = HeadlessDom::new(composed, runtime.clone());
         ui.wait_until("Settings sections listed", |ui| {
             ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
@@ -226,7 +226,7 @@ impl Shell {
         Self {
             runtime,
             ui,
-            counter: MicroId::new(micro_counter_manifest::ID),
+            counter: MicroId::local(micro_counter_manifest::ID),
         }
     }
 }
@@ -249,7 +249,7 @@ async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_g
     })
     .await;
     assert_eq!(
-        runtime.state(&MicroId::new(micro_sample::ID)),
+        runtime.state(&MicroId::local(micro_sample::ID)),
         MicroState::Active
     );
 
@@ -373,7 +373,7 @@ async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
     // The manifest row outlives the micro's incarnations: the section is still listed.
     assert!(ui.find(COUNTER).is_some());
     assert_eq!(
-        runtime.state(&MicroId::new(micro_sample::ID)),
+        runtime.state(&MicroId::local(micro_sample::ID)),
         MicroState::Active
     );
 

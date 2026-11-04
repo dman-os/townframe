@@ -29,15 +29,18 @@ pub fn runtime_scope(micro: &MicroId) -> Vec<u8> {
 /// `RegistrationCollection::install` into [`manifest_scope`].
 pub type DeclaredRows = BTreeMap<String, BTreeMap<Vec<u8>, Option<CollectionValue>>>;
 
-/// The rows `sidecar` declares, grouped by binding (validation guarantees each
+/// The rows `sidecar` declares for the micro installed as `micro`, grouped by binding (validation guarantees each
 /// names a collection request with write access). A key is the CBOR text of the declared key. The payload is
 /// the row body as JSON; the one-member object `{"$attachment": n}` stands for the reserved
 /// attachment tag over index `n` (JSON has no tags). Each declared attachment becomes the
 /// endpoint of one of the package's own publications, so the stored row never retains the
 /// provider (ADR 031 §7).
-pub fn declared_rows(sidecar: &Sidecar) -> Result<DeclaredRows, String> {
+pub fn declared_rows(
+    micro: &crate::manifest::MicroId,
+    sidecar: &Sidecar,
+) -> Result<DeclaredRows, String> {
     sidecar.validate()?;
-    let micro = &MicroId::new(sidecar.id.as_str());
+    let micro = &MicroId::from(micro);
     let manifest = &sidecar.manifest;
     let mut bindings = DeclaredRows::new();
     for contribution in &manifest.contributions {

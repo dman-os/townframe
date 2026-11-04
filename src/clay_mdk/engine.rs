@@ -87,7 +87,7 @@ pub(crate) fn factory<E: Engine>(
     let declared = declared_publications(&manifest);
     Rc::new(GuestFactory::<E> {
         resources,
-        micro: MicroId::new(micro.as_str()),
+        micro: (&micro).into(),
         manifest,
         declared,
         bindings,
