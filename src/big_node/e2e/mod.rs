@@ -30,6 +30,8 @@ use std::collections::BTreeSet;
 mod blob_discovery;
 mod blobs;
 mod dispatch;
+mod harness;
+mod ladder;
 mod listeners;
 mod many_nodes;
 mod network;

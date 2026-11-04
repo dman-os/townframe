@@ -290,6 +290,13 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - Add the embedder peer-policy hook to the config.
   - Implement the cabinet per-peer partition query (ADR 019) as the default policy.
   - Port test helpers onto it.
+- **N5 (done, with 2 pinned failures).**
+  - `e2e/harness.rs` `Cluster`: durable nodes per nickname, peers-attachment topology, a shared mirrored drawer, notes and blobs through the service clients, waits pumped by `PeersEvent`s plus datum-index revisions, with no sleeps.
+  - `e2e/ladder.rs`: 11 of 13 pass.
+  - **Pinned finding:** `a_peer_that_was_shut_down_catches_up_on_returning` and `branches_made_apart_merge_and_converge` stall. A doc created while a peer was offline is never pulled after it reconnects: the receiver shows `NoLocalContent`, `sync_demand: false`, while the keyhive pull is healthy in both directions.
+    - Suspects: the serving side's part replay or classification for the reconnecting peer, and the untie-broken mutual redial (`invalid handshake: aborted by peer`).
+    - Note: `DocSynced` fires before the doc is materialized, so it is not a "readable" signal.
+  - Correction to N4: there is a keyhive access signal. `KeyhiveAccessRevisionStore` is driven by a `ConcurrentDeltaWalker`, as `big_blobs/permissions.rs` does. The peers service must consume it instead of relying on the 15 s sweep (slice N4b).
 - **N5. Harness and ladder suite.** An N-node harness that reuses `big_repo` test2's topology and nickname helpers. Port the scenarios of `daybook_core/sync/tests/ladder.rs` onto it.
 - **N6. Scale, stress and cross-node nodules.** 10k-document replication, a seeded randomized stress test (`long_test` names), and a plug published on node A then installed and invoked on node B.
 
