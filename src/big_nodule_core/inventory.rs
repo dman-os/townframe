@@ -2,7 +2,7 @@
 //!
 //! [`admit_plug_nodule`] validates the carrying [`Plug`] envelope, extracts its [`Nodule`]
 //! contribution, checks the contribution schema and nodule admission rules, and verifies that
-//! every artifact a routine names is declared in the envelope. [`InstalledNodule`] is the admitted
+//! every artifact the handler names is declared in the envelope. [`InstalledNodule`] is the admitted
 //! result that [`crate::config::NoduleConfig`] resolves, with its enablement, configuration,
 //! artifact availability, and readiness.
 
@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 /// Availability of an artifact declared in the carrying [`Plug`] envelope.
 ///
-/// Without a blob store wired into this standalone inventory, every artifact a routine references
+/// Without a blob store wired into this standalone inventory, every artifact the handler references
 /// is recorded from the envelope metadata and remains [`Self::Unavailable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,8 +32,8 @@ pub enum ArtifactState {
     Unavailable,
 }
 
-/// Why an [`InstalledNodule`] cannot yet execute routines on a standalone node, in priority order:
-/// refused configuration first, then disabled, then missing routine artifact bytes, then the
+/// Why an [`InstalledNodule`] cannot yet serve its handler on a standalone node, in priority order:
+/// refused configuration first, then disabled, then missing handler artifact bytes, then the
 /// absence of a Wasm executor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,7 +126,7 @@ pub enum InventoryError {
     UnsupportedSchema { id: PlugId, schema: String },
     #[error("plug `{id}` nodule contribution is not a valid nodule datum: {reason}")]
     InvalidContribution { id: PlugId, reason: String },
-    #[error("plug `{id}` routine requires artifact `{artifact}` not declared in plug envelope")]
+    #[error("plug `{id}` handler requires artifact `{artifact}` not declared in plug envelope")]
     MissingArtifact { id: PlugId, artifact: String },
     #[error(
         "nodule `{nodule_id}` in plug `{id}` conflicts with authority `{existing_nodule}` owned by `{existing_plug}`"

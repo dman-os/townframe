@@ -12,7 +12,6 @@ pub big_nodule_core::config::fn grants_key (plug_id : & PlugId) -> DatumKey
 pub big_nodule_core::config::fn install_key (plug_id : & PlugId) -> DatumKey
 pub big_nodule_core::config::fn settings_key (plug_id : & PlugId) -> DatumKey
 pub const big_nodule_core::AUTHORITY: & str
-pub enum big_nodule_core::Execution { Call (Call), Workflow (Workflow), # [datum (other)] Unknown (UnknownMember) }
 pub enum big_nodule_core::NoduleError { # [error ("nodule description invalid at `{path}`: {reason}")] Invalid { path : String , reason : String } }
 pub enum big_nodule_core::RunMode { Once, EveryStart, # [datum (other)] Unknown (String) }
 pub enum big_nodule_core::StateKind { Sqlite, Kv, # [datum (other)] Unknown (String) }
@@ -21,7 +20,7 @@ pub enum big_nodule_core::config::Admission { Admitted { version : Version , nod
 pub enum big_nodule_core::config::DatumSlot< T > { # [default] Absent, Accepted { value : T , raw : Option < Value > , }, Invalid { raw : Option < Value > , reason : String , } }
 pub enum big_nodule_core::config::NoduleResolution { Admitted { installed : InstalledNodule , desired_grants : BTreeMap < DrawerId , DrawerAccess > , }, Refused { plug_id : PlugId , version : Option < Version > , revision : Option < Revision > , nodule_id : Option < String > , enabled : bool , config : Option < IndexMap < String , Value > > , reason : String , } }
 pub enum big_nodule_core::inventory::ArtifactState { Unavailable }
-pub enum big_nodule_core::inventory::InventoryError { # [error (transparent)] Plug (# [from] PlugError), # [error (transparent)] Nodule (# [from] NoduleError), # [error ("plug `{0}` carries no nodule contribution")] MissingContribution (PlugId), # [error ("plug `{id}` nodule contribution has unsupported schema `{schema}`")] UnsupportedSchema { id : PlugId , schema : String }, # [error ("plug `{id}` nodule contribution is not a valid nodule datum: {reason}")] InvalidContribution { id : PlugId , reason : String }, # [error ("plug `{id}` routine requires artifact `{artifact}` not declared in plug envelope")] MissingArtifact { id : PlugId , artifact : String }, # [error ("nodule `{nodule_id}` in plug `{id}` conflicts with authority `{existing_nodule}` owned by `{existing_plug}`")] AuthorityConflict { id : PlugId , nodule_id : String , existing_plug : Box < PlugId > , existing_nodule : String , }, # [error ("plug `{id}` cannot change nodule authority from `{existing}` to `{incoming}`")] AuthorityChanged { id : PlugId , existing : String , incoming : String , }, # [error ("nodule for plug `{0}` is not installed")] UnknownPlug (PlugId), # [error ("nodule for plug `{0}` declares no config schema")] NoConfigSchema (PlugId) }
+pub enum big_nodule_core::inventory::InventoryError { # [error (transparent)] Plug (# [from] PlugError), # [error (transparent)] Nodule (# [from] NoduleError), # [error ("plug `{0}` carries no nodule contribution")] MissingContribution (PlugId), # [error ("plug `{id}` nodule contribution has unsupported schema `{schema}`")] UnsupportedSchema { id : PlugId , schema : String }, # [error ("plug `{id}` nodule contribution is not a valid nodule datum: {reason}")] InvalidContribution { id : PlugId , reason : String }, # [error ("plug `{id}` handler requires artifact `{artifact}` not declared in plug envelope")] MissingArtifact { id : PlugId , artifact : String }, # [error ("nodule `{nodule_id}` in plug `{id}` conflicts with authority `{existing_nodule}` owned by `{existing_plug}`")] AuthorityConflict { id : PlugId , nodule_id : String , existing_plug : Box < PlugId > , existing_nodule : String , }, # [error ("plug `{id}` cannot change nodule authority from `{existing}` to `{incoming}`")] AuthorityChanged { id : PlugId , existing : String , incoming : String , }, # [error ("nodule for plug `{0}` is not installed")] UnknownPlug (PlugId), # [error ("nodule for plug `{0}` declares no config schema")] NoConfigSchema (PlugId) }
 pub enum big_nodule_core::inventory::Readiness { Refused, Disabled, ArtifactsUnavailable, ExecutorUnavailable }
 pub enum big_nodule_core::protocol::NodulesError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("nodule state failed: {0}")] Storage (String), # [error ("the package was refused: {0}")] Rejected (String), # [error ("nodule for plug `{0}` is not installed")] UnknownPlug (PlugId), # [error ("nodule for plug `{0}` declares no config schema")] NoConfigSchema (PlugId) }
 pub impl big_nodule_core::Nodule::fn admit (& self) -> Result < Admitted >
@@ -56,18 +55,13 @@ pub impl big_nodule_core::protocol::NoduleScope::fn covers (& self , other : & S
 pub mod big_nodule_core::config
 pub mod big_nodule_core::inventory
 pub mod big_nodule_core::protocol
-pub struct big_nodule_core::Admitted  { operations: BTreeMap < String , OperationKind >, artifacts: BTreeSet < String > }
-pub struct big_nodule_core::Call  { artifact: String, export: String, extra: Extra }
-pub struct big_nodule_core::Command  { key: String, target: String, view: Option < String >, extra: Extra }
+pub struct big_nodule_core::Admitted  { operations: BTreeMap < String , Option < OperationKind > >, artifacts: BTreeSet < String > }
 pub struct big_nodule_core::Config  { schema: String, defaults: Option < IndexMap < String , Value > >, extra: Extra }
+pub struct big_nodule_core::Handler  { artifact: String, extra: Extra }
 pub struct big_nodule_core::Initializer  { target: String, mode: RunMode, extra: Extra }
-pub struct big_nodule_core::Nodule  { id: String, lexicons: Vec < IndexMap < String , Value > >, requires: Vec < String >, routines: Vec < Routine >, revisioned_stores: Vec < RevisionedStore >, commands: Vec < Command >, views: Vec < View >, initialization: Vec < Initializer >, processors: Vec < Processor >, private_state: Vec < PrivateState >, config: Option < Config >, extra: Extra }
+pub struct big_nodule_core::Nodule  { id: String, lexicons: Vec < IndexMap < String , Value > >, requires: Vec < String >, handler: Option < Handler >, implements: Vec < String >, revisioned_stores: Vec < RevisionedStore >, initialization: Vec < Initializer >, private_state: Vec < PrivateState >, config: Option < Config >, bindings: IndexMap < String , Value >, extra: Extra }
 pub struct big_nodule_core::PrivateState  { key: String, kind: StateKind, extra: Extra }
-pub struct big_nodule_core::Processor  { key: String, target: String, trigger: IndexMap < String , Value >, extra: Extra }
 pub struct big_nodule_core::RevisionedStore  { key: String, selector: String, entry: String, mode: StoreMode, source: Option < String >, extra: Extra }
-pub struct big_nodule_core::Routine  { key: String, implements: String, execution: Execution, state: Vec < String >, extra: Extra }
-pub struct big_nodule_core::View  { key: String, input: String, presenter: String, extra: Extra }
-pub struct big_nodule_core::Workflow  { artifact: String, export: String, extra: Extra }
 pub struct big_nodule_core::config::AdmissionCache  {  }
 pub struct big_nodule_core::config::NoduleConfig  {  }
 pub struct big_nodule_core::config::NoduleEntry  { install: DatumSlot < NoduleInstall >, settings: DatumSlot < NoduleSettings >, grants: DatumSlot < NoduleGrants > }

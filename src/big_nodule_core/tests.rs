@@ -6,16 +6,8 @@ fn file(value: Value) -> IndexMap<String, Value> {
     serde_json::from_value(value).unwrap()
 }
 
-fn call(artifact: &str, export: &str) -> Execution {
-    Execution::Call(Call {
-        artifact: artifact.into(),
-        export: export.into(),
-        extra: Default::default(),
-    })
-}
-
 /// The photo browser of ADR 027 §3: declares its own datum, query and subscription, requires
-/// the search vocabulary, and presents search hits through a stateless view.
+/// the search vocabulary, and carries a command, view and processor binding it never interprets.
 fn photos() -> Nodule {
     let mut nodule = Nodule::new("org.example.photos");
     nodule.lexicons.push(file(json!({
@@ -86,62 +78,30 @@ fn photos() -> Nodule {
         "id": "org.example.photos.settings",
         "defs": { "main": { "type": "object", "properties": { "thumbnails": { "type": "boolean" } } } },
     })));
-    nodule.requires.push("org.example.search.query".into());
     nodule.private_state.push(PrivateState {
         key: "index".into(),
         kind: StateKind::Sqlite,
         extra: Default::default(),
     });
-    nodule.routines.push(Routine {
-        key: "list".into(),
-        implements: "org.example.photos.list".into(),
-        execution: call("routines", "list"),
-        state: vec!["index".into()],
+    nodule.handler = Some(Handler {
+        artifact: "handler".into(),
         extra: Default::default(),
     });
-    nodule.routines.push(Routine {
-        key: "import".into(),
-        implements: "org.example.photos.import".into(),
-        execution: Execution::Workflow(Workflow {
-            artifact: "routines".into(),
-            export: "import".into(),
-            extra: Default::default(),
-        }),
-        state: vec!["index".into()],
-        extra: Default::default(),
-    });
-    nodule.routines.push(Routine {
-        key: "present".into(),
-        implements: "org.example.photos.present".into(),
-        execution: call("routines", "present"),
-        state: Vec::new(),
-        extra: Default::default(),
-    });
-    nodule.routines.push(Routine {
-        key: "search".into(),
-        implements: "org.example.search.query".into(),
-        execution: call("routines", "search"),
-        state: vec!["index".into()],
-        extra: Default::default(),
-    });
+    nodule.implements = [
+        "org.example.photos.list",
+        "org.example.photos.import",
+        "org.example.photos.present",
+        "org.example.photos.changes",
+        "org.example.search.query",
+    ]
+    .map(String::from)
+    .to_vec();
     nodule.revisioned_stores.push(RevisionedStore {
         key: "photos".into(),
         selector: "org.example.photos.photo#still".into(),
         entry: "org.example.photos.photo".into(),
         mode: StoreMode::Frontier,
-        source: Some("import".into()),
-        extra: Default::default(),
-    });
-    nodule.views.push(View {
-        key: "hits".into(),
-        input: "org.example.search.query#hits".into(),
-        presenter: "present".into(),
-        extra: Default::default(),
-    });
-    nodule.commands.push(Command {
-        key: "findPhotos".into(),
-        target: "org.example.search.query".into(),
-        view: Some("hits".into()),
+        source: Some("org.example.photos.import".into()),
         extra: Default::default(),
     });
     nodule.initialization.push(Initializer {
@@ -149,14 +109,18 @@ fn photos() -> Nodule {
         mode: RunMode::Once,
         extra: Default::default(),
     });
-    nodule.processors.push(Processor {
-        key: "thumbnails".into(),
-        target: "org.example.photos.import".into(),
-        trigger: [("on".to_owned(), json!("documentWritten"))]
-            .into_iter()
-            .collect(),
-        extra: Default::default(),
-    });
+    nodule.bindings.insert(
+        "org.example.daybook.nodule.commands".into(),
+        json!([{ "key": "findPhotos", "target": "org.example.search.query", "view": "hits" }]),
+    );
+    nodule.bindings.insert(
+        "org.example.daybook.nodule.views".into(),
+        json!([{ "key": "hits", "input": "#nowhere", "presenter": "not-a-routine" }]),
+    );
+    nodule.bindings.insert(
+        "org.example.daybook.nodule.processors".into(),
+        json!([{ "key": "thumbnails", "target": "org.example.tags.apply", "trigger": { "on": "documentWritten" } }]),
+    );
     nodule.config = Some(Config {
         schema: "org.example.photos.settings".into(),
         defaults: Some(
@@ -181,21 +145,25 @@ fn the_photo_browser_admits_and_round_trips() {
     assert_eq!(
         admitted.operations,
         [
-            ("org.example.photos.changes", OperationKind::Subscription),
-            ("org.example.photos.import", OperationKind::Procedure),
-            ("org.example.photos.list", OperationKind::Query),
-            ("org.example.photos.present", OperationKind::Query),
+            (
+                "org.example.photos.changes",
+                Some(OperationKind::Subscription)
+            ),
+            ("org.example.photos.import", Some(OperationKind::Procedure)),
+            ("org.example.photos.list", Some(OperationKind::Query)),
+            ("org.example.photos.present", Some(OperationKind::Query)),
+            ("org.example.search.query", None),
         ]
         .into_iter()
         .map(|(id, kind)| (id.to_owned(), kind))
         .collect()
     );
-    assert_eq!(admitted.artifacts, BTreeSet::from(["routines".to_owned()]));
+    assert_eq!(admitted.artifacts, BTreeSet::from(["handler".to_owned()]));
     assert_eq!(nodule.datum_lexicons().count(), 2);
 
     let value = serde_json::to_value(&nodule).unwrap();
-    assert_eq!(value["routines"][0]["execution"]["$type"], Call::ID);
-    assert_eq!(value["routines"][1]["execution"]["$type"], Workflow::ID);
+    assert_eq!(value["handler"]["artifact"], "handler");
+    assert_eq!(value["implements"][0], "org.example.photos.list");
     assert_eq!(value["revisionedStores"][0]["mode"], "frontier");
     assert_eq!(value["initialization"][0]["mode"], "once");
     assert_eq!(value["privateState"][0]["kind"], "sqlite");
@@ -203,34 +171,41 @@ fn the_photo_browser_admits_and_round_trips() {
 }
 
 #[test]
-fn unknown_kinds_are_carried_on_the_wire_and_refused_at_admission() {
+fn unknown_vocabulary_is_carried_on_the_wire_and_refused_at_admission() {
     let value = json!({
         "id": "org.example.photos",
-        "routines": [{
-            "key": "r",
-            "implements": "org.example.other.op",
-            "execution": { "$type": "org.example.daybook.nodule.native", "binary": "x" },
-        }],
         "privateState": [{ "key": "s", "kind": "graph" }],
         "futureField": 1,
     });
     let nodule: Nodule = serde_json::from_value(value.clone()).unwrap();
-    assert!(matches!(
-        nodule.routines[0].execution,
-        Execution::Unknown(_)
-    ));
     assert_eq!(
         nodule.private_state[0].kind,
         StateKind::Unknown("graph".into())
     );
     assert_eq!(serde_json::to_value(&nodule).unwrap(), value);
-    refuse(nodule.clone(), "no `graph` state");
-    let mut known_state = nodule;
-    known_state.private_state[0].kind = StateKind::Kv;
-    refuse(
-        known_state,
-        "no `org.example.daybook.nodule.native` execution",
-    );
+    refuse(nodule, "no `graph` state");
+}
+
+#[test]
+fn bindings_are_carried_verbatim_and_never_validated() {
+    // Known sections with content the old per-binding checks refused, and a section no build
+    // knows: all admit, and the description re-encodes byte-identically.
+    let mut value = serde_json::to_value(photos()).unwrap();
+    value["bindings"]["org.example.future.section"] =
+        json!({ "anything": [1, { "goes": null }], "$type": "org.example.future.section" });
+    value["bindings"]["org.example.daybook.nodule.commands"] =
+        json!([{ "key": "", "target": "not an nsid", "unknownField": true }]);
+    let nodule: Nodule = serde_json::from_value(value.clone()).unwrap();
+    nodule.admit().unwrap();
+    assert_eq!(nodule.bindings.len(), 4);
+    assert_eq!(serde_json::to_value(&nodule).unwrap(), value);
+
+    // Pre-reshape top-level binding fields are no longer typed: they are carried as unknown
+    // members, not interpreted.
+    let legacy = json!({ "id": "org.example.photos", "commands": [{ "key": "x" }] });
+    let nodule: Nodule = serde_json::from_value(legacy.clone()).unwrap();
+    nodule.admit().unwrap();
+    assert_eq!(serde_json::to_value(&nodule).unwrap(), legacy);
 }
 
 #[test]
@@ -272,7 +247,7 @@ fn own_references_resolve_and_foreign_ones_pass() {
     refuse(operation_as_schema, "is an operation, not a schema");
 
     let mut local_ref_in_contribution = photos();
-    local_ref_in_contribution.views[0].input = "#hits".into();
+    local_ref_in_contribution.revisioned_stores[0].selector = "#still".into();
     refuse(local_ref_in_contribution, "a contribution names its file");
 
     let mut bad_operation_ref = photos();
@@ -284,59 +259,101 @@ fn own_references_resolve_and_foreign_ones_pass() {
     );
 
     let mut foreign = photos();
-    foreign.views[0].input = "org.example.elsewhere.defs#anything".into();
+    foreign.revisioned_stores[0].entry = "org.example.elsewhere.defs#anything".into();
     foreign.admit().unwrap();
 }
 
 #[test]
-fn routines_implement_one_operation_each_with_a_fitting_execution() {
+fn the_handler_implements_each_declared_operation_once() {
     let mut twice = photos();
-    twice.routines[2].implements = "org.example.photos.list".into();
-    refuse(twice, "already implemented by routine `list`");
+    twice.implements.push("org.example.photos.list".into());
+    refuse(twice, "`org.example.photos.list` is implemented twice");
 
     let mut undeclared = photos();
-    undeclared.routines[0].implements = "org.example.photos.missing".into();
-    refuse(undeclared, "not a declared operation");
+    undeclared.implements[0] = "org.example.photos.missing".into();
+    refuse(
+        undeclared,
+        "under this nodule's authority but is not a declared operation",
+    );
 
-    let mut workflow_query = photos();
-    workflow_query.routines[0].execution = Execution::Workflow(Workflow {
-        artifact: "routines".into(),
-        export: "list".into(),
-        extra: Default::default(),
-    });
-    refuse(workflow_query, "only a `procedure` is one");
+    let mut datum_not_operation = photos();
+    datum_not_operation.implements[0] = "org.example.photos.photo".into();
+    refuse(
+        datum_not_operation,
+        "under this nodule's authority but is not a declared operation",
+    );
+
+    let mut self_edge = photos();
+    self_edge.requires.push("org.example.search.query".into());
+    refuse(self_edge, "both required and implemented");
+
+    // A foreign operation is admitted on syntax alone (its contract is resolved at bind time);
+    // a malformed NSID and a duplicate foreign entry are not.
+    let mut malformed = photos();
+    malformed.implements.push("not an nsid".into());
+    refuse(malformed, "`not an nsid` is not an NSID");
+    let mut foreign_twice = photos();
+    foreign_twice
+        .implements
+        .push("org.example.search.query".into());
+    refuse(
+        foreign_twice,
+        "`org.example.search.query` is implemented twice",
+    );
+    let mut foreign = photos();
+    foreign.implements.push("org.example.tags.apply".into());
+    assert_eq!(
+        foreign.admit().unwrap().operations["org.example.tags.apply"],
+        None
+    );
+
+    let mut no_handler = photos();
+    no_handler.handler = None;
+    refuse(no_handler, "need a `handler`");
 
     let mut no_artifact = photos();
-    no_artifact.routines[0].execution = call("", "list");
+    no_artifact.handler.as_mut().unwrap().artifact = String::new();
     refuse(no_artifact, "names the artifact");
 
-    let mut unknown_state = photos();
-    unknown_state.routines[0].state.push("cache".into());
-    refuse(unknown_state, "`cache` is not a declared private state");
-
-    let mut duplicate_key = photos();
-    duplicate_key.routines[1].key = "list".into();
-    refuse(duplicate_key, "routines[1].key");
-
-    // A foreign operation's kind is another nodule's contract: a workflow for it passes here.
-    let mut foreign_workflow = photos();
-    foreign_workflow.routines[3].execution = Execution::Workflow(Workflow {
-        artifact: "routines".into(),
-        export: "search".into(),
-        extra: Default::default(),
-    });
-    foreign_workflow.admit().unwrap();
+    // A handler with nothing to serve and a nodule with neither are both fine.
+    let mut idle_handler = photos();
+    idle_handler.implements.clear();
+    idle_handler.revisioned_stores[0].source = None;
+    idle_handler.initialization.clear();
+    idle_handler.admit().unwrap();
+    Nodule::new("org.example.photos").admit().unwrap();
 }
 
 #[test]
-fn invocations_target_queries_or_procedures_that_are_declared_or_required() {
+fn initializers_and_store_sources_name_implemented_or_required_operations() {
     let mut subscription = photos();
-    subscription.commands[0].target = "org.example.photos.changes".into();
+    subscription.initialization[0].target = "org.example.photos.changes".into();
     refuse(subscription, "is a subscription");
 
+    let mut unimplemented = photos();
+    unimplemented
+        .implements
+        .retain(|nsid| nsid != "org.example.photos.import");
+    unimplemented.revisioned_stores[0].source = None;
+    refuse(
+        unimplemented,
+        "under this nodule's authority but is not implemented",
+    );
+
     let mut unrequired = photos();
-    unrequired.processors[0].target = "org.example.tags.apply".into();
+    unrequired.initialization[0].target = "org.example.tags.apply".into();
     refuse(unrequired, "foreign and not in `requires`");
+
+    // A foreign operation this nodule implements is as good a target or source as a local one.
+    let mut foreign_implemented = photos();
+    foreign_implemented.initialization[0].target = "org.example.search.query".into();
+    foreign_implemented.revisioned_stores[0].source = Some("org.example.search.query".into());
+    foreign_implemented.admit().unwrap();
+
+    let mut required = photos();
+    required.requires.push("org.example.tags.apply".into());
+    required.initialization[0].target = "org.example.tags.apply".into();
+    required.admit().unwrap();
 
     let mut own_in_requires = photos();
     own_in_requires
@@ -344,17 +361,9 @@ fn invocations_target_queries_or_procedures_that_are_declared_or_required() {
         .push("org.example.photos.list".into());
     refuse(own_in_requires, "`requires` lists foreign operations");
 
-    let mut missing_view = photos();
-    missing_view.commands[0].view = Some("table".into());
-    refuse(missing_view, "`table` is not a declared view");
-
-    let mut workflow_presenter = photos();
-    workflow_presenter.views[0].presenter = "import".into();
-    refuse(workflow_presenter, "a presenter is stateless");
-
     let mut missing_source = photos();
     missing_source.revisioned_stores[0].source = Some("ingest".into());
-    refuse(missing_source, "`ingest` is not a declared routine");
+    refuse(missing_source, "`ingest` is not an implemented operation");
 
     let mut unknown_mode = photos();
     unknown_mode.initialization[0].mode = RunMode::Unknown("hourly".into());
@@ -453,7 +462,7 @@ mod admission_tests {
     fn plug_with(id: &str, version: &str, nodule: Nodule) -> Plug {
         let mut plug = Plug::new(id.parse().unwrap(), version.parse().unwrap());
         plug.artifacts.push(Artifact {
-            key: "routines".into(),
+            key: "handler".into(),
             digest: Digest::of(b"wasm-bytes"),
             size: Some(10),
             media_type: Some("application/wasm".into()),
@@ -499,7 +508,7 @@ mod admission_tests {
         assert_eq!(installed.readiness(), Readiness::Disabled);
         assert!(!installed.readiness().is_ready());
         assert_eq!(
-            installed.artifacts.get("routines").map(|(_, s)| *s),
+            installed.artifacts.get("handler").map(|(_, s)| *s),
             Some(ArtifactState::Unavailable)
         );
         assert_eq!(installed.config, Some(settings(json!(true))));
@@ -830,7 +839,7 @@ mod admission_tests {
         no_artifact.artifacts.clear();
         assert!(matches!(
             config.admit(&cache, &no_artifact, None),
-            Err(InventoryError::MissingArtifact { artifact, .. }) if artifact == "routines"
+            Err(InventoryError::MissingArtifact { artifact, .. }) if artifact == "handler"
         ));
         assert!(
             config.resolve(&cache).is_empty(),
@@ -874,39 +883,26 @@ mod declaration {
 
     #[test]
     fn the_description_datums_declare_publish_and_admit() {
-        let universe = Universe::collect([
-            Declaration::of::<Nodule>().unwrap(),
-            Declaration::of::<Call>().unwrap(),
-            Declaration::of::<Workflow>().unwrap(),
-        ]);
+        let universe = Universe::collect([Declaration::of::<Nodule>().unwrap()]);
         let ids: Vec<&str> = universe
             .datums
             .iter()
             .map(|datum| datum.id.as_str())
             .collect();
-        assert_eq!(
-            ids,
-            [
-                "org.example.daybook.nodule",
-                "org.example.daybook.nodule.call",
-                "org.example.daybook.nodule.workflow",
-            ]
-        );
+        assert_eq!(ids, ["org.example.daybook.nodule"]);
         let bundle = Bundle::new(&universe, Vec::new());
         let lexicons = bundle.lexicons().unwrap();
-        assert_eq!(lexicons.len(), 3);
+        assert_eq!(lexicons.len(), 1);
         let nodule = &lexicons[0].file;
         let main = &nodule["defs"]["main"];
         assert_eq!(
             main["properties"]["lexicons"]["items"]["type"], "unknown",
             "{nodule}"
         );
-        let execution = &nodule["defs"]["Routine"]["properties"]["execution"];
-        assert_eq!(execution["type"], "union", "{nodule}");
-        assert_eq!(execution.get("closed"), None, "{nodule}");
+        let handler = &nodule["defs"]["Handler"]["properties"];
+        assert_eq!(handler["artifact"]["type"], "string", "{nodule}");
         assert_eq!(
-            execution["refs"],
-            json!([Call::ID, Workflow::ID]),
+            main["properties"]["bindings"]["type"], "unknown",
             "{nodule}"
         );
         let mode = &nodule["defs"]["RevisionedStore"]["properties"]["mode"];
@@ -995,7 +991,7 @@ mod config_tests {
     fn sample_plug(id: &str, version: &str) -> Plug {
         let mut plug = Plug::new(id.parse().unwrap(), version.parse().unwrap());
         plug.artifacts.push(Artifact {
-            key: "routines".into(),
+            key: "handler".into(),
             digest: Digest::of(b"wasm-bytes"),
             size: Some(10),
             media_type: Some("application/wasm".into()),

@@ -318,12 +318,12 @@ NoduleDescription
   lexicons: declared datum definitions and operation contracts (query | procedure | subscription)
   -- understood by the runtime --
   requires: operation NSIDs and host facilities required by this nodule
-  routines: key, implemented operation NSID, artifact/export, state needs
-            (the serialized reshape to one handler component + `implements` is proposed, §10)
-  revisioned_stores: key, selector/entry schemas, frontier/retention mode, backing routine/source
+  handler: the one XRPC handler component (artifact key) serving /xrpc/<nsid>
+  implements: operation NSIDs declared in this nodule's Lexicons that the handler serves
+  revisioned_stores: key, selector/entry schemas, frontier/retention mode, source (an implemented operation)
   initialization: target operation NSID, run mode
   private_state: named SQLite/KV state declarations
-  -- bindings, carried opaquely --
+  -- bindings, carried opaquely (an open map keyed by section tag) --
   commands: key, target operation NSID, optional stateless view key
   views: key, typed input schema, portable view output, presenter operation
   processors: key, target operation NSID, trigger policy
@@ -342,7 +342,7 @@ MicroConfiguration
 The catalog owns `PackageEnvelope`, not either configuration. The runtime validates
 the understood sections: operation implementations against admitted contracts,
 settings against `config schema`, and implementation compatibility; it does not
-require a routine of the same name in the consuming manifest, and it does not
+require an implementation of the same name in the consuming manifest, and it does not
 interpret binding sections. Processor descriptions are specified for future use even
 though nothing executes them yet.
 

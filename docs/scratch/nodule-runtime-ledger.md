@@ -74,6 +74,16 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
   - Admission: verify the capability (scope covers the NSID), then readiness, then forward.
   - For `Wasm`: build `POST /xrpc/<nsid>` (GET for queries) with authority, deadline and idempotency headers, then call `Ingress::dispatch_request`.
 
+### D2b. Manifest shape decisions (manager, 2026-11-04, from D1/D2)
+- `Nodule.routines` is replaced by `handler: Option<Handler{artifact}>` plus `implements: Vec<Nsid>`. Commands, views and processors moved into the opaque `bindings: IndexMap<tag, Value>`, which is never validated and round-trips.
+- `implements` may name **foreign** operations. That is provider composability, e.g. a search nodule implementing `org.example.search.query`.
+  - A local NSID must be a declared operation in the nodule's own Lexicons.
+  - A foreign NSID is only syntax-checked at admission. The contract is resolved at bind time, and dispatch reports the service unavailable until it is known.
+  - `Admitted.operations: BTreeMap<Nsid, Option<OperationKind>>`, where `None` means foreign.
+- An NSID in both `requires` and `implements` is refused, so the runtime dependency graph has no self-edges.
+- A store `source` names an implemented operation; absent means the host writes the store. Initializer targets are implemented or required operations, and never a known subscription.
+- Workflows have no manifest section until the wflow service PR.
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
@@ -100,8 +110,10 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
-- Next: batch 3, admission narrowing (D1) plus the manifest reshape to one XRPC handler with `implements`, as D2's guest model requires. Then dispatch.
+- Next: dispatch (contract in `big_nodule_core`, host in `big_nodule`: routing table, ocap admission, `BuiltIn` provider, e2e).
 ## Done
+
+- 2026-11-04: Batch 3, admission narrowed and manifest reshaped (D2b). Manager verified: clippy clean, 35/35, lint and api clean.
 
 - 2026-11-04: Review fixes batch 2.
   - Upgrade wedge fixed. An upgrade that invalidates settings is admitted and refused with the existing reasons. The settings datum is kept `Accepted`, because `diff` refuses to write `Invalid` slots. `configure` against the new revision repairs it.

@@ -5,7 +5,7 @@
 //! capability, or a handle this domain minted through [`MintNoduleCapability`] that carries a
 //! [`NoduleScope`]. Identity is not access by itself: an arbitrary actor presenting its identity
 //! is refused, only the operator's identity and scoped handles narrowed from it administer
-//! nodules. Nothing here executes a routine; a record reports readiness so a caller can see that
+//! nodules. Nothing here serves a handler; a record reports readiness so a caller can see that
 //! execution is unavailable rather than be told a dispatch succeeded.
 
 use crate::inventory::ArtifactState;

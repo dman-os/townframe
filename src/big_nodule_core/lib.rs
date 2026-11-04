@@ -1,22 +1,24 @@
 //! The nodule description: a plug's one node-facing facet (ADR 027 §2–3, §5–7).
 //!
 //! A [`Nodule`] carries the Lexicons a package declares, both its datums and its operation
-//! contracts (`query` | `procedure` | `subscription`), and the contributions built around those
-//! contracts: routines that **implement** operations, the external operations it **requires**,
-//! revisioned stores, commands, views, initializers, processors, private state and a config
-//! schema. Commands, processors and initializers target operation NSIDs, never another nodule's
-//! private routine keys, so a different provider can implement an operation without the consumer
-//! changing.
+//! contracts (`query` | `procedure` | `subscription`), and what the runtime understands about
+//! serving them:
+//! - **services:** one XRPC [`Handler`] component and the operations it `implements`, plus the
+//!   foreign operations the nodule `requires`;
+//! - **facilities:** private state, revisioned stores and a config schema;
+//! - **lifecycle:** initializers.
 //!
-//! The datum type is the wire contract and stays open: a member, routine kind or mode this build
-//! does not know is carried untouched so the description survives a catalog that is older than
-//! the package. [`Nodule::admit`] is the gate a runtime applies before it will host the nodule:
-//! it resolves every reference under the nodule's own authority, checks each contribution against
-//! the kind of operation it names, and refuses what this build could not serve.
+//! Everything else (commands, views, processors, future sections) lives in
+//! [`Nodule::bindings`]: sections the runtime carries and round-trips but never interprets.
+//!
+//! The datum type is the wire contract and stays open: a member, mode or binding section this
+//! build does not know is carried untouched so the description survives a catalog that is older
+//! than the package. [`Nodule::admit`] is the gate a runtime applies before it will host the
+//! nodule: it resolves every reference under the nodule's own authority, checks that what it
+//! serves is declared, and refuses what this build could not serve. It reads no binding.
 
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::datum::GrammarError;
-use big_cabinet_core::datum::UnknownMember;
 use big_cabinet_core::datum::is_nsid;
 use big_cabinet_core::datum::operation;
 use big_cabinet_core::datum::operation::OperationKind;
@@ -51,85 +53,53 @@ pub struct Nodule {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lexicons: Vec<IndexMap<String, Value>>,
     /// Operation NSIDs this nodule invokes but does not declare. The runtime binds a provider for
-    /// each; a command or processor may only target a foreign operation listed here.
+    /// each; an initializer may only target a foreign operation listed here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+    /// The one HTTP-shaped XRPC handler component serving `/xrpc/<nsid>` for every operation in
+    /// [`Self::implements`]. It is handed all of [`Self::private_state`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handler: Option<Handler>,
+    /// Operation NSIDs the handler serves. One under this nodule's authority must be a query,
+    /// procedure or subscription declared in its own Lexicons. A foreign one (a provider for a
+    /// contract another authority declares) is only checked to be an NSID; a non-empty list
+    /// needs a [`Self::handler`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub routines: Vec<Routine>,
+    pub implements: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revisioned_stores: Vec<RevisionedStore>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub commands: Vec<Command>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub views: Vec<View>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initialization: Vec<Initializer>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub processors: Vec<Processor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub private_state: Vec<PrivateState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<Config>,
+    /// Binding sections (commands, views, processors, ...) keyed by section tag, for example
+    /// `org.example.daybook.nodule.commands`. The runtime carries them verbatim and never
+    /// validates them: an unknown section or unknown content inside a known one does not refuse
+    /// admission.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub bindings: IndexMap<String, Value>,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
-/// An executable implementation of one operation. `implements` is the operation's NSID, local or
-/// foreign; the routine's own key is private to the nodule and nothing outside it refers to it.
+/// The XRPC handler component: a WASI HTTP-shaped component from an envelope artifact that
+/// serves `/xrpc/<nsid>` for the nodule's implemented operations (ADR 027 §3).
 #[macros::datum]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Routine {
-    pub key: String,
-    pub implements: String,
-    pub execution: Execution,
-    /// Keys of [`Nodule::private_state`] the routine is given.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub state: Vec<String>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// How a routine runs. Wasm is the environment; `call` and `workflow` are the semantics (ADR 027
-/// §3). Open: a kind this build does not know is carried, and refused only at admission.
-#[macros::datum]
-#[derive(Debug, Clone, PartialEq)]
-pub enum Execution {
-    Call(Call),
-    Workflow(Workflow),
-    #[datum(other)]
-    Unknown(UnknownMember),
-}
-
-/// `org.example.daybook.nodule.call`: request/response execution of an export in an artifact.
-/// Cursored long-polling is an ordinary call, so this also serves subscriptions.
-#[macros::datum(authority = Nodule::ID)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Call {
+pub struct Handler {
     /// Key of an artifact in the envelope that carries this description.
     pub artifact: String,
-    pub export: String,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// `org.example.daybook.nodule.workflow`: durable execution; only a `procedure` is one.
-#[macros::datum(authority = Nodule::ID)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Workflow {
-    pub artifact: String,
-    pub export: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
 /// An ordered, replayable revision stream (ADR 027 §7). `selector` and `entry` are Lexicon
-/// references; `source`, when stated, is the routine that writes it, else the host does.
+/// references; `source`, when stated, is the implemented operation whose handler writes it, else
+/// the host does.
 #[macros::datum]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,33 +125,6 @@ pub enum StoreMode {
     Unknown(String),
 }
 
-/// An explicit invocation of an operation, optionally presented through a view.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Command {
-    pub key: String,
-    pub target: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<String>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// A stateless presentation: typed input, a portable view out, produced by a `call` routine.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct View {
-    pub key: String,
-    pub input: String,
-    pub presenter: String,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
 /// An operation the runtime invokes on the nodule's behalf when it is enabled. Registration is
 /// intent; whether it ran is the task layer's record, not this description's.
 #[macros::datum]
@@ -204,21 +147,7 @@ pub enum RunMode {
     Unknown(String),
 }
 
-/// A reactive invocation. The trigger policy is carried for the task layer that owns dispatch;
-/// nothing here reads it.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Processor {
-    pub key: String,
-    pub target: String,
-    pub trigger: IndexMap<String, Value>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// Named storage private to the nodule, handed to the routines that list it.
+/// Named storage private to the nodule, handed to its handler.
 #[macros::datum]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,11 +182,15 @@ pub struct Config {
     pub extra: Extra,
 }
 
-/// What admission established about a description: the contracts it declares and the artifacts
-/// its routines need the carrying envelope to ship.
+/// What admission established about a description: the operations it serves and the artifacts the
+/// envelope carrying it must ship. An implemented operation's kind is `Some` when its contract is
+/// declared in this nodule's own Lexicons and `None` when it is foreign: a single description
+/// cannot know another authority's contract, so the kind (and the contract itself) is resolved at
+/// bind time. Keeping one map, rather than a second set of foreign NSIDs, lets every consumer ask
+/// "is this implemented?" in one lookup and treat an unknown kind as unchecked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admitted {
-    pub operations: BTreeMap<String, OperationKind>,
+    pub operations: BTreeMap<String, Option<OperationKind>>,
     pub artifacts: BTreeSet<String>,
 }
 
@@ -289,20 +222,22 @@ impl From<GrammarError> for NoduleError {
 
 type Result<T> = std::result::Result<T, NoduleError>;
 
+/// Implemented operations by NSID; the kind is `None` for a foreign operation.
+type Implemented = BTreeMap<String, Option<OperationKind>>;
+
 impl Nodule {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             lexicons: Vec::new(),
             requires: Vec::new(),
-            routines: Vec::new(),
+            handler: None,
+            implements: Vec::new(),
             revisioned_stores: Vec::new(),
-            commands: Vec::new(),
-            views: Vec::new(),
             initialization: Vec::new(),
-            processors: Vec::new(),
             private_state: Vec::new(),
             config: None,
+            bindings: IndexMap::new(),
             extra: Default::default(),
         }
     }
@@ -322,9 +257,9 @@ impl Nodule {
             .filter(|file| operation_kind(file).is_none())
     }
 
-    /// The gate before hosting. Every reference under the nodule's own authority resolves;
-    /// foreign operations a contribution invokes are in `requires`; each contribution fits the
-    /// kind of operation it names; nothing this build cannot serve is accepted.
+    /// The gate before hosting. Every reference under the nodule's own authority resolves; the
+    /// handler serves only operations declared here; foreign operations an initializer invokes
+    /// are in `requires`; nothing this build cannot serve is accepted. Bindings are not read.
     pub fn admit(&self) -> Result<Admitted> {
         if !is_nsid(&self.id) {
             return Err(NoduleError::invalid(
@@ -338,14 +273,13 @@ impl Nodule {
             requires: self.requires()?,
         };
         admission.lexicon_refs()?;
-        let routines = keyed(&self.routines, "routines", |routine| &routine.key)?;
-        let artifacts = admission.routines()?;
-        admission.stores(&routines)?;
-        let views = admission.views(&routines)?;
-        admission.invocations(&views)?;
+        admission.private_state()?;
+        let (operations, artifacts) = admission.services()?;
+        admission.stores(&operations)?;
+        admission.initializers(&operations)?;
         admission.config()?;
         Ok(Admitted {
-            operations: admission.operations(),
+            operations,
             artifacts,
         })
     }
@@ -467,13 +401,6 @@ struct Admission<'a> {
 }
 
 impl<'a> Admission<'a> {
-    fn operations(&self) -> BTreeMap<String, OperationKind> {
-        self.lexicons
-            .iter()
-            .filter_map(|(id, lexicon)| lexicon.operation.map(|kind| ((*id).to_owned(), kind)))
-            .collect()
-    }
-
     /// Every `ref` an operation's schemas make, resolved against the file that makes it.
     fn lexicon_refs(&self) -> Result<()> {
         for (index, lexicon) in self.lexicons.values().enumerate() {
@@ -488,9 +415,8 @@ impl<'a> Admission<'a> {
         Ok(())
     }
 
-    /// Routines: one per operation, an execution this build has, an artifact to run from, and
-    /// only declared private state. Returns the artifact keys the envelope must ship.
-    fn routines(&self) -> Result<BTreeSet<String>> {
+    /// Private state: unique keys and a kind this build serves.
+    fn private_state(&self) -> Result<()> {
         let state = keyed(&self.nodule.private_state, "privateState", |state| {
             &state.key
         })?;
@@ -502,60 +428,83 @@ impl<'a> Admission<'a> {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Services: the handler's artifact and the operations it implements, each declared in this
+    /// nodule's own Lexicons, once. Returns the implemented operations by kind and the artifact
+    /// keys the envelope must ship.
+    fn services(&self) -> Result<(Implemented, BTreeSet<String>)> {
+        let nodule = self.nodule;
         let mut artifacts = BTreeSet::new();
-        let mut implemented = BTreeMap::new();
-        for (index, routine) in self.nodule.routines.iter().enumerate() {
-            let path = format!("routines[{index}]");
-            let kind = self.operation_for(&routine.implements, &format!("{path}.implements"))?;
-            if let Some(previous) = implemented.insert(routine.implements.as_str(), &routine.key) {
+        if let Some(handler) = &nodule.handler {
+            if handler.artifact.is_empty() {
                 return Err(NoduleError::invalid(
-                    format!("{path}.implements"),
+                    "handler.artifact",
+                    "the handler names the artifact it runs from",
+                ));
+            }
+            artifacts.insert(handler.artifact.clone());
+        } else if !nodule.implements.is_empty() {
+            return Err(NoduleError::invalid(
+                "implements",
+                "implemented operations need a `handler` to serve them",
+            ));
+        }
+        let mut operations = BTreeMap::new();
+        for (index, nsid) in nodule.implements.iter().enumerate() {
+            let path = format!("implements[{index}]");
+            if !is_nsid(nsid) {
+                return Err(NoduleError::invalid(
+                    path,
+                    format!("`{nsid}` is not an NSID"),
+                ));
+            }
+            // `requires` names operations provided by others; one this nodule also implements
+            // would be a self-edge in the runtime dependency graph.
+            if self.requires.contains(nsid.as_str()) {
+                return Err(NoduleError::invalid(
+                    path,
                     format!(
-                        "`{}` is already implemented by routine `{previous}`",
-                        routine.implements
+                        "`{nsid}` is both required and implemented; `requires` lists operations other nodules provide"
                     ),
                 ));
             }
-            let (artifact, workflow) = match &routine.execution {
-                Execution::Call(call) => (&call.artifact, false),
-                Execution::Workflow(workflow) => (&workflow.artifact, true),
-                Execution::Unknown(member) => {
+            // A local operation's contract is in this description, so it is checked here. A
+            // foreign one is admitted on syntax alone: its contract lives in another nodule's
+            // Lexicons, which admission cannot see. Resolving it is a bind-time concern, and
+            // dispatch reports this service unavailable until the contract is known (per-service
+            // readiness, ledger D4).
+            let kind = if nodule.owns(nsid) {
+                let Some(kind) = self
+                    .lexicons
+                    .get(nsid.as_str())
+                    .and_then(|lexicon| lexicon.operation)
+                else {
                     return Err(NoduleError::invalid(
-                        format!("{path}.execution"),
+                        path,
                         format!(
-                            "this runtime has no `{}` execution",
-                            member.id("$type").unwrap_or("?")
+                            "`{nsid}` is under this nodule's authority but is not a declared operation"
                         ),
                     ));
-                }
+                };
+                Some(kind)
+            } else {
+                None
             };
-            if artifact.is_empty() {
+            if operations.insert(nsid.clone(), kind).is_some() {
                 return Err(NoduleError::invalid(
-                    format!("{path}.execution.artifact"),
-                    "a routine names the artifact it runs from",
+                    path,
+                    format!("`{nsid}` is implemented twice"),
                 ));
-            }
-            artifacts.insert(artifact.clone());
-            if workflow && kind.is_some_and(|kind| kind != OperationKind::Procedure) {
-                return Err(NoduleError::invalid(
-                    format!("{path}.execution"),
-                    "a workflow is durable execution with effects; only a `procedure` is one",
-                ));
-            }
-            for (position, key) in routine.state.iter().enumerate() {
-                if !state.contains_key(key.as_str()) {
-                    return Err(NoduleError::invalid(
-                        format!("{path}.state[{position}]"),
-                        format!("`{key}` is not a declared private state"),
-                    ));
-                }
             }
         }
-        Ok(artifacts)
+        Ok((operations, artifacts))
     }
 
-    /// Revisioned stores: schemas that resolve, a mode this build serves, a declared source.
-    fn stores(&self, routines: &BTreeMap<&str, &Routine>) -> Result<()> {
+    /// Revisioned stores: schemas that resolve, a mode this build serves, and a source that is
+    /// an implemented operation.
+    fn stores(&self, implemented: &Implemented) -> Result<()> {
         for (index, store) in self.nodule.revisioned_stores.iter().enumerate() {
             let path = format!("revisionedStores[{index}]");
             self.resolve_ref(None, &store.selector, &format!("{path}.selector"))?;
@@ -567,11 +516,11 @@ impl<'a> Admission<'a> {
                 ));
             }
             if let Some(source) = &store.source
-                && !routines.contains_key(source.as_str())
+                && !implemented.contains_key(source.as_str())
             {
                 return Err(NoduleError::invalid(
                     format!("{path}.source"),
-                    format!("`{source}` is not a declared routine"),
+                    format!("`{source}` is not an implemented operation"),
                 ));
             }
         }
@@ -583,48 +532,12 @@ impl<'a> Admission<'a> {
         Ok(())
     }
 
-    /// Views: an input schema that resolves and a `call` routine as presenter.
-    fn views(&self, routines: &BTreeMap<&str, &Routine>) -> Result<BTreeMap<&'a str, &'a View>> {
-        let views = keyed(&self.nodule.views, "views", |view| &view.key)?;
-        for (index, view) in self.nodule.views.iter().enumerate() {
-            let path = format!("views[{index}]");
-            self.resolve_ref(None, &view.input, &format!("{path}.input"))?;
-            let Some(presenter) = routines.get(view.presenter.as_str()) else {
-                return Err(NoduleError::invalid(
-                    format!("{path}.presenter"),
-                    format!("`{}` is not a declared routine", view.presenter),
-                ));
-            };
-            if !matches!(presenter.execution, Execution::Call(_)) {
-                return Err(NoduleError::invalid(
-                    format!("{path}.presenter"),
-                    "a presenter is stateless; it is a `call` routine",
-                ));
-            }
-        }
-        Ok(views)
-    }
-
-    /// Commands, initializers and processors: each invokes a query or procedure that is declared
-    /// or required.
-    fn invocations(&self, views: &BTreeMap<&str, &View>) -> Result<()> {
-        let nodule = self.nodule;
-        for (index, command) in nodule.commands.iter().enumerate() {
-            let path = format!("commands[{index}]");
-            self.invocation_target(&command.target, &format!("{path}.target"))?;
-            if let Some(view) = &command.view
-                && !views.contains_key(view.as_str())
-            {
-                return Err(NoduleError::invalid(
-                    format!("{path}.view"),
-                    format!("`{view}` is not a declared view"),
-                ));
-            }
-        }
-        keyed(&nodule.commands, "commands", |command| &command.key)?;
-        for (index, initializer) in nodule.initialization.iter().enumerate() {
+    /// Initializers: each invokes an implemented or required query or procedure, in a run mode
+    /// this build has.
+    fn initializers(&self, implemented: &Implemented) -> Result<()> {
+        for (index, initializer) in self.nodule.initialization.iter().enumerate() {
             let path = format!("initialization[{index}]");
-            self.invocation_target(&initializer.target, &format!("{path}.target"))?;
+            self.invocation_target(&initializer.target, implemented, &format!("{path}.target"))?;
             if let RunMode::Unknown(mode) = &initializer.mode {
                 return Err(NoduleError::invalid(
                     format!("{path}.mode"),
@@ -632,11 +545,6 @@ impl<'a> Admission<'a> {
                 ));
             }
         }
-        for (index, processor) in nodule.processors.iter().enumerate() {
-            let path = format!("processors[{index}]");
-            self.invocation_target(&processor.target, &format!("{path}.target"))?;
-        }
-        keyed(&nodule.processors, "processors", |processor| &processor.key)?;
         Ok(())
     }
 
@@ -726,41 +634,27 @@ impl<'a> Admission<'a> {
         Ok(())
     }
 
-    /// The kind of an operation a routine implements: known when declared here, unknown when
-    /// foreign (its contract belongs to another nodule's Lexicons).
-    fn operation_for(&self, nsid: &str, path: &str) -> Result<Option<OperationKind>> {
+    /// An operation an initializer invokes: one this nodule implements (local, or foreign with
+    /// an unchecked kind) or a required foreign one, never a known subscription: it is observed,
+    /// not invoked.
+    fn invocation_target(&self, nsid: &str, implemented: &Implemented, path: &str) -> Result<()> {
         if !is_nsid(nsid) {
             return Err(NoduleError::invalid(
                 path,
                 format!("`{nsid}` is not an NSID"),
             ));
         }
-        match self
-            .lexicons
-            .get(nsid)
-            .and_then(|lexicon| lexicon.operation)
-        {
-            Some(kind) => Ok(Some(kind)),
-            None if self.nodule.owns(nsid) => Err(NoduleError::invalid(
-                path,
-                format!(
-                    "`{nsid}` is under this nodule's authority but is not a declared operation"
-                ),
-            )),
-            None => Ok(None),
-        }
-    }
-
-    /// An operation a command, initializer or processor invokes: a declared one or a required
-    /// one, and a `query` or `procedure`; a subscription is observed, not invoked.
-    fn invocation_target(&self, nsid: &str, path: &str) -> Result<()> {
-        match self.operation_for(nsid, path)? {
-            Some(OperationKind::Subscription) => Err(NoduleError::invalid(
+        match implemented.get(nsid) {
+            Some(Some(OperationKind::Subscription)) => Err(NoduleError::invalid(
                 path,
                 format!("`{nsid}` is a subscription; an invocation targets a query or procedure"),
             )),
             Some(_) => Ok(()),
             None if self.requires.contains(nsid) => Ok(()),
+            None if self.nodule.owns(nsid) => Err(NoduleError::invalid(
+                path,
+                format!("`{nsid}` is under this nodule's authority but is not implemented"),
+            )),
             None => Err(NoduleError::invalid(
                 path,
                 format!("`{nsid}` is foreign and not in `requires`"),
