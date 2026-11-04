@@ -539,7 +539,7 @@ mod admission_tests {
     }
 
     #[test]
-    fn lexicon_only_nodule_reaches_executor_unavailable_when_enabled() {
+    fn a_handlerless_nodule_is_ready_when_enabled() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
         let mut nodule = Nodule::new("org.example.schema");
@@ -562,8 +562,7 @@ mod admission_tests {
         assert_eq!(installed.readiness(), Readiness::Disabled);
 
         let enabled = config.set_enabled(&id, true).unwrap();
-        assert_eq!(enabled.readiness(), Readiness::ExecutorUnavailable);
-        assert!(!enabled.readiness().is_ready());
+        assert_eq!(enabled.readiness(), Readiness::Ready);
         assert!(matches!(
             config.configure(&id, IndexMap::new()),
             Err(InventoryError::NoConfigSchema(_))

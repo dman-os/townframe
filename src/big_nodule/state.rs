@@ -283,8 +283,13 @@ impl State {
                         // Revoke failures come back as a map of per-plug outcomes that
                         // `reconcile` already folded into the refused records, so only
                         // an `Err` (storage, actor or capability failure) is fatal.
+                        // A change this actor made itself (`mutate_config` reconciles it before
+                        // its own watch event arrives) is already applied at these heads; only
+                        // a change from elsewhere, such as a synced config edit, has others.
                         Some(Ok(snapshot)) => {
-                            drop(state.reconcile(&RequestContext::root(), snapshot, false).await?);
+                            if snapshot.heads != state.observed_heads {
+                                drop(state.reconcile(&RequestContext::root(), snapshot, false).await?);
+                            }
                         }
                         Some(Err(err)) => return Err(crate::store_error(err)),
                         // Shutdown stops this task before the datum store it watches, so a
@@ -803,6 +808,11 @@ impl State {
         let Some((executor, artifact_key)) = hosting else {
             self.retire(&plug_id).await;
             let readiness = installed.readiness();
+            if readiness.is_ready() {
+                // No handler: it implements nothing, so there is no provider to register.
+                self.stores.dispatch.unbind(&provider_id);
+                return readiness;
+            }
             self.stores.dispatch.register(
                 &provider_id,
                 installed.admitted.operations.clone(),

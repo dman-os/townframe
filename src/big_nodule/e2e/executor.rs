@@ -64,6 +64,8 @@ struct FakeExecutor {
 struct FakeState {
     ready: bool,
     hosted: BTreeMap<PlugId, Digest>,
+    /// Every `ensure` call, which the reconciler makes once per reconcile of a hosted nodule.
+    ensures: usize,
     log: Vec<String>,
     reensure: BTreeMap<PlugId, Reensure>,
 }
@@ -108,6 +110,7 @@ impl NoduleExecutor for FakeExecutor {
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
         let mut state = self.state.lock().unwrap();
+        state.ensures += 1;
         if state.hosted.get(&spec.plug_id) != Some(&spec.handler.digest) {
             state
                 .hosted
@@ -254,6 +257,87 @@ async fn an_upgrade_retires_the_old_revision_before_ensuring_the_new_one() {
         ]
     );
     assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_again() {
+    let executor = FakeExecutor::new();
+    let node = super::node_with(Some(Arc::clone(&executor) as Arc<dyn NoduleExecutor>)).await;
+    let operator = node.operator();
+    node.admit(operator, serving_plug(PHOTOS, OWN))
+        .await
+        .unwrap();
+    let ensures = || executor.state.lock().unwrap().ensures;
+    // Enough turns for a watch event that is already queued to be handled: the services are all
+    // in-process, so a ready event needs no I/O.
+    let settle = || async {
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+        }
+    };
+
+    // The mutation reconciles itself; its own watch event finds the heads already applied.
+    let before = ensures();
+    node.set_enabled(PHOTOS, true).await;
+    settle().await;
+    assert_eq!(ensures() - before, 1);
+
+    // A write the actor did not make (here, a stray artifact reference in the config document,
+    // as a synced edit would bring) moves the heads and reconciles once.
+    let before = ensures();
+    let config_doc = DocId::from(node.drawers.local().config_id.clone());
+    let write = node
+        .docs
+        .client
+        .call(
+            RequestContext::root(),
+            MintDocCapability {
+                authorization: Authorization::identity(node.drawers_actor.capability),
+                scope: DocScope {
+                    write: BTreeSet::from([config_doc.clone()]),
+                    ..DocScope::default()
+                },
+                rights: Rights::USE,
+            },
+        )
+        .await
+        .unwrap();
+    node.docs
+        .client
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability: write.capability_id,
+                command: None,
+                doc_id: config_doc,
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(
+                    DatumKey::from_text(Blob::ID, "nodule.artifact/garbage").unwrap(),
+                    json!({
+                        "$type": Blob::ID,
+                        "mime": "image/png",
+                        "lengthOctets": 3,
+                        "digest": Digest::of(b"png").to_string(),
+                    }),
+                )]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    // The store's view of the document reaches the actor through the watch, so wait for it.
+    while ensures() == before {
+        tokio::task::yield_now().await;
+    }
+    settle().await;
+    assert_eq!(ensures() - before, 1);
+    node.get(operator, PHOTOS).await.unwrap();
+    assert_eq!(
+        ensures() - before,
+        1,
+        "reading at applied heads reconciles nothing"
+    );
     node.shutdown().await;
 }
 

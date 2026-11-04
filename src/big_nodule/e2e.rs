@@ -644,7 +644,7 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
         })
         .await
         .unwrap();
-    assert_eq!(enabled.readiness, Readiness::ExecutorUnavailable);
+    assert_eq!(enabled.readiness, Readiness::Ready);
     let configured = node
         .call(ConfigureNodule {
             authorization: operator,

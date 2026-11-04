@@ -104,10 +104,14 @@ impl InstalledNodule {
     }
 
     /// Readiness as the inventory alone can tell it, which is what a node without an executor
-    /// reports: it never yields [`Readiness::Ready`], since only an executor can serve a handler.
+    /// reports. An enabled nodule with a handler never yields [`Readiness::Ready`] here, since
+    /// only an executor can serve a handler; one without a handler hosts nothing (admission
+    /// refuses `implements` without a handler), so there is nothing for it to wait on.
     pub fn readiness(&self) -> Readiness {
         if !self.enabled {
             Readiness::Disabled
+        } else if self.nodule.handler.is_none() {
+            Readiness::Ready
         } else if self
             .artifacts
             .values()
