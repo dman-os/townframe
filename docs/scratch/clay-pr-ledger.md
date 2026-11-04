@@ -395,3 +395,16 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   preference-driven startup, accept/reject controls, the Wasm fuel-trap e2e flow.
 - `clay_micro_core` deleted. `dayframe_web` still needs `--config resolver.feature-unification="selected"`
   for the wasm32 lane: `utils_rs` dev-deps pull tokio `full`/`net` into the unified graph.
+
+## C2b reviewed (2026-11-04)
+
+- Verified myself: `x/check-dayframe.ts` 454/454, guardrails lint/api clean.
+- b4ad0d34: the manifest owns `ContractIdentity` again (same fields, no dotted strings); `native`
+  converts at admission (`admitted_publication`). `clay_guest_session` is back behind `in_process`;
+  the wasip3 guest graph no longer contains it. `PresentationSlot` is reactive over its reference.
+- Agent questions settled: eager-start failure stays `Faulted` in the panel (not a crash).
+  Open for C5: `RootRow`/`SHELL_ROOTS` live in `clay_mdk::native` but are shell vocabulary; move to
+  a shell contract crate when C5 shapes enablement. Two `MicroId`s (clay_host, clay_mdk manifest)
+  also remain by design (wire vocabulary vs host type).
+- Unrun: Playwright `src/dayframe_web/e2e/counter.spec.ts` (updated, never executed) — C4c.
+- Nit seen: `SettingsMicro::edit` maps "preferences still loading" to `AccessError::Denied`.
