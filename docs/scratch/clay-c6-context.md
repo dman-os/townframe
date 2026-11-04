@@ -150,14 +150,14 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
 - Tests: `clay_mdk/native/tests.rs` (StubRegistry), `micro_sample/tests.rs`, `micro_settings` tests, `clay_mdk/tests.rs` (guest: add collection/registration/require/second-presentation/call fixtures through `export_micro!`).
 - Deleted: `guest::Context`, `native::Context<R>`, `RendererRegistry` from the author path, `AccessError`/`DocumentError`/`ConfigDocument`/`DocumentRef` from micro-facing paths, `Runtime::call` stub, `initialize` rejection of collections/registrations/requirements, single-presentation assert, `use_document_changes` public name, the `ContractIdentity` parameter of `publish_call`.
 
-## 6. Open questions for the manager
+## 6. Decisions (2026-11-04, manager)
 
-1. Is dropping `Result` from sync accessors (panic on undeclared binding, `None` on unresolved optional) acceptable, or keep `Result` for forward-compat with runtime (powerbox) grants?
-2. Contract for `publish_call` taken from the manifest declaration only (proposed) vs also stated in code?
-3. Dual-target crates: should one crate be buildable as both native micro and Wasm guest (needs `export_micro!` to also emit a native `ACTIVATE`)? And `arguments`: add native equivalent, or drop from the author API?
-4. Typed vs raw call handlers: CBOR serde generic as the default, or require Lexicon-typed (daybook_types) request/response?
-5. `Context` as one struct with cfg'd inner (proposed) vs a `Backend` trait that micros are generic over (rejected: reintroduces `Context<B>`); OK?
-6. Collection read handle exposes `async changed()` instead of tokio `watch`; OK to lose `revisions()`?
-7. Guest hot paths: per-row mirror in the guest costs CBOR decode per `rows()` call; accept, or cache decoded rows per revision?
-8. Is `RendererRegistry` kept as a `clay_host` seam with an `Element`-erased `Resources`, or collapse it to a plain `ComponentPublisher` trait now (breaking `clay_dioxus`)?
-9. Public module naming: `clay_mdk::host` for composition-only items, replacing `native::`/`wasm::`/`wcmp::` - fine?
+1. Sync accessors drop `Result`: undeclared binding panics, unresolved optional is `None`. Runtime-granted (powerbox) bindings arrive later through a separate async request API.
+2. A call's contract comes from the manifest declaration only.
+3. Isomorphic MDK is in scope (ledger F6): `export_micro!(activate)` emits the guest exports under the guest backend and a native `ACTIVATE` entry under `in_process`. `arguments` leaves the author API.
+4. Call handlers are serde CBOR generic; Lexicon typing waits for big_plugs. `publish_call_raw` only if a real caller needs it.
+5. One `Context` struct with a cfg'd inner.
+6. `async changed()` replaces the tokio `watch` in the public API.
+7. Decoded rows are cached per revision, not decoded on every `rows()`/render.
+8. `RendererRegistry` stays a `clay_host` seam behind an `Element`-erased `Resources`; no `clay_dioxus` break now.
+9. Composition-only items live in `clay_mdk::host`.
