@@ -9,9 +9,11 @@ path = "lib.rs"
 
 [dependencies]
 clay_store.workspace = true
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 proptest.workspace = true
+serde_json.workspace = true
 sqlite_rs.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

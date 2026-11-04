@@ -18,6 +18,7 @@
 
 mod ledger;
 mod mirror;
+mod nsid;
 mod projection;
 mod registration;
 mod replica;
@@ -32,6 +33,8 @@ pub use ledger::Overlay;
 pub use ledger::OverlayWait;
 pub use mirror::Mirror;
 pub use mirror::ReadTicket;
+pub use nsid::InvalidNsid;
+pub use nsid::Nsid;
 pub use projection::PendingNotifications;
 pub use projection::Projection;
 pub use projection::ProjectionLease;
