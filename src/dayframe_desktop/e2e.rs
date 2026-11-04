@@ -196,6 +196,7 @@ const SETTINGS: &str = "section[aria-label=\"Settings\"]";
 const SAMPLE: &str = "button[aria-label=\"Open Sample micro settings\"]";
 const COUNTER: &str = "button[aria-label=\"Open Counter (Wasm) settings\"]";
 const COUNTER_VALUE: &str = "button[aria-label=\"Increment Wasm counter\"]";
+const TOOLBAR_INCREMENT: &str = "[role=\"toolbar\"] button[aria-label=\"Increment\"]";
 
 struct Shell {
     runtime: CompositionRuntime,
@@ -406,6 +407,48 @@ async fn the_sample_section_edits_its_configuration() {
     ui.wait_until("sample flag toggled", |ui| {
         ui.find("button[aria-label=\"Enable sample configuration flag\"]")
             .is_some()
+    })
+    .await;
+}
+
+// The toolbar's Increment button is a manifest-declared row contributed by the counter package,
+// attached to a lazy endpoint to the guest's `increment` call. It renders, pinned outside
+// Settings, with the Wasm guest stopped; pressing it starts the guest on Wasmtime for the
+// length of the call, and the increment is visible once the counter's section is opened.
+#[tokio::test(flavor = "current_thread")]
+async fn the_toolbar_button_increments_a_stopped_wasm_counter() {
+    let Shell {
+        runtime,
+        mut ui,
+        counter,
+    } = Shell::start().await;
+    // Closing Settings unmounts the counter's section, so nothing holds the guest and it idles;
+    // the pinned toolbar stays on screen.
+    ui.click("button[aria-label=\"Close Settings\"]");
+    ui.wait_until("Settings closed, counter idle", |ui| {
+        ui.find(SETTINGS).is_none() && runtime.state(&counter) == MicroState::Idle
+    })
+    .await;
+    ui.wait_until("the toolbar lists the counter's button", |ui| {
+        ui.find(TOOLBAR_INCREMENT).is_some()
+    })
+    .await;
+    // Rendering the button read its lazy reference without starting the guest.
+    assert_eq!(runtime.state(&counter), MicroState::Idle);
+
+    ui.click(TOOLBAR_INCREMENT);
+    ui.wait_until("the press ran and the guest idled again", |ui| {
+        ui.attribute(TOOLBAR_INCREMENT, "disabled").is_none()
+            && runtime.state(&counter) == MicroState::Idle
+    })
+    .await;
+
+    ui.click("button[aria-label=\"Open Settings\"]");
+    ui.wait_until("Settings reopened", |ui| ui.find(COUNTER).is_some())
+        .await;
+    ui.click(COUNTER);
+    ui.wait_until("the counter shows the toolbar's increment", |ui| {
+        ui.find(COUNTER_VALUE).is_some() && ui.text(COUNTER_VALUE) == "1"
     })
     .await;
 }

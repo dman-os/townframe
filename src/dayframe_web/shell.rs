@@ -62,7 +62,8 @@ async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpP
 }
 
 /// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
-/// is unusable without it. Sample is eager so its section is written at boot. Collection access
+/// is unusable without it. Toolbar is on-demand: its pinned root row starts it when the shell
+/// mounts it. Sample is eager so its section is written at boot. Collection access
 /// is resolved by the composition from each manifest's requests and configuration, not
 /// hand-written here.
 fn native_micros() -> Vec<InstalledMicro> {
@@ -80,6 +81,22 @@ fn native_micros() -> Vec<InstalledMicro> {
                         micro_settings_manifest::manifest(),
                         bindings,
                         micro_settings::activate,
+                    )
+                },
+            )
+        },
+        InstalledMicro {
+            enabled_on_admission: true,
+            ..InstalledMicro::new(
+                clay_mdk::MicroId::local(micro_toolbar_manifest::ID),
+                micro_toolbar_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_toolbar_manifest::manifest(),
+                        bindings,
+                        micro_toolbar::activate,
                     )
                 },
             )
