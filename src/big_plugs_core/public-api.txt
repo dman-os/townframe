@@ -61,7 +61,7 @@ pub struct big_plugs_core::Dependency  { id: PlugId, version: VersionReq, extra:
 pub struct big_plugs_core::InvalidPlugId  { 0: String }
 pub struct big_plugs_core::MicroContribution  { schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
 pub struct big_plugs_core::NoduleContribution  { schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
-pub struct big_plugs_core::Plug  { id: PlugId, version: Version, title: Option < String >, description: Option < String >, dependencies: Vec < Dependency >, artifacts: Vec < Artifact >, contributions: Vec < Contribution >, signature: Option < signature :: PlugSignature >, extra: Extra }
+pub struct big_plugs_core::Plug  { id: PlugId, version: Version, authority: Option < String >, title: Option < String >, description: Option < String >, dependencies: Vec < Dependency >, artifacts: Vec < Artifact >, contributions: Vec < Contribution >, signature: Option < signature :: PlugSignature >, extra: Extra }
 pub struct big_plugs_core::PlugId  { namespace: String, name: String }
 pub struct big_plugs_core::Version  { 0: semver :: Version }
 pub struct big_plugs_core::VersionReq  { 0: semver :: VersionReq }

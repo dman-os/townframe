@@ -173,6 +173,34 @@ fn versions_and_requirements_reject_nonsense() {
 }
 
 #[test]
+fn the_authority_is_an_nsid_prefix_and_part_of_the_revision() {
+    let mut held = plug();
+    for valid in ["org.example", "org.example.photos", "com.atproto"] {
+        held.authority = Some(valid.into());
+        held.validate().unwrap();
+    }
+    for invalid in [
+        "",
+        "org",
+        "org..example",
+        "org.example.",
+        "Org.-example",
+        "org.example/x",
+    ] {
+        held.authority = Some(invalid.into());
+        let error = held.validate().unwrap_err().to_string();
+        assert!(error.contains("`authority`"), "{invalid}: {error}");
+    }
+    // It is signed with the rest of the envelope: the revision sees it.
+    held.authority = Some("org.example.photos".into());
+    let mut other = held.clone();
+    other.authority = Some("org.example.albums".into());
+    assert_ne!(held.revision(), other.revision());
+    let round: Plug = serde_json::from_value(serde_json::to_value(&held).unwrap()).unwrap();
+    assert_eq!(round, held);
+}
+
+#[test]
 fn the_revision_is_the_content_hash_and_sees_unknown_members() {
     let plug = plug();
     let revision = plug.revision();

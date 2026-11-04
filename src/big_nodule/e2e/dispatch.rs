@@ -126,6 +126,7 @@ pub(super) fn serving_plug_of(
     });
     nodule.implements = vec![serves.to_owned()];
     let mut plug = Plug::new(plug_id.parse().unwrap(), version.parse().unwrap());
+    plug.authority = Some(nodule_id);
     plug.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest::of(handler_bytes.as_bytes()),

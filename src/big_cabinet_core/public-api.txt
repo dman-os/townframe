@@ -318,6 +318,7 @@ pub use big_cabinet_core::datum::grammar :: parse_ref
 pub use big_cabinet_core::datum::input :: LexiconAdmissionError
 pub use big_cabinet_core::datum::member :: DatumMember
 pub use big_cabinet_core::datum::member :: is_nsid
+pub use big_cabinet_core::datum::member :: is_nsid_authority
 pub use big_cabinet_core::datum::member :: str_eq
 pub use big_cabinet_core::datum::shape :: DatumShape
 pub use big_cabinet_core::datum::shape :: Openness

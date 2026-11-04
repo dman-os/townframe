@@ -38,6 +38,7 @@ pub use grammar::GrammarError;
 pub use grammar::parse_ref;
 pub use member::DatumMember;
 pub use member::is_nsid;
+pub use member::is_nsid_authority;
 pub use member::str_eq;
 pub use shape::DatumShape;
 pub use shape::Openness;

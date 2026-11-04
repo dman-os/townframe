@@ -154,11 +154,14 @@ pub enum InventoryError {
          reference and fetch its bytes"
     )]
     ArtifactSizeRequired { id: PlugId, artifact: String },
-    #[error("plug `{id}` declares `{nsid}`, which `{existing_plug}` already holds on this node")]
+    #[error(
+        "plug `{id}` holds authority `{authority}`, which overlaps `{existing_authority}` held by `{existing_plug}`"
+    )]
     AuthorityConflict {
         id: PlugId,
-        nsid: String,
+        authority: String,
         existing_plug: Box<PlugId>,
+        existing_authority: String,
     },
     #[error("nodule for plug `{0}` is not installed")]
     UnknownPlug(PlugId),
@@ -197,7 +200,7 @@ pub(crate) fn admit_plug_nodule(plug: &Plug) -> Result<AdmittedContribution> {
             id: plug.id.clone(),
             reason: err.to_string(),
         })?;
-    let admitted = nodule.admit()?;
+    let admitted = nodule.admit(plug.authority.as_deref())?;
     let mut artifacts = BTreeMap::new();
     for key in &admitted.artifacts {
         let Some(artifact) = plug.artifact(key) else {

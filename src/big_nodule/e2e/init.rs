@@ -210,6 +210,7 @@ fn init_plug(
         big_plugs_core::test_support::plug_id(name),
         version.parse().unwrap(),
     );
+    plug.authority = Some(format!("org.example.{name}"));
     plug.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest::of(bytes.as_bytes()),

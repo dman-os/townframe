@@ -44,6 +44,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -710,12 +711,14 @@ impl NoduleConfig {
                     admitted: other_admitted,
                     ..
                 } = &*cache.admission(other_plug, other_install)
-                && let Some(nsid) = admitted.holds.intersection(&other_admitted.holds).next()
+                && let (Some(mine), Some(theirs)) = (&admitted.authority, &other_admitted.authority)
+                && (Nodule::authority_owns(mine, theirs) || Nodule::authority_owns(theirs, mine))
             {
                 return Err(InventoryError::AuthorityConflict {
                     id: plug.id.clone(),
-                    nsid: nsid.clone(),
+                    authority: mine.clone(),
                     existing_plug: Box::new(other_plug.clone()),
+                    existing_authority: theirs.clone(),
                 });
             }
         }
@@ -946,14 +949,17 @@ impl NoduleConfig {
                 results.insert(plug_id.clone(), resolution);
             }
         }
-        // A held NSID has one holder on a node. Both holders of a clash are refused, each
-        // naming the smallest other holder and the first NSID they share so the reason is stable.
-        let mut holders: BTreeMap<&str, Vec<&PlugId>> = BTreeMap::new();
+        // A plug conflicts with another when one authority equals or dot-prefixes the other.
+        // Looking each authority up by itself, by each of its dotted prefixes and by the key range
+        // of its descendants is O(n * depth) rather than comparing every pair. The smallest
+        // conflicting `PlugId` is reported so the reason is stable. Every NSID a nodule holds is
+        // under its authority, so this subsumes overlap between held NSIDs.
+        let mut authorities: BTreeMap<&str, Vec<&PlugId>> = BTreeMap::new();
         for (plug_id, resolution) in &results {
-            if let NoduleResolution::Admitted { installed, .. } = resolution {
-                for nsid in &installed.admitted.holds {
-                    holders.entry(nsid).or_default().push(plug_id);
-                }
+            if let NoduleResolution::Admitted { installed, .. } = resolution
+                && let Some(authority) = &installed.admitted.authority
+            {
+                authorities.entry(authority).or_default().push(plug_id);
             }
         }
         let conflicts: BTreeMap<PlugId, String> = results
@@ -962,17 +968,29 @@ impl NoduleConfig {
                 let NoduleResolution::Admitted { installed, .. } = resolution else {
                     return None;
                 };
-                installed.admitted.holds.iter().find_map(|nsid| {
-                    let other = holders[nsid.as_str()]
-                        .iter()
-                        .find(|holder| **holder != plug_id)?;
-                    let error = InventoryError::AuthorityConflict {
-                        id: plug_id.clone(),
-                        nsid: nsid.clone(),
-                        existing_plug: Box::new((*other).clone()),
-                    };
-                    Some((plug_id.clone(), error.to_string()))
-                })
+                let id = installed.admitted.authority.as_deref()?;
+                let ancestors = id
+                    .match_indices('.')
+                    .filter_map(|(dot, _)| authorities.get_key_value(&id[..dot]));
+                let same_or_descendants = authorities
+                    .range::<str, _>((Bound::Included(id), Bound::Unbounded))
+                    .take_while(|(other, _)| Nodule::authority_owns(id, other));
+                let (other_plug, other_authority) = ancestors
+                    .chain(same_or_descendants)
+                    .flat_map(|(other, holders)| {
+                        holders
+                            .iter()
+                            .filter(|holder| **holder != plug_id)
+                            .map(move |holder| (*holder, *other))
+                    })
+                    .min_by_key(|(holder, _)| *holder)?;
+                let error = InventoryError::AuthorityConflict {
+                    id: plug_id.clone(),
+                    authority: id.to_owned(),
+                    existing_plug: Box::new(other_plug.clone()),
+                    existing_authority: other_authority.to_owned(),
+                };
+                Some((plug_id.clone(), error.to_string()))
             })
             .collect();
 

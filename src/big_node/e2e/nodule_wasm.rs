@@ -131,6 +131,7 @@ fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
     });
     nodule.implements = operations.into();
     let mut plug = Plug::new(spec.plug.clone(), "1.0.0".parse().unwrap());
+    plug.authority = Some(spec.authority.to_owned());
     plug.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest::of(bytes),

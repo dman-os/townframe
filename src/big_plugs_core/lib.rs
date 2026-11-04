@@ -16,6 +16,7 @@ use big_cabinet_core::datum::DatumShape;
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::datum::Shape;
 use big_cabinet_core::datum::is_nsid;
+use big_cabinet_core::datum::is_nsid_authority;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
@@ -45,6 +46,15 @@ pub struct Plug {
     /// contract identity: a contract that changes meaning takes a new NSID (ADR 027 §6).
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub version: Version,
+    /// The NSID authority prefix this plug holds, for example `org.example.photos`: the schema
+    /// namespace its contributions declare under (ADR 028 §5). It is the plug's, not any one
+    /// runtime's, so every kind of contribution reads the same field. Identity stays `id`: this
+    /// says which NSIDs the package is the authority over, and a node refuses two enabled plugs
+    /// holding the same or nested prefixes. Absent for a plug that declares no schemas of its own;
+    /// a runtime refuses a contribution that declares under a prefix the envelope does not hold.
+    /// Part of the signed revision like every other member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +78,7 @@ impl Plug {
         Self {
             id,
             version,
+            authority: None,
             title: None,
             description: None,
             dependencies: Vec::new(),
@@ -96,6 +107,14 @@ impl Plug {
     /// The distribution checks the catalog owns. Contribution payloads are not read: a nodule or
     /// micro description is checked by the runtime that admits it.
     pub fn validate(&self) -> Result<(), PlugError> {
+        if let Some(authority) = &self.authority
+            && !is_nsid_authority(authority)
+        {
+            return Err(PlugError::invalid(
+                "authority",
+                format!("`{authority}` is not an NSID authority (two or more reverse-DNS labels)"),
+            ));
+        }
         let mut dependencies = BTreeSet::new();
         for (index, dependency) in self.dependencies.iter().enumerate() {
             let path = format!("dependencies[{index}]");

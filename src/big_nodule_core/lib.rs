@@ -18,8 +18,10 @@
 //! requests), checks that what it serves is declared, and refuses what this build could not
 //! serve. It reads no binding.
 //!
-//! The nodule has no identity of its own: the envelope's `PlugId` is authoritative. Which NSIDs a
-//! nodule holds is therefore read from what it declares (see [`Nodule::holds`]).
+//! The nodule has no identity or authority of its own: the envelope's `PlugId` names the package
+//! and the envelope's `authority` is the NSID prefix it holds. [`Nodule::admit`] takes that
+//! prefix: a Lexicon file under it is the nodule's own, and one outside it is a vendored copy that
+//! must be the contract of a request or an operation the nodule implements.
 
 use crate::dispatch::DispatchScope;
 use big_cabinet_core::datum::Extra;
@@ -47,9 +49,9 @@ pub mod protocol;
 pub const AUTHORITY: &str = "org.example.daybook";
 
 /// `org.example.daybook.nodule/main`: what a package contributes to a node. It carries no
-/// identity: the envelope's `PlugId` names the package. An NSID in the description is *held* when
-/// a Lexicon file here declares it and no request names it (a vendored copy of a requested
-/// contract is foreign); every other NSID it uses must be implemented or requested.
+/// identity or authority: the envelope's `PlugId` names the package and its `authority` is the NSID
+/// prefix the package holds. An NSID in the description is *held* when it is under that prefix and
+/// declared in `lexicons`; every other NSID it uses must be implemented or requested.
 #[macros::datum(authority = AUTHORITY)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -62,8 +64,8 @@ pub struct Nodule {
     pub lexicons: Vec<IndexMap<String, Value>>,
     /// What the nodule uses that it does not hold, in the shared request shape: foreign
     /// operations it calls (a request without `access`), datum contracts it reads or writes.
-    /// Strictness: any NSID the description references that it neither declares nor implements
-    /// must be a `contract` here, and an initializer may only target a foreign operation listed
+    /// Strictness: any NSID the description references outside the envelope's authority that it
+    /// does not implement must be a `contract` here, and an initializer may only target a foreign operation listed
     /// here. The runtime binds a provider for each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<Request>,
@@ -201,8 +203,8 @@ pub struct Config {
     pub extra: Extra,
 }
 
-/// What admission established about a description: the operations it serves, the NSIDs it holds
-/// and the artifacts the envelope carrying it must ship. An implemented operation's kind is `Some`
+/// What admission established about a description: the operations it serves, the authority it
+/// held and the artifacts the envelope carrying it must ship. An implemented operation's kind is `Some`
 /// when its contract is declared in this nodule's own Lexicons and `None` when it is foreign: a
 /// single description cannot know another nodule's contract, so the kind (and the contract itself) is resolved at
 /// bind time. Keeping one map, rather than a second set of foreign NSIDs, lets every consumer ask
@@ -210,9 +212,9 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admitted {
     pub operations: BTreeMap<String, Option<OperationKind>>,
-    /// The Lexicon NSIDs the nodule holds (see [`Nodule::holds`]): what two nodules on one node
-    /// must not both declare.
-    pub holds: BTreeSet<String>,
+    /// The envelope's NSID authority this admission ran under. Two nodules on one node must not
+    /// hold the same or nested prefixes.
+    pub authority: Option<String>,
     pub artifacts: BTreeSet<String>,
 }
 
@@ -254,19 +256,6 @@ impl Nodule {
     pub fn authority_owns(authority: &str, nsid: &str) -> bool {
         nsid.strip_prefix(authority)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-    }
-
-    /// Whether the nodule holds `nsid`: a Lexicon file here declares it and no request names it
-    /// (a requested contract's file is a vendored copy of another nodule's). With no stated
-    /// authority prefix this is the nodule's own authority: it is read from what is declared.
-    pub fn holds(&self, nsid: &str) -> bool {
-        self.declares(nsid) && !self.requires.iter().any(|request| request.contract == nsid)
-    }
-
-    fn declares(&self, nsid: &str) -> bool {
-        self.lexicons
-            .iter()
-            .any(|file| file.get("id").and_then(Value::as_str) == Some(nsid))
     }
 
     /// The requests that call an operation (no `access`): the ones a dispatch grant can satisfy.
@@ -333,26 +322,25 @@ impl Nodule {
             .filter(|file| operation_kind(file).is_none())
     }
 
-    /// The gate before hosting. Requests are well formed; every NSID the description references
-    /// is held, implemented or requested; the handler serves only operations declared here;
-    /// nothing this build cannot serve is accepted. Bindings are not read.
-    pub fn admit(&self) -> Result<Admitted> {
+    /// The gate before hosting, under the NSID `authority` of the envelope that carries the
+    /// description (`None`: it holds no prefix, so everything it declares is a vendored copy).
+    /// Requests are well formed and name contracts other plugs hold; every Lexicon file and
+    /// reference outside the authority is implemented or requested; the handler serves only
+    /// operations declared here; nothing this build cannot serve is accepted. Bindings are not
+    /// read.
+    pub fn admit(&self, authority: Option<&str>) -> Result<Admitted> {
         Request::validate_all(&self.requires, "requires").map_err(|error| match error {
             PlugError::Invalid { path, reason } => NoduleError::invalid(path, reason),
             other => unreachable!("request validation only reports invalid fields: {other}"),
         })?;
-        let lexicons = self.lexicons()?;
-        let holds: BTreeSet<String> = lexicons
-            .keys()
-            .filter(|id| self.holds(id))
-            .map(|id| (*id).to_owned())
-            .collect();
-        let mut admission = Admission {
+        let admission = Admission {
             nodule: self,
-            lexicons,
-            implemented: BTreeSet::new(),
+            authority,
+            lexicons: self.lexicons()?,
+            implemented: self.implements.iter().map(String::as_str).collect(),
         };
-        admission.implemented = self.implements.iter().map(String::as_str).collect();
+        admission.requests()?;
+        admission.lexicon_files()?;
         admission.lexicon_refs()?;
         admission.private_state()?;
         let (operations, artifacts) = admission.services()?;
@@ -361,7 +349,7 @@ impl Nodule {
         admission.config()?;
         Ok(Admitted {
             operations,
-            holds,
+            authority: authority.map(str::to_owned),
             artifacts,
         })
     }
@@ -444,11 +432,66 @@ impl Nodule {
 /// their own check so a reference may name one.
 struct Admission<'a> {
     nodule: &'a Nodule,
+    /// The envelope's NSID authority.
+    authority: Option<&'a str>,
     lexicons: BTreeMap<&'a str, LexiconFile<'a>>,
     implemented: BTreeSet<&'a str>,
 }
 
 impl<'a> Admission<'a> {
+    /// Whether `nsid` is under the envelope's authority (whole segments, as dispatch matches
+    /// prefixes).
+    fn owns(&self, nsid: &str) -> bool {
+        self.authority
+            .is_some_and(|authority| Nodule::authority_owns(authority, nsid))
+    }
+
+    /// Whether the nodule holds `nsid`: under its authority and declared in its Lexicons.
+    fn holds(&self, nsid: &str) -> bool {
+        self.owns(nsid) && self.lexicons.contains_key(nsid)
+    }
+
+    /// A request names a contract another plug holds: one under this nodule's own authority
+    /// would be a self-edge.
+    fn requests(&self) -> Result<()> {
+        for (index, request) in self.nodule.requires.iter().enumerate() {
+            if self.owns(&request.contract) {
+                return Err(NoduleError::invalid(
+                    format!("requires[{index}].contract"),
+                    format!(
+                        "`{}` is under this plug's authority; requests name contracts other plugs hold",
+                        request.contract
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Strictness for Lexicon files: one outside the authority is a vendored copy of a
+    /// contract, so it must be requested or an operation this nodule implements. (A file under
+    /// the authority is the nodule's own.)
+    fn lexicon_files(&self) -> Result<()> {
+        for (index, file) in self.nodule.lexicons.iter().enumerate() {
+            let id = file
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("lexicons() verified every file states its NSID");
+            if !self.owns(id) && !self.is_requested(id) && !self.implemented.contains(id) {
+                return Err(NoduleError::invalid(
+                    format!("lexicons[{index}].id"),
+                    format!(
+                        "`{id}` is outside this plug's authority{} and is neither requested nor implemented",
+                        self.authority
+                            .map(|authority| format!(" `{authority}`"))
+                            .unwrap_or_default()
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Every `ref` an operation's schemas make, resolved against the file that makes it.
     fn lexicon_refs(&self) -> Result<()> {
         for lexicon in self.lexicons.values() {
@@ -519,8 +562,9 @@ impl<'a> Admission<'a> {
                     ),
                 ));
             }
-            // An operation this description declares is checked here against its Lexicon. One it
-            // has no Lexicon for is admitted on syntax alone: its contract lives in another
+            // An operation under this plug's authority must be declared here as an operation. A
+            // foreign one is checked against its vendored Lexicon when this description carries
+            // one, and admitted on syntax alone otherwise: its contract lives in another
             // nodule's Lexicons, which admission cannot see. Resolving it is a bind-time
             // concern, and dispatch reports this service unavailable until the contract is known
             // (per-service readiness, ledger D4).
@@ -533,6 +577,14 @@ impl<'a> Admission<'a> {
                         ));
                     };
                     Some(kind)
+                }
+                None if self.owns(nsid) => {
+                    return Err(NoduleError::invalid(
+                        path,
+                        format!(
+                            "`{nsid}` is under this plug's authority but is not a declared operation"
+                        ),
+                    ));
                 }
                 None => None,
             };
@@ -605,10 +657,10 @@ impl<'a> Admission<'a> {
         let Some((Some(file), _)) = parse_ref(&config.schema) else {
             unreachable!("resolve_ref verified a non-local Lexicon reference");
         };
-        if !self.nodule.holds(file) {
+        if !self.holds(file) {
             return Err(NoduleError::invalid(
                 "config.schema",
-                format!("`{file}` is not a Lexicon this nodule declares"),
+                format!("`{file}` is not a Lexicon under this plug's authority"),
             ));
         }
         let defs = self.schema_defs();
@@ -654,17 +706,24 @@ impl<'a> Admission<'a> {
                 ));
             }
         };
-        if !self.nodule.holds(file) {
+        if !self.owns(file) {
             return if self.is_requested(file) || self.implemented.contains(file) {
                 Ok(())
             } else {
                 Err(NoduleError::invalid(
                     path,
-                    format!("`{file}` is neither declared, implemented nor requested"),
+                    format!(
+                        "`{file}` is outside this plug's authority and is neither implemented nor requested"
+                    ),
                 ))
             };
         }
-        let lexicon = self.lexicons.get(file).expect("a held Lexicon is declared");
+        let Some(lexicon) = self.lexicons.get(file) else {
+            return Err(NoduleError::invalid(
+                path,
+                format!("`{file}` is under this plug's authority but not declared"),
+            ));
+        };
         let def = def.unwrap_or("main");
         if !lexicon.defs.contains_key(def) {
             return Err(NoduleError::invalid(
@@ -718,7 +777,7 @@ impl<'a> Admission<'a> {
                         request.access.as_deref().unwrap_or_default()
                     ),
                 )),
-                None if self.nodule.declares(nsid) => Err(NoduleError::invalid(
+                None if self.lexicons.contains_key(nsid) => Err(NoduleError::invalid(
                     path,
                     format!("`{nsid}` is declared here but is not implemented"),
                 )),

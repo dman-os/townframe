@@ -132,6 +132,7 @@ fn plug(id: &str, version: &str, settings: bool) -> Plug {
         });
     }
     let mut plug = Plug::new(id.parse().unwrap(), version.parse().unwrap());
+    plug.authority = Some(nodule_id);
     plug.contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: Nodule::ID.into(),
@@ -706,6 +707,51 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     let schema = node.get(operator, example_plug!("schema")).await.unwrap();
     assert!(!schema.enabled);
     assert_eq!(schema.config, None);
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_enabled_plug_holds_its_authority_against_equal_and_nested_prefixes() {
+    let node = node().await;
+    let operator = node.operator();
+    node.admit(operator, plug(example_plug!("photos"), "1.0.0", false))
+        .await
+        .unwrap();
+    node.set_enabled(example_plug!("photos"), true).await;
+
+    // `org.example.photos` holds itself and everything under it, in either direction.
+    for (name, authority) in [
+        ("same", "org.example.photos"),
+        ("nested", "org.example.photos.gallery"),
+        ("parent", "org.example"),
+    ] {
+        // A nodule that declares nothing, so only its authority is in question.
+        let mut rival = Plug::new(
+            big_plugs_core::test_support::plug_id(name),
+            "1.0.0".parse().unwrap(),
+        );
+        rival
+            .contributions
+            .push(Contribution::Nodule(NoduleContribution {
+                schema: Nodule::ID.into(),
+                description: lexicon(serde_json::to_value(Nodule::default()).unwrap()),
+                extra: Default::default(),
+            }));
+        rival.authority = Some(authority.into());
+        let refused = node.admit(operator, rival).await.unwrap_err().to_string();
+        assert!(
+            refused.contains("overlaps `org.example.photos`"),
+            "{name}: {refused}"
+        );
+    }
+
+    // Whole segments only: a sibling that merely shares a string prefix is no conflict.
+    node.admit(
+        operator,
+        plug(example_plug!("photosynthesis"), "1.0.0", false),
+    )
+    .await
+    .unwrap();
     node.shutdown().await;
 }
 
