@@ -20,7 +20,6 @@ mod interlude {
 
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
-use crate::keyhive_storage::KEYHIVE_SUBDIR;
 use sqlite_rs as sqlite_rs_alias;
 use sqlite_rs::Database;
 mod sqlite {
@@ -56,7 +55,9 @@ pub mod ephemeral;
 pub(crate) mod handler;
 mod keyhive;
 pub(crate) mod keyhive_conn;
+pub(crate) mod keyhive_files;
 pub(crate) mod keyhive_listener;
+pub use keyhive_files::KeyhiveFiles;
 pub(crate) mod keyhive_storage;
 pub mod rpc;
 
@@ -211,7 +212,7 @@ pub struct Config {
     /// Single identity seed used to derive both the Keyhive individual and
     /// the Subduction signer.
     pub node_identity_seed: [u8; 32],
-    pub storage: StorageConfig,
+    pub storage: Storage,
     /// Scope key used to isolate this BigRepo instance's data in SQLite storage.
     pub scope_key: Arc<str>,
     pub hidden_parts: HashSet<PartKey>,
@@ -230,10 +231,70 @@ pub struct Config {
     pub keyhive_change_notifs: bool,
 }
 
+/// The storage resources a repo is handed. The repo opens no location itself: the composition
+/// root opens the database and the keyhive archive directory and passes them in, so the root
+/// alone decides where a node lives (ADR 032 section 8).
+#[derive(Clone)]
+pub struct Storage {
+    /// The database holding the repo's partition stores, keyhive event log and secret blobs.
+    /// Several repos may share one database when their [`Config::scope_key`]s differ.
+    pub sql: Database,
+    pub keyhive: KeyhiveStorage,
+}
+
+impl std::fmt::Debug for Storage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Storage")
+            .field("keyhive", &self.keyhive)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Storage {
+    /// A repo that lives and dies with the process: a fresh ephemeral database from `runtime`
+    /// (its temp directory goes when the last handle drops) and in-memory keyhive archives.
+    pub fn memory(runtime: &sqlite_rs::SqliteRuntime) -> Res<Self> {
+        Ok(Self {
+            sql: runtime.ephemeral(&[])?,
+            keyhive: KeyhiveStorage::Memory,
+        })
+    }
+
+    /// The repo's storage rooted at `directory`, for embedders that want "a repo in a directory":
+    /// the database at `big_repo.sqlite` and the keyhive archives under `keyhive/`. This is an
+    /// opener for the composition root to call, not something the repo does at boot.
+    ///
+    /// `secrets` sources the keyhive data-encryption keys from the OS keyring; `None` keeps them
+    /// as 0600 files under the keyhive directory.
+    pub fn in_directory(
+        runtime: &sqlite_rs::SqliteRuntime,
+        directory: &std::path::Path,
+        secrets: Option<Arc<secrets_rs::SecretStore>>,
+    ) -> Res<Self> {
+        std::fs::create_dir_all(directory).wrap_err_with(|| {
+            format!(
+                "failed creating BigRepo data directory: {}",
+                directory.display()
+            )
+        })?;
+        Ok(Self {
+            sql: runtime.database(
+                directory.join("big_repo.sqlite"),
+                &[],
+                "_sqlite_rs_migrations",
+            ),
+            keyhive: KeyhiveStorage::Files(KeyhiveFiles::open(directory.join("keyhive"), secrets)?),
+        })
+    }
+}
+
+/// Where the keyhive archives live. The event log and secret blobs are in [`Storage::sql`].
 #[derive(Debug, Clone)]
-pub enum StorageConfig {
-    Disk { path: PathBuf },
+pub enum KeyhiveStorage {
+    /// Ephemeral by design: all keyhive state including key material is process-local.
     Memory,
+    Files(KeyhiveFiles),
 }
 
 #[derive(educe::Educe)]
@@ -287,10 +348,7 @@ impl BigRepo {
     ///
     /// The [`Config::scope_key`] isolates this instance's data from other
     /// BigRepo instances sharing the same SQLite database.
-    pub async fn boot(
-        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
-        config: Config,
-    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
         #[cfg(test)]
         let keyhive_change_notifs = config.keyhive_change_notifs;
         let Config {
@@ -303,18 +361,8 @@ impl BigRepo {
             group_part_group_scope,
             ..
         } = config;
-        let sql = match &storage {
-            StorageConfig::Memory => sqlite_runtime.ephemeral(&[])?,
-            StorageConfig::Disk { path } => {
-                std::fs::create_dir_all(path).wrap_err_with(|| {
-                    format!("failed creating BigRepo data directory: {}", path.display())
-                })?;
-                let db_path = path.join("big_repo.sqlite");
-                sqlite_runtime.database(db_path, &[], "_sqlite_rs_migrations")
-            }
-        };
         let store = SqliteBigRepoStore::new_with_config(
-            sql,
+            storage.sql.clone(),
             Arc::clone(&scope_key),
             big_sync_core::BuckId::MAX_LEVEL,
             big_sync::HostPartStoreConfig {
@@ -445,13 +493,10 @@ impl BigRepo {
         // identity to the Keyhive individual identifier, so BigRepo derives
         // both identities from this one seed.
         let sync_policy = runtime2::types::BigRepoSyncPolicy::default();
-        let keyhive_storage = match &storage {
-            StorageConfig::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
-            StorageConfig::Disk { path } => {
-                let keyhive_root = path.join(KEYHIVE_SUBDIR);
-                // Key material goes through the OS keyring where available;
-                // fsync'd files remain the fallback of record.
-                BigRepoKeyhiveStorage::fs_with_secret_store(keyhive_events.clone(), keyhive_root)
+        let keyhive_storage = match storage.keyhive {
+            KeyhiveStorage::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
+            KeyhiveStorage::Files(files) => {
+                BigRepoKeyhiveStorage::files(keyhive_events.clone(), files)
                     .await
                     .wrap_err("failed booting keyhive storage")?
             }

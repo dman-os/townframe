@@ -51,16 +51,30 @@ use sqlite_rs::SqliteRuntime;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::Arc;
 use utils_rs::prelude::Res;
 
-pub struct Config<'a> {
+/// What a node is configured with. Every storage resource in it is a binding the composition
+/// root already opened (ADR 032 section 8): no service opens a path, so the node's place on disk,
+/// in memory or in a shared pool is decided by whoever builds this value.
+///
+/// Two nodes may be handed the same `SqliteRuntime` (it is a pool of workers) and the same
+/// `repo.storage.sql` database when their `repo.scope_key`s differ. `sql` is not scoped, so each
+/// node needs a database of its own for it.
+pub struct Config {
+    /// The repo's tuning and its bindings, [`big_repo::Config::storage`].
     pub repo: big_repo::Config,
+    /// The node's own database: authority, blobs, cabinet, indexes, plugs and nodules. One per
+    /// node.
     pub sql: Database,
-    pub sqlite_runtime: Arc<SqliteRuntime>,
     pub schemas: Arc<SchemaRepo>,
-    pub secrets: &'a SecretStore,
+    /// The node's secret store: one per node. The authority keeps its wrapping key under a
+    /// fixed name in it, so nodes sharing one store would seal their actor keys under the same
+    /// key, and nodes booting at once could each create a different one.
+    pub secrets: Arc<SecretStore>,
     pub index_concurrency: NonZeroUsize,
+    /// The blob store, opened by the composition root.
     pub blob_storage: big_blobs::Storage,
     /// The operator's grant of dispatch to the nodule service: the ceiling of what any nodule
     /// can be granted to invoke. A nodule's own operation grants are minted from it, so a grant
@@ -68,6 +82,48 @@ pub struct Config<'a> {
     pub nodule_operations: DispatchScope,
     /// The attachments that serve the node's router. Empty is a complete node.
     pub listeners: Listeners,
+}
+
+/// The storage bindings of "a node in a directory", for embedders that want exactly that. It is
+/// the one place `big_node` opens locations, and it does so as a composition root would, handing
+/// the results to the services through [`Config`]:
+///
+/// ```text
+/// Config {
+///     repo: big_repo::Config { storage: bindings.repo, .. },
+///     sql: bindings.sql,
+///     blob_storage: bindings.blobs,
+///     ..
+/// }
+/// ```
+pub struct Bindings {
+    pub sql: Database,
+    pub repo: big_repo::Storage,
+    pub blobs: big_blobs::Storage,
+}
+
+impl Bindings {
+    /// Opens the node's databases, keyhive archives and blob store under `directory`:
+    /// `node.sqlite`, `repo/` (`big_repo.sqlite` and `keyhive/`) and `blobs/`.
+    ///
+    /// `keyhive_secrets` sources the keyhive data-encryption keys from the OS keyring; `None`
+    /// keeps them as files under `repo/keyhive`.
+    pub async fn in_directory(
+        runtime: &SqliteRuntime,
+        directory: &Path,
+        keyhive_secrets: Option<Arc<SecretStore>>,
+    ) -> Res<Self> {
+        std::fs::create_dir_all(directory)?;
+        Ok(Self {
+            sql: runtime.database(directory.join("node.sqlite"), &[], "_sqlite_rs_migrations"),
+            repo: big_repo::Storage::in_directory(
+                runtime,
+                &directory.join("repo"),
+                keyhive_secrets,
+            )?,
+            blobs: big_blobs::Storage::filesystem(directory.join("blobs")).await?,
+        })
+    }
 }
 
 pub struct BigNode {
@@ -99,7 +155,7 @@ pub struct BigNode {
 }
 
 impl BigNode {
-    pub async fn boot(config: Config<'_>) -> Res<(Self, StopToken)> {
+    pub async fn boot(config: Config) -> Res<(Self, StopToken)> {
         let mut stop = StopToken::default();
         // Boxed: booting every service inline makes this future large enough (in debug builds)
         // that a caller awaiting it, such as a test that reboots a node, overflows its stack.
@@ -110,7 +166,7 @@ impl BigNode {
                 big_plugs::schema_group(),
             ])?);
             let (authority, authority_stop) =
-                big_cabinet::authority::boot(config.secrets, config.sql.clone()).await?;
+                big_cabinet::authority::boot(&config.secrets, config.sql.clone()).await?;
             stop.stages.push(Stage::Service(authority_stop));
             let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;
             let (drawers_actor, drawers_namespace) = open_actor(&authority, "drawers").await?;
@@ -119,7 +175,7 @@ impl BigNode {
             let (dispatch_actor, dispatch_namespace) = open_actor(&authority, "dispatch").await?;
             let (blobs_actor, blobs_namespace) = open_actor(&authority, "blobs").await?;
 
-            let (repo, repo_stop) = BigRepo::boot(config.sqlite_runtime, config.repo).await?;
+            let (repo, repo_stop) = BigRepo::boot(config.repo).await?;
             stop.stages.push(Stage::Repo(repo_stop));
             let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
                 storage: config.blob_storage,

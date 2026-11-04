@@ -254,7 +254,7 @@ impl Harness {
         )
         .await?;
         let (blobs, stop) = crate::boot(crate::Config {
-            storage: crate::Storage::Memory,
+            storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
             authority: Client::direct(Arc::new(UnusedAuthority)),
             namespace: Namespace {

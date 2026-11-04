@@ -27,7 +27,7 @@ async fn reopen(
 ) -> Res<(Blobs, StopToken, Database)> {
     let sql = runtime.database(directory.join("local.sqlite"), &[], "test_migrations");
     let (blobs, stop) = boot(Config {
-        storage: Storage::Filesystem(directory.join("store")),
+        storage: Storage::filesystem(directory.join("store")).await?,
         sql: sql.clone(),
         authority: Client::direct(Arc::new(UnusedAuthority)),
         namespace: Namespace {
@@ -62,8 +62,8 @@ async fn shutdown_recovers_pending_effects_after_service_handles_drop() -> Res<(
     let directory = tempfile::tempdir()?;
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     for storage in [
-        Storage::Memory,
-        Storage::Filesystem(directory.path().join("store")),
+        Storage::memory().unwrap(),
+        Storage::filesystem(directory.path().join("store")).await?,
     ] {
         let sql = runtime.ephemeral(&[])?;
         let (blobs, stop) = boot(Config {
@@ -129,7 +129,7 @@ async fn shutdown_drains_cancelled_publication_before_closing_store() -> Res<()>
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[])?;
     let (blobs, stop) = boot(Config {
-        storage: Storage::Memory,
+        storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::direct(Arc::new(UnusedAuthority)),
         namespace: Namespace {
@@ -190,7 +190,7 @@ async fn complete_virtual_outboard_is_unavailable_after_final_owner_release() ->
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[])?;
     let (blobs, stop) = boot(Config {
-        storage: Storage::Memory,
+        storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::direct(Arc::new(UnusedAuthority)),
         namespace: Namespace {

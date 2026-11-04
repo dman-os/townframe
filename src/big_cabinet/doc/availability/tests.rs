@@ -4,7 +4,7 @@ use big_cabinet_core::authority::RetractCapability;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use secrets_rs::SecretStore;
 
 struct ScopeAccess {
@@ -102,18 +102,15 @@ impl Node {
             .open_namespace(Uuid7::new())
             .await
             .unwrap();
-        let (big_repo, repo_stop) = BigRepo::boot(
-            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-            Config {
-                node_identity_seed: [73; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "availability-tests".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (big_repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [73; 32],
+            storage: Storage::memory(&sqlite_rs::SqliteRuntime::new(Default::default())).unwrap(),
+            scope_key: "availability-tests".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await
         .unwrap();
         let access = Arc::new(ScopeAccess {

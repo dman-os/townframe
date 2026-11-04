@@ -3,9 +3,11 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":[]}
 # exposed_external_crates: []
 
-pub impl big_node::BigNode::async fn boot (config : Config < '_ >) -> Res < (Self , StopToken) >
+pub impl big_node::BigNode::async fn boot (config : Config) -> Res < (Self , StopToken) >
+pub impl big_node::Bindings::async fn in_directory (runtime : & SqliteRuntime , directory : & Path , keyhive_secrets : Option < Arc < SecretStore > > ,) -> Res < Self >
 pub impl big_node::StopToken::async fn stop (mut self) -> Res < () >
 pub struct big_node::BigNode  { repo: SharedBigRepo, authority: Authority, docs_actor: Actor, docs_namespace: Namespace, drawers_actor: Actor, drawers_namespace: Namespace, blobs_actor: Actor, blobs_namespace: Namespace, blobs: big_blobs :: Blobs, blob_workers: big_blobs :: workers :: BlobWorkers, nodules_actor: Actor, plugs_actor: Actor, dispatch_actor: Actor, indexes: Arc < Indexes >, drawer_access: Arc < DrawerAccess >, docs: DocsRepo, drawers: Drawers, dispatch: Dispatch, wasm: Arc < WasmExecutor >, nodules: Nodules, plugs: Plugs, registry_drawer: DrawerId, listeners: Listeners }
-pub struct big_node::Config< 'a >  { repo: big_repo :: Config, sql: Database, sqlite_runtime: Arc < SqliteRuntime >, schemas: Arc < SchemaRepo >, secrets: & 'a SecretStore, index_concurrency: NonZeroUsize, blob_storage: big_blobs :: Storage, nodule_operations: DispatchScope, listeners: Listeners }
+pub struct big_node::Bindings  { sql: Database, repo: big_repo :: Storage, blobs: big_blobs :: Storage }
+pub struct big_node::Config  { repo: big_repo :: Config, sql: Database, schemas: Arc < SchemaRepo >, secrets: Arc < SecretStore >, index_concurrency: NonZeroUsize, blob_storage: big_blobs :: Storage, nodule_operations: DispatchScope, listeners: Listeners }
 pub struct big_node::StopToken  {  }
 pub use big_node::listeners :: Listeners

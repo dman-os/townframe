@@ -6,11 +6,11 @@
 //! surfaces as an `Err`, exposing runtime2 ordering bugs.
 
 use super::harness::Pair;
+use super::harness::StorageConfig;
 use super::harness::fixtures;
 use super::harness::heads;
 use crate::BigRepoChangeFilter;
 use crate::BigRepoDocIdFilter;
-use crate::StorageConfig;
 use automerge::ReadDoc;
 use automerge::ScalarValue;
 use automerge::transaction::Transactable;

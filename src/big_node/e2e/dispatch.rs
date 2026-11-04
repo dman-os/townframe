@@ -79,9 +79,13 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
     let secrets = secrets().await;
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    let (node, stop) = BigNode::boot(config(&secrets, &runtime, sql, StorageConfig::Memory))
-        .await
-        .unwrap();
+    let (node, stop) = BigNode::boot(config(
+        Arc::clone(&secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap();
     let router = &node.dispatch.router;
     for (provider_id, expected) in [
         ("builtin:docs", CreateDoc::XRPC.nsid),

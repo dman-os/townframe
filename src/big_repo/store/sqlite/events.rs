@@ -18,6 +18,32 @@ pub(crate) const KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR: (&str, &str) =
     ("big_repo.prekey_janitor", "admission");
 
 impl SqliteBigRepoStore {
+    /// The walker-state namespace of an admission consumer in this store's scope.
+    ///
+    /// Walker progress and retention-reader ids are keyed by namespace and consumer alone, with no
+    /// scope column, so the scope key has to be part of the namespace: two repos sharing a
+    /// database would otherwise share one cursor per consumer, and one repo would see the other's
+    /// admissions as "already replayed".
+    pub(crate) fn admission_consumer_namespace(&self, namespace: &str) -> String {
+        format!("{namespace}@{}", self.core.scope_key)
+    }
+
+    /// The durable walker state of the admission consumer `(namespace, consumer_id)` (one of the
+    /// `KEYHIVE_ADMISSION_CONSUMER_*` identities) in this store's scope.
+    pub(crate) async fn admission_consumer_state(
+        &self,
+        (namespace, consumer_id): (&'static str, &'static str),
+    ) -> Res<big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo> {
+        Ok(
+            big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo::new(
+                self.sql.clone(),
+                self.admission_consumer_namespace(namespace),
+                consumer_id,
+            )
+            .await?,
+        )
+    }
+
     /// All part IDs currently present in this store's scope.
     ///
     /// Used by the `All` worker-scope path to watch every part without
@@ -256,7 +282,7 @@ impl SqliteBigRepoStore {
         ] {
             self.register_keyhive_admission_reader(
                 &big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo::retention_reader_id_of(
-                    namespace,
+                    &self.admission_consumer_namespace(namespace),
                     consumer_id,
                 ),
             )

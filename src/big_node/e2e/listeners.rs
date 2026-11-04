@@ -25,11 +25,18 @@ use std::path::PathBuf;
 const MAX_RESPONSE: usize = 1 << 20;
 
 /// A node with the echo nodule enabled, listening as `listeners` says.
-async fn boot_listening(secrets: &SecretStore, listeners: Listeners) -> (BigNode, StopToken, Spec) {
+async fn boot_listening(
+    secrets: &Arc<SecretStore>,
+    listeners: Listeners,
+) -> (BigNode, StopToken, Spec) {
     let bytes = guest_bytes();
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    let mut config = config(secrets, &runtime, sql, StorageConfig::Memory);
+    let mut config = config(
+        Arc::clone(secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    );
     config.listeners = listeners;
     let (node, stop) = BigNode::boot(config).await.unwrap();
     let spec = caller();
@@ -39,14 +46,14 @@ async fn boot_listening(secrets: &SecretStore, listeners: Listeners) -> (BigNode
     (node, stop, spec)
 }
 
-fn unix(path: &Path) -> Listeners {
+pub(super) fn unix(path: &Path) -> Listeners {
     Listeners {
         unix_socket: Some(path.to_owned()),
         ..Default::default()
     }
 }
 
-fn owner_only_directory(path: &Path) -> PathBuf {
+pub(super) fn owner_only_directory(path: &Path) -> PathBuf {
     std::fs::create_dir(path).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     path.to_owned()
@@ -263,7 +270,11 @@ async fn a_stale_socket_is_replaced_but_a_live_socket_or_a_foreign_file_is_not()
     // A second node on the same path must not take the live socket over.
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    let mut second = config(&secrets, &runtime, sql, StorageConfig::Memory);
+    let mut second = config(
+        Arc::clone(&secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    );
     second.listeners = unix(&socket);
     let Err(error) = BigNode::boot(second).await else {
         panic!("a live socket must not be replaced");
@@ -280,7 +291,11 @@ async fn a_stale_socket_is_replaced_but_a_live_socket_or_a_foreign_file_is_not()
     std::fs::write(&file, b"not a socket").unwrap();
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    let mut config = config(&secrets, &runtime, sql, StorageConfig::Memory);
+    let mut config = config(
+        Arc::clone(&secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    );
     config.listeners = unix(&file);
     let Err(error) = BigNode::boot(config).await else {
         panic!("a regular file must not be replaced");
@@ -301,7 +316,11 @@ async fn a_socket_directory_other_users_can_enter_is_refused() {
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    let mut config = config(&secrets, &runtime, sql, StorageConfig::Memory);
+    let mut config = config(
+        Arc::clone(&secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    );
     config.listeners = unix(&parent.join("node.sock"));
     let Err(error) = BigNode::boot(config).await else {
         panic!("an open directory must be refused");

@@ -18,4 +18,5 @@ pub(crate) mod topo;
 
 pub(crate) use topo::Node;
 pub(crate) use topo::Pair;
+pub(crate) use topo::StorageConfig;
 pub(crate) use topo::Topo;

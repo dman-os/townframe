@@ -2324,20 +2324,19 @@ async fn init_told_sync_node(
         let identity = crate::secrets::load_identity(&secret_store, &checkout_id.clone())
             .await?
             .ok_or_else(|| eyre::eyre!("told node identity missing from the secret store"))?;
-        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
-            Arc::clone(&sqlite_runtime),
-            big_repo::Config {
-                node_identity_seed: identity.iroh_secret_key.to_bytes(),
-                storage: big_repo::StorageConfig::Disk {
-                    path: layout.big_repo_root.clone(),
-                },
-                scope_key: Arc::from("daybook-core"),
-                hidden_parts: default(),
-                automerge_frontier_group_scope: default(),
-                causal_checkpoint_group_scope: default(),
-                group_part_group_scope: default(),
-            },
-        )
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: identity.iroh_secret_key.to_bytes(),
+            storage: big_repo::Storage::in_directory(
+                &sqlite_runtime,
+                &layout.big_repo_root,
+                Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+            )?,
+            scope_key: Arc::from("daybook-core"),
+            hidden_parts: default(),
+            automerge_frontier_group_scope: default(),
+            causal_checkpoint_group_scope: default(),
+            group_part_group_scope: default(),
+        })
         .await?;
         let parts = crate::repo::RepoCtxParts {
             layout: layout.clone(),

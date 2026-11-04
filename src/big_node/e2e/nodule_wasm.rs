@@ -247,12 +247,16 @@ pub(super) async fn invoke(
         })
 }
 
-pub(super) async fn boot_node(secrets: &SecretStore) -> (BigNode, StopToken) {
+pub(super) async fn boot_node(secrets: &Arc<SecretStore>) -> (BigNode, StopToken) {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    BigNode::boot(config(secrets, &runtime, sql, StorageConfig::Memory))
-        .await
-        .unwrap()
+    BigNode::boot(config(
+        Arc::clone(secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

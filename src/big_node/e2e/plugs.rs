@@ -211,14 +211,13 @@ async fn retained(sql: &Database, document: &DocId) -> BTreeSet<String> {
     .collect()
 }
 
-async fn boot_memory(secrets: &SecretStore) -> (BigNode, StopToken, Database) {
+async fn boot_memory(secrets: &Arc<SecretStore>) -> (BigNode, StopToken, Database) {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
     let (node, stop) = BigNode::boot(config(
-        secrets,
-        &runtime,
+        Arc::clone(secrets),
         sql.clone(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     ))
     .await
     .unwrap();
@@ -548,17 +547,17 @@ async fn the_registry_is_rebuilt_from_its_drawer_after_a_restart() {
     let directory = tempfile::tempdir().unwrap();
     let secrets = secrets().await;
     let sql_path = directory.path().join("cabinet.sqlite");
-    let boot = |runtime: Arc<SqliteRuntime>| {
+    let boot = async |runtime: Arc<SqliteRuntime>| {
         let mut config = config(
-            &secrets,
-            &runtime,
+            Arc::clone(&secrets),
             runtime.database(&sql_path, &[], "_sqlite_rs_migrations"),
-            StorageConfig::Disk {
-                path: directory.path().join("repo"),
-            },
+            big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None)
+                .unwrap(),
         );
-        config.blob_storage = big_blobs::Storage::Filesystem(directory.path().join("blobs"));
-        async move { BigNode::boot(config).await.unwrap() }
+        config.blob_storage = big_blobs::Storage::filesystem(directory.path().join("blobs"))
+            .await
+            .unwrap();
+        BigNode::boot(config).await.unwrap()
     };
     let (node, stop) = boot(Arc::new(SqliteRuntime::new(Default::default()))).await;
     let operator = operator(&node);

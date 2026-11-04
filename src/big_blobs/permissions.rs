@@ -148,18 +148,15 @@ mod tests {
         let mut nodes = Vec::new();
         for seed in [81, 82] {
             nodes.push(
-                big_repo::BigRepo::boot(
-                    Arc::clone(&runtime),
-                    big_repo::Config {
-                        node_identity_seed: [seed; 32],
-                        storage: big_repo::StorageConfig::Memory,
-                        scope_key: "inventory-permissions".into(),
-                        hidden_parts: Default::default(),
-                        automerge_frontier_group_scope: Default::default(),
-                        causal_checkpoint_group_scope: Default::default(),
-                        group_part_group_scope: Default::default(),
-                    },
-                )
+                big_repo::BigRepo::boot(big_repo::Config {
+                    node_identity_seed: [seed; 32],
+                    storage: big_repo::Storage::memory(&runtime).unwrap(),
+                    scope_key: "inventory-permissions".into(),
+                    hidden_parts: Default::default(),
+                    automerge_frontier_group_scope: Default::default(),
+                    causal_checkpoint_group_scope: Default::default(),
+                    group_part_group_scope: Default::default(),
+                })
                 .await?,
             );
         }

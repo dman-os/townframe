@@ -581,20 +581,19 @@ pub async fn clone_repo_init_from_url(
         };
         let identity =
             crate::secrets::set_identity(&secret_store, &checkout_id, local_secret.clone()).await?;
-        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
-            Arc::clone(&sqlite_runtime),
-            big_repo::Config {
-                node_identity_seed: identity.iroh_secret_key.to_bytes(),
-                storage: big_repo::StorageConfig::Disk {
-                    path: staging.join("big_repo"),
-                },
-                scope_key: Arc::from("daybook-core"),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: identity.iroh_secret_key.to_bytes(),
+            storage: big_repo::Storage::in_directory(
+                &sqlite_runtime,
+                &staging.join("big_repo"),
+                Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+            )?,
+            scope_key: Arc::from("daybook-core"),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await?;
         let provision = request_clone_provision_from_url(
             source_url,

@@ -779,18 +779,16 @@ fn changed(
 }
 
 async fn boot_repo() -> (SharedBigRepo, big_repo::BigRepoStopToken) {
-    big_repo::BigRepo::boot(
-        Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-        big_repo::Config {
-            node_identity_seed: [31; 32],
-            storage: big_repo::StorageConfig::Memory,
-            scope_key: "datum-set-test".into(),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        },
-    )
+    big_repo::BigRepo::boot(big_repo::Config {
+        node_identity_seed: [31; 32],
+        storage: big_repo::Storage::memory(&sqlite_rs::SqliteRuntime::new(Default::default()))
+            .unwrap(),
+        scope_key: "datum-set-test".into(),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
     .await
     .unwrap()
 }

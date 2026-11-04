@@ -30,21 +30,18 @@ struct Harness {
 impl Harness {
     async fn boot() -> Res<Self> {
         let runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
-        let (repo, repo_stop) = big_repo::BigRepo::boot(
-            Arc::clone(&runtime),
-            big_repo::Config {
-                node_identity_seed: [92; 32],
-                storage: big_repo::StorageConfig::Memory,
-                scope_key: "admission-projection".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (repo, repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: [92; 32],
+            storage: big_repo::Storage::memory(&runtime).unwrap(),
+            scope_key: "admission-projection".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await?;
         let (blobs, blobs_stop) = crate::boot(crate::Config {
-            storage: crate::Storage::Memory,
+            storage: crate::Storage::memory().unwrap(),
             sql: runtime.ephemeral(&[])?,
             authority: Client::direct(Arc::new(UnusedAuthority)),
             namespace: Namespace {

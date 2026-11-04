@@ -69,7 +69,7 @@ use big_plugs_core::PlugId;
 use big_plugs_core::example_plug;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use indexmap::IndexMap;
 use irpc::Channels;
 use irpc::WithChannels;
@@ -299,17 +299,15 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         .await
         .expect("drawers namespace");
     let (repo, repo_stop) = BigRepo::boot(
-        runtime,
         big_repo::Config {
             node_identity_seed: [19; 32],
-            storage: StorageConfig::Memory,
+            storage: Storage::memory(&runtime).unwrap(),
             scope_key: "big-nodule-e2e".into(),
             hidden_parts: Default::default(),
             automerge_frontier_group_scope: Default::default(),
             causal_checkpoint_group_scope: Default::default(),
             group_part_group_scope: Default::default(),
-        },
-    )
+        })
     .await
     .expect("repo boot");
     let schemas = test_schemas();

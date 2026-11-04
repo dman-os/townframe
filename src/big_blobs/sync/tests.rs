@@ -43,22 +43,18 @@ impl Harness {
 
     async fn boot(path: Option<&std::path::Path>, seed: u8) -> Res<Self> {
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
-        let (repo, repo_stop) = big_repo::BigRepo::boot(
-            Arc::clone(&runtime),
-            big_repo::Config {
-                node_identity_seed: [seed; 32],
-                storage: path.map_or(big_repo::StorageConfig::Memory, |path| {
-                    big_repo::StorageConfig::Disk {
-                        path: path.join("repo"),
-                    }
-                }),
-                scope_key: "inventory-transfers".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
+        let (repo, repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: [seed; 32],
+            storage: match path {
+                Some(path) => big_repo::Storage::in_directory(&runtime, &path.join("repo"), None)?,
+                None => big_repo::Storage::memory(&runtime)?,
             },
-        )
+            scope_key: "inventory-transfers".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await?;
         let sql = match path {
             Some(path) => {
@@ -73,9 +69,10 @@ impl Harness {
             None => Arc::new(big_sync::MemoryPartStore::new()),
         };
         let (blobs, blob_stop) = crate::boot(crate::Config {
-            storage: path.map_or(crate::Storage::Memory, |path| {
-                crate::Storage::Filesystem(path.join("blobs"))
-            }),
+            storage: match path {
+                Some(path) => crate::Storage::filesystem(path.join("blobs")).await?,
+                None => crate::Storage::memory()?,
+            },
             sql: sql.clone(),
             authority: Client::direct(Arc::new(UnusedAuthority)),
             namespace: Namespace {

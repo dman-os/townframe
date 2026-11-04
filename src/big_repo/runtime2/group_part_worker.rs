@@ -56,9 +56,11 @@ pub fn spawn_group_part_worker(
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
         let fut = async move {
-            let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART;
-            let state =
-                SqliteDeltaWalkerStateRepo::new(store.sql.clone(), identity.0, identity.1).await?;
+            let state = store
+                .admission_consumer_state(
+                    crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART,
+                )
+                .await?;
 
             // The walker's durable revision is the authority on what has been
             // reconciled: it advances only after every sink task for that prefix has

@@ -89,18 +89,15 @@ struct Peer {
 impl Peer {
     async fn boot(seed: u8, response: Option<Response>) -> Res<Self> {
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
-        let (repo, repo_stop) = BigRepo::boot(
-            runtime,
-            big_repo::Config {
-                node_identity_seed: [seed; 32],
-                storage: big_repo::StorageConfig::Memory,
-                scope_key: "inventory-access-transfer".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (repo, repo_stop) = BigRepo::boot(big_repo::Config {
+            node_identity_seed: [seed; 32],
+            storage: big_repo::Storage::memory(&runtime).unwrap(),
+            scope_key: "inventory-access-transfer".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await?;
         let lookup = iroh::address_lookup::MemoryLookup::default();
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -215,7 +212,7 @@ impl Fixture {
         let sql = SqliteRuntime::new(Default::default()).ephemeral(&[])?;
         let parts: big_repo::SharedPartStore = Arc::new(big_sync::MemoryPartStore::new());
         let (blobs, blob_stop) = crate::boot(crate::Config {
-            storage: crate::Storage::Memory,
+            storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
             authority: Client::direct(Arc::new(UnusedAuthority)),
             namespace: Namespace {

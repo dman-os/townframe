@@ -38,7 +38,7 @@ use big_cabinet_core::query::Predicate;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use big_sync_core::keyed_frontier::FrontierEntry;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
@@ -174,18 +174,15 @@ impl Node {
             .open_namespace(drawers_actor.actor_id)
             .await
             .unwrap();
-        let (repo, repo_stop) = BigRepo::boot(
-            Arc::clone(&runtime),
-            Config {
-                node_identity_seed: [seed; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "drawers-e2e".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [seed; 32],
+            storage: Storage::memory(&runtime).unwrap(),
+            scope_key: "drawers-e2e".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await
         .unwrap();
         let sql = runtime.ephemeral(&[]).unwrap();

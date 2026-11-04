@@ -407,7 +407,7 @@ struct SelectionFixture {
     owner_stop: StopToken,
     reader: BigNode,
     reader_stop: StopToken,
-    reader_secrets: SecretStore,
+    reader_secrets: Arc<SecretStore>,
     runtime: Arc<SqliteRuntime>,
     dir: tempfile::TempDir,
     owner_net: Network,
@@ -426,10 +426,9 @@ async fn selection_fixture() -> SelectionFixture {
     let reader_secrets = secrets().await;
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let mut owner_cfg = config(
-        &owner_secrets,
-        &runtime,
+        Arc::clone(&owner_secrets),
         runtime.ephemeral(&[]).unwrap(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     );
     owner_cfg.repo.node_identity_seed = [141; 32];
     let (owner, owner_stop) = BigNode::boot(owner_cfg).await.unwrap();
@@ -440,15 +439,14 @@ async fn selection_fixture() -> SelectionFixture {
         "_sqlite_rs_migrations",
     );
     let mut reader_cfg = config(
-        &reader_secrets,
-        &runtime,
+        Arc::clone(&reader_secrets),
         reader_sql,
-        StorageConfig::Disk {
-            path: dir.path().join("repo"),
-        },
+        big_repo::Storage::in_directory(&runtime, &dir.path().join("repo"), None).unwrap(),
     );
     reader_cfg.repo.node_identity_seed = [142; 32];
-    reader_cfg.blob_storage = big_blobs::Storage::Filesystem(dir.path().join("blobs"));
+    reader_cfg.blob_storage = big_blobs::Storage::filesystem(dir.path().join("blobs"))
+        .await
+        .unwrap();
     let (reader, reader_stop) = BigNode::boot(reader_cfg).await.unwrap();
     let a = collection(&owner, "A").await;
     let b = collection(&owner, "B").await;
@@ -543,15 +541,14 @@ async fn selecting_only_a_discovers_deep_inventories_and_reopens_without_reselec
         "_sqlite_rs_migrations",
     );
     let mut reader_cfg = config(
-        &reader_secrets,
-        &runtime,
+        Arc::clone(&reader_secrets),
         reader_sql,
-        StorageConfig::Disk {
-            path: dir.path().join("repo"),
-        },
+        big_repo::Storage::in_directory(&runtime, &dir.path().join("repo"), None).unwrap(),
     );
     reader_cfg.repo.node_identity_seed = [142; 32];
-    reader_cfg.blob_storage = big_blobs::Storage::Filesystem(dir.path().join("blobs"));
+    reader_cfg.blob_storage = big_blobs::Storage::filesystem(dir.path().join("blobs"))
+        .await
+        .unwrap();
     let (reader, reader_stop) = BigNode::boot(reader_cfg).await.unwrap();
     let mut reader_net = Network::boot(&reader, 142).await;
     let (connection, accepted) =
@@ -656,18 +653,16 @@ async fn transitive_matrix(access: Access, root: MetaRoot, name: &str) {
     let reader_secrets = secrets().await;
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let mut cfg = config(
-        &owner_secrets,
-        &runtime,
+        Arc::clone(&owner_secrets),
         runtime.ephemeral(&[]).unwrap(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [146; 32];
     let (owner, owner_stop) = BigNode::boot(cfg).await.unwrap();
     let mut cfg = config(
-        &reader_secrets,
-        &runtime,
+        Arc::clone(&reader_secrets),
         runtime.ephemeral(&[]).unwrap(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [147; 32];
     let (reader, reader_stop) = BigNode::boot(cfg).await.unwrap();
@@ -729,18 +724,16 @@ async fn relay_discovers_only_public_inventory_and_revocation_preserves_retained
     let relay_secrets = secrets().await;
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let mut cfg = config(
-        &owner_secrets,
-        &runtime,
+        Arc::clone(&owner_secrets),
         runtime.ephemeral(&[]).unwrap(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [143; 32];
     let (owner, owner_stop) = BigNode::boot(cfg).await.unwrap();
     let mut cfg = config(
-        &relay_secrets,
-        &runtime,
+        Arc::clone(&relay_secrets),
         runtime.ephemeral(&[]).unwrap(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [144; 32];
     let (relay, relay_stop) = BigNode::boot(cfg).await.unwrap();
@@ -804,10 +797,9 @@ async fn relay_discovers_only_public_inventory_and_revocation_preserves_retained
     );
     let read_secrets = secrets().await;
     let mut cfg = config(
-        &read_secrets,
-        &runtime,
+        Arc::clone(&read_secrets),
         runtime.ephemeral(&[]).unwrap(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     );
     cfg.repo.node_identity_seed = [145; 32];
     let (read, read_stop) = BigNode::boot(cfg).await.unwrap();

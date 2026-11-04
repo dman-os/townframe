@@ -251,7 +251,7 @@ async fn tier6_reopen_after_authority_grant_keeps_new_documents_writable() -> cr
     let temp = tempfile::tempdir()?;
     let left_path = temp.path().join("left");
     let right_path = temp.path().join("right");
-    let left_storage = crate::StorageConfig::Disk {
+    let left_storage = super::harness::StorageConfig::Disk {
         path: left_path.clone(),
     };
     let mut pair = Pair::boot_persistent(196, 197, "Owner", "Clone", left_path, right_path).await?;
@@ -348,10 +348,10 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
     let temp = tempfile::tempdir()?;
     let left_path = temp.path().join("left");
     let right_path = temp.path().join("right");
-    let left_storage = crate::StorageConfig::Disk {
+    let left_storage = super::harness::StorageConfig::Disk {
         path: left_path.clone(),
     };
-    let right_storage = crate::StorageConfig::Disk {
+    let right_storage = super::harness::StorageConfig::Disk {
         path: right_path.clone(),
     };
     let mut pair = Pair::boot_persistent(194, 195, "Owner", "Clone", left_path, right_path).await?;
@@ -1691,7 +1691,7 @@ async fn tier6_prekey_janitor_survives_missed_add_window() -> crate::Res<()> {
     let restarted = Node::boot_with_config(
         253,
         "WindowJoiner",
-        crate::StorageConfig::Disk { path: right_path },
+        super::harness::StorageConfig::Disk { path: right_path },
     )
     .await?;
     pair.put_right(restarted);

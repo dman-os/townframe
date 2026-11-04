@@ -40,6 +40,15 @@ use tempfile::tempdir;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
+/// The on-disk bindings for a repo rooted at `path`.
+async fn disk_storage(path: &std::path::Path) -> Res<Storage> {
+    Storage::in_directory(
+        &sqlite_rs::SqliteRuntime::new(Default::default()),
+        path,
+        Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+    )
+}
+
 pub async fn boot_repo() -> Res<(
     Arc<BigRepo>,
     Arc<big_sync::Ctx>,
@@ -47,19 +56,16 @@ pub async fn boot_repo() -> Res<(
 )> {
     utils_rs::testing::setup_tracing_once();
     let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
-    let (repo, stop) = BigRepo::boot(
-        Arc::clone(&sqlite_runtime),
-        Config {
-            node_identity_seed: [7_u8; 32],
-            storage: StorageConfig::Memory,
-            scope_key: Arc::from("big-repo-test"),
-            hidden_parts: HashSet::new(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-            keyhive_change_notifs: true,
-        },
-    )
+    let (repo, stop) = BigRepo::boot(Config {
+        node_identity_seed: [7_u8; 32],
+        storage: Storage::memory(&sqlite_runtime).unwrap(),
+        scope_key: Arc::from("big-repo-test"),
+        hidden_parts: HashSet::new(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+        keyhive_change_notifs: true,
+    })
     .await?;
     let shared_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -102,19 +108,16 @@ pub async fn _boot_disk_repo(
 )> {
     std::fs::create_dir_all(&path)
         .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
-    let (repo, stop) = BigRepo::boot(
-        Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-        Config {
-            node_identity_seed: [7_u8; 32],
-            storage: StorageConfig::Disk { path },
-            scope_key: Arc::from("big-repo-test"),
-            hidden_parts: HashSet::new(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-            keyhive_change_notifs: true,
-        },
-    )
+    let (repo, stop) = BigRepo::boot(Config {
+        node_identity_seed: [7_u8; 32],
+        storage: disk_storage(&path).await?,
+        scope_key: Arc::from("big-repo-test"),
+        hidden_parts: HashSet::new(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+        keyhive_change_notifs: true,
+    })
     .await?;
     let shared_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -1551,7 +1554,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
 
     let client_keyhive_storage = crate::keyhive_storage::BigRepoKeyhiveStorage::fs(
         client.repo.sqlite_store(),
-        client_path.join(crate::keyhive_storage::KEYHIVE_SUBDIR),
+        client_path.join("keyhive"),
     )
     .await?;
     let stored_events = subduction_keyhive::load_events::<Vec<u8>, _, future_form::Sendable>(
@@ -2174,19 +2177,16 @@ impl SyncRepoNode {
             .await
             .wrap_err_with(|| format!("failed creating sync repo path: {}", path.display()))?;
         let node_identity_seed = [seed; 32];
-        let (repo, stop_token) = BigRepo::boot(
-            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-            Config {
-                node_identity_seed,
-                storage: StorageConfig::Disk { path: path.clone() },
-                scope_key: Arc::from("big-repo-sync-test"),
-                hidden_parts: HashSet::new(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-                keyhive_change_notifs: true,
-            },
-        )
+        let (repo, stop_token) = BigRepo::boot(Config {
+            node_identity_seed,
+            storage: disk_storage(&path).await?,
+            scope_key: Arc::from("big-repo-sync-test"),
+            hidden_parts: HashSet::new(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+            keyhive_change_notifs: true,
+        })
         .await?;
         let shared_store = repo.shared_part_store();
         let (initial_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -3766,19 +3766,16 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
 #[tokio::test]
 async fn stop_releases_the_database_despite_the_keyhive_reference_cycle() -> Res<()> {
     let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
-    let (repo, stop) = BigRepo::boot(
-        Arc::clone(&sqlite_runtime),
-        Config {
-            node_identity_seed: [7_u8; 32],
-            storage: StorageConfig::Memory,
-            scope_key: Arc::from("big-repo-test"),
-            hidden_parts: HashSet::new(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-            keyhive_change_notifs: true,
-        },
-    )
+    let (repo, stop) = BigRepo::boot(Config {
+        node_identity_seed: [7_u8; 32],
+        storage: Storage::memory(&sqlite_runtime).unwrap(),
+        scope_key: Arc::from("big-repo-test"),
+        hidden_parts: HashSet::new(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+        keyhive_change_notifs: true,
+    })
     .await?;
     let group = repo.create_group_with_parents(vec![]).await?;
     let mut doc = automerge::Automerge::new();
@@ -3799,5 +3796,51 @@ async fn stop_releases_the_database_despite_the_keyhive_reference_cycle() -> Res
         0,
         "the stopped repo's database is still held by leaked keyhive state"
     );
+    Ok(())
+}
+
+/// Two repos may share one database when their scope keys differ: every durable cursor (the
+/// keyhive admission consumers' walker progress and retention registrations included) is keyed
+/// by scope. The second repo boots after the first has admitted keyhive events, so a cursor
+/// shared between them would stand ahead of the second repo's own empty admission log and its
+/// consumers would fail replaying.
+#[tokio::test]
+async fn repos_with_distinct_scope_keys_share_a_database() -> Res<()> {
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.ephemeral(&[])?;
+    let mut repos = Vec::new();
+    for (seed, scope_key) in [(1_u8, "first"), (2, "second")] {
+        let (repo, stop) = BigRepo::boot(Config {
+            node_identity_seed: [seed; 32],
+            storage: Storage {
+                sql: sql.clone(),
+                keyhive: KeyhiveStorage::Memory,
+            },
+            scope_key: Arc::from(scope_key),
+            hidden_parts: HashSet::new(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+            keyhive_change_notifs: true,
+        })
+        .await?;
+        let group = repo.create_group_with_parents(vec![]).await?;
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| tx.put(automerge::ROOT, "title", "shared database"))
+            .expect("failed seeding doc");
+        let handle = repo
+            .create_doc_with_parents(doc, vec![group.clone().into()])
+            .await?;
+        repo.wait_for_quiescence(None).await?;
+        drop((handle, group));
+        repos.push((repo, stop));
+    }
+    for (repo, stop) in repos {
+        drop(repo);
+        stop.stop().await?;
+    }
+    drop(sql);
+    runtime.drain_workers().await;
+    assert_eq!(runtime.live_database_count(), 0);
     Ok(())
 }

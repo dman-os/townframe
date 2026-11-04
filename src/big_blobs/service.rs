@@ -68,9 +68,63 @@ impl std::fmt::Debug for ImportedBlob {
     }
 }
 
-pub enum Storage {
-    Memory,
-    Filesystem(PathBuf),
+/// The blob store a node is handed. The service opens no location itself: the composition root
+/// opens the store ([`Storage::memory`] or [`Storage::filesystem`]) and passes it in.
+pub struct Storage {
+    store: Store,
+    provider: Arc<CipherBlobProvider>,
+    /// Holds the exclusive owner lock of a filesystem store for as long as the store lives.
+    owner: Option<std::fs::File>,
+}
+
+impl Storage {
+    /// A store that lives and dies with the process. Must be called inside a tokio runtime.
+    pub fn memory() -> Res<Self> {
+        let (memory, providers) =
+            iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+        let provider = Arc::new(CipherBlobProvider::new());
+        provider.register(&providers)?;
+        Ok(Self {
+            store: Store::from(memory),
+            provider,
+            owner: None,
+        })
+    }
+
+    /// Opens (creating if needed) the store rooted at `root` and takes its exclusive owner lock.
+    pub async fn filesystem(root: PathBuf) -> Res<Self> {
+        tokio::fs::create_dir_all(&root).await?;
+        let owner = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("owner.lock"))?;
+        // fs4 reports contention as `Ok(false)`, not an error: only real IO
+        // failures arrive in `Err`. Proceeding on `false` would reopen the
+        // already-owned `blobs.db` and block forever inside redb's own
+        // exclusive lock, so the second open must fail here instead.
+        let locked = owner.try_lock_exclusive().map_err(|error| {
+            utils_rs::prelude::eyre::eyre!("could not take the blob store owner lock: {error}")
+        })?;
+        if !locked {
+            return Err(utils_rs::prelude::eyre::eyre!(
+                "blob store already has an owner; connect through its service"
+            ));
+        }
+        let (filesystem, providers) = iroh_blobs::store::fs::FsStore::load_with_virtuals(
+            root.join("blobs.db"),
+            iroh_blobs::store::fs::options::Options::new(&root),
+        )
+        .await?;
+        let provider = Arc::new(CipherBlobProvider::new());
+        provider.register(&providers)?;
+        Ok(Self {
+            store: Store::from(filesystem),
+            provider,
+            owner: Some(owner),
+        })
+    }
 }
 
 pub struct Config {
@@ -136,44 +190,11 @@ pub struct Blobs {
 }
 
 pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
-    let (store, provider, owner) = match config.storage {
-        Storage::Memory => {
-            let (memory, providers) =
-                iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
-            let provider = Arc::new(CipherBlobProvider::new());
-            provider.register(&providers)?;
-            (Store::from(memory), provider, None)
-        }
-        Storage::Filesystem(root) => {
-            tokio::fs::create_dir_all(&root).await?;
-            let owner = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(root.join("owner.lock"))?;
-            // fs4 reports contention as `Ok(false)`, not an error: only real IO
-            // failures arrive in `Err`. Proceeding on `false` would reopen the
-            // already-owned `blobs.db` and block forever inside redb's own
-            // exclusive lock, so the second boot must fail here instead.
-            let locked = owner.try_lock_exclusive().map_err(|error| {
-                utils_rs::prelude::eyre::eyre!("could not take the blob store owner lock: {error}")
-            })?;
-            if !locked {
-                return Err(utils_rs::prelude::eyre::eyre!(
-                    "blob store already has an owner; connect through its service"
-                ));
-            }
-            let (filesystem, providers) = iroh_blobs::store::fs::FsStore::load_with_virtuals(
-                root.join("blobs.db"),
-                iroh_blobs::store::fs::options::Options::new(&root),
-            )
-            .await?;
-            let provider = Arc::new(CipherBlobProvider::new());
-            provider.register(&providers)?;
-            (Store::from(filesystem), provider, Some(owner))
-        }
-    };
+    let Storage {
+        store,
+        provider,
+        owner,
+    } = config.storage;
     let prepared = async {
         let roots = PairRoots::boot(config.sql.clone()).await?;
         provider.restore(&store, &roots).await?;

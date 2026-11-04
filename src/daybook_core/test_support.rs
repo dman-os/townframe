@@ -232,18 +232,15 @@ pub async fn test_cx_with_options(
 
     let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
     // Initialize SharedBigRepo with memory storage
-    let (big_repo, acx_stop) = BigRepo::boot(
-        Arc::clone(&sqlite_runtime),
-        big_repo::Config {
-            node_identity_seed: rand::random::<[u8; 32]>(),
-            storage: big_repo::StorageConfig::Memory,
-            scope_key: Arc::from("daybook-core-test"),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        },
-    )
+    let (big_repo, acx_stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: rand::random::<[u8; 32]>(),
+        storage: big_repo::Storage::memory(&sqlite_runtime).unwrap(),
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
     .await?;
     let part_store = big_repo.shared_part_store();
     let (_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -676,18 +673,15 @@ pub async fn boot_repo() -> Res<(
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
     let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
-    let (repo, stop) = BigRepo::boot(
-        sqlite_runtime,
-        big_repo::Config {
-            node_identity_seed: [7_u8; 32],
-            storage: big_repo::StorageConfig::Memory,
-            scope_key: Arc::from("daybook-core-test"),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        },
-    )
+    let (repo, stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: [7_u8; 32],
+        storage: big_repo::Storage::memory(&sqlite_runtime).unwrap(),
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
     .await?;
     let part_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -727,18 +721,19 @@ pub async fn boot_disk_repo(
         .await
         .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
     let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
-    let (repo, stop) = BigRepo::boot(
-        sqlite_runtime,
-        big_repo::Config {
-            node_identity_seed: [7_u8; 32],
-            storage: big_repo::StorageConfig::Disk { path },
-            scope_key: Arc::from("daybook-core-test"),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        },
-    )
+    let (repo, stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: [7_u8; 32],
+        storage: big_repo::Storage::in_directory(
+            &sqlite_runtime,
+            &path,
+            Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+        )?,
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
     .await?;
     let part_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(

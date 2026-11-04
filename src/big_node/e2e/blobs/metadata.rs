@@ -75,10 +75,9 @@ async fn metadata_issuer_mints_only_requested_documents_without_root_or_content_
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
     let (node, stop) = BigNode::boot(config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     ))
     .await
     .unwrap();
