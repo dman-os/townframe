@@ -205,6 +205,21 @@ Goal (operator): malleable, not an app store. Anyone may modify any plug or publ
 - **NSIDs without a domain:** see the open question to the operator (unverified local NSIDs; hosted per-user namespaces like Maven Central's verified `io.github.<user>`).
 - An ADR is to be written from D10–D13: plug identity, naming, dependencies and malleability.
 
+### P. big_plugs implementation plan (ADR 028; operator-approved 2026-11-04)
+Slices run in order, one subagent reused across them while under 400k tokens. Each slice is reviewed and verified by the manager, then committed.
+- **P1. DID namespaces in `PlugId`.** The namespace becomes a DID (validated syntactically: `did:<method>:<id>`; methods are open, `key`/`plc`/`web` are known). The name keeps the segment rules. Pick a canonical text form that is valid in datum key slots (`nodule.install/<plug>` etc.); check the key-slot grammar, and if `:` is not allowed there, use an escaping and state why. Migrate all users (about 12 files) and tests. No aliases or handles yet (resolution-side, deferred).
+- **P2. Registry service (new crate `big_plugs`, contract in `big_plugs_core`).**
+  - The registry is a **grouped** drawer (it syncs, so it needs ADR 026 blob inventories), created at node boot like the nodule config drawer.
+  - One document per plug id. Versions are immutable datums `plug.version/<label>` holding the envelope, with `Blob` datums per artifact.
+  - Operations: publish a local version (node-published; artifact bytes already in big_blobs), list, get plug, get version, remove version or plug, and watch (long-poll per ADR 023).
+  - Domain capabilities like dispatch. Immutability: rewriting an existing version label with different content is refused on publish, and a synced conflicting version is surfaced and never silently accepted (node is arbiter). Boot wiring in big_node; e2e tests.
+- **P3. Publisher signatures and import.** Versions are signed by the namespace DID. Import an author-published plug document into the registry, OCI import, and the Clay local pair. Accept rules: same DID, increasing version order, immutable content.
+- **P4. Shared request shape for nodules.** `Nodule.id` is removed (the envelope is authoritative). `requires` becomes `{binding, contract, access, necessity, resolution, minRevision?}`. Strict NSID admission: a foreign NSID that is used but not requested is refused.
+- **P5. Enable-time resolution and lockfile.** NSID → provider plug@version + schema revision recorded in the install datum. Enablement is refused until required NSIDs resolve. A provider change is re-consented.
+- **P6. Substitution.** The node-local "X is satisfied by Y" map, the installed-as slot, and `filledBy` in install datums.
+- **P7. Schema registry by NSID.** Fed by catalogued plugs, comparing vendored copies. Cabinet `SchemaRepo` gains live register/retire and reads from it, which closes the gap where nodules can't write their own datums.
+- After P2 and P4: send the Clay agent the concrete type and section names.
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
@@ -233,7 +248,7 @@ Goal (operator): malleable, not an app store. Anyone may modify any plug or publ
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- All to-do items for this PR are done. What remains is the deferred list and the open questions below.
+- big_plugs plan P1–P7 below. P1 (DID namespaces) is running.
 ## Done
 
 - 2026-11-04: Init follow-ups. Waiters are woken from `serve` on a not-ready to ready transition, matched by NSID. `NoduleInitStatus.waiting_on`. Verified 67/67.
