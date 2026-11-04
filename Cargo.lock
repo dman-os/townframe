@@ -4296,6 +4296,7 @@ dependencies = [
  "anyrender_vello",
  "anyrender_vello_cpu 0.17.0",
  "anyrender_vello_hybrid 0.10.0",
+ "clay_dioxus_kit",
  "dioxus",
  "dioxus-native",
  "serde",

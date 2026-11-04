@@ -5,16 +5,17 @@ use crate::headless::sheet::SheetSkin;
 use crate::headless::sheet::{self};
 use dioxus::prelude::*;
 
-// The scrim has no semantic role in the design language yet; `text` at reduced opacity is the
-// nearest token-only dimming (see "Design-language gaps" in the README).
+// The scrim has no semantic role in the design language yet. `surface-sunken` at reduced opacity is
+// the nearest token that darkens in both themes (`text` lightens a dark theme); see "Design-language
+// gaps" in the README.
 const BOTTOM: SheetSkin = SheetSkin {
     root: "",
-    scrim: "cursor-default bg-text opacity-40",
+    scrim: "cursor-default bg-surface-sunken opacity-80",
     panel: "h-5/6 w-full overflow-hidden rounded-t-xl bg-surface-raised text-text shadow-raised",
 };
 const SIDE: SheetSkin = SheetSkin {
     root: "",
-    scrim: "cursor-default bg-text opacity-40",
+    scrim: "cursor-default bg-surface-sunken opacity-80",
     panel: "h-full w-96 max-w-full overflow-hidden rounded-l-xl bg-surface-raised text-text shadow-raised",
 };
 

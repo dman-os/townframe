@@ -131,7 +131,7 @@ invented. They are filed in the format of the `dayframe-design-language` skill i
 
 - No **breakpoint** scale: `WidthClass` defines 600 / 840 px (the Material window-size classes)
   in `width.rs`.
-- No **scrim / overlay** role: `Sheet` dims with `bg-text opacity-40`.
+- No **scrim / overlay** role: `Sheet` dims with `bg-surface-sunken opacity-80`, the nearest token that darkens in both themes (`text` at low opacity lightens a dark theme).
 - No **layering** scale: `z-index` values (10 handle, 20 covering details, 40 sheet, 50 gesture
   overlay) are structural constants in the headless parts.
 - No **sheet size** vocabulary: `h-5/6` (compact bottom sheet) and `w-96` (side sheet) are

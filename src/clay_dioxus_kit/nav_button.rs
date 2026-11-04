@@ -8,24 +8,26 @@ const CLASS: &str = "inline-flex size-11 cursor-pointer items-center justify-cen
 /// The back / open-sidebar button a micro mounts in its app bar (FDR 006).
 #[component]
 pub fn NavButton(mode: NavButtonMode, onclick: EventHandler<()>) -> Element {
-    // A chevron for back, a three-line menu for the sidebar. Decorative: the name is on the
-    // button.
-    let path = match mode {
-        NavButtonMode::Back => "M15 18l-6-6 6-6",
-        NavButtonMode::Sidebar => "M4 6h16M4 12h16M4 18h16",
-    };
+    // The glyph is drawn from boxes in `currentColor`, which are plain elements in every
+    // renderer; inline `svg` is in the guest vocabulary but was not tried on Blitz. Decorative:
+    // the name is on the button.
     rsx! {
         nav_button::NavButton { mode, onclick, class: CLASS,
-            svg {
-                class: "size-6",
-                view_box: "0 0 24 24",
-                fill: "none",
-                stroke: "currentColor",
-                stroke_width: "2",
-                stroke_linecap: "round",
-                stroke_linejoin: "round",
-                "aria-hidden": "true",
-                path { d: path }
+            span { class: "flex size-6 items-center justify-center", "aria-hidden": "true",
+                match mode {
+                    // A chevron: two borders of a square turned 45 degrees.
+                    NavButtonMode::Back => rsx! {
+                        span { class: "size-3 rotate-45 border-b-2 border-l-2 border-current" }
+                    },
+                    // The menu glyph: three bars.
+                    NavButtonMode::Sidebar => rsx! {
+                        span { class: "flex flex-col gap-1",
+                            span { class: "h-0.5 w-5 bg-current" }
+                            span { class: "h-0.5 w-5 bg-current" }
+                            span { class: "h-0.5 w-5 bg-current" }
+                        }
+                    },
+                }
             }
         }
     }

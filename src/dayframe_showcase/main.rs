@@ -1,3 +1,5 @@
+mod kit;
+
 #[cfg(feature = "desktop")]
 use dioxus::desktop::tao::event::Event as DesktopEvent;
 #[cfg(feature = "desktop")]
@@ -136,11 +138,21 @@ fn App() -> Element {
                     "Toggle {mode:?} mode"
                 }
                 ThemeLabNav { viewport: (available_width(), 860.0) }
+                // A screenshot run names one kit specimen group; see `kit::KitSpecimens`.
+                if let Ok(group) = std::env::var("DAYFRAME_SHOWCASE_KIT") {
+                    kit::KitSpecimens { only: Some(group) }
+                } else {
                 FoundationSection {
                     id: "tile-grammar".to_string(),
                     title: "Feature grammar: Tiles".to_string(),
                     description: "This feature grammar is executable evidence, not part of the foundation token language. Ordered lists combine App, Widget, and Group tiles; content variants and sublist presentation remain feature-specific.".to_string(),
                     TileGrammarFoundation { available_width: available_width() }
+                }
+                FoundationSection {
+                    id: "kit".to_string(),
+                    title: "Component kit".to_string(),
+                    description: "clay_dioxus_kit components at a compact and an expanded host width. The kit never measures: each frame is the host, and hands the component its width class.".to_string(),
+                    kit::KitSpecimens { only: None }
                 }
                 FoundationSection {
                     id: "typography".to_string(),
@@ -178,6 +190,7 @@ fn App() -> Element {
                     description: "Material remains the baseline palette. Every source palette and generated scheme is rendered from the unchanged JSON fixture.".to_string(),
                     ColorFoundation { theme }
                 }
+                }
             }
         }
     }
@@ -211,6 +224,7 @@ fn ThemeLabNav(viewport: (f64, f64)) -> Element {
     let anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
     let ids = [
         "tile-grammar",
+        "kit",
         "typography",
         "spacing",
         "shape",
@@ -220,6 +234,7 @@ fn ThemeLabNav(viewport: (f64, f64)) -> Element {
     ];
     let labels = vec![
         "Tile grammar",
+        "Component kit",
         "Typography",
         "Spacing",
         "Shape & borders",
