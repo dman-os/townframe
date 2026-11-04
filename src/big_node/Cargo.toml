@@ -25,6 +25,8 @@ utils_rs.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
+big_nodule_core.workspace = true
+big_plugs_core.workspace = true
 iroh.workspace = true
 iroh-blobs.workspace = true
 subduction_iroh.workspace = true

@@ -518,6 +518,7 @@ mod admission_tests {
         assert!(enabled.enabled);
         assert_eq!(enabled.readiness(), Readiness::ArtifactsUnavailable);
         assert!(!enabled.readiness().is_ready());
+        assert!(Readiness::Ready.is_ready());
 
         let updated = config.configure(&id, settings(json!(false))).unwrap();
         assert_eq!(updated.config, Some(settings(json!(false))));
@@ -531,6 +532,7 @@ mod admission_tests {
             "a refused configure leaves the accepted settings in place"
         );
         assert!(!Readiness::Refused.is_ready());
+        assert!(!Readiness::ExecutorUnavailable.is_ready());
 
         config.uninstall(&id).unwrap();
         assert!(config.resolve(&cache).is_empty());
@@ -841,6 +843,12 @@ mod admission_tests {
             config.admit(&cache, &no_artifact, None),
             Err(InventoryError::MissingArtifact { artifact, .. }) if artifact == "handler"
         ));
+        let mut no_size = plug_with("@example/photos", "1.0.0", photos());
+        no_size.artifacts[0].size = None;
+        assert!(matches!(
+            config.admit(&cache, &no_size, None),
+            Err(InventoryError::ArtifactSizeRequired { artifact, .. }) if artifact == "handler"
+        ));
         assert!(
             config.resolve(&cache).is_empty(),
             "refused admissions install nothing"
@@ -964,12 +972,14 @@ mod declaration {
 
 mod config_tests {
     use super::*;
+    use crate::config::AdmissionCache;
     use crate::config::DatumSlot;
     use crate::config::NoduleConfig;
     use crate::config::NoduleGrants;
     use crate::config::NoduleInstall;
     use crate::config::NoduleResolution;
     use crate::config::NoduleSettings;
+    use crate::config::artifact_key;
     use crate::config::grants_key;
     use crate::config::install_key;
     use crate::config::settings_key;
@@ -1256,5 +1266,123 @@ mod config_tests {
         assert!(cleaned.remove_carried_key(&malformed_key));
         let clean_patch = NoduleConfig::diff(&before, &cleaned).unwrap();
         assert_eq!(clean_patch.remove, BTreeSet::from([malformed_key]));
+    }
+
+    /// The `Blob` datum stored for `plug`'s handler artifact, as the document holds it.
+    fn stored_artifact(plug: &Plug) -> Value {
+        let artifact = plug.artifact("handler").unwrap();
+        json!({
+            "mime": "application/wasm",
+            "lengthOctets": artifact.size.unwrap(),
+            "digest": artifact.digest.to_string(),
+        })
+    }
+
+    fn accepted(value: Value) -> DatumRead {
+        DatumRead::Accepted {
+            value,
+            version: DatumVersion::default(),
+        }
+    }
+
+    #[test]
+    fn handler_artifacts_are_referenced_by_blob_datums_that_follow_the_install() {
+        let id: PlugId = "@example/photos".parse().unwrap();
+        let slot = artifact_key(&id, "handler");
+        assert_eq!(
+            slot.to_string(),
+            "org.example.daybook.blob/nodule.artifact/@example/photos/handler"
+        );
+        let foreign = DatumKey::from_text(big_blobs_core::Blob::ID, "avatar").unwrap();
+        let malformed =
+            DatumKey::from_text(big_blobs_core::Blob::ID, "nodule.artifact/garbage").unwrap();
+        assert!(!NoduleConfig::owns(&foreign));
+        assert!(NoduleConfig::owns(&malformed));
+        assert!(NoduleConfig::owns(&slot));
+
+        // Admitting writes the install and the reference in the same patch, and the reference
+        // is the datum wire form big_blobs reads (no `null` for the unset options).
+        let v1 = sample_plug("@example/photos", "1.0.0");
+        let cache = AdmissionCache::new();
+        let mut config = NoduleConfig::new();
+        config.admit(&cache, &v1, None).unwrap();
+        let patch = NoduleConfig::diff(&NoduleConfig::new(), &config).unwrap();
+        assert_eq!(
+            patch.set.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([install_key(&id), slot.clone()])
+        );
+        assert_eq!(patch.set[&slot], stored_artifact(&v1));
+
+        // The document as stored holds the patch, another service's `Blob`, a malformed
+        // reference of ours, and a reference to an artifact no revision names any more.
+        let stale = artifact_key(&id, "old");
+        let mut read = DatumsRead {
+            heads: Vec::new(),
+            datums: patch
+                .set
+                .iter()
+                .map(|(key, value)| (key.clone(), accepted(value.clone())))
+                .collect(),
+        };
+        let other_blob = json!({"mime": "image/png", "lengthOctets": 1, "digest": "zQm"});
+        read.datums
+            .insert(foreign.clone(), accepted(other_blob.clone()));
+        read.datums
+            .insert(malformed.clone(), accepted(other_blob.clone()));
+        read.datums.insert(stale.clone(), accepted(other_blob));
+        let stored = NoduleConfig::hydrate(&read);
+        assert!(!stored.carried_keys().contains_key(&foreign));
+        assert!(stored.carried_keys().contains_key(&malformed));
+        assert!(matches!(
+            stored.entry(&id).unwrap().artifacts["handler"],
+            DatumSlot::Accepted { .. }
+        ));
+
+        // Re-admitting the same revision rewrites the install datum's slot only if it changed,
+        // and drops the reference no artifact of the revision names.
+        let mut again = stored.clone();
+        again.admit(&cache, &v1, None).unwrap();
+        let patch = NoduleConfig::diff(&stored, &again).unwrap();
+        assert!(patch.set.is_empty(), "{:?}", patch.set);
+        assert_eq!(patch.remove, BTreeSet::from([stale.clone()]));
+
+        // Upgrading to a revision with another handler swaps the reference in place.
+        let mut v2 = sample_plug("@example/photos", "1.1.0");
+        v2.artifacts[0].digest = Digest::of(b"other-wasm-bytes");
+        v2.artifacts[0].size = Some(16);
+        let mut upgraded = stored.clone();
+        upgraded.admit(&cache, &v2, None).unwrap();
+        let patch = NoduleConfig::diff(&stored, &upgraded).unwrap();
+        assert_eq!(
+            patch.set.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([install_key(&id), slot.clone()])
+        );
+        assert_eq!(patch.set[&slot], stored_artifact(&v2));
+        assert_eq!(patch.remove, BTreeSet::from([stale.clone()]));
+
+        // A reference that no longer decodes is replaced by the admission, which repairs it.
+        let mut damaged = read.clone();
+        damaged
+            .datums
+            .insert(slot.clone(), accepted(json!({"mime": 7})));
+        let damaged = NoduleConfig::hydrate(&damaged);
+        assert!(matches!(
+            damaged.entry(&id).unwrap().artifacts["handler"],
+            DatumSlot::Invalid { .. }
+        ));
+        let mut repaired = damaged.clone();
+        repaired.admit(&cache, &v1, None).unwrap();
+        let patch = NoduleConfig::diff(&damaged, &repaired).unwrap();
+        assert_eq!(patch.set[&slot], stored_artifact(&v1));
+
+        // Uninstalling removes the references with the install, and only ours.
+        let mut gone = stored.clone();
+        gone.uninstall(&id).unwrap();
+        let patch = NoduleConfig::diff(&stored, &gone).unwrap();
+        assert_eq!(
+            patch.remove,
+            BTreeSet::from([install_key(&id), slot, stale])
+        );
+        assert!(!patch.remove.contains(&foreign));
     }
 }

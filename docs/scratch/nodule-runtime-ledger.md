@@ -139,8 +139,18 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
-- Next, after the follow-ups agent: slice 2a (D2d).
+- Next: slice 2b (Wasm host in `big_nodule_wasm`), with the 2a follow-ups below.
 ## Done
+
+- 2026-11-04: Slice 2a.
+  - Handler artifacts are referenced by `Blob` datums in the config doc, keyed `org.example.daybook.blob/nodule.artifact/<plug>/<artifactKey>`. They're owned by `NoduleConfig` only under that slot prefix and written atomically with the install datum. Retention counts only top-level `Blob`/`CipherBlob` datums.
+  - Blob workers also poll `config_id`, with Write, because they write cipherBlob/jwk representations into the doc.
+  - Executor seam: `big_nodule/executor.rs`, `NoduleExecutor { kind, ensure(HandlerSpec) -> Hosted, retire }`.
+    - The `Reensure` signal is a `Mutex<BTreeSet>` plus a `Notify`, not a channel, so it can't fail or block and stray requests are no-ops.
+    - `ProviderKind::Executor { kind, provider }`.
+  - Readiness now has `Ready`; `ArtifactState` has `Available`. Record readiness equals dispatch readiness.
+  - Admission refuses a handler artifact without `size` (`ArtifactSizeRequired`). The manager accepted this, because `Blob.lengthOctets` is required.
+  - Manager verified 53/53, plus clippy, fmt, lint and api.
 
 - 2026-11-04: Dispatch follow-ups.
   - Authority actor-row cache in `AuthorityService`. Rows are insert-only (the manager verified there are no UPDATE/DELETE queries and no writers outside `authority/`), so no invalidation is needed. Liveness stays in the in-memory ledger, absence is never cached, and there's no TTL.
@@ -241,6 +251,14 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
   - `lifecycle::sensitive_root_creation_replays_every_boundary_without_replacing_groups_or_docs`
 
   They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
+
+### Slice 2a follow-ups
+- **[design, operator] The config drawer isn't blob-portable yet.** It's a parentless self-doc drawer, and ADR 026 gives such drawers no inventories, so no inventory pin is published and a mirror can't discover or fetch artifact bytes. Retention is local only. This undercuts D2d's "portable" rationale until big_blobs supports pins or inventories for self-doc drawers (or the config drawer gets a parent).
+- [2b] Handler bytes must already be in the local blob store before the workers can encrypt and retain them. The install path (operator `PutBlob`/import, or OCI import) must put them there.
+- [blobs] Removing a `Blob` datum leaves its worker-written cipherBlob/jwk datums in the doc. Retention is released, but the datums linger. That's big_blobs worker cleanup.
+- [perf] Every config mutation reconciles twice: in `mutate_config` and again on the watch event. Skip the watch-triggered reconcile when the snapshot heads equal the applied heads.
+- [fix] A handler-less enabled nodule reports `ExecutorUnavailable` even with an executor configured. It hosts nothing, so it should be `Ready`.
+- [main] `src/big_node/e2e/blobs/metadata.rs` isn't referenced by any `mod`, so it's dead test code from main.
 
 ## Deferred
 

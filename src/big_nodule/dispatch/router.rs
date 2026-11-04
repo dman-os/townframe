@@ -61,12 +61,39 @@ pub trait Provider: Send + Sync {
 pub enum ProviderKind {
     /// Native code registered in-process.
     BuiltIn(Arc<dyn Provider>),
+    /// A nodule handler hosted by an executor. `kind` is the executor's provider type tag
+    /// ([`crate::executor::NoduleExecutor::kind`]), which dispatch needs for type-dependent
+    /// grants.
+    Executor {
+        kind: &'static str,
+        provider: Arc<dyn Provider>,
+    },
+}
+
+impl ProviderKind {
+    /// The provider to call, whichever way it is hosted.
+    pub fn provider(&self) -> &Arc<dyn Provider> {
+        match self {
+            Self::BuiltIn(provider) | Self::Executor { provider, .. } => provider,
+        }
+    }
 }
 
 impl PartialEq for ProviderKind {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::BuiltIn(a), Self::BuiltIn(b)) => Arc::ptr_eq(a, b),
+            (
+                Self::Executor {
+                    kind: a_kind,
+                    provider: a,
+                },
+                Self::Executor {
+                    kind: b_kind,
+                    provider: b,
+                },
+            ) => a_kind == b_kind && Arc::ptr_eq(a, b),
+            _ => false,
         }
     }
 }
@@ -75,6 +102,7 @@ impl fmt::Debug for ProviderKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BuiltIn(_) => f.write_str("BuiltIn"),
+            Self::Executor { kind, .. } => write!(f, "Executor({kind})"),
         }
     }
 }
@@ -85,6 +113,16 @@ impl fmt::Debug for ProviderKind {
 pub enum ProviderState {
     Ready(ProviderKind),
     NotReady(Readiness),
+}
+
+impl ProviderState {
+    /// The readiness a caller is told, and the nodule record reports, for this state.
+    pub fn readiness(&self) -> Readiness {
+        match self {
+            Self::Ready(_) => Readiness::Ready,
+            Self::NotReady(readiness) => *readiness,
+        }
+    }
 }
 
 /// One provider's claim on one operation. `operation_kind` is `None` when the contract is
@@ -144,6 +182,10 @@ impl Router {
         operations: impl IntoIterator<Item = (String, Option<OperationKind>)>,
         state: ProviderState,
     ) {
+        assert!(
+            !matches!(&state, ProviderState::NotReady(readiness) if readiness.is_ready()),
+            "a provider that is ready is registered with the way to call it"
+        );
         let operations: BTreeMap<String, Option<OperationKind>> = operations.into_iter().collect();
         let mut slot = self.table.write().expect("routing table lock");
         let current = &**slot;

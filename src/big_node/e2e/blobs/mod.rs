@@ -15,6 +15,8 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use service_utils_rs::ClientError;
 
+mod nodule_artifacts;
+
 pub(super) async fn drawer_cap(node: &BigNode, drawer: &DocId) -> CapId {
     node.drawers
         .client

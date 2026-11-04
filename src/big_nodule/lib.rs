@@ -15,6 +15,7 @@ mod sqlite {
     include!("sqlite/gen.rs");
 }
 pub mod dispatch;
+pub mod executor;
 mod state;
 mod store;
 
@@ -81,7 +82,8 @@ const SCOPE_PREFIX: &str = "NoduleService/scope/v1/";
 static CONFIG_UNIVERSE: LazyLock<Universe> = LazyLock::new(config_universe);
 
 /// The schema registration group for the portable nodule config datums stored in the node's
-/// config drawer document.
+/// config drawer document. The handler artifact references there are `Blob` datums, whose
+/// Lexicon the embedder registers beside this group (big_blobs does).
 pub fn schema_group() -> SchemaRegistrationGroup<'static> {
     let bundle = Bundle::new(&CONFIG_UNIVERSE, Vec::new());
     let lexicons = bundle.lexicons().expect("nodule config lexicons publish");
@@ -95,8 +97,9 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
 /// drawers services it reads config from and applies grants through, the node's config drawer,
 /// the subsystem actor it provisions nodule actors under and that actor's registry path, the
 /// namespace it mints management handles in, the operator whose identity administers nodules,
-/// the dispatch router it registers each admitted nodule's implemented operations in, and its
-/// database.
+/// the dispatch router it registers each admitted nodule's implemented operations in, the optional
+/// executor that hosts their handlers, and its database. Without an executor a handler is never
+/// ready: its operations are registered not ready with the nodule's own readiness.
 pub struct NodulesConfig {
     pub authority: Client<AuthorityProtocol>,
     pub docs: Client<DocsProtocol>,
@@ -107,6 +110,7 @@ pub struct NodulesConfig {
     pub namespace: Namespace,
     pub operator: Uuid7,
     pub dispatch: Arc<dispatch::Router>,
+    pub executor: Option<Arc<dyn executor::NoduleExecutor>>,
     pub sql: Database,
 }
 
@@ -423,6 +427,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         parent: config.actor,
         parent_path: config.actor_path,
         dispatch: config.dispatch,
+        executor: config.executor,
     })
     .await
     {

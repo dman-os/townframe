@@ -24,20 +24,24 @@ use std::collections::BTreeMap;
 
 /// Availability of an artifact declared in the carrying [`Plug`] envelope.
 ///
-/// Without a blob store wired into this standalone inventory, every artifact the handler references
-/// is recorded from the envelope metadata and remains [`Self::Unavailable`].
+/// Admission records every artifact the handler references as [`Self::Unavailable`] from the
+/// envelope metadata alone. Only a node's executor, which loads the bytes, can establish
+/// [`Self::Available`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ArtifactState {
     Unavailable,
+    Available,
 }
 
-/// Why an [`InstalledNodule`] cannot yet serve its handler on a standalone node, in priority order:
-/// refused configuration first, then disabled, then missing handler artifact bytes, then the
-/// absence of a Wasm executor.
+/// Whether an [`InstalledNodule`] can serve its handler, and if not the first reason in priority
+/// order: refused configuration, then disabled, then missing handler artifact bytes, then the
+/// absence of a handler executor. [`Self::Ready`] is the executor's word that the handler can be
+/// called now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Readiness {
+    Ready,
     Refused,
     Disabled,
     ArtifactsUnavailable,
@@ -46,7 +50,7 @@ pub enum Readiness {
 
 impl Readiness {
     pub fn is_ready(self) -> bool {
-        false
+        self == Self::Ready
     }
 }
 
@@ -99,6 +103,8 @@ impl InstalledNodule {
         self.configured
     }
 
+    /// Readiness as the inventory alone can tell it, which is what a node without an executor
+    /// reports: it never yields [`Readiness::Ready`], since only an executor can serve a handler.
     pub fn readiness(&self) -> Readiness {
         if !self.enabled {
             Readiness::Disabled
@@ -128,6 +134,11 @@ pub enum InventoryError {
     InvalidContribution { id: PlugId, reason: String },
     #[error("plug `{id}` handler requires artifact `{artifact}` not declared in plug envelope")]
     MissingArtifact { id: PlugId, artifact: String },
+    #[error(
+        "plug `{id}` handler artifact `{artifact}` declares no size, which a node needs to \
+         reference and fetch its bytes"
+    )]
+    ArtifactSizeRequired { id: PlugId, artifact: String },
     #[error(
         "nodule `{nodule_id}` in plug `{id}` conflicts with authority `{existing_nodule}` owned by `{existing_plug}`"
     )]
@@ -189,6 +200,12 @@ pub(crate) fn admit_plug_nodule(plug: &Plug) -> Result<AdmittedContribution> {
                 artifact: key.clone(),
             });
         };
+        if artifact.size.is_none() {
+            return Err(InventoryError::ArtifactSizeRequired {
+                id: plug.id.clone(),
+                artifact: key.clone(),
+            });
+        }
         artifacts.insert(key.clone(), (artifact.clone(), ArtifactState::Unavailable));
     }
     Ok((nodule, admitted, artifacts))

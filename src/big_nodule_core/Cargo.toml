@@ -16,6 +16,7 @@ default = []
 schemars = ["dep:schemars", "big_cabinet_core/schemars", "big_plugs_core/schemars"]
 
 [dependencies]
+big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
 big_plugs_core = { path = "../big_plugs_core", default-features = false }
 macros = { path = "../macros" }

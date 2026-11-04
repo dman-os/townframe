@@ -34,6 +34,11 @@ pub(super) async fn boot(
                     drawers: BTreeMap::from([
                         (local.present_id.clone(), Access::Read),
                         (local.originated_id.clone(), Access::Write),
+                        // The config drawer is a self-doc drawer: the nodule service keeps its
+                        // handler artifacts as `Blob` datums in the drawer's own document, so
+                        // the workers retain them and write their cipherBlob/jwk representation
+                        // there like in any other document they maintain.
+                        (local.config_id.clone(), Access::Write),
                     ]),
                     ..Default::default()
                 },
@@ -56,7 +61,11 @@ pub(super) async fn boot(
         service: Arc::clone(&blobs.service),
         docs: docs.client.clone(),
         capability: capability.capability_id,
-        drawers: vec![local.present_id.clone(), local.originated_id.clone()],
+        drawers: vec![
+            local.present_id.clone(),
+            local.originated_id.clone(),
+            local.config_id.clone(),
+        ],
         datum_set,
         parts,
         repo: Arc::clone(repo),

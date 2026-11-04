@@ -251,6 +251,7 @@ async fn boot_nodules(
         namespace,
         operator: authority.service.operator_uuid(),
         dispatch,
+        executor: None,
         sql,
     })
     .await?)

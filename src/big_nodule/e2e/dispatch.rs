@@ -44,7 +44,7 @@ const ECHO: &str = "org.example.echo.ping";
 /// refuse the way a provider does; `{"wait": true}` blocks on `release` after signalling
 /// `started`, so a test decides when (and whether) the call finishes.
 #[derive(Default)]
-struct Echo {
+pub(super) struct Echo {
     started: Notify,
     release: Notify,
 }
@@ -84,7 +84,22 @@ impl Provider for Echo {
 
 /// A package serving `serves` through a handler component. `serves` is declared in its own
 /// Lexicons when it lives under `org.example.<name>`, otherwise it is a foreign operation.
-fn serving_plug(plug_id: &str, serves: &str) -> Plug {
+pub(super) fn serving_plug(plug_id: &str, serves: &str) -> Plug {
+    serving_plug_of(
+        plug_id,
+        "1.0.0",
+        serves,
+        plug_id.rsplit('/').next().unwrap(),
+    )
+}
+
+/// [`serving_plug`] at `version`, whose handler artifact is `handler_bytes`.
+pub(super) fn serving_plug_of(
+    plug_id: &str,
+    version: &str,
+    serves: &str,
+    handler_bytes: &str,
+) -> Plug {
     let name = plug_id.rsplit('/').next().unwrap();
     let nodule_id = format!("org.example.{name}");
     let mut nodule = Nodule::new(&nodule_id);
@@ -107,11 +122,11 @@ fn serving_plug(plug_id: &str, serves: &str) -> Plug {
         extra: Default::default(),
     });
     nodule.implements = vec![serves.to_owned()];
-    let mut plug = Plug::new(plug_id.parse().unwrap(), "1.0.0".parse().unwrap());
+    let mut plug = Plug::new(plug_id.parse().unwrap(), version.parse().unwrap());
     plug.artifacts.push(Artifact {
         key: "handler".into(),
-        digest: Digest::of(name.as_bytes()),
-        size: None,
+        digest: Digest::of(handler_bytes.as_bytes()),
+        size: Some(handler_bytes.len() as u64),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
@@ -161,7 +176,7 @@ impl Node {
             })
     }
 
-    async fn invoke(
+    pub(super) async fn invoke(
         &self,
         authorization: Authorization,
         operation: &str,
@@ -198,7 +213,7 @@ impl Node {
         })
     }
 
-    async fn set_enabled(&self, plug_id: &str, enabled: bool) {
+    pub(super) async fn set_enabled(&self, plug_id: &str, enabled: bool) {
         self.call(SetNoduleEnabled {
             authorization: self.operator(),
             plug_id: id(plug_id),
@@ -216,7 +231,7 @@ fn authorities(prefixes: &[&str]) -> DispatchScope {
     }
 }
 
-fn not_ready(reason: NotReadyReason) -> DispatchError {
+pub(super) fn not_ready(reason: NotReadyReason) -> DispatchError {
     DispatchError::NotReady { reason }
 }
 
@@ -369,6 +384,10 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
     let entry = node.dispatch.router.resolve(own).unwrap();
     assert_eq!(entry.provider_id, "@example/photos");
     assert_eq!(entry.operation_kind, Some(OperationKind::Query));
+    // The nodule's record reports the readiness dispatch answers with.
+    let record = node.get(operator, "@example/photos").await.unwrap();
+    assert_eq!(record.readiness, entry.state.readiness());
+    assert_eq!(record.readiness, Readiness::ArtifactsUnavailable);
 
     // Registrations come from the config, so a restart of the nodule service re-derives them.
     node.restart_nodules().await.unwrap();

@@ -7,6 +7,10 @@
 //! - [`NoduleSettings`][]: `org.example.daybook.nodule.settings/<plugId>`
 //! - [`NoduleGrants`][]: `org.example.daybook.nodule.grants/<plugId>`
 //!
+//! Beside them, each installed nodule's handler artifact is referenced by a
+//! `org.example.daybook.blob/nodule.artifact/<plugId>/<artifactKey>` [`Blob`] datum (see
+//! [`artifact_key`]), which is what makes big_blobs retain and fetch the bytes.
+//!
 //! [`NoduleConfig`] hydrates these datums from one [`DatumsRead`] frontier, preserves unknown
 //! fields, unknown vocabulary values, and undecodable/rejected/pending entries so unrelated edits
 //! never delete them, and resolves each nodule's desired state independently for the reconciler.
@@ -15,6 +19,7 @@ use crate::Nodule;
 use crate::inventory::InstalledNodule;
 use crate::inventory::InventoryError;
 use crate::inventory::admit_plug_nodule;
+use big_blobs_core::Blob;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::Extra;
@@ -166,6 +171,39 @@ pub fn grants_key(plug_id: &PlugId) -> DatumKey {
         .expect("a PlugId is a valid datum key slot")
 }
 
+/// The slot prefix that namespaces the [`Blob`] datums this projection owns inside the node config
+/// document. `owns` claims a blob-tagged key only under this prefix, so a `Blob` datum another
+/// service later writes into the same document is neither read nor deleted here.
+const ARTIFACT_SLOT_PREFIX: &str = "nodule.artifact/";
+
+/// `org.example.daybook.blob/nodule.artifact/<plugId>/<artifactKey>`: the [`Blob`] datum that
+/// references one artifact of an installed plug. big_blobs retains and fetches the bytes of every
+/// `Blob` in the document, so this is the nodule's artifact pin. A plug id is exactly
+/// `@namespace/name` (no further `/`), so the artifact key, which may contain `/`, is whatever
+/// follows the second `/`.
+pub fn artifact_key(plug_id: &PlugId, artifact: &str) -> DatumKey {
+    DatumKey::from_text(
+        Blob::ID,
+        format!("{ARTIFACT_SLOT_PREFIX}{plug_id}/{artifact}"),
+    )
+    .expect("a plug id and a non-empty artifact key are a valid datum key slot")
+}
+
+/// The plug and artifact key an [`artifact_key`] slot names, `None` when the slot carries the
+/// prefix but not that shape.
+fn parse_artifact_slot(slot: &[u8]) -> Option<(PlugId, String)> {
+    let rest = std::str::from_utf8(slot)
+        .ok()?
+        .strip_prefix(ARTIFACT_SLOT_PREFIX)?;
+    let (namespace, rest) = rest.split_once('/')?;
+    let (name, artifact) = rest.split_once('/')?;
+    if artifact.is_empty() {
+        return None;
+    }
+    let plug_id = format!("{namespace}/{name}").parse().ok()?;
+    Some((plug_id, artifact.to_owned()))
+}
+
 /// One datum slot in [`NoduleEntry`], distinguishing absence from accepted values and carried
 /// invalid/unaccepted reads.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -225,17 +263,23 @@ impl<T: DeserializeOwned> DatumSlot<T> {
     }
 }
 
-/// The three configuration datum slots for one [`PlugId`].
+/// The configuration datum slots for one [`PlugId`]: the three nodule datums and the artifact
+/// [`Blob`] references, by artifact key. An artifact slot present here is always in the document
+/// or about to be; absence from the map is absence from the document.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NoduleEntry {
     pub install: DatumSlot<NoduleInstall>,
     pub settings: DatumSlot<NoduleSettings>,
     pub grants: DatumSlot<NoduleGrants>,
+    pub artifacts: BTreeMap<String, DatumSlot<Blob>>,
 }
 
 impl NoduleEntry {
     pub fn is_empty(&self) -> bool {
-        self.install.is_absent() && self.settings.is_absent() && self.grants.is_absent()
+        self.install.is_absent()
+            && self.settings.is_absent()
+            && self.grants.is_absent()
+            && self.artifacts.is_empty()
     }
 }
 
@@ -391,16 +435,32 @@ impl From<InventoryError> for StoreError {
 
 impl DatumStore for NoduleConfig {
     fn owns(key: &DatumKey) -> bool {
-        matches!(
-            key.tag().as_str(),
-            NoduleInstall::ID | NoduleSettings::ID | NoduleGrants::ID
-        )
+        match key.tag().as_str() {
+            NoduleInstall::ID | NoduleSettings::ID | NoduleGrants::ID => true,
+            Blob::ID => key
+                .slot_bytes()
+                .starts_with(ARTIFACT_SLOT_PREFIX.as_bytes()),
+            _ => false,
+        }
     }
 
     fn hydrate(read: &DatumsRead) -> Self {
         let mut config = Self::default();
         for (key, datum_read) in &read.datums {
             if !Self::owns(key) || matches!(datum_read, DatumRead::Absent { .. }) {
+                continue;
+            }
+            if key.tag().as_str() == Blob::ID {
+                let Some((plug_id, artifact)) = parse_artifact_slot(key.slot_bytes()) else {
+                    config.carried_keys.insert(key.clone(), datum_read.clone());
+                    continue;
+                };
+                config
+                    .entries
+                    .entry(plug_id)
+                    .or_default()
+                    .artifacts
+                    .insert(artifact, DatumSlot::from_read(datum_read));
                 continue;
             }
             let Some(plug_id) = std::str::from_utf8(key.slot_bytes())
@@ -443,6 +503,17 @@ impl DatumStore for NoduleConfig {
                 &mut patch,
             )?;
             diff_slot(grants_key(plug_id), &prev.grants, &next.grants, &mut patch)?;
+            let absent = DatumSlot::Absent;
+            let artifacts: BTreeSet<&String> =
+                prev.artifacts.keys().chain(next.artifacts.keys()).collect();
+            for artifact in artifacts {
+                diff_slot(
+                    artifact_key(plug_id, artifact),
+                    prev.artifacts.get(artifact).unwrap_or(&absent),
+                    next.artifacts.get(artifact).unwrap_or(&absent),
+                    &mut patch,
+                )?;
+            }
         }
         for key in before.carried_keys.keys() {
             if !after.carried_keys.contains_key(key) {
@@ -491,6 +562,56 @@ fn diff_slot<T: PartialEq + Serialize>(
             "cannot write invalid datum `{key}`: {reason}"
         ))),
     }
+}
+
+/// The artifact [`Blob`] slots an install of `artifacts` leaves: exactly one per artifact, and
+/// none for a key the previous revision had and this one lacks, so the diff removes the stale
+/// reference together with the install datum. A slot whose stored blob already says the same is
+/// kept as stored (no write), a changed one keeps its stored unknown fields, and a stored slot
+/// that did not decode is replaced, which is how it is repaired.
+fn artifact_slots(
+    stored: &BTreeMap<String, DatumSlot<Blob>>,
+    artifacts: &BTreeMap<String, (big_plugs_core::Artifact, crate::inventory::ArtifactState)>,
+) -> BTreeMap<String, DatumSlot<Blob>> {
+    artifacts
+        .iter()
+        .map(|(key, (artifact, _))| {
+            let (extra, kept) = match stored.get(key) {
+                Some(DatumSlot::Accepted { value, raw }) => {
+                    (value.extra.clone(), Some((value, raw)))
+                }
+                _ => (Extra::default(), None),
+            };
+            let desired = Blob {
+                mime: artifact
+                    .media_type
+                    .clone()
+                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
+                length_octets: artifact
+                    .size
+                    .expect("admission refuses an artifact without a size"),
+                digest: artifact.digest.to_string(),
+                inline: None,
+                urls: None,
+                extra,
+            };
+            let slot = match kept {
+                Some((value, _)) if *value == desired => stored[key].clone(),
+                _ => {
+                    // The datum wire form omits an unset option rather than writing `null`.
+                    let mut raw = serde_json::to_value(&desired).expect("a blob serializes");
+                    raw.as_object_mut()
+                        .expect("a blob serializes as an object")
+                        .retain(|_, value| !value.is_null());
+                    DatumSlot::Accepted {
+                        value: desired,
+                        raw: Some(raw),
+                    }
+                }
+            };
+            (key.clone(), slot)
+        })
+        .collect()
 }
 
 fn apply_grants_slot(
@@ -647,6 +768,7 @@ impl NoduleConfig {
         if let Some(drawers) = drawers {
             apply_grants_slot(&mut entry.grants, drawers);
         }
+        entry.artifacts = artifact_slots(&entry.artifacts, &artifacts);
 
         Ok(InstalledNodule::new(
             plug.id.clone(),

@@ -8,6 +8,7 @@ use crate::boot;
 use crate::dispatch::Dispatch;
 use crate::dispatch::DispatchConfig;
 use crate::dispatch::Router;
+use crate::executor::NoduleExecutor;
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
 use big_cabinet::DocsConfig;
@@ -88,6 +89,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 mod dispatch;
+mod executor;
 
 const NODULES_PATH: &str = "nodules";
 const NOTE: &str = "org.example.note";
@@ -167,10 +169,27 @@ struct Node {
     dispatch: Dispatch,
     dispatch_stop: StopToken,
     nodules: Nodules,
+    executor: Option<Arc<dyn NoduleExecutor>>,
     stop: Option<StopToken>,
 }
 
+/// The `Blob` datum Lexicon, which the nodule config document's artifact references need and the
+/// embedder (big_node, through big_blobs) registers beside [`crate::schema_group`].
+fn blob_schemas() -> SchemaRegistrationGroup<'static> {
+    let bundle = big_cabinet_core::datum::Bundle::new(&big_blobs_core::UNIVERSE, Vec::new());
+    let registrations = bundle
+        .lexicons()
+        .expect("blob declarations publish lexicons")
+        .into_iter()
+        .map(|lexicon| SchemaRegistration::new(lexicon.id, lexicon.file));
+    SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new())
+}
+
 async fn node() -> Node {
+    node_with(None).await
+}
+
+async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
     let keyring = keyring_core::mock::Store::new().expect("mock keyring")
         as Arc<keyring_core::CredentialStore>;
     let secrets = SecretStore::boot_with_store(keyring)
@@ -232,6 +251,7 @@ async fn node() -> Node {
     let schemas = Arc::new(
         SchemaRepo::open([
             crate::schema_group(),
+            blob_schemas(),
             SchemaRegistrationGroup::new(
                 None,
                 [SchemaRegistration::new(
@@ -302,6 +322,7 @@ async fn node() -> Node {
         &nodules_actor,
         &dispatch.router,
         &sql,
+        executor.clone(),
     )
     .await
     .expect("nodule service boot");
@@ -323,6 +344,7 @@ async fn node() -> Node {
         dispatch,
         dispatch_stop,
         nodules,
+        executor,
         stop: Some(stop),
     }
 }
@@ -370,6 +392,7 @@ async fn boot_nodules(
     nodules_actor: &Actor,
     dispatch: &Arc<Router>,
     sql: &TestDb,
+    executor: Option<Arc<dyn NoduleExecutor>>,
 ) -> Result<(Nodules, StopToken), NodulesError> {
     let namespace = authority
         .service
@@ -386,6 +409,7 @@ async fn boot_nodules(
         namespace,
         operator: authority.service.operator_uuid(),
         dispatch: Arc::clone(dispatch),
+        executor,
         sql: (**sql).clone(),
     })
     .await
@@ -402,6 +426,7 @@ impl Node {
             &self.nodules_actor,
             &self.dispatch.router,
             &self.sql,
+            self.executor.clone(),
         )
         .await?;
         self.nodules = nodules;

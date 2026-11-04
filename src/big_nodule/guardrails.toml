@@ -2,6 +2,7 @@ version = 1
 role = "runtime"
 dependency_reason = "The nodule service hosts the standalone nodule inventory behind the authority's capability model: it admits catalogued packages, provisions each nodule's durable actor from the authority service, and persists management state in SQLite."
 allowed_dependencies = [
+    "big_blobs_core",
     "big_cabinet",
     "big_cabinet_core",
     "big_nodule_core",

@@ -7,6 +7,8 @@ allowed_dependencies = [
     "big_cabinet",
     "big_cabinet_core",
     "big_nodule",
+    "big_nodule_core",
+    "big_plugs_core",
     "big_repo",
     "big_sync",
     "big_sync_core",

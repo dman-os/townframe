@@ -7,8 +7,13 @@
 //! `parent_path`, and applies or revokes service-owned local drawer grants within the nodules
 //! actor's delegated authority.
 
+use crate::dispatch::ProviderKind;
 use crate::dispatch::ProviderState;
 use crate::dispatch::Router;
+use crate::executor::HandlerSpec;
+use crate::executor::Hosted;
+use crate::executor::NoduleExecutor;
+use crate::executor::ReensureQueue;
 use crate::store;
 use big_cabinet::DatumStoreHandle;
 use big_cabinet_core::authority::Actor;
@@ -35,6 +40,7 @@ use big_nodule_core::Nodule;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
+use big_nodule_core::inventory::ArtifactState;
 use big_nodule_core::inventory::InstalledNodule;
 use big_nodule_core::inventory::InventoryError;
 use big_nodule_core::inventory::Readiness;
@@ -45,6 +51,7 @@ use big_nodule_core::protocol::NoduleScope;
 use big_nodule_core::protocol::NodulesError;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugId;
+use big_plugs_core::Revision;
 use futures::StreamExt;
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -72,6 +79,7 @@ pub(crate) struct Stores {
     pub(crate) parent: Actor,
     pub(crate) parent_path: String,
     pub(crate) dispatch: Arc<Router>,
+    pub(crate) executor: Option<Arc<dyn NoduleExecutor>>,
 }
 
 pub(crate) enum Command {
@@ -139,6 +147,12 @@ pub(crate) struct State {
     observed_heads: Vec<ChangeHash>,
     /// Memoized per-envelope admission, shared with the config-mutation closures.
     admission_cache: Arc<AdmissionCache>,
+    /// The revision the executor was last asked to host for each plug. A plug is here exactly
+    /// while the executor may hold a workload for it, which is what `retire` must undo.
+    hosted: BTreeMap<PlugId, Revision>,
+    /// Plugs whose executor asked to be ensured again. The state actor constructs it and
+    /// outlives nothing that holds a handle to it in a way that matters (see [`ReensureQueue`]).
+    reensure: Arc<ReensureQueue>,
 }
 
 fn nodule_actor(actor: &Actor) -> NoduleActor {
@@ -193,6 +207,8 @@ impl State {
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
             admission_cache: Arc::default(),
+            hosted: BTreeMap::new(),
+            reensure: Arc::default(),
         };
         let context = RequestContext::root();
         for (plug_id, (nodule_id, expected_actor_id)) in state.persisted_actors.clone() {
@@ -214,11 +230,26 @@ impl State {
         // (those live in the records `reconcile` builds), so the task unwraps its result: the
         // process panic handler then brings everything down instead of leaving a dead actor
         // that panics every later `Handle::ask` on a closed channel.
+        let reensure = Arc::clone(&state.reensure);
         let run = async move {
             loop {
                 tokio::select! {
                     biased;
                     () = cancellation.cancelled() => break,
+                    // An executor's workload changed readiness after `ensure` returned. Only
+                    // plugs it is still hosting matter: a request from a retired or upgraded-away
+                    // workload names nothing to redo.
+                    plugs = reensure.requested() => {
+                        if plugs.iter().any(|plug_id| state.hosted.contains_key(plug_id)) {
+                            let snapshot = state
+                                .stores
+                                .datum_store
+                                .snapshot()
+                                .await
+                                .map_err(crate::store_error)?;
+                            drop(state.reconcile(&RequestContext::root(), snapshot, false).await?);
+                        }
+                    },
                     command = inbox.recv() => match command {
                         Some(command) => state.run(command).await,
                         None => break,
@@ -589,6 +620,7 @@ impl State {
                     reason,
                 } => {
                     self.stores.dispatch.unbind(&plug_id.to_string());
+                    self.retire(&plug_id).await;
                     let error = match revoke_errors.get(&plug_id) {
                         Some(revoke_err) => format!("{reason}; {revoke_err}"),
                         None => reason,
@@ -616,7 +648,6 @@ impl State {
                     installed,
                     desired_grants,
                 } => {
-                    self.register_operations(&installed);
                     let record = self
                         .reconcile_admitted(
                             context,
@@ -632,33 +663,117 @@ impl State {
         }
 
         // A plug that left the config (uninstall) has no resolution to unbind it from above.
-        for plug_id in self.records.keys() {
-            if !new_records.contains_key(plug_id) {
-                self.stores.dispatch.unbind(&plug_id.to_string());
-            }
+        let removed: Vec<PlugId> = self
+            .records
+            .keys()
+            .filter(|plug_id| !new_records.contains_key(*plug_id))
+            .cloned()
+            .collect();
+        for plug_id in removed {
+            self.stores.dispatch.unbind(&plug_id.to_string());
+            self.retire(&plug_id).await;
         }
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
     }
 
-    /// Makes an admitted nodule's `implements` visible through dispatch under its plug id, as
-    /// not ready for the reason [`InstalledNodule::readiness`] reports (today the handler
-    /// artifact is unavailable and there is no executor). A disabled nodule is unbound instead:
-    /// two providers of one operation are ambiguous, and disabling one is how an operator
-    /// resolves that, which a registered-but-disabled claim would keep blocking. Registering is
-    /// a no-op when nothing changed, so every reconcile may call this.
-    fn register_operations(&self, installed: &InstalledNodule) {
-        let provider_id = installed.plug_id.to_string();
-        if installed.enabled {
+    /// Stops the executor hosting `plug_id`, if it was. Dispatch must already have stopped
+    /// routing to it.
+    async fn retire(&mut self, plug_id: &PlugId) {
+        if self.hosted.remove(plug_id).is_some()
+            && let Some(executor) = &self.stores.executor
+        {
+            executor.retire(plug_id).await;
+        }
+    }
+
+    /// Makes an admitted nodule's `implements` visible through dispatch under its plug id and
+    /// returns the readiness both dispatch and the nodule's record report.
+    ///
+    /// A disabled nodule is unbound instead: two providers of one operation are ambiguous, and
+    /// disabling one is how an operator resolves that, which a registered-but-disabled claim
+    /// would keep blocking. An enabled one with a handler is ensured with the executor, if there
+    /// is one, and registered ready or not ready as the executor says, with the handler's
+    /// artifacts marked available unless the executor lacks their bytes. Otherwise it is
+    /// registered not ready with the readiness the inventory alone can tell.
+    ///
+    /// Registering is a no-op when nothing changed and `ensure` is idempotent, so every
+    /// reconcile may call this.
+    async fn serve(&mut self, installed: &mut InstalledNodule, actor_id: Uuid7) -> Readiness {
+        let plug_id = installed.plug_id.clone();
+        let provider_id = plug_id.to_string();
+        let hosting = match (&self.stores.executor, &installed.nodule.handler) {
+            (Some(executor), Some(handler)) if installed.enabled => {
+                Some((Arc::clone(executor), handler.artifact.clone()))
+            }
+            _ => None,
+        };
+        if !installed.enabled {
+            self.stores.dispatch.unbind(&provider_id);
+            self.retire(&plug_id).await;
+            return Readiness::Disabled;
+        }
+        let Some((executor, artifact_key)) = hosting else {
+            self.retire(&plug_id).await;
+            let readiness = installed.readiness();
             self.stores.dispatch.register(
                 &provider_id,
                 installed.admitted.operations.clone(),
-                ProviderState::NotReady(installed.readiness()),
+                ProviderState::NotReady(readiness),
             );
-        } else {
+            return readiness;
+        };
+        // Upgrading to another revision replaces the workload: the old one stops being routed
+        // to (the registration below swaps it in one step) and is retired before the new one
+        // is ensured.
+        if self
+            .hosted
+            .get(&plug_id)
+            .is_some_and(|hosted| *hosted != installed.revision)
+        {
             self.stores.dispatch.unbind(&provider_id);
+            self.retire(&plug_id).await;
         }
+        let (handler, _) = installed
+            .artifacts
+            .get(&artifact_key)
+            .expect("admission resolved the handler artifact");
+        let spec = HandlerSpec {
+            plug_id: plug_id.clone(),
+            revision: installed.revision,
+            nodule_id: installed.nodule.id.clone(),
+            handler: handler.clone(),
+            actor_id,
+            operations: installed.admitted.operations.clone(),
+            reensure: self.reensure.handle(plug_id.clone()),
+        };
+        self.hosted.insert(plug_id, installed.revision);
+        let state = match executor.ensure(&spec).await {
+            Hosted::Ready(provider) => ProviderState::Ready(ProviderKind::Executor {
+                kind: executor.kind(),
+                provider,
+            }),
+            Hosted::NotReady(readiness) => {
+                assert!(
+                    !readiness.is_ready(),
+                    "executor `{}` reported `{provider_id}` ready without a provider",
+                    executor.kind()
+                );
+                ProviderState::NotReady(readiness)
+            }
+        };
+        if state.readiness() != Readiness::ArtifactsUnavailable
+            && let Some((_, artifact_state)) = installed.artifacts.get_mut(&artifact_key)
+        {
+            *artifact_state = ArtifactState::Available;
+        }
+        self.stores.dispatch.register(
+            &provider_id,
+            installed.admitted.operations.clone(),
+            state.clone(),
+        );
+        state.readiness()
     }
 
     async fn ensure_nodule_actor(
@@ -692,13 +807,14 @@ impl State {
         context: &RequestContext,
         heads: &[ChangeHash],
         on_boot: bool,
-        installed: InstalledNodule,
+        mut installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
     ) -> Res<NoduleRecord> {
         let plug_id = installed.plug_id.clone();
         let actor = self
             .ensure_nodule_actor(context, &plug_id, &installed.nodule.id)
             .await?;
+        let readiness = self.serve(&mut installed, actor.actor_id).await;
 
         let mut apply_errors = Vec::new();
         if let Err(err) = self
@@ -818,7 +934,7 @@ impl State {
             nodule_id: Some(installed.nodule.id.clone()),
             actor: Some(nodule_actor(&actor)),
             enabled: installed.enabled,
-            readiness: installed.readiness(),
+            readiness,
             config: installed.config.clone(),
             artifacts: installed
                 .artifacts
