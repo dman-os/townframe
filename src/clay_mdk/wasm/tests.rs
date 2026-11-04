@@ -54,6 +54,13 @@ fn declaring_view() -> InitialContext {
                     contract: Nsid::literal("org.example.dayframe.counter.count"),
                 },
             ),
+            (
+                "increment".to_owned(),
+                DeclaredPublication {
+                    kind: clay_guest_session::capabilities::PublicationKind::Call,
+                    contract: Nsid::literal("org.example.dayframe.counter.increment"),
+                },
+            ),
         ]),
         ..InitialContext::default()
     }
@@ -62,7 +69,7 @@ fn declaring_view() -> InitialContext {
 fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
-        // The counter also publishes a badge presentation and a `count` call.
+        // The counter also publishes a badge presentation and the `count` and `increment` calls.
         publications: vec![
             PublicationDeclaration {
                 name: view.into(),
@@ -78,6 +85,11 @@ fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
                 name: "count".into(),
                 kind: PublicationKind::Call,
                 contract: Some(Nsid::literal("org.example.dayframe.counter.count")),
+            },
+            PublicationDeclaration {
+                name: "increment".into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal("org.example.dayframe.counter.increment")),
             },
         ],
         requires: vec![],
