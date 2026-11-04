@@ -17,6 +17,7 @@ pub enum big_nodule_core::NoduleError { # [error ("nodule description invalid at
 pub enum big_nodule_core::RunMode { Once, EveryStart, # [datum (other)] Unknown (String) }
 pub enum big_nodule_core::StateKind { Sqlite, Kv, # [datum (other)] Unknown (String) }
 pub enum big_nodule_core::StoreMode { Frontier, Log, # [datum (other)] Unknown (String) }
+pub enum big_nodule_core::config::Admission { Admitted { version : Version , nodule : Nodule , admitted : crate :: Admitted , artifacts : BTreeMap < String , (big_plugs_core :: Artifact , crate :: inventory :: ArtifactState) > , }, # [doc = " The envelope cannot be installed; `version` and `nodule_id` are best-effort reads of the"] # [doc = " raw envelope for the refusal record."] Refused { version : Option < Version > , nodule_id : Option < String > , reason : String , } }
 pub enum big_nodule_core::config::DatumSlot< T > { # [default] Absent, Accepted { value : T , raw : Option < Value > , }, Invalid { raw : Option < Value > , reason : String , } }
 pub enum big_nodule_core::config::NoduleResolution { Admitted { installed : InstalledNodule , desired_grants : BTreeMap < DrawerId , DrawerAccess > , }, Refused { plug_id : PlugId , version : Option < Version > , revision : Option < Revision > , nodule_id : Option < String > , enabled : bool , config : Option < IndexMap < String , Value > > , reason : String , } }
 pub enum big_nodule_core::inventory::ArtifactState { Unavailable }
@@ -28,16 +29,18 @@ pub impl big_nodule_core::Nodule::fn datum_lexicons (& self) -> impl Iterator < 
 pub impl big_nodule_core::Nodule::fn new (id : impl Into < String >) -> Self
 pub impl big_nodule_core::Nodule::fn owns (& self , nsid : & str) -> bool
 pub impl big_nodule_core::Nodule::fn validate_config (& self , settings : & IndexMap < String , Value > , path : & str) -> Result < () >
+pub impl big_nodule_core::config::AdmissionCache::fn admission (& self , plug_id : & PlugId , install : & NoduleInstall) -> Arc < Admission >
+pub impl big_nodule_core::config::AdmissionCache::fn new () -> Self
 pub impl big_nodule_core::config::DatumSlot < T >::fn accepted (& self) -> Option < & T >
 pub impl big_nodule_core::config::DatumSlot < T >::fn is_absent (& self) -> bool
-pub impl big_nodule_core::config::NoduleConfig::fn admit (& mut self , plug : & Plug , drawers : Option < BTreeMap < DrawerId , DrawerAccess > > ,) -> Result < InstalledNodule , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn admit (& mut self , cache : & AdmissionCache , plug : & Plug , drawers : Option < BTreeMap < DrawerId , DrawerAccess > > ,) -> Result < InstalledNodule , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn carried_keys (& self) -> & BTreeMap < DatumKey , DatumRead >
 pub impl big_nodule_core::config::NoduleConfig::fn configure (& mut self , plug_id : & PlugId , settings : IndexMap < String , Value > ,) -> Result < InstalledNodule , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn entries (& self) -> & BTreeMap < PlugId , NoduleEntry >
 pub impl big_nodule_core::config::NoduleConfig::fn entry (& self , plug_id : & PlugId) -> Option < & NoduleEntry >
 pub impl big_nodule_core::config::NoduleConfig::fn new () -> Self
 pub impl big_nodule_core::config::NoduleConfig::fn remove_carried_key (& mut self , key : & DatumKey) -> bool
-pub impl big_nodule_core::config::NoduleConfig::fn resolve (& self) -> BTreeMap < PlugId , NoduleResolution >
+pub impl big_nodule_core::config::NoduleConfig::fn resolve (& self , cache : & AdmissionCache) -> BTreeMap < PlugId , NoduleResolution >
 pub impl big_nodule_core::config::NoduleConfig::fn set_drawer_grants (& mut self , plug_id : & PlugId , drawers : BTreeMap < DrawerId , DrawerAccess > ,) -> Result < InstalledNodule , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn set_enabled (& mut self , plug_id : & PlugId , enabled : bool ,) -> Result < InstalledNodule , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn uninstall (& mut self , plug_id : & PlugId) -> Result < () , InventoryError >
@@ -65,6 +68,7 @@ pub struct big_nodule_core::RevisionedStore  { key: String, selector: String, en
 pub struct big_nodule_core::Routine  { key: String, implements: String, execution: Execution, state: Vec < String >, extra: Extra }
 pub struct big_nodule_core::View  { key: String, input: String, presenter: String, extra: Extra }
 pub struct big_nodule_core::Workflow  { artifact: String, export: String, extra: Extra }
+pub struct big_nodule_core::config::AdmissionCache  {  }
 pub struct big_nodule_core::config::NoduleConfig  {  }
 pub struct big_nodule_core::config::NoduleEntry  { install: DatumSlot < NoduleInstall >, settings: DatumSlot < NoduleSettings >, grants: DatumSlot < NoduleGrants > }
 pub struct big_nodule_core::config::NoduleGrants  { drawers: BTreeMap < DrawerId , EntryAccess >, extra: Extra }

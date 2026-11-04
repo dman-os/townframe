@@ -426,18 +426,29 @@ fn config_schema_must_be_local_object_and_defaults_must_conform() {
 
 mod admission_tests {
     use super::*;
+    use crate::config::Admission;
+    use crate::config::AdmissionCache;
     use crate::config::NoduleConfig;
+    use crate::config::NoduleInstall;
     use crate::config::NoduleResolution;
+    use crate::config::install_key;
     use crate::inventory::ArtifactState;
     use crate::inventory::InstalledNodule;
     use crate::inventory::InventoryError;
     use crate::inventory::Readiness;
+    use big_cabinet_core::DocId;
+    use big_cabinet_core::doc::DatumRead;
+    use big_cabinet_core::doc::DatumStore;
+    use big_cabinet_core::doc::DatumVersion;
+    use big_cabinet_core::doc::DatumsRead;
+    use big_cabinet_core::drawer::DrawerAccess;
     use big_plugs_core::Artifact;
     use big_plugs_core::Contribution;
     use big_plugs_core::Digest;
     use big_plugs_core::NoduleContribution;
     use big_plugs_core::Plug;
     use big_plugs_core::PlugId;
+    use std::sync::Arc;
 
     fn plug_with(id: &str, version: &str, nodule: Nodule) -> Plug {
         let mut plug = Plug::new(id.parse().unwrap(), version.parse().unwrap());
@@ -466,8 +477,8 @@ mod admission_tests {
     }
 
     /// The installed nodule `config` currently resolves for `id`, as the runtime would see it.
-    fn resolved(config: &NoduleConfig, id: &PlugId) -> InstalledNodule {
-        match config.resolve().remove(id) {
+    fn resolved(config: &NoduleConfig, cache: &AdmissionCache, id: &PlugId) -> InstalledNodule {
+        match config.resolve(cache).remove(id) {
             Some(NoduleResolution::Admitted { installed, .. }) => installed,
             other => panic!("expected `{id}` to resolve admitted, got {other:?}"),
         }
@@ -476,10 +487,11 @@ mod admission_tests {
     #[test]
     fn admits_plug_tracks_readiness_and_configures_settings() {
         let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
         let plug = plug_with("@example/photos", "1.0.0", photos());
         let id: PlugId = "@example/photos".parse().unwrap();
 
-        let installed = config.admit(&plug, None).unwrap();
+        let installed = config.admit(&cache, &plug, None).unwrap();
         assert_eq!(installed.plug_id, id);
         assert_eq!(installed.version, "1.0.0".parse().unwrap());
         assert_eq!(installed.revision, plug.revision());
@@ -491,7 +503,7 @@ mod admission_tests {
             Some(ArtifactState::Unavailable)
         );
         assert_eq!(installed.config, Some(settings(json!(true))));
-        assert_eq!(resolved(&config, &id), installed);
+        assert_eq!(resolved(&config, &cache, &id), installed);
 
         let enabled = config.set_enabled(&id, true).unwrap();
         assert!(enabled.enabled);
@@ -505,19 +517,20 @@ mod admission_tests {
         let bad = config.configure(&id, settings(json!("invalid")));
         assert!(matches!(bad, Err(InventoryError::Nodule(_))));
         assert_eq!(
-            resolved(&config, &id).config,
+            resolved(&config, &cache, &id).config,
             Some(settings(json!(false))),
             "a refused configure leaves the accepted settings in place"
         );
         assert!(!Readiness::Refused.is_ready());
 
         config.uninstall(&id).unwrap();
-        assert!(config.resolve().is_empty());
+        assert!(config.resolve(&cache).is_empty());
     }
 
     #[test]
     fn lexicon_only_nodule_reaches_executor_unavailable_when_enabled() {
         let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
         let mut nodule = Nodule::new("org.example.schema");
         nodule.lexicons.push(file(json!({
             "lexicon": 1,
@@ -533,7 +546,7 @@ mod admission_tests {
         let plug = plug_with("@example/schema", "0.1.0", nodule);
         let id: PlugId = "@example/schema".parse().unwrap();
 
-        let installed = config.admit(&plug, None).unwrap();
+        let installed = config.admit(&cache, &plug, None).unwrap();
         assert!(installed.artifacts.is_empty());
         assert_eq!(installed.readiness(), Readiness::Disabled);
 
@@ -549,16 +562,17 @@ mod admission_tests {
     #[test]
     fn upgrades_preserve_state_and_validate_configured_settings() {
         let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
         let id: PlugId = "@example/photos".parse().unwrap();
         let v1 = plug_with("@example/photos", "1.0.0", photos());
-        config.admit(&v1, None).unwrap();
+        config.admit(&cache, &v1, None).unwrap();
         config.set_enabled(&id, true).unwrap();
 
         // Unconfigured upgrade adopts the new version's defaults and keeps `enabled`.
         let mut nodule_v2 = photos();
         nodule_v2.config.as_mut().unwrap().defaults = Some(settings(json!(false)));
         let v2 = plug_with("@example/photos", "1.1.0", nodule_v2);
-        let upgraded = config.admit(&v2, None).unwrap();
+        let upgraded = config.admit(&cache, &v2, None).unwrap();
         assert!(upgraded.enabled);
         assert_eq!(upgraded.version, "1.1.0".parse().unwrap());
         assert_eq!(upgraded.config, Some(settings(json!(false))));
@@ -567,7 +581,7 @@ mod admission_tests {
         // new version's schema breaks it.
         config.configure(&id, settings(json!(true))).unwrap();
         let v3 = plug_with("@example/photos", "1.2.0", photos());
-        let upgraded = config.admit(&v3, None).unwrap();
+        let upgraded = config.admit(&cache, &v3, None).unwrap();
         assert_eq!(upgraded.config, Some(settings(json!(true))));
 
         let mut incompatible = photos();
@@ -594,19 +608,203 @@ mod admission_tests {
             .collect(),
         );
         let v4_bad = plug_with("@example/photos", "2.0.0", incompatible);
+        // The upgrade is admitted even though it invalidates the explicit settings; resolution
+        // refuses the nodule until the settings are rewritten (see the wedge test below).
+        config.admit(&cache, &v4_bad, None).unwrap();
         assert!(matches!(
-            config.admit(&v4_bad, None),
+            config.resolve(&cache).get(&id),
+            Some(NoduleResolution::Refused { version: Some(v), .. }) if *v == "2.0.0".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn an_upgrade_that_invalidates_settings_is_admitted_refused_and_repaired_by_configure() {
+        let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
+        let id: PlugId = "@example/photos".parse().unwrap();
+        let drawer = DocId::random();
+        config
+            .admit(
+                &cache,
+                &plug_with("@example/photos", "1.0.0", photos()),
+                Some(BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])),
+            )
+            .unwrap();
+        config.set_enabled(&id, true).unwrap();
+        config.configure(&id, settings(json!(true))).unwrap();
+
+        // v2 requires a string `endpoint` the stored settings lack.
+        let mut v2_nodule = photos();
+        v2_nodule.lexicons[5] = file(json!({
+            "lexicon": 1,
+            "id": "org.example.photos.settings",
+            "defs": {
+                "main": {
+                    "type": "object",
+                    "required": ["thumbnails", "endpoint"],
+                    "properties": {
+                        "thumbnails": { "type": "boolean" },
+                        "endpoint": { "type": "string" }
+                    }
+                }
+            }
+        }));
+        v2_nodule.config.as_mut().unwrap().defaults = Some(
+            [
+                ("thumbnails".to_owned(), json!(true)),
+                ("endpoint".to_owned(), json!("https://example.org")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let before = config.clone();
+        config
+            .admit(
+                &cache,
+                &plug_with("@example/photos", "2.0.0", v2_nodule.clone()),
+                None,
+            )
+            .unwrap();
+
+        let Some(NoduleResolution::Refused {
+            version,
+            enabled,
+            config: kept_settings,
+            reason,
+            ..
+        }) = config.resolve(&cache).remove(&id)
+        else {
+            panic!("settings that no longer conform refuse the nodule");
+        };
+        assert_eq!(version, Some("2.0.0".parse().unwrap()));
+        assert!(enabled);
+        assert_eq!(kept_settings, Some(settings(json!(true))));
+        assert!(reason.contains("endpoint"), "{reason}");
+
+        // The stored settings and grants datums are not rewritten by the upgrade.
+        let patch = NoduleConfig::diff(&before, &config).unwrap();
+        assert_eq!(patch.set.keys().collect::<Vec<_>>(), [&install_key(&id)]);
+        assert!(patch.remove.is_empty());
+
+        // Enabling and grants still work on the refused nodule, and `configure` validates against
+        // the newly installed revision: a bad rewrite is refused, a conforming one repairs it.
+        config.set_enabled(&id, false).unwrap();
+        config.set_enabled(&id, true).unwrap();
+        assert!(matches!(
+            config.configure(&id, settings(json!(true))),
             Err(InventoryError::Nodule(_))
         ));
-        assert_eq!(resolved(&config, &id).version, "1.2.0".parse().unwrap());
+        let mut repaired = settings(json!(true));
+        repaired.insert("endpoint".into(), json!("https://example.org"));
+        config.configure(&id, repaired.clone()).unwrap();
+        let Some(NoduleResolution::Admitted {
+            installed,
+            desired_grants,
+        }) = config.resolve(&cache).remove(&id)
+        else {
+            panic!("rewritten settings repair the nodule");
+        };
+        assert_eq!(installed.config, Some(repaired));
+        assert_eq!(
+            desired_grants,
+            BTreeMap::from([(drawer, DrawerAccess::Read)]),
+            "desired grants survive the refusal"
+        );
+
+        // An upgrade to a revision with no config schema at all is refused the same way. Settings
+        // can then no longer be rewritten, which `configure` reports as `NoConfigSchema`.
+        let schemaless = plug_with("@example/photos", "3.0.0", {
+            let mut nodule = photos();
+            nodule.config = None;
+            nodule.lexicons.truncate(5);
+            nodule
+        });
+        config.admit(&cache, &schemaless, None).unwrap();
+        let Some(NoduleResolution::Refused { reason, .. }) = config.resolve(&cache).remove(&id)
+        else {
+            panic!("settings without a schema refuse the nodule");
+        };
+        assert!(reason.contains("config schema"), "{reason}");
+        assert!(matches!(
+            config.configure(&id, settings(json!(true))),
+            Err(InventoryError::NoConfigSchema(_))
+        ));
+    }
+
+    #[test]
+    fn unchanged_envelopes_are_admitted_once_and_changed_ones_again() {
+        let cache = AdmissionCache::new();
+        let id: PlugId = "@example/photos".parse().unwrap();
+        let v1 = NoduleInstall::from_plug(&plug_with("@example/photos", "1.0.0", photos()), false);
+        let first = cache.admission(&id, &v1);
+        assert!(matches!(&*first, Admission::Admitted { .. }));
+        assert!(
+            Arc::ptr_eq(&first, &cache.admission(&id, &v1)),
+            "the same envelope reuses the stored outcome"
+        );
+
+        // Toggling `enabled` leaves the envelope alone; a new revision does not.
+        let mut enabled = v1.clone();
+        enabled.enabled = true;
+        assert!(Arc::ptr_eq(&first, &cache.admission(&id, &enabled)));
+        let v2 = NoduleInstall::from_plug(&plug_with("@example/photos", "1.1.0", photos()), false);
+        assert!(!Arc::ptr_eq(&first, &cache.admission(&id, &v2)));
+
+        // A tampered envelope under an unchanged revision pin is not served from the cache and
+        // fails the revision check instead.
+        let mut tampered = v2.clone();
+        tampered.envelope.insert("version".into(), json!("9.9.9"));
+        let Admission::Refused { reason, .. } = &*cache.admission(&id, &tampered) else {
+            panic!("a tampered envelope is refused");
+        };
+        assert!(reason.contains("revision mismatch"), "{reason}");
+    }
+
+    #[test]
+    fn authority_conflicts_cover_equal_ancestor_and_descendant_authorities() {
+        let cache = AdmissionCache::new();
+        // Admitting pairwise-conflicting nodules is refused by `admit`, so seed the config with
+        // install datums the way an import would, then let `resolve` find the conflicts.
+        let mut read = DatumsRead {
+            heads: Vec::new(),
+            datums: BTreeMap::new(),
+        };
+        for (plug_id, authority) in [
+            ("@example/a", "org.example.a"),
+            ("@example/b", "org.example.a.b"),
+            ("@example/c", "org.example.ab"),
+            ("@example/d", "org.example.d"),
+            ("@example/e", "org.example.d"),
+        ] {
+            let plug = plug_with(plug_id, "1.0.0", Nodule::new(authority));
+            read.datums.insert(
+                install_key(&plug.id),
+                DatumRead::Accepted {
+                    value: serde_json::to_value(NoduleInstall::from_plug(&plug, false)).unwrap(),
+                    version: DatumVersion::default(),
+                },
+            );
+        }
+        let config = NoduleConfig::hydrate(&read);
+        let resolved = config.resolve(&cache);
+        let refused = |plug_id: &str| {
+            matches!(
+                resolved.get(&plug_id.parse::<PlugId>().unwrap()),
+                Some(NoduleResolution::Refused { .. })
+            )
+        };
+        // `org.example.a` owns `org.example.a.b` but not the sibling `org.example.ab`.
+        assert!(refused("@example/a") && refused("@example/b") && !refused("@example/c"));
+        assert!(refused("@example/d") && refused("@example/e"));
     }
 
     #[test]
     fn refuses_missing_contribution_bad_schema_missing_artifact_and_authority_conflicts() {
         let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
         let empty = Plug::new("@example/empty".parse().unwrap(), "0.1.0".parse().unwrap());
         assert!(matches!(
-            config.admit(&empty, None),
+            config.admit(&cache, &empty, None),
             Err(InventoryError::MissingContribution(_))
         ));
 
@@ -615,7 +813,7 @@ mod admission_tests {
             n.schema = "org.example.other.nodule".into();
         }
         assert!(matches!(
-            config.admit(&bad_schema, None),
+            config.admit(&cache, &bad_schema, None),
             Err(InventoryError::UnsupportedSchema { .. })
         ));
 
@@ -624,34 +822,34 @@ mod admission_tests {
             n.description.insert("id".into(), json!(123));
         }
         assert!(matches!(
-            config.admit(&bad_payload, None),
+            config.admit(&cache, &bad_payload, None),
             Err(InventoryError::InvalidContribution { .. })
         ));
 
         let mut no_artifact = plug_with("@example/photos", "1.0.0", photos());
         no_artifact.artifacts.clear();
         assert!(matches!(
-            config.admit(&no_artifact, None),
+            config.admit(&cache, &no_artifact, None),
             Err(InventoryError::MissingArtifact { artifact, .. }) if artifact == "routines"
         ));
         assert!(
-            config.resolve().is_empty(),
+            config.resolve(&cache).is_empty(),
             "refused admissions install nothing"
         );
 
         let valid = plug_with("@example/photos", "1.0.0", photos());
-        config.admit(&valid, None).unwrap();
+        config.admit(&cache, &valid, None).unwrap();
 
         let duplicate_authority = plug_with("@example/other-photos", "1.0.0", photos());
         assert!(matches!(
-            config.admit(&duplicate_authority, None),
+            config.admit(&cache, &duplicate_authority, None),
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
         let sub_authority = Nodule::new("org.example.photos.sub");
         let sub_plug = plug_with("@example/sub-photos", "1.0.0", sub_authority);
         assert!(matches!(
-            config.admit(&sub_plug, None),
+            config.admit(&cache, &sub_plug, None),
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
@@ -661,7 +859,7 @@ mod admission_tests {
             Nodule::new("org.example.gallery"),
         );
         assert!(matches!(
-            config.admit(&changed_plug, None),
+            config.admit(&cache, &changed_plug, None),
             Err(InventoryError::AuthorityChanged { .. })
         ));
     }
@@ -902,7 +1100,8 @@ mod config_tests {
             },
         );
         let config = NoduleConfig::hydrate(&read);
-        let Some(NoduleResolution::Refused { nodule_id, .. }) = config.resolve().remove(&plug.id)
+        let Some(NoduleResolution::Refused { nodule_id, .. }) =
+            config.resolve(&Default::default()).remove(&plug.id)
         else {
             panic!("a nodule with an unsupported schema is refused");
         };
@@ -996,7 +1195,7 @@ mod config_tests {
         assert!(before.entry(&orphan_id).unwrap().install.is_absent());
 
         // Resolve admits `@example/photos`, refuses `@example/broken`, and ignores `@example/orphan`.
-        let resolved = before.resolve();
+        let resolved = before.resolve(&Default::default());
         assert!(matches!(
             resolved.get(&photos_id),
             Some(NoduleResolution::Admitted { .. })

@@ -29,6 +29,7 @@ use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
 use big_nodule_core::inventory::InventoryError;
@@ -131,6 +132,8 @@ pub(crate) struct State {
     applied_heads: BTreeMap<PlugId, Vec<ChangeHash>>,
     records: BTreeMap<PlugId, NoduleRecord>,
     observed_heads: Vec<ChangeHash>,
+    /// Memoized per-envelope admission, shared with the config-mutation closures.
+    admission_cache: Arc<AdmissionCache>,
 }
 
 fn nodule_actor(actor: &Actor) -> NoduleActor {
@@ -184,6 +187,7 @@ impl State {
             applied_heads: BTreeMap::new(),
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
+            admission_cache: Arc::default(),
         };
         let context = RequestContext::root();
         for (plug_id, (nodule_id, expected_actor_id)) in state.persisted_actors.clone() {
@@ -356,8 +360,9 @@ impl State {
             }
         }
         let plug_id = plug.id.clone();
+        let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
-            config.admit(&plug, drawers).map(|_| ())
+            config.admit(&cache, &plug, drawers).map(|_| ())
         })
         .await?;
         self.records
@@ -462,11 +467,27 @@ impl State {
             .records
             .values()
             .any(|record| record.applied_heads.as_ref() != Some(&record.observed_heads));
-        if snapshot.heads != self.observed_heads || has_unapplied || !self.applied_grants.is_empty()
+        // Config heads do not move when an applied grant's source capability is retracted
+        // elsewhere (for instance when the nodules actor loses Admin on the drawer), so the
+        // records would keep reporting `granted: true`. Check only those capabilities' liveness
+        // and run the full reconcile, which re-applies or re-reports the grant, just when one
+        // died.
+        if snapshot.heads != self.observed_heads
+            || has_unapplied
+            || self.any_applied_grant_dead(context).await?
         {
             drop(self.reconcile(context, snapshot, false).await?);
         }
         Ok(())
+    }
+
+    async fn any_applied_grant_dead(&self, context: &RequestContext) -> Res<bool> {
+        for (_, cap_id) in self.applied_grants.values().flat_map(BTreeMap::values) {
+            if !self.stores.is_cap_live(context, *cap_id).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn get(&mut self, context: &RequestContext, plug_id: &PlugId) -> Res<NoduleRecord> {
@@ -501,7 +522,7 @@ impl State {
         snapshot: StoreSnapshot<NoduleConfig>,
         on_boot: bool,
     ) -> Res<BTreeMap<PlugId, NodulesError>> {
-        let mut resolved = snapshot.value.resolve();
+        let mut resolved = snapshot.value.resolve(&self.admission_cache);
         for (plug_id, (saved_nodule_id, _)) in &self.persisted_actors {
             if let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(plug_id)
                 && &installed.nodule.id != saved_nodule_id

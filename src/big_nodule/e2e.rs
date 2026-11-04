@@ -748,6 +748,86 @@ async fn an_admit_scoped_handle_admits_only_its_own_plugs() {
     node.shutdown().await;
 }
 
+/// `plug(.., true)` whose settings schema also requires a string `endpoint`, so settings written
+/// against the plain revision no longer conform to it.
+fn plug_requiring_endpoint(id: &str, version: &str) -> Plug {
+    let mut plug = plug(id, version, true);
+    let Some(Contribution::Nodule(contribution)) = plug.contributions.first_mut() else {
+        panic!("test plugs carry a nodule contribution");
+    };
+    let settings = &mut contribution.description["lexicons"][1]["defs"]["main"];
+    settings["required"] = json!(["endpoint"]);
+    settings["properties"]["endpoint"] = json!({ "type": "string" });
+    contribution.description["config"]["defaults"]["endpoint"] = json!("https://example.org");
+    plug
+}
+
+#[tokio::test]
+async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_losing_actor_or_grants()
+ {
+    let node = node().await;
+    let operator = node.operator();
+    let present = node.drawers.local().present_id.clone();
+    grant_drawer_admin(
+        &node.drawers,
+        &node.drawers_actor,
+        &present,
+        node.nodules_actor.actor_id,
+    )
+    .await;
+    let v1 = node
+        .call(AdmitNodule {
+            authorization: operator,
+            plug: plug("@example/photos", "1.0.0", true),
+            drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
+        })
+        .await
+        .unwrap();
+    assert_eq!(v1.error, None);
+    assert!(v1.drawers[&present].granted);
+    node.call(ConfigureNodule {
+        authorization: operator,
+        plug_id: id("@example/photos"),
+        settings: settings_of(false),
+    })
+    .await
+    .unwrap();
+
+    // The upgrade is admitted; the nodule is refused because the saved settings lack `endpoint`.
+    let refused = node
+        .admit(
+            operator,
+            plug_requiring_endpoint("@example/photos", "2.0.0"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.version, Some("2.0.0".parse().unwrap()));
+    assert_eq!(refused.readiness, Readiness::Refused);
+    assert!(refused.error.as_deref().unwrap().contains("endpoint"));
+    assert_eq!(refused.config, Some(settings_of(false)));
+    assert_eq!(refused.actor, v1.actor, "the durable actor is kept");
+    // Existing reconcile semantics: a refused nodule is not Admitted, so its applied grants are
+    // retracted. The desired grants stay in config and return on repair.
+    assert!(refused.drawers.is_empty());
+
+    let mut repaired = settings_of(false);
+    repaired.insert("endpoint".into(), json!("https://example.org"));
+    let record = node
+        .call(ConfigureNodule {
+            authorization: operator,
+            plug_id: id("@example/photos"),
+            settings: repaired.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(record.error, None);
+    assert_eq!(record.readiness, Readiness::Disabled);
+    assert_eq!(record.config, Some(repaired));
+    assert_eq!(record.actor, v1.actor);
+    assert!(record.drawers[&present].granted);
+    node.shutdown().await;
+}
+
 #[tokio::test]
 async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     let mut node = node().await;

@@ -100,13 +100,29 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
-- Review fixes batch 2 (next): the upgrade wedge (accept the upgrade and mark settings `Invalid`), then reconcile perf. After that, admission narrowing (D1), then the dispatch work.
-- wash-runtime fork seam (subagent) in `../wasmCloud`, a jj clone of `dman-os/wasmCloud`:
-  - bookmark `townframe-changes`, based on the pinned `1bcaeba`;
-  - adds pub `Ingress::dispatch_request` with a test;
-  - not pushed.
-
+- Next: batch 3, admission narrowing (D1) plus the manifest reshape to one XRPC handler with `implements`, as D2's guest model requires. Then dispatch.
 ## Done
+
+- 2026-11-04: Review fixes batch 2.
+  - Upgrade wedge fixed. An upgrade that invalidates settings is admitted and refused with the existing reasons. The settings datum is kept `Accepted`, because `diff` refuses to write `Invalid` slots. `configure` against the new revision repairs it.
+  - Reconcile perf:
+    - `AdmissionCache` keyed by `(plug, revision)`, with a byte-equal envelope check, owned by the state actor.
+    - Reads only check applied-grant capability liveness (one `InspectCapability` per applied grant) instead of a full reconcile.
+    - The authority-conflict check is O(n × depth).
+  - Remaining costs: `InstalledNodule` clones per resolve, settings revalidated per resolve, hydrate on every snapshot.
+  - Operator questions:
+    1. Should a settings-only refusal keep applied grants? Today any non-Admitted plug loses them until repaired.
+    2. There's no way to clear settings for a schemaless revision except uninstall.
+
+- 2026-11-04: wash-runtime fork seam committed in `../wasmCloud` (jj, colocated clone of `dman-os/wasmCloud`, `upstream` remote added).
+  - Bookmark `townframe-changes` = `e7648c6e`, directly on the pinned `1bcaeba`; author dman-os. Not pushed.
+  - Adds pub `Ingress::dispatch_request(workload_id, Request<WasiBody>)` over `dispatch_local`. Order: service first, then component; unbound workloads error; the Router is not consulted. It does not apply `MeteredBody`/`record_response_status` from the wire path.
+  - The integration test `test_dispatch_request_delivers_in_process` covers p2+p3 fixtures in-process and the unknown-id case; 15/15 in `integration_http_local_routing`.
+  - Gotchas:
+    - Build that fork with `RUSTUP_TOOLCHAIN=1.96.0`. The nix nightly 1.100 trips the fork workspace's deny-warnings on a recursion lint at the base rev (not our change). As a git dependency, Cargo caps the dep's lints, so townframe is unaffected.
+    - Build fixtures with `cargo xtask build-fixtures <names>`.
+  - Working copy parked on an empty "scratch" change above the bookmark.
+  - **Operator action:** push `townframe-changes` to `dman-os/wasmCloud`; then we repin `wash-runtime` to `e7648c6e` and drop the local `[patch]`.
 
 - 2026-11-04: Review fixes batch 1:
   - Reconcile and watch failures now crash the state actor loudly instead of silently.
@@ -150,6 +166,9 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 - [test] There is no dedicated test for `Predicate::sole_doc` page filtering. Add one in `big_cabinet` doc observe tests: a single-doc poll is not woken by writes elsewhere.
 - [cleanup] Two ADRs are numbered 007 (`007-doc-branch-identity`, `007-plug-manifests-as-drawer-docs`), and lint doesn't flag it. Raise with the operator.
 - [cleanup] The root `Cargo.toml` has many unused workspace dependencies flagged by cargo's `unused_workspace_dependencies` lint (`axum-extra`, `big_node`, `bon`, `clay_rt_wcmp_wasmi`, `micro_counter`, `once_cell`, `subduction_redb_storage`, `tower`, `tower-http`, `tracing-appender`, …). All come from main. Clean up if the operator agrees.
+
+- [main] `src/big_node/e2e/blob_discovery/mod.rs` is not rustfmt-clean on origin/main (byte-identical here), so the flake `rust-fmt` check fails on it.
+- [main] The big_node `blob_discovery` e2e tests take about 95–105s alone. Under a parallel run they exceed the default nextest kill (60s × 2) and aren't named `long_test`. Pinned 2026-11-04; they don't involve nodules.
 
 ## Deferred
 
