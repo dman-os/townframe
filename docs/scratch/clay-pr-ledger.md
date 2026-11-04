@@ -373,3 +373,9 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 - Tombstones count toward `rows_per_writer` (they are scope state). A micro's bindings share one
   WriterId; equal stamps between them break by scope id.
 - Not compiled: native `clay_mdk` tests (known red from the `HostedCollection` removal, fixed in C2b).
+
+## WCMP fork nix lanes (2026-11-04)
+
+- The fork's devshell is broken since 687e486 (wasm-bindgen pinned to 0.2.127 with no
+  `wasmBindgenHashes."0.2.127"` entry in flake.nix). Bootstrapping the hashes builds wasm-bindgen-cli
+  through Nix and filled `/` (/tmp) on this machine. Deferred; 7604dc8 verified with plain cargo test only.
