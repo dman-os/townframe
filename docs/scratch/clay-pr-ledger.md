@@ -542,3 +542,11 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   (manifest-declared collections); update every cross-reference in docs and source comments.
   The nodule manifest adopts our request shape `{binding, contract, access, necessity}` +
   `minRevision`.
+- ADR 028 accepted by the operator (feat/nodules `bea32514`). Clay alignment step "C6d" after C6c
+  and the ADR renumbering: NSID rename (contracts, schemas), drop `MicroManifest.id`/
+  `package_version` (envelope authoritative; until the envelope exists the sidecar carries them
+  outside the manifest), request shape `{binding, contract, access, necessity, resolution,
+  minRevision?}` for requirements and collection requests, drop `FacetAccess.owner_plug_id`,
+  contributions target a binding, micro id = installed-as plug id, writer identity = (replica,
+  micro id), BLAKE3 digests, grants re-checked against the granted request set. Envelope Rust
+  type names arrive from the peer before C7.
