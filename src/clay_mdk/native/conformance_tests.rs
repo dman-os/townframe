@@ -8,10 +8,12 @@
 //! from the scenario's `InitialContext` grants and runs `activate` the way the supervisor's
 //! [`factory`] does, then closes the incarnation's root.
 //!
-//! The scenarios over the raw-WIT `lifecycle` fixture are not here: they need
+//! Every scenario that needs only `Incarnations` runs here. The three over the raw-WIT
+//! `lifecycle` fixture (`guest_trap_*`, `sync_exports_*`, `dropped_call_*`) need
 //! `GuestIncarnations` (see its docs), which an in-process micro cannot offer.
 use super::*;
 use clay_guest_session::InitialContext;
+use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::lifecycle_conformance;
 use clay_guest_session::lifecycle_conformance::GuestResidue;
 use clay_guest_session::lifecycle_conformance::Incarnations;
@@ -28,12 +30,17 @@ struct Running {
     root: Box<dyn Root>,
     capabilities: CapabilitySession,
     collections: CollectionSession,
+    calls: InFlightCalls,
 }
 
 impl Running {
-    /// An in-process micro has no resource table; the sessions are all it holds.
+    /// An in-process micro has no resource table; the sessions and its running handlers are all
+    /// it holds.
     fn residue(&self) -> GuestResidue {
-        GuestResidue::of(true, &self.capabilities, &self.collections)
+        GuestResidue {
+            calls: self.calls.count(),
+            ..GuestResidue::of(true, &self.capabilities, &self.collections)
+        }
     }
 }
 
@@ -48,8 +55,10 @@ impl Incarnations for InProcess {
     ) -> LocalFuture<'static, Result<(Running, LocalFuture<'static, ()>), String>> {
         Box::pin(async move {
             let manifest = micro::manifest();
-            // The manifest is the declaration here as in the supervisor's factory; a guest's
-            // engine is told the same thing through `context.publications`.
+            // The manifest is what the micro publishes against, as in the supervisor's factory.
+            // A guest engine is told what its package declares through `context.publications`
+            // and admits against that, so this does too: the scenarios that make the two
+            // disagree get the refusal a guest's sidecar mismatch gets.
             let declared = declared_publications(&manifest);
             let capabilities =
                 CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
@@ -98,6 +107,7 @@ impl Incarnations for InProcess {
                 .collect::<Result<_, String>>()?;
             let requirements =
                 resolve_requirements(&capabilities, &manifest, &context.requirements)?;
+            let calls = InFlightCalls::default();
             let initialized = Granted {
                 instance,
                 components: NativeComponents::new(&host),
@@ -110,8 +120,12 @@ impl Incarnations for InProcess {
                 requirements,
                 collections: slots,
                 declared,
+                calls: calls.clone(),
             }
-            .activate(&|context| Box::pin(micro::activate(context)))
+            .activate(
+                &|context| Box::pin(micro::activate(context)),
+                &context.publications,
+            )
             .await?;
             // Native tasks are the incarnation's own local tasks, so there is no driver to poll.
             let driver: LocalFuture<'static, ()> = Box::pin(std::future::ready(()));
@@ -121,6 +135,7 @@ impl Incarnations for InProcess {
                     root: initialized.root,
                     capabilities,
                     collections,
+                    calls,
                 },
                 driver,
             ))
@@ -135,11 +150,25 @@ impl Incarnations for InProcess {
         runtime.residue()
     }
 
+    fn calls_in_flight(runtime: &Running) -> InFlightCalls {
+        runtime.calls.clone()
+    }
+
     fn close(runtime: Running) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
         Box::pin(async move {
-            let closed = runtime.root.close().await;
+            let Running {
+                root,
+                capabilities,
+                collections,
+                calls,
+                ..
+            } = runtime;
+            let closed = root.close().await;
             // The root's tasks and leases are gone; what the sessions still count is a leak.
-            let residue = GuestResidue::of(true, &runtime.capabilities, &runtime.collections);
+            let residue = GuestResidue {
+                calls: calls.count(),
+                ..GuestResidue::of(true, &capabilities, &collections)
+            };
             (closed, residue)
         })
     }
@@ -158,6 +187,18 @@ macro_rules! conformance {
 }
 
 conformance! {
+    registration_scope_ownership,
+    failed_registration_initialization_publishes_nothing,
+    provider_consumer_graph,
+    failing_provider_publishes_nothing,
+    leased_provider_closes_when_idle,
+    lazy_references_activate_retain_and_release,
+    undeclared_publications_fail_initialization,
+    overlapping_calls_complete_out_of_order,
+    many_overlapping_calls_complete,
+    calls_reenter_their_provider,
+    disable_with_calls_in_flight_revokes_callers,
+    shutdown_with_calls_in_flight_revokes_callers,
     context_collections_and_calls,
     context_follows_a_provider,
     context_retains_a_call,

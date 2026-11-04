@@ -1,33 +1,34 @@
-//! Engine conformance for the ADR 030 activation boundary, run against the prepared
-//! `lifecycle` fixture component (`src/clay_mdk/lifecycle_fixture.rs`).
+//! Engine conformance for the ADR 030 activation boundary, run against the shared `context`
+//! micro (`src/clay_mdk/context_micro.rs`).
 //!
 //! Each engine crate implements [`Incarnations`] over its runtime and runs these scenarios from
 //! its own tests, so every engine is held to one chain: configured requirement → strong binding
 //! (or external lease) → provider initialization → named publication visible only once committed
-//! → async `instance-root.close` with dependencies live → publications revoked →
-//! reverse-order teardown that leaves the guest holding nothing.
+//! → close with dependencies live → publications revoked → reverse-order teardown that leaves
+//! the incarnation holding nothing. The micro is written against `clay_mdk::Context`, so the
+//! native engine runs its source in-process and the guest engines run it as a component: one
+//! micro, one scenario list, three engines. The micro takes its role from what the scenario
+//! grants it (requirements, `feed` rows; see its docs), never from arguments, and it has no
+//! close hook: what a scenario learns about closing it learns from values the incarnation owns
+//! being dropped (ADR 030 §6).
 //!
-//! The concurrency scenarios (`overlapping_*`, `many_*`, `sync_exports_*`, `calls_reenter_*`,
-//! `guest_trap_*`, `close_with_*`, `dropped_call_*`) hold an engine to ordinary per-call async
-//! exports: many calls into one incarnation in flight at once, each call a component-model task
-//! of its own, with nothing serializing them.
+//! The concurrency scenarios (`overlapping_*`, `many_*`, `calls_reenter_*`, `disable_*`,
+//! `shutdown_*`) hold an engine to ordinary per-call async exports: many calls into one
+//! incarnation in flight at once, each call a task of its own, with nothing serializing them.
+//! Three scenarios (`guest_trap_*`, `sync_exports_*`, `dropped_call_*`) are properties of a guest
+//! engine's store (a trap, synchronous WIT exports, the store's residue), run over a raw-WIT
+//! component with the same wire (`src/clay_mdk/lifecycle_fixture.rs`), and require
+//! [`GuestIncarnations`].
 //!
 //! Scenarios must run inside a [`tokio::task::LocalSet`]: incarnation drivers are spawned with
 //! [`tokio::task::spawn_local`] and joined (panics propagate) once the host closes.
 use std::any::Any;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 
-use crate::collections::BytesRegistrations;
-use crate::collections::CollectionSession;
-use crate::collections::bytes_registrations;
-use clay_collection::Change;
-use clay_collection::ReadLimits;
 use clay_host::Activator;
 use clay_host::ConfiguredMicro;
 use clay_host::Factory;
@@ -43,11 +44,6 @@ use clay_host::Requirement;
 use clay_host::Root;
 use clay_host::StartError;
 use clay_host::Supervisor;
-use futures::FutureExt as _;
-use futures::future::BoxFuture;
-use tokio::sync::oneshot;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use crate::InitialContext;
 use crate::capabilities::CallError;
@@ -65,22 +61,43 @@ use crate::capabilities::PublishedCapability;
 use crate::capabilities::RefStatus;
 use crate::capabilities::RowAttachment;
 use crate::capabilities::presentation_component;
+use crate::collections::BytesRegistrations;
+use crate::collections::CollectionSession;
+use crate::collections::bytes_registrations;
 use clay_collection::Nsid;
+use clay_collection::ReadLimits;
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
+use tokio::task::JoinHandle;
 
+mod calls;
 mod context;
+mod registrations;
+pub use calls::calls_reenter_their_provider;
+pub use calls::disable_with_calls_in_flight_revokes_callers;
+pub use calls::dropped_call_finishes_in_the_guest_without_leaks;
+pub use calls::guest_trap_fails_outstanding_calls;
+pub use calls::many_overlapping_calls_complete;
+pub use calls::overlapping_calls_complete_out_of_order;
+pub use calls::shutdown_with_calls_in_flight_revokes_callers;
+pub use calls::sync_exports_interleave_with_suspended_calls;
+use context::ContextWorld;
+use context::cbor_text;
 pub use context::context_collections_and_calls;
 pub use context::context_follows_a_provider;
 pub use context::context_peers_demanding_each_other_fail_as_unavailable;
 pub use context::context_peers_retaining_each_other_close_together;
 pub use context::context_retains_a_call;
 pub use context::context_sees_a_closed_provider_revoked;
+use context::seeder;
+pub use registrations::failed_registration_initialization_publishes_nothing;
+pub use registrations::registration_scope_ownership;
 
-/// The manifest's names (`provides[].id`) for the fixture's two publications: a presentation
-/// and an `echo` call whose handler answers `echo:` plus the request.
-const PUBLICATION: &str = "presentation";
+/// The micro's names: a presentation, and an `echo` call that answers its request.
+const PUBLICATION: &str = "detail";
 const ECHO: &str = "echo";
-/// The fixture's `relay` call: it forwards its request to its `peer` requirement and answers
-/// `relay:` plus the peer's answer; the request `trap` traps the guest.
+/// The micro's `relay` call forwards its request to its `peer` requirement and answers `relay:`
+/// plus the peer's answer.
 const RELAY: &str = "relay";
 
 /// The writer identity `micro` has on the one replica the conformance scenarios run on.
@@ -92,39 +109,11 @@ fn writer_of(micro: &str) -> clay_collection::WriterId {
 }
 
 fn echo_contract() -> Nsid {
-    Nsid::literal("org.example.clay.test.lifecycle.echo")
+    Nsid::literal(context::ECHO_CONTRACT)
 }
 
 fn relay_contract() -> Nsid {
-    Nsid::literal("org.example.clay.test.lifecycle.relay")
-}
-
-/// What the fixture's manifest declares it publishes (the manifest vocabulary has no kind yet,
-/// so the scenarios state it).
-fn declared_publications() -> BTreeMap<String, DeclaredPublication> {
-    BTreeMap::from([
-        (
-            PUBLICATION.to_owned(),
-            DeclaredPublication {
-                kind: PublicationKind::Presentation,
-                contract: presentation_component(),
-            },
-        ),
-        (
-            ECHO.to_owned(),
-            DeclaredPublication {
-                kind: PublicationKind::Call,
-                contract: echo_contract(),
-            },
-        ),
-        (
-            RELAY.to_owned(),
-            DeclaredPublication {
-                kind: PublicationKind::Call,
-                contract: relay_contract(),
-            },
-        ),
-    ])
+    Nsid::literal(context::RELAY_CONTRACT)
 }
 
 /// What an incarnation's store holds. After its guest half closed, anything but
@@ -173,8 +162,8 @@ impl GuestResidue {
     }
 }
 
-/// One engine's incarnations of a prepared fixture micro: the guest engines run the fixture
-/// components, a native engine runs the same micro in-process.
+/// One engine's incarnations of the `context` micro: the guest engines run its component, a
+/// native engine runs the same source in-process.
 pub trait Incarnations: 'static {
     type Runtime: 'static;
 
@@ -199,32 +188,32 @@ pub trait Incarnations: 'static {
     /// What the incarnation currently holds through its sessions.
     fn inspect(runtime: &Self::Runtime) -> GuestResidue;
 
+    /// The incarnation's live call handlers, awaitable until they all ended.
+    fn calls_in_flight(runtime: &Self::Runtime) -> InFlightCalls;
+
     /// Close the guest half and report what the store still held afterwards, before it drops.
     fn close(runtime: Self::Runtime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)>;
 }
 
-/// An engine that hosts the raw guest fixtures: the `lifecycle` component, which speaks the WIT
-/// directly (roles chosen by CBOR arguments, raw-bytes calls, a root whose `close` redeems its
-/// proxy, a call that traps), and drives the per-call machinery. Native micros author against
+/// An engine that hosts the raw guest fixture, the `lifecycle` component: the same wire as the
+/// micro's `echo` and `relay` over raw WIT, plus what only a guest store has (a call that traps,
+/// synchronous WIT exports, a resource table to leave residue in). Native micros author against
 /// the MDK's `Context`, which has none of these, so only the guest engines implement it and the
-/// scenarios over the `lifecycle` fixture require it; the `context_*` scenarios need only
-/// [`Incarnations`].
+/// scenarios over the raw fixture require it; every other scenario needs only [`Incarnations`].
 pub trait GuestIncarnations: Incarnations {
     /// Mount the presentation the runtime published as `publication` into an engine-owned
     /// sink and check that the guest rendered into it. Dropping the result unmounts.
     fn mount(runtime: &Self::Runtime, publication: &str) -> Result<Box<dyn Any>, String>;
-
-    /// The incarnation's live call handlers, awaitable until they all ended.
-    fn calls_in_flight(runtime: &Self::Runtime) -> InFlightCalls;
 }
 
-/// The consumer requires `provider`'s presentation and redeems it while initializing and again
-/// while closing. An external lease on the same publication is a second strong edge. Disabling
-/// the provider must close the consumer first, with the provider still live, and revoke the
-/// lease's publication.
-pub async fn provider_consumer_graph<E: GuestIncarnations>(engine: E) {
+/// The consumer requires `provider`'s presentation and redeems it while initializing, and keeps
+/// the proxy in a value its incarnation owns, whose `Drop` redeems it once more as the
+/// incarnation closes. An external lease on the same publication is a second strong edge.
+/// Disabling the provider must close the consumer first, with the provider still live (the
+/// consumer's drop crashes the close otherwise), and revoke the lease's publication.
+pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
     let harness = Harness::new(engine);
-    let supervisor = harness.supervisor("provider");
+    let supervisor = harness.supervisor(false);
     let (provider_id, consumer_id) = (MicroId::new("provider"), MicroId::new("consumer"));
     assert!(harness.log().is_empty(), "configuring instantiates nothing");
 
@@ -253,25 +242,22 @@ pub async fn provider_consumer_graph<E: GuestIncarnations>(engine: E) {
         observed.redeem_presentation().await.is_ok(),
         "a committed publication is visible outside its incarnation"
     );
-    assert!(
-        supervisor.acquire(&consumer_id, PUBLICATION).await.is_err(),
-        "the consumer publishes nothing"
-    );
-    // The consumer's own initialization already called the provider's `echo` from its store
-    // into the provider's (it fails unless the provider answered `echo:ping`); a host-side
-    // recipient does the same through the same publication.
+    // The consumer's own initialization already called the provider's `echo` from its
+    // incarnation into the provider's (it refuses to activate unless the provider answered);
+    // a host-side recipient does the same through the same publication.
     let echo = supervisor
         .acquire(&provider_id, ECHO)
         .await
         .expect("the committed provider publishes its echo call");
     assert_eq!(
-        harness.observe(&echo).call(b"ping".to_vec()).await,
-        Ok(b"echo:ping".to_vec())
+        harness.observe(&echo).call(cbor_text("ping")).await,
+        Ok(cbor_text("ping"))
     );
     drop(echo);
 
-    // Closing the provider closes its dependent first; the consumer's guest `close`
-    // redeems its proxy and fails unless the provider is still live at that point.
+    // Closing the provider closes its dependent first, while the provider is still live: the
+    // consumer's owned proxy is dropped in that close and a drop that found the provider
+    // withdrawn would crash it.
     supervisor.disable(&provider_id).await.unwrap();
     assert_eq!(
         harness.log(),
@@ -295,14 +281,14 @@ pub async fn provider_consumer_graph<E: GuestIncarnations>(engine: E) {
     harness.finish(supervisor).await;
 }
 
-/// ADR 031 §§6 and 9 against a lazy reference to the fixture's provider: `status` reports
-/// `Dormant` without starting anything; a `call` activates the provider, answers, and lets it
-/// idle-close once the call's lease drops; a `retain-call` binding keeps it up until dropped;
-/// a redeemed presentation can be mounted, keeps it up while held, and lets it close when
-/// dropped.
-pub async fn lazy_references_activate_retain_and_release<E: GuestIncarnations>(engine: E) {
+/// ADR 031 §§6 and 9 against a lazy reference to the provider: `status` reports `Dormant`
+/// without starting anything; a `call` activates the provider, answers, and lets it idle-close
+/// once the call's lease drops; a `retain-call` binding keeps it up until dropped; a redeemed
+/// presentation keeps it up while held and lets it close when dropped. (Mounting a redeemed
+/// presentation is the renderer's: `sync_exports_*` mounts one on the guest engines.)
+pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine: E) {
     let harness = Harness::new(engine);
-    let supervisor = harness.supervisor("provider");
+    let supervisor = harness.supervisor(false);
     let provider_id = MicroId::new("provider");
     let lazy = |publication: &str, contract: Nsid| {
         harness.lazy_ref(&supervisor, provider_id.as_str(), publication, contract)
@@ -348,39 +334,27 @@ pub async fn lazy_references_activate_retain_and_release<E: GuestIncarnations>(e
             assert!(harness.log().is_empty(), "reading a status never starts the provider");
 
             // A call activates the provider and holds it only for the call.
-            assert_eq!(echo.call(b"one".to_vec()).await, Ok(b"echo:one".to_vec()));
+            assert_eq!(echo.call(cbor_text("one")).await, Ok(cbor_text("one")));
             idle(closed(1)).await;
             assert_eq!(echo.status(), RefStatus::Dormant);
 
             // A retained binding keeps the provider up for as long as it is held.
             let binding = echo.retain_call().await.unwrap();
-            assert_eq!(binding.call(b"two".to_vec()).await, Ok(b"echo:two".to_vec()));
+            assert_eq!(binding.call(cbor_text("two")).await, Ok(cbor_text("two")));
             assert_eq!(echo.status(), RefStatus::Live);
             stays_up(2).await;
-            assert_eq!(binding.call(b"three".to_vec()).await, Ok(b"echo:three".to_vec()));
+            assert_eq!(binding.call(cbor_text("three")).await, Ok(cbor_text("three")));
             drop(binding);
             idle(closed(2)).await;
 
-            // A redeemed presentation retains it too, and it mounts while held.
+            // A redeemed presentation retains it too, for as long as it is held.
             let component = view.redeem_presentation().await.unwrap();
             assert!(component.component().is_ok());
-            let runtime = harness
-                .shared
-                .runtime("provider")
-                .downcast::<E::Runtime>()
-                .unwrap_or_else(|_| panic!("the provider runs this engine"));
-            let mounted = E::mount(&runtime, PUBLICATION).expect("a live presentation mounts");
-            drop(runtime);
-            stays_up(3).await;
-            drop(mounted);
             stays_up(3).await;
             drop(component);
             idle(closed(3)).await;
             assert_eq!(view.status(), RefStatus::Dormant);
-            assert!(matches!(
-                echo.call(b"after".to_vec()).await,
-                Ok(response) if response == b"echo:after"
-            ));
+            assert_eq!(echo.call(cbor_text("after")).await, Ok(cbor_text("after")));
             idle(closed(4)).await;
         } => {}
     }
@@ -388,16 +362,17 @@ pub async fn lazy_references_activate_retain_and_release<E: GuestIncarnations>(e
     harness.finish(supervisor).await;
 }
 
-/// A guest that returns a publication its manifest does not declare, or declares as another
-/// kind or under another contract, fails its initialization (ADR 031 §8).
-pub async fn undeclared_publications_fail_initialization<E: GuestIncarnations>(engine: E) {
+/// A micro whose package declares fewer publications than it returns, or declares one as another
+/// kind or under another contract, fails its initialization (ADR 031 §8). The mismatch is the
+/// host's declaration (the package's sidecar) disagreeing with the component.
+pub async fn undeclared_publications_fail_initialization<E: Incarnations>(engine: E) {
     let engine = Rc::new(engine);
-    let declared = declared_publications();
+    let declared = ContextWorld::declared();
     let mut wrong_kind = declared.clone();
     wrong_kind.get_mut(ECHO).unwrap().kind = PublicationKind::Presentation;
     let mut wrong_contract = declared.clone();
     wrong_contract.get_mut(ECHO).unwrap().contract =
-        Nsid::literal("org.example.clay.test.lifecycle.echoV2");
+        Nsid::literal("org.example.clay.test.context.echoV2");
     let mut undeclared = declared;
     undeclared.remove(ECHO);
     for (publications, refusal) in [
@@ -414,16 +389,16 @@ pub async fn undeclared_publications_fail_initialization<E: GuestIncarnations>(e
         let host = Host::new();
         let instance = host.create("provider").unwrap();
         host.begin_initialization(&instance).unwrap();
-        let mut arguments = Vec::new();
-        ciborium::into_writer("provider", &mut arguments).unwrap();
+        let registrations = bytes_registrations(std::num::NonZeroUsize::new(16).unwrap(), [85, 86]);
+        // No micro is configured, so nothing can be activated through the demand handle.
+        let supervisor = Supervisor::<CapabilityPublication>::new(host.clone(), []);
         let result = Rc::clone(&engine)
             .initialize(
                 host.clone(),
                 instance.clone(),
                 InitialContext {
-                    arguments,
                     publications,
-                    ..InitialContext::default()
+                    ..ContextWorld::granted("provider", &registrations, supervisor.activator())
                 },
             )
             .await;
@@ -438,9 +413,9 @@ pub async fn undeclared_publications_fail_initialization<E: GuestIncarnations>(e
 
 /// A lease alone retains a lazy provider; dropping the last one lets the supervisor's idle
 /// driver close it, which revokes the publication the lease handed out.
-pub async fn leased_provider_closes_when_idle<E: GuestIncarnations>(engine: E) {
+pub async fn leased_provider_closes_when_idle<E: Incarnations>(engine: E) {
     let harness = Harness::new(engine);
-    let supervisor = harness.supervisor("provider");
+    let supervisor = harness.supervisor(false);
     let provider_id = MicroId::new("provider");
     tokio::select! {
         never = supervisor.drive() => never,
@@ -468,26 +443,29 @@ pub async fn leased_provider_closes_when_idle<E: GuestIncarnations>(engine: E) {
 
 /// A provider that publishes and then rejects its initialization publishes nothing: the
 /// consumer is never initialized and records the unavailable requirement.
-pub async fn failing_provider_publishes_nothing<E: GuestIncarnations>(engine: E) {
+pub async fn failing_provider_publishes_nothing<E: Incarnations>(engine: E) {
     let harness = Harness::new(engine);
-    let supervisor = harness.supervisor("failing-provider");
+    let supervisor = harness.supervisor(true);
     let (provider_id, consumer_id) = (MicroId::new("provider"), MicroId::new("consumer"));
-    let refusal = "guest refused initialization: rejected: failing provider rejects its \
-                   initialization";
-    assert_eq!(
-        supervisor.reconcile().await,
-        BTreeMap::from([(
-            consumer_id.clone(),
-            StartError::Unavailable {
-                binding: "presentation".to_owned(),
-                cause: Box::new(StartError::Faulted(refusal.to_owned())),
-            }
-        )])
-    );
+    // Each engine words its refusal its own way; the micro's reason is in all of them.
+    let reason = "failing provider rejects its initialization";
+    let failures = supervisor.reconcile().await;
+    assert_eq!(failures.keys().collect::<Vec<_>>(), [&consumer_id]);
+    let StartError::Unavailable { binding, cause } = &failures[&consumer_id] else {
+        panic!(
+            "the consumer is unavailable, not {:?}",
+            failures[&consumer_id]
+        );
+    };
+    assert_eq!(binding, "presentation");
+    let StartError::Faulted(refusal) = &**cause else {
+        panic!("the provider faulted, not {cause:?}");
+    };
+    assert!(refusal.contains(reason), "{refusal}");
     assert_eq!(harness.log(), ["initialize provider"]);
     assert_eq!(
         supervisor.state(&provider_id),
-        MicroState::Faulted(refusal.to_owned())
+        MicroState::Faulted(refusal.clone())
     );
     assert_eq!(
         supervisor.state(&consumer_id),
@@ -496,299 +474,6 @@ pub async fn failing_provider_publishes_nothing<E: GuestIncarnations>(engine: E)
     assert_eq!(supervisor.instance(&provider_id), None);
     assert_eq!(supervisor.instance(&consumer_id), None);
     harness.finish(supervisor).await;
-}
-
-/// What an incarnation's registrations publish: staged scopes commit as one transaction of
-/// the net rows; active scopes publish each visible change as its own transaction, with b's
-/// delete of y as a tombstone row, not a removal. Returns the newest row version per key.
-fn assert_registration_publication(
-    initial_state: Lifecycle,
-    published: &crate::collections::BytesPage,
-    rows: &BTreeMap<Vec<u8>, clay_collection::Stamped<Option<crate::collections::CollectionValue>>>,
-) -> BTreeMap<Vec<u8>, clay_collection::Version> {
-    if initial_state == Lifecycle::Initializing {
-        assert_eq!(published.transactions.len(), 1);
-        assert_eq!(published.transactions[0].changes.len(), 2);
-        assert!(published.transactions[0].changes.iter().all(|change| {
-            matches!(change, Change::Upsert { key, value, .. } if rows.get(key) == Some(value))
-        }));
-    } else {
-        // a-x, a-y, b-x over a-x, b's tombstone of y, then a's supersession of it.
-        assert_eq!(
-            published
-                .transactions
-                .iter()
-                .map(|transaction| transaction.changes.len())
-                .collect::<Vec<_>>(),
-            [1, 1, 1, 1, 1]
-        );
-        assert!(matches!(
-            published.transactions[3].changes[..],
-            [Change::Upsert {
-                value: clay_collection::Stamped { value: None, .. },
-                ..
-            }]
-        ));
-    }
-    let mut versions = BTreeMap::new();
-    for change in published
-        .transactions
-        .iter()
-        .flat_map(|transaction| &transaction.changes)
-    {
-        versions.insert(change.key().clone(), change.row_version());
-    }
-    versions
-}
-
-pub async fn registration_scope_ownership<E: GuestIncarnations>(engine: E) {
-    let engine = Rc::new(engine);
-    for initial_state in [Lifecycle::Initializing, Lifecycle::Active] {
-        let host = Host::new();
-        let registrations = bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), [81, 82]);
-        let mut observer = registrations
-            .projection()
-            .acquire(Vec::new(), None)
-            .unwrap();
-        let bootstrap = observer.read(None, ReadLimits::default()).await.unwrap();
-        assert!(bootstrap.bootstrap_complete);
-        assert!(bootstrap.transactions.is_empty());
-        let mut through = bootstrap.through;
-        let mut incarnations = Vec::new();
-        let mut owned_rows = Vec::new();
-        let mut published_versions = Vec::new();
-        for name in ["first", "other"] {
-            // Each incarnation writes under its own key prefix.
-            let prefix = format!("{name}/").into_bytes();
-            let instance = host.create(name).unwrap();
-            host.begin_initialization(&instance).unwrap();
-            if initial_state == Lifecycle::Active {
-                host.commit_initialization(&instance).unwrap();
-            }
-            let before = registrations.snapshot();
-            let (runtime, driver) = Rc::clone(&engine)
-                .initialize(
-                    host.clone(),
-                    instance.clone(),
-                    registration_context(
-                        "registrations",
-                        &registrations,
-                        &MicroId::new(name),
-                        &prefix,
-                    ),
-                )
-                .await
-                .unwrap();
-            assert_eq!(E::inspect(&runtime), GuestResidue::NONE);
-            if initial_state == Lifecycle::Initializing {
-                assert_eq!(registrations.snapshot(), before);
-                let staged = observer
-                    .read(Some(through.clone()), ReadLimits::default())
-                    .complete_timeout()
-                    .unwrap();
-                assert!(staged.transactions.is_empty());
-                assert_eq!(staged.through, through);
-                host.commit_initialization(&instance).unwrap();
-            }
-            let rows = registrations
-                .snapshot()
-                .into_iter()
-                .filter(|(key, _)| !before.contains_key(key))
-                .collect::<BTreeMap<_, _>>();
-            let mut values = rows
-                .values()
-                .map(|entry| {
-                    let value = entry
-                        .value
-                        .as_ref()
-                        .expect("the fixture leaves no tombstone winner");
-                    assert!(value.attachments.is_empty());
-                    assert_eq!(entry.stamp.writer.as_bytes(), writer_of(name).as_bytes());
-                    ciborium::from_reader::<String, _>(value.body.as_slice()).unwrap()
-                })
-                .collect::<Vec<_>>();
-            values.sort();
-            // `a` wrote x and y; `b` superseded x and tombstoned y, then `a` superseded the
-            // tombstone: the visible rows are b's x and a's y.
-            assert_eq!(values, ["a-y", "b-x"]);
-            let published = observer
-                .read(Some(through), ReadLimits::default())
-                .await
-                .unwrap();
-            let versions = assert_registration_publication(initial_state, &published, &rows);
-            published_versions.push(versions);
-            through = published.through;
-            incarnations.push((instance, runtime, driver));
-            owned_rows.push(rows);
-        }
-        let [
-            (first, runtime, driver),
-            (other, other_runtime, other_driver),
-        ]: [_; 2] = incarnations.try_into().ok().unwrap();
-        let [first_rows, other_rows]: [_; 2] = owned_rows.try_into().unwrap();
-        let [first_versions, _]: [_; 2] = published_versions.try_into().unwrap();
-        assert_eq!(registrations.snapshot().len(), 4);
-        assert!(host.begin_close(&first).unwrap());
-        assert_eq!(registrations.snapshot().len(), 4);
-        let closing = observer
-            .read(Some(through.clone()), ReadLimits::default())
-            .complete_timeout()
-            .unwrap();
-        assert!(closing.transactions.is_empty());
-        let (closed, residue) = E::close(runtime).await;
-        closed.unwrap();
-        assert_eq!(residue, GuestResidue::NONE);
-        drop(driver);
-        assert_eq!(registrations.snapshot().len(), 4);
-        host.close_instance(&first).unwrap();
-        let removed = observer
-            .read(
-                Some(through),
-                ReadLimits {
-                    max_transactions: Some(1),
-                    max_changes: Some(1),
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(removed.transactions.len(), 1);
-        assert_eq!(removed.transactions[0].changes.len(), first_rows.len());
-        let removed_keys = removed.transactions[0]
-            .changes
-            .iter()
-            .map(|change| {
-                let Change::Remove { key, row_version } = change else {
-                    panic!("incarnation closure published an upsert");
-                };
-                assert!(*row_version > first_versions[key]);
-                key.clone()
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(removed_keys, first_rows.into_keys().collect());
-        assert_eq!(registrations.snapshot(), other_rows);
-        let quiet = observer
-            .read(Some(removed.through.clone()), ReadLimits::default())
-            .complete_timeout()
-            .unwrap();
-        assert!(quiet.transactions.is_empty());
-        drop((other_runtime, other_driver));
-        assert_eq!(registrations.snapshot(), other_rows);
-        host.close_instance(&other).unwrap();
-        let removed = observer
-            .read(Some(removed.through), ReadLimits::default())
-            .await
-            .unwrap();
-        assert_eq!(removed.transactions.len(), 1);
-        assert_eq!(removed.transactions[0].changes.len(), other_rows.len());
-        assert!(registrations.snapshot().is_empty());
-        host.close();
-    }
-}
-
-pub async fn failed_registration_initialization_publishes_nothing<E: GuestIncarnations>(engine: E) {
-    let host = Host::new();
-    let registrations = bytes_registrations(std::num::NonZeroUsize::new(16).unwrap(), [83, 84]);
-    let mut observer = registrations
-        .projection()
-        .acquire(Vec::new(), None)
-        .unwrap();
-    let bootstrap = observer.read(None, ReadLimits::default()).await.unwrap();
-    let instance = host.create("failing-registrations").unwrap();
-    host.begin_initialization(&instance).unwrap();
-    let result = Rc::new(engine)
-        .initialize(
-            host.clone(),
-            instance.clone(),
-            registration_context(
-                "failing-registrations",
-                &registrations,
-                &MicroId::new("failing"),
-                b"failing/",
-            ),
-        )
-        .await;
-    assert_eq!(
-        result.err().unwrap(),
-        "guest refused initialization: rejected: registration fixture rejects its initialization"
-    );
-    host.close_instance(&instance).unwrap();
-    assert!(registrations.snapshot().is_empty());
-    let unseen = observer
-        .read(Some(bootstrap.through), ReadLimits::default())
-        .complete_timeout()
-        .unwrap();
-    assert!(unseen.transactions.is_empty());
-    host.close();
-}
-
-/// A host-side call the scenario answers by hand: each call parks until [`Gate::release`] names
-/// its request, then answers with that request. A guest handler that awaits it is a call
-/// suspended on something the test controls.
-struct Gate {
-    held: Mutex<BTreeMap<Vec<u8>, oneshot::Sender<()>>>,
-    arrivals: watch::Sender<usize>,
-}
-
-impl Gate {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            held: Mutex::default(),
-            arrivals: watch::channel(0).0,
-        })
-    }
-
-    /// Resolves once `count` calls have reached the gate in total.
-    async fn arrived(&self, count: usize) {
-        self.arrivals
-            .subscribe()
-            .wait_for(|&arrivals| arrivals >= count)
-            .await
-            .unwrap();
-    }
-
-    fn release(&self, request: &[u8]) {
-        let parked = self
-            .held
-            .lock()
-            .unwrap()
-            .remove(request)
-            .expect("the released call reached the gate");
-        parked
-            .send(())
-            .expect("the released call is still waiting at the gate");
-    }
-}
-
-impl CallTarget for Gate {
-    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
-        let (release, released) = oneshot::channel();
-        let previous = self.held.lock().unwrap().insert(request.clone(), release);
-        assert!(previous.is_none(), "scenario requests are unique");
-        self.arrivals.send_modify(|arrivals| *arrivals += 1);
-        async move {
-            released
-                .await
-                .map_err(|_dropped| CapabilityFailure::Revoked)?;
-            Ok(request)
-        }
-        .boxed()
-    }
-}
-
-/// A host-side call that forwards to a reference the scenario points it at after the graph
-/// exists (a guest's `peer` must be granted before the micros it reaches are started).
-#[derive(Default)]
-struct Forward(OnceLock<CapabilityRef>);
-
-impl CallTarget for Forward {
-    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
-        let target = self
-            .0
-            .get()
-            .expect("the scenario points the forward before any call")
-            .share();
-        async move { target.call(request).await }.boxed()
-    }
 }
 
 /// Wait until `condition` holds over the supervisor's recorded micro states, woken by its
@@ -805,352 +490,13 @@ async fn settle(
         .expect("the supervisor outlives the wait");
 }
 
-/// One lazy relay provider `a`, held live by a lease, whose `peer` is a [`Gate`]: every call of
-/// its `relay` parks in the guest until the scenario releases it.
-struct Gated<E: GuestIncarnations> {
-    harness: Harness<E>,
-    supervisor: Supervisor<CapabilityPublication>,
-    gate: Arc<Gate>,
-    /// The gate as published to the guest; revoked when dropped.
-    _peer: PublishedCapability,
-    lease: Lease<CapabilityPublication>,
-    relay: CapabilityRef,
-}
-
-impl<E: GuestIncarnations> Gated<E> {
-    async fn start(engine: E) -> Self {
-        let harness = Harness::new(engine);
-        let gate = Gate::new();
-        let peer = harness.publish_peer(&gate);
-        let supervisor = harness.relays([("a", peer.publication())]);
-        let lease = supervisor
-            .acquire(&MicroId::new("a"), RELAY)
-            .await
-            .expect("the relay provider starts");
-        let relay = harness.observe(&lease);
-        Self {
-            harness,
-            supervisor,
-            gate,
-            _peer: peer,
-            lease,
-            relay,
-        }
-    }
-
-    /// Start one `relay` call from outside the incarnation. The returned task is the caller:
-    /// aborting it drops the call.
-    fn call(&self, request: impl Into<Vec<u8>>) -> JoinHandle<Result<Vec<u8>, CallError>> {
-        let relay = self.relay.share();
-        let request = request.into();
-        tokio::task::spawn_local(async move { relay.call(request).await })
-    }
-
-    fn residue(&self) -> GuestResidue {
-        self.harness.residue("a")
-    }
-
-    fn instance(&self) -> Instance {
-        self.supervisor.instance(&MicroId::new("a")).unwrap()
-    }
-
-    /// Run `scenario` while the supervisor's driver serves idle closes.
-    async fn run(&self, scenario: impl Future<Output = ()>) {
-        tokio::select! {
-            never = self.supervisor.drive() => never,
-            () = scenario => {}
-        }
-    }
-
-    async fn finish(self) {
-        let Self {
-            harness,
-            supervisor,
-            lease,
-            relay,
-            ..
-        } = self;
-        drop((relay, lease));
-        harness.finish(supervisor).await;
-    }
-}
-
-/// Two calls into one incarnation are both in flight, suspended in the guest, and complete in
-/// the opposite order to the one they started in. Each call is a task of its own: the second
-/// does not wait for the first, and neither's state is mistaken for the other's.
-pub async fn overlapping_calls_complete_out_of_order<E: GuestIncarnations>(engine: E) {
-    let g = Gated::start(engine).await;
-    g.run(async {
-        let baseline = g.residue();
-        let first = g.call("one");
-        let second = g.call("two");
-        g.gate.arrived(2).await;
-        assert_eq!(g.residue().calls, 2, "both handlers are in the guest");
-        g.gate.release(b"two");
-        assert_eq!(second.await.unwrap(), Ok(b"relay:two".to_vec()));
-        assert!(!first.is_finished(), "the first call is still suspended");
-        g.gate.release(b"one");
-        assert_eq!(first.await.unwrap(), Ok(b"relay:one".to_vec()));
-        g.harness.calls_drained("a").await;
-        assert_eq!(g.residue(), baseline, "no call left anything behind");
-    })
-    .await;
-    g.finish().await;
-}
-
-/// Fifty calls in flight at once, released in an interleaved order, all answered with their own
-/// request.
-pub async fn many_overlapping_calls_complete<E: GuestIncarnations>(engine: E) {
-    const CALLS: usize = 50;
-    let g = Gated::start(engine).await;
-    g.run(async {
-        let baseline = g.residue();
-        let calls: Vec<_> = (0..CALLS)
-            .map(|index| (index, g.call(format!("call-{index}"))))
-            .collect();
-        g.gate.arrived(CALLS).await;
-        assert_eq!(g.residue().calls, CALLS);
-        // Odd calls first, newest first, then the even ones oldest first.
-        let order = (0..CALLS)
-            .rev()
-            .filter(|index| index % 2 == 1)
-            .chain((0..CALLS).filter(|index| index % 2 == 0));
-        for index in order {
-            g.gate.release(format!("call-{index}").as_bytes());
-        }
-        for (index, call) in calls {
-            assert_eq!(
-                call.await.unwrap(),
-                Ok(format!("relay:call-{index}").into_bytes())
-            );
-        }
-        g.harness.calls_drained("a").await;
-        assert_eq!(g.residue(), baseline);
-    })
-    .await;
-    g.finish().await;
-}
-
-/// Synchronous exports (`mount`, unmount) and an unrelated async export (`echo`) run while a
-/// `relay` call is suspended in the guest. `mount` reads the guest's `ROLE`, which `initialize`
-/// (a different task, long finished) wrote: it only works because all tasks share one TLS.
-pub async fn sync_exports_interleave_with_suspended_calls<E: GuestIncarnations>(engine: E) {
-    let g = Gated::start(engine).await;
-    g.run(async {
-        let parked = g.call("parked");
-        g.gate.arrived(1).await;
-        let runtime = g
-            .harness
-            .shared
-            .runtime("a")
-            .downcast::<E::Runtime>()
-            .unwrap_or_else(|_| panic!("a runs this engine"));
-        let mounted = E::mount(&runtime, PUBLICATION).expect("a live presentation mounts");
-        let echo = g
-            .supervisor
-            .acquire(&MicroId::new("a"), ECHO)
-            .await
-            .unwrap();
-        assert_eq!(
-            g.harness.observe(&echo).call(b"x".to_vec()).await,
-            Ok(b"echo:x".to_vec()),
-            "another call completes while the relay is suspended"
-        );
-        assert!(!parked.is_finished());
-        drop((mounted, echo));
-        drop(runtime);
-        g.gate.release(b"parked");
-        assert_eq!(parked.await.unwrap(), Ok(b"relay:parked".to_vec()));
-    })
-    .await;
-    g.finish().await;
-}
-
-/// A guest import that reaches back into its own incarnation completes: A calls B which calls
-/// A's `echo` while A's `relay` is suspended (A to B to A), and `c` calls its own `echo` (A to
-/// A). The host answers an import by queueing into the provider's driver, never by entering the
-/// provider's store from the import's first poll. The hops go through lazy references.
-pub async fn calls_reenter_their_provider<E: GuestIncarnations>(engine: E) {
-    let harness = Harness::new(engine);
-    let (a_to_b, b_to_a, c_to_c) = (
-        Arc::new(Forward::default()),
-        Arc::new(Forward::default()),
-        Arc::new(Forward::default()),
-    );
-    let peers = [&a_to_b, &b_to_a, &c_to_c].map(|forward| harness.publish_peer(forward));
-    let supervisor = harness.relays([
-        ("a", peers[0].publication()),
-        ("b", peers[1].publication()),
-        ("c", peers[2].publication()),
-    ]);
-    let lazy = |micro: &str, publication: &str, contract| {
-        harness.lazy_ref(&supervisor, micro, publication, contract)
-    };
-    assert!(a_to_b.0.set(lazy("b", RELAY, relay_contract())).is_ok());
-    assert!(b_to_a.0.set(lazy("a", ECHO, echo_contract())).is_ok());
-    assert!(c_to_c.0.set(lazy("c", ECHO, echo_contract())).is_ok());
-    let relay_a = lazy("a", RELAY, relay_contract());
-    let relay_c = lazy("c", RELAY, relay_contract());
-    tokio::select! {
-        never = supervisor.drive() => never,
-        () = async {
-            assert_eq!(
-                relay_a.call(b"x".to_vec()).await,
-                Ok(b"relay:relay:echo:x".to_vec())
-            );
-            assert_eq!(
-                relay_c.call(b"y".to_vec()).await,
-                Ok(b"relay:echo:y".to_vec())
-            );
-            for micro in ["a", "b", "c"] {
-                let micro = MicroId::new(micro);
-                settle(&supervisor, || supervisor.state(&micro) == MicroState::Idle).await;
-            }
-        } => {}
-    }
-    drop((relay_a, relay_c, a_to_b, b_to_a, c_to_c));
-    harness.finish(supervisor).await;
-}
-
-/// A guest trap fails every call outstanding on the incarnation instead of leaving them
-/// suspended forever: they answer `Revoked`, the incarnation closes, and host teardown runs.
-pub async fn guest_trap_fails_outstanding_calls<E: GuestIncarnations>(engine: E) {
-    let g = Gated::start(engine).await;
-    g.run(async {
-        let instance = g.instance();
-        let outstanding: Vec<_> = (0..3)
-            .map(|index| g.call(format!("call-{index}")))
-            .collect();
-        g.gate.arrived(3).await;
-        let trapper = g.call("trap").await.unwrap();
-        assert!(trapper.is_err(), "the trapping call fails: {trapper:?}");
-        for call in outstanding {
-            assert_eq!(
-                call.await.unwrap(),
-                Err(CapabilityFailure::Revoked.into()),
-                "a call suspended in a trapped guest is revoked"
-            );
-        }
-        g.harness.host.await_close(&instance).await;
-        assert_eq!(g.harness.host.lifecycle(&instance), Lifecycle::Closed);
-        assert_eq!(
-            g.relay.call(b"after".to_vec()).await,
-            Err(CapabilityFailure::Revoked.into())
-        );
-    })
-    .await;
-    g.finish().await;
-}
-
-/// The guest's async `instance-root.close` runs beside calls that are still in flight, and the
-/// forced close then drops the store: the callers answer `Revoked` rather than hang. This one
-/// is the supervisor disabling the micro.
-pub async fn disable_with_calls_in_flight_revokes_callers<E: GuestIncarnations>(engine: E) {
-    close_with_calls_in_flight(engine, false).await;
-}
-
-/// [`disable_with_calls_in_flight_revokes_callers`], with the supervisor shutting down.
-pub async fn shutdown_with_calls_in_flight_revokes_callers<E: GuestIncarnations>(engine: E) {
-    close_with_calls_in_flight(engine, true).await;
-}
-
-async fn close_with_calls_in_flight<E: GuestIncarnations>(engine: E, shutdown: bool) {
-    let g = Gated::start(engine).await;
-    g.run(async {
-        let instance = g.instance();
-        let outstanding: Vec<_> = (0..3)
-            .map(|index| g.call(format!("call-{index}")))
-            .collect();
-        g.gate.arrived(3).await;
-        if shutdown {
-            g.supervisor.shutdown().await.unwrap();
-        } else {
-            g.supervisor.disable(&MicroId::new("a")).await.unwrap();
-        }
-        assert_eq!(g.harness.log(), ["initialize a", "close a"]);
-        assert_eq!(g.harness.host.lifecycle(&instance), Lifecycle::Closed);
-        for call in outstanding {
-            assert_eq!(
-                call.await.unwrap(),
-                Err(CapabilityFailure::Revoked.into()),
-                "a call in flight at a forced close is revoked"
-            );
-        }
-    })
-    .await;
-    g.finish().await;
-}
-
-/// A caller that gives up on a call cannot cancel the guest handler: it runs to completion and
-/// its answer is discarded. Nothing leaks when it does: the guest holds what it did before the
-/// call, and the lease that kept the provider live is released normally, after which the
-/// provider idles closed with nothing left behind (the fixture root asserts that at its close).
-pub async fn dropped_call_finishes_in_the_guest_without_leaks<E: GuestIncarnations>(engine: E) {
-    let g = Gated::start(engine).await;
-    g.run(async {
-        let baseline = g.residue();
-        let call = g.call("abandoned");
-        g.gate.arrived(1).await;
-        call.abort();
-        assert!(call.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            g.residue().calls,
-            1,
-            "the guest handler outlives its caller"
-        );
-        g.gate.release(b"abandoned");
-        g.harness.calls_drained("a").await;
-        assert_eq!(g.residue(), baseline);
-    })
-    .await;
-    let Gated {
-        harness,
-        supervisor,
-        relay,
-        lease,
-        ..
-    } = g;
-    drop((relay, lease));
-    let micro = MicroId::new("a");
-    tokio::select! {
-        never = supervisor.drive() => never,
-        () = settle(&supervisor, || supervisor.state(&micro) == MicroState::Idle) => {}
-    }
-    assert_eq!(harness.log(), ["initialize a", "close a"]);
-    harness.finish(supervisor).await;
-}
-
-fn registration_context(
-    role: &str,
-    registrations: &BytesRegistrations,
-    micro: &MicroId,
-    prefix: &[u8],
-) -> InitialContext {
-    let mut arguments = Vec::new();
-    let arguments_value = ciborium::Value::Array(vec![
-        ciborium::Value::Text(role.to_owned()),
-        ciborium::Value::Bytes(prefix.to_vec()),
-    ]);
-    ciborium::into_writer(&arguments_value, &mut arguments).unwrap();
-    let grant = || clay_host::Grant {
-        collection: registrations.clone(),
-        micro: micro.clone(),
-        writer: writer_of(micro.as_str()),
-    };
-    InitialContext {
-        arguments,
-        registrations: BTreeMap::from([("a".to_owned(), grant()), ("b".to_owned(), grant())]),
-        ..InitialContext::default()
-    }
-}
-
 struct Harness<E> {
     engine: Rc<E>,
     host: Host,
     shared: Rc<Shared>,
 }
 
-/// State every fixture factory and root of one scenario writes to.
+/// State every factory and root of one scenario writes to.
 struct Shared {
     log: RefCell<Vec<String>>,
     drivers: RefCell<Vec<tokio::task::JoinHandle<()>>>,
@@ -1158,8 +504,13 @@ struct Shared {
     observer: CapabilitySession,
     observer_instance: Instance,
     /// Each live incarnation's runtime by identity, shared with its root, so a scenario can
-    /// reach the guest the supervisor started (for example to mount its presentation).
+    /// reach the incarnation the supervisor started.
     runtimes: RefCell<BTreeMap<&'static str, Rc<dyn Any>>>,
+    /// The host's writers of the `reject` rows seeded into incarnations' feeds, kept so the
+    /// rows stay for as long as the scenario runs.
+    seeders: RefCell<Vec<crate::collections::RegistrationWriter>>,
+    /// The runtime epoch the next incarnation's `feed` collection gets.
+    epoch: Cell<u64>,
 }
 
 impl Shared {
@@ -1168,7 +519,7 @@ impl Shared {
     }
 }
 
-impl<E: GuestIncarnations> Harness<E> {
+impl<E: Incarnations> Harness<E> {
     fn new(engine: E) -> Self {
         let host = Host::new();
         let observer_instance = host.start("observer");
@@ -1186,21 +537,23 @@ impl<E: GuestIncarnations> Harness<E> {
                 observer,
                 observer_instance,
                 runtimes: RefCell::default(),
+                seeders: RefCell::default(),
+                epoch: Cell::new(1000),
             }),
         }
     }
 
-    /// The configured graph: an eager `consumer` that requires the `presentation` and `echo`
-    /// publications (bound as `presentation` and `service`) of a lazy `provider` playing
-    /// `provider_role`.
-    fn supervisor(&self, provider_role: &'static str) -> Supervisor<CapabilityPublication> {
+    /// The configured graph: an eager `consumer` that requires the `detail` presentation and
+    /// `echo` call (bound as `presentation` and `service`) of a lazy `provider`, which fails
+    /// its own initialization if `provider_rejects`.
+    fn supervisor(&self, provider_rejects: bool) -> Supervisor<CapabilityPublication> {
         let provider = ConfiguredMicro {
             identity: MicroId::new("provider"),
             eager: false,
             enabled: true,
             requirements: BTreeMap::new(),
             unresolved_bindings: Vec::new(),
-            factory: self.factory("provider", provider_role, None),
+            factory: self.factory("provider", None, provider_rejects),
         };
         let consumer = ConfiguredMicro {
             identity: MicroId::new("consumer"),
@@ -1223,7 +576,7 @@ impl<E: GuestIncarnations> Harness<E> {
                 ),
             ]),
             unresolved_bindings: Vec::new(),
-            factory: self.factory("consumer", "consumer", None),
+            factory: self.factory("consumer", None, false),
         };
         Supervisor::new(self.host.clone(), [provider, consumer])
     }
@@ -1231,19 +584,20 @@ impl<E: GuestIncarnations> Harness<E> {
     fn factory(
         &self,
         identity: &'static str,
-        role: &'static str,
         peer: Option<CapabilityPublication>,
+        rejects: bool,
     ) -> Rc<dyn Factory<CapabilityPublication>> {
         Rc::new(Fixture {
             engine: Rc::clone(&self.engine),
+            host: self.host.clone(),
             shared: Rc::clone(&self.shared),
             identity,
-            role,
             peer,
+            rejects,
         })
     }
 
-    /// A graph of lazy `provider` micros without requirements, one per `(identity, peer)`.
+    /// A graph of lazy micros without configured requirements, one per `(identity, peer)`.
     /// Each one's `relay` forwards to its `peer`.
     fn relays(
         &self,
@@ -1257,7 +611,7 @@ impl<E: GuestIncarnations> Harness<E> {
                 enabled: true,
                 requirements: BTreeMap::new(),
                 unresolved_bindings: Vec::new(),
-                factory: self.factory(identity, "provider", Some(peer)),
+                factory: self.factory(identity, Some(peer), false),
             }),
         )
     }
@@ -1286,14 +640,14 @@ impl<E: GuestIncarnations> Harness<E> {
             .unwrap()
     }
 
-    /// Publish a host-side call as the outside observer, to hand a guest as its `peer`.
+    /// Publish a host-side call as the outside observer, to hand a micro as its `peer`.
     fn publish_peer<T: CallTarget + 'static>(&self, target: &Arc<T>) -> PublishedCapability {
         let target: Arc<dyn CallTarget> = Arc::clone(target) as _;
         self.shared
             .observer
             .publish_call(
                 "peer",
-                Nsid::literal("org.example.clay.test.lifecycle.peer"),
+                Nsid::literal("org.example.clay.test.context.peer"),
                 target,
             )
             .unwrap()
@@ -1344,16 +698,20 @@ impl<E: GuestIncarnations> Harness<E> {
     }
 }
 
+/// The factory of one micro of a scenario: each incarnation is the `context` micro on `E`, with a
+/// `feed` collection of its own.
 struct Fixture<E> {
     engine: Rc<E>,
+    host: Host,
     shared: Rc<Shared>,
     identity: &'static str,
-    role: &'static str,
-    /// Granted to the guest as its `peer` requirement, which the `relay` publication forwards to.
+    /// Granted as the micro's `peer` requirement, which its `relay` forwards to.
     peer: Option<CapabilityPublication>,
+    /// Seeds the `reject` row, which makes the micro fail its activation after publishing.
+    rejects: bool,
 }
 
-impl<E: GuestIncarnations> Factory<CapabilityPublication> for Fixture<E> {
+impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
     fn initialize(
         &self,
         host: Host,
@@ -1364,24 +722,37 @@ impl<E: GuestIncarnations> Factory<CapabilityPublication> for Fixture<E> {
         let engine = Rc::clone(&self.engine);
         let shared = Rc::clone(&self.shared);
         let identity = self.identity;
-        let role = self.role;
         let peer = self.peer.clone();
+        let rejects = self.rejects;
+        let seeding = self.host.clone();
         Box::pin(async move {
             shared
                 .log
                 .borrow_mut()
                 .push(format!("initialize {identity}"));
-            let mut arguments = Vec::new();
-            ciborium::into_writer(role, &mut arguments).unwrap();
-            let mut requirements = requirements;
-            requirements.extend(peer.map(|peer| ("peer".to_owned(), peer)));
-            let context = InitialContext {
-                arguments,
-                requirements,
-                publications: declared_publications(),
-                activator: Some(activator),
-                ..InitialContext::default()
-            };
+            let epoch = shared.epoch.get();
+            shared.epoch.set(epoch + 2);
+            let registrations =
+                bytes_registrations(std::num::NonZeroUsize::new(16).unwrap(), [epoch, epoch + 1]);
+            if rejects {
+                let seeder = seeder(&seeding, &format!("seeder-{identity}"), &registrations);
+                seeder
+                    .put_value(
+                        cbor_text("reject"),
+                        clay_collection::WriteBasis::Concurrent,
+                        crate::collections::CollectionValue {
+                            body: cbor_text("reject"),
+                            attachments: Vec::new(),
+                        },
+                    )
+                    .unwrap();
+                shared.seeders.borrow_mut().push(seeder);
+            }
+            let mut context = ContextWorld::granted(identity, &registrations, activator);
+            context.requirements = requirements;
+            context
+                .requirements
+                .extend(peer.map(|peer| ("peer".to_owned(), peer)));
             let (runtime, driver) = engine
                 .initialize(host.clone(), instance.clone(), context)
                 .await?;
@@ -1422,13 +793,13 @@ impl<E: GuestIncarnations> Factory<CapabilityPublication> for Fixture<E> {
     }
 }
 
-struct FixtureRoot<E: GuestIncarnations> {
+struct FixtureRoot<E: Incarnations> {
     runtime: Rc<E::Runtime>,
     shared: Rc<Shared>,
     identity: &'static str,
 }
 
-impl<E: GuestIncarnations> Root for FixtureRoot<E> {
+impl<E: Incarnations> Root for FixtureRoot<E> {
     fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
         let Self {
             runtime,
@@ -1444,7 +815,7 @@ impl<E: GuestIncarnations> Root for FixtureRoot<E> {
                 assert_eq!(
                     residue,
                     GuestResidue::NONE,
-                    "{identity} still held guest resources after its close"
+                    "{identity} still held resources after its close"
                 );
             }
             shared.log.borrow_mut().push(format!("close {identity}"));

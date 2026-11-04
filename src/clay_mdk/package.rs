@@ -201,7 +201,7 @@ mod tests {
                 .iter()
                 .map(|publication| publication.name.as_str())
                 .collect::<Vec<_>>(),
-            ["presentation", "echo", "relay"]
+            ["detail", "echo", "relay"]
         );
         sidecar.manifest.validate().unwrap();
     }

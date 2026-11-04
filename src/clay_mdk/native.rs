@@ -56,6 +56,7 @@ use crate::rows::stored_page;
 use clay_guest_session::capabilities::CapabilityLimits;
 use clay_guest_session::capabilities::CapabilitySession;
 use clay_guest_session::capabilities::DeclaredPublication;
+use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::capabilities::admit_publications;
 use clay_guest_session::collections::BytesRegistrations;
@@ -214,6 +215,9 @@ pub(crate) struct Activation {
     /// programming error.
     published: RefCell<Option<Vec<(String, PublishedCapability)>>>,
     tasks: Rc<RefCell<Tasks>>,
+    /// The call handlers running right now, which the engine-conformance run reads the way it
+    /// reads a guest engine's count.
+    calls: InFlightCalls,
 }
 
 impl Activation {
@@ -284,6 +288,7 @@ impl Activation {
         let contract = this.declared_call(name);
         let (queue, mut inbox) = mpsc::unbounded_channel::<GuestCall>();
         let target = Arc::new(GuestCallTarget::new(name.to_owned(), queue));
+        let calls = this.calls.clone();
         this.spawn(Box::pin(async move {
             let mut running = JoinSet::new();
             loop {
@@ -293,7 +298,11 @@ impl Activation {
                             return;
                         };
                         let handler = Rc::clone(&handler);
+                        // Counted from the moment it is queued, until the handler task ends
+                        // (or is dropped with the incarnation).
+                        let counted = calls.start();
                         running.spawn_local(async move {
+                            let _counted = counted;
                             let outcome = handler(request)
                                 .await
                                 .map_err(|error| CallError::Provider(error.to_string()));
@@ -413,13 +422,20 @@ pub(crate) struct Granted {
     pub(crate) requirements: BTreeMap<String, Option<Capability>>,
     pub(crate) collections: BTreeMap<String, Option<CollectionSlot>>,
     pub(crate) declared: BTreeMap<String, DeclaredPublication>,
+    /// Counts the incarnation's running call handlers; the supervisor's factory has no reader
+    /// for it, the conformance run does.
+    pub(crate) calls: InFlightCalls,
 }
 
 impl Granted {
-    /// Run `activate` over the grants, then admit what it staged against the declarations.
+    /// Run `activate` over the grants, then admit what it staged against `admitted`: the
+    /// declarations the host holds for the micro, which are `declared` unless a host is
+    /// told something else (a guest engine is, when a package's sidecar disagrees with its
+    /// component, and the conformance run reproduces that).
     pub(crate) async fn activate(
         self,
         activate: &dyn Fn(Context) -> LocalFuture<'static, Result<(), Error>>,
+        admitted: &BTreeMap<String, DeclaredPublication>,
     ) -> Result<Initialized<CapabilityPublication>, String> {
         let Self {
             instance,
@@ -429,15 +445,17 @@ impl Granted {
             requirements,
             collections,
             declared,
+            calls,
         } = self;
         let activation = Rc::new(Activation {
             instance,
             components,
             collections,
-            declared: declared.clone(),
+            declared,
             capabilities,
             published: RefCell::new(Some(Vec::new())),
             tasks: Rc::default(),
+            calls,
         });
         let context = Context(Rc::new(Shared {
             configs,
@@ -452,7 +470,7 @@ impl Granted {
             .borrow_mut()
             .take()
             .expect("admission is the only taker of staged publications");
-        let leases = admit_publications(&declared, published)?;
+        let leases = admit_publications(admitted, published)?;
         let publications = leases
             .iter()
             .map(|(name, lease)| (name.clone(), lease.publication()))
@@ -513,14 +531,23 @@ struct NativeRoot {
 }
 
 impl Root for NativeRoot {
+    /// ADR 030 §6 for an in-process micro, with no close hook: author code cleans up by owning
+    /// values whose `Drop` does it, and closing is dropping what the incarnation owns, in this
+    /// order. First the tasks: aborting a task drops its future, and with it every call handler
+    /// (the publication loops own them), view task and value (a redeemed proxy, a retained
+    /// binding, whatever a handler captured) the micro put there, and `close` resolves only
+    /// once each future is gone. The supervisor calls this while the incarnation's configured
+    /// providers and leases are still held, so those drops can still use the dependencies they
+    /// were made to release (a `Drop` that reads a proxy it owns finds the provider live), and
+    /// nothing is revoked yet. Then the publication leases, so callers stop reaching handlers
+    /// that no longer exist; the supervisor revokes the publications and tears the incarnation
+    /// scope down after this returns.
     fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
         Box::pin(async move {
             let Self { leases, tasks } = *self;
             // Taken out of the shared cell: the tasks themselves may still hold the context.
             let tasks = std::mem::take(&mut *tasks.borrow_mut());
             tasks.close().await;
-            // The leases drop with the root; the supervisor revokes the publications it
-            // handed out before it tears the incarnation down.
             drop(leases);
             Ok(())
         })
@@ -599,9 +626,10 @@ impl Factory<CapabilityPublication> for NativeFactory {
                 configs,
                 requirements,
                 collections,
-                declared,
+                declared: declared.clone(),
+                calls: InFlightCalls::default(),
             }
-            .activate(activate.as_ref())
+            .activate(activate.as_ref(), &declared)
             .await
         })
     }

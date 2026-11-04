@@ -9,16 +9,12 @@ use clay_host::LocalFuture;
 use clay_surface::SurfaceTree;
 use std::rc::Rc;
 
-/// The prepared lifecycle fixture, incarnated by this engine.
+/// A prepared fixture component, incarnated by this engine.
 struct Wasmtime(WasmPackage);
 
 impl Wasmtime {
-    async fn load() -> Self {
-        Self::load_fixture("lifecycle").await
-    }
-
-    /// A prepared fixture component by name (`lifecycle`, or `context` for the authoring
-    /// surface's scenario).
+    /// A prepared fixture component by name: `context`, the shared micro, or `lifecycle`, the
+    /// raw-WIT fixture of the engine-only scenarios.
     async fn load_fixture(name: &str) -> Self {
         Self(
             WasmPackage::from_env(name)
@@ -68,6 +64,11 @@ impl Incarnations for Wasmtime {
         residue_of(active.as_ref().unwrap())
     }
 
+    fn calls_in_flight(runtime: &WasmRuntime) -> InFlightCalls {
+        let active = runtime.incarnation.lock().unwrap();
+        active.as_ref().unwrap().calls_in_flight.clone()
+    }
+
     fn close(runtime: WasmRuntime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)> {
         Box::pin(async move {
             let taken = runtime.incarnation.lock().unwrap().take();
@@ -90,19 +91,16 @@ impl GuestIncarnations for Wasmtime {
         }
         Ok(Box::new(session))
     }
-
-    fn calls_in_flight(runtime: &WasmRuntime) -> InFlightCalls {
-        let active = runtime.incarnation.lock().unwrap();
-        active.as_ref().unwrap().calls_in_flight.clone()
-    }
 }
 
-/// One test per conformance scenario, each in a fresh engine and `LocalSet`.
+/// One test per conformance scenario, each in a fresh engine and `LocalSet` over the named
+/// fixture: the scenarios of the shared `context` micro, then the engine-only ones over the
+/// raw-WIT `lifecycle` fixture.
 macro_rules! conformance {
-    ($($name:ident => $scenario:ident),+ $(,)?) => {$(
+    ($fixture:literal: $($name:ident => $scenario:ident),+ $(,)?) => {$(
         #[tokio::test]
         async fn $name() {
-            let engine = Wasmtime::load().await;
+            let engine = Wasmtime::load_fixture($fixture).await;
             tokio::task::LocalSet::new()
                 .run_until(lifecycle_conformance::$scenario(engine))
                 .await;
@@ -111,6 +109,7 @@ macro_rules! conformance {
 }
 
 conformance! {
+    "context":
     lifecycle_conformance_registration_scope_ownership => registration_scope_ownership,
     lifecycle_conformance_failed_registration_initialization => failed_registration_initialization_publishes_nothing,
     provider_consumer_graph_activates_and_closes_in_order => provider_consumer_graph,
@@ -120,11 +119,15 @@ conformance! {
     undeclared_publications_fail_initialization => undeclared_publications_fail_initialization,
     overlapping_calls_complete_out_of_order => overlapping_calls_complete_out_of_order,
     many_overlapping_calls_complete => many_overlapping_calls_complete,
-    sync_exports_interleave_with_suspended_calls => sync_exports_interleave_with_suspended_calls,
     calls_reenter_their_provider => calls_reenter_their_provider,
-    guest_trap_fails_outstanding_calls => guest_trap_fails_outstanding_calls,
     disable_with_calls_in_flight_revokes_callers => disable_with_calls_in_flight_revokes_callers,
     shutdown_with_calls_in_flight_revokes_callers => shutdown_with_calls_in_flight_revokes_callers,
+}
+
+conformance! {
+    "lifecycle":
+    sync_exports_interleave_with_suspended_calls => sync_exports_interleave_with_suspended_calls,
+    guest_trap_fails_outstanding_calls => guest_trap_fails_outstanding_calls,
     dropped_call_finishes_in_the_guest_without_leaks => dropped_call_finishes_in_the_guest_without_leaks,
 }
 

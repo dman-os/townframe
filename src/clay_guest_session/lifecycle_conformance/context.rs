@@ -133,7 +133,7 @@ async fn collections_and_calls_over<E: Incarnations>(
 }
 
 /// The host's writer of a `feed` collection, as the micro instance `name`.
-fn seeder(
+pub(super) fn seeder(
     host: &Host,
     name: &str,
     registrations: &BytesRegistrations,
@@ -151,7 +151,7 @@ fn seeder(
     .unwrap()
 }
 
-fn cbor_text(text: &str) -> Vec<u8> {
+pub(super) fn cbor_text(text: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     ciborium::into_writer(text, &mut bytes).unwrap();
     bytes
@@ -281,7 +281,7 @@ impl<E: Incarnations> ContextRig<E> {
 /// it grants the fixture, and a provider factory whose presentation `view` the fixture follows
 /// and whose call `echo` (answering its request) it retains.
 #[derive(Default)]
-struct ContextWorld {
+pub(super) struct ContextWorld {
     /// How many incarnations of the provider have started.
     activations: Rc<std::cell::Cell<usize>>,
 }
@@ -296,16 +296,13 @@ impl CallTarget for Echoes {
 }
 
 /// The contract of the provider's `echo` call.
-const ECHO_CONTRACT: &str = "org.example.clay.test.context.echo";
+pub(super) const ECHO_CONTRACT: &str = "org.example.clay.test.context.echo";
+/// The contract of the micro's own `relay` call.
+pub(super) const RELAY_CONTRACT: &str = "org.example.clay.test.context.relay";
 
 impl ContextWorld {
-    /// The `feed` registration collection and the publications the fixture's manifest declares,
-    /// with `supervisor` behind the lazy references its mirror mints.
-    fn granted(
-        micro: &str,
-        registrations: &BytesRegistrations,
-        activator: Activator<CapabilityPublication>,
-    ) -> InitialContext {
+    /// The publications the `context` micro's manifest declares, by name.
+    pub(super) fn declared() -> BTreeMap<String, DeclaredPublication> {
         let call = |contract: &str| DeclaredPublication {
             kind: PublicationKind::Call,
             contract: Nsid::literal(contract),
@@ -314,6 +311,45 @@ impl ContextWorld {
             kind: PublicationKind::Presentation,
             contract: presentation_component(),
         };
+        BTreeMap::from([
+            (
+                "rows".to_owned(),
+                call("org.example.clay.test.context.rows"),
+            ),
+            (
+                "attach".to_owned(),
+                call("org.example.clay.test.context.attach"),
+            ),
+            (
+                "follow".to_owned(),
+                call("org.example.clay.test.context.follow"),
+            ),
+            (
+                "hold".to_owned(),
+                call("org.example.clay.test.context.hold"),
+            ),
+            (
+                "release".to_owned(),
+                call("org.example.clay.test.context.release"),
+            ),
+            (
+                "probe".to_owned(),
+                call("org.example.clay.test.context.probe"),
+            ),
+            ("echo".to_owned(), call(ECHO_CONTRACT)),
+            ("relay".to_owned(), call(RELAY_CONTRACT)),
+            ("detail".to_owned(), presentation()),
+            ("slot".to_owned(), presentation()),
+        ])
+    }
+
+    /// The `feed` registration collection and the publications the fixture's manifest declares,
+    /// with `supervisor` behind the lazy references its mirror mints.
+    pub(super) fn granted(
+        micro: &str,
+        registrations: &BytesRegistrations,
+        activator: Activator<CapabilityPublication>,
+    ) -> InitialContext {
         InitialContext {
             collections: BTreeMap::from([("feed".to_owned(), registrations.projection())]),
             registrations: BTreeMap::from([(
@@ -324,38 +360,7 @@ impl ContextWorld {
                     writer: writer_of(micro),
                 },
             )]),
-            publications: BTreeMap::from([
-                (
-                    "rows".to_owned(),
-                    call("org.example.clay.test.context.rows"),
-                ),
-                (
-                    "attach".to_owned(),
-                    call("org.example.clay.test.context.attach"),
-                ),
-                (
-                    "follow".to_owned(),
-                    call("org.example.clay.test.context.follow"),
-                ),
-                (
-                    "hold".to_owned(),
-                    call("org.example.clay.test.context.hold"),
-                ),
-                (
-                    "release".to_owned(),
-                    call("org.example.clay.test.context.release"),
-                ),
-                (
-                    "probe".to_owned(),
-                    call("org.example.clay.test.context.probe"),
-                ),
-                (
-                    "echo".to_owned(),
-                    call("org.example.clay.test.context.echo"),
-                ),
-                ("detail".to_owned(), presentation()),
-                ("slot".to_owned(), presentation()),
-            ]),
+            publications: Self::declared(),
             micro: Some(MicroId::new(micro)),
             activator: Some(activator),
             ..InitialContext::default()
