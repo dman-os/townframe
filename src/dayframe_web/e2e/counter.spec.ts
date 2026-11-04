@@ -22,18 +22,24 @@ test("the composed wcmp counter mounts and dispatches clicks in the browser", as
   // A package from the index is admitted disabled: enable it through the lifecycle panel,
   // which writes its install datum, before its section can start the guest.
   await page.getByText("Micro lifecycle controls").click();
-  await page.getByRole("button", { name: "Enable dayframe.counter micro" }).click();
+  await page
+    .getByRole("button", { name: "Enable dayframe.counter micro" })
+    .click();
   await expect(
     page.getByRole("button", { name: "Disable dayframe.counter micro" }),
   ).toBeVisible();
   // The label follows the install datum at once; the supervisor follows it through the
   // document watch a moment later. Opening the section before that redeems a disabled micro.
   await expect(
-    page.getByRole("status").filter({ hasText: "dayframe.counter runtime: Idle" }),
+    page
+      .getByRole("status")
+      .filter({ hasText: "dayframe.counter runtime: Idle" }),
   ).toBeVisible();
   // Settings opened the counter's section at boot, while the micro was disabled, so it shows
   // "unavailable"; a slot does not re-redeem when its micro is enabled, so reopen it.
-  await page.getByRole("button", { name: "Open Sample micro settings" }).click();
+  await page
+    .getByRole("button", { name: "Open Sample micro settings" })
+    .click();
   await openCounter.click();
 
   const counter = page.getByRole("button", { name: "Increment Wasm counter" });
@@ -47,13 +53,21 @@ test("the composed wcmp counter mounts and dispatches clicks in the browser", as
   // Disabling the micro withdraws its mounted section; its manifest row stays listed, and
   // re-enabling it lets a fresh open start a new incarnation. The lifecycle panel is still
   // open from enabling the counter above.
-  await page.getByRole("button", { name: "Disable dayframe.counter micro" }).click();
+  await page
+    .getByRole("button", { name: "Disable dayframe.counter micro" })
+    .click();
   await expect(counter).toBeHidden();
-  await page.getByRole("button", { name: "Enable dayframe.counter micro" }).click();
+  await page
+    .getByRole("button", { name: "Enable dayframe.counter micro" })
+    .click();
   await expect(
-    page.getByRole("status").filter({ hasText: "dayframe.counter runtime: Idle" }),
+    page
+      .getByRole("status")
+      .filter({ hasText: "dayframe.counter runtime: Idle" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Open Sample micro settings" }).click();
+  await page
+    .getByRole("button", { name: "Open Sample micro settings" })
+    .click();
   await openCounter.click();
   await expect(counter).toBeVisible({ timeout: 60_000 });
   expect(failures).toEqual([]);
@@ -70,8 +84,12 @@ test("a disabled counter stays disabled across a reload", async ({ page }) => {
 
   await page.goto("/");
   await page.getByText("Micro lifecycle controls").click();
-  await page.getByRole("button", { name: "Enable dayframe.counter micro" }).click();
-  await page.getByRole("button", { name: "Disable dayframe.counter micro" }).click();
+  await page
+    .getByRole("button", { name: "Enable dayframe.counter micro" })
+    .click();
+  await page
+    .getByRole("button", { name: "Disable dayframe.counter micro" })
+    .click();
   // The toggle is inert until the datum reached IndexedDB; a reload before that would race
   // the write, since a reload does not run the persister's shutdown drain.
   await expect(
