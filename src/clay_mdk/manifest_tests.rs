@@ -439,6 +439,12 @@ fn a_package_declares_only_nsids_under_its_authority() {
     let mut foreign_request = canonical_sidecar();
     foreign_request.manifest.collection_requests[0].contract = Nsid::literal("org.other.tallies");
     foreign_request.validate().unwrap();
+    // Implementing a call contract is not owning it (ADR 028 §5): a published call may name
+    // any NSID, while a collection contract the package declares must stay under its authority.
+    let mut foreign_call = canonical_sidecar();
+    foreign_call.manifest.publications[1].contract =
+        Some(Nsid::literal("org.example.other.toolbar.action"));
+    foreign_call.validate().unwrap();
 
     type Mutation = fn(&mut Sidecar);
     let cases: &[(Mutation, &str)] = &[
@@ -455,14 +461,6 @@ fn a_package_declares_only_nsids_under_its_authority() {
                     Some(Nsid::literal("org.example.test.counterfeit.context"))
             },
             "write-context schema org.example.test.counterfeit.context is outside the package's \
-             authority org.example.test.counter",
-        ),
-        (
-            |sidecar| {
-                sidecar.manifest.publications[1].contract =
-                    Some(Nsid::literal("org.example.clay.presentationComponent"))
-            },
-            "call contract org.example.clay.presentationComponent is outside the package's \
              authority org.example.test.counter",
         ),
         (

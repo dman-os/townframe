@@ -4,7 +4,8 @@
 //!
 //! A button row is keyed by its contributor's chosen id (CBOR text) and holds a [`Button`]:
 //! static metadata (a label and an icon name) and an attachment naming the call the button
-//! performs. A micro whose button should exist while it is stopped declares the row in its
+//! performs, a call of the [`ACTION_CONTRACT`] contract (empty request and response) that the
+//! toolbar owns and contributors implement. A micro whose button should exist while it is stopped declares the row in its
 //! manifest, which stores a lazy endpoint to its own call publication: the toolbar renders the
 //! metadata without starting the contributor, and pressing the button calls the endpoint, which
 //! activates or joins the contributor for the length of the call.
@@ -31,6 +32,11 @@ pub const PACKAGE_VERSION: u32 = 1;
 /// The NSID prefix the toolbar holds: every NSID it declares (its collection contract and
 /// schemas) lies under it, everything else it names is a request.
 pub const AUTHORITY: &str = "org.example.dayframe.toolbar";
+/// The contract NSID of the call a button's attachment performs: empty request, empty response
+/// (CBOR `()` in and out). The toolbar defines it and a contributor's call publication
+/// implements it; implementing is not owning (ADR 028 §5), so the contributor needs no request
+/// and the NSID is under the toolbar's authority.
+pub const ACTION_CONTRACT: &str = "org.example.dayframe.toolbar.action";
 /// The Toolbar presentation, which the shell mounts as a root.
 pub const VIEW: &str = "view";
 /// The contract NSID, and so the declared collection's id, of the buttons collection.
@@ -47,7 +53,8 @@ pub const BUTTON_VALUE_SCHEMA: &str = "org.example.dayframe.toolbar.button";
 pub const BUTTON_SELECTOR_SCHEMA: &str = "org.example.dayframe.toolbar.buttonSelector";
 
 /// One toolbar button: what it shows, and the call it performs, as an attachment of the row.
-/// The attached call takes an empty request and returns an empty response.
+/// The attachment is a call of the [`ACTION_CONTRACT`] contract: an empty request and an empty
+/// response.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Button {
     pub label: String,

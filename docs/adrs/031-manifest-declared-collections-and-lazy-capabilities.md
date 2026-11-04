@@ -291,7 +291,7 @@ value:
     icon: "plus"
     action: attachment 0
 endpoints:
-    0: LazyEndpoint(counter, "increment", toolbar.action@1)   // Call, empty request/response
+    0: LazyEndpoint(counter, "increment", org.example.dayframe.toolbar.action)   // Call, empty request/response
 ```
 
 The toolbar reads and renders the button while the counter is stopped. Pressing it calls attachment 0, which activates or joins the counter incarnation, holds a strong edge for the call, and then permits idle shutdown. No ephemeral toolbar collection or provider polling is required.

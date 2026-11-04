@@ -474,8 +474,11 @@ impl Sidecar {
     }
 
     /// [`MicroManifest::validate`] plus the authority rule: every NSID the package declares
-    /// lies under its authority, namely its collection contracts and the contract of each call
-    /// it publishes. A declared contract's selector, key, value and write-context schemas may
+    /// lies under its authority, namely its collection contracts. The contract of a call the
+    /// package publishes is not declared by it and may be any NSID: implementing a contract is
+    /// not owning it (ADR 028 §5), and a fork or a provider implements the NSID of whoever
+    /// defined the call (the toolbar owns its action contract, providers implement it).
+    /// Implementing grants the implementer no access, so it needs no request. A declared contract's selector, key, value and write-context schemas may
     /// instead be outside the authority when the package requests them (ADR 028 §4: anything
     /// outside the authority must be requested, whatever refers to it), i.e. a request's
     /// `contract` names the schema. What a package merely requests (collection requests,
@@ -511,13 +514,6 @@ impl Sidecar {
             owned_or_requested(&contract.value_schema, "value schema")?;
             if let Some(schema) = &contract.write_context_schema {
                 owned_or_requested(schema, "write-context schema")?;
-            }
-        }
-        for publication in &self.manifest.publications {
-            if let (PublicationKind::Call, Some(contract)) =
-                (&publication.kind, &publication.contract)
-            {
-                owned(contract, "call contract")?;
             }
         }
         Ok(())

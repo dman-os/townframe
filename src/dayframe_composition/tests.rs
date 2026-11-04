@@ -3,11 +3,11 @@ use clay_collection::Stamped;
 use clay_dioxus::NativeComponents;
 use clay_guest_session::capabilities::RowAttachment;
 use clay_host::StartError;
-use clay_mdk::host::factory;
 use clay_mdk::Capability;
 use clay_mdk::Error;
-use micro_settings_manifest::Section;
+use clay_mdk::host::factory;
 use micro_settings_manifest::SECTIONS;
+use micro_settings_manifest::Section;
 use std::future::Future;
 
 const COUNTER: &str = micro_counter_manifest::ID;
@@ -198,11 +198,13 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         [RowAttachment::Endpoint(endpoint)] if endpoint.micro == supervised(COUNTER) && endpoint.publication == "view"
     ));
     // The sample writes its row at runtime, so nothing exists for it yet.
-    assert!(runtime
-        .collection(&sections())
-        .unwrap()
-        .get(&cbor_key(micro_sample::ID))
-        .is_none());
+    assert!(
+        runtime
+            .collection(&sections())
+            .unwrap()
+            .get(&cbor_key(micro_sample::ID))
+            .is_none()
+    );
     runtime.host.close();
 }
 
@@ -355,8 +357,18 @@ async fn a_contribution_through_a_read_only_binding_is_an_installation_error() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_declaration_outside_the_packages_authority_is_an_installation_error() {
     let (runtime, error) = refused(|sidecar| {
-        sidecar.manifest.publications[2].contract =
-            Some(Nsid::literal("org.example.dayframe.settings.hijack"))
+        let hijack = |name: &str| Nsid::literal(&format!("org.example.dayframe.settings.{name}"));
+        sidecar
+            .manifest
+            .collection_contracts
+            .push(clay_mdk::CollectionContract {
+                id: hijack("hijack"),
+                selector_schema: hijack("hijackSelector"),
+                key_schema: hijack("hijackKey"),
+                value_schema: hijack("hijackValue"),
+                write_context_schema: None,
+                offered: vec![clay_mdk::CollectionCapability::Read],
+            })
     })
     .await;
     assert!(error.contains("outside the package's authority"), "{error}");
