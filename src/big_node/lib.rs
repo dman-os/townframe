@@ -265,6 +265,20 @@ async fn boot_plugs(
         namespace,
         operator: authority.service.operator_uuid(),
         blobs: Arc::clone(&blobs.service),
+        node_key: big_plugs::NodeKey {
+            public_key: authority.service.node_public_key(),
+            sign: Arc::new({
+                let service = Arc::clone(&authority.service);
+                // The registry hands over its whole signing message; the authority re-binds the
+                // plug domain itself, so this closure cannot sign anything outside that domain.
+                move |message: &[u8]| {
+                    let payload = message
+                        .strip_prefix(big_plugs_core::signature::SIGNING_DOMAIN)
+                        .expect("the registry only signs plug signing messages");
+                    service.sign_as_node(big_plugs_core::signature::SIGNING_DOMAIN, payload)
+                }
+            }),
+        },
         sql,
     })
     .await?;

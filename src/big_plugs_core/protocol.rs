@@ -11,6 +11,7 @@ use crate::Plug;
 use crate::PlugId;
 use crate::Revision;
 use crate::Version;
+use crate::signature::SignatureError;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Capability;
@@ -23,21 +24,40 @@ use service_core_rs::ContextError;
 use service_core_rs::declare_service_protocol;
 use service_core_rs::service_operation;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// What a minted registry handle may do. Without `publish` it reads the registry (list, get,
-/// watch); with it, it also publishes and removes. Publishing here is local and trusted under the
-/// holder's capability; per-publisher signatures and namespace-scoped handles belong to the
-/// publisher layer above this one.
+/// watch); with it, it also publishes and removes. `namespaces` narrows publishing and removal to
+/// plugs whose id lives under one of those DIDs; absent means any namespace, which is what the
+/// operator's own identity has. A handle can only be minted with a scope its minter covers, so a
+/// namespace set only ever narrows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlugsScope {
     #[serde(default)]
     pub publish: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespaces: Option<BTreeSet<String>>,
 }
 
 impl PlugsScope {
     pub fn covers(&self, other: &Self) -> bool {
-        self.publish || !other.publish
+        (self.publish || !other.publish)
+            && match (&self.namespaces, &other.namespaces) {
+                (None, _) => true,
+                // Without `publish` the namespaces are never consulted.
+                (Some(_), None) => !other.publish,
+                (Some(own), Some(narrower)) => narrower.is_subset(own),
+            }
+    }
+
+    /// Whether this scope may publish or remove plugs under `namespace`.
+    pub fn may_publish_under(&self, namespace: &str) -> bool {
+        self.publish
+            && self
+                .namespaces
+                .as_ref()
+                .is_none_or(|namespaces| namespaces.contains(namespace))
     }
 }
 
@@ -50,13 +70,24 @@ pub struct MintPlugsCapability {
 }
 
 /// Publish one version. Every artifact of the envelope must already be in the local blob store.
-/// The same label with an identical envelope is an idempotent no-op; the same label with a
-/// different one is refused with [`PlugsError::VersionExists`].
+/// The envelope must carry the signature of its namespace DID, except that an unsigned envelope
+/// under the node's own publisher DID (see [`GetPublisher`]) is signed by the node. The same
+/// label with an identical envelope is an idempotent no-op; the same label with a different one
+/// is refused with [`PlugsError::VersionExists`]; a new label must be greater than every label
+/// the plug has or had ([`PlugsError::Downgrade`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPlugVersion {
     pub authorization: Authorization,
     pub envelope: Plug,
+}
+
+/// The DID this node publishes under: the `did:key` of the node's Ed25519 signing key. Plug ids
+/// built under it can be published unsigned and are signed by the node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetPublisher {
+    pub authorization: Authorization,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +202,11 @@ pub struct PlugVersionSummary {
     pub revision: Revision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// Why the version's signature did not verify (a synced write whose signature is bad, or
+    /// whose DID method cannot be verified here). Such a version is listed so it is visible, but
+    /// it is not served: [`GetPlugVersion`] refuses it with [`PlugsError::Unverified`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified: Option<String>,
 }
 
 /// One plug in the registry, from its document in the drawer.
@@ -227,6 +263,35 @@ pub enum PlugsError {
         existing: Revision,
         incoming: Revision,
     },
+    /// The envelope's signature is missing or does not verify against its namespace DID, or the
+    /// DID's method cannot be verified without resolution (fail closed).
+    #[error("the envelope's signature was refused: {0}")]
+    Signature(#[from] SignatureError),
+    /// An unsigned envelope can be signed by the node only for the node's own DID.
+    #[error(
+        "the envelope is unsigned and `{namespace}` is not this node's publisher DID, so the node \
+         cannot sign it"
+    )]
+    UnsignedForeignNamespace { namespace: String },
+    /// A new label must order after every label the plug has or had, so a validly signed older
+    /// version cannot be published as new (a downgrade attack). Taking an older version is an
+    /// explicit runtime action, not a registry one.
+    #[error("plug `{id}` {version} does not order after {newest}, the newest version it has had")]
+    Downgrade {
+        id: PlugId,
+        version: Box<Version>,
+        newest: Box<Version>,
+    },
+    /// The handle's namespace scope does not include the plug's namespace.
+    #[error("the presented capability may not publish under `{namespace}`")]
+    NamespaceNotPermitted { namespace: String },
+    /// The version exists in the drawer but its signature did not verify, so it is not served.
+    #[error("plug `{id}` {version} is not served: {reason}")]
+    Unverified {
+        id: PlugId,
+        version: Box<Version>,
+        reason: String,
+    },
     /// An artifact's bytes are not in the local blob store, so the registry would pin bytes it
     /// cannot serve.
     #[error("artifact `{artifact}` of plug `{id}` is not in the local blob store")]
@@ -241,6 +306,7 @@ service_operation!(MintPlugsCapability => Capability, PlugsError, procedure("org
 service_operation!(PublishPlugVersion => PublishedPlugVersion, PlugsError, procedure("org.example.daybook.plugs.publishPlugVersion"));
 service_operation!(RemovePlugVersion => (), PlugsError, procedure("org.example.daybook.plugs.removePlugVersion"));
 service_operation!(RemovePlug => (), PlugsError, procedure("org.example.daybook.plugs.removePlug"));
+service_operation!(GetPublisher => String, PlugsError, query("org.example.daybook.plugs.getPublisher"));
 service_operation!(ListPlugs => Vec<PlugRecord>, PlugsError, query("org.example.daybook.plugs.listPlugs"));
 service_operation!(GetPlug => PlugRecord, PlugsError, query("org.example.daybook.plugs.getPlug"));
 service_operation!(GetPlugVersion => PlugVersionRecord, PlugsError, query("org.example.daybook.plugs.getPlugVersion"));
@@ -253,6 +319,7 @@ declare_service_protocol! {
             PublishPlugVersion(PublishPlugVersion),
             RemovePlugVersion(RemovePlugVersion),
             RemovePlug(RemovePlug),
+            GetPublisher(GetPublisher),
             ListPlugs(ListPlugs),
             GetPlug(GetPlug),
             GetPlugVersion(GetPlugVersion),

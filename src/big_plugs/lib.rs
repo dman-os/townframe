@@ -54,6 +54,7 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_plugs_core::protocol::GetPlug;
 use big_plugs_core::protocol::GetPlugVersion;
+use big_plugs_core::protocol::GetPublisher;
 use big_plugs_core::protocol::ListPlugs;
 use big_plugs_core::protocol::MintPlugsCapability;
 use big_plugs_core::protocol::PlugChanges;
@@ -69,6 +70,7 @@ use big_plugs_core::protocol::RemovePlug;
 use big_plugs_core::protocol::RemovePlugVersion;
 use big_plugs_core::protocol::WatchPlugs;
 use big_plugs_core::registry::registry_universe;
+use big_plugs_core::signature::did_key;
 use registry::Registry;
 use service_utils_rs::Client;
 use service_utils_rs::ClientError;
@@ -244,10 +246,22 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
     Ok(drawer)
 }
 
+/// The node's publisher identity: its Ed25519 public key and a function that signs a message with
+/// the matching secret. The secret never leaves its owner; the registry only ever asks for
+/// signatures over envelopes (domain-separated, see [`big_plugs_core::signature`]).
+pub struct NodeKey {
+    pub public_key: [u8; 32],
+    pub sign: NodeSigner,
+}
+
+/// Signs a message with the node's secret key, returning the 64 Ed25519 signature bytes.
+pub type NodeSigner = Arc<dyn Fn(&[u8]) -> [u8; 64] + Send + Sync>;
+
 /// What the embedder hands the service: the authority it mints handles from, the docs service it
 /// reads and writes the registry drawer through, the drawer (from [`ensure_registry_drawer`]) and
 /// the actor holding Admin on it, the namespace it mints handles in, the operator whose identity
-/// administers the registry, the blob service it checks artifact bytes against, and the database.
+/// administers the registry, the blob service it checks artifact bytes against, the node's
+/// publisher key, and the database.
 pub struct PlugsConfig {
     pub authority: Client<AuthorityProtocol>,
     pub docs: Client<DocsProtocol>,
@@ -256,6 +270,7 @@ pub struct PlugsConfig {
     pub namespace: Namespace,
     pub operator: Uuid7,
     pub blobs: Arc<BlobService>,
+    pub node_key: NodeKey,
     pub sql: Database,
 }
 
@@ -264,6 +279,10 @@ pub struct PlugService {
     capabilities: DomainCapabilities,
     operator: Uuid7,
     registry: Arc<Registry>,
+    /// The `did:key` of the node's key, and the key's signer: an unsigned envelope in this
+    /// namespace is signed by the node on publish.
+    publisher: String,
+    node_key: NodeKey,
     /// Ends a held watch when the service stops, rather than at its hold's expiry.
     tasks: Spawner,
 }
@@ -293,10 +312,16 @@ impl PlugService {
         }
     }
 
-    /// Publishing and removing need the handle's `publish` scope.
-    fn require_publish(&self, caller: &Invocation<PlugsScope>) -> Res<()> {
+    /// Publishing and removing need the handle's `publish` scope, and the plug's namespace must be
+    /// one the handle may publish under.
+    fn require_publish(&self, caller: &Invocation<PlugsScope>, namespace: &str) -> Res<()> {
         match self.scope_of(caller)? {
             Some(scope) if !scope.publish => Err(PlugsError::Denied),
+            Some(scope) if !scope.may_publish_under(namespace) => {
+                Err(PlugsError::NamespaceNotPermitted {
+                    namespace: namespace.to_owned(),
+                })
+            }
             _ => Ok(()),
         }
     }
@@ -310,9 +335,10 @@ impl PlugService {
         &self,
         context: &RequestContext,
         authorization: Authorization,
+        namespace: &str,
     ) -> Res<()> {
         let caller = self.caller(context, authorization).await?;
-        self.require_publish(&caller)
+        self.require_publish(&caller, namespace)
     }
 
     async fn mint(&self, context: &RequestContext, params: MintPlugsCapability) -> Res<Capability> {
@@ -340,20 +366,39 @@ impl PlugService {
         context: &RequestContext,
         params: PublishPlugVersion,
     ) -> Res<PublishedPlugVersion> {
-        self.write_caller(context, params.authorization).await?;
-        self.registry.publish(params.envelope).await
+        let mut envelope = params.envelope;
+        self.write_caller(context, params.authorization, &envelope.id.namespace)
+            .await?;
+        if envelope.signature.is_none() {
+            // The node signs only for its own DID: signing for any other namespace would let a
+            // local publisher pass an envelope off as someone else's.
+            if envelope.id.namespace != self.publisher {
+                return Err(PlugsError::UnsignedForeignNamespace {
+                    namespace: envelope.id.namespace,
+                });
+            }
+            envelope.sign_with(|message| (self.node_key.sign)(message));
+        }
+        self.registry.publish(envelope).await
     }
 
     async fn remove_version(&self, context: &RequestContext, params: RemovePlugVersion) -> Res<()> {
-        self.write_caller(context, params.authorization).await?;
+        self.write_caller(context, params.authorization, &params.id.namespace)
+            .await?;
         self.registry
             .remove_version(&params.id, &params.version)
             .await
     }
 
     async fn remove_plug(&self, context: &RequestContext, params: RemovePlug) -> Res<()> {
-        self.write_caller(context, params.authorization).await?;
+        self.write_caller(context, params.authorization, &params.id.namespace)
+            .await?;
         self.registry.remove_plug(&params.id).await
+    }
+
+    async fn get_publisher(&self, context: &RequestContext, params: GetPublisher) -> Res<String> {
+        self.read_caller(context, params.authorization).await?;
+        Ok(self.publisher.clone())
     }
 
     async fn list(&self, context: &RequestContext, params: ListPlugs) -> Res<Vec<PlugRecord>> {
@@ -427,6 +472,7 @@ handlers! {
     PublishPlugVersion => publish: PublishedPlugVersion;
     RemovePlugVersion => remove_version: ();
     RemovePlug => remove_plug: ();
+    GetPublisher => get_publisher: String;
     ListPlugs => list: Vec<PlugRecord>;
     GetPlug => get: PlugRecord;
     GetPlugVersion => get_version: PlugVersionRecord;
@@ -440,6 +486,7 @@ service_utils_rs::bind_service_protocol! {
             PublishPlugVersion(PublishPlugVersion),
             RemovePlugVersion(RemovePlugVersion),
             RemovePlug(RemovePlug),
+            GetPublisher(GetPublisher),
             ListPlugs(ListPlugs),
             GetPlug(GetPlug),
             GetPlugVersion(GetPlugVersion),
@@ -455,6 +502,8 @@ pub type PlugsHandler = Arc<PlugService>;
 pub struct Plugs {
     pub host: Arc<Host<PlugsHandler>>,
     pub client: Client<PlugsProtocol>,
+    /// The node's publisher DID, the namespace unsigned envelopes are signed for.
+    pub publisher: String,
 }
 
 /// Boot the registry on `config.registry_drawer`: scan the drawer into the served state, wait for
@@ -509,16 +558,23 @@ pub async fn boot(config: PlugsConfig) -> Res<(Plugs, StopToken)> {
     scanned
         .await
         .expect("the registry follower reports its first scan");
+    let publisher = did_key(&config.node_key.public_key);
     let service = Arc::new(PlugService {
         capabilities,
         operator: config.operator,
         registry,
+        publisher: publisher.clone(),
+        node_key: config.node_key,
         tasks,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
     let client = Client::direct(PlugsBinding::new(Arc::clone(&host)));
     Ok((
-        Plugs { host, client },
+        Plugs {
+            host,
+            client,
+            publisher,
+        },
         host_stop.then(follow_stop).then(domain_stop),
     ))
 }

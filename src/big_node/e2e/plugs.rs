@@ -13,6 +13,7 @@ use big_plugs_core::Plug;
 use big_plugs_core::example_plug;
 use big_plugs_core::protocol::GetPlug;
 use big_plugs_core::protocol::GetPlugVersion;
+use big_plugs_core::protocol::GetPublisher;
 use big_plugs_core::protocol::ListPlugs;
 use big_plugs_core::protocol::MintPlugsCapability;
 use big_plugs_core::protocol::PlugChanges;
@@ -25,7 +26,10 @@ use big_plugs_core::protocol::RemovePlug;
 use big_plugs_core::protocol::RemovePlugVersion;
 use big_plugs_core::protocol::WatchPlugs;
 use big_plugs_core::registry::version_key;
+use big_plugs_core::signature::SignatureError;
 use big_plugs_core::test_support::plug_id;
+use big_plugs_core::test_support::sign_as_example;
+use big_plugs_core::test_support::sign_with_seed;
 use service_utils_rs::ClientError;
 use std::time::Duration;
 
@@ -56,9 +60,9 @@ async fn put(node: &BigNode, bytes: &[u8]) -> BlobInfo {
         .unwrap()
 }
 
-/// `photos` at `version` with one artifact, `handler`, holding `info`'s bytes.
-fn photos(version: &str, info: &BlobInfo) -> Plug {
-    let mut plug = Plug::new(PHOTOS.parse().unwrap(), version.parse().unwrap());
+/// `id` at `version` with one artifact, `handler`, holding `info`'s bytes, not yet signed.
+fn unsigned(id: &str, version: &str, info: &BlobInfo) -> Plug {
+    let mut plug = Plug::new(id.parse().unwrap(), version.parse().unwrap());
     plug.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest(info.blob_id.to_bytes32()),
@@ -67,6 +71,60 @@ fn photos(version: &str, info: &BlobInfo) -> Plug {
         extra: Default::default(),
     });
     plug
+}
+
+/// `photos` under the example namespace, signed by its owner as an external publisher would.
+fn photos(version: &str, info: &BlobInfo) -> Plug {
+    sign_as_example(unsigned(PHOTOS, version, info))
+}
+
+/// A write to one version slot of a registry document, as a synced change from another node
+/// would land: straight on the document, past the registry service.
+async fn write_version_datum(node: &BigNode, doc_id: &DocId, envelope: &Plug) {
+    node.docs
+        .client
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability: capability(
+                    node,
+                    DocScope {
+                        write: BTreeSet::from([doc_id.clone()]),
+                        ..DocScope::default()
+                    },
+                )
+                .await,
+                command: None,
+                doc_id: doc_id.clone(),
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(
+                    version_key(&envelope.version),
+                    serde_json::to_value(envelope).unwrap(),
+                )]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+}
+
+async fn get_version(
+    node: &BigNode,
+    id: &str,
+    version: &str,
+) -> Result<big_plugs_core::protocol::PlugVersionRecord, PlugsError> {
+    node.plugs
+        .client
+        .call(
+            RequestContext::root(),
+            GetPlugVersion {
+                authorization: operator(node),
+                id: id.parse().unwrap(),
+                version: version.parse().unwrap(),
+            },
+        )
+        .await
+        .map_err(operation)
 }
 
 async fn publish(
@@ -236,8 +294,22 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
 
     // A read handle lists and gets but does not publish or remove; a publish handle does; an
     // actor presenting only its own identity is refused outright.
-    let reader = mint(&node, PlugsScope { publish: false }).await;
-    let publisher = mint(&node, PlugsScope { publish: true }).await;
+    let reader = mint(
+        &node,
+        PlugsScope {
+            publish: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let publisher = mint(
+        &node,
+        PlugsScope {
+            publish: true,
+            ..Default::default()
+        },
+    )
+    .await;
     node.plugs
         .client
         .call(
@@ -289,7 +361,10 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
                 RequestContext::root(),
                 MintPlugsCapability {
                     authorization: reader,
-                    scope: PlugsScope { publish: true },
+                    scope: PlugsScope {
+                        publish: true,
+                        ..Default::default()
+                    },
                     rights: Rights::USE,
                 }
             )
@@ -317,6 +392,7 @@ async fn a_published_version_never_changes_content() {
 
     let mut changed = photos("1.0.0", &info);
     changed.title = Some("Photos, renamed".into());
+    let changed = sign_as_example(changed);
     assert_eq!(
         publish(&node, operator, changed.clone()).await,
         Err(PlugsError::VersionExists {
@@ -517,6 +593,7 @@ async fn the_registry_is_rebuilt_from_its_drawer_after_a_restart() {
     // The node still remembers what it first saw for the label, so the label stays immutable.
     let mut changed = photos("1.0.0", &info);
     changed.description = Some("different".into());
+    let changed = sign_as_example(changed);
     assert!(matches!(
         publish(&node, Authorization::identity(node.authority.root), changed).await,
         Err(PlugsError::VersionExists { existing, .. }) if existing == published.record.revision
@@ -615,31 +692,7 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
     // it directly, as the synced change would land.
     let mut rewritten = original.clone();
     rewritten.title = Some("Rewritten elsewhere".into());
-    node.docs
-        .client
-        .call(
-            RequestContext::root(),
-            WriteDatums {
-                capability: capability(
-                    &node,
-                    DocScope {
-                        write: BTreeSet::from([record.doc_id.clone()]),
-                        ..DocScope::default()
-                    },
-                )
-                .await,
-                command: None,
-                doc_id: record.doc_id.clone(),
-                mode: WriteMode::AtCurrent,
-                set: BTreeMap::from([(
-                    version_key(&"1.0.0".parse().unwrap()),
-                    serde_json::to_value(&rewritten).unwrap(),
-                )]),
-                remove: BTreeSet::new(),
-            },
-        )
-        .await
-        .unwrap();
+    write_version_datum(&node, &record.doc_id, &sign_as_example(rewritten)).await;
 
     let version = loop {
         let version = node
@@ -671,5 +724,348 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
     let republished = publish(&node, operator, original.clone()).await.unwrap();
     assert!(!republished.unchanged);
     assert_eq!(republished.record.conflict, None);
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
+async fn an_envelope_must_carry_its_namespace_owners_signature() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let operator = operator(&node);
+    let info = put(&node, b"signed handler").await;
+
+    // Unsigned under a namespace that is not the node's: the node will not sign for it.
+    assert_eq!(
+        publish(&node, operator, unsigned(PHOTOS, "1.0.0", &info)).await,
+        Err(PlugsError::UnsignedForeignNamespace {
+            namespace: big_plugs_core::example_namespace!().into(),
+        })
+    );
+    // Signed with another key than the namespace's.
+    assert!(matches!(
+        publish(
+            &node,
+            operator,
+            sign_with_seed(unsigned(PHOTOS, "1.0.0", &info), &[9; 32])
+        )
+        .await,
+        Err(PlugsError::Signature(SignatureError::Invalid(_)))
+    ));
+    // A signature that no longer matches the envelope it is attached to.
+    let mut tampered = photos("1.0.0", &info);
+    tampered.title = Some("edited after signing".into());
+    assert!(matches!(
+        publish(&node, operator, tampered).await,
+        Err(PlugsError::Signature(SignatureError::Invalid(_)))
+    ));
+    // A DID whose method cannot be verified without resolution fails closed, signed or not.
+    let web = sign_as_example(unsigned("did:web:example.com/photos", "1.0.0", &info));
+    assert_eq!(
+        publish(&node, operator, web).await,
+        Err(PlugsError::Signature(SignatureError::UnsupportedMethod(
+            "web".into()
+        )))
+    );
+    assert!(list(&node).await.is_empty());
+
+    // The owner's signature is accepted, and survives the round trip through the drawer.
+    let published = publish(&node, operator, photos("1.0.0", &info))
+        .await
+        .unwrap();
+    published.record.envelope.verify_signature().unwrap();
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
+async fn the_node_signs_unsigned_envelopes_under_its_own_publisher_did() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let operator = operator(&node);
+    let info = put(&node, b"node published handler").await;
+    let publisher = node
+        .plugs
+        .client
+        .call(
+            RequestContext::root(),
+            GetPublisher {
+                authorization: operator,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(publisher, node.plugs.publisher);
+    // The DID is the did:key of the authority's node key, the one that issues attribution
+    // certificates.
+    assert_eq!(
+        publisher,
+        big_plugs_core::signature::did_key(&node.authority.service.node_public_key())
+    );
+
+    let own = format!("{publisher}/mine");
+    let published = publish(&node, operator, unsigned(&own, "1.0.0", &info))
+        .await
+        .unwrap();
+    assert!(published.record.envelope.signature.is_some());
+    published.record.envelope.verify_signature().unwrap();
+    assert_eq!(published.record.id.to_string(), own);
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
+async fn a_new_label_must_order_after_every_label_the_plug_has_or_had() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let operator = operator(&node);
+    let info = put(&node, b"ordered handler").await;
+    publish(&node, operator, photos("1.0.0", &info))
+        .await
+        .unwrap();
+    publish(&node, operator, photos("1.1.0", &info))
+        .await
+        .unwrap();
+
+    // A validly signed older version is not an upgrade, even though nothing is wrong with it.
+    let downgrade = |version: &str, newest: &str| PlugsError::Downgrade {
+        id: plug_id("photos"),
+        version: Box::new(version.parse().unwrap()),
+        newest: Box::new(newest.parse().unwrap()),
+    };
+    assert_eq!(
+        publish(&node, operator, photos("0.9.0", &info)).await,
+        Err(downgrade("0.9.0", "1.1.0"))
+    );
+    assert_eq!(
+        publish(&node, operator, photos("1.0.5", &info)).await,
+        Err(downgrade("1.0.5", "1.1.0"))
+    );
+    assert_eq!(
+        publish(&node, operator, photos("1.1.0-rc.1", &info)).await,
+        Err(downgrade("1.1.0-rc.1", "1.1.0"))
+    );
+    // Republishing an existing label's identical content is not a new label.
+    assert!(
+        publish(&node, operator, photos("1.0.0", &info))
+            .await
+            .unwrap()
+            .unchanged
+    );
+
+    // A removed version still counts: the newest label stays the bar after it is gone, and the
+    // older one's identical content may still be published again.
+    publish(&node, operator, photos("1.2.0", &info))
+        .await
+        .unwrap();
+    for version in ["1.2.0", "1.0.0"] {
+        node.plugs
+            .client
+            .call(
+                RequestContext::root(),
+                RemovePlugVersion {
+                    authorization: operator,
+                    id: plug_id("photos"),
+                    version: version.parse().unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        publish(&node, operator, photos("1.1.5", &info)).await,
+        Err(downgrade("1.1.5", "1.2.0"))
+    );
+    publish(&node, operator, photos("1.0.0", &info))
+        .await
+        .unwrap();
+    publish(&node, operator, photos("1.2.1", &info))
+        .await
+        .unwrap();
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
+async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let operator = operator(&node);
+    let info = put(&node, b"forged handler").await;
+    publish(&node, operator, photos("1.0.0", &info))
+        .await
+        .unwrap();
+    let record = node
+        .plugs
+        .client
+        .call(
+            RequestContext::root(),
+            GetPlug {
+                authorization: operator,
+                id: plug_id("photos"),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Another node's write of a version signed by the wrong key lands on the document.
+    let forged = sign_with_seed(unsigned(PHOTOS, "1.1.0", &info), &[9; 32]);
+    write_version_datum(&node, &record.doc_id, &forged).await;
+    let listed = loop {
+        let record = node
+            .plugs
+            .client
+            .call(
+                RequestContext::root(),
+                GetPlug {
+                    authorization: operator,
+                    id: plug_id("photos"),
+                },
+            )
+            .await
+            .unwrap();
+        if record.versions.len() == 2 {
+            break record;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let summary = &listed.versions[1];
+    assert_eq!(summary.version.to_string(), "1.1.0");
+    assert!(
+        summary
+            .unverified
+            .as_deref()
+            .is_some_and(|reason| reason.contains("does not verify")),
+        "{summary:?}"
+    );
+    assert_eq!(listed.versions[0].unverified, None);
+    assert!(matches!(
+        get_version(&node, PHOTOS, "1.1.0").await,
+        Err(PlugsError::Unverified { .. })
+    ));
+    // The genuine versions are untouched.
+    assert_eq!(
+        get_version(&node, PHOTOS, "1.0.0").await.unwrap().envelope,
+        photos("1.0.0", &info)
+    );
+
+    // The bad copy never reserved the label: the owner publishes the genuine 1.1.0 over it.
+    let genuine = publish(&node, operator, photos("1.1.0", &info))
+        .await
+        .unwrap();
+    assert_eq!(genuine.record.envelope, photos("1.1.0", &info));
+    assert_eq!(
+        get_version(&node, PHOTOS, "1.1.0").await.unwrap().envelope,
+        photos("1.1.0", &info)
+    );
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
+async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let info = put(&node, b"scoped handler").await;
+    let own = format!("{}/mine", node.plugs.publisher);
+    let scoped = |namespaces: Option<&[&str]>| PlugsScope {
+        publish: true,
+        namespaces: namespaces.map(|namespaces| {
+            namespaces
+                .iter()
+                .map(|namespace| (*namespace).to_owned())
+                .collect()
+        }),
+    };
+    // A handle can mint narrower handles only if it carries the NARROW right.
+    let mint_as = |authorization: Authorization, scope: PlugsScope, rights: Rights| {
+        let node = &node;
+        async move {
+            node.plugs
+                .client
+                .call(
+                    RequestContext::root(),
+                    MintPlugsCapability {
+                        authorization,
+                        scope,
+                        rights,
+                    },
+                )
+                .await
+                .map_err(operation)
+                .map(|capability| Authorization {
+                    authority: capability.capability_id,
+                    signer: authorization.signer,
+                })
+        }
+    };
+    let handle = mint_as(
+        operator(&node),
+        scoped(Some(&[big_plugs_core::example_namespace!()])),
+        Rights::USE | Rights::NARROW,
+    )
+    .await
+    .unwrap();
+
+    publish(&node, handle, photos("1.0.0", &info))
+        .await
+        .unwrap();
+    assert_eq!(
+        publish(&node, handle, unsigned(&own, "1.0.0", &info)).await,
+        Err(PlugsError::NamespaceNotPermitted {
+            namespace: node.plugs.publisher.clone()
+        })
+    );
+    // The node's convenience signing is not a way around the scope, and removal is scoped too.
+    publish(&node, operator(&node), unsigned(&own, "1.0.0", &info))
+        .await
+        .unwrap();
+    assert_eq!(
+        node.plugs
+            .client
+            .call(
+                RequestContext::root(),
+                RemovePlug {
+                    authorization: handle,
+                    id: own.parse().unwrap(),
+                }
+            )
+            .await
+            .map_err(operation),
+        Err(PlugsError::NamespaceNotPermitted {
+            namespace: node.plugs.publisher.clone()
+        })
+    );
+    node.plugs
+        .client
+        .call(
+            RequestContext::root(),
+            RemovePlug {
+                authorization: handle,
+                id: plug_id("photos"),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Minting narrows: the same or fewer namespaces, never any or more.
+    let narrower = mint_as(
+        handle,
+        scoped(Some(&[big_plugs_core::example_namespace!()])),
+        Rights::USE,
+    )
+    .await
+    .unwrap();
+    publish(&node, narrower, photos("2.0.0", &info))
+        .await
+        .unwrap();
+    assert_eq!(
+        mint_as(handle, scoped(None), Rights::USE).await,
+        Err(PlugsError::Denied)
+    );
+    assert_eq!(
+        mint_as(
+            handle,
+            scoped(Some(&[big_plugs_core::example_namespace!(), "did:web:x"])),
+            Rights::USE
+        )
+        .await,
+        Err(PlugsError::Denied)
+    );
     shutdown(node, stop).await;
 }

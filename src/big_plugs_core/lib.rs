@@ -26,6 +26,7 @@ use std::str::FromStr;
 pub mod catalog;
 pub mod protocol;
 pub mod registry;
+pub mod signature;
 
 pub const AUTHORITY: &str = "org.example.daybook";
 
@@ -53,6 +54,10 @@ pub struct Plug {
     pub artifacts: Vec<Artifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contributions: Vec<Contribution>,
+    /// The publisher's signature over [`Plug::revision`] (see [`signature`]). Absent on an
+    /// envelope that has not been signed yet; the registry accepts only signed ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<signature::PlugSignature>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -67,15 +72,23 @@ impl Plug {
             dependencies: Vec::new(),
             artifacts: Vec::new(),
             contributions: Vec::new(),
+            signature: None,
             extra: Default::default(),
         }
     }
 
     /// The immutable revision this envelope is: blake3 over its canonical JSON, including every
     /// member this build does not know about, so a peer that added a field produced a different
-    /// revision and a pin never silently means newer bytes.
+    /// revision and a pin never silently means newer bytes. The signature is the one member left
+    /// out: it signs the revision, so it cannot be part of it, and a version's identity must not
+    /// change when it is signed or re-signed.
     pub fn revision(&self) -> Revision {
-        let canonical = json_canon::to_vec(self).expect("an envelope serializes");
+        let mut value = serde_json::to_value(self).expect("an envelope serializes");
+        value
+            .as_object_mut()
+            .expect("an envelope serializes as an object")
+            .remove("signature");
+        let canonical = json_canon::to_vec(&value).expect("an envelope serializes");
         Revision(*blake3::hash(&canonical).as_bytes())
     }
 
@@ -395,7 +408,7 @@ impl FromStr for PlugId {
 #[macro_export]
 macro_rules! example_namespace {
     () => {
-        "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
     };
 }
 
@@ -412,6 +425,7 @@ macro_rules! example_plug {
 /// Plug ids for tests across the crates that consume them.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
+    use super::Plug;
     use super::PlugId;
 
     pub const EXAMPLE_NAMESPACE: &str = example_namespace!();
@@ -419,6 +433,24 @@ pub mod test_support {
     /// `EXAMPLE_NAMESPACE/<name>`.
     pub fn plug_id(name: &str) -> PlugId {
         PlugId::new(EXAMPLE_NAMESPACE, name).expect("fixture plug ids are valid")
+    }
+
+    /// The seed of the Ed25519 key whose `did:key` is [`EXAMPLE_NAMESPACE`]: a published test
+    /// vector, not a secret.
+    pub const EXAMPLE_SEED: [u8; 32] = [7; 32];
+
+    /// Signs `plug` with the key whose `did:key` is `seed`'s, which is the namespace of every
+    /// fixture id when `seed` is [`EXAMPLE_SEED`].
+    pub fn sign_with_seed(mut plug: Plug, seed: &[u8; 32]) -> Plug {
+        use ed25519_dalek::Signer;
+        let key = ed25519_dalek::SigningKey::from_bytes(seed);
+        plug.sign_with(|message| key.sign(message).to_bytes());
+        plug
+    }
+
+    /// `plug` signed by the owner of [`EXAMPLE_NAMESPACE`].
+    pub fn sign_as_example(plug: Plug) -> Plug {
+        sign_with_seed(plug, &EXAMPLE_SEED)
     }
 }
 

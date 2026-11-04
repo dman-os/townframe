@@ -17,6 +17,7 @@ big_cabinet_core = { path = "../big_cabinet_core" }
 big_nodule.workspace = true
 big_nodule_wasm.workspace = true
 big_plugs.workspace = true
+big_plugs_core.workspace = true
 big_repo.workspace = true
 big_nodule_core.workspace = true
 big_sync.workspace = true

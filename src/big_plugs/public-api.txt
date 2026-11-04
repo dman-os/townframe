@@ -6,8 +6,10 @@
 pub big_plugs::async fn boot (config : PlugsConfig) -> Res < (Plugs , StopToken) >
 pub big_plugs::async fn ensure_registry_drawer (config : RegistryDrawerConfig < '_ >) -> Res < DrawerId >
 pub big_plugs::fn schema_group () -> SchemaRegistrationGroup < 'static >
+pub struct big_plugs::NodeKey  { public_key: [u8 ; 32], sign: NodeSigner }
 pub struct big_plugs::PlugService  {  }
-pub struct big_plugs::Plugs  { host: Arc < Host < PlugsHandler > >, client: Client < PlugsProtocol > }
-pub struct big_plugs::PlugsConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, registry_drawer: DrawerId, actor: Actor, namespace: Namespace, operator: Uuid7, blobs: Arc < BlobService >, sql: Database }
+pub struct big_plugs::Plugs  { host: Arc < Host < PlugsHandler > >, client: Client < PlugsProtocol >, publisher: String }
+pub struct big_plugs::PlugsConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, registry_drawer: DrawerId, actor: Actor, namespace: Namespace, operator: Uuid7, blobs: Arc < BlobService >, node_key: NodeKey, sql: Database }
 pub struct big_plugs::RegistryDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a Actor, access: & 'a DrawerAccess, sql: Database }
+pub type big_plugs::NodeSigner = Arc < dyn Fn (& [u8]) -> [u8 ; 64] + Send + Sync >
 pub type big_plugs::PlugsHandler = Arc < PlugService >

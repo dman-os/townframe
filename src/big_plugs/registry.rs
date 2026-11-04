@@ -85,11 +85,15 @@ pub(crate) const WATCH_MAX_HOLD_MS: u32 = 15_000;
 
 type FirstSeenMap = BTreeMap<(PlugId, Version), FirstSeen>;
 
-/// One version as served: the first-seen envelope, and whether the drawer disagrees with it.
+/// One version as served: the first-seen envelope, and whether the drawer disagrees with it. An
+/// `unverified` version is one the drawer holds whose signature did not verify and that this node
+/// never accepted (so it has no first-seen record): it is listed with the reason and never
+/// served.
 #[derive(Debug, Clone, PartialEq)]
 struct VersionState {
     envelope: Plug,
     conflict: Option<String>,
+    unverified: Option<String>,
 }
 
 /// What one registry document says, after comparing it with the first-seen record.
@@ -171,16 +175,32 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
         };
         let pin = first_seen.get(&(id.clone(), version.clone()));
         match (content, pin) {
-            (Ok(envelope), None) => {
-                view.versions.insert(
-                    version,
-                    VersionState {
-                        envelope: envelope.clone(),
-                        conflict: None,
-                    },
-                );
-                fresh.push(envelope);
-            }
+            // A version this node meets for the first time is accepted only with a signature that
+            // verifies against its namespace DID. Until it is accepted it is not pinned as
+            // first-seen, so a bad copy never reserves the label against the genuine one.
+            (Ok(envelope), None) => match envelope.verify_signature() {
+                Ok(()) => {
+                    view.versions.insert(
+                        version,
+                        VersionState {
+                            envelope: envelope.clone(),
+                            conflict: None,
+                            unverified: None,
+                        },
+                    );
+                    fresh.push(envelope);
+                }
+                Err(error) => {
+                    view.versions.insert(
+                        version,
+                        VersionState {
+                            envelope,
+                            conflict: None,
+                            unverified: Some(error.to_string()),
+                        },
+                    );
+                }
+            },
             (Ok(envelope), Some(pin)) => {
                 let conflict = (envelope.revision() != pin.revision).then(|| {
                     format!(
@@ -194,6 +214,7 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
                     VersionState {
                         envelope: pin.envelope.clone(),
                         conflict,
+                        unverified: None,
                     },
                 );
             }
@@ -203,6 +224,7 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
                     VersionState {
                         envelope: pin.envelope.clone(),
                         conflict: Some(reason),
+                        unverified: None,
                     },
                 );
             }
@@ -233,6 +255,7 @@ impl State {
                     version: version.clone(),
                     revision: state.envelope.revision(),
                     conflict: state.conflict.clone(),
+                    unverified: state.unverified.clone(),
                 })
                 .collect(),
             unreadable: view.unreadable.clone(),
@@ -252,6 +275,13 @@ impl State {
                     id: id.clone(),
                     version: Box::new(version.clone()),
                 })?;
+        if let Some(reason) = &state.unverified {
+            return Err(PlugsError::Unverified {
+                id: id.clone(),
+                version: Box::new(version.clone()),
+                reason: reason.clone(),
+            });
+        }
         Ok(PlugVersionRecord {
             id: id.clone(),
             version: version.clone(),
@@ -407,7 +437,6 @@ pub(crate) struct Registry {
     capability: CapId,
     drawer: DrawerId,
     blobs: Arc<BlobService>,
-    sql: Database,
 }
 
 impl Registry {
@@ -430,7 +459,7 @@ impl Registry {
         let mut state = State {
             docs: docs.clone(),
             capability,
-            sql: sql.clone(),
+            sql,
             first_seen,
             views: BTreeMap::new(),
             claims: BTreeMap::new(),
@@ -481,7 +510,6 @@ impl Registry {
             capability,
             drawer,
             blobs,
-            sql,
         })
     }
 
@@ -562,6 +590,10 @@ impl Registry {
         envelope
             .validate()
             .map_err(|error| PlugsError::Rejected(error.to_string()))?;
+        // Signature checking is CPU work with no registry state in it, so it runs before the gate.
+        // It also runs for an envelope the service just signed for the node: acceptance never
+        // assumes who produced the signature.
+        envelope.verify_signature()?;
         let _gate = self
             .gate
             .acquire()
@@ -572,15 +604,41 @@ impl Registry {
         let checked = {
             let (id, version) = (id.clone(), version.clone());
             self.query(move |state| {
-                if let Some(seen) = state.first_seen.get(&(id.clone(), version.clone()))
-                    && seen.revision != revision
-                {
-                    return Err(PlugsError::VersionExists {
-                        id,
-                        version: Box::new(version),
-                        existing: seen.revision,
-                        incoming: revision,
-                    });
+                match state.first_seen.get(&(id.clone(), version.clone())) {
+                    Some(seen) if seen.revision != revision => {
+                        return Err(PlugsError::VersionExists {
+                            id,
+                            version: Box::new(version),
+                            existing: seen.revision,
+                            incoming: revision,
+                        });
+                    }
+                    // An existing or tombstoned label with identical content is a republish,
+                    // which is allowed whatever its position in the version order.
+                    Some(_) => {}
+                    // A new label must order after every label this plug has or had, tombstones
+                    // included (the first-seen record outlives removal), so a validly signed
+                    // older version cannot be published as if it were an upgrade.
+                    None => {
+                        // `0.0.0-0` is the lowest semver precedence, so the range starts at the
+                        // plug's first possible version.
+                        let lowest: Version = "0.0.0-0".parse().expect("a valid semver");
+                        let newest = state
+                            .first_seen
+                            .range((id.clone(), lowest)..)
+                            .take_while(|((seen, _), _)| *seen == id)
+                            .map(|((_, seen), _)| seen)
+                            .last();
+                        if let Some(newest) = newest
+                            && version <= *newest
+                        {
+                            return Err(PlugsError::Downgrade {
+                                id,
+                                version: Box::new(version),
+                                newest: Box::new(newest.clone()),
+                            });
+                        }
+                    }
                 }
                 if let Ok(record) = state.version(&id, &version)
                     && record.revision == revision
@@ -710,10 +768,10 @@ impl Registry {
         }
         let waited = (id.clone(), version.clone(), label);
         self.settled(move |state| {
-            state.version(&waited.0, &waited.1).is_err()
-                && state
-                    .primary_doc(&waited.0)
-                    .is_none_or(|doc| !state.views[doc].unreadable.contains_key(&waited.2))
+            state.primary_doc(&waited.0).is_none_or(|doc| {
+                !state.views[doc].versions.contains_key(&waited.1)
+                    && !state.views[doc].unreadable.contains_key(&waited.2)
+            })
         })
         .await;
         // The first-seen record outlives the removal as a tombstone. As with npm, a removed
@@ -906,6 +964,8 @@ mod tests {
     use super::*;
     use big_cabinet_core::doc::DatumVersion;
     use big_plugs_core::test_support::plug_id;
+    use big_plugs_core::test_support::sign_as_example;
+    use big_plugs_core::test_support::sign_with_seed;
     use serde_json::json;
 
     fn accepted(value: Json) -> DatumRead {
@@ -918,7 +978,7 @@ mod tests {
     fn plug(version: &str, title: &str) -> Plug {
         let mut plug = Plug::new(plug_id("photos"), version.parse().unwrap());
         plug.title = Some(title.into());
-        plug
+        sign_as_example(plug)
     }
 
     /// A registry document for `photos` holding `versions` as `(slot, datum)`.
@@ -1018,5 +1078,54 @@ mod tests {
             view.versions[&seen.version].conflict.as_deref(),
             Some("rejected: bad")
         );
+    }
+
+    #[test]
+    fn an_unseen_version_with_a_bad_signature_is_listed_unverified_and_never_pinned() {
+        let genuine = plug("1.0.0", "Photos");
+        let forged = sign_with_seed(plug("1.1.0", "Photos"), &[9; 32]);
+        let mut unsigned = plug("1.2.0", "Photos");
+        unsigned.signature = None;
+        let mut web = plug("1.3.0", "Photos");
+        web.id = big_plugs_core::PlugId::new("did:web:example.com", "photos").unwrap();
+        let (view, fresh) = fold_doc(
+            &document(vec![
+                ("1.0.0", datum(&genuine)),
+                ("1.1.0", datum(&forged)),
+                ("1.2.0", datum(&unsigned)),
+            ]),
+            &pins(&[]),
+        )
+        .unwrap();
+        // Only the verified version is pinned as first-seen, so a bad copy cannot reserve a label.
+        assert_eq!(fresh, std::slice::from_ref(&genuine));
+        assert_eq!(view.versions[&genuine.version].unverified, None);
+        for (version, reason) in [
+            (&forged.version, "does not verify"),
+            (&unsigned.version, "no signature"),
+        ] {
+            let reason_found = view.versions[version].unverified.as_deref().unwrap();
+            assert!(reason_found.contains(reason), "{reason_found}");
+        }
+        // A version already pinned stays served from the pin even if the drawer's copy lost its
+        // signature: the revision is the same content, and the pin was verified when it was taken.
+        let (view, _) = fold_doc(
+            &document(vec![(
+                "1.0.0",
+                datum(&{
+                    let mut stripped = genuine.clone();
+                    stripped.signature = None;
+                    stripped
+                }),
+            )]),
+            &pins(&[&genuine]),
+        )
+        .unwrap();
+        let state = &view.versions[&genuine.version];
+        assert_eq!(
+            (state.conflict.as_deref(), state.unverified.as_deref()),
+            (None, None)
+        );
+        assert_eq!(state.envelope, genuine);
     }
 }

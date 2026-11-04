@@ -372,3 +372,98 @@ mod registry_layout {
             .unwrap();
     }
 }
+
+mod signatures {
+    use super::*;
+    use crate::signature::SignatureError;
+    use crate::signature::did_key;
+    use crate::test_support::EXAMPLE_SEED;
+    use crate::test_support::sign_as_example;
+    use crate::test_support::sign_with_seed;
+
+    #[test]
+    fn the_example_namespace_is_the_did_of_the_example_seed() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&EXAMPLE_SEED);
+        assert_eq!(
+            did_key(key.verifying_key().as_bytes()),
+            test_support::EXAMPLE_NAMESPACE
+        );
+    }
+
+    #[test]
+    fn a_signature_round_trips_and_leaves_the_revision_alone() {
+        let unsigned = plug();
+        let signed = sign_as_example(unsigned.clone());
+        signed.verify_signature().unwrap();
+        assert_eq!(signed.revision(), unsigned.revision());
+        let value = serde_json::to_value(&signed).unwrap();
+        assert_eq!(value["signature"]["alg"], "ed25519");
+        assert!(
+            value["signature"]["value"]
+                .as_str()
+                .unwrap()
+                .starts_with('z')
+        );
+        let decoded: Plug = serde_json::from_value(value).unwrap();
+        decoded.verify_signature().unwrap();
+        assert_eq!(unsigned.verify_signature(), Err(SignatureError::Missing));
+    }
+
+    #[test]
+    fn a_tampered_envelope_does_not_verify() {
+        let mut signed = sign_as_example(plug());
+        signed.title = Some("Not what was signed".into());
+        assert!(matches!(
+            signed.verify_signature(),
+            Err(SignatureError::Invalid(_))
+        ));
+        let mut carried = sign_as_example(plug());
+        carried.extra.insert("futureField".into(), json!(1));
+        assert!(matches!(
+            carried.verify_signature(),
+            Err(SignatureError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn another_keys_signature_does_not_verify() {
+        let forged = sign_with_seed(plug(), &[9; 32]);
+        assert!(matches!(
+            forged.verify_signature(),
+            Err(SignatureError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn only_ed25519_did_key_is_verifiable() {
+        let mut web = sign_as_example(plug());
+        web.id = PlugId::new("did:web:example.com", "photos").unwrap();
+        assert_eq!(
+            web.verify_signature(),
+            Err(SignatureError::UnsupportedMethod("web".into()))
+        );
+        // A did:key of another key type (a secp256k1 multicodec) is refused, not guessed at.
+        let mut other = sign_as_example(plug());
+        other.id = PlugId::new(
+            "did:key:zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme",
+            "photos",
+        )
+        .unwrap();
+        assert!(matches!(
+            other.verify_signature(),
+            Err(SignatureError::UnsupportedKey(_))
+        ));
+        let mut unknown = sign_as_example(plug());
+        unknown.signature.as_mut().unwrap().alg = "rsa".into();
+        assert_eq!(
+            unknown.verify_signature(),
+            Err(SignatureError::UnsupportedAlgorithm("rsa".into()))
+        );
+        let mut garbled = sign_as_example(plug());
+        garbled.signature.as_mut().unwrap().value = "z11".into();
+        assert!(matches!(
+            garbled.verify_signature(),
+            Err(SignatureError::Malformed(_))
+        ));
+    }
+}

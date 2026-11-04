@@ -319,8 +319,28 @@ impl AuthorityService {
         self.operator
     }
 
-    fn node_public_key(&self) -> ActorPublicKey {
+    pub fn node_public_key(&self) -> ActorPublicKey {
         self.node_key.verifying_key().to_bytes()
+    }
+
+    /// Signs `domain || payload` with the node's own key. In-process only: it is deliberately not
+    /// an operation of the authority protocol, so only code the embedder hands this service to can
+    /// sign as the node. The same key issues attribution certificates, so this never signs bare
+    /// bytes: every signature is bound to a caller-named domain (a non-empty, NUL-terminated label
+    /// such as the plug registry's `org.example.daybook.plug.signature.v1\0`), and a signature made
+    /// here is never valid as an attribution certificate or as another domain's structure.
+    pub fn sign_as_node(&self, domain: &[u8], payload: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer;
+        assert!(
+            domain.len() > 1
+                && domain.last() == Some(&0)
+                && !domain[..domain.len() - 1].contains(&0),
+            "a node signing domain is a non-empty label terminated by one NUL"
+        );
+        let mut message = Vec::with_capacity(domain.len() + payload.len());
+        message.extend_from_slice(domain);
+        message.extend_from_slice(payload);
+        self.node_key.sign(&message).to_bytes()
     }
 
     /// The issuer a verifier must expect on this node's attribution certificates.

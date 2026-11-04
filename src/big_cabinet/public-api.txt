@@ -29,8 +29,10 @@ pub enum big_cabinet::schema::SchemaRepoError { # [error ("known datum schema ta
 pub impl big_cabinet::authority::AuthorityService::async fn boot (secrets : & SecretStore , sql : Database ,) -> Result < (Arc < Self > , StopToken) , AuthorityError >
 pub impl big_cabinet::authority::AuthorityService::async fn open_namespace (& self , namespace_id : Uuid7) -> Result < Namespace , AuthorityError >
 pub impl big_cabinet::authority::AuthorityService::fn node_issuer (& self) -> MultibaseKey
+pub impl big_cabinet::authority::AuthorityService::fn node_public_key (& self) -> ActorPublicKey
 pub impl big_cabinet::authority::AuthorityService::fn operator_uuid (& self) -> Uuid7
 pub impl big_cabinet::authority::AuthorityService::fn root_cap (& self) -> CapId
+pub impl big_cabinet::authority::AuthorityService::fn sign_as_node (& self , domain : & [u8] , payload : & [u8]) -> [u8 ; 64]
 pub impl big_cabinet::capability::DomainCapabilities::async fn mint < S : Serialize > (& self , context : & RequestContext , source : CapId , caller : & Invocation < S > , scope : S , rights : Rights , mut dependencies : Vec < CapId > ,) -> Result < Capability , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn resolve < S : DeserializeOwned > (& self , context : & RequestContext , capability : CapId ,) -> Result < Invocation < S > , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn retract (& self , context : & RequestContext , capability : CapId) -> Result < () , Error >
