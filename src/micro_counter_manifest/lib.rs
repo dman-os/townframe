@@ -1,50 +1,38 @@
 //! Engine-neutral Counter declarations. The manifest is portable MDK vocabulary (ADR 024
-//! §§11–15): identity, contract references, the configuration it requests, and the Settings
-//! section it declares plus the default registration that activates it while Settings is live.
-//! The wasm guest reads only the constants; the composition root reads `manifest()`.
-use clay_mdk::ActivationRegistrationTemplate;
+//! §§11–15): identity, the presentation it publishes, the configuration it requests, and the
+//! Settings section row it declares into the `settings.sections` collection, whose attachment
+//! is a lazy endpoint to the counter's own presentation. The wasm guest reads only the
+//! constants; the composition root reads `manifest()`.
+use clay_mdk::AttachmentDeclaration;
 use clay_mdk::ConfigurationRequest;
-use clay_mdk::ContractRef;
 use clay_mdk::ContributionDeclaration;
 use clay_mdk::Entrypoints;
 use clay_mdk::FacetAccess;
 use clay_mdk::MANIFEST_SCHEMA;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
-use clay_mdk::Necessity;
-use clay_mdk::ProvidedContract;
-use clay_mdk::RequiredContract;
-use clay_mdk::Retention;
-use clay_mdk::Trigger;
+use clay_mdk::PublicationDeclaration;
+use clay_mdk::PublicationKind;
 
 pub const ID: &str = "dayframe.counter";
 pub const CONFIG_NAME: &str = "counter";
 pub const CONFIG_TAG: &str = "org.dayframe.counter.config";
 pub const CONFIG_KEY: &str = "count";
+/// The counter's one publication: the presentation the host mounts.
+pub const VIEW: &str = "view";
 
 pub fn manifest() -> MicroManifest {
-    let settings_sections = ContractRef {
-        id: "settings.sections".into(),
-        version: 1,
-    };
     MicroManifest {
         schema: MANIFEST_SCHEMA,
         id: MicroId::new(ID),
         package_version: 1,
         entrypoints: Entrypoints::micro_client(),
-        provides: vec![ProvidedContract {
-            id: "controller".into(),
-            contract: ContractRef {
-                id: "wasm.controller".into(),
-                version: 1,
-            },
-            retention: Retention::Strong,
+        publications: vec![PublicationDeclaration {
+            name: VIEW.into(),
+            kind: PublicationKind::Presentation,
+            contract: None,
         }],
-        requires: vec![RequiredContract {
-            binding: "settings".into(),
-            contract: settings_sections.clone(),
-            necessity: Necessity::Optional,
-        }],
+        requires: vec![],
         configuration_requests: vec![ConfigurationRequest {
             binding: CONFIG_NAME.into(),
             facets: vec![FacetAccess {
@@ -58,18 +46,13 @@ pub fn manifest() -> MicroManifest {
         collection_contracts: vec![],
         contributions: vec![ContributionDeclaration {
             id: "settings-section".into(),
-            target_binding: "settings".into(),
-            extension_contract: settings_sections.clone(),
+            collection: "settings.sections".into(),
+            key: ID.into(),
             payload: serde_json::json!({ "title": "Counter (Wasm)" }),
-            capability_slots: vec![],
-        }],
-        activation_defaults: vec![ActivationRegistrationTemplate {
-            id: "settings-section".into(),
-            trigger: Trigger::TargetLive {
-                target_binding: "settings".into(),
-                extension_contract: settings_sections,
-            },
-            declaration_id: "settings-section".into(),
+            attachments: vec![AttachmentDeclaration {
+                index: 0,
+                publication: VIEW.into(),
+            }],
         }],
         extra: Default::default(),
     }

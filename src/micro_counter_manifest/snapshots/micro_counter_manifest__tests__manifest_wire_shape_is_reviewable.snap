@@ -9,18 +9,11 @@ entrypoints:
   initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
   presentation: "townframe:dayframe/presentation-events@0.4.0"
   installer: ~
-provides:
-  - id: controller
-    contract:
-      id: wasm.controller
-      version: 1
-    retention: strong
-requires:
-  - binding: settings
-    contract:
-      id: settings.sections
-      version: 1
-    necessity: optional
+publications:
+  - name: view
+    kind: presentation
+    contract: ~
+requires: []
 configuration_requests:
   - binding: counter
     facets:
@@ -34,19 +27,10 @@ configuration_requests:
 collection_contracts: []
 contributions:
   - id: settings-section
-    target_binding: settings
-    extension_contract:
-      id: settings.sections
-      version: 1
+    collection: settings.sections
+    key: dayframe.counter
     payload:
       title: Counter (Wasm)
-    capability_slots: []
-activation_defaults:
-  - id: settings-section
-    trigger:
-      kind: target-live
-      target_binding: settings
-      extension_contract:
-        id: settings.sections
-        version: 1
-    declaration_id: settings-section
+    attachments:
+      - index: 0
+        publication: view

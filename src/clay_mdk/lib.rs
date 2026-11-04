@@ -320,10 +320,9 @@ pub extern "C" fn __wasilibc_task_hook(hook: i32, prev_context_0: i32, hook_stac
 }
 
 mod manifest;
-pub use manifest::ActivationRegistrationTemplate;
-pub use manifest::CapabilitySlotDeclaration;
 pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
+pub use manifest::AttachmentDeclaration;
 pub use manifest::ConfigurationRequest;
 pub use manifest::ContractRef;
 pub use manifest::ContributionDeclaration;
@@ -334,11 +333,9 @@ pub use manifest::MANIFEST_SCHEMA;
 pub use manifest::MicroId;
 pub use manifest::MicroManifest;
 pub use manifest::Necessity;
-pub use manifest::ProvidedContract;
-pub use manifest::Provision;
+pub use manifest::PublicationDeclaration;
+pub use manifest::PublicationKind;
 pub use manifest::RequiredContract;
-pub use manifest::Retention;
-pub use manifest::Trigger;
 
 mod component;
 pub use component::ComponentRef;

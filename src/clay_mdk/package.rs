@@ -81,12 +81,9 @@ fn manifest_section(bytes: &[u8]) -> Result<Option<&[u8]>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ActivationRegistrationTemplate;
-    use crate::ContractRef;
     use crate::Entrypoints;
     use crate::MANIFEST_SCHEMA;
     use crate::MicroId;
-    use crate::Trigger;
 
     fn manifest() -> MicroManifest {
         MicroManifest {
@@ -94,12 +91,11 @@ mod tests {
             id: MicroId::new("dayframe.test"),
             package_version: 1,
             entrypoints: Entrypoints::micro_client(),
-            provides: vec![],
+            publications: vec![],
             requires: vec![],
             configuration_requests: vec![],
             collection_contracts: vec![],
             contributions: vec![],
-            activation_defaults: vec![],
             extra: Default::default(),
         }
     }
@@ -107,23 +103,6 @@ mod tests {
     /// The manifest the lifecycle fixture guest embeds in its `dayframe.manifest` section.
     fn lifecycle_fixture_manifest() -> MicroManifest {
         serde_json::from_str(include_str!("lifecycle_fixture.manifest.json")).unwrap()
-    }
-
-    /// The fixture's one default registration: activate its `serve-host` contribution while
-    /// the instance configured for its `host` binding is live and accepts the lifecycle
-    /// presentation contract.
-    fn serve_host() -> ActivationRegistrationTemplate {
-        ActivationRegistrationTemplate {
-            id: "serve-host".into(),
-            trigger: Trigger::TargetLive {
-                target_binding: "host".into(),
-                extension_contract: ContractRef {
-                    id: "dayframe.lifecycle.presentation".into(),
-                    version: 1,
-                },
-            },
-            declaration_id: "serve-host".into(),
-        }
     }
 
     /// A minimal core module carrying one custom section, hand-encoded: section id 0,
@@ -225,24 +204,30 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_fixture_manifest_declares_its_activation_default() {
+    fn lifecycle_fixture_manifest_declares_its_publications() {
         let manifest = lifecycle_fixture_manifest();
         assert_eq!(manifest.id.as_str(), "dayframe.lifecycle-fixture");
-        assert_eq!(manifest.activation_defaults, vec![serve_host()]);
+        assert_eq!(
+            manifest
+                .publications
+                .iter()
+                .map(|publication| publication.name.as_str())
+                .collect::<Vec<_>>(),
+            ["presentation", "echo", "relay"]
+        );
         manifest.validate().unwrap();
     }
 
-    /// Reverse activation is registered from the manifest alone (ADR 024 validation 1): the
-    /// prepared component's section is read without instantiating it and must declare exactly
-    /// the fixture file it embedded.
+    /// Publications are declared by the manifest alone (ADR 024 validation 1): the prepared
+    /// component's section is read without instantiating it and must declare exactly the
+    /// fixture file it embedded.
     #[test]
-    fn prepared_lifecycle_component_declares_its_activation_defaults_statically() {
+    fn prepared_lifecycle_component_declares_its_manifest_statically() {
         let Ok(path) = std::env::var("DAYFRAME_LIFECYCLE_COMPONENT") else {
             return;
         };
         let bytes = std::fs::read(path).unwrap();
         let package = Package::from_bytes(bytes).unwrap();
-        assert_eq!(package.manifest().activation_defaults, vec![serve_host()]);
         assert_eq!(package.manifest(), &lifecycle_fixture_manifest());
     }
 }
