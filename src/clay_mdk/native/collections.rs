@@ -94,7 +94,7 @@ impl<K, V> Clone for CollectionWatch<K, V> {
 impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
     /// Start mirroring `reader`. Returns the watch and the loop that feeds it, which the
     /// caller owns and must drive until the incarnation closes.
-    pub(crate) fn start(
+    pub fn start(
         reader: CollectionReader,
         capabilities: CapabilitySession,
     ) -> (Self, impl Future<Output = ()> + 'static) {

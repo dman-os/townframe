@@ -14,6 +14,7 @@
 //! tasks, so a supervisor driving native micros runs inside a `tokio::task::LocalSet`.
 
 mod collections;
+mod declared;
 
 pub use clay_docs::DocumentRef;
 pub use clay_docs::DocumentService;
@@ -43,8 +44,11 @@ pub use collections::Attachment;
 pub use collections::CollectionWatch;
 pub use collections::Registration;
 pub use collections::Row;
+pub use declared::DeclaredRows;
+pub use declared::declared_rows;
+pub use declared::manifest_scope;
+pub use declared::runtime_scope;
 
-use crate::ComponentRef;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
 use crate::manifest::PublicationKind;
@@ -87,6 +91,19 @@ pub struct Resources<R: RendererRegistry> {
 pub struct CollectionBindings {
     pub read: Vec<String>,
     pub write: Vec<String>,
+}
+
+/// The declared registration collection a shell reads its roots from: micros register a
+/// [`RootRow`] (usually as a manifest-declared row) and the shell redeems the presentation each
+/// one attaches.
+pub const SHELL_ROOTS: &str = "shell.roots";
+
+/// One `shell.roots` row, keyed by the registering micro's id: a title and the root
+/// presentation (an attachment of the row).
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RootRow {
+    pub title: String,
+    pub content: Attachment,
 }
 
 /// Local tasks an incarnation owns. Dropping them aborts them, so a failed initialization
@@ -157,14 +174,15 @@ impl<R: RendererRegistry> Context<R> {
     /// Stage a presentation publication named `name` whose component renders `render`. The
     /// name must be one the manifest declares as a presentation; admission checks that once
     /// `activate` returns, and nothing is reachable by other micros before then.
+    ///
+    /// Returns the staged publication, which a row can attach (see [`Registration::put`]).
     pub fn publish_component(
         &self,
         name: &str,
         render: impl Fn() -> R::Render + 'static,
-    ) -> Result<ComponentRef, AccessError> {
+    ) -> Result<CapabilityPublication, AccessError> {
         let component = self.registry.publish(&self.instance, render)?;
-        self.stage(self.capabilities.publish_component(name, component))?;
-        Ok(ComponentRef::from_host(component))
+        self.stage(self.capabilities.publish_component(name, component))
     }
 
     /// Stage a call publication named `name` served by `target` under `contract`.

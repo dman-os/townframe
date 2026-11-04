@@ -382,3 +382,59 @@ fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
         ContractIdentity::presentation_component()
     );
 }
+
+#[test]
+fn declared_rows_store_endpoints_and_tag_attachment_slots() {
+    use crate::AttachmentDeclaration;
+    use crate::ContributionDeclaration;
+
+    let mut manifest = MicroManifest {
+        schema: MANIFEST_SCHEMA,
+        id: ManifestId::new("native.declares"),
+        package_version: 1,
+        entrypoints: Entrypoints::micro_client(),
+        publications: vec![presentation("view")],
+        requires: vec![],
+        configuration_requests: vec![],
+        collection_contracts: vec![],
+        contributions: vec![ContributionDeclaration {
+            id: "root".into(),
+            collection: SHELL_ROOTS.into(),
+            key: "native.declares".into(),
+            payload: serde_json::json!({"title": "Declared", "content": {"$attachment": 0}}),
+            attachments: vec![AttachmentDeclaration {
+                index: 0,
+                publication: "view".into(),
+            }],
+        }],
+        extra: BTreeMap::new(),
+    };
+    let rows = declared_rows(&manifest).unwrap();
+    let mut key = Vec::new();
+    ciborium::into_writer("native.declares", &mut key).unwrap();
+    let value = rows[SHELL_ROOTS][&key].clone().unwrap();
+    let row: RootRow = ciborium::from_reader(value.body.as_slice()).unwrap();
+    assert_eq!(
+        row,
+        RootRow {
+            title: "Declared".into(),
+            content: Attachment::at(0)
+        }
+    );
+    assert_eq!(
+        value.attachments,
+        [RowAttachment::Endpoint(PublicationEndpoint {
+            micro: clay_host::MicroId::new("native.declares"),
+            publication: "view".into(),
+            contract: ContractIdentity::presentation_component(),
+        })]
+    );
+    assert_ne!(
+        manifest_scope(&clay_host::MicroId::new("native.declares")),
+        runtime_scope(&clay_host::MicroId::new("native.declares"))
+    );
+
+    // An attachment index that the contribution does not declare is refused.
+    manifest.contributions[0].attachments[0].index = 3;
+    assert!(declared_rows(&manifest).unwrap_err().contains("index 3"));
+}
