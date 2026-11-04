@@ -127,6 +127,35 @@ fn recursive_component_slots_are_rejected_without_recursing_into_the_factory() {
     host.close();
 }
 
+/// A presentation publication mints its reference when the incarnation publishes it, before
+/// any renderer knows it; attaching the engine's surface factory afterwards makes it mountable
+/// exactly like one `publish_surface` issued.
+#[test]
+fn a_surface_attached_to_an_issued_reference_mounts_like_a_published_one() {
+    let host = Host::new();
+    let components = NativeComponents::new(&host);
+    let owner = host.start("publisher");
+    let reference = host.publish_component(&owner).unwrap();
+    let mounts = Rc::new(Cell::new(0));
+    components.attach_surface(&owner, reference, {
+        let mounts = mounts.clone();
+        move |_, writer| {
+            mounts.set(mounts.get() + 1);
+            writer.apply(&counter_initial_batch())?;
+            Ok(SurfaceSession::new(|_| EventResponse::default()))
+        }
+    });
+    fn app(props: (NativeComponents, Instance, ComponentRef)) -> Element {
+        rsx! { ComponentMount { components: props.0, owner: props.1, reference: props.2 } }
+    }
+    let mut dom = VirtualDom::new_with_props(app, (components, owner, reference));
+    let mut tree = SurfaceTree::new();
+    dom.rebuild(&mut tree);
+    assert_eq!(mounts.get(), 1);
+    assert_eq!(tree.text_content(), "0");
+    host.close();
+}
+
 fn counter_initial_batch() -> Vec<Mutation> {
     vec![
         Mutation::PushId(0),
