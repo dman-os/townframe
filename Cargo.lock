@@ -2714,6 +2714,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clay_dioxus_kit"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "serde_json",
+]
+
+[[package]]
 name = "clay_docs"
 version = "0.1.0"
 dependencies = [

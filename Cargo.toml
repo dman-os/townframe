@@ -62,6 +62,7 @@ members = [
   "./src/micro_collection_probe",
   "./src/micro_counter_manifest",
   "./src/ui",
+  "./src/clay_dioxus_kit",
   "./src/dayframe_composition",
   "./src/dayframe_web",
   "./src/dayframe_desktop",
@@ -127,6 +128,7 @@ clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }
 clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
+clay_dioxus_kit = { path = "./src/clay_dioxus_kit" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
