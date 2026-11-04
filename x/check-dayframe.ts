@@ -22,6 +22,11 @@ const isolated = ["--config", 'resolver.feature-unification="selected"'];
 // can turn it back on, so check what every wasip3 guest closure resolves to. The guest
 // workspace has its own lockfile and resolution.
 const witBindgen = ["-e", "features", "-i", "wit-bindgen@0.62.0"];
+// The trees below are `--offline`, so every git rev and crate must already be in the package
+// cache; fetch first (sequentially) so a fresh runner does not die with "you are in the offline
+// mode", and so the parallel trees never race on the package-cache lock.
+await $`cargo fetch --locked`;
+await $`cargo fetch --locked --manifest-path src/wasm_utils_rs/Cargo.toml`;
 const resolutions = [
   ...["micro_counter", "micro_layout", "micro_collection_probe", "clay_mdk"]
     .map((guest) =>
