@@ -9,23 +9,23 @@ path = "lib.rs"
 [dependencies]
 clay_collection = { workspace = true }
 clay_dioxus = { workspace = true }
+clay_docs = { workspace = true }
 clay_guest_session = { workspace = true }
 clay_host = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
 clay_store = { workspace = true }
+daybook_types = { workspace = true, default-features = false, features = ["manifest"] }
 dioxus = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 
 [dev-dependencies]
 ciborium.workspace = true
-clay_docs = { workspace = true }
-daybook_types = { workspace = true, default-features = false, features = ["manifest"] }
 micro_counter_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_settings = { workspace = true }
 micro_settings_manifest = { workspace = true }
 dioxus-core = { workspace = true }
 dioxus-html = { workspace = true }
-serde_json = { workspace = true }
 sqlite_rs = { workspace = true }
 tempfile = { workspace = true }

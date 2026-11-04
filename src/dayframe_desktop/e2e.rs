@@ -213,6 +213,10 @@ impl Shell {
         let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
             .await
             .unwrap();
+        // A discovered package is admitted disabled; these scenarios exercise the counter, so
+        // enable it the way a user does, through its install datum. The reconciler applies the
+        // datum when the shell starts serving.
+        runtime.set_enabled(&MicroId::new(micro_counter_manifest::ID), true);
         let mut ui = HeadlessDom::new(composed, runtime.clone());
         ui.wait_until("Settings sections listed", |ui| {
             ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()

@@ -122,6 +122,7 @@ impl World {
         let micro = ConfiguredMicro {
             identity: provider(),
             eager: false,
+            enabled: true,
             requirements: BTreeMap::new(),
             factory: Rc::new(Provider(Arc::clone(&script))),
         };

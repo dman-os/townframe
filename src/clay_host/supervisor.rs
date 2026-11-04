@@ -99,6 +99,10 @@ pub trait Root {
 pub struct ConfiguredMicro<P> {
     pub identity: MicroId,
     pub eager: bool,
+    /// Whether the micro starts enabled. A disabled micro starts in [`MicroState::Disabled`],
+    /// so an eager reconcile never starts it and no boot-time race with applying the persisted
+    /// enablement exists; [`Supervisor::enable`] and [`Supervisor::disable`] move it later.
+    pub enabled: bool,
     /// Local requirement binding -> what satisfies it.
     pub requirements: BTreeMap<String, Requirement>,
     pub factory: Rc<dyn Factory<P>>,
@@ -268,8 +272,12 @@ impl<P: Clone + 'static> Supervisor<P> {
         for config in micros {
             let identity = config.identity.clone();
             let node = Node {
+                state: if config.enabled {
+                    NodeState::Idle
+                } else {
+                    NodeState::Disabled
+                },
                 config,
-                state: NodeState::Idle,
             };
             assert!(
                 nodes.insert(identity.clone(), node).is_none(),
@@ -286,8 +294,15 @@ impl<P: Clone + 'static> Supervisor<P> {
             }
         }
         let mirror = nodes
-            .keys()
-            .map(|identity| (identity.clone(), MicroState::Idle))
+            .iter()
+            .map(|(identity, node)| {
+                let state = if node.config.enabled {
+                    MicroState::Idle
+                } else {
+                    MicroState::Disabled
+                };
+                (identity.clone(), state)
+            })
             .collect();
         let (requests, served) = mpsc::unbounded_channel();
         Self {
@@ -320,7 +335,8 @@ impl<P: Clone + 'static> Supervisor<P> {
             .borrow()
             .nodes
             .iter()
-            .filter(|(_, node)| node.config.eager)
+            // A disabled root stays down; that is its recorded state, not a start failure.
+            .filter(|(_, node)| node.config.eager && !matches!(node.state, NodeState::Disabled))
             .map(|(identity, _)| identity.clone())
             .collect::<Vec<_>>();
         let mut failures = BTreeMap::new();

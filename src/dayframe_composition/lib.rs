@@ -13,6 +13,12 @@
 //! except for the enable/disable/retry controls of the lifecycle panel.
 use clay_dioxus::use_component_recovery;
 use clay_dioxus::NativeComponents;
+use clay_docs::DocumentGrant;
+use clay_docs::DocumentWatch;
+use clay_docs::FacetRoute;
+use clay_docs::FacetSelection;
+use clay_docs::FacetValue;
+use clay_docs::WatchSelection;
 use clay_guest_session::collections::durable_bytes_registrations;
 use clay_guest_session::collections::BytesRegistrations;
 use clay_host::CollectionContract;
@@ -46,6 +52,7 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::sync::Notify;
 
 /// One installed micro in the launcher-supplied catalog: its self-describing manifest, its
@@ -57,6 +64,11 @@ pub struct InstalledMicro {
     pub manifest: clay_mdk::MicroManifest,
     /// Started at boot rather than on first use.
     pub eager: bool,
+    /// Whether admission (the first boot that sees this micro) records it enabled. Launchers
+    /// set it for the native built-ins they link; a package the launcher merely discovered
+    /// stays disabled until a user enables it. Only consulted when the micro has no install
+    /// datum yet, because a stored datum always wins.
+    pub enabled_on_admission: bool,
     /// Offered no enable/disable controls: the shell cannot run without it.
     pub locked: bool,
     /// Local requirement binding -> the provider's publication that satisfies it.
@@ -66,7 +78,7 @@ pub struct InstalledMicro {
 }
 
 impl InstalledMicro {
-    /// An on-demand, unlocked micro with no requirements.
+    /// An on-demand, unlocked micro with no requirements, admitted disabled.
     pub fn new(
         manifest: clay_mdk::MicroManifest,
         factory: impl FnOnce(Resources<NativeComponents>) -> Rc<dyn Factory<CapabilityPublication>>
@@ -75,10 +87,132 @@ impl InstalledMicro {
         Self {
             manifest,
             eager: false,
+            enabled_on_admission: false,
             locked: false,
             requirements: BTreeMap::new(),
             factory: Box::new(factory),
         }
+    }
+}
+
+/// Desired enablement lives in a config document, shaped like big_nodule's install datum: one
+/// facet per micro, `{ "enabled": bool, "package_version": u32 }`, keyed by micro id.
+const INSTALLS_DOCUMENT: &str = "dayframe.installs";
+const INSTALLS_BRANCH: &str = "main";
+const INSTALL_TAG: &str = "clay.micro.install";
+
+fn install_route(micro: &MicroId) -> FacetRoute {
+    FacetRoute {
+        document: INSTALLS_DOCUMENT.into(),
+        branch: INSTALLS_BRANCH.into(),
+        tag: INSTALL_TAG.into(),
+        key_id: micro.as_str().into(),
+    }
+}
+
+fn install_datum(enabled: bool, package_version: u32) -> serde_json::Value {
+    serde_json::json!({ "enabled": enabled, "package_version": package_version })
+}
+
+/// The datum's flag. Only this crate writes the document, so a malformed datum is a bug.
+fn datum_enabled(datum: &serde_json::Value) -> bool {
+    datum["enabled"]
+        .as_bool()
+        .expect("an install datum carries a boolean `enabled`")
+}
+
+/// Admission of the install datums, returning each unlocked micro's enablement at boot.
+fn admit_installs(
+    documents: &DocumentService,
+    installed: &[InstalledMicro],
+) -> BTreeMap<MicroId, bool> {
+    // Admission. The composition is the authority writing the install document; while the
+    // node is mocked it writes through the host-side `external_change` (as big_nodule's
+    // service writes its config document with its own capability), not through a granted
+    // mutation. A stored datum always wins, so only its package version is refreshed.
+    let installs = documents.mock_documents();
+    let mut enabled_at_boot = BTreeMap::new();
+    for micro in installed.iter().filter(|micro| !micro.locked) {
+        let identity = MicroId::new(micro.manifest.id.as_str());
+        let route = install_route(&identity);
+        let version = micro.manifest.package_version;
+        let enabled = match installs.get(&route) {
+            Some(stored) => {
+                let enabled = datum_enabled(&stored);
+                if stored["package_version"] != version {
+                    installs.external_change(route, Some(install_datum(enabled, version)));
+                }
+                enabled
+            }
+            None => {
+                let enabled = micro.enabled_on_admission;
+                installs.external_change(route, Some(install_datum(enabled, version)));
+                enabled
+            }
+        };
+        enabled_at_boot.insert(identity, enabled);
+    }
+    enabled_at_boot
+}
+
+/// The shell's read-only watch of the install document.
+fn watch_installs(documents: &DocumentService, host: &Host, shell: &Instance) -> DocumentWatch {
+    documents
+        .grant_documents(
+            host,
+            shell,
+            vec![DocumentGrant {
+                document: INSTALLS_DOCUMENT.into(),
+                branch: INSTALLS_BRANCH.into(),
+                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                    tag: INSTALL_TAG.into(),
+                    read: true,
+                    ..Default::default()
+                }],
+            }],
+        )
+        .and_then(|access| {
+            access.watch(WatchSelection {
+                documents: [INSTALLS_DOCUMENT.to_owned()].into(),
+                branch: INSTALLS_BRANCH.into(),
+                facets: FacetSelection::Tags([INSTALL_TAG.to_owned()].into()),
+            })
+        })
+        .expect("the shell instance is live")
+}
+
+/// Applies the install document to the supervisor for as long as it runs: every snapshot
+/// brings each micro's state in line with its datum. A disable is awaited before the next
+/// snapshot is read, and the next read returns the latest revision, so a quick disable then
+/// enable converges on the final datum. A close error is published for the lifecycle panel.
+async fn reconcile_installs(
+    installs: DocumentWatch,
+    supervisor: Rc<Supervisor<CapabilityPublication>>,
+    micros: Vec<MicroId>,
+    failure: watch::Sender<Option<String>>,
+) {
+    let mut snapshot = installs.current().expect("the install watch is live");
+    loop {
+        for micro in &micros {
+            let Some(FacetValue::Present(datum)) = snapshot.facets.get(&install_route(micro))
+            else {
+                continue;
+            };
+            let disabled = supervisor.state(micro) == MicroState::Disabled;
+            if datum_enabled(datum) {
+                if disabled {
+                    supervisor.enable(micro);
+                }
+            } else if !disabled {
+                if let Err(error) = supervisor.disable(micro).await {
+                    failure.send_replace(Some(error.to_string()));
+                }
+            }
+        }
+        snapshot = installs
+            .next(snapshot.revision)
+            .await
+            .expect("the install watch lives until the composition shuts down");
     }
 }
 
@@ -96,6 +230,11 @@ pub struct CompositionRuntime {
     /// The shell's own instance: it mounts roots and owns the references minted from rows.
     shell: Instance,
     roots: CollectionWatch<String, RootRow>,
+    /// Applies changes of the install document to the supervisor; taken by the one
+    /// [`Self::serve`].
+    reconcile_installs: Rc<RefCell<Option<LocalFuture<'static, ()>>>>,
+    /// Close errors from the install reconciler, for the lifecycle panel.
+    lifecycle_failure: watch::Sender<Option<String>>,
     /// The roots mirror's feed loop, taken by the one [`Self::serve`].
     feed: Rc<RefCell<Option<LocalFuture<'static, ()>>>>,
     /// Writes the mock document source back to the store; taken by the one [`Self::serve`].
@@ -217,6 +356,8 @@ impl CompositionRuntime {
             }
         }
 
+        let enabled_at_boot = admit_installs(&documents, &installed);
+
         let resources = Resources {
             registry: components.clone(),
             documents: documents.clone(),
@@ -232,6 +373,8 @@ impl CompositionRuntime {
                 locked.insert(identity.clone());
             }
             configured.push(ConfiguredMicro {
+                // Locked micros have no datum and are always enabled.
+                enabled: enabled_at_boot.get(&identity).copied().unwrap_or(true),
                 identity,
                 eager: micro.eager,
                 requirements: micro.requirements,
@@ -243,6 +386,14 @@ impl CompositionRuntime {
         let (roots, feed) =
             CollectionWatch::observe(&host, &shell, supervisor.activator(), &roots_collection)
                 .expect("the shell instance is live");
+        let installs = watch_installs(&documents, &host, &shell);
+        let (lifecycle_failure, _) = watch::channel(None);
+        let reconcile_installs = reconcile_installs(
+            installs,
+            Rc::clone(&supervisor),
+            micros.clone(),
+            lifecycle_failure.clone(),
+        );
         Ok(Self {
             host,
             supervisor,
@@ -255,6 +406,8 @@ impl CompositionRuntime {
             roots,
             feed: Rc::new(RefCell::new(Some(Box::pin(feed)))),
             persist_documents: Rc::new(RefCell::new(Some(Box::pin(persist_documents)))),
+            reconcile_installs: Rc::new(RefCell::new(Some(Box::pin(reconcile_installs)))),
+            lifecycle_failure,
             shutdown: Rc::new(Notify::new()),
             installation_errors: errors,
         })
@@ -276,10 +429,16 @@ impl CompositionRuntime {
             .borrow_mut()
             .take()
             .expect("the composition is served once");
+        let reconcile_installs = self
+            .reconcile_installs
+            .borrow_mut()
+            .take()
+            .expect("the composition is served once");
         tokio::task::LocalSet::new()
             .run_until(async {
                 tokio::task::spawn_local(feed);
                 let persisting = tokio::task::spawn_local(persist_documents);
+                let mut reconciling = tokio::task::spawn_local(reconcile_installs);
                 let supervisor = Rc::clone(&self.supervisor);
                 // A failed eager start is recorded as the micro's `Faulted` state, which the
                 // lifecycle panel shows; there is no other consumer for the report.
@@ -288,6 +447,14 @@ impl CompositionRuntime {
                     never = self.supervisor.drive() => never,
                     () = async {
                         self.shutdown.notified().await;
+                        // The reconciler never ends on its own; stop it before the supervisor
+                        // shuts down so it cannot enable or disable a micro mid-shutdown.
+                        reconciling.abort();
+                        match (&mut reconciling).await {
+                            Err(error) if error.is_cancelled() => {}
+                            Err(error) => std::panic::resume_unwind(error.into_panic()),
+                            Ok(()) => unreachable!("the install reconciler never completes"),
+                        }
                         self.supervisor
                             .shutdown()
                             .await
@@ -332,6 +499,29 @@ impl CompositionRuntime {
         &self.micros
     }
 
+    /// Record the desired enablement of `micro` in its install datum, keeping the stored
+    /// package version. The supervisor follows through the reconciler's watch, not directly.
+    /// Written host-side like admission (the node is mocked). Locked micros have no datum.
+    pub fn set_enabled(&self, micro: &MicroId, enabled: bool) {
+        let installs = self.documents.mock_documents();
+        let route = install_route(micro);
+        let stored = installs
+            .get(&route)
+            .expect("an unlocked micro was admitted with an install datum");
+        installs.external_change(
+            route,
+            Some(install_datum(
+                enabled,
+                stored["package_version"].as_u64().unwrap() as u32,
+            )),
+        );
+    }
+
+    /// The latest close error of a disable the reconciler applied; `None` until one fails.
+    pub fn lifecycle_failures(&self) -> watch::Receiver<Option<String>> {
+        self.lifecycle_failure.subscribe()
+    }
+
     pub fn state(&self, micro: &MicroId) -> MicroState {
         self.supervisor.state(micro)
     }
@@ -367,6 +557,15 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
     });
     let _ = states();
     let mut failure = use_signal(|| None::<String>);
+    let failures = shell.lifecycle_failures();
+    use_future(move || {
+        let mut failures = failures.clone();
+        async move {
+            while failures.changed().await.is_ok() {
+                failure.set(failures.borrow_and_update().clone());
+            }
+        }
+    });
     let mut settings_open = use_signal(|| true);
     let roots = use_rows(&shell.roots);
 
@@ -399,7 +598,7 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
             }
             details { class: "rounded-md border border-border p-4",
                 summary { "Micro lifecycle controls" }
-                p { "Configuration uses document facets backed by the in-memory mock node; it is not saved across restarts." }
+                p { "Enablement and configuration are stored in documents on this device. A mock node stands in for sync, so they are not shared with other devices." }
                 for error in shell.installation_errors.clone() {
                     p { key: "install-{error}", role: "status", "Package installation failed: {error}" }
                 }
@@ -424,9 +623,9 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                     for micro in shell.micros().to_vec() {
                         if !shell.is_locked(&micro) {
                             {
-                                let supervisor = Rc::clone(&shell.supervisor);
                                 let state = shell.state(&micro);
                                 let toggle = micro.clone();
+                                let runtime = shell.clone();
                                 let label = if state == MicroState::Disabled {
                                     format!("Enable {micro} micro")
                                 } else {
@@ -441,15 +640,8 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                                         class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                                         "aria-label": "{label}",
                                         onclick: move |_| {
-                                            let supervisor = Rc::clone(&supervisor);
-                                            let micro = toggle.clone();
-                                            spawn(async move {
-                                                if supervisor.state(&micro) == MicroState::Disabled {
-                                                    supervisor.enable(&micro);
-                                                } else if let Err(error) = supervisor.disable(&micro).await {
-                                                    failure.set(Some(error.to_string()));
-                                                }
-                                            });
+                                            let enable = runtime.state(&toggle) == MicroState::Disabled;
+                                            runtime.set_enabled(&toggle, enable);
                                         },
                                         "{label}"
                                     }

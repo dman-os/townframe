@@ -149,6 +149,7 @@ mod tests {
                 let settings = ConfiguredMicro {
                     identity: MicroId::new(contract::ID),
                     eager: false,
+                    enabled: true,
                     requirements: BTreeMap::new(),
                     factory: factory(
                         resources,

@@ -52,6 +52,7 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
             let sample = ConfiguredMicro {
                 identity: clay_host::MicroId::new(ID),
                 eager: true,
+                enabled: true,
                 requirements: BTreeMap::new(),
                 factory: factory(
                     resources,

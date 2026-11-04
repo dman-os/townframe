@@ -857,6 +857,16 @@ impl MockDocuments {
             "config owner already bound"
         );
     }
+    /// The source's current value, for the host-side writer that must decide before writing.
+    pub fn get(&self, route: &FacetRoute) -> Option<Value> {
+        self.service
+            .inner
+            .lock()
+            .unwrap()
+            .source
+            .get(route)
+            .cloned()
+    }
     pub fn seed(&self, route: FacetRoute, value: Value) {
         let mut state = self.service.inner.lock().unwrap();
         state.note_route(&route);

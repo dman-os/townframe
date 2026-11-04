@@ -90,6 +90,7 @@ fn native_micros() -> Vec<InstalledMicro> {
         },
         InstalledMicro {
             eager: true,
+            enabled_on_admission: true,
             ..InstalledMicro::new(micro_sample::manifest(), |resources| {
                 factory(
                     resources,
