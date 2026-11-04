@@ -520,3 +520,10 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 - Pending: micros requiring nodule operations by NSID.
 - Clay plan: alignment step after the envelope/section type names arrive (NSID rename, drop id/
   package_version, BLAKE3); not started.
+- Lineage/fork discussion (peer draft: publisher-key lineages, node-local substitution, signed
+  Automerge branches). Clay follow-ups raised, not started:
+  - Grants re-consent: a binding whose request widens (read→write, contract change) under the same
+    binding name must become unresolved, not inherit; compare the granted request set.
+  - `WriterId` = micro id breaks the total tie-break once collections sync across nodes (equal
+    `(lamport, writer)` with different values); should become (replica identity, micro id).
+  - Install datum should record lineage `{publisher, plug doc ref, version}` beside `enabled`.
