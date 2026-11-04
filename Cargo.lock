@@ -9444,6 +9444,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "micro_shell"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "micro_shell_manifest",
+ "tokio",
+]
+
+[[package]]
+name = "micro_shell_manifest"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clay_mdk",
+ "insta",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "micro_toolbar"
 version = "0.1.0"
 dependencies = [
