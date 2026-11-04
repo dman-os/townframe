@@ -605,3 +605,25 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   `Root::close` rather than inside it as a guest's presentations do; values whose `Drop` needs a live dependency are held by tasks or
   handlers here (documented at `NativeRoot::close`), and a view-held one needs checking before anyone relies on it. (3) Whether to keep a mutation check of the
   `Held` drop order as a test.
+
+## C7h notes (2026-11-04): native views are dropped inside close
+
+- **The defect.** A native micro's `publish_component` closure lived in `NativeComponents.renderers` until `use_component_recovery`
+  noticed the host withdrew the reference, i.e. after `NativeRoot::close` returned and the scope was torn down. A proxy or `Drop` guard a
+  view captured therefore dropped after its providers could be revoked; the guest runtime drops its views inside `Runtime::close`.
+- **Ownership fix.** `RendererRegistry::publish` and `NativeComponents::publish_surface` return `(ComponentRef, RenderGuard)`;
+  `attach_surface` returns the guard. Dropping a `RenderGuard` removes that renderer (the removed closure is dropped after the map borrow
+  ends). Native: `Activation.views` stages the guards, `NativeRoot` holds them and `close` drops tasks, then views, then leases. Guest:
+  `GuestRoot` holds the surface guards and drops them before `E::close(runtime)` (each factory holds a runtime handle, so the engine's
+  close now owns the runtime alone). One owner each: the host owns the reference's lifetime (withdrawn at supplier teardown), the guard
+  owns the renderer.
+- **Deleted.** `use_component_recovery`, `NativeComponents::recover_withdrawn`, `Host::component_lifetimes` and the `live_components`
+  watch (it also rebuilt a full key set on every publish and teardown), plus the host test of it. Nothing needs host-driven cleanup now.
+- **Behavior change to know.** `ComponentMount` used to panic ("live component has no native renderer") when a live mount found no
+  renderer. The owner now drops its renderer as its close begins and the host withdraws the reference only after the close returns, so
+  a render in that window legitimately finds the mount live and the renderer gone; it renders "Component withdrawn." like a withdrawn
+  component. Slot recovery tests are unchanged and green.
+- **Tests.** `native::tests::a_value_captured_by_a_view_is_dropped_inside_the_close` (the drop is observed with the instance
+  `Closing`, exactly once; verified to fail with the guard's removal disabled). The `context` micro's `detail` view also captures a
+  second `Held` proxy (a guard-order check on Wasmtime/Wasmi, where the guest drops views in `Runtime::close`); natively it does not
+  discriminate by itself, the native test above does.

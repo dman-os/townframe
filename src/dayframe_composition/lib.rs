@@ -17,7 +17,6 @@ use bindings::BindingsDatum;
 use bindings::DeclaredCollections;
 use bindings::Resolution;
 use clay_collection::ReplicaId;
-use clay_dioxus::use_component_recovery;
 use clay_dioxus::NativeComponents;
 use clay_docs::DocumentGrant;
 use clay_docs::DocumentWatch;
@@ -793,7 +792,6 @@ impl CompositionRuntime {
 pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
     let shell = runtime.read().clone();
     use_context_provider(|| shell.components.clone());
-    use_component_recovery(shell.components.clone());
     // The composition outlives this scope's tasks: shutdown must keep being served after the
     // scope is gone, so it is spawned forever and stopped by `request_shutdown`.
     let serving = shell.clone();

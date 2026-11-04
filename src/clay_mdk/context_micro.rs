@@ -30,7 +30,8 @@
 //!
 //! * the optional requirements `presentation` and `service` make it a consumer: it redeems the
 //!   presentation and calls the service's `echo` while activating, and keeps the redeemed proxy
-//!   in a [`Held`] owned by a task of its incarnation, whose `Drop` runs when the incarnation
+//!   in a [`Held`] owned by a task of its incarnation, and a second one in the `detail` view's
+//!   closure (a view-held value); their `Drop`s run when the incarnation
 //!   closes (ADR 030 §6). There is no close hook: cleanup is RAII on what the incarnation owns;
 //! * the optional requirement `peer` is what its `relay` call forwards to (`relay:` plus the
 //!   peer's answer);
@@ -295,8 +296,12 @@ pub async fn activate(context: Context) -> Result<(), Error> {
     let reject = rows.iter().any(|row| row.key == "reject");
     // A consumer redeems its provider's presentation before it finishes initializing, and
     // calls the service if it has one; a failure refuses the activation.
+    let mut shown = None;
     if let Some(presentation) = context.require("presentation") {
         let proxy = presentation.redeem_presentation().await?;
+        // A second proxy is captured by the `detail` view below: views are dropped by the close
+        // too, so it is dropped with the provider still live as well.
+        shown = Some(Held(presentation.redeem_presentation().await?));
         proxy.component()?;
         if let Some(service) = context.require("service") {
             let answer: String = service.call(&"ping".to_owned()).await?;
@@ -334,7 +339,10 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             Ok(format!("relay:{answer}"))
         }
     })?;
-    context.publish_component("detail", dioxus_core::VNode::empty)?;
+    context.publish_component("detail", move || {
+        let _ = &shown;
+        dioxus_core::VNode::empty()
+    })?;
     context.publish_component("slot", {
         let collection = collection.clone();
         move || {

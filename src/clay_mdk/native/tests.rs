@@ -652,6 +652,64 @@ async fn a_row_written_after_activate_attaches_the_writers_own_declared_publicat
     .await;
 }
 
+/// ADR 030 §6 for a view: the render closure of a published component is dropped by the
+/// incarnation's close, while the incarnation is still `Closing` and not yet torn down, and
+/// not later with whatever registry holds it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_value_captured_by_a_view_is_dropped_inside_the_close() {
+    struct Probe {
+        host: Host,
+        instance: Rc<RefCell<Option<clay_host::Instance>>>,
+        seen: Rc<RefCell<Vec<clay_host::Lifecycle>>>,
+    }
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            let instance = self.instance.borrow().clone().unwrap();
+            self.seen.borrow_mut().push(self.host.lifecycle(&instance));
+        }
+    }
+    in_local_set(async {
+        let rig = Rig::new();
+        let instance = Rc::new(RefCell::new(None));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let micro = rig.micro(
+            "native.viewer",
+            Spec {
+                eager: true,
+                publications: vec![presentation("view")],
+                ..Spec::default()
+            },
+            {
+                let (host, instance, seen) = (rig.host.clone(), instance.clone(), seen.clone());
+                move |context| {
+                    let probe = Probe {
+                        host: host.clone(),
+                        instance: instance.clone(),
+                        seen: seen.clone(),
+                    };
+                    async move {
+                        context.publish_component("view", move || {
+                            let _ = &probe;
+                            blank()
+                        })?;
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [micro]);
+        let id = host_id("native.viewer");
+        assert!(supervisor.reconcile().await.is_empty());
+        *instance.borrow_mut() = supervisor.instance(&id);
+        assert!(seen.borrow().is_empty(), "a live view keeps its captures");
+        supervisor.disable(&id).await.unwrap();
+        assert_eq!(*seen.borrow(), [clay_host::Lifecycle::Closing]);
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
 #[test]
 fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
     let manifest = MicroManifest {

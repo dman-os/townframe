@@ -10,6 +10,7 @@ use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
+use clay_dioxus::RenderGuard;
 use clay_host::Activator;
 use clay_host::ComponentRef;
 use clay_host::Factory;
@@ -96,6 +97,9 @@ pub(crate) fn factory<E: Engine>(
 }
 
 struct GuestRoot<E: Engine> {
+    /// The surface factories attached to the presentations. Each holds a handle to the runtime,
+    /// so they go first at close: the engine's close then owns the runtime alone.
+    surfaces: Vec<RenderGuard>,
     runtime: E::Runtime,
     driver: JoinHandle<()>,
 }
@@ -103,7 +107,12 @@ struct GuestRoot<E: Engine> {
 impl<E: Engine> Root for GuestRoot<E> {
     fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
         Box::pin(async move {
-            let Self { runtime, driver } = *self;
+            let Self {
+                surfaces,
+                runtime,
+                driver,
+            } = *self;
+            drop(surfaces);
             let closed = E::close(runtime).await;
             // The driver returns once the incarnation's store is gone. A panic in it is a
             // programming error raised here.
@@ -166,6 +175,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
             let (runtime, driver) = E::initialize(host, instance.clone(), package, context).await?;
             let driver = tokio::task::spawn_local(driver);
             let publications = E::publications(&runtime);
+            let mut surfaces = Vec::new();
             for (name, publication) in &publications {
                 if publication.kind() != PublicationKind::Presentation {
                     continue;
@@ -175,14 +185,18 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                     .expect("a presentation publication has a component");
                 let mounted = runtime.clone();
                 let name = name.clone();
-                resources
-                    .components
-                    .attach_surface(&instance, component, move |_mount, writer| {
-                        E::mount(&mounted, &name, Arc::new(writer))
-                    });
+                surfaces.push(resources.components.attach_surface(
+                    &instance,
+                    component,
+                    move |_mount, writer| E::mount(&mounted, &name, Arc::new(writer)),
+                ));
             }
             Ok(Initialized {
-                root: Box::new(GuestRoot::<E> { runtime, driver }),
+                root: Box::new(GuestRoot::<E> {
+                    surfaces,
+                    runtime,
+                    driver,
+                }),
                 publications,
             })
         })

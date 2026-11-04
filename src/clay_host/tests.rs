@@ -705,29 +705,6 @@ fn mount_liveness_follows_supplier_teardown_and_mount_drop() {
     host.close();
 }
 
-#[test]
-fn component_lifetimes_track_publication_and_supplier_withdrawal() {
-    let host = Host::new();
-    let supplier = host.start("supplier");
-    let other = host.start("other");
-    let mut lifetimes = host.component_lifetimes();
-    assert!(lifetimes.borrow_and_update().is_empty());
-
-    let first = host.publish_component(&supplier).unwrap();
-    let second = host.publish_component(&supplier).unwrap();
-    let unrelated = host.publish_component(&other).unwrap();
-    assert_eq!(
-        *lifetimes.borrow_and_update(),
-        BTreeSet::from([first, second, unrelated])
-    );
-
-    // Supplier teardown withdraws exactly its own components, no more.
-    host.close_instance(&supplier).unwrap();
-    assert_eq!(*lifetimes.borrow_and_update(), BTreeSet::from([unrelated]));
-    host.close();
-    assert!(lifetimes.borrow_and_update().is_empty());
-}
-
 // ── Staged lifecycle: initialization, outward hooks, and strong bindings ─────
 
 type Events = Arc<Mutex<Vec<Lifecycle>>>;

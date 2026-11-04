@@ -103,7 +103,15 @@ pub trait RendererRegistry: Clone {
 
     /// Publish `render` as a component owned by `owner`. The implementor must route the
     /// capability check through [`Host::publish_component`] so revocation stays authoritative.
-    fn publish<F>(&self, owner: &Instance, render: F) -> Result<ComponentRef, AccessError>
+    /// Owns the registered render factory: dropping it unregisters the factory and drops what
+    /// it captured. The publishing incarnation holds it until its close.
+    type Guard: 'static;
+
+    fn publish<F>(
+        &self,
+        owner: &Instance,
+        render: F,
+    ) -> Result<(ComponentRef, Self::Guard), AccessError>
     where
         F: Fn() -> Self::Render + 'static;
 }
@@ -146,7 +154,6 @@ pub(crate) struct State {
     /// [`Lifecycle::Closing`], which only withdraws outward visibility.
     pub(crate) tearing_down: BTreeSet<u64>,
     pub(crate) components: BTreeMap<ComponentRef, u64>,
-    pub(crate) live_components: watch::Sender<BTreeSet<ComponentRef>>,
     pub(crate) mounts: BTreeMap<u64, MountRecord>,
     pub(crate) recovery: Recovery,
     pub(crate) changes: watch::Sender<HostStatus>,
@@ -188,7 +195,6 @@ impl Host {
                 dependencies: BTreeMap::new(),
                 tearing_down: BTreeSet::new(),
                 components: BTreeMap::new(),
-                live_components: watch::channel(BTreeSet::new()).0,
                 mounts: BTreeMap::new(),
                 recovery: Recovery {
                     active: false,
@@ -432,9 +438,6 @@ impl Host {
             id: state.next,
         };
         assert!(state.components.insert(reference, owner.id).is_none());
-        state
-            .live_components
-            .send_replace(state.components.keys().copied().collect());
         Ok(reference)
     }
 
@@ -451,10 +454,6 @@ impl Host {
             return Err(AccessError::Revoked);
         }
         Ok(())
-    }
-
-    pub fn component_lifetimes(&self) -> watch::Receiver<BTreeSet<ComponentRef>> {
-        self.inner.lock().unwrap().live_components.subscribe()
     }
 
     pub fn mount(&self, owner: &Instance, component: ComponentRef) -> Result<Mount, AccessError> {
@@ -770,9 +769,6 @@ impl Host {
                 }
             });
             state.components.retain(|_, owner| *owner != id);
-            state
-                .live_components
-                .send_replace(state.components.keys().copied().collect());
             let ending = Ending {
                 ended: record.ended,
                 lifecycle: record.lifecycle,

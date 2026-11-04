@@ -18,6 +18,7 @@ use dioxus::prelude::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::rc::Weak;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -166,50 +167,80 @@ impl NativeComponents {
         owner: &Instance,
         mount_surface: impl Fn(Arc<Mount>, SurfaceWriter) -> Result<SurfaceSession, PresentationError>
         + 'static,
-    ) -> Result<ComponentRef, AccessError> {
-        self.recover_withdrawn();
+    ) -> Result<(ComponentRef, RenderGuard), AccessError> {
         let reference = self.host.publish_component(owner)?;
-        self.attach_surface(owner, reference, mount_surface);
-        Ok(reference)
+        let guard = self.attach_surface(owner, reference, mount_surface);
+        Ok((reference, guard))
     }
 
     /// Bind an engine-driven surface to a component reference the host already issued to
     /// `owner`, such as the one a presentation publication minted when its incarnation
     /// published it (ADR 031 §5). The reference was issued by this registry's host to `owner`;
-    /// a second factory for one reference is a programming error.
+    /// a second factory for one reference is a programming error. The factory lives exactly as
+    /// long as the returned guard: whoever attaches it owns it and drops it when the
+    /// incarnation closes.
     pub fn attach_surface(
         &self,
         owner: &Instance,
         reference: ComponentRef,
         mount_surface: impl Fn(Arc<Mount>, SurfaceWriter) -> Result<SurfaceSession, PresentationError>
         + 'static,
-    ) {
+    ) -> RenderGuard {
         let factory = SurfaceFactory(Rc::new(mount_surface));
         let owner = owner.clone();
+        self.retain(
+            reference,
+            Rc::new(move |mount| {
+                rsx! {
+                    MountedSurface {
+                        mount: SharedMount(mount.clone()),
+                        owner: owner.clone(),
+                        factory: factory.clone(),
+                    }
+                }
+            }),
+        )
+    }
+
+    fn retain(&self, reference: ComponentRef, renderer: Renderer) -> RenderGuard {
         assert!(
             self.renderers
                 .borrow_mut()
-                .insert(
-                    reference,
-                    Rc::new(move |mount| {
-                        rsx! {
-                            MountedSurface {
-                                mount: SharedMount(mount.clone()),
-                                owner: owner.clone(),
-                                factory: factory.clone(),
-                            }
-                        }
-                    }),
-                )
+                .insert(reference, renderer)
                 .is_none(),
-            "a surface factory is already attached to this component reference"
+            "a renderer is already attached to this component reference"
         );
+        RenderGuard {
+            renderers: Rc::downgrade(&self.renderers),
+            reference,
+        }
     }
-    fn recover_withdrawn(&self) {
-        let allowed = self.host.component_lifetimes().borrow().clone();
-        self.renderers
-            .borrow_mut()
-            .retain(|reference, _| allowed.contains(reference));
+}
+
+/// Owns one component's renderer in a [`NativeComponents`] registry: dropping the guard removes
+/// it, so the render closure (and every value it captured) is dropped at the moment its owner
+/// lets go, not whenever the registry next notices the host withdrew the reference. The
+/// incarnation that published the component holds the guard and drops it as the views step of
+/// its close (ADR 030 §6), while its dependencies are still retained. The host owns the
+/// reference's lifetime (withdrawn when the supplier is torn down); the guard owns only the
+/// renderer, and a mount that still shows a component whose renderer is gone renders the
+/// withdrawn placeholder.
+#[must_use = "dropping the guard removes the renderer immediately"]
+pub struct RenderGuard {
+    renderers: Weak<RefCell<BTreeMap<ComponentRef, Renderer>>>,
+    reference: ComponentRef,
+}
+
+impl Drop for RenderGuard {
+    fn drop(&mut self) {
+        // The registry may be gone first (application teardown), taking the renderer with it.
+        let Some(renderers) = self.renderers.upgrade() else {
+            return;
+        };
+        // Bound to a local so the map's borrow ends before the closure's captures drop: a
+        // captured value's `Drop` may reach back into this registry.
+        let removed = renderers.borrow_mut().remove(&self.reference);
+        drop(removed);
     }
 }
 
@@ -220,44 +251,20 @@ impl RendererRegistry for NativeComponents {
         NativeComponents::new(host)
     }
 
-    fn publish<F>(&self, owner: &Instance, render: F) -> Result<ComponentRef, AccessError>
+    type Guard = RenderGuard;
+
+    fn publish<F>(
+        &self,
+        owner: &Instance,
+        render: F,
+    ) -> Result<(ComponentRef, RenderGuard), AccessError>
     where
         F: Fn() -> Element + 'static,
     {
-        self.recover_withdrawn();
         let reference = self.host.publish_component(owner)?;
-        let render = Rc::new(render);
-        assert!(
-            self.renderers
-                .borrow_mut()
-                .insert(reference, Rc::new(move |_mount| render()))
-                .is_none()
-        );
-        Ok(reference)
+        let guard = self.retain(reference, Rc::new(move |_mount| render()));
+        Ok((reference, guard))
     }
-}
-
-/// The native adapter drops local factories when the host withdraws their portable references.
-/// This task belongs to the application render scope; no micro-specific cleanup lives in startup.
-pub fn use_component_recovery(components: NativeComponents) {
-    use_future(move || {
-        let mut lifetimes = components.host.component_lifetimes();
-        let registry = Rc::downgrade(&components.renderers);
-        async move {
-            loop {
-                let allowed = lifetimes.borrow_and_update().clone();
-                let Some(registry) = registry.upgrade() else {
-                    break;
-                };
-                registry
-                    .borrow_mut()
-                    .retain(|reference, _| allowed.contains(reference));
-                if lifetimes.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
 }
 
 #[derive(Clone, Default)]
@@ -341,9 +348,12 @@ fn MountedComponent(
         return rsx! { p { "Component withdrawn." } };
     };
     let render = components.renderers.borrow().get(&reference).cloned();
+    // The owner drops its renderer as its close begins and the host withdraws the reference
+    // only after the close returns, so a render in that window finds the mount live and the
+    // renderer gone: it shows what a withdrawn component shows.
     match render {
         Some(render) => render(&mount),
-        None => panic!("live component has no native renderer"),
+        None => rsx! { p { "Component withdrawn." } },
     }
 }
 
