@@ -31,7 +31,6 @@ pub use clay_guest_session::capabilities::CallTarget;
 pub use clay_guest_session::capabilities::CapabilityFailure;
 pub use clay_guest_session::capabilities::CapabilityPublication;
 pub use clay_guest_session::capabilities::CapabilityRef;
-pub use clay_guest_session::capabilities::ContractIdentity;
 pub use clay_guest_session::capabilities::PresentationComponent;
 pub use clay_guest_session::capabilities::PublicationEndpoint;
 pub use clay_guest_session::capabilities::RowAttachment;
@@ -49,8 +48,10 @@ pub use declared::declared_rows;
 pub use declared::manifest_scope;
 pub use declared::runtime_scope;
 
+use crate::manifest::ContractIdentity;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
+use crate::manifest::PublicationDeclaration;
 use crate::manifest::PublicationKind;
 use clay_guest_session::capabilities::CapabilityLimits;
 use clay_guest_session::capabilities::CapabilitySession;
@@ -192,7 +193,7 @@ impl<R: RendererRegistry> Context<R> {
         contract: ContractIdentity,
         target: std::sync::Arc<dyn CallTarget>,
     ) -> Result<(), AccessError> {
-        self.stage(self.capabilities.publish_call(name, contract, target))?;
+        self.stage(self.capabilities.publish_call(name, contract.admitted(), target))?;
         Ok(())
     }
 
@@ -417,20 +418,7 @@ pub(crate) fn declared_publications(
         .publications
         .iter()
         .filter_map(|publication| {
-            let (kind, contract) = match (&publication.kind, &publication.contract) {
-                (PublicationKind::Presentation, _) => (
-                    clay_guest_session::capabilities::PublicationKind::Presentation,
-                    ContractIdentity::presentation_component(),
-                ),
-                (PublicationKind::Call, Some(contract)) => (
-                    clay_guest_session::capabilities::PublicationKind::Call,
-                    contract.clone(),
-                ),
-                (PublicationKind::Call, None) => {
-                    unreachable!("a validated manifest gives every call a contract")
-                }
-                (PublicationKind::Other(_), _) => return None,
-            };
+            let (kind, contract) = admitted_publication(publication)?;
             Some((
                 publication.name.clone(),
                 DeclaredPublication { kind, contract },
@@ -458,3 +446,38 @@ pub(crate) fn routine_facets(
 
 #[cfg(test)]
 mod tests;
+
+/// The kind and contract the capability bank admits `publication` under, or `None` for a kind
+/// this build does not serve. Every Presentation shares the one presentation-component
+/// contract, so a contract alone tells a redeemer which kind to expect. Expects a validated
+/// manifest, which gives every Call a contract.
+pub(crate) fn admitted_publication(
+    publication: &PublicationDeclaration,
+) -> Option<(
+    clay_guest_session::capabilities::PublicationKind,
+    clay_guest_session::capabilities::ContractIdentity,
+)> {
+    use clay_guest_session::capabilities::PublicationKind as Kind;
+    match (&publication.kind, &publication.contract) {
+        (PublicationKind::Presentation, _) => Some((
+            Kind::Presentation,
+            clay_guest_session::capabilities::ContractIdentity::presentation_component(),
+        )),
+        (PublicationKind::Call, Some(contract)) => Some((Kind::Call, contract.admitted())),
+        (PublicationKind::Call, None) => {
+            unreachable!("a validated manifest gives every call a contract")
+        }
+        (PublicationKind::Other(_), _) => None,
+    }
+}
+
+impl ContractIdentity {
+    /// The capability bank's form of this manifest contract; the fields carry over unchanged.
+    pub(crate) fn admitted(&self) -> clay_guest_session::capabilities::ContractIdentity {
+        clay_guest_session::capabilities::ContractIdentity::new(
+            self.namespace.clone(),
+            self.name.clone(),
+            self.version,
+        )
+    }
+}

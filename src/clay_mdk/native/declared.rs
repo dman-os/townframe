@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 
 use ciborium::Value;
-use clay_guest_session::capabilities::ContractIdentity;
 use clay_guest_session::capabilities::PublicationEndpoint;
 use clay_guest_session::capabilities::RowAttachment;
 use clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG;
@@ -13,7 +12,6 @@ use clay_guest_session::collections::CollectionValue;
 use clay_host::MicroId;
 
 use crate::manifest::MicroManifest;
-use crate::manifest::PublicationKind;
 
 /// The installation scope that holds `micro`'s manifest-declared rows.
 pub fn manifest_scope(micro: &MicroId) -> Vec<u8> {
@@ -47,15 +45,11 @@ pub fn declared_rows(manifest: &MicroManifest) -> Result<DeclaredRows, String> {
                 .iter()
                 .find(|publication| publication.name == attachment.publication)
                 .expect("validate checked that the attachment names a declared publication");
-            let contract = match (&publication.kind, &publication.contract) {
-                (PublicationKind::Presentation, _) => ContractIdentity::presentation_component(),
-                (PublicationKind::Call, Some(contract)) => contract.clone(),
-                _ => {
-                    return Err(format!(
-                        "contribution {:?} attaches {:?}, which is not a servable publication",
-                        contribution.id, publication.name
-                    ));
-                }
+            let Some((_, contract)) = super::admitted_publication(publication) else {
+                return Err(format!(
+                    "contribution {:?} attaches {:?}, which is not a servable publication",
+                    contribution.id, publication.name
+                ));
             };
             let slot = usize::try_from(attachment.index)
                 .ok()
@@ -126,13 +120,11 @@ fn cbor(json: &serde_json::Value) -> Value {
         },
         Json::String(text) => Value::Text(text.clone()),
         Json::Array(items) => Value::Array(items.iter().map(cbor).collect()),
-        Json::Object(members) => match members.iter().collect::<Vec<_>>().as_slice() {
-            [(name, Json::Number(index))] if *name == "$attachment" && index.is_u64() => {
-                Value::Tag(
-                    CAPABILITY_ATTACHMENT_TAG,
-                    Box::new(Value::Integer(index.as_u64().unwrap().into())),
-                )
-            }
+        Json::Object(members) => match members.get("$attachment").and_then(Json::as_u64) {
+            Some(index) if members.len() == 1 => Value::Tag(
+                CAPABILITY_ATTACHMENT_TAG,
+                Box::new(Value::Integer(index.into())),
+            ),
             _ => Value::Map(
                 members
                     .iter()
