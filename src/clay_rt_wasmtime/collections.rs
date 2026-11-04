@@ -11,7 +11,10 @@ use clay_collection::Cursor;
 use clay_collection::ReadError;
 use clay_collection::ReadLimits;
 use clay_collection::RowEvidence;
-use clay_collection::Version;
+use clay_collection::Stamp;
+use clay_collection::Stamped;
+use clay_collection::WriteBasis;
+use clay_collection::WriterId;
 use clay_guest_session::capabilities::CallBinding;
 use clay_guest_session::capabilities::CallError;
 use clay_guest_session::capabilities::CapabilityFailure;
@@ -119,61 +122,43 @@ impl<T: 'static> registration_wit::HostRegistrationWriterWithStore<T> for HasSel
     async fn put(
         accessor: &Accessor<T, Self>,
         writer: Resource<RegistrationWriter>,
-        local_key: Vec<u8>,
-        based_on: Option<wit::Version>,
+        key: Vec<u8>,
+        basis: registration_wit::WriteBasis,
         value: wit::EncodedValue,
-    ) -> wasmtime::Result<Result<registration_wit::MutationAccepted, registration_wit::MutationError>>
-    {
+    ) -> wasmtime::Result<Result<wit::Stamp, registration_wit::MutationError>> {
         accessor.with(|mut access| {
             let state = access.get();
             let value = value_from_wire(state, value)?;
             let writer = state.table.get(&writer)?;
             Ok(writer
-                .put_value(local_key, based_on.map(version_from_wire), value)
-                .map(accepted)
+                .put_value(key, basis_from_wire(basis), value)
+                .map(stamp_to_wire)
                 .map_err(write_failure))
         })
     }
 
-    async fn remove(
+    async fn delete(
         accessor: &Accessor<T, Self>,
         writer: Resource<RegistrationWriter>,
-        local_key: Vec<u8>,
-        based_on: Option<wit::Version>,
-    ) -> wasmtime::Result<
-        Result<Option<registration_wit::MutationAccepted>, registration_wit::MutationError>,
-    > {
+        key: Vec<u8>,
+        basis: registration_wit::WriteBasis,
+    ) -> wasmtime::Result<Result<wit::Stamp, registration_wit::MutationError>> {
         accessor.with(|mut access| {
             let writer = access.get().table.get(&writer)?;
             Ok(writer
-                .remove(local_key, based_on.map(version_from_wire))
-                .map(|version| version.map(accepted))
+                .delete(key, basis_from_wire(basis))
+                .map(stamp_to_wire)
                 .map_err(write_failure))
         })
-    }
-
-    async fn clear(
-        accessor: &Accessor<T, Self>,
-        writer: Resource<RegistrationWriter>,
-    ) -> wasmtime::Result<Result<(), registration_wit::MutationError>> {
-        accessor.with(|mut access| {
-            let writer = access.get().table.get(&writer)?;
-            Ok(writer.clear().map_err(write_failure))
-        })
-    }
-}
-
-fn accepted(version: Version) -> registration_wit::MutationAccepted {
-    registration_wit::MutationAccepted {
-        row_version: version_to_wire(version),
     }
 }
 
 fn write_failure(failure: WriteFailure) -> registration_wit::MutationError {
     match failure {
         WriteFailure::Conflict { current } => {
-            registration_wit::MutationError::Conflict(current.map(version_to_wire))
+            registration_wit::MutationError::Conflict(current.map(stamp_to_wire))
         }
+        WriteFailure::Forbidden => registration_wit::MutationError::Forbidden,
         WriteFailure::Revoked => registration_wit::MutationError::Revoked,
         WriteFailure::KeyTooLarge => registration_wit::MutationError::KeyTooLarge,
         WriteFailure::ValueTooLarge => registration_wit::MutationError::ValueTooLarge,
@@ -183,8 +168,30 @@ fn write_failure(failure: WriteFailure) -> registration_wit::MutationError {
     }
 }
 
-fn version_from_wire(version: wit::Version) -> Version {
-    Version::new(version.incarnation, version.sequence)
+fn basis_from_wire(basis: registration_wit::WriteBasis) -> WriteBasis {
+    match basis {
+        registration_wit::WriteBasis::Concurrent => WriteBasis::Concurrent,
+        registration_wit::WriteBasis::Observed(stamp) => {
+            WriteBasis::Observed(stamp_from_wire(stamp))
+        }
+        registration_wit::WriteBasis::CompareAndSet(expected) => {
+            WriteBasis::CompareAndSet(expected.map(stamp_from_wire))
+        }
+    }
+}
+
+fn stamp_from_wire(stamp: wit::Stamp) -> Stamp {
+    Stamp {
+        lamport: stamp.lamport,
+        writer: WriterId::new(stamp.writer),
+    }
+}
+
+fn stamp_to_wire(stamp: Stamp) -> wit::Stamp {
+    wit::Stamp {
+        lamport: stamp.lamport,
+        writer: stamp.writer.as_bytes().to_vec(),
+    }
 }
 
 fn acquire_error(error: AcquireError) -> wit::AcquireError {
@@ -207,7 +214,7 @@ fn read_error(error: ReadError) -> wit::ReadError {
 
 fn page_to_wire(
     state: &mut WasmStoreState,
-    page: clay_collection::Page<Vec<u8>, CollectionValue>,
+    page: clay_collection::Page<Vec<u8>, Stamped<Option<CollectionValue>>>,
 ) -> wasmtime::Result<wit::Page> {
     let mut transactions = Vec::with_capacity(page.transactions.len());
     for transaction in page.transactions {
@@ -221,32 +228,40 @@ fn page_to_wire(
                     evidence,
                     write_context,
                 } => {
-                    let mut capabilities = Vec::with_capacity(value.capabilities.len());
-                    for publication in &value.capabilities {
-                        let reference = state
-                            .capabilities
-                            .mint(publication)
-                            .map_err(|failure| wasmtime::Error::msg(format!("{failure:?}")))?;
-                        match state.table.push(reference) {
-                            Ok(resource) => capabilities.push(resource),
-                            Err(error) => {
-                                for resource in capabilities {
-                                    state.table.delete(resource)?;
+                    let Stamped { stamp, value } = value;
+                    let value = match value {
+                        None => None,
+                        Some(value) => {
+                            let mut capabilities = Vec::with_capacity(value.capabilities.len());
+                            for publication in &value.capabilities {
+                                let reference =
+                                    state.capabilities.mint(publication).map_err(|failure| {
+                                        wasmtime::Error::msg(format!("{failure:?}"))
+                                    })?;
+                                match state.table.push(reference) {
+                                    Ok(resource) => capabilities.push(resource),
+                                    Err(error) => {
+                                        for resource in capabilities {
+                                            state.table.delete(resource)?;
+                                        }
+                                        return Err(error.into());
+                                    }
                                 }
-                                return Err(error.into());
                             }
+                            Some(wit::EncodedValue {
+                                body: value.body,
+                                capabilities,
+                            })
                         }
-                    }
+                    };
                     wit::Change::Upsert(wit::Upsert {
                         key: wit::EncodedValue {
                             body: key,
                             capabilities: Vec::new(),
                         },
                         row_version: version_to_wire(row_version),
-                        value: wit::EncodedValue {
-                            body: value.body,
-                            capabilities,
-                        },
+                        stamp: stamp_to_wire(stamp),
+                        value,
                         evidence: match evidence {
                             RowEvidence::Authoritative => wit::RowEvidence::Authoritative,
                             RowEvidence::Pending => wit::RowEvidence::Pending,
@@ -484,7 +499,7 @@ impl cap_wit::HostPresentationComponent for WasmStoreState {
     }
 }
 
-fn version_to_wire(version: Version) -> wit::Version {
+fn version_to_wire(version: clay_collection::Version) -> wit::Version {
     wit::Version {
         incarnation: version.incarnation,
         sequence: version.seq,

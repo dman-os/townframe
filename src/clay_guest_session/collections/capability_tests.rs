@@ -30,7 +30,9 @@ fn attachment_indices_scan_nested_cb_or_and_opaque_bodies_stay_opaque() {
 #[test]
 fn fabricated_indices_and_copied_cbor_convey_no_authority() {
     let (host, _instance, session, registrations) = setup();
-    let writer = session.grant_writer(&registrations).unwrap();
+    let writer = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
     let provider = CapabilitySession::new(
         host.clone(),
         host.start("provider"),
@@ -40,13 +42,17 @@ fn fabricated_indices_and_copied_cbor_convey_no_authority() {
 
     // Index 0 named, but no attachment list at all.
     assert_eq!(
-        writer.put_value(vec![1], None, CollectionValue::plain(tagged_body(0))),
+        writer.put_value(
+            vec![1],
+            WriteBasis::Concurrent,
+            CollectionValue::plain(tagged_body(0)),
+        ),
         Err(WriteFailure::InvalidAttachment)
     );
     // Copied body bytes with an empty attachment list are equally authority-free.
     let copied = writer.put_value(
         vec![1],
-        None,
+        WriteBasis::Concurrent,
         CollectionValue {
             body: tagged_body(0),
             capabilities: Vec::new(),
@@ -55,24 +61,24 @@ fn fabricated_indices_and_copied_cbor_convey_no_authority() {
     assert_eq!(copied, Err(WriteFailure::InvalidAttachment));
     assert!(registrations.snapshot().is_empty());
 
-    let version = writer
+    let stamp = writer
         .put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue {
                 body: tagged_body(0),
                 capabilities: vec![lease.publication()],
             },
         )
         .unwrap();
-    assert!(version.seq > 0);
+    assert_eq!(stamp.lamport, 1);
     // Attachment-count limit.
     let many = CollectionValue {
         body: vec![0x80],
         capabilities: vec![lease.publication(); 33],
     };
     assert_eq!(
-        writer.put_value(vec![2], None, many),
+        writer.put_value(vec![2], WriteBasis::Concurrent, many),
         Err(WriteFailure::CapabilityLimit)
     );
 }
@@ -80,7 +86,9 @@ fn fabricated_indices_and_copied_cbor_convey_no_authority() {
 #[tokio::test]
 async fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
     let (host, _instance, session, registrations) = setup();
-    let writer = session.grant_writer(&registrations).unwrap();
+    let writer = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
     let provider = CapabilitySession::new(
         host.clone(),
         host.start("provider"),
@@ -98,17 +106,23 @@ async fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
         CapabilityLimits::default(),
     );
 
-    let version = writer
+    let stamp = writer
         .put_value(
             vec![1],
-            None,
+            WriteBasis::Concurrent,
             CollectionValue {
                 body: tagged_body(0),
                 capabilities: vec![lease.publication()],
             },
         )
         .unwrap();
-    let stored = registrations.snapshot().into_values().next().unwrap().value;
+    let stored = registrations
+        .snapshot()
+        .into_values()
+        .next()
+        .unwrap()
+        .value
+        .unwrap();
     // Two recipients mint distinct local refs to the one publication.
     let mirror_ref = consumer.mint(&stored.capabilities[0]).unwrap();
     let other_ref = other.mint(&stored.capabilities[0]).unwrap();
@@ -120,11 +134,16 @@ async fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
     let proxy = mirror_ref.redeem_presentation().await.unwrap();
 
     // Replace then remove the row: substrate drops its stored clones.
-    let version = writer
-        .put_value(vec![1], Some(version), CollectionValue::plain(vec![0x80]))
+    let stamp = writer
+        .put_value(
+            vec![1],
+            WriteBasis::Observed(stamp),
+            CollectionValue::plain(vec![0x80]),
+        )
         .unwrap();
-    writer.remove(vec![1], Some(version)).unwrap();
-    assert!(registrations.snapshot().is_empty());
+    writer.delete(vec![1], WriteBasis::Observed(stamp)).unwrap();
+    // The tombstone row holds no value, so no capability clone.
+    assert!(registrations.get(&vec![1]).unwrap().value.is_none());
     // The guest mirror dropping its delivered ref releases only that ref.
     drop(mirror_ref);
     assert_eq!(consumer.reference_count(), 0);
