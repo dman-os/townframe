@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::rc::Rc;
 use tokio::sync::Notify;
+use tokio::sync::watch;
 
 const PRESENTATION: &str = "presentation";
 
@@ -39,6 +40,8 @@ struct Controls(Rc<RefCell<Script>>);
 #[derive(Default)]
 struct Script {
     log: Vec<String>,
+    /// Wakes a waiter in [`Controls::logged`] once `log` grew.
+    recorded: Rc<Notify>,
     /// Publications dropping, with the incarnation lifecycle at that moment.
     drops: Vec<String>,
     fail_init: BTreeSet<String>,
@@ -63,7 +66,18 @@ struct FakeRoot {
 
 impl Controls {
     fn record(&self, entry: String) {
-        self.0.borrow_mut().log.push(entry);
+        let mut script = self.0.borrow_mut();
+        script.log.push(entry);
+        script.recorded.notify_one();
+    }
+
+    /// Wait until at least `count` entries were recorded. Each `record` stores a wake permit,
+    /// so an entry made before this call is never missed.
+    async fn logged(&self, count: usize) {
+        let recorded = Rc::clone(&self.0.borrow().recorded);
+        while self.0.borrow().log.len() < count {
+            recorded.notified().await;
+        }
     }
 
     fn log(&self) -> Vec<String> {
@@ -228,10 +242,11 @@ async fn driven<T>(supervisor: &Supervisor<Provision>, scenario: impl Future<Out
     }
 }
 
-async fn settle(mut done: impl FnMut() -> bool) {
-    while !done() {
-        tokio::task::yield_now().await;
-    }
+/// Wait until `done` holds, woken by a change receiver (`Supervisor::changes` or
+/// `Activator::changes`): the supervisor ticks it after the recorded state `done` reads was
+/// updated, and the receiver is taken before the first check, so no change can be missed.
+async fn settle(mut changes: watch::Receiver<u64>, mut done: impl FnMut() -> bool) {
+    changes.wait_for(|_| done()).await.unwrap();
 }
 
 fn assert_quiescent(host: &Host) {
@@ -322,7 +337,7 @@ async fn concurrent_acquires_share_one_initialization() {
         supervisor.acquire(&solo, PRESENTATION),
         supervisor.acquire(&solo, PRESENTATION),
         async {
-            settle(|| !controls.log().is_empty()).await;
+            controls.logged(1).await;
             gate.notify_one();
         }
     );
@@ -349,7 +364,10 @@ async fn dropping_the_last_lease_closes_the_micro_exactly_once() {
         }
         assert_eq!(supervisor.state(&solo), MicroState::Active);
         drop(second);
-        settle(|| supervisor.state(&solo) == MicroState::Idle).await;
+        settle(supervisor.changes(), || {
+            supervisor.state(&solo) == MicroState::Idle
+        })
+        .await;
         assert_eq!(host.lifecycle(&incarnation), Lifecycle::Closed);
     })
     .await;
@@ -413,7 +431,10 @@ async fn a_lease_keeps_a_provider_a_binding_would_release() {
         supervisor.disable(&consumer).await.unwrap();
         assert_eq!(supervisor.state(&provider), MicroState::Active);
         drop(lease);
-        settle(|| supervisor.state(&provider) == MicroState::Idle).await;
+        settle(supervisor.changes(), || {
+            supervisor.state(&provider) == MicroState::Idle
+        })
+        .await;
     })
     .await;
     assert_quiescent(&host);
@@ -456,16 +477,15 @@ async fn a_closing_micro_is_recorded_before_its_guest_close_returns() {
     let (solo, activator) = (id("solo"), supervisor.activator());
     driven(&supervisor, async {
         drop(supervisor.acquire(&solo, PRESENTATION).await.unwrap());
-        let mut changes = activator.changes();
-        changes
-            .wait_for(|_| activator.status(&solo) == Some(MicroState::Closing))
-            .await
-            .unwrap();
+        settle(activator.changes(), || {
+            activator.status(&solo) == Some(MicroState::Closing)
+        })
+        .await;
         close_gate.notify_one();
-        changes
-            .wait_for(|_| activator.status(&solo) == Some(MicroState::Idle))
-            .await
-            .unwrap();
+        settle(activator.changes(), || {
+            activator.status(&solo) == Some(MicroState::Idle)
+        })
+        .await;
     })
     .await;
     assert_eq!(controls.log(), ["init solo", "close solo"]);
@@ -483,7 +503,10 @@ async fn acquiring_during_closing_waits_for_a_fresh_incarnation() {
         let old = first.owner.clone();
         // The last lease drops; the driver parks inside the guest's close.
         drop(first);
-        settle(|| supervisor.state(&solo) == MicroState::Closing).await;
+        settle(supervisor.changes(), || {
+            supervisor.state(&solo) == MicroState::Closing
+        })
+        .await;
         let (lease, ()) = tokio::join!(supervisor.acquire(&solo, PRESENTATION), async {
             for _ in 0..8 {
                 tokio::task::yield_now().await;
@@ -547,7 +570,9 @@ async fn acquiring_an_unpublished_name_fails_and_leaves_the_incarnation_up() {
     drop(held);
     driven(
         &supervisor,
-        settle(|| supervisor.state(&solo) == MicroState::Idle),
+        settle(supervisor.changes(), || {
+            supervisor.state(&solo) == MicroState::Idle
+        }),
     )
     .await;
     assert_eq!(controls.count("init solo"), 1);
@@ -561,7 +586,7 @@ async fn an_acquire_resolves_only_after_initialization_returns() {
     let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
     let solo = id("solo");
     let (lease, ()) = tokio::join!(supervisor.acquire(&solo, PRESENTATION), async {
-        settle(|| !controls.log().is_empty()).await;
+        controls.logged(1).await;
         // Mid-initialization the publication is staged: nothing can lease it.
         assert_eq!(supervisor.state(&solo), MicroState::Initializing);
         assert!(!matches!(
@@ -816,9 +841,7 @@ async fn disabling_a_pending_initialization_cancels_it_without_exposure() {
     );
     let consumer_id = id("consumer");
     let (started, ()) = tokio::join!(supervisor.start(&consumer_id), async {
-        while controls.log().len() < 2 {
-            tokio::task::yield_now().await;
-        }
+        controls.logged(2).await;
         // Mid-initialization: nothing the consumer would provide is observable.
         assert_eq!(supervisor.state(&id("consumer")), MicroState::Initializing);
         assert!(!matches!(
@@ -909,7 +932,10 @@ async fn a_failed_demand_that_started_the_micro_lets_it_idle_close() {
     let solo = id("solo");
     driven(&supervisor, async {
         assert!(supervisor.acquire(&solo, "absent").await.is_err());
-        settle(|| supervisor.state(&solo) == MicroState::Idle).await;
+        settle(supervisor.changes(), || {
+            supervisor.state(&solo) == MicroState::Idle
+        })
+        .await;
     })
     .await;
     assert_eq!(controls.log(), ["init solo", "close solo"]);
@@ -931,7 +957,7 @@ async fn an_activator_is_served_by_the_driver_and_status_never_activates() {
     assert!(controls.log().is_empty());
     driven(&supervisor, async {
         let (lease, ()) = tokio::join!(activator.acquire(&solo, PRESENTATION), async {
-            settle(|| !controls.log().is_empty()).await;
+            controls.logged(1).await;
             assert_eq!(activator.status(&solo), Some(MicroState::Initializing));
             gate.notify_one();
         });
@@ -939,7 +965,10 @@ async fn an_activator_is_served_by_the_driver_and_status_never_activates() {
         assert_eq!(activator.status(&solo), Some(MicroState::Active));
         assert_eq!(lease.owner, supervisor.instance(&solo).unwrap());
         drop(lease);
-        settle(|| activator.status(&solo) == Some(MicroState::Idle)).await;
+        settle(activator.changes(), || {
+            activator.status(&solo) == Some(MicroState::Idle)
+        })
+        .await;
     })
     .await;
     assert_eq!(controls.log(), ["init solo", "close solo"]);

@@ -94,9 +94,12 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
                 assert_eq!(runtime.state(&counter), MicroState::Active);
                 assert!(detail.component().is_ok());
                 drop(detail);
-                while runtime.state(&counter) != MicroState::Idle {
-                    tokio::task::yield_now().await;
-                }
+                runtime
+                    .supervisor()
+                    .changes()
+                    .wait_for(|_| runtime.state(&counter) == MicroState::Idle)
+                    .await
+                    .unwrap();
             };
             tokio::select! {
                 () = &mut serving => panic!("the composition stopped before shutdown"),

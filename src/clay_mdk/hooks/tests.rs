@@ -8,10 +8,7 @@ use clay_guest_session::collections::CollectionSession;
 use clay_guest_session::collections::bytes_registrations;
 use clay_host::Host;
 use clay_host::MicroId;
-use std::future::Future;
 use std::num::NonZeroUsize;
-use std::task::Context as TaskContext;
-use std::task::Waker;
 
 fn cbor(text: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -29,18 +26,27 @@ fn app(watch: Collection<String, String>) -> Element {
     rsx! { "[{text}]" }
 }
 
-/// Let the feed task and the Dioxus runtime make the progress they can, then render.
-async fn settle(dom: &mut VirtualDom, tree: &mut clay_surface::SurfaceTree) {
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
+/// Wait until the mirror holds `rows` rows, then drive the hook's own follower task until the
+/// rendered text is `expected`. Both waits are woken by the change they wait for: the mirror's
+/// `changed`, and the dirty scope the follower marks (`wait_for_work`); nothing polls.
+async fn rendered(
+    dom: &mut VirtualDom,
+    tree: &mut clay_surface::SurfaceTree,
+    watch: &Collection<String, String>,
+    rows: usize,
+    expected: &str,
+) {
+    let mut changes = watch.clone();
+    while changes.rows().unwrap().len() != rows {
+        changes.changed().await.unwrap();
     }
-    {
-        let mut work = std::pin::pin!(dom.wait_for_work());
-        let _pending = work
-            .as_mut()
-            .poll(&mut TaskContext::from_waker(Waker::noop()));
+    loop {
+        dom.render_immediate(tree);
+        if tree.text_content() == expected {
+            return;
+        }
+        dom.wait_for_work().await;
     }
-    dom.render_immediate(tree);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -70,26 +76,26 @@ async fn rows_hook_rerenders_on_each_change_and_hides_tombstones() {
             let (watch, feed) = Collection::<String, String>::start(reader, capabilities);
             tokio::task::spawn_local(feed);
 
-            let mut dom = VirtualDom::new_with_props(app, watch);
+            let mut dom = VirtualDom::new_with_props(app, watch.clone());
             let mut tree = clay_surface::SurfaceTree::new();
             dom.rebuild(&mut tree);
-            settle(&mut dom, &mut tree).await;
-            assert_eq!(tree.text_content(), "[]");
+            rendered(&mut dom, &mut tree, &watch, 0, "[]").await;
 
             writer
                 .put(cbor("a"), WriteBasis::Concurrent, cbor("one"))
                 .unwrap();
-            settle(&mut dom, &mut tree).await;
-            assert_eq!(tree.text_content(), "[a=one]");
+            rendered(&mut dom, &mut tree, &watch, 1, "[a=one]").await;
 
+            // The tombstone is observed (and so hidden) before the render is checked: the
+            // second row shows, then goes.
             let stamp = writer
                 .put(cbor("b"), WriteBasis::Concurrent, cbor("two"))
                 .unwrap();
+            rendered(&mut dom, &mut tree, &watch, 2, "[a=one,b=two]").await;
             writer
                 .delete(cbor("b"), WriteBasis::Observed(stamp))
                 .unwrap();
-            settle(&mut dom, &mut tree).await;
-            assert_eq!(tree.text_content(), "[a=one]");
+            rendered(&mut dom, &mut tree, &watch, 1, "[a=one]").await;
 
             drop(dom);
             host.close();

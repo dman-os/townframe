@@ -20,7 +20,7 @@ use clay_guest_session::capabilities::CallError;
 use clay_guest_session::capabilities::CapabilityFailure;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::GuestCall;
-use clay_guest_session::capabilities::InFlightCall;
+use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
@@ -42,7 +42,6 @@ use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
@@ -112,7 +111,7 @@ pub struct WcmpStoreState {
     /// Where this incarnation's call publications queue their requests (see [`GuestCall`]).
     calls: mpsc::UnboundedSender<GuestCall>,
     /// How many call handlers are in the store, including those whose caller gave up.
-    calls_in_flight: Arc<AtomicUsize>,
+    calls_in_flight: InFlightCalls,
     pub presentation: clay_guest_session::PresentationHost,
 }
 
@@ -145,9 +144,9 @@ impl WcmpStoreState {
             .collect())
     }
 
-    /// How many call handlers are in the store.
-    pub fn calls_in_flight(&self) -> usize {
-        self.calls_in_flight.load(Ordering::Acquire)
+    /// The call handlers in the store.
+    pub fn calls_in_flight(&self) -> &InFlightCalls {
+        &self.calls_in_flight
     }
 }
 
@@ -175,7 +174,7 @@ impl WcmpStoreState {
                 collection_limits,
                 collection_wake: None,
                 calls,
-                calls_in_flight: Arc::new(AtomicUsize::new(0)),
+                calls_in_flight: InFlightCalls::default(),
                 presentation: clay_guest_session::PresentationHost::new(host, instance),
             },
             incoming,
@@ -481,7 +480,7 @@ impl WcmpIncarnation {
             reply,
         } = call;
         let client = Arc::clone(&self.client);
-        let in_flight = InFlightCall::start(&self.store.data().calls_in_flight);
+        let in_flight = self.store.data().calls_in_flight.start();
         let trapped = Arc::clone(&self.call_trapped);
         let wake = Arc::clone(&self.wake);
         // The handle is dropped on purpose: dropping it cancels nothing.

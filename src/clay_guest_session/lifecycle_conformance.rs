@@ -58,6 +58,7 @@ use crate::capabilities::CapabilityPublication;
 use crate::capabilities::CapabilityRef;
 use crate::capabilities::CapabilitySession;
 use crate::capabilities::DeclaredPublication;
+use crate::capabilities::InFlightCalls;
 use crate::capabilities::PublicationEndpoint;
 use crate::capabilities::PublicationKind;
 use crate::capabilities::PublishedCapability;
@@ -197,6 +198,9 @@ pub trait Incarnations: 'static {
 
     fn inspect(runtime: &Self::Runtime) -> GuestResidue;
 
+    /// The incarnation's live call handlers, awaitable until they all ended.
+    fn calls_in_flight(runtime: &Self::Runtime) -> InFlightCalls;
+
     /// Close the guest half and report what the store still held afterwards, before it drops.
     fn close(runtime: Self::Runtime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)>;
 }
@@ -303,9 +307,10 @@ pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine
         expected
     };
     let idle = async |expected: Vec<String>| {
-        while supervisor.state(&provider_id) != MicroState::Idle {
-            tokio::task::yield_now().await;
-        }
+        settle(&supervisor, || {
+            supervisor.state(&provider_id) == MicroState::Idle
+        })
+        .await;
         assert_eq!(harness.log(), expected);
     };
     let stays_up = async |lives: usize| {
@@ -433,9 +438,10 @@ pub async fn leased_provider_closes_when_idle<E: Incarnations>(engine: E) {
             let observed = harness.observe(&lease);
             assert!(observed.redeem_presentation().await.is_ok());
             drop(lease);
-            while supervisor.state(&provider_id) != MicroState::Idle {
-                tokio::task::yield_now().await;
-            }
+            settle(&supervisor, || {
+                supervisor.state(&provider_id) == MicroState::Idle
+            })
+            .await;
             assert_eq!(harness.log(), ["initialize provider", "close provider"]);
             assert_eq!(harness.host.lifecycle(&instance), Lifecycle::Closed);
             assert_eq!(
@@ -772,11 +778,18 @@ impl CallTarget for Forward {
     }
 }
 
-/// Wait for a condition that other tasks bring about.
-async fn until(mut condition: impl FnMut() -> bool) {
-    while !condition() {
-        tokio::task::yield_now().await;
-    }
+/// Wait until `condition` holds over the supervisor's recorded micro states, woken by its
+/// change ticks (sent after the mirror `Supervisor::state` reads was updated). The receiver is
+/// taken before the first check, so a change between the two cannot be missed.
+async fn settle(
+    supervisor: &Supervisor<CapabilityPublication>,
+    mut condition: impl FnMut() -> bool,
+) {
+    supervisor
+        .changes()
+        .wait_for(|_| condition())
+        .await
+        .expect("the supervisor outlives the wait");
 }
 
 /// One lazy relay provider `a`, held live by a lease, whose `peer` is a [`Gate`]: every call of
@@ -865,7 +878,7 @@ pub async fn overlapping_calls_complete_out_of_order<E: Incarnations>(engine: E)
         assert!(!first.is_finished(), "the first call is still suspended");
         g.gate.release(b"one");
         assert_eq!(first.await.unwrap(), Ok(b"relay:one".to_vec()));
-        until(|| g.residue().calls == 0).await;
+        g.harness.calls_drained("a").await;
         assert_eq!(g.residue(), baseline, "no call left anything behind");
     })
     .await;
@@ -898,7 +911,7 @@ pub async fn many_overlapping_calls_complete<E: Incarnations>(engine: E) {
                 Ok(format!("relay:call-{index}").into_bytes())
             );
         }
-        until(|| g.residue().calls == 0).await;
+        g.harness.calls_drained("a").await;
         assert_eq!(g.residue(), baseline);
     })
     .await;
@@ -978,7 +991,7 @@ pub async fn calls_reenter_their_provider<E: Incarnations>(engine: E) {
             );
             for micro in ["a", "b", "c"] {
                 let micro = MicroId::new(micro);
-                until(|| supervisor.state(&micro) == MicroState::Idle).await;
+                settle(&supervisor, || supervisor.state(&micro) == MicroState::Idle).await;
             }
         } => {}
     }
@@ -1073,7 +1086,7 @@ pub async fn dropped_call_finishes_in_the_guest_without_leaks<E: Incarnations>(e
             "the guest handler outlives its caller"
         );
         g.gate.release(b"abandoned");
-        until(|| g.residue().calls == 0).await;
+        g.harness.calls_drained("a").await;
         assert_eq!(g.residue(), baseline);
     })
     .await;
@@ -1088,7 +1101,7 @@ pub async fn dropped_call_finishes_in_the_guest_without_leaks<E: Incarnations>(e
     let micro = MicroId::new("a");
     tokio::select! {
         never = supervisor.drive() => never,
-        () = until(|| supervisor.state(&micro) == MicroState::Idle) => {}
+        () = settle(&supervisor, || supervisor.state(&micro) == MicroState::Idle) => {}
     }
     assert_eq!(harness.log(), ["initialize a", "close a"]);
     harness.finish(supervisor).await;
@@ -1281,6 +1294,18 @@ impl<E: Incarnations> Harness<E> {
             .downcast::<E::Runtime>()
             .unwrap_or_else(|_| panic!("{identity} runs this engine"));
         E::inspect(&runtime)
+    }
+
+    /// Resolves once every call handler in the live incarnation `identity` has returned.
+    async fn calls_drained(&self, identity: &str) {
+        let runtime = self
+            .shared
+            .runtime(identity)
+            .downcast::<E::Runtime>()
+            .unwrap_or_else(|_| panic!("{identity} runs this engine"));
+        let calls = E::calls_in_flight(&runtime);
+        drop(runtime);
+        calls.drained().await;
     }
 
     fn log(&self) -> Vec<String> {

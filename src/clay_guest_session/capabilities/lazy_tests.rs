@@ -26,6 +26,10 @@ struct Script {
     init: Notify,
     call: Notify,
     close: Notify,
+    /// Stored permits (`notify_one`) that say the provider's initialization or a call has
+    /// begun, so a scenario waits on the event itself instead of polling the counters.
+    entered_init: Notify,
+    entered_call: Notify,
 }
 
 impl Script {
@@ -58,6 +62,7 @@ impl Factory<CapabilityPublication> for Provider {
         let script = Arc::clone(&self.0);
         Box::pin(async move {
             script.inits.fetch_add(1, Ordering::SeqCst);
+            script.entered_init.notify_one();
             if script.gate_init.load(Ordering::SeqCst) {
                 script.init.notified().await;
             }
@@ -96,6 +101,7 @@ impl CallTarget for Echo {
         let script = Arc::clone(&self.0);
         async move {
             script.calls.fetch_add(1, Ordering::SeqCst);
+            script.entered_call.notify_one();
             if script.gate_call.load(Ordering::SeqCst) {
                 script.call.notified().await;
             }
@@ -172,10 +178,14 @@ impl World {
         }
     }
 
+    /// Wait until `done` holds, woken by the supervisor's change ticks (it reads recorded
+    /// micro states, which tick after the mirror was updated).
     async fn settle(&self, done: impl Fn() -> bool) {
-        while !done() {
-            tokio::task::yield_now().await;
-        }
+        self.supervisor
+            .changes()
+            .wait_for(|_| done())
+            .await
+            .unwrap();
     }
 
     /// Give the driver every chance to close the provider; it must not while retained.
@@ -226,9 +236,7 @@ async fn concurrent_lazy_calls_from_two_recipients_initialize_once() {
     let (from_a, from_b, ()) = world
         .driven(async {
             tokio::join!(a.call(b"a".to_vec()), b.call(b"b".to_vec()), async {
-                world
-                    .settle(|| Script::count(&world.script.inits) > 0)
-                    .await;
+                world.script.entered_init.notified().await;
                 assert_eq!(a.status(), RefStatus::Dormant);
                 world.script.init.notify_one();
             })
@@ -248,9 +256,7 @@ async fn a_lazy_call_holds_the_provider_only_for_the_call() {
     world
         .driven(async {
             let (response, ()) = tokio::join!(reference.call(b"ping".to_vec()), async {
-                world
-                    .settle(|| Script::count(&world.script.calls) > 0)
-                    .await;
+                world.script.entered_call.notified().await;
                 // Mid-call nothing else retains the provider, but the call's lease does.
                 world.stay_live().await;
                 world.script.call.notify_one();

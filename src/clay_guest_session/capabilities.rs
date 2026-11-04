@@ -29,10 +29,10 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 /// The one contract every Presentation publication has (ADR 031 §5): the shared
 /// presentation-component contract the runtime itself defines. A Call can never have it, so a
@@ -145,21 +145,40 @@ impl CallTarget for GuestCallTarget {
     }
 }
 
-/// One live call handler in an incarnation's store, counted in the incarnation's in-flight
-/// counter until the handler's task ends or the store drops it (including when its caller gave
-/// up long before). Engines hold one in each call task.
-pub struct InFlightCall(Arc<AtomicUsize>);
+/// How many call handlers are live in one incarnation's store, including those whose caller
+/// gave up. The count is a watch value so [`Self::drained`] can be awaited: a handler ending
+/// after its caller already got an answer is bookkeeping that has no other host-side event.
+#[derive(Clone, Default)]
+pub struct InFlightCalls(Arc<watch::Sender<usize>>);
 
-impl InFlightCall {
-    pub fn start(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::AcqRel);
-        Self(Arc::clone(counter))
+impl InFlightCalls {
+    /// Count one handler until the returned guard drops (when its task ends or the store drops
+    /// it). Engines hold one in each call task.
+    pub fn start(&self) -> InFlightCall {
+        self.0.send_modify(|count| *count += 1);
+        InFlightCall(self.clone())
+    }
+
+    pub fn count(&self) -> usize {
+        *self.0.borrow()
+    }
+
+    /// Resolves once no handler is live.
+    pub async fn drained(&self) {
+        self.0
+            .subscribe()
+            .wait_for(|&count| count == 0)
+            .await
+            .expect("this value holds the sender");
     }
 }
 
+/// One live call handler counted in [`InFlightCalls`] until dropped.
+pub struct InFlightCall(InFlightCalls);
+
 impl Drop for InFlightCall {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0.0.send_modify(|count| *count -= 1);
     }
 }
 
