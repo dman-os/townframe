@@ -1,5 +1,5 @@
 [package]
-name = "wflow_sdk"
+name = "wflow_wdk_wasm"
 version.workspace = true
 edition.workspace = true
 
@@ -10,22 +10,10 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-#
-# internal
 utils_rs.workspace = true
 wasm_utils_rs.workspace = true
+wflow_wdk.workspace = true
 
-#
-# encoding
 serde.workspace = true
-serde_json.workspace = true
 
-#
-# error
-color-eyre.workspace = true
-thiserror.workspace = true
-displaydoc.workspace = true
-
-#
-# wit
 wit-bindgen.workspace = true

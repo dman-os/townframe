@@ -37,4 +37,7 @@ async-trait.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 loom.workspace = true
+proptest.workspace = true
+quint-connect.workspace = true

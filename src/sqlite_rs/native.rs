@@ -492,6 +492,12 @@ impl DbInner {
 }
 
 impl Database {
+    /// The database file path. Callers may place sidecar files (such as
+    /// advisory owner locks) next to it; registering opens nothing.
+    pub fn path(&self) -> &std::path::Path {
+        &self.inner.path
+    }
+
     async fn ensure_initialized(&self) -> SqlResult<()> {
         if *self.inner.initialized.lock().expect(ERROR_MUTEX) {
             return Ok(());

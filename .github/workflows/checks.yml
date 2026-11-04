@@ -56,6 +56,23 @@ jobs:
       # pre-commit hook in the lint job. This job owns the package outputs.
       - name: Build CLI and run its packaged round-trip test
         run: nix build --print-build-logs --no-link .#daybook-cli.tests.round-trip
+  wflow-authority:
+    name: wflow authority model and conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: Swatinem/rust-cache@v2
+      - name: Typecheck and simulate the bounded model
+        run: |
+          nix develop .#ci-rust --command quint typecheck src/wflow_core/partition/authority.qnt
+          nix develop .#ci-rust --command quint run src/wflow_core/partition/authority.qnt --main=bounded --max-samples=100 --max-steps=16 --seed=0x678b2 --verbosity=1
+      - name: Run production conformance and core tests
+        run: nix develop .#ci-rust --command cargo nextest run -p wflow_core --lib --profile "$NEXTEST_PROFILE"
+      - name: Check model safety through four transitions
+        run: nix develop .#ci-rust --command quint verify src/wflow_core/partition/authority.qnt --main=bounded --init=init --step=step --invariant=invariant --max-steps=4 --apalache-version=0.62.1 --verbosity=1
   rust-target-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 60

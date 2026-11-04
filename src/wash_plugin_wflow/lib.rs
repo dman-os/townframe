@@ -15,6 +15,7 @@ use wash_runtime::plugin::WitInterfaces;
 use wash_runtime::wit::WitInterface;
 use wash_runtime::wit::WitWorld;
 
+use wasmtime::component::Accessor;
 use wasmtime::component::HasSelf;
 use wflow_core::r#gen::metastore::WasmcloudWflowServiceMeta;
 use wflow_core::r#gen::metastore::WflowServiceMeta;
@@ -23,6 +24,12 @@ use wflow_core::partition::effects;
 use wflow_core::partition::job_events;
 use wflow_core::partition::state;
 use wflow_tokio::partition::service;
+use wflow_wdk::session::ReplayStep;
+use wflow_wdk::session::SessionYield;
+use wflow_wdk::session::WaitYield;
+use wflow_wdk::types::CleanupCause;
+
+mod authority_session;
 
 pub mod binds_partition_host {
     wash_runtime::wasmtime::component::bindgen!({
@@ -51,6 +58,7 @@ mod binds_service {
         path: "../wash_plugin_wflow/wit",
         imports: { default: async | trappable | tracing },
         exports: { default: async | trappable | tracing },
+        additional_derives: [PartialEq, Eq],
     });
 }
 pub use crate::binds_metastore::townframe::wflow::metastore as service_metastore;
@@ -63,6 +71,7 @@ use binds_service::townframe::wflow::types;
 #[derive(educe::Educe)]
 #[educe(Debug)]
 struct ActiveJobCtx {
+    job_id: Arc<str>,
     #[educe(Debug(ignore))]
     yield_tx: mpsc::UnboundedSender<JobTrap>,
     #[educe(Debug(ignore))]
@@ -71,7 +80,13 @@ struct ActiveJobCtx {
     pause_cancel: CancellationToken,
     cur_step: AtomicU64,
     active_step: std::sync::Mutex<Option<ActiveStepCtx>>,
-    journal: std::sync::Mutex<state::JobState>,
+    replay: std::sync::Mutex<Vec<ReplayStep>>,
+    /// Set once the job entered cleanup; every forward boundary reached after
+    /// that returns it as `host-error.interrupted` unless a committed replay
+    /// value exists for the step, which replays as usual so the workflow
+    /// re-registers the defers it derived from it. `Defer` steps never see it.
+    cleanup: std::sync::Mutex<Option<CleanupCause>>,
+    ctx_id: Arc<str>,
 }
 
 #[derive(Debug)]
@@ -79,6 +94,9 @@ struct ActiveStepCtx {
     attempt_id: u64,
     step_id: u64,
     start_at: Timestamp,
+    /// The boundary the guest declared for this step, carried to the trap so
+    /// the authority records the durable kind and name it commits against.
+    meta: host::StepMeta,
 }
 
 enum JobTrap {
@@ -88,14 +106,21 @@ enum JobTrap {
         end_at: Timestamp,
         value_json: Arc<str>,
         attempt_id: u64,
+        meta: host::StepMeta,
     },
     WaitStep {
         step_id: u64,
         attempt_id: u64,
         start_at: Timestamp,
         deets: WaitTrapDeets,
+        meta: host::StepMeta,
     },
     RunComplete(Result<String, types::JobError>),
+    /// Forward work ended in the terminal `error_json` with compensation
+    /// registered; the host records the cause durably and resumes with it.
+    BeginCleanup {
+        error_json: Arc<str>,
+    },
 }
 
 #[derive(Debug)]
@@ -104,9 +129,14 @@ enum WaitTrapDeets {
     Message { wait_id: u64 },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum SessionResume {
     Continue,
+    Deliver(Arc<str>),
+    /// Resumes a parked boundary with the durable cause the job entered
+    /// cleanup under: a committed `PersistStep` continues, a wait or a
+    /// `BeginCleanup` returns the cause to the workflow.
+    Interrupt(CleanupCause),
     Stop,
 }
 
@@ -114,10 +144,121 @@ fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
     wasmtime::Error::msg(msg.to_string())
 }
 
+fn to_wit_cleanup_cause(cause: CleanupCause) -> host::CleanupCause {
+    match cause {
+        CleanupCause::Cancelled { reason } => host::CleanupCause::Cancelled(reason),
+        CleanupCause::Failed { error } => host::CleanupCause::Failed(error),
+        CleanupCause::RetriesExhausted {
+            retries,
+            max_retries,
+            last_error,
+        } => host::CleanupCause::RetriesExhausted(host::RetriesExhausted {
+            retries,
+            max_retries,
+            last_error,
+        }),
+    }
+}
+
 fn wait_id_for(step_id: u64, attempt_id: u64) -> u64 {
     let lo = step_id & 0xFFFF_FFFF;
     let hi = (attempt_id & 0xFFFF_FFFF) << 32;
     hi | lo
+}
+
+fn replay_from_job_state(journal: &state::JobState) -> Vec<ReplayStep> {
+    let mut replay: Vec<_> = journal
+        .steps
+        .iter()
+        .map(|step| {
+            let state::JobStepState::Effect { attempts } = step;
+            match attempts.last().map(|attempt| &attempt.deets) {
+                Some(job_events::JobEffectResultDeets::Success { value_json }) => {
+                    ReplayStep::completed(Arc::clone(value_json))
+                }
+                _ => ReplayStep {
+                    failed_attempts: attempts.len() as u64,
+                    ..default()
+                },
+            }
+        })
+        .collect();
+    for run in &journal.runs {
+        if let job_events::JobRunResult::StepWait(wait) = &run.result {
+            let index = wait.step_id as usize;
+            if replay.len() <= index {
+                replay.resize_with(index + 1, default);
+            }
+            replay[index].kind = Some(match wait.deets {
+                job_events::JobWaitResultDeets::Timer { .. } => wflow_core::StepKind::Sleep,
+                job_events::JobWaitResultDeets::Message { .. } => wflow_core::StepKind::Recv,
+            });
+        }
+    }
+    replay
+}
+
+fn lookup_active_job<T>(
+    accessor: &Accessor<T, HasSelf<SharedWashCtx>>,
+    job_id: &str,
+) -> Result<(Arc<WflowPlugin>, Arc<ActiveJobCtx>), host::HostError> {
+    accessor.with(|mut access| {
+        let wcx = access.get();
+        let plugin = WflowPlugin::from_ctx(wcx);
+        let ctx_id = &wcx.active_ctx.id;
+        let active_job = plugin
+            .active_jobs
+            .read()
+            .expect(ERROR_MUTEX)
+            .get(ctx_id)
+            .cloned()
+            .ok_or_else(|| host::HostError::Protocol("job not active".into()))?;
+        if active_job.job_id.as_ref() != job_id {
+            return Err(host::HostError::Protocol(format!(
+                "job_id mismatch for active context: expected {}, got {job_id}",
+                active_job.job_id
+            )));
+        }
+        Ok((plugin, active_job))
+    })
+}
+
+impl ActiveJobCtx {
+    /// Parks the session on `trap` until the host resumes it. A hard stop
+    /// (the session was cancelled or its channels closed) is not cooperative
+    /// cleanup: the invocation is being torn down, so it surfaces as a
+    /// protocol error rather than an interruption that would run defers.
+    async fn yield_and_wait_resume(&self, trap: JobTrap) -> Result<SessionResume, host::HostError> {
+        if self.yield_tx.send(trap).is_err() {
+            if self.pause_cancel.is_cancelled() {
+                return Err(host::HostError::Protocol("session cancelled".into()));
+            }
+            return Err(host::HostError::Protocol("session parent dropped".into()));
+        }
+
+        let mut resume_rx = self.resume_rx.lock().await;
+        let cmd = tokio::select! {
+            biased;
+            _ = self.pause_cancel.cancelled() => {
+                return Err(host::HostError::Protocol("session cancelled".into()));
+            }
+            cmd = resume_rx.recv() => cmd
+        };
+        match cmd {
+            Some(SessionResume::Stop) | None => {
+                Err(host::HostError::Protocol("session stopped".into()))
+            }
+            Some(cmd) => Ok(cmd),
+        }
+    }
+
+    /// Records the durable cause the job entered cleanup under so every later
+    /// forward boundary is interrupted with it. The authority owns which cause
+    /// wins (an earlier cancel over a later failure); the host only mirrors
+    /// what it was resumed with.
+    fn record_cleanup(&self, cause: CleanupCause) {
+        *self.cleanup.lock().expect(ERROR_MUTEX) = Some(cause);
+    }
 }
 
 struct SessionHandle {
@@ -127,10 +268,12 @@ struct SessionHandle {
     component_id: String,
     next_run_id: u64,
     last_effect_id: effects::EffectId,
+    active_job: Arc<ActiveJobCtx>,
     resume_tx: mpsc::UnboundedSender<SessionResume>,
     yield_rx: mpsc::UnboundedReceiver<JobTrap>,
     cancel_token: CancellationToken,
     join_handle: tokio::task::JoinHandle<()>,
+    jobs: Arc<RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>>,
 }
 
 impl SessionHandle {
@@ -140,6 +283,17 @@ impl SessionHandle {
             .inspect_err(|err| warn_loc!(ERROR_CHANNEL, ?err))
             .ok();
         self.cancel_token.cancel();
+    }
+
+    /// Moves the parked session into cleanup under `cause`: the flag makes
+    /// every later forward boundary return `interrupted`, and the resume wakes
+    /// whichever boundary is parked right now (a committed persist continues,
+    /// a wait or `begin-cleanup` returns the cause). `false` means the session
+    /// was already stopped.
+    #[must_use]
+    fn interrupt(&self, cause: CleanupCause) -> bool {
+        self.active_job.record_cleanup(cause.clone());
+        self.resume_tx.send(SessionResume::Interrupt(cause)).is_ok()
     }
 }
 
@@ -152,6 +306,7 @@ impl Drop for SessionHandle {
     fn drop(&mut self) {
         self.cancel_token.cancel();
         self.join_handle.abort();
+        self.jobs.write().expect(ERROR_MUTEX).remove(&self.ctx_id);
     }
 }
 
@@ -165,36 +320,30 @@ impl service::WflowServiceSession for WasmRunSession {
     }
 }
 
-impl host::Host for SharedWashCtx {
+impl host::Host for SharedWashCtx {}
+
+impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
     async fn next_step(
-        &mut self,
+        accessor: &Accessor<T, Self>,
         job_id: partition_host::JobId,
-    ) -> wasmtime::Result<Result<host::StepState, String>> {
-        let plugin = WflowPlugin::from_ctx(self);
-        let Some(job) = plugin
-            .active_jobs
-            .read()
-            .expect(ERROR_MUTEX)
-            .get(job_id.as_str())
-            .cloned()
-        else {
-            return Err(wasmtime_err("job not active"));
+        meta: host::StepMeta,
+    ) -> wasmtime::Result<Result<host::StepState, host::HostError>> {
+        let (plugin, job) = match lookup_active_job(accessor, &job_id) {
+            Ok(pair) => pair,
+            Err(err) => return Ok(Err(err)),
         };
+        if job.pause_cancel.is_cancelled() {
+            return Ok(Err(host::HostError::Protocol("session cancelled".into())));
+        }
         let mut active_step = job.active_step.lock().expect(ERROR_MUTEX);
         if let Some(stale_active) = active_step.as_ref() {
             let stale_step_id = stale_active.step_id;
-            let journal = job.journal.lock().expect(ERROR_MUTEX);
-            let stale_completed = journal.steps.get(stale_step_id as usize).and_then(|state| {
-                use wflow_core::partition::job_events::JobEffectResultDeets;
-                use wflow_core::partition::state::JobStepState;
-                let JobStepState::Effect { attempts } = state;
-                attempts.last().and_then(|attempt| match &attempt.deets {
-                    JobEffectResultDeets::Success { .. } => Some(()),
-                    JobEffectResultDeets::EffectErr(_) => None,
-                })
-            });
-            drop(journal);
-            if stale_completed.is_some() {
+            let replay = job.replay.lock().expect(ERROR_MUTEX);
+            let stale_completed = replay
+                .get(stale_step_id as usize)
+                .is_some_and(|step| step.value_json.is_some());
+            drop(replay);
+            if stale_completed {
                 active_step.take();
                 job.cur_step
                     .compare_exchange(
@@ -205,50 +354,50 @@ impl host::Host for SharedWashCtx {
                     )
                     .expect("impossible: wasm is single threaded");
             } else {
-                return Err(wasmtime_err("concurrent steps not allowed"));
+                return Ok(Err(host::HostError::Protocol(
+                    "concurrent steps not allowed".into(),
+                )));
             }
         }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);
-        let journal = job.journal.lock().expect(ERROR_MUTEX);
-        let attempt_id = if let Some(state) = journal.steps.get(step_id as usize) {
-            use wflow_core::partition::job_events::JobEffectResultDeets;
-            use wflow_core::partition::state::JobStepState;
-            match state {
-                JobStepState::Effect { attempts } => {
-                    if let Some(attempt) = attempts.last() {
-                        match &attempt.deets {
-                            JobEffectResultDeets::Success { value_json } => {
-                                job.cur_step
-                                    .compare_exchange(
-                                        step_id,
-                                        step_id + 1,
-                                        std::sync::atomic::Ordering::SeqCst,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    )
-                                    .expect("impossible: wasm is single threaded");
-                                return Ok(Ok(host::StepState::Completed(
-                                    host::CompletedStepState {
-                                        id: step_id,
-                                        value_json: value_json.to_string(),
-                                    },
-                                )));
-                            }
-                            JobEffectResultDeets::EffectErr(_) => attempts.len(),
-                        }
-                    } else {
-                        0
-                    }
-                }
+        let replay = job.replay.lock().expect(ERROR_MUTEX);
+        let step = replay.get(step_id as usize);
+        // A job in cleanup only moves through committed forward steps (so the
+        // workflow re-registers the defers it derived from them); the first
+        // uncommitted forward boundary is where it is interrupted.
+        if meta.kind != host::StepKind::Defer
+            && step.is_none_or(|step| step.value_json.is_none())
+            && let Some(cause) = job.cleanup.lock().expect(ERROR_MUTEX).clone()
+        {
+            return Ok(Err(host::HostError::Interrupted(to_wit_cleanup_cause(
+                cause,
+            ))));
+        }
+        if let Err(err) = plugin.validate_and_record_meta(&job, step, step_id, &meta) {
+            return Ok(Err(err));
+        }
+        let attempt_id = match step {
+            Some(ReplayStep {
+                value_json: Some(value),
+                ..
+            }) => {
+                job.cur_step
+                    .store(step_id + 1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(Ok(host::StepState::Completed(host::CompletedStepState {
+                    id: step_id,
+                    value_json: value.to_string(),
+                })));
             }
-        } else {
-            0
+            Some(step) => step.failed_attempts,
+            None => 0,
         };
-        drop(journal);
+        drop(replay);
         let start_at = Timestamp::now();
         active_step.replace(ActiveStepCtx {
-            attempt_id: attempt_id as u64,
+            attempt_id,
             step_id,
             start_at,
+            meta,
         });
         Ok(Ok(host::StepState::Active(host::ActiveStepState {
             id: step_id,
@@ -256,28 +405,24 @@ impl host::Host for SharedWashCtx {
     }
 
     async fn persist_step(
-        &mut self,
+        accessor: &Accessor<T, Self>,
         job_id: partition_host::JobId,
         step_id: host::StepId,
         value_json: String,
-    ) -> wasmtime::Result<Result<(), String>> {
-        let plugin = WflowPlugin::from_ctx(self);
-        let Some(job) = plugin
-            .active_jobs
-            .read()
-            .expect(ERROR_MUTEX)
-            .get(job_id.as_str())
-            .cloned()
-        else {
-            return Err(wasmtime_err("job not active"));
+    ) -> wasmtime::Result<Result<(), host::HostError>> {
+        let (_plugin, job) = match lookup_active_job(accessor, &job_id) {
+            Ok(pair) => pair,
+            Err(err) => return Ok(Err(err)),
         };
         let trap = {
             let mut active_step = job.active_step.lock().expect(ERROR_MUTEX);
             let Some(active_step) = active_step.take() else {
-                return Err(wasmtime_err("step not active"));
+                return Ok(Err(host::HostError::Protocol("step not active".into())));
             };
             if active_step.step_id != step_id {
-                return Err(wasmtime_err("given step_id is not active"));
+                return Ok(Err(host::HostError::Protocol(
+                    "given step_id is not active".into(),
+                )));
             }
             let end_at = Timestamp::now();
             JobTrap::PersistStep {
@@ -286,6 +431,7 @@ impl host::Host for SharedWashCtx {
                 attempt_id: active_step.attempt_id,
                 start_at: active_step.start_at,
                 end_at,
+                meta: active_step.meta,
             }
         };
 
@@ -298,48 +444,48 @@ impl host::Host for SharedWashCtx {
             )
             .expect("impossible: wasm is single threaded");
 
-        if job.yield_tx.send(trap).is_err() {
-            return Err(wasmtime_err("session parent dropped"));
-        }
-
-        let mut resume_rx = job.resume_rx.lock().await;
-        let cmd = tokio::select! {
-            _ = job.pause_cancel.cancelled() => {
-                return Ok(Err("session cancelled".to_string()));
+        Ok(match job.yield_and_wait_resume(trap).await {
+            Ok(SessionResume::Continue) => Ok(()),
+            // The host only interrupts a parked persist after its commit
+            // landed, so the step is durable and the workflow observes the
+            // cause at its next forward boundary.
+            Ok(SessionResume::Interrupt(cause)) => {
+                job.record_cleanup(cause);
+                Ok(())
             }
-            cmd = resume_rx.recv() => cmd
-        };
-        match cmd {
-            Some(SessionResume::Continue) => Ok(Ok(())),
-            Some(SessionResume::Stop) | None => Ok(Err("session stopped".to_string())),
-        }
+            Ok(SessionResume::Deliver(_)) => Err(host::HostError::Protocol(
+                "persisted step resumed with a delivered value".into(),
+            )),
+            Ok(SessionResume::Stop) => unreachable!(),
+            Err(err) => Err(err),
+        })
     }
 
     async fn sleep(
-        &mut self,
+        accessor: &Accessor<T, Self>,
         job_id: partition_host::JobId,
         step_id: host::StepId,
         duration_ms: u64,
-    ) -> wasmtime::Result<Result<(), String>> {
-        let plugin = WflowPlugin::from_ctx(self);
-        let Some(job) = plugin
-            .active_jobs
-            .read()
-            .expect(ERROR_MUTEX)
-            .get(job_id.as_str())
-            .cloned()
-        else {
-            return Err(wasmtime_err("job not active"));
+    ) -> wasmtime::Result<Result<(), host::HostError>> {
+        let (plugin, job) = match lookup_active_job(accessor, &job_id) {
+            Ok(pair) => pair,
+            Err(err) => return Ok(Err(err)),
         };
-        let (attempt_id, start_at) = {
+        let (attempt_id, start_at, meta) = {
             let active_step = job.active_step.lock().expect(ERROR_MUTEX);
             let Some(active_step) = active_step.as_ref() else {
-                return Err(wasmtime_err("step not active"));
+                return Ok(Err(host::HostError::Protocol("step not active".into())));
             };
             if active_step.step_id != step_id {
-                return Err(wasmtime_err("given step_id is not active"));
+                return Ok(Err(host::HostError::Protocol(
+                    "given step_id is not active".into(),
+                )));
             }
-            (active_step.attempt_id, active_step.start_at)
+            (
+                active_step.attempt_id,
+                active_step.start_at,
+                active_step.meta.clone(),
+            )
         };
 
         let fire_at = start_at
@@ -353,49 +499,50 @@ impl host::Host for SharedWashCtx {
                 wait_id: wait_id_for(step_id, attempt_id),
                 fire_at,
             },
+            meta,
         };
 
-        if job.yield_tx.send(trap).is_err() {
-            return Err(wasmtime_err("session parent dropped"));
-        }
-
-        let mut resume_rx = job.resume_rx.lock().await;
-        let cmd = tokio::select! {
-            _ = job.pause_cancel.cancelled() => {
-                return Ok(Err("session cancelled".to_string()));
-            }
-            cmd = resume_rx.recv() => cmd
+        // A timer resolves to no value the workflow observes.
+        let resumed = match job.yield_and_wait_resume(trap).await {
+            Ok(resumed) => resumed,
+            Err(err) => return Ok(Err(err)),
         };
-        match cmd {
-            Some(SessionResume::Continue) => Ok(Ok(())),
-            Some(SessionResume::Stop) | None => Ok(Err("session stopped".to_string())),
+        if let SessionResume::Interrupt(cause) = resumed {
+            plugin.abandon_active_step(&job, cause.clone());
+            return Ok(Err(host::HostError::Interrupted(to_wit_cleanup_cause(
+                cause,
+            ))));
         }
+        job.active_step.lock().expect(ERROR_MUTEX).take();
+        job.cur_step
+            .store(step_id + 1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Ok(()))
     }
 
     async fn recv_message(
-        &mut self,
+        accessor: &Accessor<T, Self>,
         job_id: partition_host::JobId,
         step_id: host::StepId,
-    ) -> wasmtime::Result<Result<String, String>> {
-        let plugin = WflowPlugin::from_ctx(self);
-        let Some(job) = plugin
-            .active_jobs
-            .read()
-            .expect(ERROR_MUTEX)
-            .get(job_id.as_str())
-            .cloned()
-        else {
-            return Err(wasmtime_err("job not active"));
+    ) -> wasmtime::Result<Result<String, host::HostError>> {
+        let (plugin, job) = match lookup_active_job(accessor, &job_id) {
+            Ok(pair) => pair,
+            Err(err) => return Ok(Err(err)),
         };
-        let (attempt_id, start_at) = {
+        let (attempt_id, start_at, meta) = {
             let active_step = job.active_step.lock().expect(ERROR_MUTEX);
             let Some(active_step) = active_step.as_ref() else {
-                return Err(wasmtime_err("step not active"));
+                return Ok(Err(host::HostError::Protocol("step not active".into())));
             };
             if active_step.step_id != step_id {
-                return Err(wasmtime_err("given step_id is not active"));
+                return Ok(Err(host::HostError::Protocol(
+                    "given step_id is not active".into(),
+                )));
             }
-            (active_step.attempt_id, active_step.start_at)
+            (
+                active_step.attempt_id,
+                active_step.start_at,
+                active_step.meta.clone(),
+            )
         };
 
         let trap = JobTrap::WaitStep {
@@ -405,38 +552,71 @@ impl host::Host for SharedWashCtx {
             deets: WaitTrapDeets::Message {
                 wait_id: wait_id_for(step_id, attempt_id),
             },
+            meta,
         };
 
-        if job.yield_tx.send(trap).is_err() {
-            return Err(wasmtime_err("session parent dropped"));
-        }
-
-        let mut resume_rx = job.resume_rx.lock().await;
-        let cmd = tokio::select! {
-            _ = job.pause_cancel.cancelled() => {
-                return Ok(Err("session cancelled".to_string()));
-            }
-            cmd = resume_rx.recv() => cmd
+        let resumed = match job.yield_and_wait_resume(trap).await {
+            Ok(resumed) => resumed,
+            Err(err) => return Ok(Err(err)),
         };
-        match cmd {
-            Some(SessionResume::Continue) => {
-                let journal = job.journal.lock().expect(ERROR_MUTEX);
-                let Some(step_state) = journal.steps.get(step_id as usize) else {
-                    return Err(wasmtime_err("step missing from journal"));
-                };
-                let wflow_core::partition::state::JobStepState::Effect { attempts } = step_state;
-                let Some(last_attempt) = attempts.last() else {
-                    return Err(wasmtime_err("step has no attempts in journal"));
-                };
-                let wflow_core::partition::job_events::JobEffectResultDeets::Success { value_json } =
-                    &last_attempt.deets
-                else {
-                    return Err(wasmtime_err("step has no success value"));
-                };
-                Ok(Ok(value_json.to_string()))
+        let delivered = match resumed {
+            SessionResume::Deliver(value) => Some(value),
+            // The legacy partition worker delivers by rewriting the replay
+            // before a plain resume.
+            SessionResume::Continue => job
+                .replay
+                .lock()
+                .expect(ERROR_MUTEX)
+                .get(step_id as usize)
+                .and_then(|step| step.value_json.clone()),
+            SessionResume::Interrupt(cause) => {
+                plugin.abandon_active_step(&job, cause.clone());
+                return Ok(Err(host::HostError::Interrupted(to_wit_cleanup_cause(
+                    cause,
+                ))));
             }
-            Some(SessionResume::Stop) | None => Ok(Err("session stopped".to_string())),
-        }
+            SessionResume::Stop => unreachable!(),
+        };
+        let Some(value) = delivered else {
+            return Ok(Err(host::HostError::Protocol(
+                "resumed message has no value".into(),
+            )));
+        };
+        job.active_step.lock().expect(ERROR_MUTEX).take();
+        job.cur_step
+            .store(step_id + 1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Ok(value.to_string()))
+    }
+
+    async fn begin_cleanup(
+        accessor: &Accessor<T, Self>,
+        job_id: partition_host::JobId,
+        error_json: String,
+    ) -> wasmtime::Result<Result<host::CleanupCause, host::HostError>> {
+        let (plugin, job) = match lookup_active_job(accessor, &job_id) {
+            Ok(pair) => pair,
+            Err(err) => return Ok(Err(err)),
+        };
+        let trap = JobTrap::BeginCleanup {
+            error_json: error_json.into(),
+        };
+        // The only valid resume carries the cause the host recorded durably;
+        // the guest never gets to proceed to a defer on a plain continue.
+        Ok(match job.yield_and_wait_resume(trap).await {
+            // Forward work is over: the effect whose closure failed terminally
+            // (if any) is still the active step; it never persisted, so its
+            // slot is freed for the first defer instead of reporting a
+            // concurrent step.
+            Ok(SessionResume::Interrupt(cause)) => {
+                plugin.abandon_active_step(&job, cause.clone());
+                Ok(to_wit_cleanup_cause(cause))
+            }
+            Ok(SessionResume::Continue | SessionResume::Deliver(_)) => Err(
+                host::HostError::Protocol("begin-cleanup resumed without a cleanup cause".into()),
+            ),
+            Ok(SessionResume::Stop) => unreachable!(),
+            Err(err) => Err(err),
+        })
     }
 }
 
@@ -494,6 +674,12 @@ impl metastore::Host for SharedWashCtx {
     }
 }
 
+#[derive(Default)]
+struct JobStepMetas {
+    ctx_id: Arc<str>,
+    steps: Vec<host::StepMeta>,
+}
+
 pub struct WflowPlugin {
     pending_workloads: DHashMap<Arc<str>, HashSet<Arc<str>>>,
 
@@ -501,10 +687,9 @@ pub struct WflowPlugin {
     active_workloads: RwLock<HashMap<Arc<str>, Arc<WflowWorkload>>>,
     // wflow key -> workload_id
     active_keys: DHashMap<Arc<str>, Arc<str>>,
-    // job id ->
-    active_jobs: RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>,
-    // ctx id -> job id
-    active_contexts: DHashMap<Arc<str>, Arc<str>>,
+    // ctx id -> active job
+    active_jobs: Arc<RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>>,
+    job_step_metas: std::sync::Mutex<HashMap<Arc<str>, JobStepMetas>>,
     metastore: Arc<dyn MetdataStore>,
 }
 
@@ -515,7 +700,7 @@ impl WflowPlugin {
             pending_workloads: default(),
             active_keys: default(),
             active_jobs: default(),
-            active_contexts: default(),
+            job_step_metas: default(),
             metastore,
         }
     }
@@ -531,24 +716,85 @@ impl WflowPlugin {
     }
 
     pub fn job_id_of_ctx(&self, wcx: &SharedWashCtx) -> Option<Arc<str>> {
-        self.active_contexts
+        self.active_jobs
+            .read()
+            .expect(ERROR_MUTEX)
             .get(&wcx.active_ctx.id[..])
-            .map(|val| Arc::clone(val.value()))
+            .map(|job| Arc::clone(&job.job_id))
+    }
+
+    fn validate_and_record_meta(
+        &self,
+        job: &ActiveJobCtx,
+        replay: Option<&ReplayStep>,
+        step_id: u64,
+        meta: &host::StepMeta,
+    ) -> Result<(), host::HostError> {
+        let expected_kind = replay.and_then(|step| step.kind).map(|kind| match kind {
+            wflow_core::StepKind::Effect => host::StepKind::Effect,
+            wflow_core::StepKind::Sleep => host::StepKind::Sleep,
+            wflow_core::StepKind::Recv => host::StepKind::Recv,
+            wflow_core::StepKind::Defer => host::StepKind::Defer,
+        });
+        if let Some(kind) = expected_kind
+            && kind != meta.kind
+            && !matches!(
+                (kind, meta.kind),
+                (host::StepKind::Effect, host::StepKind::Defer)
+            )
+        {
+            return Err(host::HostError::NondeterministicReplay(
+                host::NondeterministicReplayError {
+                    step_id,
+                    expected: host::StepMeta {
+                        kind,
+                        name: meta.name.clone(),
+                    },
+                    found: meta.clone(),
+                },
+            ));
+        }
+        let mut all_metas = self.job_step_metas.lock().expect(ERROR_MUTEX);
+        let Some(metas) = all_metas.get_mut(&job.job_id) else {
+            return Ok(());
+        };
+        if let Some(expected) = metas.steps.get(step_id as usize) {
+            if expected != meta {
+                return Err(host::HostError::NondeterministicReplay(
+                    host::NondeterministicReplayError {
+                        step_id,
+                        expected: expected.clone(),
+                        found: meta.clone(),
+                    },
+                ));
+            }
+        } else if metas.ctx_id == job.ctx_id && metas.steps.len() == step_id as usize {
+            metas.steps.push(meta.clone());
+        }
+        Ok(())
+    }
+
+    /// Abandons `job`'s uncommitted active step for cleanup: a wait the host
+    /// interrupted, or an effect whose closure failed terminally. It never
+    /// persisted, so its step slot is the one the first defer takes: the
+    /// cursor stays put and the boundary identity recorded for the slot is
+    /// dropped, matching what a cold replay in cleanup records there.
+    fn abandon_active_step(&self, job: &ActiveJobCtx, cause: CleanupCause) {
+        job.record_cleanup(cause);
+        let Some(active) = job.active_step.lock().expect(ERROR_MUTEX).take() else {
+            return;
+        };
+        let mut all_metas = self.job_step_metas.lock().expect(ERROR_MUTEX);
+        if let Some(metas) = all_metas.get_mut(&job.job_id)
+            && metas.ctx_id == job.ctx_id
+            && metas.steps.len() == active.step_id as usize + 1
+        {
+            metas.steps.truncate(active.step_id as usize);
+        }
     }
 
     fn drop_session_handle(&self, session: SessionHandle) {
-        session
-            .resume_tx
-            .send(SessionResume::Stop)
-            .inspect_err(|err| warn_loc!(ERROR_CHANNEL, ?err))
-            .ok();
-        session.cancel_token.cancel();
-        session.join_handle.abort();
-        self.active_contexts.remove(&session.ctx_id);
-        self.active_jobs
-            .write()
-            .expect(ERROR_MUTEX)
-            .remove(&session.job_id);
+        drop(session);
     }
 
     fn trap_to_result(trap: JobTrap) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
@@ -559,6 +805,17 @@ impl WflowPlugin {
                     retry_policy: err.retry_policy.map(|policy| match policy {
                         types::RetryPolicy::Immediate => {
                             wflow_core::partition::RetryPolicy::Immediate
+                        }
+                        types::RetryPolicy::Fixed(fixed) => {
+                            wflow_core::partition::RetryPolicy::Fixed {
+                                delay_ms: fixed.delay_ms,
+                            }
+                        }
+                        types::RetryPolicy::CappedExponential(exp) => {
+                            wflow_core::partition::RetryPolicy::CappedExponential {
+                                base_ms: exp.base_ms,
+                                cap_ms: exp.cap_ms,
+                            }
                         }
                     }),
                 }
@@ -574,6 +831,7 @@ impl WflowPlugin {
                 start_at,
                 end_at,
                 attempt_id,
+                ..
             } => Ok(job_events::JobRunResult::StepEffect(
                 job_events::JobEffectResult {
                     step_id,
@@ -588,6 +846,7 @@ impl WflowPlugin {
                 attempt_id,
                 start_at,
                 deets,
+                ..
             } => Ok(job_events::JobRunResult::StepWait(
                 job_events::JobWaitResult {
                     step_id,
@@ -606,14 +865,24 @@ impl WflowPlugin {
             JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
                 value_json: value_json.into(),
             }),
+            JobTrap::BeginCleanup { .. } => {
+                unreachable!("begin-cleanup is acknowledged in wait_for_session_yield")
+            }
         }
     }
 
+    /// Instantiates the workload and starts `wflow_key` as `job_id`, replaying
+    /// `replay` before any step closure runs. `cleanup` seeds the session of a
+    /// job that already entered cleanup durably: its committed forward steps
+    /// replay and the first uncommitted forward boundary is interrupted.
     async fn start_session(
         &self,
         workload: &Arc<WflowWorkload>,
         job_id: Arc<str>,
-        journal: state::JobState,
+        wflow_key: &str,
+        args_json: String,
+        replay: Vec<ReplayStep>,
+        cleanup: Option<CleanupCause>,
     ) -> Result<SessionHandle, job_events::JobRunResult> {
         let mut store = workload
             .resolved_handle
@@ -633,29 +902,37 @@ impl WflowPlugin {
             ctx: types::JobCtx {
                 job_id: job_id.to_string(),
             },
-            wflow_key: journal.wflow.key.clone(),
-            args_json: journal.init_args_json.to_string(),
+            wflow_key: wflow_key.to_owned(),
+            args_json,
         };
         let ctx_id = Arc::clone(&store.data().active_ctx.id);
+        {
+            let mut all_metas = self.job_step_metas.lock().expect(ERROR_MUTEX);
+            let metas = all_metas.entry(Arc::clone(&job_id)).or_default();
+            metas.ctx_id = Arc::clone(&ctx_id);
+            metas.steps.truncate(replay.len());
+        }
         let (yield_tx, yield_rx) = mpsc::unbounded_channel();
         let (resume_tx, resume_rx) = mpsc::unbounded_channel();
         let pause_cancel = CancellationToken::new();
-        let _old = self.active_jobs.write().expect(ERROR_MUTEX).insert(
-            Arc::clone(&job_id),
-            ActiveJobCtx {
-                yield_tx: yield_tx.clone(),
-                resume_rx: tokio::sync::Mutex::new(resume_rx),
-                pause_cancel: pause_cancel.clone(),
-                journal: std::sync::Mutex::new(journal),
-                cur_step: default(),
-                active_step: None.into(),
-            }
-            .into(),
-        );
+        let active_job = Arc::new(ActiveJobCtx {
+            job_id: Arc::clone(&job_id),
+            yield_tx: yield_tx.clone(),
+            resume_rx: resume_rx.into(),
+            pause_cancel: pause_cancel.clone(),
+            replay: std::sync::Mutex::new(replay),
+            cleanup: std::sync::Mutex::new(cleanup),
+            ctx_id: Arc::clone(&ctx_id),
+            cur_step: default(),
+            active_step: None.into(),
+        });
+        let _old = self
+            .active_jobs
+            .write()
+            .expect(ERROR_MUTEX)
+            .insert(Arc::clone(&ctx_id), Arc::clone(&active_job));
         assert!(_old.is_none(), "fishy");
 
-        self.active_contexts
-            .insert(Arc::clone(&ctx_id), Arc::clone(&job_id));
         let join_handle = tokio::spawn({
             let cancel_token = pause_cancel.clone();
             async move {
@@ -697,10 +974,12 @@ impl WflowPlugin {
                 entry_id: 0,
                 effect_idx: 0,
             },
+            active_job,
             resume_tx,
             yield_rx,
             cancel_token: pause_cancel,
             join_handle,
+            jobs: Arc::clone(&self.active_jobs),
         })
     }
 
@@ -709,23 +988,43 @@ impl WflowPlugin {
         session: &mut SessionHandle,
         cancel_token: &CancellationToken,
     ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
-        let trap = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => {
-                debug!("cancel token lit");
-                session.request_cancel();
-                return Ok(job_events::JobRunResult::Aborted);
+        loop {
+            let trap = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    debug!("cancel token lit");
+                    session.request_cancel();
+                    return Ok(job_events::JobRunResult::Aborted);
+                }
+                trap = session.yield_rx.recv() => trap
+            };
+            let Some(trap) = trap else {
+                return Err(job_events::JobRunResult::WorkerErr(
+                    job_events::JobRunWorkerError::Other {
+                        msg: "session loop closed without yielding".into(),
+                    },
+                ));
+            };
+            // The legacy partition journal has no cleanup phase to record the
+            // cause in, so it is acknowledged NON-durably: the defers still run
+            // on a terminal error, but a crash mid-cleanup re-runs forward work
+            // on the next run instead of resuming compensation. Only the
+            // authority runtime makes this durable; this path is slated for
+            // obsolete-path review.
+            if let JobTrap::BeginCleanup { error_json } = trap {
+                if !session.interrupt(CleanupCause::Failed {
+                    error: error_json.to_string(),
+                }) {
+                    return Err(job_events::JobRunResult::WorkerErr(
+                        job_events::JobRunWorkerError::Other {
+                            msg: "session stopped before cleanup was acknowledged".into(),
+                        },
+                    ));
+                }
+                continue;
             }
-            trap = session.yield_rx.recv() => trap
-        };
-        let Some(trap) = trap else {
-            return Err(job_events::JobRunResult::WorkerErr(
-                job_events::JobRunWorkerError::Other {
-                    msg: "session loop closed without yielding".into(),
-                },
-            ));
-        };
-        Self::trap_to_result(trap)
+            return Self::trap_to_result(trap);
+        }
     }
 }
 
@@ -939,9 +1238,20 @@ impl service::WflowServiceHost for WflowPlugin {
                 session: None,
             };
         };
-        let start_session = |journal| async {
-            self.start_session(&workload, Arc::clone(&job_id), journal)
+        let start_session = |journal: state::JobState| {
+            let workload = &workload;
+            let job_id = Arc::clone(&job_id);
+            async move {
+                self.start_session(
+                    workload,
+                    job_id,
+                    &journal.wflow.key,
+                    journal.init_args_json.to_string(),
+                    replay_from_job_state(&journal),
+                    None,
+                )
                 .await
+            }
         };
         let mut session = if let Some(mut session_box) = session.take() {
             let session = session_box
@@ -960,7 +1270,7 @@ impl service::WflowServiceHost for WflowPlugin {
                     .active_jobs
                     .read()
                     .expect(ERROR_MUTEX)
-                    .contains_key(&job_id);
+                    .contains_key(&session.ctx_id);
             if !session_valid {
                 self.drop_session_handle(session);
                 match start_session(journal.clone()).await {
@@ -973,14 +1283,8 @@ impl service::WflowServiceHost for WflowPlugin {
                     }
                 }
             } else {
-                let active_job = self
-                    .active_jobs
-                    .read()
-                    .expect(ERROR_MUTEX)
-                    .get(&job_id)
-                    .cloned()
-                    .expect("active job missing for valid session");
-                *active_job.journal.lock().expect(ERROR_MUTEX) = journal.clone();
+                *session.active_job.replay.lock().expect(ERROR_MUTEX) =
+                    replay_from_job_state(&journal);
                 if session.resume_tx.send(SessionResume::Continue).is_err() {
                     self.drop_session_handle(session);
                     match start_session(journal.clone()).await {

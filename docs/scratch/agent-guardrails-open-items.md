@@ -31,7 +31,7 @@ All in `src/xtask/` (`cargo x …`), no separate checker crate:
   until `cargo x guardrails bless` lowers it. `bless` never raises or adds. `adopt` refuses
   to run when a policy already exists.
 - `cargo x api --all --check|--bless` — `public-api.txt` per pilot crate (`big_sync_core`,
-  `daybook_ffi`, `daybook_pdk`, `daybook_types`, `wflow_sdk`) with exposed-external-crate
+  `daybook_ffi`, `daybook_pdk`, `daybook_types`, `wflow_wdk`) with exposed-external-crate
   header; failure prints added/removed items, newly exposed crates and affected consumers.
   Syntactic (syn), not rustdoc-JSON: no auto-trait/bounds resolution yet (§10 item).
 - `cargo x plan <files>`, `cargo x overlap --base <trunk>`, `cargo x record/verify`
@@ -156,7 +156,7 @@ splitting work into issues or PRs. Do not delete unfinished rows during a handof
 | ID | Approval / current state | Evidence and next acceptance criteria |
 |---|---|---|
 | GR-01 | **Approved, reversed without approval**: component-exported plug manifest | Turns 9–10; user explicitly approved WIT changes and opt-in Wasmtime (lines 931, 970). At lines 983–996 the unrelated “don't use offline eval” instruction was misread as dropping the runner. `src/xtask/main.rs:214` still runs native `--bin manifest`. Restore component export while preserving manifest/routines crates and native e2e tests; ordinary xtask builds must exclude Wasmtime. Verify the manifest extracted from the shipped component and OCI round-trip. No operator reversal is recorded. |
-| GR-02 | **Approved, partial; cleanup audit required**: retain only live `api_utils_rs` code | Turn 16 (lines 1836, 1863–1867, 1991). `src/daybook_types/wit.rs:47` and `:60` retain WIT `FacetMeta`/`Dmeta`, the codec moved to `wasm_utils_rs`, and `daybook_types/Cargo.toml:24` depends on it unconditionally. Recheck consumers including re-exports, macros and native tests; remove genuinely unused WIT types/codec/dependencies and recheck native/WASI contracts and API snapshots. Do not confuse these with live `daybook_types::doc` types of the same names. Audit `wflow_sdk`/`daybook_pdk` native consumers separately; root membership or native binding generation alone is not proof of a defect. |
+| GR-02 | **Approved, partial; cleanup audit required**: retain only live `api_utils_rs` code | Turn 16 (lines 1836, 1863–1867, 1991). `src/daybook_types/wit.rs:47` and `:60` retain WIT `FacetMeta`/`Dmeta`, the codec moved to `wasm_utils_rs`, and `daybook_types/Cargo.toml:24` depends on it unconditionally. Recheck consumers including re-exports, macros and native tests; remove genuinely unused WIT types/codec/dependencies and recheck native/WASI contracts and API snapshots. Do not confuse these with live `daybook_types::doc` types of the same names. Audit `wflow_wdk`/`daybook_pdk` native consumers separately; root membership or native binding generation alone is not proof of a defect. |
 | GR-03 | **Partial**: architecture policy is narrower than its fields imply | Turns 1–3, §5.4. `Policy::role` and `allow_external_api_types` in `src/xtask/guardrails/policy.rs` are serialized but do not enforce layer direction or external-type restrictions. Dependency allowlists do work. Agree the role/edge semantics, then enforce or explicitly remove nonoperative policy fields, with negative tests. Network/fs/DB/spawn capability metadata remains proposed (already listed in §5.4), not implemented; static dependency checks cannot prove absence of effects. |
 | GR-04 | **Partial**: compiler-resolved API snapshots | Turns 0–3, §10. Current `syn` snapshots are useful but configuration is recorded in the header, not used to resolve the API. Add rustdoc-JSON extraction per supported target/features, public re-exports, bounds/auto traits and external types; pin tooling with the compiler and test a cfg-only and Send/Sync-only change. Keep intentional breaking changes reviewable, not forbidden. |
 | GR-05 | **Partial / calibration open**: public-surface and coupling metrics | Turn 2, §4.1. `Metric::public_items` is counted per module, not checked as a crate export budget. Define reachable authored exports and report per-crate API size, fan-out/reverse fan-out; calibrate before proposing new budgets. Existing module/type/function/match-arm/test-module gates are implemented. Do not invent a coupling gate or a new raw-file-length gate. |
@@ -440,7 +440,7 @@ coordination.
       per-symbol exemptions. In-file markers were dropped: a marker edits the file it
       exempts, which is exactly the file two branches are already fighting over.
 - [x] **Q3 Which crates pilot public-API snapshots.** Done for `daybook_types`,
-      `daybook_ffi`, `daybook_pdk`, `wflow_sdk`, `big_sync_core` (`[api]` in their policies).
+      `daybook_ffi`, `daybook_pdk`, `wflow_wdk`, `big_sync_core` (`[api]` in their policies).
 - [ ] **Q4 Pedantic clippy measurement — approved, not run (GR-06).** Turn 3 approved
       the proposed measurement on `utils_rs`, `big_sync_core`, `daybook_types`.
       Run it and report counts; selecting/enabling lints is the subsequent decision.

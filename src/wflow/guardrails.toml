@@ -7,6 +7,7 @@ allowed_dependencies = [
     "wash_plugin_wflow",
     "wflow_core",
     "wflow_tokio",
+    "wflow_wdk",
 ]
 allow_external_api_types = false
 
@@ -72,3 +73,6 @@ ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
 reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[migrations]
+"src/wflow/kvstore/sqlite/migrations/001_atomic.sql" = "0ec4591d14812006b80ab9db469874fa35762f02803eaed26bc5733b6214e5c3"

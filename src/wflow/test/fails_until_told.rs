@@ -93,16 +93,81 @@ async fn test_fails_until_told() -> Res<()> {
     // Wait until there are no active jobs (job completed or archived)
     test_cx.wait_until_no_active_jobs(10).await?;
 
-    tracing::info!("Second run completed, getting snapshot");
+    tracing::info!("Second run completed, checking the run trace");
 
-    // Snapshot the full partition log
-    test_cx
-        .assert_partition_log_snapshot("fails_until_told_partition_log")
-        .await?;
+    // The legacy scheduler re-issues a transiently failed run immediately, so
+    // the guest's next flag read races the `set_value` above: how many
+    // transient rounds land before the flag is visible depends on scheduling.
+    // Assert the trace shape instead of an exact log snapshot.
+    let log = test_cx.get_partition_log_snapshot().await?;
+    let trace = run_trace(&log, &job_id);
+    let transient_rounds = trace
+        .iter()
+        .take_while(|run| run.starts_with("transient:"))
+        .count();
+    assert!(
+        transient_rounds >= 1,
+        "expected at least one transient round, got {trace:?}"
+    );
+    assert!(
+        trace[..transient_rounds]
+            .iter()
+            .all(|run| run.contains("waiting for flag to be set")),
+        "unexpected transient error in {trace:?}"
+    );
+    assert_eq!(
+        &trace[transient_rounds..],
+        ["step 0 attempt 0 ok", "success"],
+        "unexpected tail in {trace:?}"
+    );
 
     // Cleanup
     test_cx.stop().await?;
     tracing::info!("test complete");
 
     Ok(())
+}
+
+/// One entry per run of `job_id`, in run order, classified by its result.
+fn run_trace(
+    log: &[(u64, wflow_core::partition::log::PartitionLogEntry)],
+    job_id: &str,
+) -> Vec<String> {
+    use wflow_core::partition::job_events::JobEffectResultDeets;
+    use wflow_core::partition::job_events::JobError;
+    use wflow_core::partition::job_events::JobRunResult;
+    use wflow_core::partition::log::PartitionLogEntry;
+
+    let mut trace = Vec::new();
+    for (_, entry) in log {
+        let PartitionLogEntry::JobEffectResult(event) = entry else {
+            continue;
+        };
+        if event.job_id.as_ref() != job_id {
+            continue;
+        }
+        assert_eq!(
+            event.run_id as usize,
+            trace.len(),
+            "runs must be contiguous"
+        );
+        trace.push(match &event.result {
+            JobRunResult::WflowErr(JobError::Transient { error_json, .. }) => {
+                format!("transient:{error_json}")
+            }
+            JobRunResult::StepEffect(step) => {
+                let outcome = match &step.deets {
+                    JobEffectResultDeets::Success { .. } => "ok",
+                    JobEffectResultDeets::EffectErr(_) => "err",
+                };
+                format!(
+                    "step {} attempt {} {outcome}",
+                    step.step_id, step.attempt_id
+                )
+            }
+            JobRunResult::Success { .. } => "success".to_string(),
+            other => format!("{other:?}"),
+        });
+    }
+    trace
 }

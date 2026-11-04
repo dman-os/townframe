@@ -485,7 +485,7 @@ reported phantom `E0437`/`E0407` ("`Render` is not a member of trait
 `RendererRegistry`") while the same crate compiled clean under `-p clay_dioxus`;
 `cargo clean -p clay_host -p clay_dioxus` fixed it — when a trait member is "not
 a member" in one graph but fine in another, suspect the cache before the code.
-And workspace-wide `cargo clippy --all-features` fails in `wflow_sdk` (unfetched
+And workspace-wide `cargo clippy --all-features` fails in `wflow_wdk_wasm` (unfetched
 WIT deps: package `townframe:wflow` not found) — pre-existing, outside the
 gate's package list, same family as the `api_utils_rs` rotation wipe; its fix is
 a per-crate `wash wit fetch`, not a gate change.

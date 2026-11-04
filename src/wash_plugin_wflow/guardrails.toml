@@ -5,6 +5,7 @@ allowed_dependencies = [
     "utils_rs",
     "wflow_core",
     "wflow_tokio",
+    "wflow_wdk",
 ]
 allow_external_api_types = false
 
@@ -21,7 +22,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_SHARED_ASYNC_STATE"
 path = "src/wash_plugin_wflow/lib.rs"
 symbol = "module"
-ceiling = 4
+ceiling = 3
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
 reference = "docs/scratch/agent-guardrails-open-items.md"

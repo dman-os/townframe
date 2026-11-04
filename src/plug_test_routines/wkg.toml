@@ -5,4 +5,4 @@
 "townframe:mltools" = { path = "../mltools/wit" }
 "townframe:api-utils" = { path = "../wasm_utils_rs/wit" }
 "townframe:wflow" = { path = "../wash_plugin_wflow/wit" }
-"townframe:wflow-sdk" = { path = "../wflow_sdk/wit" }
+"townframe:wflow-wdk" = { path = "../wflow_wdk_wasm/wit" }

@@ -178,7 +178,6 @@ pub fn reduce_job_run_event(
     let Some(&mut state::JobState {
         ref mut runs,
         ref mut steps,
-        ref override_wflow_retry_policy,
         ref cancelling,
         ref mut pending_messages,
         ref mut active_wait,
@@ -206,24 +205,22 @@ pub fn reduce_job_run_event(
             *active_wait = None;
             archive_job(state, &job_id);
         }
-        job_events::JobRunResult::WflowErr(JobError::Transient { retry_policy, .. }) => {
+        job_events::JobRunResult::WflowErr(JobError::Transient { .. }) => {
             if *cancelling {
                 archive_job(state, &job_id);
             } else {
                 *active_wait = None;
-                let retry_policy = retry_policy
-                    .clone()
-                    .or(override_wflow_retry_policy.clone())
-                    .unwrap_or(crate::partition::RetryPolicy::Immediate);
-                match retry_policy {
-                    crate::partition::RetryPolicy::Immediate => effects.push(PartitionEffect {
-                        job_id,
-                        deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
-                            run_id: runs.len() as u64,
-                            preferred_worker_id: None,
-                        }),
+                // The legacy scheduler has no deadline queue, so the resolved
+                // retry policy cannot delay anything: every transient failure
+                // re-issues the run immediately. The durable authority
+                // (wflow_tokio) is what honours `Fixed`/`CappedExponential`.
+                effects.push(PartitionEffect {
+                    job_id,
+                    deets: effects::PartitionEffectDeets::RunJob(effects::RunJobAttemptDeets {
+                        run_id: runs.len() as u64,
+                        preferred_worker_id: None,
                     }),
-                }
+                });
             }
         }
         job_events::JobRunResult::StepEffect(res) => {
@@ -257,30 +254,21 @@ pub fn reduce_job_run_event(
                         });
                     }
                 }
-                job_events::JobEffectResultDeets::EffectErr(JobError::Transient {
-                    retry_policy,
-                    ..
-                }) => {
+                job_events::JobEffectResultDeets::EffectErr(JobError::Transient { .. }) => {
                     if *cancelling {
                         archive_job(state, &job_id);
                     } else {
-                        match retry_policy
-                            .as_ref()
-                            .or(override_wflow_retry_policy.as_ref())
-                            .unwrap_or(&crate::partition::RetryPolicy::Immediate)
-                        {
-                            crate::partition::RetryPolicy::Immediate => {
-                                effects.push(PartitionEffect {
-                                    job_id,
-                                    deets: effects::PartitionEffectDeets::RunJob(
-                                        effects::RunJobAttemptDeets {
-                                            run_id: next_run_id,
-                                            preferred_worker_id: None,
-                                        },
-                                    ),
-                                })
-                            }
-                        }
+                        // No deadline queue in the legacy scheduler; see the
+                        // run-result arm above.
+                        effects.push(PartitionEffect {
+                            job_id,
+                            deets: effects::PartitionEffectDeets::RunJob(
+                                effects::RunJobAttemptDeets {
+                                    run_id: next_run_id,
+                                    preferred_worker_id: None,
+                                },
+                            ),
+                        });
                     }
                 }
             }

@@ -145,3 +145,143 @@ impl LogStore for KvStoreLog {
         .boxed()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::kvstore::CasGuard;
+    use futures::FutureExt;
+    use futures::channel::oneshot;
+    use std::sync::Mutex;
+
+    struct GatedStore {
+        inner: Arc<dyn KvStore + Send + Sync>,
+        release_first_write: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl GatedStore {
+        fn new() -> (Arc<Self>, oneshot::Sender<()>) {
+            let (release, released) = oneshot::channel();
+            let inner = Arc::new(Arc::new(DHashMap::<Arc<[u8]>, Arc<[u8]>>::default()));
+            (
+                Arc::new(Self {
+                    inner,
+                    release_first_write: Mutex::new(Some(released)),
+                }),
+                release,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl KvStore for GatedStore {
+        async fn get(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
+            self.inner.get(key).await
+        }
+
+        async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>) -> Res<Option<Arc<[u8]>>> {
+            if key.as_ref() == 1u64.to_le_bytes() {
+                let released = self.release_first_write.lock().unwrap().take().unwrap();
+                released.await?;
+            }
+            self.inner.set(key, value).await
+        }
+
+        async fn del(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
+            self.inner.del(key).await
+        }
+
+        async fn increment(&self, key: &[u8], delta: i64) -> Res<i64> {
+            self.inner.increment(key, delta).await
+        }
+
+        async fn new_cas(&self, key: &[u8]) -> Res<CasGuard> {
+            self.inner.new_cas(key).await
+        }
+    }
+
+    #[test]
+    fn legacy_split_append_skips_a_late_entry_and_regresses_notification() -> Res<()> {
+        futures::executor::block_on(async {
+            let (store, release) = GatedStore::new();
+            let log = KvStoreLog::new(Arc::clone(&store) as _).await?;
+            let mut slow = Box::pin(log.append(b"first"));
+            assert!(futures::poll!(&mut slow).is_pending());
+            assert_eq!(log.latest_idx().await?, 1);
+            assert_eq!(store.inner.get(&1u64.to_le_bytes()).await?, None);
+
+            assert_eq!(log.append(b"second").await?, 2);
+            assert_eq!(*log.local_commited_idx_rx.borrow(), 2);
+            let mut tail = log.tail(1);
+            let first = tail.next().now_or_never().unwrap().unwrap()?;
+            let second = tail.next().now_or_never().unwrap().unwrap()?;
+            assert_eq!((first.idx, first.val), (1, None));
+            assert_eq!(
+                (second.idx, second.val.as_deref()),
+                (2, Some(&b"second"[..]))
+            );
+
+            release.send(()).unwrap();
+            assert_eq!(slow.await?, 1);
+            assert_eq!(*log.local_commited_idx_rx.borrow(), 1);
+            assert_eq!(log.latest_idx().await?, 2);
+            assert!(tail.next().now_or_never().is_none());
+            let recovered = log.tail(1).next().now_or_never().unwrap().unwrap()?;
+            assert_eq!(
+                (recovered.idx, recovered.val.as_deref()),
+                (1, Some(&b"first"[..]))
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn legacy_interrupted_append_reopens_with_an_unpublished_frontier() -> Res<()> {
+        futures::executor::block_on(async {
+            let (store, release) = GatedStore::new();
+            {
+                let log = KvStoreLog::new(Arc::clone(&store) as _).await?;
+                let mut interrupted = Box::pin(log.append(b"never published"));
+                assert!(futures::poll!(&mut interrupted).is_pending());
+                assert_eq!(log.latest_idx().await?, 1);
+            }
+            assert!(release.send(()).is_err());
+            let reopened = KvStoreLog::new(Arc::clone(&store.inner)).await?;
+            assert_eq!(reopened.latest_idx().await?, 1);
+            assert_eq!(store.inner.get(&1u64.to_le_bytes()).await?, None);
+            let mut tail = reopened.tail(1);
+            assert!(tail.next().now_or_never().is_none());
+            assert_eq!(reopened.append(b"after restart").await?, 2);
+            let hole = tail.next().now_or_never().unwrap().unwrap()?;
+            let second = tail.next().now_or_never().unwrap().unwrap()?;
+            assert_eq!((hole.idx, hole.val), (1, None));
+            assert_eq!(
+                (second.idx, second.val.as_deref()),
+                (2, Some(&b"after restart"[..]))
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn legacy_reader_handle_is_not_notified_by_another_writer_handle() -> Res<()> {
+        futures::executor::block_on(async {
+            let store: Arc<dyn KvStore + Send + Sync> =
+                Arc::new(Arc::new(DHashMap::<Arc<[u8]>, Arc<[u8]>>::default()));
+            let reader = KvStoreLog::new(Arc::clone(&store)).await?;
+            let writer = KvStoreLog::new(store).await?;
+            let mut tail = reader.tail(1);
+            assert!(tail.next().now_or_never().is_none());
+            assert_eq!(writer.append(b"committed").await?, 1);
+            assert_eq!(reader.latest_idx().await?, 1);
+            assert!(tail.next().now_or_never().is_none());
+            let fresh = reader.tail(1).next().now_or_never().unwrap().unwrap()?;
+            assert_eq!(
+                (fresh.idx, fresh.val.as_deref()),
+                (1, Some(&b"committed"[..]))
+            );
+            Ok(())
+        })
+    }
+}

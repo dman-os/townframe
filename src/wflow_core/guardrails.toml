@@ -8,7 +8,7 @@ allow_external_api_types = false
 code = "ERROR_FN_LENGTH"
 path = "src/wflow_core/partition/reduce.rs"
 symbol = "module::reduce_job_run_event"
-ceiling = 178
+ceiling = 166
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
@@ -102,3 +102,18 @@ ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
 reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[builds.native]
+features = [
+    "serde",
+    "test-harness",
+]
+required_features = []
+default_features = true
+powerset = false
+
+[builds.wasm32-wasip3]
+features = []
+required_features = []
+default_features = false
+powerset = false

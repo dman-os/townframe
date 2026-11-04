@@ -41,7 +41,7 @@ sqlite_rs.workspace = true
 
 #
 # wasm
-wash-runtime = { workspace = true, features = ["wasi-config"] }
+wash-runtime = { workspace = true, default-features = true, features = ["wasi-config"] }
 wasmtime = { workspace = true, optional = true }
 
 #
@@ -54,6 +54,9 @@ tempfile = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
+wflow_wdk.workspace = true
+serde.workspace = true
+
 #
 # testing
 insta = { workspace = true, features = ["json"] }

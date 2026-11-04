@@ -1,6 +1,10 @@
 use crate::interlude::*;
 
 #[cfg(test)]
+mod authority_conformance;
+#[cfg(test)]
+mod authority_runtime;
+#[cfg(test)]
 mod cancel_job;
 #[cfg(test)]
 mod effect_chain_perf;
@@ -11,6 +15,8 @@ mod fails_until_told;
 #[cfg(any(test, feature = "test-harness"))]
 #[expect(unused)]
 mod keyvalue_plugin;
+#[cfg(test)]
+mod native_wasm_conformance;
 #[cfg(test)]
 mod recover_from_log;
 #[cfg(test)]
@@ -152,6 +158,7 @@ impl WflowTestContextBuilder {
         ]);
 
         let host = crate::build_wash_host(self.plugins).await?;
+        let local_native_host = Arc::new(wflow_tokio::local_native_host::LocalNativeHost::new());
         Ok(WflowTestContext {
             temp_dir,
             metastore,
@@ -160,6 +167,7 @@ impl WflowTestContextBuilder {
             partition_log,
             ingress,
             keyvalue_plugin,
+            local_native_host,
             initial_workloads: self.initial_workloads,
             pending_host: Some(host),
             host: None,
@@ -178,6 +186,7 @@ pub struct WflowTestContext {
     pub partition_log: wflow_tokio::partition::PartitionLogRef,
     pub ingress: Arc<crate::ingress::PartitionLogIngress>,
     pub keyvalue_plugin: Arc<keyvalue_plugin::WasiKeyvalue>,
+    pub local_native_host: Arc<wflow_tokio::local_native_host::LocalNativeHost>,
     initial_workloads: Vec<InitialWorkload>,
     pending_host: Option<wash_runtime::host::Host>,
     host: Option<Arc<wash_runtime::host::Host>>,
@@ -244,8 +253,13 @@ impl WflowTestContext {
 
         self.host = Some(host);
 
-        let (worker_handle, working_state) =
-            crate::start_partition_worker(&wcx, Arc::clone(&self.wflow_plugin), 0).await?;
+        let (worker_handle, working_state) = crate::start_partition_worker_with_native_host(
+            &wcx,
+            Arc::clone(&self.wflow_plugin),
+            Arc::clone(&self.local_native_host),
+            0,
+        )
+        .await?;
 
         self.worker_handle = Some(worker_handle);
         self.working_state = Some(working_state);
@@ -290,6 +304,21 @@ impl WflowTestContext {
                 .await?;
         }
         register_workload_on_host(workload_id.into(), host.as_ref(), wasm_path, wflow_keys).await
+    }
+
+    pub async fn register_native_wflows(&self, wflow_keys: Vec<String>) -> Res<()> {
+        for key in &wflow_keys {
+            self.metastore
+                .set_wflow(
+                    key,
+                    &metastore::WflowMeta {
+                        key: key.clone(),
+                        service: metastore::WflowServiceMeta::LocalNative,
+                    },
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     /// Schedule a workflow job
@@ -391,11 +420,39 @@ impl WflowTestContext {
                     // Timeout reached
                     let final_elapsed = start.elapsed();
                     let final_counts = working_state.get_job_counts().await;
+                    let active_summary = {
+                        let jobs = working_state.read_jobs().await;
+                        jobs.active
+                            .iter()
+                            .map(|(id, state)| {
+                                format!(
+                                    "{id}(runs={},steps={})",
+                                    state.runs.len(),
+                                    state.steps.len()
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let effects_summary = {
+                        let effects = working_state.read_effects().await;
+                        effects
+                            .iter()
+                            .map(|(id, eff)| format!("{id:?}:{}", eff.job_id))
+                            .collect::<Vec<_>>()
+                    };
+                    let last_applied = working_state
+                        .last_applied_entry_id
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let latest_idx = self.logstore.latest_idx().await.unwrap_or(0);
                     return Err(ferr!(
-                        "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
+                        "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {}, last_applied: {}, latest_idx: {}, active: {:?}, effects: {:?})",
                         timeout_secs,
                         final_elapsed,
-                        final_counts.active
+                        final_counts.active,
+                        last_applied,
+                        latest_idx,
+                        active_summary,
+                        effects_summary
                     ));
                 }
             }
@@ -522,6 +579,12 @@ impl WflowTestContext {
             .await
             .to_eyre()?;
         Ok(())
+    }
+
+    pub async fn get_keyvalue(&self, bucket: &str, key: &str) -> Option<Vec<u8>> {
+        self.keyvalue_plugin
+            .get_value("workload_123", bucket, key)
+            .await
     }
 
     /// Cleanup: shutdown all workers

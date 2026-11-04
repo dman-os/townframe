@@ -17,6 +17,9 @@ pub struct PartitionJobsState {
 pub struct JobState {
     pub init_args_json: Arc<str>,
     pub wflow: WflowMeta,
+    /// Recorded at init and never acted on: this scheduler has no deadline
+    /// queue, so it cannot delay a re-run. Kept because it is durable state;
+    /// the authority in `wflow_tokio` is what resolves retry delays.
     pub override_wflow_retry_policy: Option<RetryPolicy>,
     // FIXME: could be cleaner
     pub cancelling: bool,

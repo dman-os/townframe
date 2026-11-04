@@ -20,10 +20,13 @@ path = "lib.rs"
 #
 # internal
 wflow_core.workspace = true
+wflow_wdk.workspace = true
+wflow_wdk_native.workspace = true
 utils_rs.workspace = true
 
 #
 # encoding
+serde.workspace = true
 serde_json.workspace = true
 
 #
