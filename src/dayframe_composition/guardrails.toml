@@ -1,14 +1,15 @@
 version = 1
 role = "application"
-dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top; daybook_types supplies the facet access vocabulary for the root's composition configuration grant"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
     "clay_dioxus",
+    "clay_collection",
     "clay_docs",
+    "clay_guest_session",
+    "clay_store",
     "clay_host",
     "clay_mdk",
-    "clay_micro_core",
     "clay_surface",
-    "daybook_types",
     "micro_counter_manifest",
     "micro_sample",
     "micro_settings",

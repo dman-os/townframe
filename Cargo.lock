@@ -4090,13 +4090,14 @@ dependencies = [
 name = "dayframe_composition"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
+ "clay_collection",
  "clay_dioxus",
  "clay_docs",
+ "clay_guest_session",
  "clay_host",
  "clay_mdk",
- "clay_micro_core",
- "clay_surface",
- "daybook_types",
+ "clay_store",
  "dioxus",
  "dioxus-core",
  "dioxus-html",

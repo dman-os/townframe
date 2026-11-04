@@ -16,11 +16,16 @@ use clay_collection::ReadLimits;
 use clay_collection::Stamp;
 use clay_collection::Stamped;
 use clay_collection::WriteBasis;
+use clay_guest_session::capabilities::CapabilityLimits;
+use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::CapabilityRef;
 use clay_guest_session::capabilities::CapabilitySession;
 use clay_guest_session::capabilities::RowAttachment;
+use clay_guest_session::collections::BytesRegistrations;
 use clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG;
+use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionReader;
+use clay_guest_session::collections::CollectionSession;
 use clay_guest_session::collections::CollectionValue;
 use clay_guest_session::collections::ReadFailure;
 use clay_guest_session::collections::RegistrationWriter;
@@ -31,6 +36,9 @@ use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 
 use clay_host::AccessError;
+use clay_host::Activator;
+use clay_host::Host;
+use clay_host::Instance;
 
 /// A value's reference to one of its row's attachments, written under the reserved CBOR tag.
 /// The body alone conveys no authority: the index names an entry of the row's attachment list,
@@ -94,7 +102,7 @@ impl<K, V> Clone for CollectionWatch<K, V> {
 impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
     /// Start mirroring `reader`. Returns the watch and the loop that feeds it, which the
     /// caller owns and must drive until the incarnation closes.
-    pub fn start(
+    pub(crate) fn start(
         reader: CollectionReader,
         capabilities: CapabilitySession,
     ) -> (Self, impl Future<Output = ()> + 'static) {
@@ -151,6 +159,25 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
             },
             feed,
         )
+    }
+
+    /// Mirror `collection` for a participant that is not a micro, such as a shell: `instance`
+    /// is the participant's own instance and `activator` is what its rows' lazy references
+    /// activate through. Returns the watch and the feed loop, which the caller must drive
+    /// until `instance` closes.
+    pub fn observe(
+        host: &Host,
+        instance: &Instance,
+        activator: Activator<CapabilityPublication>,
+        collection: &BytesRegistrations,
+    ) -> Result<(Self, impl Future<Output = ()> + 'static + use<K, V>), AccessError> {
+        let capabilities =
+            CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
+        capabilities.attach_activator(activator);
+        let sessions =
+            CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
+        let reader = sessions.grant(collection.projection())?;
+        Ok(Self::start(reader, capabilities))
     }
 
     /// Every live row (tombstoned keys are hidden), attachments minted for this incarnation.
