@@ -8,7 +8,7 @@ rust-version.workspace = true
 path = "lib.rs"
 
 [dependencies]
-clay_mdk = { workspace = true }
+clay_mdk = { workspace = true, features = ["contract"] }
 micro_layout_manifest = { workspace = true }
 micro_settings_manifest = { workspace = true }
 micro_toolbar_manifest = { workspace = true }

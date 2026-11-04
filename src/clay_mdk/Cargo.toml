@@ -77,7 +77,7 @@ wit = []
 # over the host sessions. A context publishes through the `clay_dioxus::NativeComponents`
 # registry its `Resources` carry. Micro crates depend on this, never on the host-side crates
 # directly.
-in_process = ["dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:ciborium", "dep:tokio", "dep:daybook_types", "dep:dioxus-core", "dep:thiserror", "dep:clay_dioxus"]
+in_process = ["contract", "dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:ciborium", "dep:tokio", "dep:daybook_types", "dep:dioxus-core", "dep:thiserror", "dep:clay_dioxus"]
 # The Dioxus half of the in-process backend: the view-side slot components and hooks. Micros with a host-linked view need this; contract
 # crates and headless compositions do not.
 view = ["in_process", "dep:dioxus"]
@@ -87,9 +87,12 @@ wasmtime = ["view", "dep:clay_rt_wasmtime", "dep:clay_surface"]
 # `wcmp` provider assembly for composition roots that link the browser (or Wasmi) engine.
 # Same provision id as `wasmtime`, different engine; no instruction-fuel control (ADR 018 §5).
 wcmp = ["view", "dep:clay_rt_wcmp", "dep:clay_surface"]
+# Row-value vocabulary for contract crates (attachment references), with no backend. Both
+# backends include it.
+contract = ["dep:ciborium"]
 # Static package pairing: sidecar manifest plus component digest, no engine.
 package = ["dep:blake3"]
 # The guest backend: the same `Context` authoring surface over the WIT imports a wasm micro is
 # linked against, the Dioxus guest VirtualDom adapter (GuestDom, WireMutations), and the
 # `export_micro!` entry point.
-guest = ["wit", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]
+guest = ["wit", "contract", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]

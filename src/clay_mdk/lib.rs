@@ -536,6 +536,12 @@ mod native;
 mod context;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod rows;
+#[cfg(feature = "contract")]
+mod attachment;
+#[cfg(feature = "contract")]
+pub use attachment::Attachment;
+#[cfg(feature = "contract")]
+pub use attachment::CAPABILITY_ATTACHMENT_TAG;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::CallBinding;
 #[cfg(any(feature = "in_process", feature = "guest"))]
@@ -568,8 +574,6 @@ pub use context::RefStatus;
 pub use context::RowAttachment;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Stamp;
-#[cfg(any(feature = "in_process", feature = "guest"))]
-pub use rows::Attachment;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use rows::Collection;
 #[cfg(any(feature = "in_process", feature = "guest"))]
