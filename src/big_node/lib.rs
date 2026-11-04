@@ -92,7 +92,9 @@ pub struct BigNode {
 impl BigNode {
     pub async fn boot(config: Config<'_>) -> Res<(Self, StopToken)> {
         let mut stop = StopToken::default();
-        let boot: Res<Self> = async {
+        // Boxed: booting every service inline makes this future large enough (in debug builds)
+        // that a caller awaiting it, such as a test that reboots a node, overflows its stack.
+        let boot: Res<Self> = Box::pin(async {
             let schemas = Arc::new(config.schemas.with_groups([
                 big_blobs::schema::registration(),
                 big_nodule::schema_group(),
@@ -233,7 +235,7 @@ impl BigNode {
                 plugs,
                 registry_drawer,
             })
-        }
+        })
         .await;
         match boot {
             Ok(node) => Ok((node, stop)),
