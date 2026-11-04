@@ -69,12 +69,14 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
         )
         .await
         .unwrap();
-    let mut nodule = Nodule::new("org.example.artifacts");
-    nodule.handler = Some(Handler {
-        artifact: "handler".into(),
-        extra: Default::default(),
-    });
-    nodule.implements = vec!["org.example.other.ping".into()];
+    let nodule = Nodule {
+        handler: Some(Handler {
+            artifact: "handler".into(),
+            extra: Default::default(),
+        }),
+        implements: vec!["org.example.other.ping".into()],
+        ..Default::default()
+    };
     let mut plug = Plug::new(PLUG.parse().unwrap(), "1.0.0".parse().unwrap());
     plug.artifacts.push(Artifact {
         key: "handler".into(),

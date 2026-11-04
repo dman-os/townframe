@@ -32,7 +32,6 @@ use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::EntryAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugError;
 use big_plugs_core::PlugId;
@@ -45,7 +44,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -336,7 +334,6 @@ pub enum NoduleResolution {
         plug_id: PlugId,
         version: Option<Version>,
         revision: Option<Revision>,
-        nodule_id: Option<String>,
         enabled: bool,
         config: Option<IndexMap<String, Value>>,
         reason: String,
@@ -357,11 +354,10 @@ pub enum Admission {
         admitted: crate::Admitted,
         artifacts: BTreeMap<String, (big_plugs_core::Artifact, crate::inventory::ArtifactState)>,
     },
-    /// The envelope cannot be installed; `version` and `nodule_id` are best-effort reads of the
-    /// raw envelope for the refusal record.
+    /// The envelope cannot be installed; `version` is a best-effort read of the raw envelope for
+    /// the refusal record.
     Refused {
         version: Option<Version>,
-        nodule_id: Option<String>,
         reason: String,
     },
 }
@@ -417,7 +413,6 @@ impl AdmissionCache {
     }
 
     fn compute(plug_id: &PlugId, install: &NoduleInstall) -> Admission {
-        let nodule_id = envelope_nodule_id(&install.envelope);
         let plug = match install.decode_plug() {
             Ok(plug) => plug,
             Err(reason) => {
@@ -427,7 +422,6 @@ impl AdmissionCache {
                         .get("version")
                         .and_then(Value::as_str)
                         .and_then(|v| v.parse::<Version>().ok()),
-                    nodule_id,
                     reason,
                 };
             }
@@ -435,7 +429,6 @@ impl AdmissionCache {
         if &plug.id != plug_id {
             return Admission::Refused {
                 version: Some(plug.version),
-                nodule_id,
                 reason: format!(
                     "install datum key `{plug_id}` does not match envelope id `{}`",
                     plug.id
@@ -451,7 +444,6 @@ impl AdmissionCache {
             },
             Err(err) => Admission::Refused {
                 version: Some(plug.version),
-                nodule_id,
                 reason: err.to_string(),
             },
         }
@@ -715,28 +707,27 @@ impl NoduleConfig {
             }
             if let Some(other_install) = other_entry.install.accepted()
                 && let Admission::Admitted {
-                    nodule: other_nodule,
+                    admitted: other_admitted,
                     ..
                 } = &*cache.admission(other_plug, other_install)
-                && (other_nodule.owns(&nodule.id) || nodule.owns(&other_nodule.id))
+                && let Some(nsid) = admitted.holds.intersection(&other_admitted.holds).next()
             {
                 return Err(InventoryError::AuthorityConflict {
                     id: plug.id.clone(),
-                    nodule_id: nodule.id,
+                    nsid: nsid.clone(),
                     existing_plug: Box::new(other_plug.clone()),
-                    existing_nodule: other_nodule.id.clone(),
                 });
             }
         }
 
         let revision = plug.revision();
-        let (enabled, install_extra, config, configured) = if let Some(existing_entry) =
-            self.entries.get(&plug.id)
-        {
-            if let Some(existing_install) = existing_entry.install.accepted()
-                && let Ok(existing_plug) = existing_install.decode_plug()
-            {
-                if existing_plug.version == plug.version && existing_install.revision != revision {
+        let (enabled, install_extra, config, configured) =
+            if let Some(existing_entry) = self.entries.get(&plug.id) {
+                if let Some(existing_install) = existing_entry.install.accepted()
+                    && let Ok(existing_plug) = existing_install.decode_plug()
+                    && existing_plug.version == plug.version
+                    && existing_install.revision != revision
+                {
                     return Err(InventoryError::Plug(PlugError::Conflict {
                         id: plug.id.clone(),
                         version: Box::new(plug.version.clone()),
@@ -744,58 +735,48 @@ impl NoduleConfig {
                         incoming: revision,
                     }));
                 }
-                if let Ok((existing_nodule, _, _)) = admit_plug_nodule(&existing_plug)
-                    && existing_nodule.id != nodule.id
+                if drawers.is_none()
+                    && let DatumSlot::Invalid { reason, .. } = &existing_entry.grants
                 {
-                    return Err(InventoryError::AuthorityChanged {
-                        id: plug.id.clone(),
-                        existing: existing_nodule.id,
-                        incoming: nodule.id,
-                    });
-                }
-            }
-            if drawers.is_none()
-                && let DatumSlot::Invalid { reason, .. } = &existing_entry.grants
-            {
-                return Err(InventoryError::InvalidContribution {
-                    id: plug.id.clone(),
-                    reason: format!("existing grants datum is invalid: {reason}"),
-                });
-            }
-            let (config, configured) = match &existing_entry.settings {
-                DatumSlot::Absent => (
-                    nodule
-                        .config
-                        .as_ref()
-                        .and_then(|config| config.defaults.clone()),
-                    false,
-                ),
-                // Explicit settings are carried verbatim even when the incoming revision's
-                // schema no longer accepts them (or it declares none): the stored datum is
-                // untouched, `resolve` refuses the nodule with the schema error, and
-                // `configure` validates against this newly installed revision so rewriting the
-                // settings repairs it. Rejecting the upgrade here would wedge the operator,
-                // who could not repair settings against the old revision.
-                DatumSlot::Accepted { value, .. } => (Some(value.values.clone()), true),
-                DatumSlot::Invalid { reason, .. } => {
                     return Err(InventoryError::InvalidContribution {
                         id: plug.id.clone(),
-                        reason: format!("existing settings datum is invalid: {reason}"),
+                        reason: format!("existing grants datum is invalid: {reason}"),
                     });
                 }
+                let (config, configured) = match &existing_entry.settings {
+                    DatumSlot::Absent => (
+                        nodule
+                            .config
+                            .as_ref()
+                            .and_then(|config| config.defaults.clone()),
+                        false,
+                    ),
+                    // Explicit settings are carried verbatim even when the incoming revision's
+                    // schema no longer accepts them (or it declares none): the stored datum is
+                    // untouched, `resolve` refuses the nodule with the schema error, and
+                    // `configure` validates against this newly installed revision so rewriting the
+                    // settings repairs it. Rejecting the upgrade here would wedge the operator,
+                    // who could not repair settings against the old revision.
+                    DatumSlot::Accepted { value, .. } => (Some(value.values.clone()), true),
+                    DatumSlot::Invalid { reason, .. } => {
+                        return Err(InventoryError::InvalidContribution {
+                            id: plug.id.clone(),
+                            reason: format!("existing settings datum is invalid: {reason}"),
+                        });
+                    }
+                };
+                let (enabled, extra) = match &existing_entry.install {
+                    DatumSlot::Accepted { value, .. } => (value.enabled, value.extra.clone()),
+                    _ => (false, Extra::default()),
+                };
+                (enabled, extra, config, configured)
+            } else {
+                let defaults = nodule
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.defaults.clone());
+                (false, Extra::default(), defaults, false)
             };
-            let (enabled, extra) = match &existing_entry.install {
-                DatumSlot::Accepted { value, .. } => (value.enabled, value.extra.clone()),
-                _ => (false, Extra::default()),
-            };
-            (enabled, extra, config, configured)
-        } else {
-            let defaults = nodule
-                .config
-                .as_ref()
-                .and_then(|config| config.defaults.clone());
-            (false, Extra::default(), defaults, false)
-        };
 
         let mut install = NoduleInstall::from_plug(plug, enabled);
         install.extra = install_extra;
@@ -960,57 +941,40 @@ impl NoduleConfig {
     /// not install a nodule.
     pub fn resolve(&self, cache: &AdmissionCache) -> BTreeMap<PlugId, NoduleResolution> {
         let mut results = BTreeMap::new();
-        let mut authorities: BTreeMap<String, Vec<PlugId>> = BTreeMap::new();
-
         for (plug_id, entry) in &self.entries {
-            let Some(resolution) = resolve_entry(plug_id, entry, cache) else {
-                continue;
-            };
-            if let NoduleResolution::Admitted { installed, .. } = &resolution {
-                authorities
-                    .entry(installed.nodule.id.clone())
-                    .or_default()
-                    .push(plug_id.clone());
+            if let Some(resolution) = resolve_entry(plug_id, entry, cache) {
+                results.insert(plug_id.clone(), resolution);
             }
-            results.insert(plug_id.clone(), resolution);
         }
-        cache.retain(self.entries.keys());
-
-        // A plug conflicts with another when one authority equals or dot-prefixes the other.
-        // Looking each authority up by itself, by each of its dotted prefixes and by the key range
-        // of its descendants is O(n * depth) rather than comparing every pair. The smallest
-        // conflicting `PlugId` is reported so the reason is stable.
-        let mut conflicts: BTreeMap<PlugId, String> = BTreeMap::new();
+        // A held NSID has one holder on a node. Both holders of a clash are refused, each
+        // naming the smallest other holder and the first NSID they share so the reason is stable.
+        let mut holders: BTreeMap<&str, Vec<&PlugId>> = BTreeMap::new();
         for (plug_id, resolution) in &results {
-            let NoduleResolution::Admitted { installed, .. } = resolution else {
-                continue;
-            };
-            let id = installed.nodule.id.as_str();
-            let ancestors = id
-                .match_indices('.')
-                .filter_map(|(dot, _)| authorities.get_key_value(&id[..dot]));
-            let same_or_descendants = authorities
-                .range::<str, _>((Bound::Included(id), Bound::Unbounded))
-                .take_while(|(other, _)| Nodule::authority_owns(id, other));
-            let conflict = ancestors
-                .chain(same_or_descendants)
-                .flat_map(|(other_id, holders)| {
-                    holders
-                        .iter()
-                        .filter(|holder| *holder != plug_id)
-                        .map(move |holder| (holder, other_id))
-                })
-                .min_by_key(|(holder, _)| *holder);
-            if let Some((other_plug, other_nodule_id)) = conflict {
-                let err = InventoryError::AuthorityConflict {
-                    id: plug_id.clone(),
-                    nodule_id: installed.nodule.id.clone(),
-                    existing_plug: Box::new(other_plug.clone()),
-                    existing_nodule: other_nodule_id.clone(),
-                };
-                conflicts.insert(plug_id.clone(), err.to_string());
+            if let NoduleResolution::Admitted { installed, .. } = resolution {
+                for nsid in &installed.admitted.holds {
+                    holders.entry(nsid).or_default().push(plug_id);
+                }
             }
         }
+        let conflicts: BTreeMap<PlugId, String> = results
+            .iter()
+            .filter_map(|(plug_id, resolution)| {
+                let NoduleResolution::Admitted { installed, .. } = resolution else {
+                    return None;
+                };
+                installed.admitted.holds.iter().find_map(|nsid| {
+                    let other = holders[nsid.as_str()]
+                        .iter()
+                        .find(|holder| **holder != plug_id)?;
+                    let error = InventoryError::AuthorityConflict {
+                        id: plug_id.clone(),
+                        nsid: nsid.clone(),
+                        existing_plug: Box::new((*other).clone()),
+                    };
+                    Some((plug_id.clone(), error.to_string()))
+                })
+            })
+            .collect();
 
         for (plug_id, reason) in conflicts {
             if let Some(NoduleResolution::Admitted { installed, .. }) = results.remove(&plug_id) {
@@ -1020,7 +984,6 @@ impl NoduleConfig {
                         plug_id,
                         version: Some(installed.version),
                         revision: Some(installed.revision),
-                        nodule_id: Some(installed.nodule.id),
                         enabled: installed.enabled,
                         config: installed.config,
                         reason,
@@ -1028,6 +991,7 @@ impl NoduleConfig {
                 );
             }
         }
+        cache.retain(self.entries.keys());
 
         results
     }
@@ -1123,23 +1087,6 @@ impl NoduleConfig {
     }
 }
 
-/// The nodule id as written in a raw envelope, for refusals whose envelope cannot be decoded.
-/// Only the nodule contribution names the nodule: a micro's `description.id` is a GUI key. The
-/// raw envelope tags each contribution with `$type`.
-fn envelope_nodule_id(envelope: &IndexMap<String, Value>) -> Option<String> {
-    envelope
-        .get("contributions")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter(|item| item.get("$type").and_then(Value::as_str) == Some(NoduleContribution::ID))
-        .find_map(|item| {
-            item.get("description")?
-                .get("id")?
-                .as_str()
-                .map(str::to_owned)
-        })
-}
-
 fn resolve_entry(
     plug_id: &PlugId,
     entry: &NoduleEntry,
@@ -1152,7 +1099,6 @@ fn resolve_entry(
                 plug_id: plug_id.clone(),
                 version: None,
                 revision: None,
-                nodule_id: None,
                 enabled: false,
                 config: None,
                 reason: format!("invalid install datum: {reason}"),
@@ -1161,31 +1107,23 @@ fn resolve_entry(
         DatumSlot::Accepted { value, .. } => value,
     };
 
-    let refuse = |version: Option<Version>,
-                  nodule_id: Option<String>,
-                  config: Option<IndexMap<String, Value>>,
-                  reason: String| {
-        NoduleResolution::Refused {
-            plug_id: plug_id.clone(),
-            version,
-            revision: Some(install.revision),
-            nodule_id,
-            enabled: install.enabled,
-            config,
-            reason,
-        }
-    };
+    let refuse =
+        |version: Option<Version>, config: Option<IndexMap<String, Value>>, reason: String| {
+            NoduleResolution::Refused {
+                plug_id: plug_id.clone(),
+                version,
+                revision: Some(install.revision),
+                enabled: install.enabled,
+                config,
+                reason,
+            }
+        };
 
     let admission = cache.admission(plug_id, install);
     let (version, nodule, admitted, artifacts) = match &*admission {
-        Admission::Refused {
-            version,
-            nodule_id,
-            reason,
-        } => {
+        Admission::Refused { version, reason } => {
             return Some(refuse(
                 version.clone(),
-                nodule_id.clone(),
                 entry.settings.accepted().map(|s| s.values.clone()),
                 reason.clone(),
             ));
@@ -1214,7 +1152,6 @@ fn resolve_entry(
         DatumSlot::Invalid { reason, .. } => {
             return Some(refuse(
                 Some(version.clone()),
-                Some(nodule.id),
                 None,
                 format!("invalid settings datum: {reason}"),
             ));
@@ -1223,7 +1160,6 @@ fn resolve_entry(
             if nodule.config.is_none() {
                 return Some(refuse(
                     Some(version.clone()),
-                    Some(nodule.id),
                     Some(value.values.clone()),
                     InventoryError::NoConfigSchema(plug_id.clone()).to_string(),
                 ));
@@ -1231,7 +1167,6 @@ fn resolve_entry(
             if let Err(err) = nodule.validate_config(&value.values, "config") {
                 return Some(refuse(
                     Some(version.clone()),
-                    Some(nodule.id),
                     Some(value.values.clone()),
                     err.to_string(),
                 ));
@@ -1247,7 +1182,6 @@ fn resolve_entry(
         DatumSlot::Invalid { reason, .. } => {
             return Some(refuse(
                 Some(version.clone()),
-                Some(nodule.id),
                 config,
                 format!("invalid grants datum: {reason}"),
             ));
@@ -1257,7 +1191,6 @@ fn resolve_entry(
                 let Some(known) = access.known() else {
                     return Some(refuse(
                         Some(version.clone()),
-                        Some(nodule.id),
                         config,
                         format!(
                             "unknown drawer access level `{}` for drawer `{drawer_id}`",

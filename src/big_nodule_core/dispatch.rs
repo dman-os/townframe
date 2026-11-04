@@ -36,6 +36,10 @@ pub struct DispatchScope {
 }
 
 impl DispatchScope {
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty() && self.authorities.is_empty()
+    }
+
     /// Whether a holder of this scope may invoke `nsid`.
     pub fn permits(&self, nsid: &str) -> bool {
         self.operations.contains(nsid)

@@ -29,6 +29,8 @@ use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugId;
 use big_plugs_core::example_plug;
+use big_plugs_core::request::Necessity;
+use big_plugs_core::request::Request;
 use service_utils_rs::ClientError;
 use std::time::Duration;
 
@@ -101,10 +103,22 @@ fn procedure(nsid: &str) -> Value {
     })
 }
 
-/// The plug whose nodule owns `spec.authority` and implements all three operations through the
-/// handler artifact `bytes`.
-fn plug(spec: &Spec, bytes: &[u8]) -> Plug {
-    let mut nodule = Nodule::new(spec.authority);
+/// The plug whose nodule declares `spec.authority`'s three operations, implements them through
+/// the handler artifact `bytes`, and requests each of `calls` (operations of another nodule it
+/// relays to). The requests are optional: the nodule runs before its grant, and the tests
+/// exercise what the grant then permits.
+fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
+    let mut nodule = Nodule {
+        requires: calls
+            .iter()
+            .map(|nsid| {
+                let mut request = Request::new(nsid, nsid);
+                request.necessity = Necessity::Optional;
+                request
+            })
+            .collect(),
+        ..Default::default()
+    };
     let operations = [spec.echo(), spec.relay(), spec.absent()];
     for nsid in &operations {
         nodule
@@ -248,7 +262,7 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     let spec = caller();
     let (echo, absent) = (spec.echo(), spec.absent());
     put(&node, &bytes).await;
-    admit(&node, plug(&spec, &bytes)).await;
+    admit(&node, plug(&spec, &bytes, &[])).await;
     let enabled = set_enabled(&node, &spec, true).await;
     assert_eq!(enabled.readiness, Readiness::Ready);
     assert!(node.wasm.hosts(&spec.plug));
@@ -355,8 +369,11 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     let (node, stop) = boot_node(&secrets).await;
     let (a, b) = (caller(), callee());
     put(&node, &bytes).await;
-    for spec in [&a, &b] {
-        admit(&node, plug(spec, &bytes)).await;
+    // A relays to B's operations, and B to A's echo: each requests what it calls, which is all
+    // its grants can ever confer.
+    let requested = [(&a, vec![b.echo(), b.absent()]), (&b, vec![a.echo()])];
+    for (spec, calls) in &requested {
+        admit(&node, plug(spec, &bytes, calls)).await;
         assert_eq!(
             set_enabled(&node, spec, true).await.readiness,
             Readiness::Ready
@@ -409,20 +426,22 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     assert_eq!(relayed["body"]["noduleCapability"], Value::Null);
 
     // A guest forging another nodule's capability id is denied: B's capability is bound to B.
+    // It permits A's echo (which B requested), so only its holder binding can refuse A's use of
+    // it.
     set_operations(
         &node,
         &b,
         DispatchScope {
-            authorities: [b.authority.to_owned()].into(),
+            authorities: [a.authority.to_owned()].into(),
             ..Default::default()
         },
     )
     .await;
     let theirs = own_capability(&node, &b).await.unwrap();
-    let forged = relay(&node, &a, &target, Some(&theirs), context.clone()).await;
+    let forged = relay(&node, &a, &a.echo(), Some(&theirs), context.clone()).await;
     assert_eq!(forged["status"], 403, "{forged}");
     // The same capability from its own nodule is honored, which is what the forgery lacked.
-    let own = relay(&node, &b, &target, None, context.clone()).await;
+    let own = relay(&node, &b, &a.echo(), None, context.clone()).await;
     assert_eq!(own["status"], 200, "{own}");
 
     // Revoking by a config change takes effect: the handler is told no capability, and the one
@@ -467,7 +486,7 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     let (node, stop) = boot_node(&secrets).await;
     let spec = caller();
     let echo = spec.echo();
-    admit(&node, plug(&spec, &bytes)).await;
+    admit(&node, plug(&spec, &bytes, &[])).await;
     let waiting = set_enabled(&node, &spec, true).await;
     assert_eq!(waiting.readiness, Readiness::ArtifactsUnavailable);
     assert!(!node.wasm.hosts(&spec.plug));

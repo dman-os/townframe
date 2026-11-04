@@ -1,5 +1,6 @@
 use super::*;
 use big_cabinet_core::datum::DatumMember;
+use big_plugs_core::request::Necessity;
 use serde_json::json;
 
 fn file(value: Value) -> IndexMap<String, Value> {
@@ -9,7 +10,7 @@ fn file(value: Value) -> IndexMap<String, Value> {
 /// The photo browser of ADR 027 §3: declares its own datum, query and subscription, requires
 /// the search vocabulary, and carries a command, view and processor binding it never interprets.
 fn photos() -> Nodule {
-    let mut nodule = Nodule::new("org.example.photos");
+    let mut nodule = Nodule::default();
     nodule.lexicons.push(file(json!({
         "lexicon": 1,
         "id": "org.example.photos.photo",
@@ -139,6 +140,26 @@ fn refuse(nodule: Nodule, needle: &str) {
     assert!(error.contains(needle), "{error}");
 }
 
+/// A request to read the data contract `contract`.
+fn data_request(binding: &str, contract: &str) -> Request {
+    let mut request = Request::new(binding, contract);
+    request.access = Some("read".into());
+    request
+}
+
+/// A nodule declaring one empty datum Lexicon per NSID in `ids`, which it therefore holds.
+fn declaring(ids: &[&str]) -> Nodule {
+    let mut nodule = Nodule::default();
+    for id in ids {
+        nodule.lexicons.push(file(json!({
+            "lexicon": 1,
+            "id": id,
+            "defs": { "main": { "type": "object", "properties": {} } },
+        })));
+    }
+    nodule
+}
+
 #[test]
 fn the_photo_browser_admits_and_round_trips() {
     let nodule = photos();
@@ -174,7 +195,6 @@ fn the_photo_browser_admits_and_round_trips() {
 #[test]
 fn unknown_vocabulary_is_carried_on_the_wire_and_refused_at_admission() {
     let value = json!({
-        "id": "org.example.photos",
         "privateState": [{ "key": "s", "kind": "graph" }],
         "futureField": 1,
     });
@@ -203,31 +223,39 @@ fn bindings_are_carried_verbatim_and_never_validated() {
 
     // Pre-reshape top-level binding fields are no longer typed: they are carried as unknown
     // members, not interpreted.
-    let legacy = json!({ "id": "org.example.photos", "commands": [{ "key": "x" }] });
+    let legacy = json!({ "commands": [{ "key": "x" }] });
     let nodule: Nodule = serde_json::from_value(legacy.clone()).unwrap();
     nodule.admit().unwrap();
     assert_eq!(serde_json::to_value(&nodule).unwrap(), legacy);
 }
 
 #[test]
-fn lexicons_live_under_the_nodule_authority() {
-    let mut foreign = photos();
-    foreign.lexicons[0].insert("id".into(), json!("org.example.other.photo"));
-    refuse(foreign, "not under this nodule's authority");
-
+fn lexicon_files_are_unique_and_a_requested_contract_is_not_held() {
     let mut duplicate = photos();
     duplicate.lexicons.push(duplicate.lexicons[0].clone());
     refuse(duplicate, "declared twice");
 
     let mut not_nsid = photos();
-    not_nsid.id = "photos".into();
-    refuse(not_nsid, "`photos` is not an NSID");
+    not_nsid.lexicons[0].insert("id".into(), json!("photo"));
+    refuse(not_nsid, "lexicons[0].id");
 
-    let nodule = Nodule::new("org.example.photos");
-    assert!(nodule.owns("org.example.photos"));
-    assert!(nodule.owns("org.example.photos.photo"));
-    assert!(!nodule.owns("org.example.photosx.photo"));
-    assert!(!nodule.owns("org.example.search.query"));
+    let nodule = photos();
+    assert!(nodule.holds("org.example.photos.photo"));
+    assert!(!nodule.holds("org.example.search.query"));
+    // A vendored copy of a requested contract is not held: the nodule declares it, but another
+    // nodule is its authority.
+    let mut vendored = declaring(&["org.example.tags.label"]);
+    assert!(vendored.holds("org.example.tags.label"));
+    vendored
+        .requires
+        .push(Request::new("labels", "org.example.tags.label"));
+    assert!(!vendored.holds("org.example.tags.label"));
+    assert!(vendored.admit().unwrap().holds.is_empty());
+    // Datums and operations alike: every file the photo browser declares is its own.
+    assert_eq!(
+        photos().admit().unwrap().holds.len(),
+        photos().lexicons.len()
+    );
 }
 
 #[test]
@@ -236,7 +264,7 @@ fn own_references_resolve_and_foreign_ones_pass() {
     missing_file.revisioned_stores[0].entry = "org.example.photos.album".into();
     refuse(
         missing_file,
-        "`org.example.photos.album` is under this nodule's authority but not declared",
+        "`revisionedStores[0].entry`: `org.example.photos.album` is neither declared, implemented nor requested",
     );
 
     let mut missing_def = photos();
@@ -259,8 +287,16 @@ fn own_references_resolve_and_foreign_ones_pass() {
         "lexicons[1].defs.page.properties.photos.items.ref",
     );
 
+    // A foreign Lexicon is left to its provider, but only once the nodule has asked for it.
     let mut foreign = photos();
     foreign.revisioned_stores[0].entry = "org.example.elsewhere.defs#anything".into();
+    refuse(
+        foreign.clone(),
+        "revisionedStores[0].entry`: `org.example.elsewhere.defs` is neither declared, implemented nor requested",
+    );
+    foreign
+        .requires
+        .push(data_request("defs", "org.example.elsewhere.defs"));
     foreign.admit().unwrap();
 }
 
@@ -272,21 +308,25 @@ fn the_handler_implements_each_declared_operation_once() {
 
     let mut undeclared = photos();
     undeclared.implements[0] = "org.example.photos.missing".into();
-    refuse(
-        undeclared,
-        "under this nodule's authority but is not a declared operation",
+    // With no Lexicon here it is a provider for a contract declared elsewhere, so its kind is
+    // unchecked.
+    assert_eq!(
+        undeclared.admit().unwrap().operations["org.example.photos.missing"],
+        None
     );
 
     let mut datum_not_operation = photos();
     datum_not_operation.implements[0] = "org.example.photos.photo".into();
     refuse(
         datum_not_operation,
-        "under this nodule's authority but is not a declared operation",
+        "implements[0]`: `org.example.photos.photo` is declared here but is not an operation",
     );
 
     let mut self_edge = photos();
-    self_edge.requires.push("org.example.search.query".into());
-    refuse(self_edge, "both required and implemented");
+    self_edge
+        .requires
+        .push(Request::new("search", "org.example.search.query"));
+    refuse(self_edge, "both requested and implemented");
 
     // A foreign operation is admitted on syntax alone (its contract is resolved at bind time);
     // a malformed NSID and a duplicate foreign entry are not.
@@ -319,10 +359,13 @@ fn the_handler_implements_each_declared_operation_once() {
     // A handler with nothing to serve and a nodule with neither are both fine.
     let mut idle_handler = photos();
     idle_handler.implements.clear();
+    idle_handler
+        .requires
+        .push(Request::new("search", "org.example.search.query"));
     idle_handler.revisioned_stores[0].source = None;
     idle_handler.initialization.clear();
     idle_handler.admit().unwrap();
-    Nodule::new("org.example.photos").admit().unwrap();
+    Nodule::default().admit().unwrap();
 }
 
 #[test]
@@ -338,12 +381,15 @@ fn initializers_and_store_sources_name_implemented_or_required_operations() {
     unimplemented.revisioned_stores[0].source = None;
     refuse(
         unimplemented,
-        "under this nodule's authority but is not implemented",
+        "initialization[0].target`: `org.example.photos.import` is declared here but is not implemented",
     );
 
     let mut unrequired = photos();
     unrequired.initialization[0].target = "org.example.tags.apply".into();
-    refuse(unrequired, "foreign and not in `requires`");
+    refuse(
+        unrequired,
+        "initialization[0].target`: `org.example.tags.apply` is neither implemented nor requested",
+    );
 
     // A foreign operation this nodule implements is as good a target or source as a local one.
     let mut foreign_implemented = photos();
@@ -352,15 +398,22 @@ fn initializers_and_store_sources_name_implemented_or_required_operations() {
     foreign_implemented.admit().unwrap();
 
     let mut required = photos();
-    required.requires.push("org.example.tags.apply".into());
+    required
+        .requires
+        .push(Request::new("tags", "org.example.tags.apply"));
     required.initialization[0].target = "org.example.tags.apply".into();
     required.admit().unwrap();
 
-    let mut own_in_requires = photos();
-    own_in_requires
+    // A data contract is read or written, not called.
+    let mut data_target = photos();
+    data_target
         .requires
-        .push("org.example.photos.list".into());
-    refuse(own_in_requires, "`requires` lists foreign operations");
+        .push(data_request("tags", "org.example.tags.apply"));
+    data_target.initialization[0].target = "org.example.tags.apply".into();
+    refuse(
+        data_target,
+        "requested with `read` access; an initializer calls an operation",
+    );
 
     let mut missing_source = photos();
     missing_source.revisioned_stores[0].source = Some("ingest".into());
@@ -397,7 +450,15 @@ fn initializer_keys_are_present_and_unique() {
 fn config_schema_must_be_local_object_and_defaults_must_conform() {
     let mut foreign_schema = photos();
     foreign_schema.config.as_mut().unwrap().schema = "org.example.other.settings".into();
-    refuse(foreign_schema, "not under this nodule's authority");
+    refuse(
+        foreign_schema.clone(),
+        "config.schema`: `org.example.other.settings` is neither declared, implemented nor requested",
+    );
+    // Requesting it makes it another nodule's schema, which this nodule's settings cannot use.
+    foreign_schema
+        .requires
+        .push(data_request("other", "org.example.other.settings"));
+    refuse(foreign_schema, "is not a Lexicon this nodule declares");
 
     let mut record_schema = photos();
     record_schema.config.as_mut().unwrap().schema = "org.example.photos.photo".into();
@@ -453,6 +514,119 @@ fn config_schema_must_be_local_object_and_defaults_must_conform() {
     refuse(
         missing_required_default,
         "missing required property `maxCount`",
+    );
+}
+
+#[test]
+fn requests_are_validated_and_an_unknown_necessity_is_required() {
+    let mut duplicate = photos();
+    duplicate.requires = vec![
+        Request::new("tags", "org.example.tags.apply"),
+        Request::new("tags", "org.example.tags.list"),
+    ];
+    refuse(
+        duplicate,
+        "requires[1].binding`: binding `tags` is declared twice",
+    );
+
+    let mut bad_nsid = photos();
+    bad_nsid.requires = vec![Request::new("tags", "tags")];
+    refuse(bad_nsid, "requires[0].contract`: `tags` is not an NSID");
+
+    // An unknown necessity is carried through the wire and counts as required.
+    let value = json!({
+        "requires": [
+            { "binding": "tags", "contract": "org.example.tags.apply", "necessity": "someday", "resolution": "configured" },
+            { "binding": "log", "contract": "org.example.log.write", "necessity": "optional", "resolution": "atRuntime", "minRevision": 3 },
+        ],
+    });
+    let nodule: Nodule = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(
+        nodule.requires[0].necessity,
+        Necessity::Unknown("someday".into())
+    );
+    assert_eq!(serde_json::to_value(&nodule).unwrap(), value);
+    nodule.admit().unwrap();
+    let none = DispatchScope::default();
+    let unmet: Vec<_> = nodule
+        .unmet_requests(&none)
+        .map(|request| request.binding.as_str())
+        .collect();
+    assert_eq!(unmet, ["tags"], "the optional request needs no grant");
+}
+
+#[test]
+fn grants_never_exceed_requests() {
+    let nodule = Nodule {
+        requires: vec![
+            Request::new("apply", "org.example.tags.apply"),
+            Request::new("list", "org.example.tags.list"),
+            data_request("docs", "org.example.docs.note"),
+        ],
+        ..Default::default()
+    };
+    let grants = DispatchScope {
+        operations: ["org.example.tags.apply", "org.example.mail.send"]
+            .map(String::from)
+            .into(),
+        authorities: ["org.example.tags", "org.example.search"]
+            .map(String::from)
+            .into(),
+    };
+    let (applied, unrequested) = nodule.bind_operations(&grants);
+    // The `org.example.tags` prefix is applied as the two requested operations it covers, not as
+    // the prefix; a data request is never an operation.
+    assert_eq!(
+        applied.operations,
+        ["org.example.tags.apply", "org.example.tags.list"]
+            .map(String::from)
+            .into()
+    );
+    assert!(applied.authorities.is_empty());
+    assert_eq!(
+        unrequested.operations,
+        ["org.example.mail.send".to_owned()].into()
+    );
+    assert_eq!(
+        unrequested.authorities,
+        ["org.example.search".to_owned()].into()
+    );
+    assert_eq!(nodule.unmet_requests(&applied).count(), 0);
+    let only_apply = DispatchScope {
+        operations: ["org.example.tags.apply".to_owned()].into(),
+        authorities: Default::default(),
+    };
+    let unmet: Vec<_> = nodule
+        .unmet_requests(&only_apply)
+        .map(|request| request.contract.as_str())
+        .collect();
+    assert_eq!(unmet, ["org.example.tags.list"]);
+}
+
+#[test]
+fn strictness_refuses_every_unrequested_foreign_nsid_with_its_path() {
+    // A reference from an operation's own schema.
+    let mut schema_ref = photos();
+    schema_ref.lexicons[1]["defs"]["page"]["properties"]["photos"]["items"]["ref"] =
+        json!("org.example.albums.album");
+    refuse(
+        schema_ref.clone(),
+        "lexicons[1].defs.page.properties.photos.items.ref`: `org.example.albums.album` is neither declared, implemented nor requested",
+    );
+    schema_ref
+        .requires
+        .push(data_request("albums", "org.example.albums.album"));
+    schema_ref.admit().unwrap();
+
+    // Implementing a foreign operation satisfies a reference to it; dropping that provider
+    // leaves the `present` query's output ref unsatisfied, at its exact path.
+    let mut unimplemented = photos();
+    unimplemented
+        .implements
+        .retain(|nsid| nsid != "org.example.search.query");
+    refuse(
+        unimplemented,
+        "lexicons[4].defs.main.output.schema.ref`: `org.example.search.query` is neither declared, implemented nor requested",
     );
 }
 
@@ -566,7 +740,7 @@ mod admission_tests {
     fn a_handlerless_nodule_is_ready_when_enabled() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
-        let mut nodule = Nodule::new("org.example.schema");
+        let mut nodule = Nodule::default();
         nodule.lexicons.push(file(json!({
             "lexicon": 1,
             "id": "org.example.schema.item",
@@ -861,7 +1035,7 @@ mod admission_tests {
     }
 
     #[test]
-    fn authority_conflicts_cover_equal_ancestor_and_descendant_authorities() {
+    fn two_plugs_declaring_one_nsid_both_refuse() {
         let cache = AdmissionCache::new();
         // Admitting pairwise-conflicting nodules is refused by `admit`, so seed the config with
         // install datums the way an import would, then let `resolve` find the conflicts.
@@ -871,12 +1045,12 @@ mod admission_tests {
         };
         for (plug_id, authority) in [
             (example_plug!("a"), "org.example.a"),
-            (example_plug!("b"), "org.example.a.b"),
-            (example_plug!("c"), "org.example.ab"),
+            (example_plug!("b"), "org.example.a"),
+            (example_plug!("c"), "org.example.a.c"),
             (example_plug!("d"), "org.example.d"),
             (example_plug!("e"), "org.example.d"),
         ] {
-            let plug = plug_with(plug_id, "1.0.0", Nodule::new(authority));
+            let plug = plug_with(plug_id, "1.0.0", declaring(&[authority]));
             read.datums.insert(
                 install_key(&plug.id),
                 DatumRead::Accepted {
@@ -893,7 +1067,8 @@ mod admission_tests {
                 Some(NoduleResolution::Refused { .. })
             )
         };
-        // `org.example.a` owns `org.example.a.b` but not the sibling `org.example.ab`.
+        // Only the exact NSID is held: `org.example.a.c` sits under `org.example.a` but is
+        // another file.
         assert!(
             refused(example_plug!("a"))
                 && refused(example_plug!("b"))
@@ -926,7 +1101,7 @@ mod admission_tests {
 
         let mut bad_payload = plug_with(example_plug!("photos"), "1.0.0", photos());
         if let Contribution::Nodule(n) = &mut bad_payload.contributions[0] {
-            n.description.insert("id".into(), json!(123));
+            n.description.insert("lexicons".into(), json!(123));
         }
         assert!(matches!(
             config.admit(&cache, &bad_payload, None),
@@ -959,21 +1134,14 @@ mod admission_tests {
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
-        let sub_authority = Nodule::new("org.example.photos.sub");
-        let sub_plug = plug_with(example_plug!("sub-photos"), "1.0.0", sub_authority);
-        assert!(matches!(
-            config.admit(&cache, &sub_plug, None),
-            Err(InventoryError::AuthorityConflict { .. })
-        ));
-
-        let changed_plug = plug_with(
-            example_plug!("photos"),
-            "2.0.0",
-            Nodule::new("org.example.gallery"),
+        let sharing = plug_with(
+            example_plug!("sub-photos"),
+            "1.0.0",
+            declaring(&["org.example.photos.photo"]),
         );
         assert!(matches!(
-            config.admit(&cache, &changed_plug, None),
-            Err(InventoryError::AuthorityChanged { .. })
+            config.admit(&cache, &sharing, None),
+            Err(InventoryError::AuthorityConflict { nsid, .. }) if nsid == "org.example.photos.photo"
         ));
     }
 }
@@ -1168,46 +1336,6 @@ mod config_tests {
         assert!(NoduleConfig::owns(&ik));
         assert!(NoduleConfig::owns(&sk));
         assert!(NoduleConfig::owns(&gk));
-    }
-
-    #[test]
-    fn refused_entries_take_the_nodule_id_from_the_nodule_contribution_only() {
-        // A micro precedes the nodule and carries a string `description.id` of its own; the
-        // nodule's schema is wrong so admission refuses and the id must come from the raw envelope.
-        let mut plug = sample_plug(example_plug!("photos"), "1.0.0");
-        let mut micro_description = IndexMap::new();
-        micro_description.insert("id".to_owned(), json!("ui-button"));
-        plug.contributions.insert(
-            0,
-            Contribution::Micro(big_plugs_core::MicroContribution {
-                schema: "org.example.micro.button".into(),
-                description: micro_description,
-                extra: Default::default(),
-            }),
-        );
-        let Some(Contribution::Nodule(nodule)) = plug.contributions.get_mut(1) else {
-            panic!("sample plug carries its nodule after the micro");
-        };
-        nodule.schema = "org.example.other.nodule".into();
-
-        let mut read = DatumsRead {
-            heads: Vec::new(),
-            datums: BTreeMap::new(),
-        };
-        read.datums.insert(
-            install_key(&plug.id),
-            DatumRead::Accepted {
-                value: serde_json::to_value(NoduleInstall::from_plug(&plug, false)).unwrap(),
-                version: DatumVersion::default(),
-            },
-        );
-        let config = NoduleConfig::hydrate(&read);
-        let Some(NoduleResolution::Refused { nodule_id, .. }) =
-            config.resolve(&Default::default()).remove(&plug.id)
-        else {
-            panic!("a nodule with an unsupported schema is refused");
-        };
-        assert_eq!(nodule_id.as_deref(), Some("org.example.photos"));
     }
 
     #[test]

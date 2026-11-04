@@ -148,10 +148,16 @@ pub struct NoduleGrantStatus {
 }
 
 /// Desired and effective state of the dispatch capability a nodule's operation grants mint.
+/// `desired` is the configured grants bounded by the manifest: only operations the nodule
+/// requests (see [`crate::Nodule::bind_operations`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleOperationGrantStatus {
     pub desired: DispatchScope,
+    /// Configured grant entries that cover no requested operation. They are not applied: the
+    /// manifest bounds what configuration can confer.
+    #[serde(default, skip_serializing_if = "DispatchScope::is_empty")]
+    pub unrequested: DispatchScope,
     pub granted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -184,8 +190,6 @@ pub struct NoduleRecord {
     pub version: Option<Version>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<Revision>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nodule_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<NoduleActor>,
     pub enabled: bool,

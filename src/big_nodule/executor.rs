@@ -30,7 +30,6 @@ use tokio::sync::Notify;
 pub struct HandlerSpec {
     pub plug_id: PlugId,
     pub revision: Revision,
-    pub nodule_id: String,
     /// The handler artifact as the envelope declares it: key, digest, size and media type. Its
     /// bytes are retained and fetched through the `Blob` datum the config document carries.
     pub handler: Artifact,

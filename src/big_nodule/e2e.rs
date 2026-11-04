@@ -102,7 +102,7 @@ const NOTE: &str = "org.example.note";
 /// schema with one boolean `thumbnails` setting defaulting to `true`.
 fn plug(id: &str, version: &str, settings: bool) -> Plug {
     let nodule_id = format!("org.example.{}", id.rsplit('/').next().unwrap());
-    let mut nodule = Nodule::new(&nodule_id);
+    let mut nodule = Nodule::default();
     nodule.lexicons.push(lexicon(json!({
         "lexicon": 1,
         "id": format!("{nodule_id}.item"),
@@ -592,14 +592,14 @@ impl Node {
 
     /// The actor the nodule path names right now, opened by the test through the subsystem
     /// actor it holds, so a record's actor can be checked without the service's handle.
-    async fn actor_at(&self, nodule_id: &str) -> Actor {
+    async fn actor_at(&self, plug_id: &PlugId) -> Actor {
         self.authority
             .client
             .call(
                 RequestContext::root(),
                 OpenActor {
                     parent: self.nodules_actor.capability,
-                    path: format!("{NODULES_PATH}/{nodule_id}"),
+                    path: format!("{NODULES_PATH}/{}", crate::store::actor_segment(plug_id)),
                     rights: Rights::USE | Rights::NARROW,
                 },
             )
@@ -625,14 +625,13 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
         .await
         .unwrap();
     assert_eq!(record.plug_id, id(example_plug!("photos")));
-    assert_eq!(record.nodule_id.as_deref(), Some("org.example.photos"));
     assert!(!record.enabled);
     assert_eq!(record.readiness, Readiness::Disabled);
     assert_eq!(record.config, Some(settings_of(true)));
     assert_eq!(record.error, None);
     assert!(!record.observed_heads.is_empty());
     assert_eq!(record.applied_heads.as_ref(), Some(&record.observed_heads));
-    let actor = node.actor_at("org.example.photos").await;
+    let actor = node.actor_at(&id(example_plug!("photos"))).await;
     let record_actor = record.actor.as_ref().expect("provisioned actor");
     assert_eq!(record_actor.actor_id, actor.actor_id);
     assert_eq!(record_actor.public_key, actor.public_key);
@@ -973,7 +972,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     );
     assert!(blocked.drawers[&present].error.is_some());
 
-    let actor = node.actor_at("org.example.photos").await;
+    let actor = node.actor_at(&id(example_plug!("photos"))).await;
     assert!(matches!(
         node.docs
             .client

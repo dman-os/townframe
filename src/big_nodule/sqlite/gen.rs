@@ -8,18 +8,18 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_nodules.sql", sql: include_str!("migrations/001_nodules.sql") },
     Migration { version: 2, name: "002_applied_operations.sql", sql: include_str!("migrations/002_applied_operations.sql") },
     Migration { version: 3, name: "003_init_done.sql", sql: include_str!("migrations/003_init_done.sql") },
+    Migration { version: 4, name: "004_actor_path_derived.sql", sql: include_str!("migrations/004_actor_path_derived.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActorsRow {
     pub plug_id: String,
-    pub nodule_id: String,
     pub actor_uuid: String,
 }
 impl crate::sqlite_rs_alias::FromRow for ActorsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
-        row.require_width(3)?;
-        Ok(ActorsRow { plug_id: row.get::<String>("plug_id")?, nodule_id: row.get::<String>("nodule_id")?, actor_uuid: row.get::<String>("actor_uuid")? })
+        row.require_width(2)?;
+        Ok(ActorsRow { plug_id: row.get::<String>("plug_id")?, actor_uuid: row.get::<String>("actor_uuid")? })
     }
 }
 
@@ -103,8 +103,8 @@ pub async fn init_done(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlRe
 }
 
 pub const UPSERT_ACTOR_SQL: &str = include_str!("queries/upsert_actor.sql");
-pub async fn upsert_actor(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, nodule_id: String, actor_uuid: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(UPSERT_ACTOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(nodule_id), crate::sqlite_rs_alias::IntoValue::into_value(actor_uuid)]).await
+pub async fn upsert_actor(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, actor_uuid: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_ACTOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(actor_uuid)]).await
 }
 
 pub const UPSERT_APPLIED_GRANT_SQL: &str = include_str!("queries/upsert_applied_grant.sql");

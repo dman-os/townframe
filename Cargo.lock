@@ -1587,6 +1587,7 @@ dependencies = [
  "big_nodule_core",
  "big_plugs_core",
  "big_repo",
+ "blake3",
  "futures",
  "indexmap 2.14.2",
  "irpc",

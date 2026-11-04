@@ -40,7 +40,6 @@ use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
-use big_nodule_core::Nodule;
 use big_nodule_core::RunMode;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::NoduleConfig;
@@ -269,7 +268,7 @@ impl Handle {
 
 pub(crate) struct State {
     stores: Stores,
-    persisted_actors: BTreeMap<PlugId, (String, Uuid7)>,
+    persisted_actors: BTreeMap<PlugId, Uuid7>,
     actors: BTreeMap<PlugId, Actor>,
     applied_grants: BTreeMap<PlugId, BTreeMap<DrawerId, (DrawerAccess, CapId)>>,
     /// The dispatch handle minted for each nodule from its operation grants, with the scope it
@@ -317,7 +316,7 @@ impl State {
     pub(crate) async fn recover(stores: Stores) -> Res<(Handle, StopToken)> {
         let mut persisted_actors = BTreeMap::new();
         for row in store::actors(&stores.sql).await? {
-            persisted_actors.insert(row.plug_id, (row.nodule_id, row.actor_id));
+            persisted_actors.insert(row.plug_id, row.actor_id);
         }
         let mut applied_grants: BTreeMap<PlugId, BTreeMap<DrawerId, (DrawerAccess, CapId)>> =
             BTreeMap::new();
@@ -377,8 +376,8 @@ impl State {
             init_results,
         };
         let context = RequestContext::root();
-        for (plug_id, (nodule_id, expected_actor_id)) in state.persisted_actors.clone() {
-            let actor = state.stores.open_actor(&context, &nodule_id).await?;
+        for (plug_id, expected_actor_id) in state.persisted_actors.clone() {
+            let actor = state.stores.open_actor(&context, &plug_id).await?;
             if actor.actor_id != expected_actor_id {
                 return Err(NodulesError::Storage(format!(
                     "installed nodule `{plug_id}` was given actor {expected_actor_id} but its path now opens {}",
@@ -571,37 +570,6 @@ impl State {
         plug: Plug,
         drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
     ) -> Res<NoduleRecord> {
-        let incoming_nodule_id = plug
-            .nodule()
-            .and_then(|c| c.description.get("id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if let Some((saved_nodule_id, _)) = self.persisted_actors.get(&plug.id)
-            && let Some(incoming_id) = &incoming_nodule_id
-            && incoming_id != saved_nodule_id
-        {
-            return Err(InventoryError::AuthorityChanged {
-                id: plug.id,
-                existing: saved_nodule_id.clone(),
-                incoming: incoming_id.clone(),
-            }
-            .into());
-        }
-        for (other_plug, (other_nodule_id, _)) in &self.persisted_actors {
-            if other_plug != &plug.id
-                && let Some(incoming_id) = &incoming_nodule_id
-                && (Nodule::authority_owns(other_nodule_id, incoming_id)
-                    || Nodule::authority_owns(incoming_id, other_nodule_id))
-            {
-                return Err(InventoryError::AuthorityConflict {
-                    id: plug.id,
-                    nodule_id: incoming_id.clone(),
-                    existing_plug: Box::new(other_plug.clone()),
-                    existing_nodule: other_nodule_id.clone(),
-                }
-                .into());
-            }
-        }
         let plug_id = plug.id.clone();
         let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
@@ -788,36 +756,7 @@ impl State {
         snapshot: StoreSnapshot<NoduleConfig>,
         trigger: Trigger,
     ) -> Res<BTreeMap<PlugId, NodulesError>> {
-        let mut resolved = snapshot.value.resolve(&self.admission_cache);
-        for (plug_id, (saved_nodule_id, _)) in &self.persisted_actors {
-            if let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(plug_id)
-                && &installed.nodule.id != saved_nodule_id
-            {
-                let reason = InventoryError::AuthorityChanged {
-                    id: plug_id.clone(),
-                    existing: saved_nodule_id.clone(),
-                    incoming: installed.nodule.id.clone(),
-                }
-                .to_string();
-                let Some(NoduleResolution::Admitted { installed, .. }) = resolved.remove(plug_id)
-                else {
-                    unreachable!();
-                };
-                resolved.insert(
-                    plug_id.clone(),
-                    NoduleResolution::Refused {
-                        plug_id: plug_id.clone(),
-                        version: Some(installed.version),
-                        revision: Some(installed.revision),
-                        nodule_id: Some(installed.nodule.id),
-                        enabled: installed.enabled,
-                        config: installed.config,
-                        reason,
-                    },
-                );
-            }
-        }
-
+        let resolved = snapshot.value.resolve(&self.admission_cache);
         let mut revoke_errors: BTreeMap<PlugId, NodulesError> = BTreeMap::new();
         let active_plugs: BTreeSet<PlugId> = self
             .applied_grants
@@ -854,7 +793,6 @@ impl State {
                     plug_id,
                     version,
                     revision,
-                    nodule_id,
                     enabled,
                     config,
                     reason,
@@ -870,7 +808,6 @@ impl State {
                             plug_id: plug_id.clone(),
                             version,
                             revision,
-                            nodule_id,
                             actor: self.actors.get(&plug_id).map(nodule_actor),
                             enabled,
                             readiness: Readiness::Refused,
@@ -962,6 +899,7 @@ impl State {
         installed: &mut InstalledNodule,
         actor: &Actor,
         capability: Option<CapId>,
+        granted: &DispatchScope,
         trigger: Trigger,
     ) -> Readiness {
         let plug_id = installed.plug_id.clone();
@@ -984,6 +922,18 @@ impl State {
         if !installed.enabled {
             self.withdraw(&plug_id).await;
             return Readiness::Disabled;
+        }
+        // A required operation with no covering grant is configuration the nodule is waiting
+        // for, not a fault (Clay's "needs configuration"): nothing is hosted or initialized
+        // until it is granted, and callers get the retryable not-ready.
+        if installed.nodule.unmet_requests(granted).next().is_some() {
+            self.retire(&plug_id).await;
+            self.stores.dispatch.register(
+                &provider_id,
+                installed.admitted.operations.clone(),
+                ProviderState::NotReady(Readiness::NeedsConfiguration),
+            );
+            return Readiness::NeedsConfiguration;
         }
         let Some((executor, artifact_key)) = hosting else {
             self.retire(&plug_id).await;
@@ -1023,7 +973,6 @@ impl State {
         let spec = HandlerSpec {
             plug_id: plug_id.clone(),
             revision: installed.revision,
-            nodule_id: installed.nodule.id.clone(),
             handler: handler.clone(),
             actor: actor.clone(),
             capability,
@@ -1352,23 +1301,22 @@ impl State {
         &mut self,
         context: &RequestContext,
         plug_id: &PlugId,
-        nodule_id: &str,
     ) -> Res<Actor> {
         if let Some(actor) = self.actors.get(plug_id) {
             return Ok(actor.clone());
         }
-        let opened = self.stores.open_actor(context, nodule_id).await?;
-        if let Some((saved_nodule_id, saved_actor_id)) = self.persisted_actors.get(plug_id) {
-            if saved_nodule_id != nodule_id || opened.actor_id != *saved_actor_id {
+        let opened = self.stores.open_actor(context, plug_id).await?;
+        if let Some(saved_actor_id) = self.persisted_actors.get(plug_id) {
+            if opened.actor_id != *saved_actor_id {
                 return Err(NodulesError::Storage(format!(
                     "installed nodule `{plug_id}` was given actor {saved_actor_id} but its path now opens {}",
                     opened.actor_id
                 )));
             }
         } else {
-            store::upsert_actor(&self.stores.sql, plug_id, nodule_id, opened.actor_id).await?;
+            store::upsert_actor(&self.stores.sql, plug_id, opened.actor_id).await?;
             self.persisted_actors
-                .insert(plug_id.clone(), (nodule_id.to_owned(), opened.actor_id));
+                .insert(plug_id.clone(), opened.actor_id);
         }
         self.actors.insert(plug_id.clone(), opened.clone());
         Ok(opened)
@@ -1384,22 +1332,38 @@ impl State {
         desired_operations: DispatchScope,
     ) -> Res<NoduleRecord> {
         let plug_id = installed.plug_id.clone();
-        let actor = self
-            .ensure_nodule_actor(context, &plug_id, &installed.nodule.id)
-            .await?;
+        let actor = self.ensure_nodule_actor(context, &plug_id).await?;
         // The handle is minted (or revoked) before the handler is ensured, so the executor is
         // handed the handle that is live now. A disabled nodule has none: it is not serving, and
         // re-enabling it mints a fresh one.
+        // The manifest bounds what configuration can confer: only the grants that cover a
+        // requested operation are minted, as those exact operations. An entry covering no
+        // request is reported on the record rather than applied, which is what keeps "can X
+        // ever reach Y" answerable from the manifest alone.
+        let (bound_operations, unrequested_operations) =
+            installed.nodule.bind_operations(&desired_operations);
         let effective_operations = if installed.enabled {
-            desired_operations.clone()
+            bound_operations.clone()
         } else {
             DispatchScope::default()
         };
         let (capability, operations_error) = self
             .apply_operations(context, &plug_id, &actor, &effective_operations)
             .await?;
+        // A grant that failed to mint covers nothing, so it cannot satisfy a request.
+        let granted_operations = if capability.is_some() {
+            effective_operations
+        } else {
+            DispatchScope::default()
+        };
         let readiness = self
-            .serve(&mut installed, &actor, capability, trigger)
+            .serve(
+                &mut installed,
+                &actor,
+                capability,
+                &granted_operations,
+                trigger,
+            )
             .await;
 
         let mut apply_errors = Vec::new();
@@ -1504,7 +1468,6 @@ impl State {
             plug_id: installed.plug_id.clone(),
             version: Some(installed.version.clone()),
             revision: Some(installed.revision),
-            nodule_id: Some(installed.nodule.id.clone()),
             actor: Some(nodule_actor(&actor)),
             enabled: installed.enabled,
             readiness,
@@ -1515,12 +1478,11 @@ impl State {
                 .map(|(key, (_, state))| (key.clone(), *state))
                 .collect(),
             drawers: drawer_statuses,
-            operations: (desired_operations != DispatchScope::default()).then(|| {
-                NoduleOperationGrantStatus {
-                    desired: desired_operations,
-                    granted: capability.is_some(),
-                    error: operations_error,
-                }
+            operations: (!desired_operations.is_empty()).then(|| NoduleOperationGrantStatus {
+                desired: bound_operations,
+                unrequested: unrequested_operations,
+                granted: capability.is_some(),
+                error: operations_error,
             }),
             init: self.init_status(&plug_id),
             observed_heads: heads.to_vec(),
@@ -1643,13 +1605,13 @@ impl State {
 }
 
 impl Stores {
-    async fn open_actor(&self, context: &RequestContext, nodule_id: &str) -> Res<Actor> {
+    async fn open_actor(&self, context: &RequestContext, plug_id: &PlugId) -> Res<Actor> {
         self.authority
             .call(
                 context.child(),
                 OpenActor {
                     parent: self.parent.capability,
-                    path: format!("{}/{nodule_id}", self.parent_path),
+                    path: format!("{}/{}", self.parent_path, store::actor_segment(plug_id)),
                     rights: Rights::USE,
                 },
             )

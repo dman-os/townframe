@@ -37,6 +37,8 @@ use big_plugs_core::Digest;
 use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
 use big_plugs_core::example_plug;
+use big_plugs_core::request::Necessity;
+use big_plugs_core::request::Request;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -174,8 +176,7 @@ fn init_plug(
     requires: &[&str],
     inits: &[(&str, &str, RunMode)],
 ) -> Plug {
-    let nodule_id = format!("org.example.{name}");
-    let mut nodule = Nodule::new(&nodule_id);
+    let mut nodule = Nodule::default();
     for nsid in serves {
         nodule.lexicons.push(lexicon(Value::Object(query(nsid))));
     }
@@ -184,7 +185,17 @@ fn init_plug(
         extra: Default::default(),
     });
     nodule.implements = serves.iter().map(|nsid| (*nsid).to_owned()).collect();
-    nodule.requires = requires.iter().map(|nsid| (*nsid).to_owned()).collect();
+    // Optional, so the nodule stays runnable before its grant: these tests exercise how an
+    // initializer waits on and calls a provider, including the dispatch refusal without a grant.
+    // A required request holds the nodule at `NeedsConfiguration` instead (see `requests`).
+    nodule.requires = requires
+        .iter()
+        .map(|nsid| {
+            let mut request = Request::new(*nsid, *nsid);
+            request.necessity = Necessity::Optional;
+            request
+        })
+        .collect();
     nodule.initialization = inits
         .iter()
         .map(|(key, target, mode)| Initializer {
@@ -658,5 +669,143 @@ async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_p
     node.set_enabled(example_plug!("beta"), true).await;
     node.until(ALPHA, Readiness::Ready).await;
     assert_eq!(probe.operations(), [beta_ping]);
+    node.shutdown().await;
+}
+
+/// `plug` with its nodule's requests replaced by `requests`, for tests of what a request does
+/// to the nodule (`init_plug` states its requests as optional).
+fn with_requests(mut plug: Plug, requests: Vec<Request>) -> Plug {
+    let Some(Contribution::Nodule(nodule)) = plug.contributions.first_mut() else {
+        panic!("init plugs carry a nodule");
+    };
+    nodule
+        .description
+        .insert("requires".into(), serde_json::to_value(requests).unwrap());
+    plug
+}
+
+fn necessity(nsid: &str, necessity: Necessity) -> Request {
+    let mut request = Request::new(nsid, nsid);
+    request.necessity = necessity;
+    request
+}
+
+#[tokio::test]
+async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
+    let probe = Probe::new();
+    let node = node_hosting(&probe).await;
+    let operator = node.operator();
+    node.admit(
+        operator,
+        with_requests(
+            init_plug("alpha", "1.0.0", &[PING], &[], &[]),
+            vec![necessity(REMOTE, Necessity::Optional)],
+        ),
+    )
+    .await
+    .unwrap();
+
+    node.set_enabled(ALPHA, true).await;
+
+    // Granted: the requested operation (under a covering prefix), a prefix that covers nothing
+    // requested, and an operation nobody requested.
+    let record = node
+        .call(SetNoduleOperationGrants {
+            authorization: operator,
+            plug_id: id(ALPHA),
+            operations: DispatchScope {
+                operations: ["org.example.mail.send".to_owned()].into(),
+                authorities: [
+                    "org.example.remote".to_owned(),
+                    "org.example.other".to_owned(),
+                ]
+                .into(),
+            },
+        })
+        .await
+        .unwrap();
+    let operations = record.operations.unwrap();
+    assert!(operations.granted);
+    // The prefix is applied as the one requested operation it covers, not as the prefix.
+    assert_eq!(
+        operations.desired,
+        DispatchScope {
+            operations: [REMOTE.to_owned()].into(),
+            authorities: BTreeSet::new(),
+        }
+    );
+    assert_eq!(
+        operations.unrequested,
+        DispatchScope {
+            operations: ["org.example.mail.send".to_owned()].into(),
+            authorities: ["org.example.other".to_owned()].into(),
+        }
+    );
+
+    // Grants alone confer nothing: with no request they are all reported and none minted.
+    node.admit(
+        operator,
+        with_requests(init_plug("alpha", "1.1.0", &[PING], &[], &[]), Vec::new()),
+    )
+    .await
+    .unwrap();
+    let record = node.get(operator, ALPHA).await.unwrap();
+    let operations = record.operations.unwrap();
+    assert!(!operations.granted);
+    assert!(operations.desired.is_empty());
+    assert_eq!(operations.unrequested.operations.len(), 1);
+    assert_eq!(operations.unrequested.authorities.len(), 2);
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_required_request_needs_configuration_until_granted_and_an_optional_one_does_not() {
+    let probe = Probe::new();
+    let node = node_hosting(&probe).await;
+    let operator = node.operator();
+    let beta_ping = "org.example.beta.ping";
+    node.admit(
+        operator,
+        with_requests(
+            init_plug("alpha", "1.0.0", &[PING], &[], &[]),
+            vec![necessity(REMOTE, Necessity::Required)],
+        ),
+    )
+    .await
+    .unwrap();
+    node.admit(
+        operator,
+        with_requests(
+            init_plug("beta", "1.0.0", &[beta_ping], &[], &[]),
+            vec![necessity(REMOTE, Necessity::Optional)],
+        ),
+    )
+    .await
+    .unwrap();
+
+    // The required request has no grant: not ready, not a fault, and callers get the
+    // retryable not-ready. The optional one has no readiness effect.
+    let record = node.set_enabled_record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::NeedsConfiguration);
+    assert_eq!(record.error, None);
+    assert_eq!(
+        node.invoke(operator, PING, json!({})).await,
+        Err(not_ready(NotReadyReason::Provider(
+            Readiness::NeedsConfiguration
+        )))
+    );
+    let beta = node.set_enabled_record(example_plug!("beta")).await;
+    assert_eq!(beta.readiness, Readiness::Ready);
+
+    // A grant that covers the request makes it ready and serving; one that does not does not.
+    let record = node.grant_operations(ALPHA, &["org.example.other"]).await;
+    assert_eq!(record.readiness, Readiness::NeedsConfiguration);
+    let record = node.grant_operations(ALPHA, &["org.example.remote"]).await;
+    assert_eq!(record.readiness, Readiness::Ready);
+    assert!(node.invoke(operator, PING, json!({})).await.is_ok());
+
+    // Revoking the grant takes it back.
+    let record = node.grant_operations(ALPHA, &[]).await;
+    assert_eq!(record.readiness, Readiness::NeedsConfiguration);
     node.shutdown().await;
 }

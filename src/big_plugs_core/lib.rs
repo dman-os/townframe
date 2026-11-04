@@ -26,6 +26,7 @@ use std::str::FromStr;
 pub mod catalog;
 pub mod protocol;
 pub mod registry;
+pub mod request;
 pub mod signature;
 
 pub const AUTHORITY: &str = "org.example.daybook";

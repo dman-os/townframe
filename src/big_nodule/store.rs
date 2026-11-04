@@ -2,7 +2,7 @@
 //! service-owned drawer grant bookkeeping.
 //!
 //! Portable desired configuration (`NoduleInstall`, `NoduleSettings`, `NoduleGrants`) lives in the
-//! node's config drawer document; SQLite stores only the host's `(plug_id, nodule_id, actor_uuid)`
+//! node's config drawer document; SQLite stores only the host's `(plug_id, actor_uuid)`
 //! identity binding, the `(plug_id, drawer_id) -> access` grants this service has applied, and the
 //! `plug_id -> (scope, capability)` dispatch capability minted from each nodule's operation grants,
 //! and the `(plug_id, init key) -> revision` a [`Once`](big_nodule_core::RunMode::Once)
@@ -22,7 +22,6 @@ use sqlite_rs::Database;
 #[derive(Debug, Clone)]
 pub(crate) struct ActorRow {
     pub(crate) plug_id: PlugId,
-    pub(crate) nodule_id: String,
     pub(crate) actor_id: Uuid7,
 }
 
@@ -61,6 +60,15 @@ pub(crate) async fn migrate(database: &Database) -> Result<(), NodulesError> {
         .map_err(storage)
 }
 
+/// The one path segment a plug's actor lives at below the nodules actor. A plug id cannot be
+/// the segment itself: it holds `/` and `:`, and an actor segment is only ASCII letters, digits,
+/// `-`, `_` and `.`. The name keeps it readable in actor URLs and the 128-bit blake3 prefix of
+/// the full id keeps it unique across namespaces, so the segment is derived and never stored.
+pub(crate) fn actor_segment(plug_id: &PlugId) -> String {
+    let digest = blake3::hash(plug_id.to_string().as_bytes()).to_hex();
+    format!("{}-{}", plug_id.name, &digest.as_str()[..32])
+}
+
 pub(crate) async fn actors(database: &Database) -> Result<Vec<ActorRow>, NodulesError> {
     let transaction = database.begin_read().await.map_err(storage)?;
     let rows = sqlite::actors(&transaction).await.map_err(storage)?;
@@ -81,7 +89,6 @@ pub(crate) async fn actors(database: &Database) -> Result<Vec<ActorRow>, Nodules
                 })?;
             Ok(ActorRow {
                 plug_id,
-                nodule_id: row.nodule_id,
                 actor_id: Uuid7::try_from(actor_uuid).map_err(storage)?,
             })
         })
@@ -91,18 +98,12 @@ pub(crate) async fn actors(database: &Database) -> Result<Vec<ActorRow>, Nodules
 pub(crate) async fn upsert_actor(
     database: &Database,
     plug_id: &PlugId,
-    nodule_id: &str,
     actor_id: Uuid7,
 ) -> Result<(), NodulesError> {
     let transaction = database.begin_write().await.map_err(storage)?;
-    sqlite::upsert_actor(
-        &transaction,
-        plug_id.to_string(),
-        nodule_id.to_owned(),
-        actor_id.to_string(),
-    )
-    .await
-    .map_err(storage)?;
+    sqlite::upsert_actor(&transaction, plug_id.to_string(), actor_id.to_string())
+        .await
+        .map_err(storage)?;
     transaction.commit().await.map_err(storage)
 }
 

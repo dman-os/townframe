@@ -19,6 +19,9 @@ big_plugs_core.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 
+# identity
+blake3.workspace = true
+
 # encoding
 automerge.workspace = true
 serde.workspace = true

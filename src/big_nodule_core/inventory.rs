@@ -35,7 +35,8 @@ pub enum ArtifactState {
 }
 
 /// Whether an [`InstalledNodule`] can serve its handler, and if not the first reason in priority
-/// order: refused configuration, then disabled, then missing handler artifact bytes, then the
+/// order: refused configuration, then disabled, then a required operation request no grant
+/// covers, then missing handler artifact bytes, then the
 /// absence of a handler executor, then initialization. [`Self::Ready`] is the executor's word
 /// that the handler can be called now and the node's word that every initializer of this
 /// revision and start has succeeded.
@@ -45,6 +46,9 @@ pub enum Readiness {
     Ready,
     Refused,
     Disabled,
+    /// A required operation request has no covering grant. Not a fault: configuration (granting
+    /// the operation) makes the nodule ready. An optional request never causes this.
+    NeedsConfiguration,
     ArtifactsUnavailable,
     ExecutorUnavailable,
     /// The handler is hosted but an initializer of this revision and start is still running or
@@ -150,20 +154,11 @@ pub enum InventoryError {
          reference and fetch its bytes"
     )]
     ArtifactSizeRequired { id: PlugId, artifact: String },
-    #[error(
-        "nodule `{nodule_id}` in plug `{id}` conflicts with authority `{existing_nodule}` owned by `{existing_plug}`"
-    )]
+    #[error("plug `{id}` declares `{nsid}`, which `{existing_plug}` already holds on this node")]
     AuthorityConflict {
         id: PlugId,
-        nodule_id: String,
+        nsid: String,
         existing_plug: Box<PlugId>,
-        existing_nodule: String,
-    },
-    #[error("plug `{id}` cannot change nodule authority from `{existing}` to `{incoming}`")]
-    AuthorityChanged {
-        id: PlugId,
-        existing: String,
-        incoming: String,
     },
     #[error("nodule for plug `{0}` is not installed")]
     UnknownPlug(PlugId),

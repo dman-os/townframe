@@ -105,7 +105,7 @@ pub(super) fn serving_plug_of(
 ) -> Plug {
     let name = plug_id.rsplit('/').next().unwrap();
     let nodule_id = format!("org.example.{name}");
-    let mut nodule = Nodule::new(&nodule_id);
+    let mut nodule = Nodule::default();
     if serves.starts_with(&format!("{nodule_id}.")) {
         nodule.lexicons.push(lexicon(json!({
             "lexicon": 1,
