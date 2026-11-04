@@ -6,16 +6,13 @@
 pub enum big_dispatch_core::DispatchError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("no provider implements the operation")] UnknownOperation, # [doc = " Retryable: the provider exists but is not serving yet."] # [error ("the operation's provider is not ready: {reason:?}")] NotReady { reason : NotReadyReason }, # [error ("the provider refused the input: {0}")] InvalidInput (String), # [error ("the call exceeded its deadline")] DeadlineExceeded, # [doc = " The provider's own XRPC error, passed through untouched."] # [error ("the provider failed with status {status}")] Provider { status : u16 , body : Value } }
 pub enum big_dispatch_core::NotReadyReason { Provider (Readiness), Ambiguous }
 pub enum big_dispatch_core::Readiness { Ready, Refused, Disabled, # [doc = " A required operation request has no covering grant. Not a fault: configuration (granting"] # [doc = " the operation) makes the nodule ready. An optional request never causes this."] NeedsConfiguration, # [doc = " A required operation request has no provider that satisfies it: none enabled, more than"] # [doc = " one, a revision older than the request's `minRevision`, or a different plug than the one"] # [doc = " the operator consented to. The record's `requests` say which and why. Not a fault: the"] # [doc = " nodule is enabled and waits (as a Kubernetes pod waits on a missing dependency, a systemd"] # [doc = " unit on `Requires=`), and becomes ready once a provider appears or the operator confirms."] # [doc = " An optional request never causes this."] ProviderMissing, ArtifactsUnavailable, ExecutorUnavailable, # [doc = " The handler is hosted but an initializer of this revision and start is still running or"] # [doc = " waiting on the provider of a foreign operation. Retryable: callers are not queued."] Initializing, # [doc = " An initializer failed; the record carries the error. It runs again on the next reconcile"] # [doc = " of the node (boot, config change, enable)."] InitFailed }
-pub impl big_dispatch_core::BearerToken::fn from_header_value (value : & str) -> Option < Self >
-pub impl big_dispatch_core::BearerToken::fn header_value (& self) -> String
 pub impl big_dispatch_core::DispatchScope::fn authority_owns (authority : & str , nsid : & str) -> bool
 pub impl big_dispatch_core::DispatchScope::fn covers (& self , other : & Self) -> bool
 pub impl big_dispatch_core::DispatchScope::fn is_empty (& self) -> bool
 pub impl big_dispatch_core::DispatchScope::fn permits (& self , nsid : & str) -> bool
 pub impl big_dispatch_core::Readiness::fn is_ready (self) -> bool
-pub struct big_dispatch_core::BearerToken  { 0: Authorization }
 pub struct big_dispatch_core::DispatchScope  { operations: BTreeSet < String >, authorities: BTreeSet < String > }
 pub struct big_dispatch_core::InvocationContext  { deadline_unix_ms: Option < u64 >, idempotency_key: Option < String > }
-pub struct big_dispatch_core::Invoke  { authorization: Authorization, operation: String, input: Value, context: InvocationContext }
+pub struct big_dispatch_core::Invoke  { operation: String, input: Value, context: InvocationContext }
 pub struct big_dispatch_core::InvokeOutput  { output: Value }
-pub struct big_dispatch_core::MintDispatchCapability  { authorization: Authorization, scope: DispatchScope, rights: Rights }
+pub struct big_dispatch_core::MintDispatchCapability  { scope: DispatchScope, rights: Rights }

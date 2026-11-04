@@ -11,10 +11,10 @@ use service_utils_rs::ClientError;
 async fn drawer_capability(node: &BigNode, scope: DrawerScope) -> CapId {
     node.drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope,
                 rights: Rights::USE,
             },

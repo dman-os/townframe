@@ -13,7 +13,6 @@ use super::nodule_wasm::put;
 use super::nodule_wasm::set_enabled;
 use super::*;
 use big_cabinet_core::doc::DocsProtocol;
-use big_dispatch_core::BearerToken;
 use service_utils_rs::Client;
 use service_utils_rs::Envelope;
 use service_utils_rs::HttpMetadata;
@@ -60,13 +59,6 @@ fn tcp() -> Listeners {
     }
 }
 
-fn bearer(authorization: Authorization) -> HttpMetadata {
-    HttpMetadata {
-        authorization: Some(BearerToken(authorization).header_value()),
-        idempotency_key: None,
-    }
-}
-
 /// One plain XRPC procedure call: the status and the JSON body.
 async fn post(
     client: &XrpcClient,
@@ -79,7 +71,7 @@ async fn post(
         .post(client.base_url().join(&format!("xrpc/{nsid}")).unwrap())
         .json(&input);
     if let Some(authorization) = authorization {
-        request = request.header("authorization", BearerToken(authorization).header_value());
+        request = request.header("authorization", authorization.header_value());
     }
     let response = request.send().await.unwrap();
     (response.status().as_u16(), response.json().await.unwrap())
@@ -177,7 +169,7 @@ async fn a_token_narrows_a_socket_connection_to_its_scope() {
     // The same uid, so the operator without a token could create the document. The token
     // narrows it: docs operations are outside its scope and denied before the service runs.
     let docs = Client::<DocsProtocol>::xrpc(client.clone());
-    let denied = create_note(&node, &docs, bearer(token)).await;
+    let denied = create_note(&node, &docs, token.metadata()).await;
     let Err(denied) = denied else {
         panic!("a token without docs scope must not create a document");
     };

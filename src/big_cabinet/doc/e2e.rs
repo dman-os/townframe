@@ -289,10 +289,10 @@ impl Node {
     async fn capability(&self, actor: &Actor, scope: DocScope) -> Result<CapId, DocsError> {
         op(self
             .client()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(actor.capability),
                     scope,
                     rights: Rights::USE,
                 },

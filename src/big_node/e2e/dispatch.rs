@@ -26,10 +26,10 @@ pub(super) async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorizat
     let capability = node
         .dispatch
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             MintDispatchCapability {
-                authorization: operator,
                 scope,
                 rights: Rights::USE | Rights::NARROW,
             },
@@ -57,10 +57,10 @@ async fn call(
 ) -> Result<Value, DispatchError> {
     node.dispatch
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            authorization.metadata(),
             big_dispatch_core::Invoke {
-                authorization,
                 operation: operation.to_owned(),
                 input,
                 context: Default::default(),

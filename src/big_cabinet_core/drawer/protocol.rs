@@ -6,7 +6,6 @@ use super::GroupKey;
 use super::LayoutKind;
 use super::MetaRoot;
 use crate::authority::AuthorityServiceError;
-use crate::authority::Authorization;
 use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::Rights;
@@ -125,7 +124,6 @@ pub struct DrawerScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDrawerCapability {
-    pub authorization: Authorization,
     pub scope: DrawerScope,
     pub rights: Rights,
 }

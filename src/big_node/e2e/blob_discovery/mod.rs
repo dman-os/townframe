@@ -29,10 +29,10 @@ async fn collection(node: &BigNode, name: &str) -> DocId {
     let cap = node
         .drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: true,
                     ..Default::default()
@@ -62,10 +62,10 @@ async fn child(node: &BigNode, parent: &DocId, child: &DocId) {
     let cap = node
         .drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([
@@ -247,10 +247,10 @@ async fn self_doc(node: &BigNode, parent: &DocId, inventory: &DocId) -> BlobId {
     let cap = node
         .drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: true,
                     drawers: BTreeMap::from([(parent.clone(), Access::Admin)]),

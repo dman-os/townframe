@@ -482,10 +482,10 @@ async fn boot_dispatch(
     stop.stages.push(Stage::Service(dispatch_stop));
     let capability = dispatch
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
-                authorization: Authorization::identity(authority.root),
                 scope,
                 rights: Rights::USE | Rights::NARROW,
             },
@@ -525,10 +525,10 @@ async fn grant_drawer_admin(
 ) -> Res<()> {
     let cap = drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(issuer.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(issuer.capability),
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), EntryAccess::Admin)]),
                     create: false,

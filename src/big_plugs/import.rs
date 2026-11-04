@@ -105,7 +105,7 @@ pub async fn micro_pair(
     }
 
     let publisher = plugs
-        .call(RequestContext::root(), GetPublisher { authorization })
+        .call_with(RequestContext::root(), authorization.metadata(), GetPublisher {})
         .await
         .map_err(registry_error)?;
     let plug_id = PlugId::new(&publisher, &id).map_err(|error| {
@@ -140,12 +140,10 @@ pub async fn micro_pair(
             extra: Default::default(),
         }));
     plugs
-        .call(
+        .call_with(
             RequestContext::root(),
-            PublishPlugVersion {
-                authorization,
-                envelope,
-            },
+            authorization.metadata(),
+            PublishPlugVersion { envelope },
         )
         .await
         .map_err(registry_error)

@@ -2,15 +2,14 @@
 //! from its callers.
 //!
 //! A caller names an operation by NSID and hands dispatch JSON; dispatch admits the caller's
-//! [`Authorization`], resolves the provider for the NSID and forwards. Like
-//! [`crate::protocol`], every operation carries an `Authorization`: the operator's identity
-//! capability, or a handle minted through [`MintDispatchCapability`] that carries a
+//! [`Authorization`], resolves the provider for the NSID and forwards. Like every service
+//! operation, the caller's `Authorization` is not in the request body: it is the request's
+//! `Authorization: Bearer` credential (the envelope's HTTP metadata). It is the operator's
+//! identity capability, or a handle minted through [`MintDispatchCapability`] that carries a
 //! [`DispatchScope`]. Nothing here serves a provider; routing, readiness and the providers
 //! themselves are the host's.
 
 use big_cabinet_core::authority::AuthorityServiceError;
-use big_cabinet_core::authority::Authorization;
-use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use serde::Deserialize;
@@ -71,52 +70,8 @@ impl DispatchScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDispatchCapability {
-    pub authorization: Authorization,
     pub scope: DispatchScope,
     pub rights: Rights,
-}
-
-/// How a caller's dispatch [`Authorization`] travels in an HTTP `Authorization: Bearer <token>`
-/// header, as atproto XRPC presents a credential. The token is the authority and the signer
-/// capability ids joined by a dot (`<uuid>.<uuid>`), which are token68-safe. Like any bearer
-/// token it is a secret: whoever holds both ids acts with that capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BearerToken(pub Authorization);
-
-impl BearerToken {
-    const SCHEME: &'static str = "Bearer ";
-
-    fn id(text: &str) -> Option<CapId> {
-        serde_json::from_value(serde_json::Value::String(text.to_owned())).ok()
-    }
-
-    /// The header value, `Bearer <authority>.<signer>`.
-    pub fn header_value(&self) -> String {
-        let id = |id: CapId| match serde_json::to_value(id).expect("a capability id serializes") {
-            serde_json::Value::String(text) => text,
-            other => unreachable!("a capability id serializes as a string, not {other}"),
-        };
-        format!(
-            "{}{}.{}",
-            Self::SCHEME,
-            id(self.0.authority),
-            id(self.0.signer)
-        )
-    }
-
-    /// Parses a header value written by [`Self::header_value`]; `None` for any other scheme or
-    /// a malformed token.
-    pub fn from_header_value(value: &str) -> Option<Self> {
-        let token = value
-            .get(..Self::SCHEME.len())
-            .filter(|scheme| scheme.eq_ignore_ascii_case(Self::SCHEME))
-            .map(|_| &value[Self::SCHEME.len()..])?;
-        let (authority, signer) = token.split_once('.')?;
-        Some(Self(Authorization {
-            authority: Self::id(authority)?,
-            signer: Self::id(signer)?,
-        }))
-    }
 }
 
 /// Whether a provider can serve a call, and if not the first reason in priority order. For a
@@ -174,7 +129,6 @@ pub struct InvocationContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invoke {
-    pub authorization: Authorization,
     pub operation: String,
     pub input: Value,
     #[serde(default)]
@@ -266,38 +220,6 @@ mod tests {
         assert!(held.permits("org.example.photos.list"));
         assert!(!held.permits("org.example.photosynthesis.list"));
         assert!(!held.permits("org.example.search.other"));
-    }
-
-    #[test]
-    fn a_bearer_token_round_trips_an_authorization_and_rejects_anything_else() {
-        let authorization = Authorization {
-            authority: CapId::new_random(),
-            signer: CapId::new_random(),
-        };
-        let header = BearerToken(authorization).header_value();
-        assert_eq!(
-            BearerToken::from_header_value(&header),
-            Some(BearerToken(authorization))
-        );
-        assert_eq!(
-            BearerToken::from_header_value(&header.replacen("Bearer", "bearer", 1)),
-            Some(BearerToken(authorization))
-        );
-        let token = header.strip_prefix("Bearer ").unwrap();
-        for malformed in [
-            token.to_owned(),
-            format!("Basic {token}"),
-            "Bearer ".to_owned(),
-            "Bearer not-a-uuid.not-a-uuid".to_owned(),
-            format!("Bearer {token}.{token}"),
-            format!("Bearer {}", token.replace('.', ":")),
-        ] {
-            assert_eq!(
-                BearerToken::from_header_value(&malformed),
-                None,
-                "{malformed}"
-            );
-        }
     }
 
     #[test]

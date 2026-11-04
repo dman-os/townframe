@@ -8,6 +8,7 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 use service_core_rs::ContextError;
+use service_core_rs::HttpMetadata;
 use service_core_rs::Operation;
 use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
@@ -160,10 +161,114 @@ pub struct Authorization {
 }
 
 impl Authorization {
+    const BEARER_SCHEME: &'static str = "Bearer ";
+
     pub const fn identity(capability: CapId) -> Self {
         Self {
             authority: capability,
             signer: capability,
+        }
+    }
+
+    fn id_text(id: CapId) -> String {
+        match serde_json::to_value(id).expect("a capability id serializes") {
+            serde_json::Value::String(text) => text,
+            other => unreachable!("a capability id serializes as a string, not {other}"),
+        }
+    }
+
+    /// The caller's credential as an HTTP `Authorization: Bearer <authority>.<signer>` header
+    /// value, as atproto XRPC presents one. The token is the authority and signer capability ids
+    /// joined by a dot (`<uuid>.<uuid>`), which are token68-safe. Like any bearer token it is a
+    /// secret: whoever holds both ids acts with that capability.
+    pub fn header_value(&self) -> String {
+        format!(
+            "{}{}.{}",
+            Self::BEARER_SCHEME,
+            Self::id_text(self.authority),
+            Self::id_text(self.signer)
+        )
+    }
+
+    /// Parses a header value written by [`Self::header_value`]; `None` for any other scheme or a
+    /// malformed token.
+    pub fn from_header_value(value: &str) -> Option<Self> {
+        let id = |text: &str| -> Option<CapId> {
+            serde_json::from_value(serde_json::Value::String(text.to_owned())).ok()
+        };
+        let token = value
+            .get(..Self::BEARER_SCHEME.len())
+            .filter(|scheme| scheme.eq_ignore_ascii_case(Self::BEARER_SCHEME))
+            .map(|_| &value[Self::BEARER_SCHEME.len()..])?;
+        let (authority, signer) = token.split_once('.')?;
+        Some(Self {
+            authority: id(authority)?,
+            signer: id(signer)?,
+        })
+    }
+
+    /// The HTTP metadata of a request made by this caller: the credential the request context
+    /// travels with, in the header the XRPC server parses it from.
+    pub fn metadata(&self) -> HttpMetadata {
+        HttpMetadata {
+            authorization: Some(self.header_value()),
+            idempotency_key: None,
+        }
+    }
+
+    /// The caller's credential carried by a request. Absent or unparseable is
+    /// [`ContextError::Unauthenticated`], which every service error carries through
+    /// `From<ContextError>`.
+    pub fn from_metadata(metadata: &HttpMetadata) -> Result<Self, ContextError> {
+        metadata
+            .authorization
+            .as_deref()
+            .and_then(Self::from_header_value)
+            .ok_or(ContextError::Unauthenticated)
+    }
+}
+
+#[cfg(test)]
+mod bearer_tests {
+    use super::*;
+
+    #[test]
+    fn a_bearer_header_round_trips_an_authorization_and_rejects_anything_else() {
+        let authorization = Authorization {
+            authority: CapId::new_random(),
+            signer: CapId::new_random(),
+        };
+        let header = authorization.header_value();
+        assert_eq!(
+            Authorization::from_header_value(&header),
+            Some(authorization)
+        );
+        assert_eq!(
+            Authorization::from_header_value(&header.replacen("Bearer", "bearer", 1)),
+            Some(authorization)
+        );
+        assert_eq!(
+            Authorization::from_metadata(&authorization.metadata()),
+            Ok(authorization)
+        );
+        assert_eq!(
+            Authorization::from_metadata(&HttpMetadata::default()),
+            Err(ContextError::Unauthenticated)
+        );
+        let token = header.strip_prefix("Bearer ").unwrap();
+        for malformed in [
+            token.to_owned(),
+            format!("Basic {token}"),
+            "Bearer ".to_owned(),
+            "Bearer not-a-uuid.not-a-uuid".to_owned(),
+            format!("Bearer {token}.{token}"),
+            format!("Bearer {}", token.replace('.', ":")),
+        ] {
+            assert_eq!(
+                Authorization::from_header_value(&malformed),
+                None,
+                "{malformed}"
+            );
         }
     }
 }

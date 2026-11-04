@@ -228,12 +228,9 @@ async fn a_hosted_handler_is_registered_not_ready_until_the_executor_signals_and
     assert_eq!(executor.log().last().unwrap(), &host_of(PHOTOS, "photos"));
     assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
 
-    node.call(UninstallNodule {
-        authorization: operator,
-        plug_id: photos,
-    })
-    .await
-    .unwrap();
+    node.call(operator, UninstallNodule { plug_id: photos })
+        .await
+        .unwrap();
     assert_eq!(executor.log().last().unwrap(), &format!("retire {PHOTOS}"));
     assert_eq!(
         node.invoke(operator, OWN, json!({})).await,
@@ -300,10 +297,10 @@ async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_
     let write = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DocScope {
                     write: BTreeSet::from([config_doc.clone()]),
                     ..DocScope::default()
@@ -356,10 +353,10 @@ async fn config_blobs(node: &Node) -> BTreeMap<DatumKey, DatumRead> {
     let capability = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DocScope {
                     read: BTreeSet::from([config_doc.clone()]),
                     ..DocScope::default()
@@ -408,10 +405,10 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
     let write = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DocScope {
                     write: BTreeSet::from([config_doc.clone()]),
                     ..DocScope::default()
@@ -479,10 +476,12 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
     assert_eq!(blobs.len(), 3);
 
     // Uninstalling removes the reference and nothing else.
-    node.call(UninstallNodule {
-        authorization: operator,
-        plug_id: id(PHOTOS),
-    })
+    node.call(
+        operator,
+        UninstallNodule {
+            plug_id: id(PHOTOS),
+        },
+    )
     .await
     .unwrap();
     let blobs = config_blobs(&node).await;

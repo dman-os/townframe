@@ -67,11 +67,13 @@ fn host(plug_id: &str, bytes: &str) -> String {
 
 impl Node {
     async fn substitute(&self, slot: &str, by: Option<&str>) -> Result<NoduleRecord, NodulesError> {
-        self.call(SetNoduleSubstitution {
-            authorization: self.operator(),
-            plug_id: id(slot),
-            by: by.map(id),
-        })
+        self.call(
+            self.operator(),
+            SetNoduleSubstitution {
+                plug_id: id(slot),
+                by: by.map(id),
+            },
+        )
         .await
     }
 }
@@ -188,14 +190,16 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
     assert_eq!(record.readiness, Readiness::NeedsConfiguration);
     // Naming the added operation is the consent, and makes the slot ready.
     let record = node
-        .call(SetNoduleOperationGrants {
-            authorization: node.operator(),
-            plug_id: id(BETA),
-            operations: DispatchScope {
-                operations: [MORE.to_owned()].into(),
-                authorities: ["org.example.remote".to_owned()].into(),
+        .call(
+            node.operator(),
+            SetNoduleOperationGrants {
+                plug_id: id(BETA),
+                operations: DispatchScope {
+                    operations: [MORE.to_owned()].into(),
+                    authorities: ["org.example.remote".to_owned()].into(),
+                },
             },
-        })
+        )
         .await
         .unwrap();
     assert_eq!(record.readiness, Readiness::Ready);
@@ -245,11 +249,13 @@ async fn a_substitute_enabled_on_its_own_cannot_fill_a_slot_and_the_reverse() {
     let (node, _executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
     let operator = node.operator();
     let enable = |plug_id: &str| {
-        node.call(SetNoduleEnabled {
-            authorization: operator,
-            plug_id: id(plug_id),
-            enabled: true,
-        })
+        node.call(
+            operator,
+            SetNoduleEnabled {
+                plug_id: id(plug_id),
+                enabled: true,
+            },
+        )
     };
 
     // Beta holds the prefix, so the fork cannot be enabled beside it at all.

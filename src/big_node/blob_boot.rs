@@ -31,10 +31,10 @@ pub(super) async fn boot(
     let local = drawers.local();
     let capability = docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(signer).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(signer),
                 scope: DocScope {
                     drawers: BTreeMap::from([
                         (local.present_id.clone(), Access::Read),
@@ -140,10 +140,10 @@ pub(super) fn metadata_capability(
                     return Err(service_utils_rs::ClientError::Operation(DocsError::Denied));
                 }
             }
-            docs.call(
+            docs.call_with(
                 RequestContext::root(),
+                Authorization::identity(signer).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(signer),
                     scope,
                     rights: Rights::USE,
                 },

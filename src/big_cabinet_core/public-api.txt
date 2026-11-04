@@ -108,6 +108,10 @@ pub enum big_cabinet_core::reference::ReferenceDocId { Concrete (DocId), SelfDoc
 pub enum big_cabinet_core::reference::ReferenceError { # [error ("invalid URI {value:?}: {source}")] InvalidUri { value : String , source : url :: ParseError , }, # [error ("invalid datum reference {0:?}")] InvalidReference (String), # [error ("wrong URI scheme {0:?}")] WrongScheme (String), # [error ("datum references cannot have an authority")] AuthorityNotAllowed, # [error ("datum references cannot have a query or fragment")] QueryOrFragmentNotAllowed, # [error ("datum reference path must be absolute")] MissingPath, # [error ("datum reference is missing a document id")] MissingDoc, # [error ("datum reference is missing a datum tag or key slot")] MissingDatumKey, # [error ("datum reference has an empty datum tag")] EmptyDatumTag, # [error ("invalid datum tag {0:?}")] InvalidDatumTag (String), # [error ("invalid percent escape in datum reference component")] InvalidPercentEscape, # [error ("invalid Go string escape in datum key slot")] InvalidGoEscape, # [error ("invalid UTF-8 in datum reference component")] InvalidUtf8, # [error ("invalid document id {0:?}")] InvalidDocId (String), # [error ("dot segments are not valid in datum reference paths")] DotSegment, # [error ("URL normalization would change datum reference {value:?} to {normalized:?}")] UrlNormalization { value : String , normalized : String } }
 pub enum big_cabinet_core::schema_compat::Compatibility { # [doc = " The supported rules found no incompatibility."] Compatible, # [doc = " A supported rule proves that the evolution breaks a reader or native representation."] Incompatible, # [doc = " The schemas use a construct this checker cannot prove safe."] NotEstablished }
 pub impl big_cabinet_core::authority::Authorization::const fn identity (capability : CapId) -> Self
+pub impl big_cabinet_core::authority::Authorization::fn from_header_value (value : & str) -> Option < Self >
+pub impl big_cabinet_core::authority::Authorization::fn from_metadata (metadata : & HttpMetadata) -> Result < Self , ContextError >
+pub impl big_cabinet_core::authority::Authorization::fn header_value (& self) -> String
+pub impl big_cabinet_core::authority::Authorization::fn metadata (& self) -> HttpMetadata
 pub impl big_cabinet_core::authority::CapId::const fn from_bytes (bytes : [u8 ; 16]) -> Self
 pub impl big_cabinet_core::authority::CapId::fn as_bytes (& self) -> & [u8 ; 16]
 pub impl big_cabinet_core::authority::CapId::fn new_random () -> Self
@@ -235,7 +239,7 @@ pub struct big_cabinet_core::doc::DatumsRead  { heads: Vec < ChangeHash >, datum
 pub struct big_cabinet_core::doc::DocScope  { read: BTreeSet < DocId >, write: BTreeSet < DocId >, create: BTreeSet < String >, drawers: BTreeMap < DocId , DrawerAccess > }
 pub struct big_cabinet_core::doc::ListDatums  { capability: CapId, doc_id: DocId, at: At }
 pub struct big_cabinet_core::doc::MergeDoc  { capability: CapId, command: Option < CommandId >, source_id: DocId, at: At, target_id: DocId }
-pub struct big_cabinet_core::doc::MintDocCapability  { authorization: Authorization, scope: DocScope, rights: Rights }
+pub struct big_cabinet_core::doc::MintDocCapability  { scope: DocScope, rights: Rights }
 pub struct big_cabinet_core::doc::PollDatums  { capability: CapId, predicate: Predicate, datums: DatumSelection, after: u64, limit: u32, hold_ms: u32 }
 pub struct big_cabinet_core::doc::QueriedDatumRef  { origin_doc_id: DocId, origin_datum_key: DatumKey, path: String, target_doc_id: DocId, target_datum_key: DatumKey, ref_heads: Vec < ChangeHash > }
 pub struct big_cabinet_core::doc::QueryDatumRefs  { capability: CapId, drawer_id: Option < DocId >, selector: DatumRefSelector }
@@ -278,7 +282,7 @@ pub struct big_cabinet_core::drawer::protocol::ListedDoc  { doc_id: DocId, acces
 pub struct big_cabinet_core::drawer::protocol::ListedDrawer  { drawer_id: DrawerId, layout: DrawerLayout, descriptor: Drawer, access: Access }
 pub struct big_cabinet_core::drawer::protocol::LocalDrawers  { present_id: DrawerId, originated_id: DrawerId, registry_id: DrawerId, config_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::MetaDocCreated  { drawer_id: DrawerId, kind: String, name: String, root: MetaRoot, doc_id: DocId, heads: Vec < ChangeHash > }
-pub struct big_cabinet_core::drawer::protocol::MintDrawerCapability  { authorization: Authorization, scope: DrawerScope, rights: Rights }
+pub struct big_cabinet_core::drawer::protocol::MintDrawerCapability  { scope: DrawerScope, rights: Rights }
 pub struct big_cabinet_core::drawer::protocol::RememberDrawer  { capability: CapId, drawer_id: DrawerId, mirror: bool }
 pub struct big_cabinet_core::drawer::protocol::RemoveChild  { capability: CapId, command: CommandId, parent_id: DrawerId, child_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::RemoveDoc  { capability: CapId, command: CommandId, drawer_id: DrawerId, doc_id: DocId }

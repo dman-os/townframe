@@ -94,11 +94,13 @@ impl Node {
     }
 
     async fn confirm(&self, plug_id: &str, binding: &str) -> Result<NoduleRecord, NodulesError> {
-        self.call(ConfirmNoduleResolution {
-            authorization: self.operator(),
-            plug_id: id(plug_id),
-            binding: binding.to_owned(),
-        })
+        self.call(
+            self.operator(),
+            ConfirmNoduleResolution {
+                plug_id: id(plug_id),
+                binding: binding.to_owned(),
+            },
+        )
         .await
     }
 

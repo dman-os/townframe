@@ -275,31 +275,31 @@ impl Node {
     /// A config change that touches nothing: every config mutation reconciles once, which is
     /// what retries a failed initializer.
     async fn touch(&self, plug_id: &str) -> NoduleRecord {
-        self.call(SetNoduleDrawerGrants {
-            authorization: self.operator(),
-            plug_id: id(plug_id),
-            drawers: BTreeMap::new(),
-        })
+        self.call(
+            self.operator(),
+            SetNoduleDrawerGrants {
+                plug_id: id(plug_id),
+                drawers: BTreeMap::new(),
+            },
+        )
         .await
         .unwrap()
     }
 
     pub(super) async fn set_enabled_record(&self, plug_id: &str) -> NoduleRecord {
-        self.call(SetNoduleEnabled {
-            authorization: self.operator(),
-            plug_id: id(plug_id),
-            enabled: true,
-        })
+        self.call(
+            self.operator(),
+            SetNoduleEnabled {
+                plug_id: id(plug_id),
+                enabled: true,
+            },
+        )
         .await
         .unwrap()
     }
 
     async fn list_records(&self) -> Vec<NoduleRecord> {
-        self.call(ListNodules {
-            authorization: self.operator(),
-        })
-        .await
-        .unwrap()
+        self.call(self.operator(), ListNodules {}).await.unwrap()
     }
 
     pub(super) async fn grant_operations(
@@ -307,14 +307,16 @@ impl Node {
         plug_id: &str,
         authorities: &[&str],
     ) -> NoduleRecord {
-        self.call(SetNoduleOperationGrants {
-            authorization: self.operator(),
-            plug_id: id(plug_id),
-            operations: DispatchScope {
-                authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
-                ..Default::default()
+        self.call(
+            self.operator(),
+            SetNoduleOperationGrants {
+                plug_id: id(plug_id),
+                operations: DispatchScope {
+                    authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
+                    ..Default::default()
+                },
             },
-        })
+        )
         .await
         .unwrap()
     }
@@ -715,18 +717,20 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     // Granted: the requested operation (under a covering prefix), a prefix that covers nothing
     // requested, and an operation nobody requested.
     let record = node
-        .call(SetNoduleOperationGrants {
-            authorization: operator,
-            plug_id: id(ALPHA),
-            operations: DispatchScope {
-                operations: ["org.example.mail.send".to_owned()].into(),
-                authorities: [
-                    "org.example.remote".to_owned(),
-                    "org.example.other".to_owned(),
-                ]
-                .into(),
+        .call(
+            operator,
+            SetNoduleOperationGrants {
+                plug_id: id(ALPHA),
+                operations: DispatchScope {
+                    operations: ["org.example.mail.send".to_owned()].into(),
+                    authorities: [
+                        "org.example.remote".to_owned(),
+                        "org.example.other".to_owned(),
+                    ]
+                    .into(),
+                },
             },
-        })
+        )
         .await
         .unwrap();
     let operations = record.operations.unwrap();

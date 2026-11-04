@@ -245,10 +245,10 @@ impl Drawers {
         rights: Rights,
     ) -> Result<Capability, DrawersError> {
         self.client
-            .call(
+            .call_with(
                 context.child(),
+                authorization.metadata(),
                 MintDrawerCapability {
-                    authorization,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), access)]),
                         create: false,
@@ -272,10 +272,11 @@ impl Handler<MintDrawerCapability> for DrawerService {
         request: Envelope<MintDrawerCapability>,
     ) -> Result<ResponseEnvelope<Capability>, DrawersError> {
         let params = request.params;
+        let authorization = Authorization::from_metadata(&request.metadata)?;
         let caller = self
             .core
             .capabilities
-            .source::<DrawerScope>(&request.context, params.authorization)
+            .source::<DrawerScope>(&request.context, authorization)
             .await
             .map_err(authority_error)?;
         if !caller.rights.contains(Rights::NARROW) || !params.rights.is_subset_of(caller.rights) {
@@ -314,7 +315,7 @@ impl Handler<MintDrawerCapability> for DrawerService {
             .capabilities
             .mint(
                 &request.context,
-                params.authorization.authority,
+                authorization.authority,
                 &caller,
                 params.scope,
                 params.rights,
@@ -444,13 +445,14 @@ impl Core {
     {
         let capability = self
             .docs()
-            .call(
+            .call_with(
                 context.child(),
+                Authorization {
+                    authority: self.issuer,
+                    signer,
+                }
+                .metadata(),
                 MintDocCapability {
-                    authorization: Authorization {
-                        authority: self.issuer,
-                        signer,
-                    },
                     scope,
                     rights: Rights::USE,
                 },

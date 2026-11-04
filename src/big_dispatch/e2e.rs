@@ -176,10 +176,10 @@ impl Harness {
     ) -> Result<Value, DispatchError> {
         self.dispatch
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                authorization.metadata(),
                 Invoke {
-                    authorization,
                     operation: operation.to_owned(),
                     input,
                     context,
@@ -211,10 +211,10 @@ impl Harness {
         let capability = self
             .dispatch
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                authorization.metadata(),
                 MintDispatchCapability {
-                    authorization,
                     scope,
                     rights: Rights::USE | Rights::NARROW,
                 },
@@ -376,9 +376,38 @@ async fn an_elapsed_deadline_fails_before_the_provider_and_a_running_call_is_cut
     h.shutdown().await;
 }
 
+#[tokio::test]
+async fn a_request_without_a_credential_is_unauthenticated() {
+    let h = harness().await;
+    h.register_echo();
+    let result = h
+        .dispatch
+        .client
+        .call(
+            RequestContext::root(),
+            Invoke {
+                operation: ECHO.to_owned(),
+                input: json!({}),
+                context: Default::default(),
+            },
+        )
+        .await;
+    assert_eq!(
+        result.map(|_| ()).map_err(|error| match error {
+            ClientError::Operation(error) => error,
+            ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
+        }),
+        Err(DispatchError::Context(
+            service_utils_rs::ContextError::Unauthenticated
+        ))
+    );
+    h.shutdown().await;
+}
+
 /// The adapter, exercised on dispatch's own protocol: serving `Client<DispatchProtocol>` as a
-/// provider makes `mintCapability` reachable by NSID through an `Invoke`, whose outer admission
-/// (the invoker's handle) is separate from the inner request's own `Authorization`.
+/// provider makes `mintCapability` reachable by NSID through an `Invoke`. The caller holds one
+/// credential: dispatch admits it for the NSID, then hands it on as the request's `Authorization`
+/// and the service checks it again itself.
 #[tokio::test]
 async fn a_service_provider_routes_by_nsid_and_carries_the_services_own_errors() {
     const MINT: &str = "org.example.daybook.dispatch.mintCapability";
@@ -394,24 +423,30 @@ async fn a_service_provider_routes_by_nsid_and_carries_the_services_own_errors()
     assert_eq!(entry.operation_kind, Some(OperationKind::Procedure));
 
     let operator = h.operator();
-    let request = |authorization: Authorization| {
-        json!({
-            "authorization": authorization,
-            "scope": { "authorities": ["org.example"] },
-            "rights": Rights::USE,
-        })
-    };
-    // The inner call is the service's own: the operator's identity mints.
-    let minted = h.invoke(operator, MINT, request(operator)).await.unwrap();
+    let request = json!({
+        "scope": { "authorities": ["org.example"] },
+        "rights": Rights::USE,
+    });
+    // The operator's identity is admitted by dispatch and mints in the service.
+    let minted = h.invoke(operator, MINT, request.clone()).await.unwrap();
     assert!(minted.get("capabilityId").is_some(), "{minted}");
 
-    // The service refuses a bystander's identity itself, even though the outer admission (the
-    // operator's) let the call in. Its error travels in the XRPC domain envelope.
-    let bystander = h.bystander().await;
-    let Err(DispatchError::Provider { status, body }) =
-        h.invoke(operator, MINT, request(bystander)).await
+    // A handle that admits `mintCapability` but covers no authority passes admission; the
+    // service refuses it itself, because the scope it is asked to mint is wider. Its error
+    // travels in the XRPC domain envelope.
+    let handle = h
+        .mint_dispatch(
+            operator,
+            DispatchScope {
+                operations: [MINT.to_owned()].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let Err(DispatchError::Provider { status, body }) = h.invoke(handle, MINT, request).await
     else {
-        panic!("the service must refuse the bystander");
+        panic!("the service must refuse a scope the handle does not cover");
     };
     assert_eq!(status, 400);
     assert_eq!(body["error"], "DispatchError");

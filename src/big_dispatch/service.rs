@@ -7,8 +7,11 @@
 //! [`Protocol::visit_unary`], so they follow the protocol declaration and cannot drift from it.
 //!
 //! The adapter is not an authorization boundary. Dispatch admission has already run when
-//! [`Provider::call`] is entered; the operation's own `Authorization` is a field of its request
-//! JSON and the service checks it itself, exactly as it does for any other client.
+//! [`Provider::call`] is entered. The credential dispatch admitted ([`Caller::authorization`])
+//! is handed on as the request's `Authorization: Bearer` metadata, the way an XRPC server hands
+//! it to any service, and the service checks it itself: an identity (the operator) satisfies
+//! both layers, while a dispatch-minted handle is not understood by a service's domain, which
+//! admits only its own handles. Resource capabilities (`capability` fields) stay in the input.
 
 use crate::Caller;
 use crate::Provider;
@@ -163,7 +166,7 @@ impl ServiceProvider {
 impl Provider for ServiceProvider {
     async fn call(
         &self,
-        _caller: &Caller,
+        caller: &Caller,
         operation: &str,
         context: &InvocationContext,
         input: Value,
@@ -179,7 +182,7 @@ impl Provider for ServiceProvider {
             request = request.with_time_budget(crate::until(deadline));
         }
         let metadata = HttpMetadata {
-            authorization: None,
+            authorization: Some(caller.authorization.header_value()),
             idempotency_key: context.idempotency_key.clone(),
         };
         (route.call)(request, metadata, input).await

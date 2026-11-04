@@ -223,9 +223,10 @@ impl NoduleService {
     async fn mint(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: MintNoduleCapability,
     ) -> Res<Capability> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         if let Some(scope) = self.scope_of(&caller)?
             && !scope.covers(&params.scope)
         {
@@ -234,7 +235,7 @@ impl NoduleService {
         self.capabilities
             .mint(
                 context,
-                params.authorization.authority,
+                authorization.authority,
                 &caller,
                 params.scope,
                 params.rights,
@@ -244,8 +245,13 @@ impl NoduleService {
             .map_err(authority_error)
     }
 
-    async fn admit(&self, context: &RequestContext, params: AdmitNodule) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+    async fn admit(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: AdmitNodule,
+    ) -> Res<NoduleRecord> {
+        let caller = self.caller(context, authorization).await?;
         self.require_admit(&caller, &params.plug.id)?;
         let context = context.clone();
         self.state
@@ -261,9 +267,10 @@ impl NoduleService {
     async fn configure(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: ConfigureNodule,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
         let context = context.clone();
         self.state
@@ -279,9 +286,10 @@ impl NoduleService {
     async fn set_enabled(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: SetNoduleEnabled,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
         let context = context.clone();
         self.state
@@ -297,9 +305,10 @@ impl NoduleService {
     async fn confirm_resolution(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: ConfirmNoduleResolution,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
         let context = context.clone();
         self.state
@@ -315,9 +324,10 @@ impl NoduleService {
     async fn set_substitution(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: SetNoduleSubstitution,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
         if let Some(by) = &params.by {
             self.require_manage(&caller, by)?;
@@ -336,9 +346,10 @@ impl NoduleService {
     async fn set_drawer_grants(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: SetNoduleDrawerGrants,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
         let context = context.clone();
         self.state
@@ -354,9 +365,10 @@ impl NoduleService {
     async fn set_operation_grants(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: SetNoduleOperationGrants,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
         let context = context.clone();
         self.state
@@ -369,8 +381,13 @@ impl NoduleService {
             .await
     }
 
-    async fn uninstall(&self, context: &RequestContext, params: UninstallNodule) -> Res<()> {
-        let caller = self.caller(context, params.authorization).await?;
+    async fn uninstall(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: UninstallNodule,
+    ) -> Res<()> {
+        let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
         let context = context.clone();
         self.state
@@ -382,8 +399,13 @@ impl NoduleService {
             .await
     }
 
-    async fn get(&self, context: &RequestContext, params: GetNodule) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+    async fn get(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: GetNodule,
+    ) -> Res<NoduleRecord> {
+        let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
         let context = context.clone();
         self.state
@@ -395,8 +417,13 @@ impl NoduleService {
             .await
     }
 
-    async fn list(&self, context: &RequestContext, params: ListNodules) -> Res<Vec<NoduleRecord>> {
-        let caller = self.caller(context, params.authorization).await?;
+    async fn list(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        _: ListNodules,
+    ) -> Res<Vec<NoduleRecord>> {
+        let caller = self.caller(context, authorization).await?;
         let scope = self.scope_of(&caller)?.cloned();
         let context = context.clone();
         self.state
@@ -416,7 +443,11 @@ macro_rules! handlers {
                 &self,
                 request: Envelope<$request>,
             ) -> Res<ResponseEnvelope<$output>> {
-                Ok(self.$method(&request.context, request.params).await?.into())
+                let authorization = Authorization::from_metadata(&request.metadata)?;
+                Ok(self
+                    .$method(&request.context, authorization, request.params)
+                    .await?
+                    .into())
             }
         }
     )*};
@@ -469,10 +500,10 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     let config_doc = DocId::from(config.config_drawer);
     let doc_cap = config
         .docs
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(config.actor.capability),
                 scope: DocScope {
                     read: BTreeSet::from([config_doc.clone()]),
                     write: BTreeSet::from([config_doc.clone()]),

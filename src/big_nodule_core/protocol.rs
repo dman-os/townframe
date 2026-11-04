@@ -1,7 +1,9 @@
 //! The nodule management protocol (ADR 027 §4, §6): the wire contract between the node-side
 //! nodule service and whoever administers it.
 //!
-//! Every operation names its caller by an [`Authorization`]: either the operator's own identity
+//! Every operation names its caller by the request's `Authorization: Bearer` credential (the
+//! envelope's HTTP metadata, `Authorization::from_metadata`), never by a body field; a request
+//! without one fails with `ContextError::Unauthenticated`. The credential is either the operator's own identity
 //! capability, or a handle this domain minted through [`MintNoduleCapability`] that carries a
 //! [`NoduleScope`]. Identity is not access by itself: an arbitrary actor presenting its identity
 //! is refused, only the operator's identity and scoped handles narrowed from it administer
@@ -13,7 +15,6 @@ use crate::inventory::FilledBy;
 use crate::inventory::InventoryError;
 use crate::providers::RequestStatus;
 use big_cabinet_core::authority::AuthorityServiceError;
-use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -60,7 +61,6 @@ impl NoduleScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintNoduleCapability {
-    pub authorization: Authorization,
     pub scope: NoduleScope,
     pub rights: Rights,
 }
@@ -68,7 +68,6 @@ pub struct MintNoduleCapability {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdmitNodule {
-    pub authorization: Authorization,
     pub plug: Plug,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
@@ -77,7 +76,6 @@ pub struct AdmitNodule {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigureNodule {
-    pub authorization: Authorization,
     pub plug_id: PlugId,
     pub settings: IndexMap<String, Value>,
 }
@@ -85,7 +83,6 @@ pub struct ConfigureNodule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleEnabled {
-    pub authorization: Authorization,
     pub plug_id: PlugId,
     pub enabled: bool,
 }
@@ -93,7 +90,6 @@ pub struct SetNoduleEnabled {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleDrawerGrants {
-    pub authorization: Authorization,
     pub plug_id: PlugId,
     pub drawers: BTreeMap<DrawerId, DrawerAccess>,
 }
@@ -104,7 +100,6 @@ pub struct SetNoduleDrawerGrants {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleOperationGrants {
-    pub authorization: Authorization,
     pub plug_id: PlugId,
     pub operations: DispatchScope,
 }
@@ -116,7 +111,6 @@ pub struct SetNoduleOperationGrants {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmNoduleResolution {
-    pub authorization: Authorization,
     pub plug_id: PlugId,
     pub binding: String,
 }
@@ -127,7 +121,6 @@ pub struct ConfirmNoduleResolution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleSubstitution {
-    pub authorization: Authorization,
     pub plug_id: PlugId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<PlugId>,
@@ -136,22 +129,18 @@ pub struct SetNoduleSubstitution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UninstallNodule {
-    pub authorization: Authorization,
     pub plug_id: PlugId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetNodule {
-    pub authorization: Authorization,
     pub plug_id: PlugId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListNodules {
-    pub authorization: Authorization,
-}
+pub struct ListNodules {}
 
 /// The durable actor an installed nodule acts as. Its capability is not here: the service holds
 /// it, and a caller that could read it could sign as the nodule.

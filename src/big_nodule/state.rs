@@ -259,10 +259,10 @@ impl InitRoute {
                     }
                 }),
             Self::Dispatch(authorization) => dispatch
-                .call(
+                .call_with(
                     RequestContext::root(),
+                    authorization.metadata(),
                     Invoke {
-                        authorization,
                         operation: target.to_owned(),
                         input,
                         context,
@@ -1982,13 +1982,14 @@ impl Stores {
         scope: &DispatchScope,
     ) -> Res<CapId> {
         self.dispatch_client
-            .call(
+            .call_with(
                 context.child(),
+                Authorization {
+                    authority: self.dispatch_authority,
+                    signer: actor.capability,
+                }
+                .metadata(),
                 MintDispatchCapability {
-                    authorization: Authorization {
-                        authority: self.dispatch_authority,
-                        signer: actor.capability,
-                    },
                     scope: scope.clone(),
                     rights: Rights::USE,
                 },
@@ -2031,10 +2032,10 @@ impl Stores {
     ) -> Res<CapId> {
         let cap = self
             .drawers
-            .call(
+            .call_with(
                 context.child(),
+                Authorization::identity(self.parent.capability).metadata(),
                 MintDrawerCapability {
-                    authorization: Authorization::identity(self.parent.capability),
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                         create: false,

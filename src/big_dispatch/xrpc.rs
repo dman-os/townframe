@@ -12,7 +12,6 @@
 //! ([`Anonymous`]): this module knows nothing about transports.
 
 use big_cabinet_core::authority::Authorization;
-use big_dispatch_core::BearerToken;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::InvocationContext;
@@ -50,38 +49,34 @@ pub fn xrpc_router(
             move |request| {
                 let dispatch = dispatch.clone();
                 async move {
-                    let authorization =
-                        match request.metadata.authorization.as_deref() {
-                            Some(header) => BearerToken::from_header_value(header)
-                                .ok_or_else(|| {
-                                    XrpcHandlerError::domain(
-                                        http::StatusCode::UNAUTHORIZED,
-                                        "InvalidToken",
-                                        "the Authorization header is not a dispatch bearer token",
-                                    )
-                                })?
-                                .0,
-                            None => match anonymous {
-                                Anonymous::Acts(authorization) => authorization,
-                                Anonymous::Refused => {
-                                    return Err(XrpcHandlerError::domain(
-                                        http::StatusCode::UNAUTHORIZED,
-                                        "AuthenticationRequired",
-                                        "this endpoint requires an Authorization: Bearer token",
-                                    ));
-                                }
-                            },
-                        };
+                    let mut metadata = request.metadata;
+                    if metadata.authorization.is_none() {
+                        match anonymous {
+                            Anonymous::Acts(authorization) => {
+                                metadata.authorization = Some(authorization.header_value());
+                            }
+                            Anonymous::Refused => {
+                                return Err(XrpcHandlerError::domain(
+                                    http::StatusCode::UNAUTHORIZED,
+                                    "AuthenticationRequired",
+                                    "this endpoint requires an Authorization: Bearer token",
+                                ));
+                            }
+                        }
+                    }
+                    // The credential travels in the request's metadata to dispatch, which
+                    // admits it (a malformed token is `Unauthenticated`, see `refusal`).
+                    let idempotency_key = metadata.idempotency_key.clone();
                     dispatch
-                        .call(
+                        .call_with(
                             request.context,
+                            metadata,
                             Invoke {
-                                authorization,
                                 operation: request.nsid,
                                 input: request.params,
                                 context: InvocationContext {
                                     deadline_unix_ms: None,
-                                    idempotency_key: request.metadata.idempotency_key,
+                                    idempotency_key,
                                 },
                             },
                         )
@@ -109,6 +104,11 @@ fn refusal(error: ClientError<DispatchError>) -> XrpcHandlerError {
             StatusCode::GATEWAY_TIMEOUT,
             "DeadlineExceeded",
             error.to_string(),
+        ),
+        DispatchError::Context(ContextError::Unauthenticated) => XrpcHandlerError::domain(
+            StatusCode::UNAUTHORIZED,
+            "InvalidToken",
+            "the Authorization header is not a dispatch bearer token",
         ),
         DispatchError::Context(_) | DispatchError::InvalidInput(_) => {
             XrpcHandlerError::InvalidInput(error.to_string())

@@ -17,6 +17,7 @@ use service_core_rs::ContextError;
 use service_core_rs::Envelope;
 use service_core_rs::EventFrame;
 use service_core_rs::EventReply;
+use service_core_rs::HttpMetadata;
 use service_core_rs::Reply;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseEnvelope;
@@ -117,6 +118,25 @@ impl<Proto: Service> Client<Proto> {
         Envelope<P>: Channels<Proto, Tx = Reply<P>, Rx = NoReceiver>,
     {
         self.call_with_metadata(Envelope::new(context, params))
+            .await
+            .map(|response| response.output)
+    }
+
+    /// [`Self::call`] with the request's HTTP metadata, which is where the caller's credential
+    /// (`Authorization`) and idempotency key travel.
+    pub async fn call_with<P>(
+        &self,
+        context: RequestContext,
+        metadata: HttpMetadata,
+        params: P,
+    ) -> Result<P::Output, ClientError<P::Error>>
+    where
+        P: Unary,
+        Proto: From<Envelope<P>>,
+        Proto::Message: From<WithChannels<Envelope<P>, Proto>>,
+        Envelope<P>: Channels<Proto, Tx = Reply<P>, Rx = NoReceiver>,
+    {
+        self.call_with_metadata(Envelope::with_metadata(context, metadata, params))
             .await
             .map(|response| response.output)
     }

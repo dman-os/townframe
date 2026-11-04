@@ -179,10 +179,10 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
     let create = config
         .drawers
         .client
-        .call(
+        .call_with(
             context.child(),
+            identity.metadata(),
             MintDrawerCapability {
-                authorization: identity,
                 scope: DrawerScope {
                     drawers: BTreeMap::new(),
                     create: true,
@@ -345,8 +345,13 @@ impl PlugService {
         self.require_publish(&caller, namespace)
     }
 
-    async fn mint(&self, context: &RequestContext, params: MintPlugsCapability) -> Res<Capability> {
-        let caller = self.caller(context, params.authorization).await?;
+    async fn mint(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: MintPlugsCapability,
+    ) -> Res<Capability> {
+        let caller = self.caller(context, authorization).await?;
         if let Some(scope) = self.scope_of(&caller)?
             && !scope.covers(&params.scope)
         {
@@ -355,7 +360,7 @@ impl PlugService {
         self.capabilities
             .mint(
                 context,
-                params.authorization.authority,
+                authorization.authority,
                 &caller,
                 params.scope,
                 params.rights,
@@ -368,10 +373,11 @@ impl PlugService {
     async fn publish(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: PublishPlugVersion,
     ) -> Res<PublishedPlugVersion> {
         let mut envelope = params.envelope;
-        self.write_caller(context, params.authorization, &envelope.id.namespace)
+        self.write_caller(context, authorization, &envelope.id.namespace)
             .await?;
         if envelope.signature.is_none() {
             // The node signs only for its own DID: signing for any other namespace would let a
@@ -386,16 +392,26 @@ impl PlugService {
         self.registry.publish(envelope).await
     }
 
-    async fn remove_version(&self, context: &RequestContext, params: RemovePlugVersion) -> Res<()> {
-        self.write_caller(context, params.authorization, &params.id.namespace)
+    async fn remove_version(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: RemovePlugVersion,
+    ) -> Res<()> {
+        self.write_caller(context, authorization, &params.id.namespace)
             .await?;
         self.registry
             .remove_version(&params.id, &params.version)
             .await
     }
 
-    async fn remove_plug(&self, context: &RequestContext, params: RemovePlug) -> Res<()> {
-        self.write_caller(context, params.authorization, &params.id.namespace)
+    async fn remove_plug(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: RemovePlug,
+    ) -> Res<()> {
+        self.write_caller(context, authorization, &params.id.namespace)
             .await?;
         self.registry.remove_plug(&params.id).await
     }
@@ -403,9 +419,10 @@ impl PlugService {
     async fn import_document(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: ImportPlugDocument,
     ) -> Res<PlugRecord> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         // The document's namespace is known only after it is read, so the scope is checked
         // against it by the registry once it has.
         self.registry
@@ -415,18 +432,33 @@ impl PlugService {
             .await
     }
 
-    async fn get_publisher(&self, context: &RequestContext, params: GetPublisher) -> Res<String> {
-        self.read_caller(context, params.authorization).await?;
+    async fn get_publisher(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        _: GetPublisher,
+    ) -> Res<String> {
+        self.read_caller(context, authorization).await?;
         Ok(self.publisher.clone())
     }
 
-    async fn list(&self, context: &RequestContext, params: ListPlugs) -> Res<Vec<PlugRecord>> {
-        self.read_caller(context, params.authorization).await?;
+    async fn list(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        _: ListPlugs,
+    ) -> Res<Vec<PlugRecord>> {
+        self.read_caller(context, authorization).await?;
         Ok(self.registry.records().await)
     }
 
-    async fn get(&self, context: &RequestContext, params: GetPlug) -> Res<PlugRecord> {
-        self.read_caller(context, params.authorization).await?;
+    async fn get(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: GetPlug,
+    ) -> Res<PlugRecord> {
+        self.read_caller(context, authorization).await?;
         self.registry
             .record(&params.id)
             .await
@@ -436,17 +468,23 @@ impl PlugService {
     async fn get_version(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: GetPlugVersion,
     ) -> Res<PlugVersionRecord> {
-        self.read_caller(context, params.authorization).await?;
+        self.read_caller(context, authorization).await?;
         self.registry.version(&params.id, &params.version).await
     }
 
     /// The long poll of ADR 023: answers at once when there is a change past the cursor (or the
     /// caller must reset), otherwise holds until one lands, the hold expires, or the service
     /// stops. An expired hold is an ordinary empty page.
-    async fn watch(&self, context: &RequestContext, params: WatchPlugs) -> Res<PlugChanges> {
-        self.read_caller(context, params.authorization).await?;
+    async fn watch(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: WatchPlugs,
+    ) -> Res<PlugChanges> {
+        self.read_caller(context, authorization).await?;
         let hold =
             Duration::from_millis(u64::from(params.hold_ms.min(registry::WATCH_MAX_HOLD_MS)));
         let deadline = Instant::now() + hold;
@@ -481,7 +519,11 @@ macro_rules! handlers {
                 &self,
                 request: Envelope<$request>,
             ) -> Res<ResponseEnvelope<$output>> {
-                Ok(self.$method(&request.context, request.params).await?.into())
+                let authorization = Authorization::from_metadata(&request.metadata)?;
+                Ok(self
+                    .$method(&request.context, authorization, request.params)
+                    .await?
+                    .into())
             }
         }
     )*};
@@ -534,10 +576,10 @@ pub async fn boot(config: PlugsConfig) -> Res<(Plugs, StopToken)> {
     store::migrate(&config.sql).await?;
     let capability = config
         .docs
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(config.actor.capability),
                 scope: DocScope {
                     drawers: BTreeMap::from([(config.registry_drawer.clone(), Access::Write)]),
                     ..DocScope::default()

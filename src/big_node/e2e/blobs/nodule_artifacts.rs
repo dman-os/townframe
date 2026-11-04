@@ -94,10 +94,10 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
     let operator = Authorization::identity(node.authority.root);
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             AdmitNodule {
-                authorization: operator,
                 plug,
                 drawers: None,
             },
@@ -149,10 +149,10 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
     // Uninstalling removes the reference, and with it the document's retention.
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             UninstallNodule {
-                authorization: operator,
                 plug_id: PLUG.parse().unwrap(),
             },
         )

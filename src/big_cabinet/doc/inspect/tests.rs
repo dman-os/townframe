@@ -698,13 +698,14 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
     let resource = fixture
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization {
+                authority: fixture.issuer.capability,
+                signer: signer.capability,
+            }
+            .metadata(),
             MintDocCapability {
-                authorization: Authorization {
-                    authority: fixture.issuer.capability,
-                    signer: signer.capability,
-                },
                 scope: DocScope {
                     read: BTreeSet::from([document.clone()]),
                     ..DocScope::default()

@@ -28,6 +28,8 @@ pub enum ContextError {
     StreamCapacityExceeded { limit: usize },
     #[error("request exceeded its time budget")]
     DeadlineExceeded,
+    #[error("request carries no valid Authorization credential")]
+    Unauthenticated,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

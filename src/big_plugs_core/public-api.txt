@@ -66,12 +66,12 @@ pub struct big_plugs_core::PlugId  { namespace: String, name: String }
 pub struct big_plugs_core::Version  { 0: semver :: Version }
 pub struct big_plugs_core::VersionReq  { 0: semver :: VersionReq }
 pub struct big_plugs_core::catalog::Catalog  {  }
-pub struct big_plugs_core::protocol::GetPlug  { authorization: Authorization, id: PlugId }
-pub struct big_plugs_core::protocol::GetPlugVersion  { authorization: Authorization, id: PlugId, version: Version }
-pub struct big_plugs_core::protocol::GetPublisher  { authorization: Authorization }
-pub struct big_plugs_core::protocol::ImportPlugDocument  { authorization: Authorization, doc_id: DocId, source_drawer: DrawerId }
-pub struct big_plugs_core::protocol::ListPlugs  { authorization: Authorization }
-pub struct big_plugs_core::protocol::MintPlugsCapability  { authorization: Authorization, scope: PlugsScope, rights: Rights }
+pub struct big_plugs_core::protocol::GetPlug  { id: PlugId }
+pub struct big_plugs_core::protocol::GetPlugVersion  { id: PlugId, version: Version }
+pub struct big_plugs_core::protocol::GetPublisher  {  }
+pub struct big_plugs_core::protocol::ImportPlugDocument  { doc_id: DocId, source_drawer: DrawerId }
+pub struct big_plugs_core::protocol::ListPlugs  {  }
+pub struct big_plugs_core::protocol::MintPlugsCapability  { scope: PlugsScope, rights: Rights }
 pub struct big_plugs_core::protocol::PlugChange  { seq: u64, plug_id: PlugId, removed: bool }
 pub struct big_plugs_core::protocol::PlugChanges  { changes: Vec < PlugChange >, through: PlugsCursor, caught_up: bool, reset: bool }
 pub struct big_plugs_core::protocol::PlugRecord  { id: PlugId, doc_id: DocId, versions: Vec < PlugVersionSummary >, unreadable: BTreeMap < String , String >, duplicate_docs: Vec < DocId > }
@@ -79,11 +79,11 @@ pub struct big_plugs_core::protocol::PlugVersionRecord  { id: PlugId, version: V
 pub struct big_plugs_core::protocol::PlugVersionSummary  { version: Version, revision: Revision, conflict: Option < String >, unverified: Option < String > }
 pub struct big_plugs_core::protocol::PlugsCursor  { epoch: Uuid7, seq: u64 }
 pub struct big_plugs_core::protocol::PlugsScope  { publish: bool, namespaces: Option < BTreeSet < String > > }
-pub struct big_plugs_core::protocol::PublishPlugVersion  { authorization: Authorization, envelope: Plug }
+pub struct big_plugs_core::protocol::PublishPlugVersion  { envelope: Plug }
 pub struct big_plugs_core::protocol::PublishedPlugVersion  { record: PlugVersionRecord, unchanged: bool }
-pub struct big_plugs_core::protocol::RemovePlug  { authorization: Authorization, id: PlugId }
-pub struct big_plugs_core::protocol::RemovePlugVersion  { authorization: Authorization, id: PlugId, version: Version }
-pub struct big_plugs_core::protocol::WatchPlugs  { authorization: Authorization, after: Option < PlugsCursor >, limit: u32, hold_ms: u32 }
+pub struct big_plugs_core::protocol::RemovePlug  { id: PlugId }
+pub struct big_plugs_core::protocol::RemovePlugVersion  { id: PlugId, version: Version }
+pub struct big_plugs_core::protocol::WatchPlugs  { after: Option < PlugsCursor >, limit: u32, hold_ms: u32 }
 pub struct big_plugs_core::registry::PlugIdentity  { id: PlugId, extra: Extra }
 pub struct big_plugs_core::request::Request  { binding: String, contract: String, access: Option < String >, necessity: Necessity, resolution: Resolution, min_revision: Option < u32 >, extra: Extra }
 pub struct big_plugs_core::signature::PlugSignature  { alg: String, value: String, extra: Extra }

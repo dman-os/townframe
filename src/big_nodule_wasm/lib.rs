@@ -657,10 +657,10 @@ impl Egress {
         };
         let result = self
             .dispatch
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization { authority, signer }.metadata(),
                 Invoke {
-                    authorization: Authorization { authority, signer },
                     operation,
                     input,
                     context: InvocationContext {

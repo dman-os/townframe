@@ -1,6 +1,5 @@
 use crate::DatumKey;
 use crate::authority::AuthorityServiceError;
-use crate::authority::Authorization;
 use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::Rights;
@@ -257,7 +256,6 @@ pub struct DocScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDocCapability {
-    pub authorization: Authorization,
     pub scope: DocScope,
     pub rights: Rights,
 }

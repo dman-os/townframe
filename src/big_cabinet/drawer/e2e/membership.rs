@@ -1418,13 +1418,14 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
             .await;
         let cap = node
             .docs()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization {
+                    authority: alice.capability,
+                    signer: holder.capability,
+                }
+                .metadata(),
                 MintDocCapability {
-                    authorization: Authorization {
-                        authority: alice.capability,
-                        signer: holder.capability,
-                    },
                     scope: DocScope {
                         read: BTreeSet::from([created.doc_id.clone()]),
                         ..Default::default()
@@ -1520,13 +1521,14 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
             assert_eq!(
                 docs_op(
                     node.docs()
-                        .call(
+                        .call_with(
                             RequestContext::root(),
+                            Authorization {
+                                authority: cap,
+                                signer: holder.capability
+                            }
+                            .metadata(),
                             MintDocCapability {
-                                authorization: Authorization {
-                                    authority: cap,
-                                    signer: holder.capability
-                                },
                                 scope,
                                 rights: Rights::USE,
                             },

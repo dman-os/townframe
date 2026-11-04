@@ -166,10 +166,10 @@ pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
 pub(super) async fn admit(node: &BigNode, plug: Plug) -> NoduleRecord {
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             AdmitNodule {
-                authorization: Authorization::identity(node.authority.root),
                 plug,
                 drawers: None,
             },
@@ -181,10 +181,10 @@ pub(super) async fn admit(node: &BigNode, plug: Plug) -> NoduleRecord {
 pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord {
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             SetNoduleEnabled {
-                authorization: Authorization::identity(node.authority.root),
                 plug_id: spec.plug.clone(),
                 enabled,
             },
@@ -196,10 +196,10 @@ pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> N
 async fn set_operations(node: &BigNode, spec: &Spec, operations: DispatchScope) -> NoduleRecord {
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             SetNoduleOperationGrants {
-                authorization: Authorization::identity(node.authority.root),
                 plug_id: spec.plug.clone(),
                 operations,
             },
@@ -211,10 +211,10 @@ async fn set_operations(node: &BigNode, spec: &Spec, operations: DispatchScope) 
 async fn record(node: &BigNode, spec: &Spec) -> NoduleRecord {
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             GetNodule {
-                authorization: Authorization::identity(node.authority.root),
                 plug_id: spec.plug.clone(),
             },
         )
@@ -230,10 +230,10 @@ pub(super) async fn invoke(
 ) -> Result<Value, DispatchError> {
     node.dispatch
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             Invoke {
-                authorization: Authorization::identity(node.authority.root),
                 operation: operation.to_owned(),
                 input,
                 context,

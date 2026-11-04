@@ -117,10 +117,10 @@ async fn get_version(
 ) -> Result<big_plugs_core::protocol::PlugVersionRecord, PlugsError> {
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator(node).metadata(),
             GetPlugVersion {
-                authorization: operator(node),
                 id: id.parse().unwrap(),
                 version: version.parse().unwrap(),
             },
@@ -136,12 +136,10 @@ async fn publish(
 ) -> Result<PublishedPlugVersion, PlugsError> {
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
-            PublishPlugVersion {
-                authorization,
-                envelope,
-            },
+            authorization.metadata(),
+            PublishPlugVersion { envelope },
         )
         .await
         .map_err(operation)
@@ -151,10 +149,10 @@ async fn mint(node: &BigNode, scope: PlugsScope) -> Authorization {
     let capability = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator(node).metadata(),
             MintPlugsCapability {
-                authorization: operator(node),
                 scope,
                 rights: Rights::USE,
             },
@@ -174,10 +172,10 @@ async fn watch(
 ) -> Result<PlugChanges, PlugsError> {
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator(node).metadata(),
             WatchPlugs {
-                authorization: operator(node),
                 after,
                 limit: 0,
                 hold_ms,
@@ -190,11 +188,10 @@ async fn watch(
 async fn list(node: &BigNode) -> Vec<big_plugs_core::protocol::PlugRecord> {
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
-            ListPlugs {
-                authorization: operator(node),
-            },
+            operator(node).metadata(),
+            ListPlugs {},
         )
         .await
         .unwrap()
@@ -246,12 +243,7 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     let list = node
         .plugs
         .client
-        .call(
-            RequestContext::root(),
-            ListPlugs {
-                authorization: operator,
-            },
-        )
+        .call_with(RequestContext::root(), operator.metadata(), ListPlugs {})
         .await
         .unwrap();
     assert_eq!(list.len(), 1);
@@ -267,10 +259,10 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     let record = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             GetPlug {
-                authorization: operator,
                 id: plug_id("photos"),
             },
         )
@@ -280,10 +272,10 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     let version = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             GetPlugVersion {
-                authorization: operator,
                 id: plug_id("photos"),
                 version: "1.0.0".parse().unwrap(),
             },
@@ -314,12 +306,7 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     .await;
     node.plugs
         .client
-        .call(
-            RequestContext::root(),
-            ListPlugs {
-                authorization: reader,
-            },
-        )
+        .call_with(RequestContext::root(), reader.metadata(), ListPlugs {})
         .await
         .unwrap();
     assert_eq!(
@@ -329,10 +316,10 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     assert_eq!(
         node.plugs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                reader.metadata(),
                 RemovePlug {
-                    authorization: reader,
                     id: plug_id("photos")
                 }
             )
@@ -346,11 +333,10 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     assert_eq!(
         node.plugs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
-                ListPlugs {
-                    authorization: Authorization::identity(node.docs_actor.capability)
-                }
+                Authorization::identity(node.docs_actor.capability).metadata(),
+                ListPlugs {}
             )
             .await
             .map_err(operation),
@@ -359,10 +345,10 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     assert_eq!(
         node.plugs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                reader.metadata(),
                 MintPlugsCapability {
-                    authorization: reader,
                     scope: PlugsScope {
                         publish: true,
                         ..Default::default()
@@ -408,10 +394,10 @@ async fn a_published_version_never_changes_content() {
     let kept = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             GetPlugVersion {
-                authorization: operator,
                 id: plug_id("photos"),
                 version: "1.0.0".parse().unwrap(),
             },
@@ -424,10 +410,10 @@ async fn a_published_version_never_changes_content() {
     // identical envelope may be published again.
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             RemovePlugVersion {
-                authorization: operator,
                 id: plug_id("photos"),
                 version: "1.0.0".parse().unwrap(),
             },
@@ -463,11 +449,10 @@ async fn publishing_refuses_artifacts_whose_bytes_are_not_local() {
     let listed = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
-            ListPlugs {
-                authorization: operator(&node),
-            },
+            operator(&node).metadata(),
+            ListPlugs {},
         )
         .await
         .unwrap();
@@ -487,10 +472,10 @@ async fn artifacts_are_retained_while_published_and_released_after_removal() {
     let doc = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             GetPlug {
-                authorization: operator,
                 id: plug_id("photos"),
             },
         )
@@ -503,10 +488,10 @@ async fn artifacts_are_retained_while_published_and_released_after_removal() {
     }
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             RemovePlugVersion {
-                authorization: operator,
                 id: plug_id("photos"),
                 version: "1.0.0".parse().unwrap(),
             },
@@ -520,10 +505,10 @@ async fn artifacts_are_retained_while_published_and_released_after_removal() {
     let record = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             GetPlug {
-                authorization: operator,
                 id: plug_id("photos"),
             },
         )
@@ -532,10 +517,10 @@ async fn artifacts_are_retained_while_published_and_released_after_removal() {
     assert!(record.versions.is_empty());
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             RemovePlug {
-                authorization: operator,
                 id: plug_id("photos"),
             },
         )
@@ -544,10 +529,10 @@ async fn artifacts_are_retained_while_published_and_released_after_removal() {
     assert_eq!(
         node.plugs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                operator.metadata(),
                 GetPlug {
-                    authorization: operator,
                     id: plug_id("photos"),
                 },
             )
@@ -640,10 +625,10 @@ async fn the_watch_observes_publish_and_remove_from_a_cursor() {
 
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             RemovePlug {
-                authorization: operator,
                 id: plug_id("photos"),
             },
         )
@@ -680,10 +665,10 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
     let record = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             GetPlug {
-                authorization: operator,
                 id: plug_id("photos"),
             },
         )
@@ -700,10 +685,10 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
         let version = node
             .plugs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                operator.metadata(),
                 GetPlugVersion {
-                    authorization: operator,
                     id: plug_id("photos"),
                     version: "1.0.0".parse().unwrap(),
                 },
@@ -787,12 +772,7 @@ async fn the_node_signs_unsigned_envelopes_under_its_own_publisher_did() {
     let publisher = node
         .plugs
         .client
-        .call(
-            RequestContext::root(),
-            GetPublisher {
-                authorization: operator,
-            },
-        )
+        .call_with(RequestContext::root(), operator.metadata(), GetPublisher {})
         .await
         .unwrap();
     assert_eq!(publisher, node.plugs.publisher);
@@ -860,10 +840,10 @@ async fn a_new_label_must_order_after_every_label_the_plug_has_or_had() {
     for version in ["1.2.0", "1.0.0"] {
         node.plugs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                operator.metadata(),
                 RemovePlugVersion {
-                    authorization: operator,
                     id: plug_id("photos"),
                     version: version.parse().unwrap(),
                 },
@@ -896,10 +876,10 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
     let record = node
         .plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             GetPlug {
-                authorization: operator,
                 id: plug_id("photos"),
             },
         )
@@ -913,10 +893,10 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
         let record = node
             .plugs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                operator.metadata(),
                 GetPlug {
-                    authorization: operator,
                     id: plug_id("photos"),
                 },
             )
@@ -980,13 +960,10 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
         async move {
             node.plugs
                 .client
-                .call(
+                .call_with(
                     RequestContext::root(),
-                    MintPlugsCapability {
-                        authorization,
-                        scope,
-                        rights,
-                    },
+                    authorization.metadata(),
+                    MintPlugsCapability { scope, rights },
                 )
                 .await
                 .map_err(operation)
@@ -1020,10 +997,10 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
     assert_eq!(
         node.plugs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                handle.metadata(),
                 RemovePlug {
-                    authorization: handle,
                     id: own.parse().unwrap(),
                 }
             )
@@ -1035,10 +1012,10 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
     );
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            handle.metadata(),
             RemovePlug {
-                authorization: handle,
                 id: plug_id("photos"),
             },
         )
@@ -1232,10 +1209,10 @@ async fn make_reachable_to_the_registry(node: &BigNode) {
     let cap = node
         .drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
                     create: false,
@@ -1268,10 +1245,10 @@ async fn import_document(
     let source_drawer = node.drawers.local().present_id;
     node.plugs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            authorization.metadata(),
             ImportPlugDocument {
-                authorization,
                 doc_id: doc_id.clone(),
                 source_drawer,
             },

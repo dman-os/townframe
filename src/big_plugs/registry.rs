@@ -781,10 +781,10 @@ impl Registry {
             .expect("the registry's gate is never closed");
         let read_capability = self
             .docs
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(self.import.actor).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(self.import.actor),
                     scope: DocScope {
                         read: [doc.clone()].into(),
                         ..DocScope::default()
@@ -815,10 +815,10 @@ impl Registry {
         let entry = self
             .import
             .drawers
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(self.import.actor).metadata(),
                 MintDrawerCapability {
-                    authorization: Authorization::identity(self.import.actor),
                     scope: DrawerScope {
                         drawers: BTreeMap::from([
                             (self.drawer.clone(), DrawerAccess::Write),

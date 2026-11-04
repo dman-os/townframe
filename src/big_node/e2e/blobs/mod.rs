@@ -20,10 +20,10 @@ mod nodule_artifacts;
 pub(super) async fn drawer_cap(node: &BigNode, drawer: &DocId) -> CapId {
     node.drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
@@ -368,10 +368,10 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
     let create_cap = node
         .drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: true,
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
@@ -399,10 +399,10 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
     let cap = node
         .drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([

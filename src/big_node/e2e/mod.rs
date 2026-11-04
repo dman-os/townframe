@@ -101,10 +101,10 @@ fn config<'a>(
 async fn capability(node: &BigNode, scope: DocScope) -> CapId {
     node.docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope,
                 rights: Rights::USE,
             },

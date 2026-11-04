@@ -86,23 +86,23 @@ pub struct big_nodule_core::config::NoduleSubstitution  { by: PlugId, extra: Ext
 pub struct big_nodule_core::config::OperationGrants  { operations: Vec < String >, authorities: Vec < String >, extra: Extra }
 pub struct big_nodule_core::inventory::FilledBy  { plug_id: PlugId, version: Version }
 pub struct big_nodule_core::inventory::InstalledNodule  { plug_id: PlugId, version: Version, revision: Revision, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, config: Option < IndexMap < String , Value > >, filled_by: Option < FilledBy > }
-pub struct big_nodule_core::protocol::AdmitNodule  { authorization: Authorization, plug: Plug, drawers: Option < BTreeMap < DrawerId , DrawerAccess > > }
-pub struct big_nodule_core::protocol::ConfigureNodule  { authorization: Authorization, plug_id: PlugId, settings: IndexMap < String , Value > }
-pub struct big_nodule_core::protocol::ConfirmNoduleResolution  { authorization: Authorization, plug_id: PlugId, binding: String }
-pub struct big_nodule_core::protocol::GetNodule  { authorization: Authorization, plug_id: PlugId }
-pub struct big_nodule_core::protocol::ListNodules  { authorization: Authorization }
-pub struct big_nodule_core::protocol::MintNoduleCapability  { authorization: Authorization, scope: NoduleScope, rights: Rights }
+pub struct big_nodule_core::protocol::AdmitNodule  { plug: Plug, drawers: Option < BTreeMap < DrawerId , DrawerAccess > > }
+pub struct big_nodule_core::protocol::ConfigureNodule  { plug_id: PlugId, settings: IndexMap < String , Value > }
+pub struct big_nodule_core::protocol::ConfirmNoduleResolution  { plug_id: PlugId, binding: String }
+pub struct big_nodule_core::protocol::GetNodule  { plug_id: PlugId }
+pub struct big_nodule_core::protocol::ListNodules  {  }
+pub struct big_nodule_core::protocol::MintNoduleCapability  { scope: NoduleScope, rights: Rights }
 pub struct big_nodule_core::protocol::NoduleActor  { actor_id: Uuid7, url: String, public_key: MultibaseKey }
 pub struct big_nodule_core::protocol::NoduleGrantStatus  { desired: DrawerAccess, granted: bool, error: Option < String > }
 pub struct big_nodule_core::protocol::NoduleInitStatus  { attempts: u32, error: Option < String >, waiting_on: Option < String > }
 pub struct big_nodule_core::protocol::NoduleOperationGrantStatus  { desired: DispatchScope, unrequested: DispatchScope, granted: bool, error: Option < String > }
 pub struct big_nodule_core::protocol::NoduleRecord  { plug_id: PlugId, version: Option < Version >, revision: Option < Revision >, actor: Option < NoduleActor >, filled_by: Option < FilledBy >, enabled: bool, readiness: Readiness, config: Option < IndexMap < String , Value > >, artifacts: BTreeMap < String , ArtifactState >, drawers: BTreeMap < DrawerId , NoduleGrantStatus >, operations: Option < NoduleOperationGrantStatus >, requests: BTreeMap < String , RequestStatus >, init: Option < NoduleInitStatus >, observed_heads: Vec < ChangeHash >, applied_heads: Option < Vec < ChangeHash > >, error: Option < String > }
 pub struct big_nodule_core::protocol::NoduleScope  { admit: bool, plugs: BTreeSet < PlugId > }
-pub struct big_nodule_core::protocol::SetNoduleDrawerGrants  { authorization: Authorization, plug_id: PlugId, drawers: BTreeMap < DrawerId , DrawerAccess > }
-pub struct big_nodule_core::protocol::SetNoduleEnabled  { authorization: Authorization, plug_id: PlugId, enabled: bool }
-pub struct big_nodule_core::protocol::SetNoduleOperationGrants  { authorization: Authorization, plug_id: PlugId, operations: DispatchScope }
-pub struct big_nodule_core::protocol::SetNoduleSubstitution  { authorization: Authorization, plug_id: PlugId, by: Option < PlugId > }
-pub struct big_nodule_core::protocol::UninstallNodule  { authorization: Authorization, plug_id: PlugId }
+pub struct big_nodule_core::protocol::SetNoduleDrawerGrants  { plug_id: PlugId, drawers: BTreeMap < DrawerId , DrawerAccess > }
+pub struct big_nodule_core::protocol::SetNoduleEnabled  { plug_id: PlugId, enabled: bool }
+pub struct big_nodule_core::protocol::SetNoduleOperationGrants  { plug_id: PlugId, operations: DispatchScope }
+pub struct big_nodule_core::protocol::SetNoduleSubstitution  { plug_id: PlugId, by: Option < PlugId > }
+pub struct big_nodule_core::protocol::UninstallNodule  { plug_id: PlugId }
 pub struct big_nodule_core::providers::LockedProvider  { contract: String, provider: String, version: Option < Version >, lexicon_revision: Option < u32 > }
 pub struct big_nodule_core::providers::ProviderIndex  {  }
 pub struct big_nodule_core::providers::RequestStatus  { contract: String, locked: Option < LockedProvider >, unresolved: Option < Unresolved > }

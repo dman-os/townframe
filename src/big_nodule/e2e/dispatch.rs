@@ -144,10 +144,10 @@ impl Node {
     ) -> Result<Value, DispatchError> {
         self.dispatch
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                authorization.metadata(),
                 Invoke {
-                    authorization,
                     operation: operation.to_owned(),
                     input,
                     context,
@@ -172,11 +172,13 @@ impl Node {
     }
 
     pub(super) async fn set_enabled(&self, plug_id: &str, enabled: bool) {
-        self.call(SetNoduleEnabled {
-            authorization: self.operator(),
-            plug_id: id(plug_id),
-            enabled,
-        })
+        self.call(
+            self.operator(),
+            SetNoduleEnabled {
+                plug_id: id(plug_id),
+                enabled,
+            },
+        )
         .await
         .unwrap();
     }
@@ -230,10 +232,12 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
         Err(DispatchError::UnknownOperation)
     );
     node.set_enabled(example_plug!("photos"), true).await;
-    node.call(UninstallNodule {
-        authorization: operator,
-        plug_id: id(example_plug!("photos")),
-    })
+    node.call(
+        operator,
+        UninstallNodule {
+            plug_id: id(example_plug!("photos")),
+        },
+    )
     .await
     .unwrap();
     assert_eq!(

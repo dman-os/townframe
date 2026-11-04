@@ -147,10 +147,10 @@ impl Node {
     async fn capability(&self, scope: DocScope) -> CapId {
         self.docs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(self.authority.root).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(self.authority.root),
                     scope,
                     rights: Rights::USE,
                 },

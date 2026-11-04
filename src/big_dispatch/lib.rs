@@ -4,7 +4,7 @@
 //! nodule reconciler, the node's built-in services through [`ServiceProvider`]) registers them in
 //! the [`Router`] it is handed.
 //!
-//! One call: (1) the presented [`Authorization`] is verified and its scope must cover the NSID,
+//! One call: (1) the caller's [`Authorization`] (the request's `Authorization: Bearer` metadata) is verified and its scope must cover the NSID,
 //! (2) the NSID resolves to a provider that is ready, (3) the provider is called under the
 //! caller's deadline. Nothing is persisted and the routing lookup touches no database or disk.
 
@@ -130,7 +130,12 @@ impl DispatchService {
         }
     }
 
-    async fn invoke(&self, context: &RequestContext, params: Invoke) -> Res<InvokeOutput> {
+    async fn invoke(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: Invoke,
+    ) -> Res<InvokeOutput> {
         // The tighter of the caller's request budget and the invocation's own deadline. Like
         // gRPC, which answers `DEADLINE_EXCEEDED` for a call whose deadline has already passed
         // without running the handler, an elapsed budget fails here, before admission, lookup
@@ -146,7 +151,7 @@ impl DispatchService {
         if budget == Some(Duration::ZERO) {
             return Err(DispatchError::DeadlineExceeded);
         }
-        let verified = self.caller(context, params.authorization).await?;
+        let verified = self.caller(context, authorization).await?;
         let scope = self.scope_of(&verified)?;
         // A handle is its holder's: it was minted bound to one actor and only that actor may
         // invoke through it. Presenting another actor's handle under one's own signer is the
@@ -166,7 +171,7 @@ impl DispatchService {
             return Err(DispatchError::Denied);
         }
         let caller = Caller {
-            authorization: params.authorization,
+            authorization,
             actor: verified.signer.actor_id,
             scope: scope.cloned(),
         };
@@ -200,9 +205,10 @@ impl DispatchService {
     async fn mint(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: MintDispatchCapability,
     ) -> Res<Capability> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         if let Some(scope) = self.scope_of(&caller)?
             && !scope.covers(&params.scope)
         {
@@ -211,7 +217,7 @@ impl DispatchService {
         self.capabilities
             .mint(
                 context,
-                params.authorization.authority,
+                authorization.authority,
                 &caller,
                 params.scope,
                 params.rights,
@@ -229,7 +235,11 @@ macro_rules! handlers {
                 &self,
                 request: Envelope<$request>,
             ) -> Res<ResponseEnvelope<$output>> {
-                Ok(self.$method(&request.context, request.params).await?.into())
+                let authorization = Authorization::from_metadata(&request.metadata)?;
+                Ok(self
+                    .$method(&request.context, authorization, request.params)
+                    .await?
+                    .into())
             }
         }
     )*};

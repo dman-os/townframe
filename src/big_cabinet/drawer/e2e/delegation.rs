@@ -614,13 +614,14 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
     let source = node.mint_drawer(&bob, scope.clone()).await.unwrap();
     let bound = node
         .drawers()
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization {
+                authority: source,
+                signer: plug.capability,
+            }
+            .metadata(),
             MintDrawerCapability {
-                authorization: Authorization {
-                    authority: source,
-                    signer: plug.capability,
-                },
                 scope: scope.clone(),
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
             },
@@ -726,13 +727,14 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
     assert_eq!(
         op(node
             .drawers()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization {
+                    authority: source,
+                    signer: alice.capability
+                }
+                .metadata(),
                 MintDrawerCapability {
-                    authorization: Authorization {
-                        authority: source,
-                        signer: alice.capability
-                    },
                     scope: DrawerScope {
                         drawers: [(drawer.clone(), Access::Admin)].into(),
                         create: false
@@ -1201,13 +1203,14 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
     let source = node.mint_drawer(&alice, scope.clone()).await.unwrap();
     let delegated = node
         .drawers()
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization {
+                authority: source,
+                signer: plug.capability,
+            }
+            .metadata(),
             MintDrawerCapability {
-                authorization: Authorization {
-                    authority: source,
-                    signer: plug.capability,
-                },
                 scope,
                 rights: Rights::USE,
             },
@@ -1341,13 +1344,14 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
     let source = node.mint_drawer(&alice, scope.clone()).await.unwrap();
     let delegated = node
         .drawers()
-        .call(
+        .call_with(
             context.child(),
+            Authorization {
+                authority: source,
+                signer: plug.capability,
+            }
+            .metadata(),
             MintDrawerCapability {
-                authorization: Authorization {
-                    authority: source,
-                    signer: plug.capability,
-                },
                 scope,
                 rights: Rights::USE,
             },

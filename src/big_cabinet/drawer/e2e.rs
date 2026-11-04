@@ -355,10 +355,10 @@ impl Node {
 
     async fn mint_drawer(&self, actor: &Actor, scope: DrawerScope) -> Result<CapId, DrawersError> {
         self.drawers()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDrawerCapability {
-                    authorization: Authorization::identity(actor.capability),
                     scope,
                     rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
                 },
@@ -387,10 +387,10 @@ impl Node {
 
     async fn mint_doc(&self, actor: &Actor, scope: DocScope) -> Result<CapId, DocsError> {
         self.docs()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(actor.capability),
                     scope,
                     rights: Rights::USE,
                 },

@@ -1,7 +1,9 @@
 //! The plug registry protocol (ADR 028 §1): the wire contract between the node-side registry
 //! service and whoever publishes to or reads from it.
 //!
-//! Every operation names its caller by an [`Authorization`]: the operator's own identity
+//! Every operation names its caller by the request's `Authorization: Bearer` credential (the
+//! envelope's HTTP metadata, `Authorization::from_metadata`), never by a body field; a request
+//! without one fails with `ContextError::Unauthenticated`. The credential is the operator's own identity
 //! capability, or a handle the registry minted through [`MintPlugsCapability`] that carries a
 //! [`PlugsScope`]. An arbitrary actor presenting its identity is refused. The registry does no
 //! enablement: it versions what is published and keeps a published version immutable, and each
@@ -13,7 +15,6 @@ use crate::Revision;
 use crate::Version;
 use crate::signature::SignatureError;
 use big_cabinet_core::authority::AuthorityServiceError;
-use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
@@ -65,7 +66,6 @@ impl PlugsScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintPlugsCapability {
-    pub authorization: Authorization,
     pub scope: PlugsScope,
     pub rights: Rights,
 }
@@ -79,7 +79,6 @@ pub struct MintPlugsCapability {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPlugVersion {
-    pub authorization: Authorization,
     pub envelope: Plug,
 }
 
@@ -87,9 +86,7 @@ pub struct PublishPlugVersion {
 /// built under it can be published unsigned and are signed by the node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GetPublisher {
-    pub authorization: Authorization,
-}
+pub struct GetPublisher {}
 
 /// Adds an existing document, one an author wrote and signed elsewhere, to the registry drawer.
 /// `source_drawer` is a drawer the document is in: entering a document confers access the caller
@@ -103,28 +100,23 @@ pub struct GetPublisher {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlugDocument {
-    pub authorization: Authorization,
     pub doc_id: DocId,
     pub source_drawer: DrawerId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListPlugs {
-    pub authorization: Authorization,
-}
+pub struct ListPlugs {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetPlug {
-    pub authorization: Authorization,
     pub id: PlugId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetPlugVersion {
-    pub authorization: Authorization,
     pub id: PlugId,
     pub version: Version,
 }
@@ -134,7 +126,6 @@ pub struct GetPlugVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovePlugVersion {
-    pub authorization: Authorization,
     pub id: PlugId,
     pub version: Version,
 }
@@ -143,7 +134,6 @@ pub struct RemovePlugVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovePlug {
-    pub authorization: Authorization,
     pub id: PlugId,
 }
 
@@ -153,7 +143,6 @@ pub struct RemovePlug {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchPlugs {
-    pub authorization: Authorization,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<PlugsCursor>,
     #[serde(default)]

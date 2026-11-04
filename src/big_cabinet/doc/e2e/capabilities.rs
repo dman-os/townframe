@@ -29,13 +29,10 @@ async fn mint(
     rights: Rights,
 ) -> Capability {
     node.client()
-        .call(
+        .call_with(
             RequestContext::root(),
-            MintDocCapability {
-                authorization,
-                scope,
-                rights,
-            },
+            authorization.metadata(),
+            MintDocCapability { scope, rights },
         )
         .await
         .unwrap()
@@ -184,13 +181,14 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
         assert_eq!(
             op(node
                 .client()
-                .call(
+                .call_with(
                     RequestContext::root(),
+                    Authorization {
+                        authority: source,
+                        signer: owner.capability
+                    }
+                    .metadata(),
                     MintDocCapability {
-                        authorization: Authorization {
-                            authority: source,
-                            signer: owner.capability
-                        },
                         scope: DocScope {
                             read: BTreeSet::from([other.doc_id.clone()]),
                             ..DocScope::default()
@@ -1171,10 +1169,10 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
             assert_eq!(
                 op(node
                     .client()
-                    .call(
+                    .call_with(
                         context.child(),
+                        authorization.metadata(),
                         MintDocCapability {
-                            authorization,
                             scope: scope.clone(),
                             rights: Rights::USE,
                         },
@@ -1222,10 +1220,10 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
         assert_eq!(
             op(node
                 .client()
-                .call(
+                .call_with(
                     RequestContext::root(),
+                    Authorization::identity(source.capability).metadata(),
                     MintDocCapability {
-                        authorization: Authorization::identity(source.capability),
                         scope: scope.clone(),
                         rights,
                     }
