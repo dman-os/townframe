@@ -595,8 +595,19 @@ impl documents::HostOperation for TestHost {
 }
 
 impl capability_bank::Host for TestHost {
-    fn publish_presentation_component(
+    fn publish_presentation(
         &mut self,
+        _name: String,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::PublishedCapability>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    fn publish_call(
+        &mut self,
+        _name: String,
+        _contract: capability_bank::Contract,
     ) -> wasmtime::Result<
         Result<Resource<capability_bank::PublishedCapability>, capability_bank::CapabilityError>,
     > {
@@ -605,13 +616,11 @@ impl capability_bank::Host for TestHost {
 }
 
 impl capability_bank::HostCapabilityRef for TestHost {
-    fn as_presentation_component(
+    fn status(
         &mut self,
         _reference: Resource<capability_bank::CapabilityRef>,
-    ) -> wasmtime::Result<
-        Result<Resource<capability_bank::PresentationComponent>, capability_bank::CapabilityError>,
-    > {
-        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    ) -> wasmtime::Result<capability_bank::RefStatus> {
+        Ok(capability_bank::RefStatus::Revoked)
     }
 
     fn drop(
@@ -620,6 +629,55 @@ impl capability_bank::HostCapabilityRef for TestHost {
     ) -> wasmtime::Result<()> {
         self.table.delete(reference)?;
         Ok(())
+    }
+}
+
+impl<T: 'static> capability_bank::HostCapabilityRefWithStore<T> for HasSelf<TestHost> {
+    async fn call(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<capability_bank::CapabilityRef>,
+        _request: Vec<u8>,
+    ) -> wasmtime::Result<Result<Vec<u8>, capability_bank::CallError>> {
+        Ok(Err(capability_bank::CallError::Capability(
+            capability_bank::CapabilityError::LimitExceeded,
+        )))
+    }
+
+    async fn retain_call(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<capability_bank::CapabilityRef>,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::CallBinding>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    async fn redeem_presentation(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<capability_bank::CapabilityRef>,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::PresentationComponent>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+}
+
+impl capability_bank::HostCallBinding for TestHost {
+    fn drop(&mut self, binding: Resource<capability_bank::CallBinding>) -> wasmtime::Result<()> {
+        self.table.delete(binding)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> capability_bank::HostCallBindingWithStore<T> for HasSelf<TestHost> {
+    async fn call(
+        _accessor: &Accessor<T, Self>,
+        _binding: Resource<capability_bank::CallBinding>,
+        _request: Vec<u8>,
+    ) -> wasmtime::Result<Result<Vec<u8>, capability_bank::CallError>> {
+        Ok(Err(capability_bank::CallError::Capability(
+            capability_bank::CapabilityError::LimitExceeded,
+        )))
     }
 }
 
@@ -1135,7 +1193,8 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
         .push(Placement::synthetic(Arc::new(AtomicBool::new(false))))?;
     assert!(matches!(
         events
-            .call_mount(&mut store, Resource::new_borrow(denied.rep()), &[])
+            .call_mount(&mut store,
+            "view", Resource::new_borrow(denied.rep()), &[])
             .await?,
         Err(PresentationError::Revoked)
     ));
@@ -1145,7 +1204,8 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
         .table
         .push(Placement::synthetic(first_lifetime.clone()))?;
     let surface = events
-        .call_mount(&mut store, Resource::new_borrow(placement.rep()), &[])
+        .call_mount(&mut store,
+            "view", Resource::new_borrow(placement.rep()), &[])
         .await?
         .unwrap();
     let expected_batches = expected_counter_batches(4);
@@ -1176,6 +1236,7 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
     let second_surface = second_events
         .call_mount(
             &mut store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
             &[],
         )
@@ -1245,7 +1306,8 @@ async fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
             .push(Placement::synthetic(alive.clone()))?;
         let surface = guest
             .townframe_dayframe_presentation_events()
-            .call_mount(&mut store, Resource::new_borrow(placement.rep()), &[])
+            .call_mount(&mut store,
+            "view", Resource::new_borrow(placement.rep()), &[])
             .await?
             .unwrap();
         Ok::<_, wasmtime::Error>((store, guest, surface))
@@ -1386,7 +1448,8 @@ async fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime:
     let events = guest.townframe_dayframe_presentation_events();
     let placement = rig.grant();
     let _surface = events
-        .call_mount(&mut rig.store, Resource::new_borrow(placement.rep()), &[])
+        .call_mount(&mut rig.store,
+            "view", Resource::new_borrow(placement.rep()), &[])
         .await?
         .unwrap();
 
@@ -1418,6 +1481,7 @@ async fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::R
     let _first_surface = first_events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
             &[],
         )
@@ -1426,6 +1490,7 @@ async fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::R
     let _second_surface = second_events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
             &[],
         )
@@ -1462,6 +1527,7 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     let first = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
             &[],
         )
@@ -1470,6 +1536,7 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     let second = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
             &[],
         )
@@ -1509,6 +1576,7 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     let remounted = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
             &[],
         )
@@ -1539,6 +1607,7 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     let last = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
             &[],
         )
@@ -1567,6 +1636,7 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
     let first = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
             &[],
         )
@@ -1575,6 +1645,7 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
     let second = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
             &[],
         )
@@ -1606,6 +1677,7 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
         events
             .call_mount(
                 &mut rig.store,
+            "view",
                 Resource::new_borrow(first_placement.rep()),
                 &[]
             )
@@ -1616,6 +1688,7 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
     let replacement = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(replacement_placement.rep()),
             &[],
         )
@@ -1652,6 +1725,7 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
         .townframe_dayframe_presentation_events()
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
             &[],
         )
@@ -1661,6 +1735,7 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
         .townframe_dayframe_presentation_events()
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
             &[],
         )

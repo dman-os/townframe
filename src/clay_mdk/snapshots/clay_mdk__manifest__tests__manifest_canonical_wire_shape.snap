@@ -1,5 +1,5 @@
 ---
-source: src/clay_mdk/manifest.rs
+source: src/clay_mdk/manifest_tests.rs
 expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
 ---
 {
@@ -11,14 +11,19 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
     "presentation": "townframe:dayframe/presentation-events@0.4.0",
     "installer": null
   },
-  "provides": [
+  "publications": [
     {
-      "id": "controller",
+      "name": "view",
+      "kind": "presentation",
+      "contract": null
+    },
+    {
+      "name": "increment",
+      "kind": "call",
       "contract": {
-        "id": "wasm.controller",
+        "id": "dayframe.counter.increment",
         "version": 1
-      },
-      "retention": "strong"
+      }
     }
   ],
   "requires": [
@@ -63,11 +68,8 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
   "contributions": [
     {
       "id": "toolbar-button",
-      "target_binding": "shelf",
-      "extension_contract": {
-        "id": "dayframe.shelf",
-        "version": 1
-      },
+      "collection": "dayframe.shelf",
+      "key": "counter",
       "payload": {
         "badges": [
           1,
@@ -81,36 +83,12 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
         "order": 2,
         "slot": "toolbar"
       },
-      "capability_slots": [
+      "attachments": [
         {
           "index": 0,
-          "contract": {
-            "id": "dayframe.surface-mount",
-            "version": 1
-          }
+          "publication": "view"
         }
       ]
-    }
-  ],
-  "activation_defaults": [
-    {
-      "id": "toolbar-button",
-      "trigger": {
-        "kind": "target-live",
-        "target_binding": "shelf",
-        "extension_contract": {
-          "id": "dayframe.shelf",
-          "version": 1
-        }
-      },
-      "declaration_id": "toolbar-button"
-    },
-    {
-      "id": "always-on",
-      "trigger": {
-        "kind": "explicit-root"
-      },
-      "declaration_id": "toolbar-button"
     }
   ]
 }

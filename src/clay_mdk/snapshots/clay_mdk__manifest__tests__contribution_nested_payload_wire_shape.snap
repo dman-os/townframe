@@ -1,14 +1,11 @@
 ---
-source: src/clay_mdk/manifest.rs
+source: src/clay_mdk/manifest_tests.rs
 expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
 ---
 {
   "id": "toolbar-button",
-  "target_binding": "shelf",
-  "extension_contract": {
-    "id": "dayframe.shelf",
-    "version": 1
-  },
+  "collection": "dayframe.shelf",
+  "key": "counter",
   "payload": {
     "badges": [
       1,
@@ -22,13 +19,10 @@ expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
     "order": 2,
     "slot": "toolbar"
   },
-  "capability_slots": [
+  "attachments": [
     {
       "index": 0,
-      "contract": {
-        "id": "dayframe.surface-mount",
-        "version": 1
-      }
+      "publication": "view"
     }
   ]
 }
