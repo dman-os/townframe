@@ -13,6 +13,8 @@ use crate::replica::Entry;
 use crate::types::Change;
 use crate::types::Cursor;
 use crate::types::Page;
+use crate::types::Stamped;
+use crate::types::WriteBasis;
 
 #[derive(Clone, Debug)]
 pub struct ReadTicket {
@@ -220,6 +222,34 @@ impl<K: Ord + Clone, V: Clone> Mirror<K, V> {
 
     pub fn row(&self, key: &K) -> Option<&Entry<V>> {
         self.rows.get(key)
+    }
+}
+
+/// A mirror of a registration collection keeps tombstones as `None` rows so it knows the
+/// stamp of everything it has seen deleted; these read the replica as an application
+/// does (a tombstoned key is absent) and as a writer does (any stamp is a basis).
+impl<K: Ord + Clone, V: Clone> Mirror<K, Stamped<Option<V>>> {
+    /// The live value of `key`; a tombstoned or unknown key is absent.
+    pub fn live(&self, key: &K) -> Option<&V> {
+        self.rows.get(key)?.value.value.as_ref()
+    }
+
+    /// Every live row; tombstoned keys are hidden.
+    pub fn live_rows(&self) -> Vec<(K, V)> {
+        self.rows
+            .iter()
+            .filter_map(|(key, entry)| Some((key.clone(), entry.value.value.clone()?)))
+            .collect()
+    }
+
+    /// The basis a write to `key` defaults to: `Observed` with whatever stamp this replica
+    /// holds for it, a tombstone's included, so the write supersedes what the writer has
+    /// seen; `Concurrent` only for a key the replica has never held.
+    pub fn write_basis(&self, key: &K) -> WriteBasis {
+        match self.rows.get(key) {
+            Some(entry) => WriteBasis::Observed(entry.value.stamp.clone()),
+            None => WriteBasis::Concurrent,
+        }
     }
 }
 

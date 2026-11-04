@@ -267,3 +267,41 @@ fn churn_of_distinct_removed_keys_keeps_only_current_rows_and_one_request() {
     assert_eq!(mirror.incarnation, Some(1));
     assert!(mirror.is_empty());
 }
+
+#[test]
+fn write_basis_names_any_stamp_the_replica_holds_tombstones_included() {
+    use crate::Stamp;
+    use crate::WriterId;
+    let stamp = |lamport| Stamp {
+        lamport,
+        writer: WriterId::new("w"),
+    };
+    let row = |key: u64, seq, lamport, value| Change::Upsert {
+        key,
+        row_version: Version::new(1, seq),
+        value: Stamped {
+            stamp: stamp(lamport),
+            value,
+        },
+        evidence: RowEvidence::Authoritative,
+        write_context: None,
+    };
+    let mut mirror = Mirror::default();
+    let ticket = mirror.begin_read();
+    let changes = vec![row(1, 1, 1, Some("live")), row(2, 2, 4, None)];
+    assert!(mirror.apply(&ticket, &page_of(changes, 1)));
+    assert_eq!(mirror.write_basis(&1), WriteBasis::Observed(stamp(1)));
+    assert_eq!(mirror.write_basis(&2), WriteBasis::Observed(stamp(4)));
+    assert_eq!(mirror.write_basis(&3), WriteBasis::Concurrent);
+    assert_eq!(mirror.live(&1), Some(&"live"));
+    assert_eq!(mirror.live(&2), None);
+    assert_eq!(mirror.live_rows(), vec![(1, "live")]);
+}
+
+fn page_of<V>(changes: Vec<Change<u64, V>>, through: u8) -> Page<u64, V> {
+    Page {
+        transactions: vec![Transaction { changes }],
+        through: Cursor(vec![through]),
+        bootstrap_complete: true,
+    }
+}
