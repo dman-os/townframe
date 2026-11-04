@@ -1081,6 +1081,124 @@ pub async fn dropped_call_finishes_in_the_guest_without_leaks<E: Incarnations>(e
 
 /// The fixture's `registrations` roles take `[role, key-prefix]` arguments and bind `a` and
 /// `b` to `micro`'s grant; the prefix namespaces the keys the incarnation writes.
+/// The shared authoring `Context` over this engine, run against the prepared `context` fixture
+/// (`src/clay_mdk/context_fixture.rs`): the guest reads the collection bound to `feed` (a row
+/// the host wrote before it started) and registers a row recording what it read, so the host
+/// sees a guest collection read and a guest registration write; its `rows` call then answers
+/// through its own mirror, which holds the host's row and its own once the host commits it.
+/// Closing leaves the guest holding nothing and retracts its row.
+pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
+    let host = Host::new();
+    let registrations = bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), [93, 94]);
+    let cbor = |text: &str| {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(text, &mut bytes).unwrap();
+        bytes
+    };
+    let seeder = host.start("seeder");
+    CollectionSession::new(
+        host.clone(),
+        seeder,
+        crate::collections::CollectionLimits::default(),
+    )
+    .grant_writer(clay_host::Grant {
+        collection: registrations.clone(),
+        micro: MicroId::new("seeder"),
+    })
+    .unwrap()
+    .put(
+        cbor("seed"),
+        clay_collection::WriteBasis::Concurrent,
+        cbor("one"),
+    )
+    .unwrap();
+    let instance = host.create("context").unwrap();
+    host.begin_initialization(&instance).unwrap();
+    let rows_contract = ContractIdentity::new("dayframe.context", "rows", (1, 0, 0));
+    let (runtime, driver) = Rc::new(engine)
+        .initialize(
+            host.clone(),
+            instance.clone(),
+            InitialContext {
+                collections: BTreeMap::from([("feed".to_owned(), registrations.projection())]),
+                registrations: BTreeMap::from([(
+                    "feed".to_owned(),
+                    clay_host::Grant {
+                        collection: registrations.clone(),
+                        micro: MicroId::new("context"),
+                    },
+                )]),
+                publications: BTreeMap::from([(
+                    "rows".to_owned(),
+                    DeclaredPublication {
+                        kind: PublicationKind::Call,
+                        contract: rows_contract,
+                    },
+                )]),
+                ..InitialContext::default()
+            },
+        )
+        .await
+        .unwrap();
+    let driver = tokio::task::spawn_local(driver);
+    // The guest read the seed through its mirror and registered what it saw.
+    host.commit_initialization(&instance).unwrap();
+    let written = registrations
+        .snapshot()
+        .into_iter()
+        .map(|(key, entry)| {
+            let value = ciborium::from_reader::<String, _>(entry.value.unwrap().body.as_slice());
+            (
+                ciborium::from_reader::<String, _>(key.as_slice()).unwrap(),
+                value.unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        written,
+        BTreeMap::from([
+            ("guest".to_owned(), "seed=one".to_owned()),
+            ("seed".to_owned(), "one".to_owned()),
+        ])
+    );
+
+    // The call is served from the guest's mirror, which also holds its own committed row.
+    let recipient_instance = host.start("recipient");
+    let recipient = CapabilitySession::new(
+        host.clone(),
+        recipient_instance.clone(),
+        CapabilityLimits::default(),
+    );
+    let rows = E::publications(&runtime)
+        .remove("rows")
+        .expect("the guest publishes `rows`");
+    let mut request = Vec::new();
+    ciborium::into_writer(&(), &mut request).unwrap();
+    let response = recipient.mint(&rows).unwrap().call(request).await.unwrap();
+    assert_eq!(
+        ciborium::from_reader::<Vec<(String, String)>, _>(response.as_slice()).unwrap(),
+        // Rows come in key-byte order, which is CBOR's: shorter text keys first.
+        [
+            ("seed".to_owned(), "one".to_owned()),
+            ("guest".to_owned(), "seed=one".to_owned()),
+        ]
+    );
+
+    assert!(host.begin_close(&instance).unwrap());
+    let (closed, residue) = E::close(runtime).await;
+    closed.unwrap();
+    assert_eq!(residue, GuestResidue::NONE);
+    driver.await.unwrap();
+    host.close_instance(&instance).unwrap();
+    assert_eq!(
+        registrations.snapshot().len(),
+        1,
+        "only the seed outlives the guest"
+    );
+    host.close_instance(&recipient_instance).unwrap();
+    host.close();
+}
+
 fn registration_context(
     role: &str,
     registrations: &BytesRegistrations,

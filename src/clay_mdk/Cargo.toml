@@ -20,6 +20,12 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [[example]]
+name = "context"
+path = "context_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
 name = "lifecycle"
 path = "lifecycle_fixture.rs"
 crate-type = ["cdylib"]
