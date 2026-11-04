@@ -2576,6 +2576,8 @@ version = "0.1.0"
 dependencies = [
  "clay_store",
  "proptest",
+ "serde",
+ "serde_json",
  "sqlite_rs",
  "tempfile",
  "tokio",
@@ -9234,6 +9236,7 @@ version = "0.1.0"
 dependencies = [
  "clay_mdk",
  "insta",
+ "micro_settings_manifest",
  "serde_json",
 ]
 

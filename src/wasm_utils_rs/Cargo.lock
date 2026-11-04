@@ -482,6 +482,7 @@ name = "clay_collection"
 version = "0.1.0"
 dependencies = [
  "clay_store",
+ "serde",
 ]
 
 [[package]]
