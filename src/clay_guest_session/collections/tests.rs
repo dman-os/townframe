@@ -1,6 +1,8 @@
 use super::*;
+use clay_collection::ReplicaId;
 use clay_collection::RowEvidence;
 use clay_collection::Version;
+use clay_collection::WriterId;
 use std::num::NonZeroUsize;
 use std::task::Poll;
 
@@ -30,7 +32,7 @@ fn upsert(
         value: Stamped {
             stamp: Stamp {
                 lamport: 1,
-                writer: WriterId::new("test"),
+                writer: WriterId::from_encoded("test"),
             },
             value: Some(CollectionValue::plain(value.to_vec())),
         },
@@ -393,7 +395,7 @@ async fn durable_rows_persist_endpoints_and_reload_them() {
         .install(
             b"counter/manifest",
             clay_collection::Retention::Installation,
-            WriterId::new("counter"),
+            WriterId::new(&ReplicaId::from_bytes([7; ReplicaId::LEN]), "counter"),
             std::collections::BTreeMap::from([(b"counter".to_vec(), Some(endpoint_row()))]),
         )
         .await

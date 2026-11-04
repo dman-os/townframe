@@ -1,4 +1,5 @@
 use super::*;
+use clay_collection::ReplicaId;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -928,7 +929,8 @@ fn closing_a_binding_cycle_is_an_invariant_failure() {
 
 #[test]
 fn declared_collections_outlive_grants_and_issue_full_prefix_authority() {
-    let registry = CollectionRegistry::<Arc<Mutex<Vec<u8>>>>::default();
+    let registry =
+        CollectionRegistry::<Arc<Mutex<Vec<u8>>>>::new(ReplicaId::from_bytes([1; ReplicaId::LEN]));
     let sections = clay_collection::Nsid::literal("org.example.test.sections");
     let missing = clay_collection::Nsid::literal("org.example.test.missing");
     let contract = CollectionContract {

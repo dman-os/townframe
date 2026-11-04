@@ -274,7 +274,7 @@ fn write_basis_names_any_stamp_the_replica_holds_tombstones_included() {
     use crate::WriterId;
     let stamp = |lamport| Stamp {
         lamport,
-        writer: WriterId::new("w"),
+        writer: WriterId::from_encoded("w"),
     };
     let row = |key: u64, seq, lamport, value| Change::Upsert {
         key,

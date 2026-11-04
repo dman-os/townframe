@@ -787,7 +787,7 @@ proptest! {
     ) {
         let retention = if permanent { Retention::Permanent } else { Retention::Installation };
         let candidate = Candidate {
-            stamp: Stamp { lamport, writer: WriterId::new(&writer) },
+            stamp: Stamp { lamport, writer: WriterId::from_encoded(&writer) },
             slot,
         };
         let (decoded_retention, decoded) = decode_row(codec(), &encode_row(codec(), retention, &candidate));

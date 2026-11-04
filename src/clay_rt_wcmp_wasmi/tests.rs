@@ -750,6 +750,10 @@ fn full_grant(
     clay_host::Grant {
         collection: registrations.clone(),
         micro: clay_host::MicroId::new(micro),
+        writer: clay_collection::WriterId::new(
+            &clay_collection::ReplicaId::from_bytes([1; clay_collection::ReplicaId::LEN]),
+            micro,
+        ),
     }
 }
 
@@ -769,7 +773,7 @@ fn stamped(
     clay_collection::Stamped {
         stamp: clay_collection::Stamp {
             lamport: 1,
-            writer: clay_collection::WriterId::new("test"),
+            writer: clay_collection::WriterId::from_encoded("test"),
         },
         value: Some(value),
     }

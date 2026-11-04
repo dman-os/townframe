@@ -74,6 +74,14 @@ const ECHO: &str = "echo";
 /// `relay:` plus the peer's answer; the request `trap` traps the guest.
 const RELAY: &str = "relay";
 
+/// The writer identity `micro` has on the one replica the conformance scenarios run on.
+fn writer_of(micro: &str) -> clay_collection::WriterId {
+    clay_collection::WriterId::new(
+        &clay_collection::ReplicaId::from_bytes([1; clay_collection::ReplicaId::LEN]),
+        micro,
+    )
+}
+
 fn echo_contract() -> Nsid {
     Nsid::literal("org.example.clay.test.lifecycle.echo")
 }
@@ -571,7 +579,7 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
                         .as_ref()
                         .expect("the fixture leaves no tombstone winner");
                     assert!(value.attachments.is_empty());
-                    assert_eq!(entry.stamp.writer.as_bytes(), name.as_bytes());
+                    assert_eq!(entry.stamp.writer.as_bytes(), writer_of(name).as_bytes());
                     ciborium::from_reader::<String, _>(value.body.as_slice()).unwrap()
                 })
                 .collect::<Vec<_>>();
@@ -1106,6 +1114,7 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
     .grant_writer(clay_host::Grant {
         collection: registrations.clone(),
         micro: MicroId::new("seeder"),
+        writer: writer_of("seeder"),
     })
     .unwrap()
     .put(
@@ -1132,6 +1141,7 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
                     clay_host::Grant {
                         collection: registrations.clone(),
                         micro: MicroId::new("context"),
+                        writer: writer_of("context"),
                     },
                 )]),
                 publications: BTreeMap::from([
@@ -1275,6 +1285,7 @@ fn registration_context(
     let grant = || clay_host::Grant {
         collection: registrations.clone(),
         micro: micro.clone(),
+        writer: writer_of(micro.as_str()),
     };
     InitialContext {
         arguments,

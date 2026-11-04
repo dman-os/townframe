@@ -59,6 +59,7 @@ pub use types::Page;
 pub use types::ReadError;
 pub use types::ReadLimits;
 pub use types::RegistrationScopeId;
+pub use types::ReplicaId;
 pub use types::RowEvidence;
 pub use types::ScopeId;
 pub use types::Stamp;
