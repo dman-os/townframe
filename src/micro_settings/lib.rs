@@ -4,17 +4,15 @@
 mod view;
 pub use view::SettingsView;
 
-use clay_mdk::native::AccessError;
-use clay_mdk::native::CollectionWatch;
-use clay_mdk::native::Context;
-use clay_mdk::native::DocumentSnapshot;
-use clay_mdk::native::Facet;
-use clay_mdk::native::FacetValue;
-use clay_mdk::native::Instance;
-use clay_mdk::native::Operation;
-use clay_mdk::native::RendererRegistry;
+use clay_mdk::Collection;
+use clay_mdk::Context;
+use clay_mdk::Error;
+use clay_mdk::Facet;
+use clay_mdk::FacetSnapshot;
+use clay_mdk::FacetState;
+use clay_mdk::Instance;
+use clay_mdk::Operation;
 use contract::Section;
-use dioxus::prelude::Element;
 pub use micro_settings_manifest as contract;
 use serde::Deserialize;
 use serde::Serialize;
@@ -44,7 +42,7 @@ impl SettingsConfig {
 #[derive(Clone)]
 pub struct SettingsMicro {
     pub instance: Instance,
-    pub sections: CollectionWatch<String, Section>,
+    pub sections: Collection<String, Section>,
     pub config: Facet<SettingsConfig>,
 }
 
@@ -55,18 +53,20 @@ impl PartialEq for SettingsMicro {
 }
 
 impl SettingsMicro {
-    pub fn preferences(&self, snapshot: &DocumentSnapshot) -> Option<SettingsConfig> {
-        match self.config.state(snapshot) {
-            FacetValue::Loading => None,
-            FacetValue::Absent => Some(SettingsConfig::default()),
-            FacetValue::Present(config) => Some(config),
+    /// The viewer's preferences in `snapshot`: the defaults while the document has none, and
+    /// `None` while it is still loading.
+    pub fn preferences(&self, snapshot: &FacetSnapshot<SettingsConfig>) -> Option<SettingsConfig> {
+        match &snapshot.state {
+            FacetState::Loading => None,
+            FacetState::Absent => Some(SettingsConfig::default()),
+            FacetState::Present(config) => Some(config.clone()),
         }
     }
 
-    pub fn edit(&self, update: impl FnOnce(&mut SettingsConfig)) -> Result<Operation, AccessError> {
+    pub fn edit(&self, update: impl FnOnce(&mut SettingsConfig)) -> Result<Operation, Error> {
         let mut config = self
-            .preferences(&self.config.watch.current()?)
-            .ok_or(AccessError::Denied)?;
+            .preferences(&self.config.current()?)
+            .ok_or(Error::Denied)?;
         update(&mut config);
         self.config.write(config)
     }
@@ -74,16 +74,16 @@ impl SettingsMicro {
 
 /// Settings reads the declared sections collection (its configuration binds it) and publishes
 /// its view, which the shell mounts as a root.
-pub fn activate<R: RendererRegistry<Render = Element>>(
-    context: &Context<R>,
-) -> Result<(), AccessError> {
+pub async fn activate(context: Context) -> Result<(), Error> {
     let micro = SettingsMicro {
         instance: context.instance(),
-        sections: context.collection(contract::SECTIONS_BINDING)?,
+        sections: context
+            .collection(contract::SECTIONS_BINDING)
+            .expect("configuration binds the sections collection"),
         config: context
             .config(contract::CONFIG_NAME)
             .expect("manifest declares Settings configuration")
-            .facet::<SettingsConfig>(contract::CONFIG_TAG.into(), contract::CONFIG_KEY.into())?,
+            .facet::<SettingsConfig>(contract::CONFIG_TAG, contract::CONFIG_KEY)?,
     };
     context.publish_component(contract::VIEW, move || {
         use dioxus::prelude::*;
@@ -102,12 +102,12 @@ mod tests {
     use clay_host::Host;
     use clay_host::MicroId;
     use clay_host::Supervisor;
-    use clay_mdk::native::BoundCollection;
-    use clay_mdk::native::CollectionBindings;
-    use clay_mdk::native::CollectionRegistry;
-    use clay_mdk::native::DocumentService;
-    use clay_mdk::native::Resources;
-    use clay_mdk::native::factory;
+    use clay_mdk::host::BoundCollection;
+    use clay_mdk::host::CollectionBindings;
+    use clay_mdk::host::CollectionRegistry;
+    use clay_mdk::host::DocumentService;
+    use clay_mdk::host::Resources;
+    use clay_mdk::host::factory;
     use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
 
@@ -126,11 +126,11 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let host = Host::new();
-                let resources = Resources {
-                    registry: NativeComponents::new(&host),
-                    documents: DocumentService::new(16),
-                    collections: CollectionRegistry::default(),
-                };
+                let resources = Resources::new(
+                    NativeComponents::new(&host),
+                    DocumentService::new(16),
+                    CollectionRegistry::default(),
+                );
                 resources
                     .collections
                     .declare(

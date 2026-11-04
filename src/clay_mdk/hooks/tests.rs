@@ -1,5 +1,5 @@
 use super::*;
-use crate::native::CollectionWatch;
+use crate::Collection;
 use clay_collection::WriteBasis;
 use clay_guest_session::capabilities::CapabilityLimits;
 use clay_guest_session::capabilities::CapabilitySession;
@@ -19,7 +19,7 @@ fn cbor(text: &str) -> Vec<u8> {
     bytes
 }
 
-fn app(watch: CollectionWatch<String, String>) -> Element {
+fn app(watch: Collection<String, String>) -> Element {
     let rows = use_rows(&watch);
     let text = rows
         .iter()
@@ -61,7 +61,7 @@ async fn rows_hook_rerenders_on_each_change_and_hides_tombstones() {
                 })
                 .unwrap();
             let reader = sessions.grant(registrations.projection()).unwrap();
-            let (watch, feed) = CollectionWatch::<String, String>::start(reader, capabilities);
+            let (watch, feed) = Collection::<String, String>::start(reader, capabilities);
             tokio::task::spawn_local(feed);
 
             let mut dom = VirtualDom::new_with_props(app, watch);

@@ -8,11 +8,11 @@
 //! binding unbound; if it was required the micro is not startable until configuration changes.
 use clay_docs::FacetRoute;
 use clay_host::MicroId;
-use clay_mdk::native::BoundCollection;
 use clay_mdk::BindingResolution;
 use clay_mdk::CollectionAccess;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
+use clay_mdk::host::BoundCollection;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;

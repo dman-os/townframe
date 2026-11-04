@@ -4,11 +4,14 @@
 mod tests;
 mod view;
 
+use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
 use clay_mdk::CollectionAccess;
 use clay_mdk::CollectionRequest;
 use clay_mdk::ConfigurationRequest;
+use clay_mdk::Context;
 use clay_mdk::Entrypoints;
+use clay_mdk::Error;
 use clay_mdk::FacetAccess;
 use clay_mdk::MANIFEST_SCHEMA;
 use clay_mdk::MicroId;
@@ -16,12 +19,8 @@ use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
-use clay_mdk::native::AccessError;
-use clay_mdk::native::Attachment;
-use clay_mdk::native::Context;
-use clay_mdk::native::DocumentService;
-use clay_mdk::native::RendererRegistry;
-use clay_mdk::native::RowAttachment;
+use clay_mdk::RowAttachment;
+use clay_mdk::host::DocumentService;
 use dioxus::prelude::*;
 use micro_settings_manifest::SECTIONS;
 use micro_settings_manifest::Section;
@@ -85,19 +84,17 @@ pub fn manifest() -> MicroManifest {
 /// reach the mock node. The host validated the manifest's facet ACL before this runs. The
 /// micro registers its Settings section with a registration writer, so the row lives exactly as
 /// long as this incarnation.
-pub fn activate<R: RendererRegistry<Render = Element>>(
-    context: &Context<R>,
-) -> Result<(), AccessError> {
-    let config_document = context
+pub async fn activate(context: Context) -> Result<(), Error> {
+    let config = context
         .config(CONFIG_NAME)
-        .expect("manifest declares the sample configuration binding");
-    let config = config_document.facet::<SampleConfig>(CONFIG_TAG.into(), CONFIG_KEY.into())?;
-    let content = config.clone();
+        .expect("manifest declares the sample configuration binding")
+        .facet::<SampleConfig>(CONFIG_TAG, CONFIG_KEY)?;
     let detail = context.publish_component(DETAIL, move || {
-        dioxus::prelude::rsx! { view::SampleDetail { config: content.clone() } }
+        dioxus::prelude::rsx! { view::SampleDetail { config: config.clone() } }
     })?;
     context
-        .registration::<String, Section>(SECTIONS_BINDING)?
+        .registration::<String, Section>(SECTIONS_BINDING)
+        .expect("configuration binds the sections collection")
         .put(
             &ID.to_owned(),
             &Section {
@@ -106,7 +103,7 @@ pub fn activate<R: RendererRegistry<Render = Element>>(
             },
             vec![RowAttachment::Bound(detail)],
         )
-        .map_err(|_| AccessError::Denied)?;
+        .await?;
     Ok(())
 }
 
@@ -116,7 +113,7 @@ pub fn activate<R: RendererRegistry<Render = Element>>(
 /// surface is [`activate`].
 pub fn seed_mock_defaults(documents: &DocumentService) {
     documents.mock_documents().seed(
-        clay_mdk::native::FacetRoute {
+        clay_mdk::host::FacetRoute {
             document: "sample-config".into(),
             branch: "main".into(),
             tag: CONFIG_TAG.into(),

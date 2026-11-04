@@ -3,7 +3,7 @@
 //! guest see one collection through the same host sessions, so a native reader consumes rows a
 //! guest wrote (attachments included) and the reverse.
 //!
-//! A [`CollectionWatch`] mirrors one collection into the micro's incarnation: a local task
+//! A [`Collection`] mirrors one collection into the micro's incarnation: a local task
 //! long-polls the projection lease and folds pages into a [`Mirror`]. A [`Registration`] adds
 //! a writer whose default basis is that mirror's stamp for the key (so a write supersedes what
 //! this micro has seen, tombstones included).
@@ -18,7 +18,6 @@ use clay_collection::Stamped;
 use clay_collection::WriteBasis;
 use clay_guest_session::capabilities::CapabilityLimits;
 use clay_guest_session::capabilities::CapabilityPublication;
-use clay_guest_session::capabilities::CapabilityRef;
 use clay_guest_session::capabilities::CapabilitySession;
 use clay_guest_session::capabilities::RowAttachment;
 use clay_guest_session::collections::BytesRegistrations;
@@ -29,13 +28,13 @@ use clay_guest_session::collections::CollectionSession;
 use clay_guest_session::collections::CollectionValue;
 use clay_guest_session::collections::ReadFailure;
 use clay_guest_session::collections::RegistrationWriter;
-use clay_guest_session::collections::WriteFailure;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 
-use clay_host::AccessError;
+use crate::Error;
+use crate::context::Capability;
 use clay_host::Activator;
 use clay_host::Host;
 use clay_host::Instance;
@@ -63,7 +62,7 @@ pub struct Row<K, V> {
     pub key: K,
     pub value: V,
     pub stamp: Stamp,
-    pub attachments: Vec<CapabilityRef>,
+    pub attachments: Vec<Capability>,
 }
 
 type RawMirror = Mirror<Vec<u8>, Stamped<Option<CollectionValue>>>;
@@ -80,26 +79,31 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> T {
     ciborium::from_reader(bytes).expect("collection row violates its declared contract")
 }
 
+/// The rows of one revision, decoded once and shared by every reader of that revision.
+type RowCache<K, V> = Rc<RefCell<Option<(u64, Rc<[Row<K, V>]>)>>>;
+
 /// A read-only mirror of one declared collection, kept current by a task the incarnation owns.
-pub struct CollectionWatch<K, V> {
+/// Each clone keeps its own position in the change stream (see [`Self::changed`]) and shares
+/// the mirror and the decoded-row cache.
+pub struct Collection<K, V> {
     mirror: Rc<RefCell<RawMirror>>,
     revision: watch::Receiver<u64>,
     capabilities: CapabilitySession,
-    _types: std::marker::PhantomData<fn() -> (K, V)>,
+    decoded: RowCache<K, V>,
 }
 
-impl<K, V> Clone for CollectionWatch<K, V> {
+impl<K, V> Clone for Collection<K, V> {
     fn clone(&self) -> Self {
         Self {
             mirror: Rc::clone(&self.mirror),
             revision: self.revision.clone(),
             capabilities: self.capabilities.clone(),
-            _types: std::marker::PhantomData,
+            decoded: Rc::clone(&self.decoded),
         }
     }
 }
 
-impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
+impl<K: DeserializeOwned, V: DeserializeOwned> Collection<K, V> {
     /// Start mirroring `reader`. Returns the watch and the loop that feeds it, which the
     /// caller owns and must drive until the incarnation closes.
     pub(crate) fn start(
@@ -155,7 +159,7 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
                 mirror,
                 revision,
                 capabilities,
-                _types: std::marker::PhantomData,
+                decoded: Rc::default(),
             },
             feed,
         )
@@ -170,7 +174,7 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
         instance: &Instance,
         activator: Activator<CapabilityPublication>,
         collection: &BytesRegistrations,
-    ) -> Result<(Self, impl Future<Output = ()> + 'static + use<K, V>), AccessError> {
+    ) -> Result<(Self, impl Future<Output = ()> + 'static + use<K, V>), Error> {
         let capabilities =
             CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
         capabilities.attach_activator(activator);
@@ -181,7 +185,16 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
     }
 
     /// Every live row (tombstoned keys are hidden), attachments minted for this incarnation.
-    pub fn rows(&self) -> Result<Vec<Row<K, V>>, AccessError> {
+    /// Rows are decoded once per mirror revision: the feed task folds a page and bumps the
+    /// revision with no await in between, so a revision read here names exactly the mirror
+    /// state read next, and every reader of that revision shares the decoded rows.
+    pub fn rows(&self) -> Result<Rc<[Row<K, V>]>, Error> {
+        let revision = *self.revision.borrow();
+        if let Some((cached, rows)) = &*self.decoded.borrow()
+            && *cached == revision
+        {
+            return Ok(Rc::clone(rows));
+        }
         let mirror = self.mirror.borrow();
         let mut rows = Vec::new();
         for (key, stamped) in mirror.rows() {
@@ -194,7 +207,7 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
                 .map(|attachment| {
                     self.capabilities
                         .mint_attachment(attachment)
-                        .map_err(|_| AccessError::Revoked)
+                        .map(Capability::new)
                 })
                 .collect::<Result<_, _>>()?;
             rows.push(Row {
@@ -204,6 +217,8 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
                 attachments,
             });
         }
+        let rows: Rc<[Row<K, V>]> = rows.into();
+        *self.decoded.borrow_mut() = Some((revision, Rc::clone(&rows)));
         Ok(rows)
     }
 
@@ -212,9 +227,10 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
         self.mirror.borrow().bootstrap_complete()
     }
 
-    /// A receiver that ticks whenever the mirror changes.
-    pub fn revisions(&self) -> watch::Receiver<u64> {
-        self.revision.clone()
+    /// Resolve when the mirror next changes after the last change this handle observed. Errors
+    /// with [`Error::Revoked`] once the incarnation that feeds the mirror has closed.
+    pub async fn changed(&mut self) -> Result<(), Error> {
+        self.revision.changed().await.map_err(|_| Error::Revoked)
     }
 
     /// Resolve once the mirror has folded in the collection's bootstrap.
@@ -230,48 +246,51 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
 }
 
 /// A micro's write authority over a collection together with its mirror of that collection.
+#[derive(Clone)]
 pub struct Registration<K, V> {
-    writer: RegistrationWriter,
-    watch: CollectionWatch<K, V>,
+    writer: Rc<RegistrationWriter>,
+    collection: Collection<K, V>,
 }
 
 impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Registration<K, V> {
-    pub(super) fn new(writer: RegistrationWriter, watch: CollectionWatch<K, V>) -> Self {
-        Self { writer, watch }
+    pub(crate) fn new(writer: Rc<RegistrationWriter>, collection: Collection<K, V>) -> Self {
+        Self { writer, collection }
     }
 
-    pub fn watch(&self) -> &CollectionWatch<K, V> {
-        &self.watch
+    pub fn collection(&self) -> &Collection<K, V> {
+        &self.collection
     }
 
     fn basis(&self, key: &[u8]) -> WriteBasis {
-        self.watch.mirror.borrow().write_basis(&key.to_vec())
+        self.collection.mirror.borrow().write_basis(&key.to_vec())
     }
 
     /// Put `value` at `key`, superseding what this micro's mirror holds for it. `attachments`
-    /// are the publications [`Attachment`] indices in `value` refer to.
-    pub fn put(
+    /// are the publications [`Attachment`] indices in `value` refer to. Async so the guest
+    /// backend, whose writes cross the component boundary, shares this signature; the in-process
+    /// write completes before the first poll returns.
+    pub async fn put(
         &self,
         key: &K,
         value: &V,
         attachments: Vec<RowAttachment>,
-    ) -> Result<Stamp, WriteFailure> {
+    ) -> Result<Stamp, Error> {
         let key = encode(key);
         let basis = self.basis(&key);
-        self.writer.put_value(
+        Ok(self.writer.put_value(
             key,
             basis,
             CollectionValue {
                 body: encode(value),
                 attachments,
             },
-        )
+        )?)
     }
 
     /// Delete `key`, superseding what this micro's mirror holds for it.
-    pub fn delete(&self, key: &K) -> Result<Stamp, WriteFailure> {
+    pub async fn delete(&self, key: &K) -> Result<Stamp, Error> {
         let key = encode(key);
         let basis = self.basis(&key);
-        self.writer.delete(key, basis)
+        Ok(self.writer.delete(key, basis)?)
     }
 }

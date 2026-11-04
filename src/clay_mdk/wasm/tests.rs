@@ -83,7 +83,8 @@ fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
 
 struct Rig {
     host: Host,
-    resources: Resources<NativeComponents>,
+    resources: Resources,
+    components: NativeComponents,
     supervisor: Supervisor<clay_guest_session::capabilities::CapabilityPublication>,
     id: clay_host::MicroId,
 }
@@ -91,11 +92,12 @@ struct Rig {
 impl Rig {
     async fn start(declared: MicroManifest) -> Self {
         let host = Host::new();
-        let resources = Resources {
-            registry: NativeComponents::new(&host),
-            documents: DocumentService::new(16),
-            collections: CollectionRegistry::default(),
-        };
+        let components = NativeComponents::new(&host);
+        let resources = Resources::new(
+            components.clone(),
+            DocumentService::new(16),
+            CollectionRegistry::default(),
+        );
         let package = counter_package().await;
         let id = clay_host::MicroId::new("test.wasm");
         let micro = ConfiguredMicro {
@@ -106,6 +108,7 @@ impl Rig {
             unresolved_bindings: Vec::new(),
             factory: factory(
                 resources.clone(),
+                components.clone(),
                 declared,
                 CollectionBindings::default(),
                 move || {
@@ -118,6 +121,7 @@ impl Rig {
         Self {
             host,
             resources,
+            components,
             supervisor,
             id,
         }
@@ -137,7 +141,7 @@ impl Rig {
         let mut dom = VirtualDom::new_with_props(
             mount_host_app,
             MountProps {
-                components: self.resources.registry.clone(),
+                components: self.components.clone(),
                 owner: self.host.start("viewer"),
                 reference: view.component().expect("a presentation has a component"),
             },

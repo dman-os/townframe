@@ -1,7 +1,10 @@
 # C6 proposal: one `clay_mdk::Context` for native and guest micros
 
-Status: proposal (phase 1), no code changed. Grounded in `clay_mdk/{native,guest,engine,wasm,wcmp,mirror}.rs`,
+Status: C6b implemented for the in-process backend (see "C6b notes"); guest parity is C6c. Grounded in `clay_mdk/{native,guest,engine,wasm,wcmp,mirror}.rs`,
 `clay_guest_session/wit/*.wit`, `micro_{settings,sample,counter}`.
+Owner: Claude (C6 subagent); manager reviews.
+Scope: `clay_mdk` authoring surface, `micro_*` crates and their composition call sites.
+Updated: 2026-11-04 (C6b: shared `Context` + in-process backend landed)
 
 ## 1. Author-facing API
 
@@ -161,3 +164,20 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
 7. Decoded rows are cached per revision, not decoded on every `rows()`/render.
 8. `RendererRegistry` stays a `clay_host` seam behind an `Element`-erased `Resources`; no `clay_dioxus` break now.
 9. Composition-only items live in `clay_mdk::host`.
+
+## C6b notes (2026-11-04): where the code differs from the proposal
+
+- `publish_component` / `publish_call` return `Result<Publication, Error>`, not `Publication`: the incarnation can
+  close while an async `activate` is suspended, so `Revoked` is a runtime condition, not an invariant break.
+- Collection and registration grants are taken before `activate` runs (the accessors cannot fail); a bound collection
+  that is not declared fails initialization like the guest engine path. Feed tasks start when `collection()` is called.
+- `Facet::write` takes `T` by value (the document service takes ownership); `Facet::refresh` returns the post-request
+  snapshot. `FacetState` is one shared enum (crate root) for the guest mirror and the in-process facade.
+- `Capability` is a wrapper (typed `call`, `redeem_presentation`, `status`); `AttachedRef` is gone, `PresentationSlot`
+  takes a `Capability`. `Error::Unavailable` keeps a disabled provider distinct from a revoked one.
+- Handlers run on the incarnation's executor through the same `GuestCall` queue an engine's driver serves; no
+  `publish_call_raw` (no caller).
+- `Resources` is non-generic; `wasm_factory`/`wcmp_factory` take the `NativeComponents` the surfaces attach to as an
+  explicit argument, because the erased publisher cannot attach wire surfaces.
+- Not done in C6b: `export_micro!` still emits only the guest exports; the native `ACTIVATE` entry and the guest
+  `Context` come with C6c, which is why `micro_counter` still uses `clay_mdk::guest`.

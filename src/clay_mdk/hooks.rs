@@ -1,23 +1,23 @@
-//! The view-side backend: Dioxus presentation glue over the renderer-agnostic authoring surface.
-//! A micro's own view is plain Dioxus; what lives here are the two pieces that must resolve host
-//! state *through the installed renderer* — the slot component that mounts a published
-//! [`ComponentRef`] into the host tree, and the hook that drives a host collection reader from
-//! Dioxus reactivity. Micro views reach both through this module and so never name a renderer
-//! crate (ADR 015 §3 dependency direction).
+//! The view-side half of the authoring surface: Dioxus hooks that bind the handles a micro's
+//! `activate` captured to reactivity, and the slot components that mount another micro's
+//! published component into the host tree *through the installed renderer*. Micro views reach
+//! both through this module and so never name a renderer crate (ADR 015 §3 dependency
+//! direction).
+use crate::Capability;
+use crate::Collection;
 use crate::ComponentRef;
-use crate::native::CapabilityRef;
-use crate::native::CollectionWatch;
-use crate::native::Instance;
-use crate::native::Row;
+use crate::Facet;
+use crate::FacetSnapshot;
+use crate::Instance;
+use crate::Row;
 use clay_dioxus::ComponentMount;
 use dioxus::prelude::*;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::rc::Rc;
 
-/// The view-side counterpart of [`crate::native::Context::publish_component`]: mounts a published
-/// component into the host tree, resolving the renderer registry from Dioxus context. Backend-owned
-/// so micro views never name a renderer crate; the WIT backend gains the matching slot component
-/// with the collections waist.
+/// The view-side counterpart of [`crate::Context::publish_component`]: mounts a published
+/// component into the host tree, resolving the renderer registry from Dioxus context.
 #[derive(Props, Clone, PartialEq)]
 pub struct ComponentSlotProps {
     pub owner: Instance,
@@ -30,28 +30,10 @@ pub fn ComponentSlot(props: ComponentSlotProps) -> Element {
     rsx! { ComponentMount { owner: props.owner, reference } }
 }
 
-/// A row's attachment reference as a component prop. Two props are equal when the reference
-/// stores back as the same attachment, so a re-rendered row that still names the same target
-/// does not remount its slot.
-#[derive(Clone)]
-pub struct AttachedRef(Rc<CapabilityRef>);
-
-impl AttachedRef {
-    pub fn new(reference: CapabilityRef) -> Self {
-        Self(Rc::new(reference))
-    }
-}
-
-impl PartialEq for AttachedRef {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.attachment() == other.0.attachment()
-    }
-}
-
 #[derive(Props, Clone, PartialEq)]
 pub struct PresentationSlotProps {
     pub owner: Instance,
-    pub reference: AttachedRef,
+    pub reference: Capability,
 }
 
 /// Mount the presentation a row attaches. The redemption is asynchronous (a lazy reference
@@ -64,7 +46,7 @@ pub fn PresentationSlot(props: PresentationSlotProps) -> Element {
     // anew, and dropping the old redemption releases the previous provider.
     let reference = props.reference.clone();
     let redeemed = use_resource(use_reactive!(|(reference,)| {
-        let reference = reference.0.share();
+        let reference = reference.clone();
         async move { reference.redeem_presentation().await }
     }));
     let redeemed = redeemed.read();
@@ -81,28 +63,56 @@ pub fn PresentationSlot(props: PresentationSlotProps) -> Element {
 }
 
 /// Bind a collection mirror to Dioxus reactivity: the returned rows are the mirror's live rows
-/// at this render, and the calling component re-renders on every change the mirror folds in.
-/// The subscription belongs to the calling component's scope, so dropping it stops listening.
-pub fn use_rows<K, V>(watch: &CollectionWatch<K, V>) -> Vec<Row<K, V>>
+/// at this render, decoded once per mirror revision, and the calling component re-renders on
+/// every change the mirror folds in. The subscription belongs to the calling component's scope,
+/// so dropping it stops listening.
+pub fn use_rows<K, V>(collection: &Collection<K, V>) -> Rc<[Row<K, V>]>
 where
     K: DeserializeOwned + 'static,
     V: DeserializeOwned + 'static,
 {
     let mut tick = use_signal(|| 0_u64);
-    let revisions = use_hook(|| watch.revisions());
+    let changes = use_hook(|| collection.clone());
     use_future(move || {
-        let mut revisions = revisions.clone();
+        let mut changes = changes.clone();
         async move {
-            // The sender lives in the incarnation's feed task; it ends when the incarnation does.
-            while revisions.changed().await.is_ok() {
+            // The feed task ends with the incarnation, which closes the stream.
+            while changes.changed().await.is_ok() {
                 tick += 1;
             }
         }
     });
     let _ = tick();
-    watch
+    collection
         .rows()
         .expect("the collection mirror outlives the view that reads it")
+}
+
+/// Bind a configuration facet to Dioxus reactivity: the returned snapshot is current at this
+/// render and the calling component re-renders on every change of the facet's document watch.
+pub fn use_facet<T>(facet: &Facet<T>) -> FacetSnapshot<T>
+where
+    T: Clone + DeserializeOwned + Serialize + 'static,
+{
+    let mut tick = use_signal(|| 0_u64);
+    let changes = use_hook(|| {
+        facet
+            .changes()
+            .expect("the document watch outlives the view that reads it")
+    });
+    use_future(move || {
+        let mut changes = changes.clone();
+        async move {
+            // The watch ending means the incarnation did.
+            while changes.changed().await.is_ok() {
+                tick += 1;
+            }
+        }
+    });
+    let _ = tick();
+    facet
+        .current()
+        .expect("the document watch outlives the view that reads it")
 }
 
 #[cfg(test)]
