@@ -171,7 +171,8 @@ impl GuestResidue {
     }
 }
 
-/// One engine's incarnations of the prepared lifecycle fixture.
+/// One engine's incarnations of a prepared fixture micro: the guest engines run the fixture
+/// components, a native engine runs the same micro in-process.
 pub trait Incarnations: 'static {
     type Runtime: 'static;
 
@@ -193,24 +194,33 @@ pub trait Incarnations: 'static {
     /// the [`InitialContext`]).
     fn publications(runtime: &Self::Runtime) -> BTreeMap<String, CapabilityPublication>;
 
+    /// What the incarnation currently holds through its sessions.
+    fn inspect(runtime: &Self::Runtime) -> GuestResidue;
+
+    /// Close the guest half and report what the store still held afterwards, before it drops.
+    fn close(runtime: Self::Runtime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)>;
+}
+
+/// An engine that hosts the raw guest fixtures: the `lifecycle` component, which speaks the WIT
+/// directly (roles chosen by CBOR arguments, raw-bytes calls, a root whose `close` redeems its
+/// proxy, a call that traps), and drives the per-call machinery. Native micros author against
+/// the MDK's `Context`, which has none of these, so only the guest engines implement it and the
+/// scenarios over the `lifecycle` fixture require it; the `context_*` scenarios need only
+/// [`Incarnations`].
+pub trait GuestIncarnations: Incarnations {
     /// Mount the presentation the runtime published as `publication` into an engine-owned
     /// sink and check that the guest rendered into it. Dropping the result unmounts.
     fn mount(runtime: &Self::Runtime, publication: &str) -> Result<Box<dyn Any>, String>;
 
-    fn inspect(runtime: &Self::Runtime) -> GuestResidue;
-
     /// The incarnation's live call handlers, awaitable until they all ended.
     fn calls_in_flight(runtime: &Self::Runtime) -> InFlightCalls;
-
-    /// Close the guest half and report what the store still held afterwards, before it drops.
-    fn close(runtime: Self::Runtime) -> LocalFuture<'static, (Result<(), String>, GuestResidue)>;
 }
 
 /// The consumer requires `provider`'s presentation and redeems it while initializing and again
 /// while closing. An external lease on the same publication is a second strong edge. Disabling
 /// the provider must close the consumer first, with the provider still live, and revoke the
 /// lease's publication.
-pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
+pub async fn provider_consumer_graph<E: GuestIncarnations>(engine: E) {
     let harness = Harness::new(engine);
     let supervisor = harness.supervisor("provider");
     let (provider_id, consumer_id) = (MicroId::new("provider"), MicroId::new("consumer"));
@@ -288,7 +298,7 @@ pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
 /// idle-close once the call's lease drops; a `retain-call` binding keeps it up until dropped;
 /// a redeemed presentation can be mounted, keeps it up while held, and lets it close when
 /// dropped.
-pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine: E) {
+pub async fn lazy_references_activate_retain_and_release<E: GuestIncarnations>(engine: E) {
     let harness = Harness::new(engine);
     let supervisor = harness.supervisor("provider");
     let provider_id = MicroId::new("provider");
@@ -378,7 +388,7 @@ pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine
 
 /// A guest that returns a publication its manifest does not declare, or declares as another
 /// kind or under another contract, fails its initialization (ADR 031 §8).
-pub async fn undeclared_publications_fail_initialization<E: Incarnations>(engine: E) {
+pub async fn undeclared_publications_fail_initialization<E: GuestIncarnations>(engine: E) {
     let engine = Rc::new(engine);
     let declared = declared_publications();
     let mut wrong_kind = declared.clone();
@@ -426,7 +436,7 @@ pub async fn undeclared_publications_fail_initialization<E: Incarnations>(engine
 
 /// A lease alone retains a lazy provider; dropping the last one lets the supervisor's idle
 /// driver close it, which revokes the publication the lease handed out.
-pub async fn leased_provider_closes_when_idle<E: Incarnations>(engine: E) {
+pub async fn leased_provider_closes_when_idle<E: GuestIncarnations>(engine: E) {
     let harness = Harness::new(engine);
     let supervisor = harness.supervisor("provider");
     let provider_id = MicroId::new("provider");
@@ -456,7 +466,7 @@ pub async fn leased_provider_closes_when_idle<E: Incarnations>(engine: E) {
 
 /// A provider that publishes and then rejects its initialization publishes nothing: the
 /// consumer is never initialized and records the unavailable requirement.
-pub async fn failing_provider_publishes_nothing<E: Incarnations>(engine: E) {
+pub async fn failing_provider_publishes_nothing<E: GuestIncarnations>(engine: E) {
     let harness = Harness::new(engine);
     let supervisor = harness.supervisor("failing-provider");
     let (provider_id, consumer_id) = (MicroId::new("provider"), MicroId::new("consumer"));
@@ -529,7 +539,7 @@ fn assert_registration_publication(
     versions
 }
 
-pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
+pub async fn registration_scope_ownership<E: GuestIncarnations>(engine: E) {
     let engine = Rc::new(engine);
     for initial_state in [Lifecycle::Initializing, Lifecycle::Active] {
         let host = Host::new();
@@ -673,7 +683,7 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
     }
 }
 
-pub async fn failed_registration_initialization_publishes_nothing<E: Incarnations>(engine: E) {
+pub async fn failed_registration_initialization_publishes_nothing<E: GuestIncarnations>(engine: E) {
     let host = Host::new();
     let registrations = bytes_registrations(std::num::NonZeroUsize::new(16).unwrap(), [83, 84]);
     let mut observer = registrations
@@ -795,7 +805,7 @@ async fn settle(
 
 /// One lazy relay provider `a`, held live by a lease, whose `peer` is a [`Gate`]: every call of
 /// its `relay` parks in the guest until the scenario releases it.
-struct Gated<E: Incarnations> {
+struct Gated<E: GuestIncarnations> {
     harness: Harness<E>,
     supervisor: Supervisor<CapabilityPublication>,
     gate: Arc<Gate>,
@@ -805,7 +815,7 @@ struct Gated<E: Incarnations> {
     relay: CapabilityRef,
 }
 
-impl<E: Incarnations> Gated<E> {
+impl<E: GuestIncarnations> Gated<E> {
     async fn start(engine: E) -> Self {
         let harness = Harness::new(engine);
         let gate = Gate::new();
@@ -866,7 +876,7 @@ impl<E: Incarnations> Gated<E> {
 /// Two calls into one incarnation are both in flight, suspended in the guest, and complete in
 /// the opposite order to the one they started in. Each call is a task of its own: the second
 /// does not wait for the first, and neither's state is mistaken for the other's.
-pub async fn overlapping_calls_complete_out_of_order<E: Incarnations>(engine: E) {
+pub async fn overlapping_calls_complete_out_of_order<E: GuestIncarnations>(engine: E) {
     let g = Gated::start(engine).await;
     g.run(async {
         let baseline = g.residue();
@@ -888,7 +898,7 @@ pub async fn overlapping_calls_complete_out_of_order<E: Incarnations>(engine: E)
 
 /// Fifty calls in flight at once, released in an interleaved order, all answered with their own
 /// request.
-pub async fn many_overlapping_calls_complete<E: Incarnations>(engine: E) {
+pub async fn many_overlapping_calls_complete<E: GuestIncarnations>(engine: E) {
     const CALLS: usize = 50;
     let g = Gated::start(engine).await;
     g.run(async {
@@ -922,7 +932,7 @@ pub async fn many_overlapping_calls_complete<E: Incarnations>(engine: E) {
 /// Synchronous exports (`mount`, unmount) and an unrelated async export (`echo`) run while a
 /// `relay` call is suspended in the guest. `mount` reads the guest's `ROLE`, which `initialize`
 /// (a different task, long finished) wrote: it only works because all tasks share one TLS.
-pub async fn sync_exports_interleave_with_suspended_calls<E: Incarnations>(engine: E) {
+pub async fn sync_exports_interleave_with_suspended_calls<E: GuestIncarnations>(engine: E) {
     let g = Gated::start(engine).await;
     g.run(async {
         let parked = g.call("parked");
@@ -958,7 +968,7 @@ pub async fn sync_exports_interleave_with_suspended_calls<E: Incarnations>(engin
 /// A's `echo` while A's `relay` is suspended (A to B to A), and `c` calls its own `echo` (A to
 /// A). The host answers an import by queueing into the provider's driver, never by entering the
 /// provider's store from the import's first poll. The hops go through lazy references.
-pub async fn calls_reenter_their_provider<E: Incarnations>(engine: E) {
+pub async fn calls_reenter_their_provider<E: GuestIncarnations>(engine: E) {
     let harness = Harness::new(engine);
     let (a_to_b, b_to_a, c_to_c) = (
         Arc::new(Forward::default()),
@@ -1002,7 +1012,7 @@ pub async fn calls_reenter_their_provider<E: Incarnations>(engine: E) {
 
 /// A guest trap fails every call outstanding on the incarnation instead of leaving them
 /// suspended forever: they answer `Revoked`, the incarnation closes, and host teardown runs.
-pub async fn guest_trap_fails_outstanding_calls<E: Incarnations>(engine: E) {
+pub async fn guest_trap_fails_outstanding_calls<E: GuestIncarnations>(engine: E) {
     let g = Gated::start(engine).await;
     g.run(async {
         let instance = g.instance();
@@ -1033,16 +1043,16 @@ pub async fn guest_trap_fails_outstanding_calls<E: Incarnations>(engine: E) {
 /// The guest's async `instance-root.close` runs beside calls that are still in flight, and the
 /// forced close then drops the store: the callers answer `Revoked` rather than hang. This one
 /// is the supervisor disabling the micro.
-pub async fn disable_with_calls_in_flight_revokes_callers<E: Incarnations>(engine: E) {
+pub async fn disable_with_calls_in_flight_revokes_callers<E: GuestIncarnations>(engine: E) {
     close_with_calls_in_flight(engine, false).await;
 }
 
 /// [`disable_with_calls_in_flight_revokes_callers`], with the supervisor shutting down.
-pub async fn shutdown_with_calls_in_flight_revokes_callers<E: Incarnations>(engine: E) {
+pub async fn shutdown_with_calls_in_flight_revokes_callers<E: GuestIncarnations>(engine: E) {
     close_with_calls_in_flight(engine, true).await;
 }
 
-async fn close_with_calls_in_flight<E: Incarnations>(engine: E, shutdown: bool) {
+async fn close_with_calls_in_flight<E: GuestIncarnations>(engine: E, shutdown: bool) {
     let g = Gated::start(engine).await;
     g.run(async {
         let instance = g.instance();
@@ -1073,7 +1083,7 @@ async fn close_with_calls_in_flight<E: Incarnations>(engine: E, shutdown: bool) 
 /// its answer is discarded. Nothing leaks when it does: the guest holds what it did before the
 /// call, and the lease that kept the provider live is released normally, after which the
 /// provider idles closed with nothing left behind (the fixture root asserts that at its close).
-pub async fn dropped_call_finishes_in_the_guest_without_leaks<E: Incarnations>(engine: E) {
+pub async fn dropped_call_finishes_in_the_guest_without_leaks<E: GuestIncarnations>(engine: E) {
     let g = Gated::start(engine).await;
     g.run(async {
         let baseline = g.residue();
@@ -1156,7 +1166,7 @@ impl Shared {
     }
 }
 
-impl<E: Incarnations> Harness<E> {
+impl<E: GuestIncarnations> Harness<E> {
     fn new(engine: E) -> Self {
         let host = Host::new();
         let observer_instance = host.start("observer");
@@ -1341,7 +1351,7 @@ struct Fixture<E> {
     peer: Option<CapabilityPublication>,
 }
 
-impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
+impl<E: GuestIncarnations> Factory<CapabilityPublication> for Fixture<E> {
     fn initialize(
         &self,
         host: Host,
@@ -1410,13 +1420,13 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
     }
 }
 
-struct FixtureRoot<E: Incarnations> {
+struct FixtureRoot<E: GuestIncarnations> {
     runtime: Rc<E::Runtime>,
     shared: Rc<Shared>,
     identity: &'static str,
 }
 
-impl<E: Incarnations> Root for FixtureRoot<E> {
+impl<E: GuestIncarnations> Root for FixtureRoot<E> {
     fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
         let Self {
             runtime,
