@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod blob_boot;
 
 use big_cabinet::Authority;
@@ -18,6 +20,7 @@ use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::drawer::DrawerAccess as EntryAccess;
+use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
@@ -29,6 +32,9 @@ use big_nodule::executor::NoduleExecutor;
 use big_nodule_core::dispatch::DispatchScope;
 use big_nodule_core::dispatch::MintDispatchCapability;
 use big_nodule_wasm::WasmExecutor;
+use big_plugs::Plugs;
+use big_plugs::PlugsConfig;
+use big_plugs::RegistryDrawerConfig;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::SharedBigRepo;
@@ -69,6 +75,7 @@ pub struct BigNode {
     pub blobs: big_blobs::Blobs,
     pub blob_workers: big_blobs::workers::BlobWorkers,
     pub nodules_actor: Actor,
+    pub plugs_actor: Actor,
     pub dispatch_actor: Actor,
     pub indexes: Arc<Indexes>,
     pub drawer_access: Arc<DrawerAccess>,
@@ -77,6 +84,9 @@ pub struct BigNode {
     pub dispatch: Dispatch,
     pub wasm: Arc<WasmExecutor>,
     pub nodules: Nodules,
+    /// The plug registry service and the grouped drawer it keeps its plugs in.
+    pub plugs: Plugs,
+    pub registry_drawer: DrawerId,
 }
 
 impl BigNode {
@@ -86,31 +96,17 @@ impl BigNode {
             let schemas = Arc::new(config.schemas.with_groups([
                 big_blobs::schema::registration(),
                 big_nodule::schema_group(),
+                big_plugs::schema_group(),
             ])?);
             let (authority, authority_stop) =
                 big_cabinet::authority::boot(config.secrets, config.sql.clone()).await?;
             stop.stages.push(Stage::Service(authority_stop));
-            let open = |path: &str| {
-                authority.client.call(
-                    RequestContext::root(),
-                    OpenActor {
-                        parent: authority.root,
-                        path: path.into(),
-                        rights: Rights::all(),
-                    },
-                )
-            };
-            let namespace_of = |actor: &Actor| authority.service.open_namespace(actor.actor_id);
-            let docs_actor = open("documents").await?;
-            let drawers_actor = open("drawers").await?;
-            let nodules_actor = open("nodules").await?;
-            let dispatch_actor = open("dispatch").await?;
-            let blobs_actor = open("blobs").await?;
-            let blobs_namespace = namespace_of(&blobs_actor).await?;
-            let docs_namespace = namespace_of(&docs_actor).await?;
-            let drawers_namespace = namespace_of(&drawers_actor).await?;
-            let nodules_namespace = namespace_of(&nodules_actor).await?;
-            let dispatch_namespace = namespace_of(&dispatch_actor).await?;
+            let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;
+            let (drawers_actor, drawers_namespace) = open_actor(&authority, "drawers").await?;
+            let (nodules_actor, nodules_namespace) = open_actor(&authority, "nodules").await?;
+            let (plugs_actor, plugs_namespace) = open_actor(&authority, "plugs").await?;
+            let (dispatch_actor, dispatch_namespace) = open_actor(&authority, "dispatch").await?;
+            let (blobs_actor, blobs_namespace) = open_actor(&authority, "blobs").await?;
 
             let (repo, repo_stop) = BigRepo::boot(config.sqlite_runtime, config.repo).await?;
             stop.stages.push(Stage::Repo(repo_stop));
@@ -154,34 +150,36 @@ impl BigNode {
             })
             .await?;
             stop.stages.push(Stage::Service(docs_stop));
-            let (worker, worker_stop) = provider.start(docs.client.clone());
-            stop.stages.push(Stage::DrawerWorker {
-                worker,
-                stop: worker_stop,
-            });
-            docs.recover().await?;
-            let Stage::DrawerWorker { worker, .. } = stop
-                .stages
-                .last()
-                .expect("drawer worker was constructed last")
-            else {
-                unreachable!("drawer worker was constructed last");
-            };
-            let (drawers, drawers_stop) =
-                big_cabinet::boot_drawers(DrawerConfig { worker }).await?;
-            stop.stages.push(Stage::Service(drawers_stop));
-            let (blob_workers, blob_stop) = blob_boot::boot(
+            let drawers = start_drawers(provider, &docs, &mut stop).await?;
+            // The blob workers are configured with the drawers they maintain blobs for, so the
+            // registry drawer is created (or found) there, before they start.
+            let (blob_workers, registry_drawer) = blob_boot::boot(
                 config.sql.clone(),
                 &blobs,
                 &docs,
                 &drawers,
+                &drawers_actor,
+                &plugs_actor,
                 &drawer_access,
                 &repo,
                 Arc::clone(&indexes.datum_set),
-                drawers_actor.capability,
+                &mut stop,
             )
             .await?;
-            stop.stages.push(Stage::Service(blob_stop));
+            // The registry reads artifact bytes from the blob service and keeps them pinned
+            // through the workers, so it boots after both and stops before either. Dispatch and
+            // the nodule service, its future consumers, boot after it.
+            let plugs = boot_plugs(
+                &authority,
+                &docs,
+                &registry_drawer,
+                &plugs_actor,
+                plugs_namespace,
+                &blobs,
+                config.sql.clone(),
+                &mut stop,
+            )
+            .await?;
             let (dispatch, nodule_dispatch_authority) = boot_dispatch(
                 &authority,
                 dispatch_namespace,
@@ -221,6 +219,7 @@ impl BigNode {
                 blobs,
                 blob_workers,
                 nodules_actor,
+                plugs_actor,
                 dispatch_actor,
                 indexes,
                 drawer_access,
@@ -229,6 +228,8 @@ impl BigNode {
                 dispatch,
                 wasm,
                 nodules,
+                plugs,
+                registry_drawer,
             })
         }
         .await;
@@ -240,6 +241,78 @@ impl BigNode {
             },
         }
     }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "boot wiring of already-built services"
+)]
+async fn boot_plugs(
+    authority: &Authority,
+    docs: &DocsRepo,
+    registry_drawer: &DrawerId,
+    actor: &Actor,
+    namespace: Namespace,
+    blobs: &big_blobs::Blobs,
+    sql: Database,
+    stop: &mut StopToken,
+) -> Res<Plugs> {
+    let (plugs, plugs_stop) = big_plugs::boot(PlugsConfig {
+        authority: authority.client.clone(),
+        docs: docs.client.clone(),
+        registry_drawer: registry_drawer.clone(),
+        actor: actor.clone(),
+        namespace,
+        operator: authority.service.operator_uuid(),
+        blobs: Arc::clone(&blobs.service),
+        sql,
+    })
+    .await?;
+    stop.stages.push(Stage::Service(plugs_stop));
+    Ok(plugs)
+}
+
+/// Starts the drawer policy worker, recovers the documents it needs, then boots the drawers
+/// service on that worker. The worker is a stage of its own (it must outlive the service), so it
+/// is pushed and read back from `stop` rather than owned here.
+async fn start_drawers(
+    provider: big_cabinet::drawer::access::DrawerProvider,
+    docs: &DocsRepo,
+    stop: &mut StopToken,
+) -> Res<Drawers> {
+    let (worker, worker_stop) = provider.start(docs.client.clone());
+    stop.stages.push(Stage::DrawerWorker {
+        worker,
+        stop: worker_stop,
+    });
+    docs.recover().await?;
+    let Stage::DrawerWorker { worker, .. } = stop
+        .stages
+        .last()
+        .expect("drawer worker was constructed last")
+    else {
+        unreachable!("drawer worker was constructed last");
+    };
+    let (drawers, drawers_stop) = big_cabinet::boot_drawers(DrawerConfig { worker }).await?;
+    stop.stages.push(Stage::Service(drawers_stop));
+    Ok(drawers)
+}
+
+/// Opens the subsystem actor at `path` under the node root, and its namespace.
+async fn open_actor(authority: &Authority, path: &str) -> Res<(Actor, Namespace)> {
+    let actor = authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: path.into(),
+                rights: Rights::all(),
+            },
+        )
+        .await?;
+    let namespace = authority.service.open_namespace(actor.actor_id).await?;
+    Ok((actor, namespace))
 }
 
 /// Grants the nodules actor admin over the node's config drawer, then boots the nodule service
@@ -261,7 +334,7 @@ async fn boot_nodules(
     sql: Database,
 ) -> Res<(Nodules, service_utils_rs::StopToken)> {
     let config_drawer = drawers.local().config_id.clone();
-    grant_config_drawer(drawers, drawers_actor, nodules_actor, &config_drawer).await?;
+    grant_drawer_admin(drawers, drawers_actor, nodules_actor, &config_drawer).await?;
     Ok(big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -332,13 +405,14 @@ async fn boot_dispatch(
     Ok((dispatch, capability))
 }
 
-/// Mints the drawers actor's admin capability over the node's config drawer and grants it to the
-/// nodules actor, which is how nodule config datums become writable by the nodule service.
-async fn grant_config_drawer(
+/// Mints the drawers actor's admin capability over `drawer` and grants admin to `subject`, which
+/// is how a service's actor becomes able to write a drawer the drawers actor owns: the nodule
+/// service over the node's config drawer, the plug registry over its registry drawer.
+async fn grant_drawer_admin(
     drawers: &Drawers,
     issuer: &Actor,
-    nodules_actor: &Actor,
-    config_drawer: &big_cabinet_core::dmeta::DocId,
+    subject: &Actor,
+    drawer: &DrawerId,
 ) -> Res<()> {
     let cap = drawers
         .client
@@ -347,7 +421,7 @@ async fn grant_config_drawer(
             MintDrawerCapability {
                 authorization: Authorization::identity(issuer.capability),
                 scope: DrawerScope {
-                    drawers: BTreeMap::from([(config_drawer.clone(), EntryAccess::Admin)]),
+                    drawers: BTreeMap::from([(drawer.clone(), EntryAccess::Admin)]),
                     create: false,
                 },
                 rights: Rights::USE | Rights::DELEGATE,
@@ -360,8 +434,8 @@ async fn grant_config_drawer(
             RequestContext::root(),
             GrantDrawer {
                 capability: cap.capability_id,
-                drawer_id: config_drawer.clone(),
-                subject_id: nodules_actor.actor_id,
+                drawer_id: drawer.clone(),
+                subject_id: subject.actor_id,
                 access: EntryAccess::Admin,
             },
         )

@@ -1,0 +1,24 @@
+version = 1
+role = "runtime"
+dependency_reason = "The plug registry service hosts the catalog behind the authority's capability model: it keeps one Cabinet document per plug in a grouped registry drawer, checks artifact bytes against the blob store before pinning them as Blob datums, and keeps the node's first-seen record of each published version in SQLite."
+allowed_dependencies = [
+    "big_blobs",
+    "big_blobs_core",
+    "big_cabinet",
+    "big_cabinet_core",
+    "big_plugs_core",
+    "service_utils_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
+
+[migrations]
+"src/big_plugs/sqlite/migrations/001_registry.sql" = "8a2480f77b299f20724e539daf8e4f202692952ce57b83b0f1ab601f7bbf0058"

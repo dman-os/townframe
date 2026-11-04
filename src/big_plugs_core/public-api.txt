@@ -9,11 +9,18 @@ impl FromStr for big_plugs_core::VersionReq
 impl fmt :: Display for big_plugs_core::PlugId
 impl fmt :: Display for big_plugs_core::Version
 impl fmt :: Display for big_plugs_core::VersionReq
+pub big_plugs_core::registry::fn artifact_key (version : & Version , artifact : & str) -> DatumKey
+pub big_plugs_core::registry::fn artifact_slot_version (key : & DatumKey) -> Option < String >
+pub big_plugs_core::registry::fn identity_key () -> DatumKey
+pub big_plugs_core::registry::fn registry_universe () -> big_cabinet_core :: datum :: Universe
+pub big_plugs_core::registry::fn version_key (version : & Version) -> DatumKey
 pub big_plugs_core::test_support::fn plug_id (name : & str) -> PlugId
 pub const big_plugs_core::AUTHORITY: & str
+pub const big_plugs_core::registry::ARTIFACT_SLOT_PREFIX: & str
 pub const big_plugs_core::test_support::EXAMPLE_NAMESPACE: & str
 pub enum big_plugs_core::Contribution { Nodule (NoduleContribution), Micro (MicroContribution), # [datum (other)] Unknown (big_cabinet_core :: datum :: UnknownMember) }
 pub enum big_plugs_core::PlugError { # [error ("plug envelope invalid at `{path}`: {reason}")] Invalid { path : String , reason : String }, # [doc = " One version of a package names one revision. A second envelope claiming the same version is"] # [doc = " a republish under an existing label, which would make the label mean two different byte"] # [doc = " strings; the catalog refuses it instead of picking one."] # [error ("plug `{id}` {version} is already catalogued at revision {existing}; this envelope is \ {incoming}")] Conflict { id : PlugId , version : Box < Version > , existing : Revision , incoming : Revision , } }
+pub enum big_plugs_core::protocol::PlugsError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("registry state failed: {0}")] Storage (String), # [error ("the envelope was refused: {0}")] Rejected (String), # [doc = " A published version never changes content: the label is taken by another envelope."] # [error ("plug `{id}` {version} is already published at revision {existing}; this envelope is \ {incoming}")] VersionExists { id : PlugId , version : Box < Version > , existing : Revision , incoming : Revision , }, # [doc = " An artifact's bytes are not in the local blob store, so the registry would pin bytes it"] # [doc = " cannot serve."] # [error ("artifact `{artifact}` of plug `{id}` is not in the local blob store")] ArtifactUnavailable { id : PlugId , artifact : String }, # [error ("plug `{0}` is not in the registry")] UnknownPlug (PlugId), # [error ("plug `{id}` has no version {version}")] UnknownVersion { id : PlugId , version : Box < Version > } }
 pub impl big_plugs_core::Plug::fn artifact (& self , key : & str) -> Option < & Artifact >
 pub impl big_plugs_core::Plug::fn micros (& self) -> impl Iterator < Item = & MicroContribution >
 pub impl big_plugs_core::Plug::fn new (id : PlugId , version : Version) -> Self
@@ -25,7 +32,10 @@ pub impl big_plugs_core::catalog::Catalog::fn import (& mut self , plug : Plug) 
 pub impl big_plugs_core::catalog::Catalog::fn new () -> Self
 pub impl big_plugs_core::catalog::Catalog::fn plug (& self , revision : & Revision) -> Option < & Plug >
 pub impl big_plugs_core::catalog::Catalog::fn resolve (& self , id : & PlugId , requirement : & VersionReq) -> Option < & Plug >
+pub impl big_plugs_core::protocol::PlugsScope::fn covers (& self , other : & Self) -> bool
 pub mod big_plugs_core::catalog
+pub mod big_plugs_core::protocol
+pub mod big_plugs_core::registry
 pub mod big_plugs_core::test_support
 pub struct big_plugs_core::Artifact  { key: String, digest: Digest, size: Option < u64 >, media_type: Option < String >, extra: Extra }
 pub struct big_plugs_core::Dependency  { id: PlugId, version: VersionReq, extra: Extra }
@@ -37,3 +47,20 @@ pub struct big_plugs_core::PlugId  { namespace: String, name: String }
 pub struct big_plugs_core::Version  { 0: semver :: Version }
 pub struct big_plugs_core::VersionReq  { 0: semver :: VersionReq }
 pub struct big_plugs_core::catalog::Catalog  {  }
+pub struct big_plugs_core::protocol::GetPlug  { authorization: Authorization, id: PlugId }
+pub struct big_plugs_core::protocol::GetPlugVersion  { authorization: Authorization, id: PlugId, version: Version }
+pub struct big_plugs_core::protocol::ListPlugs  { authorization: Authorization }
+pub struct big_plugs_core::protocol::MintPlugsCapability  { authorization: Authorization, scope: PlugsScope, rights: Rights }
+pub struct big_plugs_core::protocol::PlugChange  { seq: u64, plug_id: PlugId, removed: bool }
+pub struct big_plugs_core::protocol::PlugChanges  { changes: Vec < PlugChange >, through: PlugsCursor, caught_up: bool, reset: bool }
+pub struct big_plugs_core::protocol::PlugRecord  { id: PlugId, doc_id: DocId, versions: Vec < PlugVersionSummary >, unreadable: BTreeMap < String , String >, duplicate_docs: Vec < DocId > }
+pub struct big_plugs_core::protocol::PlugVersionRecord  { id: PlugId, version: Version, revision: Revision, envelope: Plug, conflict: Option < String > }
+pub struct big_plugs_core::protocol::PlugVersionSummary  { version: Version, revision: Revision, conflict: Option < String > }
+pub struct big_plugs_core::protocol::PlugsCursor  { epoch: Uuid7, seq: u64 }
+pub struct big_plugs_core::protocol::PlugsScope  { publish: bool }
+pub struct big_plugs_core::protocol::PublishPlugVersion  { authorization: Authorization, envelope: Plug }
+pub struct big_plugs_core::protocol::PublishedPlugVersion  { record: PlugVersionRecord, unchanged: bool }
+pub struct big_plugs_core::protocol::RemovePlug  { authorization: Authorization, id: PlugId }
+pub struct big_plugs_core::protocol::RemovePlugVersion  { authorization: Authorization, id: PlugId, version: Version }
+pub struct big_plugs_core::protocol::WatchPlugs  { authorization: Authorization, after: Option < PlugsCursor >, limit: u32, hold_ms: u32 }
+pub struct big_plugs_core::registry::PlugIdentity  { id: PlugId, extra: Extra }

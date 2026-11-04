@@ -1,0 +1,33 @@
+[package]
+name = "big_plugs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# internal
+utils_rs.workspace = true
+big_blobs = { path = "../big_blobs" }
+big_blobs_core = { path = "../big_blobs_core" }
+big_cabinet = { path = "../big_cabinet" }
+big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+big_plugs_core = { workspace = true, features = ["schemars"] }
+service_utils_rs.workspace = true
+sqlite_rs.workspace = true
+
+# encoding
+serde.workspace = true
+serde_json.workspace = true
+
+# errors and state
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+big_plugs_core = { workspace = true, features = ["schemars", "test-support"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

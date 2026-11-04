@@ -5,6 +5,7 @@ members = [
   "./src/big_cabinet/",
   "./src/big_cabinet_core/",
   "./src/big_plugs_core/",
+  "./src/big_plugs/",
   "./src/big_nodule_core/",
   "./src/big_nodule/",
   "./src/big_nodule_wasm/",
@@ -108,6 +109,7 @@ wash_plugin_sqlite = { path = "./src/wash_plugin_sqlite", default-features = fal
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 big_plugs_core = { path = "./src/big_plugs_core/", default-features = false }
+big_plugs = { path = "./src/big_plugs/" }
 big_nodule_core = { path = "./src/big_nodule_core/", default-features = false }
 big_nodule = { path = "./src/big_nodule/" }
 big_nodule_wasm = { path = "./src/big_nodule_wasm/" }

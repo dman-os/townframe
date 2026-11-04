@@ -24,6 +24,8 @@ use std::fmt;
 use std::str::FromStr;
 
 pub mod catalog;
+pub mod protocol;
+pub mod registry;
 
 pub const AUTHORITY: &str = "org.example.daybook";
 

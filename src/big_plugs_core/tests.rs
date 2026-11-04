@@ -323,3 +323,52 @@ mod declaration {
         }
     }
 }
+
+mod registry_layout {
+    use super::*;
+    use crate::registry::*;
+    use big_cabinet_core::DatumKey;
+
+    #[test]
+    fn keys_name_the_version_and_its_artifacts() {
+        let version: Version = "1.2.3-beta.1".parse().unwrap();
+        assert_eq!(
+            identity_key().to_string(),
+            "org.example.daybook.plug.identity/main"
+        );
+        assert_eq!(
+            version_key(&version).to_string(),
+            "org.example.daybook.plug/1.2.3-beta.1"
+        );
+        let artifact = artifact_key(&version, "wasm/handler");
+        assert_eq!(
+            artifact.to_string(),
+            "org.example.daybook.blob/plug.artifact/1.2.3-beta.1/wasm/handler"
+        );
+        assert_eq!(
+            artifact_slot_version(&artifact).as_deref(),
+            Some("1.2.3-beta.1")
+        );
+        assert_eq!(artifact_slot_version(&version_key(&version)), None);
+        let foreign = DatumKey::from_text(big_blobs_core::Blob::ID, "nodule.artifact/x/y").unwrap();
+        assert_eq!(artifact_slot_version(&foreign), None);
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn the_registry_universe_publishes_every_lexicon() {
+        let universe = registry_universe();
+        let ids: Vec<&str> = universe
+            .datums
+            .iter()
+            .map(|datum| datum.id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&PlugIdentity::ID) && ids.contains(&Plug::ID),
+            "{ids:?}"
+        );
+        big_cabinet_core::datum::Bundle::new(&universe, Vec::new())
+            .lexicons()
+            .unwrap();
+    }
+}
