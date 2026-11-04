@@ -26,6 +26,7 @@ struct FaultWriter {
     inner: MemoryWriter,
     fault: Option<Fault>,
     commits: usize,
+    mutation_counts: Vec<usize>,
 }
 
 #[async_trait]
@@ -40,6 +41,7 @@ impl Writer for FaultWriter {
         mutations: Vec<Mutation>,
     ) -> Result<u64, CommitError> {
         self.commits += 1;
+        self.mutation_counts.push(mutations.len());
         let after = match self.fault.take() {
             Some(Fault::Reject) => {
                 return Err(CommitError::NotCommitted(ferr!("injected rollback")));
@@ -69,6 +71,7 @@ async fn journal(store: &MemoryStore) -> Res<Journal<FaultWriter>> {
             inner: store.writer()?,
             fault: None,
             commits: 0,
+            mutation_counts: Vec::new(),
         },
         42,
     )
@@ -194,7 +197,7 @@ fn definite_failure_can_retry_but_unknown_outcome_requires_reopen() -> Res<()> {
 #[test]
 fn legacy_unknown_format_and_incarnation_mismatch_do_not_mutate() -> Res<()> {
     futures::executor::block_on(async {
-        for bytes in [None, Some(999)] {
+        for bytes in [None, Some(1), Some(999)] {
             let store = MemoryStore::default();
             let mut writer = store.writer()?;
             let mutation = match bytes {
@@ -380,13 +383,11 @@ fn authority_warm_step_has_one_commit_and_cold_replay_cannot_continue_old_lease(
 }
 
 #[test]
-fn snapshot_publication_gates_compaction_and_detects_missing_snapshot() -> Res<()> {
+fn paged_compaction_is_bounded_and_rejects_unpublished_cut() -> Res<()> {
     futures::executor::block_on(async {
         let store = MemoryStore::default();
         let mut log = journal(&store).await?;
-        let reader = log.reader();
-        assert!(reader.snapshot().await?.is_none());
-        for frontier in 0..4u64 {
+        for frontier in 0..5u64 {
             log.append(
                 frontier,
                 format!("entry-{}", frontier + 1).into_bytes().into(),
@@ -394,50 +395,191 @@ fn snapshot_publication_gates_compaction_and_detects_missing_snapshot() -> Res<(
             )
             .await?;
         }
+
+        assert!(matches!(
+            log.compact_page(1, LIMIT).await,
+            Err(CommitError::NotCommitted(_))
+        ));
         assert!(
-            log.compact(1).await.is_err(),
-            "compaction must fail before a snapshot at >= 1 is published"
-        );
-        assert!(
-            log.save_snapshot(5, b"beyond-frontier".as_slice().into())
+            log.save_snapshot(6, b"beyond-frontier".as_slice().into())
                 .await
-                .is_err(),
-            "snapshot cut cannot exceed frontier"
+                .is_err()
         );
         log.save_snapshot(2, b"snap-2".as_slice().into()).await?;
+        log.save_snapshot(5, b"snap-5".as_slice().into()).await?;
+        assert!(matches!(
+            log.compact_page(6, LIMIT).await,
+            Err(CommitError::NotCommitted(_))
+        ));
+
+        let before = log.writer.mutation_counts.len();
         assert_eq!(
-            reader.snapshot().await?,
+            log.compact_page(5, LIMIT).await?,
+            CompactionProgress::Pending {
+                compacted_through: 2
+            }
+        );
+        assert_eq!(
+            log.compact_page(5, LIMIT).await?,
+            CompactionProgress::Pending {
+                compacted_through: 4
+            }
+        );
+        assert_eq!(
+            log.compact_page(5, LIMIT).await?,
+            CompactionProgress::Complete {
+                compacted_through: 5
+            }
+        );
+        assert_eq!(&log.writer.mutation_counts[before..], &[3, 3, 2]);
+        assert_eq!(log.compacted_through(), 5);
+        assert_eq!(
+            log.reader().snapshot().await?,
             Some(JournalSnapshot {
-                cut: 2,
-                compacted_through: 0,
-                frontier: 4,
-                value: b"snap-2".as_slice().into(),
+                cut: 5,
+                compacted_through: 5,
+                frontier: 5,
+                value: b"snap-5".as_slice().into(),
             })
         );
-        // Before compaction, all entries 1..=4 remain readable.
+
+        let snapshots = store
+            .read(
+                &[],
+                (
+                    Bound::Included(Arc::from(&b"\x03"[..])),
+                    Bound::Excluded(Arc::from(&b"\x04"[..])),
+                ),
+                usize::MAX,
+            )
+            .await?;
+        assert_eq!(snapshots.entries.len(), 1, "one published snapshot slot");
+        Ok(())
+    })
+}
+
+#[test]
+fn compaction_rollback_and_unknown_outcome_reconcile_on_reopen() -> Res<()> {
+    futures::executor::block_on(async {
+        let store = MemoryStore::default();
+        let mut log = journal(&store).await?;
+        for frontier in 0..4u64 {
+            log.append(frontier, frontier.to_be_bytes().into(), vec![])
+                .await?;
+        }
+        log.save_snapshot(4, b"snapshot".as_slice().into()).await?;
+
+        log.writer.fault = Some(Fault::Reject);
+        assert!(matches!(
+            log.compact_page(4, LIMIT).await,
+            Err(CommitError::NotCommitted(_))
+        ));
+        assert_eq!(log.compacted_through(), 0);
+        assert_eq!(log.reader().read(1, LIMIT).await?.entries.len(), 2);
+
+        log.writer.fault = Some(Fault::Unknown);
+        assert!(matches!(
+            log.compact_page(4, LIMIT).await,
+            Err(CommitError::Unknown(_))
+        ));
+        assert_eq!(log.compacted_through(), 0);
+        assert!(matches!(
+            log.compact_page(4, LIMIT).await,
+            Err(CommitError::NotCommitted(_))
+        ));
+
+        drop(log);
+        let mut reopened = journal(&store).await?;
+        assert_eq!(reopened.compacted_through(), 2);
         assert_eq!(
-            reader
-                .read(1, NonZeroUsize::new(8).unwrap())
-                .await?
-                .entries
-                .len(),
-            4
+            reopened.compact_page(4, LIMIT).await?,
+            CompactionProgress::Complete {
+                compacted_through: 4
+            }
         );
-        assert!(
-            log.compact(3).await.is_err(),
-            "compaction beyond published snapshot cut must fail"
-        );
-        assert_eq!(log.compact(2).await?, 2);
-        assert_eq!(log.compacted_through(), 2);
+        Ok(())
+    })
+}
+
+#[test]
+fn missing_snapshot_blocks_recovery_and_compaction() -> Res<()> {
+    futures::executor::block_on(async {
+        let store = MemoryStore::default();
+        let mut log = journal(&store).await?;
+        log.append(0, b"entry".as_slice().into(), vec![]).await?;
+        log.save_snapshot(1, b"snapshot".as_slice().into()).await?;
+        let reader = log.reader();
+
+        log.commit_metadata(
+            log.metadata.clone(),
+            vec![Mutation {
+                key: PUBLISHED_SNAPSHOT_KEY.into(),
+                value: None,
+            }],
+        )
+        .await?;
+
         assert!(
             reader
-                .read(2, LIMIT)
+                .snapshot()
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("compacted through 2")
+                .contains("missing published journal snapshot at cut 1")
         );
-        let suffix = reader.read(3, NonZeroUsize::new(8).unwrap()).await?;
+        assert!(matches!(
+            log.compact_page(1, LIMIT).await,
+            Err(CommitError::NotCommitted(_))
+        ));
+        assert_eq!(log.compacted_through(), 0);
+        Ok(())
+    })
+}
+
+#[test]
+fn stale_read_and_tail_report_typed_error_once_then_require_snapshot_reload() -> Res<()> {
+    futures::executor::block_on(async {
+        let store = MemoryStore::default();
+        let mut log = journal(&store).await?;
+        for frontier in 0..4u64 {
+            log.append(frontier, frontier.to_be_bytes().into(), vec![])
+                .await?;
+        }
+        log.save_snapshot(2, b"snapshot".as_slice().into()).await?;
+        assert!(matches!(
+            log.compact_page(2, LIMIT).await?,
+            CompactionProgress::Complete {
+                compacted_through: 2
+            }
+        ));
+        let reader = log.reader();
+
+        let error = reader.read(1, LIMIT).await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<StaleReaderError>(),
+            Some(&StaleReaderError {
+                requested: 1,
+                compacted_through: 2,
+            })
+        );
+
+        let mut tail = reader.tail(2, LIMIT);
+        let error = tail.next().await.unwrap().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<StaleReaderError>(),
+            Some(&StaleReaderError {
+                requested: 2,
+                compacted_through: 2,
+            })
+        );
+        assert!(
+            tail.next().await.is_none(),
+            "stale tail terminates after one error"
+        );
+        drop(tail);
+
+        let snapshot = reader.snapshot().await?.unwrap();
+        let suffix = reader.read(snapshot.cut + 1, LIMIT).await?;
         assert_eq!(
             suffix
                 .entries
@@ -445,42 +587,6 @@ fn snapshot_publication_gates_compaction_and_detects_missing_snapshot() -> Res<(
                 .map(|entry| entry.position)
                 .collect::<Vec<_>>(),
             vec![3, 4]
-        );
-        // Publishing a newer snapshot at cut 4 keeps snap-2 until compact(4) reclaims it.
-        log.save_snapshot(4, b"snap-4".as_slice().into()).await?;
-        assert_eq!(log.compact(4).await?, 4);
-        assert_eq!(
-            reader.snapshot().await?,
-            Some(JournalSnapshot {
-                cut: 4,
-                compacted_through: 4,
-                frontier: 4,
-                value: b"snap-4".as_slice().into(),
-            })
-        );
-        // Deleting the published snapshot blob surfaces a visible recovery error.
-        drop(log);
-        let mut writer = store.writer()?;
-        let revision = store
-            .read(&[], (Bound::Unbounded, Bound::Unbounded), 0)
-            .await?
-            .revision;
-        writer
-            .commit(
-                revision,
-                vec![Mutation {
-                    key: snapshot_key(4),
-                    value: None,
-                }],
-            )
-            .await?;
-        assert!(
-            reader
-                .snapshot()
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("missing published journal snapshot at cut 4")
         );
         Ok(())
     })

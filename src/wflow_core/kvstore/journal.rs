@@ -10,7 +10,8 @@ use std::num::NonZeroUsize;
 use std::ops::Bound;
 
 const METADATA_KEY: &[u8] = b"\0wflow-journal";
-const FORMAT_VERSION: u32 = 1;
+const PUBLISHED_SNAPSHOT_KEY: &[u8] = b"\x03wflow-journal-published-snapshot";
+const FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Metadata {
@@ -45,6 +46,12 @@ impl Metadata {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionProgress {
+    Pending { compacted_through: u64 },
+    Complete { compacted_through: u64 },
 }
 
 pub struct Journal<W> {
@@ -152,7 +159,7 @@ impl<W: Writer> Journal<W> {
     }
 
     /// Durably publishes a snapshot at `cut` and advances `snapshot_cut` in a
-    /// single transaction before any old snapshot or log entry is reclaimed.
+    /// single transaction before any covered log entry is reclaimed.
     pub async fn save_snapshot(
         &mut self,
         cut: u64,
@@ -175,7 +182,7 @@ impl<W: Writer> Journal<W> {
         let mutations = vec![
             metadata_mutation(&metadata),
             Mutation {
-                key: snapshot_key(cut),
+                key: PUBLISHED_SNAPSHOT_KEY.into(),
                 value: Some(snapshot),
             },
         ];
@@ -183,10 +190,14 @@ impl<W: Writer> Journal<W> {
         Ok(self.metadata.snapshot_cut)
     }
 
-    /// Reclaims log entries through `through` (and any superseded snapshots
-    /// strictly before `snapshot_cut`), requiring a durably published snapshot
-    /// at `snapshot_cut >= through`.
-    pub async fn compact(&mut self, through: u64) -> Result<u64, CommitError> {
+    /// Reclaims at most `page_size` log entries through `through` and advances
+    /// `compacted_through` in the same transaction. Call again while the result
+    /// is [`CompactionProgress::Pending`].
+    pub async fn compact_page(
+        &mut self,
+        through: u64,
+        page_size: NonZeroUsize,
+    ) -> Result<CompactionProgress, CommitError> {
         if self.interrupted {
             return Err(CommitError::NotCommitted(ferr!(
                 "reopen journal to reconcile interrupted commit"
@@ -199,18 +210,17 @@ impl<W: Writer> Journal<W> {
             )));
         }
         if through <= self.metadata.compacted_through {
-            return Ok(self.metadata.compacted_through);
+            return Ok(CompactionProgress::Complete {
+                compacted_through: self.metadata.compacted_through,
+            });
         }
         let read = self
             .writer
             .reader()
             .read(
-                &[snapshot_key(self.metadata.snapshot_cut)],
-                (
-                    Bound::Included(snapshot_key(0)),
-                    Bound::Excluded(snapshot_key(self.metadata.snapshot_cut)),
-                ),
-                usize::MAX,
+                &[PUBLISHED_SNAPSHOT_KEY.into()],
+                (Bound::Unbounded, Bound::Unbounded),
+                0,
             )
             .await
             .map_err(CommitError::NotCommitted)?;
@@ -220,11 +230,16 @@ impl<W: Writer> Journal<W> {
                 self.metadata.snapshot_cut
             )));
         }
+        let page_size = u64::try_from(page_size.get()).unwrap();
+        let page_through = self
+            .metadata
+            .compacted_through
+            .saturating_add(page_size)
+            .min(through);
         let mut metadata = self.metadata.clone();
-        metadata.compacted_through = through;
-        let entry_deletes = (self.metadata.compacted_through + 1)..=through;
-        let mut mutations =
-            Vec::with_capacity(1 + entry_deletes.size_hint().0 + read.entries.len());
+        metadata.compacted_through = page_through;
+        let entry_deletes = (self.metadata.compacted_through + 1)..=page_through;
+        let mut mutations = Vec::with_capacity(1 + entry_deletes.size_hint().0);
         mutations.push(metadata_mutation(&metadata));
         for position in entry_deletes {
             mutations.push(Mutation {
@@ -232,14 +247,16 @@ impl<W: Writer> Journal<W> {
                 value: None,
             });
         }
-        for old_snapshot in read.entries {
-            mutations.push(Mutation {
-                key: old_snapshot.key,
-                value: None,
-            });
-        }
         self.commit_metadata(metadata, mutations).await?;
-        Ok(self.metadata.compacted_through)
+        if page_through == through {
+            Ok(CompactionProgress::Complete {
+                compacted_through: page_through,
+            })
+        } else {
+            Ok(CompactionProgress::Pending {
+                compacted_through: page_through,
+            })
+        }
     }
 
     async fn commit_metadata(
@@ -285,13 +302,6 @@ fn index_key(key: &[u8]) -> Arc<[u8]> {
     prefixed.into()
 }
 
-fn snapshot_key(cut: u64) -> Arc<[u8]> {
-    let mut key = [0; 9];
-    key[0] = 3;
-    key[1..].copy_from_slice(&cut.to_be_bytes());
-    key.into()
-}
-
 #[derive(Clone)]
 pub struct JournalReader {
     store: Arc<dyn Store>,
@@ -317,6 +327,27 @@ pub struct Page {
     pub entries: Vec<JournalEntry>,
 }
 
+/// A reader requested journal history which has already been reclaimed.
+///
+/// The caller must reload the published snapshot and resume after its cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleReaderError {
+    pub requested: u64,
+    pub compacted_through: u64,
+}
+
+impl std::fmt::Display for StaleReaderError {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            fmt,
+            "journal position {} has been compacted through {}; reload the published snapshot",
+            self.requested, self.compacted_through
+        )
+    }
+}
+
+impl std::error::Error for StaleReaderError {}
+
 impl JournalReader {
     pub async fn index(&self, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
         let mut read = self
@@ -333,12 +364,9 @@ impl JournalReader {
         let read = self
             .store
             .read(
-                &[METADATA_KEY.into()],
-                (
-                    Bound::Included(snapshot_key(0)),
-                    Bound::Excluded(Arc::from(&b"\x04"[..])),
-                ),
-                usize::MAX,
+                &[METADATA_KEY.into(), PUBLISHED_SNAPSHOT_KEY.into()],
+                (Bound::Unbounded, Bound::Unbounded),
+                0,
             )
             .await?;
         let metadata: Metadata = serde_json::from_slice(
@@ -350,22 +378,17 @@ impl JournalReader {
         if metadata.snapshot_cut == 0 {
             return Ok(None);
         }
-        let expected_key = snapshot_key(metadata.snapshot_cut);
-        let entry = read
-            .entries
-            .into_iter()
-            .find(|entry| entry.key == expected_key)
-            .ok_or_else(|| {
-                ferr!(
-                    "missing published journal snapshot at cut {}",
-                    metadata.snapshot_cut
-                )
-            })?;
+        let value = read.values[1].clone().ok_or_else(|| {
+            ferr!(
+                "missing published journal snapshot at cut {}",
+                metadata.snapshot_cut
+            )
+        })?;
         Ok(Some(JournalSnapshot {
             cut: metadata.snapshot_cut,
             compacted_through: metadata.compacted_through,
             frontier: metadata.frontier,
-            value: entry.value,
+            value,
         }))
     }
 
@@ -389,10 +412,11 @@ impl JournalReader {
         )?;
         metadata.validate()?;
         if from <= metadata.compacted_through {
-            eyre::bail!(
-                "journal position {from} has been compacted through {}",
-                metadata.compacted_through
-            );
+            return Err(StaleReaderError {
+                requested: from,
+                compacted_through: metadata.compacted_through,
+            }
+            .into());
         }
         let count = metadata
             .frontier
