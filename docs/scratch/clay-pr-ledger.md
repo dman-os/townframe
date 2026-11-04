@@ -465,3 +465,26 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   acknowledgement future; pre-serve callers drop it.
 - Open issue: a `PresentationSlot` that redeemed a disabled micro stays "unavailable" after the
   micro is enabled; nothing re-redeems on availability changes.
+
+## C6 decisions (2026-11-04, user)
+
+- OCI is not Clay's job: big_plugs delivers and manages manifests. Clay owns `MicroManifest` types
+  only. Until big_plugs lands, a package is `<name>.component.wasm` + `<name>.manifest.json` on disk
+  (stand-in loader); the `dayframe.manifest` custom section and `micro_counter/build.rs` go.
+- `activate` is async on both native and guest.
+- Collection access: declared → configured → (later) granted at runtime.
+  - Manifest declares collection requests per local binding: `{binding, contract, access:
+    read|write, necessity: required|optional}` (contract, not a concrete collection).
+  - Configuration resolves each binding to a concrete collection or leaves it unbound; manifest
+    supplies defaults (a contract with exactly one declared collection binds automatically).
+    Configuration is the final word, persisted like the C5 install datum.
+  - Lifecycle (OSGi DS-style): unresolved required binding → micro not startable, shown as
+    "needs configuration"; unresolved optional → starts, `collection(binding)` is `None`; a binding
+    change restarts the micro (no hot rebinding yet).
+  - Generic micros: a binding may be "chosen at runtime" (Powerbox / Android SAF-style); the grant
+    lands in configuration and arrives as the same handle. Declared only; the picker is ADR 025 §11's
+    deferred dynamic consent.
+- Steps: C6-pkg sidecar manifest (running) → C6a collection requests + resolution + lifecycle +
+  ADR 025 §11 → C6b unified async `Context` (native; binding-based collection/registration,
+  multi-presentation, publish_call, require) → C6c guest parity (counter: second presentation + a
+  call; a guest registration write) → C7.
