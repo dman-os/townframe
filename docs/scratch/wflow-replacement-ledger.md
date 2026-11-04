@@ -366,10 +366,10 @@ Verification policy for the implementation waves: workers run only narrow compil
 | Lane | Exact decision/deliverable | Claimed contract/files | Isolation | State | Next gate / handoff |
 |---|---|---|---|---|---|
 | A-policy | Remove cleanup/defer and receipt expiry/key reuse from durable authority semantics | `wflow_core/partition/authority*`, conformance Rust projection, one journal fixture | merged as `86d40ba0` | Handoff accepted | fresh integrated review later |
-| B-sdk | Remove compensation from programming API; define leaf Rust protocol and minimal replacement WIT | B1 leaf merged as `09f81fa0`; adapters/WIT remain | managed worktree per slice | B1 accepted; B2 pending | adapter migration handoff |
+| B-sdk | Remove compensation from programming API; define leaf Rust protocol and minimal replacement WIT | B1 leaf merged as `09f81fa0`; native and Wasm/WIT adapters split | isolated managed worktrees | B2 writers active | adapter handoffs |
 | C-runtime | Async activation/session-loss/cancel lifecycle and finite defaults | `wflow_tokio/authority_runtime*`, host/session traits | managed worktree after A/B contracts | Planned | focused runtime tests; committed handoff |
-| D-storage | Implement bounded journal snapshot discovery, typed stale readers, and paged compaction | `wflow_core/kvstore/journal*`, focused memory tests only in first slice | managed worktree | Writer queued | focused journal tests; committed handoff |
-| E-formal | Remove rejected actions and align model vocabulary with accepted authority | Quint/formal/conformance model files | managed worktree after A contract | Pending | bounded model checks later; committed handoff |
+| D-storage | Implement bounded journal snapshot discovery, typed stale readers, and paged compaction | `wflow_core/kvstore/journal*`, focused memory tests | managed worktree | D1 writer active | focused journal tests; committed handoff |
+| E-formal | Remove rejected actions and align model vocabulary with accepted authority | Quint authority model only | managed worktree | Writer active | bounded model evidence; committed handoff |
 | F-cutover | Integrate component handoffs, switch production facade/caller, delete legacy engine | `wflow`, `daybook_core`, legacy modules/hosts/tests | integration worktree only | Pending | targeted build, then review wave |
 | V-review | Fresh-context review of integrated diff | read-only whole diff | no mutation | Pending | blockers disposition |
 | V-verify | Clippy, focused tests, fault/recovery matrix, native/Wasm conformance, formal checks, guardrails | integrated tree | one verification owner | Pending | evidence ledger |
@@ -382,3 +382,4 @@ Verification policy for the implementation waves: workers run only narrow compil
 - 2026-11-04: Four scout handoffs accepted. Manager resolved their boundary/default questions as WFR-007..013. Writer wave A/B/D partitioned into isolated, non-overlapping worktrees; runtime/formal lanes remain dependency-blocked.
 - 2026-11-04: Writer workflow `32df2899-5e43-4423-a87b-fd00d9cdcfc3` launched from `af7edad2`: A-policy and B1-WDK leaf, each isolated and pinned to `openai-codex/gpt-5.6-sol:high`. D-storage waits because A owns one shared journal test fixture; revisit on native completion.
 - 2026-11-04: A-policy `f350ca42` and B1-WDK `c35dff30` inspected and accepted; focused child tests passed. Cherry-picked as `86d40ba0` and `09f81fa0`. Expected runtime/adapter fallout remains assigned, not shimmed.
+- 2026-11-04: Wave-2 workflow `5ca1007d-a7a9-4ac4-b2a5-89a7a2676676` launched from `6d5f949e`: native adapter, Wasm/WIT adapter, journal mechanics, and formal model in four isolated high-effort Codex worktrees.
