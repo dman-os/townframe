@@ -1,0 +1,13 @@
+version = 1
+role = "foundation"
+dependency_reason = "the component kit links into native, browser and wasm guest micros alike, so it sits at the bottom of the UI stack: Dioxus and design tokens only, never a backend or a renderer"
+allowed_dependencies = [
+]
+# Every public prop is a Dioxus type (`Element`, `EventHandler`): the kit is a Dioxus library.
+allow_external_api_types = true
+
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[builds.wasm32-wasip3]
