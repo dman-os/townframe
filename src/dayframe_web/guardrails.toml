@@ -4,7 +4,6 @@ dependency_reason = "dayframe microkernel layering: engine-neutral contracts at 
 allowed_dependencies = [
     "clay_dioxus",
     "clay_mdk",
-    "clay_micro_core",
     "clay_rt_wcmp",
     "clay_rt_wcmp_web",
     "dayframe_composition",

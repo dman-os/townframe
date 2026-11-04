@@ -27,5 +27,15 @@ test("the composed wcmp counter mounts and dispatches clicks in the browser", as
     await counter.click();
     await expect(counter).toHaveText(expected);
   }
+
+  // Disabling the micro withdraws its mounted section; its manifest row stays listed, and
+  // re-enabling it lets a fresh open start a new incarnation.
+  await page.getByText("Micro lifecycle controls").click();
+  await page.getByRole("button", { name: "Disable dayframe.counter micro" }).click();
+  await expect(counter).toBeHidden();
+  await page.getByRole("button", { name: "Enable dayframe.counter micro" }).click();
+  await page.getByRole("button", { name: "Open Sample micro settings" }).click();
+  await openCounter.click();
+  await expect(counter).toBeVisible({ timeout: 60_000 });
   expect(failures).toEqual([]);
 });
