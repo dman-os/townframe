@@ -321,6 +321,121 @@ pub extern "C" fn __wasilibc_task_hook(hook: i32, prev_context_0: i32, hook_stac
     task_hook::run(hook, prev_context_0, hook_stack)
 }
 
+/// Export the `micro-client` world for a micro authored as `async fn activate(Context)`, and —
+/// when the MDK is built with its in-process backend — a native `ACTIVATE` entry over the same
+/// function, so one crate links natively (`host::factory(.., ACTIVATE)`) or builds as a
+/// `cdylib` guest. Invoke once at the crate root. `$manifest` is the `fn() -> MicroManifest`
+/// the host admits this micro against: a guest names its call contracts and checks its binding
+/// names from it, so there is no second source of truth.
+#[macro_export]
+macro_rules! export_micro {
+    ($activate:path, $manifest:path) => {
+        $crate::__export_native_entry!($activate);
+        $crate::__export_guest_world!($activate, $manifest);
+    };
+}
+
+/// The native half of [`export_micro!`].
+#[doc(hidden)]
+#[macro_export]
+#[cfg(feature = "in_process")]
+macro_rules! __export_native_entry {
+    ($activate:path) => {
+        /// The micro's `activate` as the supervisor factory takes it.
+        pub const ACTIVATE: fn(
+            $crate::Context,
+        ) -> ::std::pin::Pin<
+            ::std::boxed::Box<
+                dyn ::std::future::Future<Output = ::std::result::Result<(), $crate::Error>>,
+            >,
+        > = |context| ::std::boxed::Box::pin($activate(context));
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+#[cfg(not(feature = "in_process"))]
+macro_rules! __export_native_entry {
+    ($activate:path) => {};
+}
+
+/// The guest half of [`export_micro!`].
+#[doc(hidden)]
+#[macro_export]
+#[cfg(feature = "guest")]
+macro_rules! __export_guest_world {
+    ($activate:path, $manifest:path) => {
+        struct ClayMdkExportedMicro;
+
+        impl $crate::micro_lifecycle::Guest for ClayMdkExportedMicro {
+            type InstanceRoot = $crate::guest::GuestRoot;
+
+            async fn initialize(
+                context: $crate::micro_lifecycle::InitialContext,
+            ) -> ::std::result::Result<
+                $crate::micro_lifecycle::Initialized,
+                $crate::micro_lifecycle::InitializationError,
+            > {
+                $crate::guest::Runtime::initialize($activate, $manifest, context).await
+            }
+
+            async fn call(
+                publication: ::std::string::String,
+                request: ::std::vec::Vec<u8>,
+            ) -> ::std::result::Result<::std::vec::Vec<u8>, ::std::string::String> {
+                $crate::guest::Runtime::call(publication, request).await
+            }
+        }
+
+        impl $crate::document_events::Guest for ClayMdkExportedMicro {
+            fn changed(snapshot: $crate::documents::DocumentSnapshot) {
+                $crate::guest::Runtime::changed(snapshot);
+            }
+
+            fn lagged(watch_id: u64) {
+                $crate::guest::Runtime::lagged(watch_id);
+            }
+
+            fn completed(receipt: $crate::documents::OperationReceipt) {
+                $crate::guest::Runtime::completed(receipt);
+            }
+        }
+
+        impl $crate::presentation_events::Guest for ClayMdkExportedMicro {
+            fn mount(
+                publication: ::std::string::String,
+                placement: &$crate::presentation::MountPoint,
+                components: ::std::vec::Vec<$crate::presentation::ComponentRef>,
+            ) -> ::std::result::Result<
+                $crate::presentation::Surface,
+                $crate::presentation::PresentationError,
+            > {
+                $crate::guest::Runtime::mount(&publication, placement, components)
+            }
+
+            fn unmount(surface: &$crate::presentation::Surface) {
+                $crate::guest::Runtime::unmount(surface);
+            }
+
+            fn dispatch(
+                surface: &$crate::presentation::Surface,
+                event: $crate::presentation_events::Event,
+            ) -> $crate::presentation_events::EventResponse {
+                $crate::guest::Runtime::dispatch(surface, event)
+            }
+        }
+
+        $crate::bindings::export!(ClayMdkExportedMicro with_types_in $crate::bindings);
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+#[cfg(not(feature = "guest"))]
+macro_rules! __export_guest_world {
+    ($activate:path, $manifest:path) => {};
+}
+
 mod manifest;
 pub use manifest::AttachmentDeclaration;
 pub use manifest::BindingResolution;
@@ -400,42 +515,48 @@ pub mod package;
 #[cfg(feature = "in_process")]
 mod native;
 
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 mod context;
-#[cfg(feature = "in_process")]
-pub use context::Attachment;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
+mod rows;
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Capability;
-#[cfg(feature = "in_process")]
-pub use context::Collection;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Config;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Context;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Error;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Facet;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::FacetSnapshot;
 #[cfg(feature = "in_process")]
 pub use context::Instance;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Operation;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
+pub use context::OperationError;
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::OperationReceipt;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
+pub use context::OperationStatus;
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Publication;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::RefStatus;
-#[cfg(feature = "in_process")]
-pub use context::Registration;
-#[cfg(feature = "in_process")]
-pub use context::Row;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::RowAttachment;
-#[cfg(feature = "in_process")]
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Stamp;
+#[cfg(any(feature = "in_process", feature = "guest"))]
+pub use rows::Attachment;
+#[cfg(any(feature = "in_process", feature = "guest"))]
+pub use rows::Collection;
+#[cfg(any(feature = "in_process", feature = "guest"))]
+pub use rows::Registration;
+#[cfg(any(feature = "in_process", feature = "guest"))]
+pub use rows::Row;
 
 /// A configuration facet's availability (ADR 015 §4): distinct `Loading` (not hydrated yet) and
 /// `Absent` (known absent after hydration) so an uncached facet is never mistaken for a missing
@@ -450,7 +571,7 @@ pub enum FacetState<T = String> {
 #[cfg(feature = "in_process")]
 pub mod host;
 
-#[cfg(feature = "view")]
+#[cfg(any(feature = "view", feature = "guest"))]
 pub mod hooks;
 
 #[cfg(any(feature = "wasmtime", feature = "wcmp"))]
@@ -462,13 +583,13 @@ mod wasm;
 #[cfg(feature = "wcmp")]
 mod wcmp;
 
-#[cfg(feature = "dioxus")]
+#[cfg(feature = "guest")]
 pub mod guest;
-#[cfg(feature = "dioxus")]
+#[cfg(feature = "guest")]
 pub use guest::GuestDom;
 
-#[cfg(feature = "dioxus")]
+#[cfg(feature = "guest")]
 pub mod wire;
 
-#[cfg(all(test, feature = "dioxus", not(target_arch = "wasm32")))]
+#[cfg(all(test, feature = "guest", not(target_arch = "wasm32")))]
 mod tests;

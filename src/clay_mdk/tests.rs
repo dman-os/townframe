@@ -613,7 +613,8 @@ impl capability_bank::Host for TestHost {
     ) -> wasmtime::Result<
         Result<Resource<capability_bank::PublishedCapability>, capability_bank::CapabilityError>,
     > {
-        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+        // Like presentations: the rig serves no calls, the guest only needs a lease to hand back.
+        Ok(Ok(self.table.push(TestPublished)?))
     }
 }
 

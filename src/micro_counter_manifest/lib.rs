@@ -1,10 +1,11 @@
 //! Engine-neutral Counter declarations. The manifest is portable MDK vocabulary (ADR 024
-//! §§11–15): identity, the presentation it publishes, the configuration it requests, and the
+//! §§11–15): identity, the presentations and call it publishes, the configuration it requests, and the
 //! Settings section row it declares into the `settings.sections` collection, whose attachment
 //! is a lazy endpoint to the counter's own presentation. The wasm guest reads only the
 //! constants; the composition root reads `manifest()`.
 use clay_mdk::AttachmentDeclaration;
 use clay_mdk::ConfigurationRequest;
+use clay_mdk::ContractIdentity;
 use clay_mdk::ContributionDeclaration;
 use clay_mdk::Entrypoints;
 use clay_mdk::FacetAccess;
@@ -18,8 +19,12 @@ pub const ID: &str = "dayframe.counter";
 pub const CONFIG_NAME: &str = "counter";
 pub const CONFIG_TAG: &str = "org.dayframe.counter.config";
 pub const CONFIG_KEY: &str = "count";
-/// The counter's one publication: the presentation the host mounts.
+/// The counter's full presentation, the one its Settings section mounts.
 pub const VIEW: &str = "view";
+/// A compact presentation of the same count, for any micro that wants to embed it.
+pub const BADGE: &str = "badge";
+/// The call that answers (CBOR `()` in, CBOR `u64` out) the counter's current value.
+pub const COUNT: &str = "count";
 
 pub fn manifest() -> MicroManifest {
     MicroManifest {
@@ -27,11 +32,23 @@ pub fn manifest() -> MicroManifest {
         id: MicroId::new(ID),
         package_version: 1,
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: VIEW.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
+        publications: vec![
+            PublicationDeclaration {
+                name: VIEW.into(),
+                kind: PublicationKind::Presentation,
+                contract: None,
+            },
+            PublicationDeclaration {
+                name: BADGE.into(),
+                kind: PublicationKind::Presentation,
+                contract: None,
+            },
+            PublicationDeclaration {
+                name: COUNT.into(),
+                kind: PublicationKind::Call,
+                contract: Some(ContractIdentity::new("dayframe.counter", COUNT, (1, 0, 0))),
+            },
+        ],
         requires: vec![],
         configuration_requests: vec![ConfigurationRequest {
             binding: CONFIG_NAME.into(),

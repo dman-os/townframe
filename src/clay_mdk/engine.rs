@@ -171,9 +171,11 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                     .expect("a presentation publication has a component");
                 let mounted = runtime.clone();
                 let name = name.clone();
-                resources.components.attach_surface(&instance, component, move |_mount, writer| {
-                    E::mount(&mounted, &name, Arc::new(writer))
-                });
+                resources
+                    .components
+                    .attach_surface(&instance, component, move |_mount, writer| {
+                        E::mount(&mounted, &name, Arc::new(writer))
+                    });
             }
             Ok(Initialized {
                 root: Box::new(GuestRoot::<E> { runtime, driver }),

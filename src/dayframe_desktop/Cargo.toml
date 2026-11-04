@@ -41,6 +41,7 @@ desktop = ["dioxus/desktop"]
 
 [dev-dependencies]
 ciborium.workspace = true
+clay_guest_session = { workspace = true }
 clay_surface = { workspace = true }
 blitz-dom.workspace = true
 dioxus-core.workspace = true

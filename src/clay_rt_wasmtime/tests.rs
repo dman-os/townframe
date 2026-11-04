@@ -78,17 +78,28 @@ async fn redeem(
         .unwrap()
 }
 
-/// The counter publishes its presentation as `view`, which its manifest has to declare.
+/// The counter publishes the presentations `view` and `badge` and the call `count`, which its
+/// manifest has to declare.
 fn counter_context() -> InitialContext {
+    use clay_guest_session::capabilities::ContractIdentity;
+    use clay_guest_session::capabilities::DeclaredPublication;
+    use clay_guest_session::capabilities::PublicationKind;
+    let presentation = || DeclaredPublication {
+        kind: PublicationKind::Presentation,
+        contract: ContractIdentity::presentation_component(),
+    };
     InitialContext {
-        publications: BTreeMap::from([(
-            "view".to_owned(),
-            clay_guest_session::capabilities::DeclaredPublication {
-                kind: clay_guest_session::capabilities::PublicationKind::Presentation,
-                contract:
-                    clay_guest_session::capabilities::ContractIdentity::presentation_component(),
-            },
-        )]),
+        publications: BTreeMap::from([
+            ("view".to_owned(), presentation()),
+            ("badge".to_owned(), presentation()),
+            (
+                "count".to_owned(),
+                DeclaredPublication {
+                    kind: PublicationKind::Call,
+                    contract: ContractIdentity::new("dayframe.counter", "count", (1, 0, 0)),
+                },
+            ),
+        ]),
         ..InitialContext::default()
     }
 }
@@ -1105,7 +1116,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     host.close_instance(&owner).unwrap();
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     assert_eq!(
-        runtime.mount("presentation", writer.clone(), &[]).err(),
+        runtime.mount("view", writer.clone(), &[]).err(),
         Some(PresentationError::Revoked)
     );
     assert!(writer.is_live());
@@ -1150,7 +1161,7 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
             .unwrap();
     let writer = Arc::new(LiveSink(AtomicBool::new(false)));
     let session = runtime
-        .mount("presentation", Arc::clone(&writer) as _, &[])
+        .mount("view", Arc::clone(&writer) as _, &[])
         .expect("mount must complete before dispatch blocks");
     assert!(writer.is_live());
 
@@ -1266,7 +1277,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     .await
     .unwrap();
     let writer = Arc::new(RecordingSink::new());
-    let surface = runtime.mount("presentation", writer.clone(), &[]).unwrap();
+    let surface = runtime.mount("view", writer.clone(), &[]).unwrap();
     assert_eq!(
         writer.tree(SurfaceTree::text_content),
         "3Pending counter writes: 0Refresh counter"
@@ -1359,7 +1370,7 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     .unwrap();
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
-        let session = runtime.mount("presentation", writer.clone(), &[]).unwrap();
+        let session = runtime.mount("view", writer.clone(), &[]).unwrap();
         let text = writer
             .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
             .await;
@@ -1475,7 +1486,7 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount("presentation", Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("view", Arc::<RecordingSink>::clone(&writer), &[])
             .unwrap();
         writer.wait_for(|text| text.contains("status=live")).await;
         let command = |element: u32| {
@@ -1578,7 +1589,7 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount("presentation", Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("view", Arc::<RecordingSink>::clone(&writer), &[])
             .unwrap();
         writer.wait_for(|text| text.contains("status=live")).await;
         let command = |element: u32| {

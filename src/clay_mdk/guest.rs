@@ -1,199 +1,265 @@
-//! The guest backend: the same authoring shape as [`crate::native`], implemented over the WIT
-//! imports a wasm micro is linked against. A micro writes one `activate(&Context)` and one
-//! Dioxus view; [`export_micro!`] turns that into the `micro-client` world the host drives,
-//! running `activate` inside `micro-lifecycle.initialize` (ADR 024 §5).
-//! Initialization receives already-granted configuration bindings and publishes one named
-//! presentation — the surface the host mounts — exactly as a native activation receives a
-//! [`crate::native::Context`]. The name must be one the micro's manifest declares.
-//! What the guest cannot yet do (require publications, write collections, mount roots, provide
-//! contracts) is absent here rather than stubbed; such bindings fail initialization as an
-//! invalid configuration.
+//! The guest backend: the same [`crate::Context`] as the in-process one, implemented over the WIT
+//! imports a wasm micro is linked against. A micro writes one `async fn activate(Context)` and
+//! Dioxus views; [`crate::export_micro!`] turns that into the `micro-client` world the host
+//! drives, running `activate` inside `micro-lifecycle.initialize` (ADR 024 §5). Initialization
+//! receives every already-granted binding (configuration, collections, registrations,
+//! requirements); the manifest the macro is given says which bindings the micro declared, so an
+//! undeclared name is a programming error exactly as in-process and an unresolved optional one is
+//! `None`.
 //!
-//! Document flow: the host's `document-events` callbacks advance the [`DocumentMirror`]; the
-//! mirror's one notifier bumps a Dioxus signal inside the guest runtime, so any component that
-//! called [`use_document_changes`] (directly or via [`use_facet`]) re-renders and reads the
-//! current snapshot. Reads never cross the boundary; only events and explicit resyncs do.
-pub use crate::FacetState;
-pub use crate::mirror::ConfigDocument;
-pub use crate::mirror::Facet;
-pub use crate::mirror::MirrorOperation;
-pub use crate::mirror::MirrorSnapshot;
-pub use crate::mirror::MirrorStatus;
-pub use crate::mirror::MirrorWatch;
+//! Document flow: the host's `document-events` callbacks advance the
+//! [`crate::mirror::DocumentMirror`]; collection feeds fold pages into their own mirrors. Every
+//! such change marks the runtime dirty and is then pushed into each presentation's tick signal
+//! inside its Dioxus runtime, so a component that called a hook in [`crate::hooks`] re-renders
+//! and reads the current state. Reads never cross the boundary; only events and explicit
+//! resyncs do.
 pub use dom::GuestDom;
 
+use crate::Capability;
+use crate::CollectionAccess;
+use crate::Config;
+use crate::Context;
+use crate::Error;
+use crate::FacetSnapshot;
+use crate::MicroManifest;
+use crate::OperationError;
+use crate::OperationReceipt;
+use crate::OperationStatus;
+use crate::Publication;
+use crate::PublicationKind;
+use crate::RefStatus;
+use crate::RowAttachment;
 use crate::capability_bank;
+use crate::collection_registration;
+use crate::collections;
+use crate::context::Backend;
+use crate::context::RawHandler;
+use crate::context::Shared;
 use crate::documents;
 use crate::micro_lifecycle;
 use crate::mirror::DocumentMirror;
+use crate::mirror::Facet;
+use crate::mirror::MirrorStatus;
 use crate::presentation;
 use crate::presentation_events;
+use crate::rows::Feed;
+use crate::rows::Stored;
+use crate::rows::stored_page;
+use clay_collection::Change;
+use clay_collection::Cursor;
+use clay_collection::Page;
+use clay_collection::RowEvidence;
+use clay_collection::Stamp;
+use clay_collection::Stamped;
+use clay_collection::Transaction;
+use clay_collection::Version;
+use clay_collection::WriteBasis;
 use dioxus::prelude::*;
+use serde::de::DeserializeOwned;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::Poll;
+use std::task::Waker;
 
 mod dom;
 
-/// The value surface one guest activation may use: its granted configuration documents and the
-/// publication of its presentation. Constructed only by the runtime behind [`export_micro!`].
-pub struct Context {
-    configs: BTreeMap<String, ConfigDocument>,
-    presentation: Rc<RefCell<Option<GuestDom>>>,
-    published: Rc<RefCell<Vec<micro_lifecycle::NamedPublication>>>,
-    changes: Rc<Cell<Option<Signal<u64>>>>,
+/// One row value as a guest's page carries it: its body and the references the host minted for
+/// its attachments, already recipient-local to this incarnation.
+pub(crate) struct GuestValue {
+    pub(crate) body: Vec<u8>,
+    pub(crate) capabilities: Vec<Rc<capability_bank::CapabilityRef>>,
 }
 
-impl Context {
-    /// A configuration document granted from the manifest's declared ACL. `None` means the host
-    /// handed over no binding under that name — the manifest declared none, or the composition
-    /// activated the micro standalone.
-    pub fn config(&self, name: &str) -> Option<&ConfigDocument> {
-        self.configs.get(name)
-    }
+/// One publication this incarnation staged with the capability bank. The bank's resource moves
+/// to the host when initialization returns, so a reference to the publication can only be made
+/// while `activate` runs; a row written later cannot attach it.
+pub(crate) struct Staged {
+    published: RefCell<Option<capability_bank::PublishedCapability>>,
+}
 
-    /// Publish this micro's presentation as the manifest-declared publication `name`. The host
-    /// mounts it into every placement it grants the incarnation, and other micros reach it
-    /// through that name once initialization succeeds. A guest has exactly one presentation, so
-    /// publishing twice is a programming error.
-    ///
-    /// `render` runs as the presentation's root scope and its output is rendered once per
-    /// mounted surface, so hooks called directly in `render` hold state every surface shares
-    /// — a child component's hooks hold per-surface state instead. Keep the micro's model in
-    /// `render`; keep child components presentational.
-    pub fn publish_component(&self, name: &str, render: impl Fn() -> Element + 'static) {
-        let dom = GuestDom::new_with_props(
-            root,
-            RootProps {
-                changes: self.changes.clone(),
-                render: Rc::new(render),
-            },
-        );
-        assert!(
-            self.presentation.borrow_mut().replace(dom).is_none(),
-            "guest micro published more than one component"
-        );
-        // The bank refuses only past its publication limit, which one presentation cannot hit.
-        let capability = capability_bank::publish_presentation(name)
-            .expect("the capability bank admits a guest's first publication");
-        self.published
-            .borrow_mut()
-            .push(micro_lifecycle::NamedPublication {
-                name: name.to_owned(),
-                capability,
-            });
+impl Staged {
+    /// A fresh reference to the publication, moved into one write.
+    pub(crate) fn reference(&self) -> Result<capability_bank::CapabilityRef, Error> {
+        Ok(self
+            .published
+            .borrow()
+            .as_ref()
+            .ok_or(Error::Revoked)?
+            .reference()?)
     }
 }
 
-/// Re-render the calling component on every document-mirror change — delivered snapshots, lag,
-/// completions, resyncs. Reads of [`Facet`] or [`MirrorOperation`] taken after this hook in the
-/// same render are current.
-pub fn use_document_changes() {
-    let changes = use_context::<DocumentChanges>();
-    let _ = (changes.0)();
+/// The change tick [`crate::hooks`] subscribes to, provided at each published component's root.
+#[derive(Clone, Copy)]
+pub(crate) struct ChangeTick(pub(crate) Signal<u64>);
+
+/// One published presentation: its Dioxus runtime and the tick signal its root created.
+struct Presentation {
+    dom: GuestDom,
+    tick: Rc<Cell<Option<Signal<u64>>>>,
 }
 
-/// [`use_document_changes`] plus the facet's current snapshot.
-pub fn use_facet<T>(facet: &Facet<T>) -> MirrorSnapshot {
-    use_document_changes();
-    facet.current()
+#[derive(Clone)]
+struct RootProps {
+    tick: Rc<Cell<Option<Signal<u64>>>>,
+    render: Rc<dyn Fn() -> Element>,
 }
 
-/// Export the `micro-client` world for a guest authored as `activate(&Context)`. Invoke once at
-/// the crate root of a `cdylib` micro; the generated runtime owns the document mirror and the
-/// published presentation and routes every host callback to them.
-#[macro_export]
-macro_rules! export_micro {
-    ($activate:path) => {
-        struct ClayMdkExportedMicro;
-
-        impl $crate::micro_lifecycle::Guest for ClayMdkExportedMicro {
-            type InstanceRoot = $crate::StatelessRoot;
-
-            async fn initialize(
-                context: $crate::micro_lifecycle::InitialContext,
-            ) -> ::std::result::Result<
-                $crate::micro_lifecycle::Initialized,
-                $crate::micro_lifecycle::InitializationError,
-            > {
-                $crate::guest::Runtime::initialize($activate, context)
-            }
-
-            async fn call(
-                publication: ::std::string::String,
-                _request: ::std::vec::Vec<u8>,
-            ) -> ::std::result::Result<::std::vec::Vec<u8>, ::std::string::String> {
-                $crate::guest::Runtime::call(&publication)
-            }
-        }
-
-        impl $crate::document_events::Guest for ClayMdkExportedMicro {
-            fn changed(snapshot: $crate::documents::DocumentSnapshot) {
-                $crate::guest::Runtime::changed(snapshot);
-            }
-
-            fn lagged(watch_id: u64) {
-                $crate::guest::Runtime::lagged(watch_id);
-            }
-
-            fn completed(receipt: $crate::documents::OperationReceipt) {
-                $crate::guest::Runtime::completed(receipt);
-            }
-        }
-
-        impl $crate::presentation_events::Guest for ClayMdkExportedMicro {
-            fn mount(
-                publication: ::std::string::String,
-                placement: &$crate::presentation::MountPoint,
-                components: ::std::vec::Vec<$crate::presentation::ComponentRef>,
-            ) -> ::std::result::Result<
-                $crate::presentation::Surface,
-                $crate::presentation::PresentationError,
-            > {
-                $crate::guest::Runtime::mount(&publication, placement, components)
-            }
-
-            fn unmount(surface: &$crate::presentation::Surface) {
-                $crate::guest::Runtime::unmount(surface);
-            }
-
-            fn dispatch(
-                surface: &$crate::presentation::Surface,
-                event: $crate::presentation_events::Event,
-            ) -> $crate::presentation_events::EventResponse {
-                $crate::guest::Runtime::dispatch(surface, event)
-            }
-        }
-
-        $crate::bindings::export!(ClayMdkExportedMicro with_types_in $crate::bindings);
-    };
+fn root(props: RootProps) -> Element {
+    let tick = use_hook(|| {
+        let signal = Signal::new(0_u64);
+        props.tick.set(Some(signal));
+        signal
+    });
+    use_context_provider(|| ChangeTick(tick));
+    (props.render)()
 }
 
-/// One incarnation's guest-side state: the mirror every granted binding routes through and the
-/// presentation activation published. A wasm store hosts one incarnation, so this is a
-/// thread-local; the host serializes every call into it. Public only for [`export_micro!`].
+/// Local tasks an incarnation owns. A task is dropped at its next poll once the incarnation is
+/// closing, which cancels whatever host call it was suspended in.
+#[derive(Default)]
+struct Tasks {
+    closing: Cell<bool>,
+    live: Cell<usize>,
+    /// Wakers of the tasks to rouse at close, and of whoever waits for them to be gone.
+    wakers: RefCell<Vec<Waker>>,
+    idle: RefCell<Option<Waker>>,
+}
+
+/// An incarnation-owned task: polls `future` until it ends or the incarnation closes.
+struct Owned {
+    future: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    tasks: Rc<Tasks>,
+}
+
+impl Future for Owned {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        let tasks = Rc::clone(&self.tasks);
+        let future = self
+            .future
+            .as_mut()
+            .expect("an ended task is not polled again");
+        let finished = if tasks.closing.get() {
+            true
+        } else {
+            let mut wakers = tasks.wakers.borrow_mut();
+            if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
+            drop(wakers);
+            future.as_mut().poll(cx).is_ready()
+        };
+        if !finished {
+            return Poll::Pending;
+        }
+        self.future = None;
+        tasks.live.set(tasks.live.get() - 1);
+        if tasks.live.get() == 0
+            && let Some(waker) = tasks.idle.borrow_mut().take()
+        {
+            waker.wake();
+        }
+        Poll::Ready(())
+    }
+}
+
+impl Tasks {
+    fn spawn(self: &Rc<Self>, future: Pin<Box<dyn Future<Output = ()>>>) {
+        self.live.set(self.live.get() + 1);
+        wit_bindgen::spawn_local(Owned {
+            future: Some(future),
+            tasks: Rc::clone(self),
+        });
+    }
+
+    /// Stop every task and resolve once each has dropped its future (and so its host
+    /// resources).
+    async fn close(&self) {
+        self.closing.set(true);
+        for waker in std::mem::take(&mut *self.wakers.borrow_mut()) {
+            waker.wake();
+        }
+        std::future::poll_fn(|cx| {
+            if self.live.get() == 0 {
+                return Poll::Ready(());
+            }
+            *self.idle.borrow_mut() = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+    }
+}
+
+/// What the manifest declares that guest code needs to check its own calls against.
+struct Declared {
+    collections: BTreeMap<String, CollectionAccess>,
+    calls: BTreeMap<String, capability_bank::Contract>,
+}
+
+/// One incarnation's guest-side state: the mirror every granted binding routes through, the
+/// published presentations and call handlers, and the owned tasks. A wasm store hosts one
+/// incarnation, so this is a thread-local; the host serializes every call into it. Public only
+/// for [`crate::export_micro!`].
 #[doc(hidden)]
 pub struct Runtime {
     mirror: DocumentMirror,
-    presentation: Rc<RefCell<Option<GuestDom>>>,
-    changes: Rc<Cell<Option<Signal<u64>>>>,
+    declared: Declared,
+    readers: RefCell<BTreeMap<String, Rc<collections::CollectionReader>>>,
+    writers: RefCell<BTreeMap<String, Rc<collection_registration::RegistrationWriter>>>,
+    presentations: RefCell<BTreeMap<String, Presentation>>,
+    /// The publication each mounted surface belongs to, by surface identity.
+    surfaces: RefCell<BTreeMap<u64, String>>,
+    calls: RefCell<BTreeMap<String, RawHandler>>,
+    staged: RefCell<Vec<(String, Rc<Staged>)>>,
+    /// Set by the mirror's notifier and the feeds; [`Self::mutate`] pushes it into the views.
+    dirty: Cell<bool>,
+    tasks: Rc<Tasks>,
 }
 
 thread_local! {
-    static RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) };
+    static RUNTIME: RefCell<Option<Rc<Runtime>>> = const { RefCell::new(None) };
+}
+
+/// The guest's `instance-root`: closing it ends the incarnation's tasks and drops everything it
+/// holds from the host.
+#[doc(hidden)]
+pub struct GuestRoot;
+
+impl micro_lifecycle::GuestInstanceRoot for GuestRoot {
+    async fn close(&self) -> Result<(), String> {
+        Runtime::close().await;
+        Ok(())
+    }
 }
 
 impl Runtime {
-    /// The MDK's `initialize`: bind the granted configuration documents, run `activate`, and
-    /// answer with a [`crate::StatelessRoot`] and the publications `activate` staged. Bindings the authoring surface
-    /// cannot express yet (collections, registrations, requirements) are a configuration the
-    /// micro cannot run under, not a guest fault. `arguments` are unused: no MDK micro takes
-    /// any yet.
-    pub fn initialize(
-        activate: impl FnOnce(&Context) -> Result<(), documents::DocumentError>,
+    fn current() -> Rc<Self> {
+        RUNTIME.with_borrow(|slot| {
+            Rc::clone(
+                slot.as_ref()
+                    .expect("host drove a guest micro before initializing it"),
+            )
+        })
+    }
+
+    /// The MDK's `initialize`: bind every granted binding, run `activate`, and answer with a
+    /// [`GuestRoot`] and the publications `activate` staged. `arguments` are unused: no MDK
+    /// micro takes any.
+    pub async fn initialize<Activate, Fut>(
+        activate: Activate,
+        manifest: fn() -> MicroManifest,
         context: micro_lifecycle::InitialContext,
-    ) -> Result<micro_lifecycle::Initialized, micro_lifecycle::InitializationError> {
+    ) -> Result<micro_lifecycle::Initialized, micro_lifecycle::InitializationError>
+    where
+        Activate: FnOnce(Context) -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
         let micro_lifecycle::InitialContext {
             arguments: _,
             configs,
@@ -201,76 +267,149 @@ impl Runtime {
             registrations,
             requirements,
         } = context;
-        if !(collections.is_empty() && registrations.is_empty() && requirements.is_empty()) {
-            return Err(micro_lifecycle::InitializationError::InvalidConfiguration(
-                "MDK guest micros accept only configuration document bindings".into(),
-            ));
-        }
+        let manifest = manifest();
         let mirror = DocumentMirror::default();
-        let presentation = Rc::new(RefCell::new(None));
-        let published = Rc::new(RefCell::new(Vec::new()));
-        let changes = Rc::new(Cell::new(None));
-        let context = Context {
-            configs: configs
-                .into_iter()
-                .map(|binding| (binding.name.clone(), mirror.bind(binding)))
-                .collect(),
-            presentation: presentation.clone(),
-            published: published.clone(),
-            changes: changes.clone(),
-        };
-        let runtime = Self {
+        let runtime = Rc::new(Self {
+            declared: Declared {
+                collections: manifest
+                    .collection_requests
+                    .iter()
+                    .map(|request| (request.binding.clone(), request.access.clone()))
+                    .collect(),
+                calls: manifest
+                    .publications
+                    .iter()
+                    .filter_map(|publication| {
+                        let contract = publication.contract.as_ref()?;
+                        (publication.kind == PublicationKind::Call).then(|| {
+                            (
+                                publication.name.clone(),
+                                capability_bank::Contract {
+                                    namespace: contract.namespace.clone(),
+                                    name: contract.name.clone(),
+                                    version: contract.version,
+                                },
+                            )
+                        })
+                    })
+                    .collect(),
+            },
+            readers: RefCell::new(
+                collections
+                    .into_iter()
+                    .map(|binding| (binding.name, Rc::new(binding.reader)))
+                    .collect(),
+            ),
+            writers: RefCell::new(
+                registrations
+                    .into_iter()
+                    .map(|binding| (binding.name, Rc::new(binding.writer)))
+                    .collect(),
+            ),
             mirror,
-            presentation,
-            changes,
-        };
+            presentations: RefCell::default(),
+            surfaces: RefCell::default(),
+            calls: RefCell::default(),
+            staged: RefCell::default(),
+            dirty: Cell::new(false),
+            tasks: Rc::default(),
+        });
         runtime.mirror.set_notifier({
-            let changes = runtime.changes.clone();
+            let runtime = Rc::downgrade(&runtime);
             move || {
-                let Some(mut signal) = changes.get() else {
-                    return;
-                };
-                signal += 1;
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dirty.set(true);
+                }
             }
         });
+        let mut requirements: BTreeMap<_, _> = requirements
+            .into_iter()
+            .map(|binding| (binding.name, Capability::guest(Rc::new(binding.capability))))
+            .collect();
+        let shared = Context(Rc::new(Shared {
+            configs: configs
+                .into_iter()
+                .map(|binding| {
+                    (
+                        binding.name.clone(),
+                        Config::guest(runtime.mirror.bind(binding)),
+                    )
+                })
+                .collect(),
+            requirements: manifest
+                .requires
+                .iter()
+                .map(|required| {
+                    (
+                        required.binding.clone(),
+                        requirements.remove(&required.binding),
+                    )
+                })
+                .collect(),
+            backend: Backend::Guest(Rc::clone(&runtime)),
+        }));
         RUNTIME.with_borrow_mut(|slot| {
             assert!(
-                slot.replace(runtime).is_none(),
+                slot.replace(Rc::clone(&runtime)).is_none(),
                 "guest micro initialized twice"
             );
         });
-        activate(&context)
+        activate(shared)
+            .await
             .map_err(|error| micro_lifecycle::InitializationError::Rejected(error.to_string()))?;
+        let publications = runtime
+            .staged
+            .take()
+            .into_iter()
+            .map(|(name, staged)| micro_lifecycle::NamedPublication {
+                name,
+                capability: staged
+                    .published
+                    .take()
+                    .expect("a staged publication is handed to the host exactly once"),
+            })
+            .collect();
         Ok(micro_lifecycle::Initialized {
-            root: micro_lifecycle::InstanceRoot::new(crate::StatelessRoot),
-            publications: published.take(),
+            root: micro_lifecycle::InstanceRoot::new(GuestRoot),
+            publications,
         })
     }
 
-    fn with<T>(f: impl FnOnce(&Runtime) -> T) -> T {
-        RUNTIME.with_borrow(|slot| {
-            f(slot
-                .as_ref()
-                .expect("host drove a guest micro before initializing it"))
-        })
+    /// End the incarnation: stop its tasks, then drop every view, handler and binding so the
+    /// store holds nothing the host still tracks. Clearing the maps also breaks the cycle
+    /// through captured contexts (runtime -> view -> context -> runtime).
+    async fn close() {
+        let runtime = Self::current();
+        runtime.tasks.close().await;
+        runtime.surfaces.take();
+        runtime.presentations.take();
+        runtime.calls.take();
+        runtime.readers.take();
+        runtime.writers.take();
+        RUNTIME.with_borrow_mut(Option::take);
     }
 
-    /// Run a mirror mutation where its notifier may write Dioxus state: inside the presentation's
-    /// runtime when one is published (then flush the resulting edits), plainly otherwise.
-    fn in_presentation(&self, change: impl FnOnce()) {
-        match self.presentation.borrow_mut().as_mut() {
-            Some(dom) => dom
-                .update(change)
-                .expect("guest presentation commit failed"),
-            None => change(),
+    /// Run a mutation of a mirror, then push whatever it marked dirty into every presentation.
+    fn mutate(&self, change: impl FnOnce()) {
+        change();
+        if !self.dirty.take() {
+            return;
+        }
+        for presentation in self.presentations.borrow_mut().values_mut() {
+            let Some(mut tick) = presentation.tick.get() else {
+                continue;
+            };
+            presentation
+                .dom
+                .update(move || tick += 1)
+                .expect("guest presentation commit failed");
         }
     }
 
     pub fn changed(snapshot: documents::DocumentSnapshot) {
-        Self::with(|runtime| {
-            runtime.in_presentation(|| {
-                runtime.mirror.changed(snapshot);
-            })
+        let runtime = Self::current();
+        runtime.mutate(|| {
+            runtime.mirror.changed(snapshot);
         });
     }
 
@@ -278,43 +417,46 @@ impl Runtime {
     /// better to do with it than pull the current snapshot. Every failure mode is already
     /// reflected in the watch's status (still lagged, or withdrawn), which is what views show.
     pub fn lagged(watch_id: u64) {
-        Self::with(|runtime| {
-            runtime.in_presentation(|| {
-                let Some(watch) = runtime.mirror.lagged(watch_id) else {
-                    return;
-                };
-                match watch.resync() {
-                    Ok(_)
-                    | Err(
-                        documents::DocumentError::SubscriptionLagged
-                        | documents::DocumentError::Revoked
-                        | documents::DocumentError::Denied,
-                    ) => {}
-                    Err(documents::DocumentError::InvalidValue(message)) => {
-                        panic!("document watch read rejected its own selection: {message}")
-                    }
+        let runtime = Self::current();
+        runtime.mutate(|| {
+            let Some(watch) = runtime.mirror.lagged(watch_id) else {
+                return;
+            };
+            match watch.resync() {
+                Ok(_)
+                | Err(
+                    documents::DocumentError::SubscriptionLagged
+                    | documents::DocumentError::Revoked
+                    | documents::DocumentError::Denied,
+                ) => {}
+                Err(documents::DocumentError::InvalidValue(message)) => {
+                    panic!("document watch read rejected its own selection: {message}")
                 }
-            })
+            }
         });
     }
 
     pub fn completed(receipt: documents::OperationReceipt) {
-        Self::with(|runtime| {
-            runtime.in_presentation(|| {
-                runtime.mirror.completed(receipt);
-            })
+        let runtime = Self::current();
+        runtime.mutate(|| {
+            runtime.mirror.completed(receipt);
         });
     }
 
-    /// The MDK authoring surface publishes no calls yet, so every publication name is refused.
-    pub fn call(publication: &str) -> Result<Vec<u8>, String> {
-        Err(format!("this guest micro serves no call {publication:?}"))
+    /// Serve one call: `publication` names the handler `publish_call` registered.
+    pub async fn call(publication: String, request: Vec<u8>) -> Result<Vec<u8>, String> {
+        // Cloned out so no borrow is held while the handler awaits.
+        let handler = Self::current()
+            .calls
+            .borrow()
+            .get(&publication)
+            .cloned()
+            .ok_or_else(|| format!("this guest micro serves no call {publication:?}"))?;
+        handler(request).await.map_err(|error| error.to_string())
     }
 
-    /// A guest micro has exactly one presentation until the authoring API grows more, so
-    /// `publication` is not consulted.
     pub fn mount(
-        _publication: &str,
+        publication: &str,
         placement: &presentation::MountPoint,
         components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {
@@ -322,59 +464,382 @@ impl Runtime {
             components.is_empty(),
             "component slots are not routed to Dioxus guest micros yet"
         );
-        Self::with(|runtime| {
+        let runtime = Self::current();
+        let surface = runtime
+            .presentations
+            .borrow_mut()
+            .get_mut(publication)
+            .unwrap_or_else(|| panic!("host mounted unpublished presentation {publication:?}"))
+            .dom
+            .mount(placement)?;
+        assert!(
             runtime
-                .presentation
+                .surfaces
                 .borrow_mut()
-                .as_mut()
-                .expect("host mounted a guest micro that published no component")
-                .mount(placement)
-        })
+                .insert(surface.identity(), publication.to_owned())
+                .is_none(),
+            "surface identity reused"
+        );
+        Ok(surface)
     }
 
     pub fn unmount(surface: &presentation::Surface) {
-        Self::with(|runtime| {
-            runtime
-                .presentation
-                .borrow_mut()
-                .as_mut()
-                .expect("host unmounted a guest micro that published no component")
-                .unmount(surface)
-        });
+        let runtime = Self::current();
+        let Some(publication) = runtime.surfaces.borrow_mut().remove(&surface.identity()) else {
+            return;
+        };
+        runtime
+            .presentations
+            .borrow_mut()
+            .get_mut(&publication)
+            .expect("a mounted surface's presentation outlives it")
+            .dom
+            .unmount(surface);
     }
 
     pub fn dispatch(
         surface: &presentation::Surface,
         event: presentation_events::Event,
     ) -> presentation_events::EventResponse {
-        Self::with(|runtime| {
-            runtime
-                .presentation
+        let runtime = Self::current();
+        let publication = runtime
+            .surfaces
+            .borrow()
+            .get(&surface.identity())
+            .cloned()
+            .expect("host dispatched to a surface that is not mounted");
+        runtime
+            .presentations
+            .borrow_mut()
+            .get_mut(&publication)
+            .expect("a mounted surface's presentation outlives it")
+            .dom
+            .dispatch(surface, event)
+    }
+
+    /// The reader of the collection bound to `binding`, or `None` when configuration left an
+    /// optional request unbound. Panics when the manifest declares no such request.
+    pub(crate) fn collection_reader(
+        &self,
+        binding: &str,
+    ) -> Option<Rc<collections::CollectionReader>> {
+        assert!(
+            self.declared.collections.contains_key(binding),
+            "the manifest declares no collection request {binding:?}"
+        );
+        self.readers.borrow().get(binding).cloned()
+    }
+
+    /// The writer of the collection bound to `binding`, or `None` when it is unbound. Panics
+    /// when the manifest's request for `binding` is read-only or absent.
+    pub(crate) fn registration_writer(
+        &self,
+        binding: &str,
+    ) -> Option<Rc<collection_registration::RegistrationWriter>> {
+        match self.declared.collections.get(binding) {
+            Some(CollectionAccess::Write) => self.writers.borrow().get(binding).cloned(),
+            Some(_) => panic!("collection request {binding:?} is read-only"),
+            None => panic!("the manifest declares no collection request {binding:?}"),
+        }
+    }
+
+    fn stage(&self, name: &str, published: capability_bank::PublishedCapability) -> Publication {
+        let staged = Rc::new(Staged {
+            published: RefCell::new(Some(published)),
+        });
+        self.staged
+            .borrow_mut()
+            .push((name.to_owned(), Rc::clone(&staged)));
+        Publication::guest(staged)
+    }
+
+    pub(crate) fn publish_component(
+        &self,
+        name: &str,
+        render: Rc<dyn Fn() -> Element>,
+    ) -> Result<Publication, Error> {
+        let tick = Rc::default();
+        let dom = GuestDom::new_with_props(
+            root,
+            RootProps {
+                tick: Rc::clone(&tick),
+                render,
+            },
+        );
+        let published = capability_bank::publish_presentation(name)?;
+        assert!(
+            self.presentations
                 .borrow_mut()
-                .as_mut()
-                .expect("host dispatched to a guest micro that published no component")
-                .dispatch(surface, event)
-        })
+                .insert(name.to_owned(), Presentation { dom, tick })
+                .is_none(),
+            "presentation {name:?} published twice"
+        );
+        Ok(self.stage(name, published))
+    }
+
+    pub(crate) fn publish_call(
+        &self,
+        name: &str,
+        handler: RawHandler,
+    ) -> Result<Publication, Error> {
+        let contract = self
+            .declared
+            .calls
+            .get(name)
+            .unwrap_or_else(|| panic!("the manifest declares no call publication {name:?}"));
+        let published = capability_bank::publish_call(name, contract)?;
+        assert!(
+            self.calls
+                .borrow_mut()
+                .insert(name.to_owned(), handler)
+                .is_none(),
+            "call {name:?} published twice"
+        );
+        Ok(self.stage(name, published))
+    }
+
+    pub(crate) fn spawn(&self, future: Pin<Box<dyn Future<Output = ()>>>) {
+        self.tasks.spawn(future);
     }
 }
 
-/// The document-change tick [`use_document_changes`] subscribes to, provided at the published
-/// component's root.
-#[derive(Clone, Copy)]
-struct DocumentChanges(Signal<u64>);
-
-#[derive(Clone)]
-struct RootProps {
-    changes: Rc<Cell<Option<Signal<u64>>>>,
-    render: Rc<dyn Fn() -> Element>,
+/// `facet`'s state in the mirror, or [`Error::Revoked`] once its watch was released or revoked.
+pub(crate) fn snapshot<T: DeserializeOwned>(facet: &Facet<T>) -> Result<FacetSnapshot<T>, Error> {
+    let snapshot = facet.current();
+    match snapshot.status {
+        MirrorStatus::Released | MirrorStatus::Revoked => Err(Error::Revoked),
+        // A lagged watch is resynchronized as soon as the host says so (`Runtime::lagged`); its
+        // retained state is what a view shows meanwhile.
+        MirrorStatus::Live | MirrorStatus::Lagged => Ok(FacetSnapshot {
+            state: facet.state(&snapshot),
+            refreshing: snapshot.refreshing,
+            revision: snapshot.revision,
+            pending: snapshot.pending.len(),
+        }),
+    }
 }
 
-fn root(props: RootProps) -> Element {
-    let changes = use_hook(|| {
-        let signal = Signal::new(0_u64);
-        props.changes.set(Some(signal));
-        signal
-    });
-    use_context_provider(|| DocumentChanges(changes));
-    (props.render)()
+/// Write one row through the host's registration writer; `attachments` are minted into fresh
+/// references moved with the value.
+pub(crate) async fn put(
+    writer: &collection_registration::RegistrationWriter,
+    key: Vec<u8>,
+    basis: WriteBasis,
+    body: Vec<u8>,
+    attachments: Vec<RowAttachment>,
+) -> Result<Stamp, Error> {
+    let capabilities = attachments
+        .into_iter()
+        .map(RowAttachment::into_guest)
+        .collect::<Result<_, _>>()?;
+    Ok(writer
+        .put(
+            key,
+            basis.into(),
+            collections::EncodedValue { body, capabilities },
+        )
+        .await?
+        .into())
+}
+
+pub(crate) async fn delete(
+    writer: &collection_registration::RegistrationWriter,
+    key: Vec<u8>,
+    basis: WriteBasis,
+) -> Result<Stamp, Error> {
+    Ok(writer.delete(key, basis.into()).await?.into())
+}
+
+/// Keep the mirror behind `feed` current from the host's projection of the collection `reader`
+/// names: acquire a lease over the whole collection and long-poll it, folding each page in. The
+/// host clamps the poll to its own maximum, so a caught-up read comes back empty at that cadence
+/// and costs nothing in the views (an empty page changes nothing). Runs until the lease is
+/// revoked or the incarnation closes and drops the task.
+pub(crate) async fn feed(reader: Rc<collections::CollectionReader>, feed: Feed) {
+    loop {
+        let lease = match reader.acquire(Vec::new(), None).await {
+            Ok(lease) => lease,
+            Err(collections::AcquireError::Revoked) => return,
+            Err(error) => panic!("a granted reader failed to acquire its collection: {error:?}"),
+        };
+        feed.mirror.borrow_mut().begin_lease(None);
+        loop {
+            let ticket = feed.mirror.borrow_mut().begin_read();
+            let read = lease
+                .read(
+                    ticket.committed().map(|cursor| cursor.0.clone()),
+                    collections::ReadLimits {
+                        max_transactions: None,
+                        max_changes: None,
+                        poll_timeout_ms: u32::MAX,
+                    },
+                )
+                .await;
+            match read {
+                Ok(page) => {
+                    let page =
+                        stored_page(decode_page(page), |value| Stored::Guest(Rc::new(value)));
+                    let runtime = Runtime::current();
+                    runtime.mutate(|| {
+                        let mut mirror = feed.mirror.borrow_mut();
+                        let bootstrapped = mirror.bootstrap_complete();
+                        let populated = page
+                            .transactions
+                            .iter()
+                            .any(|transaction| !transaction.changes.is_empty());
+                        assert!(mirror.apply(&ticket, &page));
+                        if populated || mirror.bootstrap_complete() != bootstrapped {
+                            drop(mirror);
+                            feed.applied();
+                            runtime.dirty.set(true);
+                        }
+                    });
+                }
+                Err(collections::ReadError::ResetRequired) => {
+                    let runtime = Runtime::current();
+                    runtime.mutate(|| {
+                        feed.mirror.borrow_mut().clear();
+                        feed.applied();
+                        runtime.dirty.set(true);
+                    });
+                    break;
+                }
+                Err(collections::ReadError::Revoked) => return,
+                Err(collections::ReadError::SourceUnavailable) => {
+                    unimplemented!("registration sources are always available")
+                }
+            }
+        }
+    }
+}
+
+fn decode_page(page: collections::Page) -> Page<Vec<u8>, Stamped<Option<GuestValue>>> {
+    let value = |value: collections::EncodedValue| GuestValue {
+        body: value.body,
+        capabilities: value.capabilities.into_iter().map(Rc::new).collect(),
+    };
+    Page {
+        transactions: page
+            .transactions
+            .into_iter()
+            .map(|transaction| Transaction {
+                changes: transaction
+                    .changes
+                    .into_iter()
+                    .map(|change| match change {
+                        collections::Change::Upsert(upsert) => Change::Upsert {
+                            key: upsert.key.body,
+                            row_version: version(upsert.row_version),
+                            value: Stamped {
+                                stamp: upsert.stamp.into(),
+                                value: upsert.value.map(value),
+                            },
+                            evidence: match upsert.evidence {
+                                collections::RowEvidence::Authoritative => {
+                                    RowEvidence::Authoritative
+                                }
+                                collections::RowEvidence::Pending => RowEvidence::Pending,
+                            },
+                            write_context: upsert.write_context,
+                        },
+                        collections::Change::Remove(removal) => Change::Remove {
+                            key: removal.key.body,
+                            row_version: version(removal.row_version),
+                        },
+                    })
+                    .collect(),
+            })
+            .collect(),
+        through: Cursor(page.through),
+        bootstrap_complete: page.bootstrap_complete,
+    }
+}
+
+fn version(version: collections::Version) -> Version {
+    Version::new(version.incarnation, version.sequence)
+}
+
+// The authoring vocabulary's view of the host's results.
+
+impl From<documents::DocumentError> for Error {
+    fn from(error: documents::DocumentError) -> Self {
+        match error {
+            documents::DocumentError::Denied => Self::Denied,
+            documents::DocumentError::Revoked => Self::Revoked,
+            documents::DocumentError::InvalidValue(message) => Self::InvalidValue(message),
+            documents::DocumentError::SubscriptionLagged => Self::Lagged,
+        }
+    }
+}
+
+impl From<capability_bank::CapabilityError> for Error {
+    fn from(error: capability_bank::CapabilityError) -> Self {
+        match error {
+            capability_bank::CapabilityError::ContractMismatch => Self::Denied,
+            capability_bank::CapabilityError::Revoked => Self::Revoked,
+            capability_bank::CapabilityError::LimitExceeded => Self::Limit,
+            capability_bank::CapabilityError::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+impl From<capability_bank::CallError> for Error {
+    fn from(error: capability_bank::CallError) -> Self {
+        match error {
+            capability_bank::CallError::Capability(error) => error.into(),
+            capability_bank::CallError::Provider(message) => Self::Rejected(message),
+        }
+    }
+}
+
+impl From<collection_registration::MutationError> for Error {
+    fn from(error: collection_registration::MutationError) -> Self {
+        use collection_registration::MutationError;
+        match error {
+            MutationError::Conflict(current) => Self::Conflict(current.map(Into::into)),
+            MutationError::Revoked => Self::Revoked,
+            MutationError::RowLimit | MutationError::CapabilityLimit => Self::Limit,
+            MutationError::KeyTooLarge | MutationError::ValueTooLarge => {
+                Self::Rejected("row exceeds the collection's size limits".into())
+            }
+            MutationError::InvalidAttachment => {
+                Self::Rejected("row names an attachment it does not carry".into())
+            }
+        }
+    }
+}
+
+impl From<capability_bank::RefStatus> for RefStatus {
+    fn from(status: capability_bank::RefStatus) -> Self {
+        match status {
+            capability_bank::RefStatus::Live => Self::Live,
+            capability_bank::RefStatus::Dormant => Self::Dormant,
+            capability_bank::RefStatus::Disabled => Self::Disabled,
+            capability_bank::RefStatus::Faulted => Self::Faulted,
+            capability_bank::RefStatus::Unavailable => Self::Unavailable,
+            capability_bank::RefStatus::Revoked => Self::Revoked,
+        }
+    }
+}
+
+impl From<documents::OperationReceipt> for OperationReceipt {
+    fn from(receipt: documents::OperationReceipt) -> Self {
+        Self {
+            id: receipt.id,
+            revision: receipt.revision,
+            status: match receipt.status {
+                documents::OperationStatus::LocallyApplied => OperationStatus::LocallyApplied,
+                documents::OperationStatus::Accepted => OperationStatus::Accepted,
+                documents::OperationStatus::RolledBack(documents::OperationFailure::Rejected(
+                    message,
+                )) => OperationStatus::RolledBack(OperationError::Rejected { message }),
+                documents::OperationStatus::RolledBack(documents::OperationFailure::Transport(
+                    failure,
+                )) => OperationStatus::RolledBack(OperationError::Transport {
+                    message: failure.message,
+                    outcome_unknown: failure.outcome_unknown,
+                }),
+            },
+        }
+    }
 }

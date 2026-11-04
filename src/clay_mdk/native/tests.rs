@@ -7,8 +7,8 @@ use crate::MicroId as ManifestId;
 use crate::Necessity;
 use crate::PublicationDeclaration;
 use crate::PublicationKind;
+use crate::Registration;
 use crate::RequiredContract;
-use crate::RowAttachment;
 use clay_guest_session::capabilities::ContractIdentity as Admitted;
 use clay_guest_session::capabilities::PublicationEndpoint;
 use clay_guest_session::collections::bytes_registrations;
@@ -454,10 +454,7 @@ async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
         );
         let supervisor = Supervisor::new(rig.host.clone(), [provider, consumer]);
         assert!(supervisor.reconcile().await.is_empty());
-        assert_eq!(
-            *status.borrow(),
-            Some(Some(clay_guest_session::capabilities::RefStatus::Live))
-        );
+        assert_eq!(*status.borrow(), Some(Some(crate::RefStatus::Live)));
         supervisor.shutdown().await.unwrap();
         rig.host.close();
     })
@@ -627,11 +624,13 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
     );
     assert_eq!(
         value.attachments,
-        [RowAttachment::Endpoint(PublicationEndpoint {
-            micro: clay_host::MicroId::new("native.declares"),
-            publication: "view".into(),
-            contract: Admitted::presentation_component(),
-        })]
+        [clay_guest_session::capabilities::RowAttachment::Endpoint(
+            PublicationEndpoint {
+                micro: clay_host::MicroId::new("native.declares"),
+                publication: "view".into(),
+                contract: Admitted::presentation_component(),
+            }
+        )]
     );
     assert_ne!(
         manifest_scope(&clay_host::MicroId::new("native.declares")),

@@ -2,7 +2,7 @@ use super::*;
 use clay_collection::Stamped;
 use clay_host::StartError;
 use clay_mdk::Error;
-use clay_mdk::RowAttachment;
+use clay_guest_session::capabilities::RowAttachment;
 use clay_mdk::host::factory;
 use micro_settings_manifest::SECTIONS;
 use micro_settings_manifest::Section;

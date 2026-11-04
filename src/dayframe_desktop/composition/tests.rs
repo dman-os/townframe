@@ -2,7 +2,7 @@ use super::*;
 use clay_host::MicroId;
 use clay_host::MicroState;
 use clay_mdk::Collection;
-use clay_mdk::RowAttachment;
+use clay_guest_session::capabilities::RowAttachment;
 use micro_settings_manifest::Section;
 
 // The package directory must install the Wasmtime counter beside the shell's native

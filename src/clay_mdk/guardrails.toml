@@ -18,12 +18,12 @@ allow_external_api_types = false
 # links on wasm32 for the browser shell. Features ≤8 so the matrix needs no powerset.
 [builds.native]
 features = ["in_process", "view", "wasmtime", "wcmp", "package"]
-required_features = ["dioxus", "wit"]
+required_features = ["guest"]
 
 [builds.wasm32-unknown-unknown]
 features = ["in_process", "view", "wcmp", "package"]
-required_features = ["dioxus", "wit"]
+required_features = ["guest"]
 
-# Guest-side authoring (wit + Dioxus guest adapter) as a wasip3 component.
+# Guest-side authoring (the guest backend over the WIT imports) as a wasip3 component.
 [builds.wasm32-wasip3]
-required_features = ["dioxus", "wit"]
+required_features = ["guest"]
