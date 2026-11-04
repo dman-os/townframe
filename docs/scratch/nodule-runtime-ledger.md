@@ -248,9 +248,28 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs plan P1–P7 below. P1 (DID namespaces) is running.
+- big_plugs: P1 `d12adcd2` and P2 `e1bd3853` done. P3 (signatures and import) is next, on a fresh agent.
 ## Done
 
+- 2026-11-04: P2 plug registry, `e1bd3853`.
+  - **Storage.** A grouped registry drawer (`CreateLayout::SingleGroup`) with `ciphertext`/`plaintext` inventories. Its id is persisted in `plugs_registry_drawer` (SQLite). `CREATE_DRAWER_OBJECT` is revoked after creation (manager fix).
+  - **Datums.** Each plug has an identity datum `org.example.daybook.plug.identity/main {id}`. Versions are `org.example.daybook.plug/<semver>`, holding the `Plug` envelope. Artifacts are `org.example.daybook.blob/plug.artifact/<label>/<key>`.
+  - **Derived state.** `Registry::follow` polls `InDrawer ∧ HasTag(identity)` (ADR 023) and folds each doc with `fold_doc`. State is owned by one task, and writes wait for the follower to confirm them.
+  - **Immutability.** First-seen (revision + envelope) is kept per label in SQLite, and a differing synced datum is served as `conflict` with the first-seen content. Removal keeps the first-seen record as a tombstone (manager fix, npm convention): identical republish is allowed, different content refused. When two nodes create a doc for the same plug, the lowest `DocId` wins and the others are listed as `duplicate_docs`.
+  - **Protocol.** `PlugsProtocol` (`org.example.daybook.plugs.*`): `mintPlugsCapability`, `publishPlugVersion`, `removePlugVersion`, `removePlug`, `listPlugs`, `getPlug`, `getPlugVersion`, `watchPlugs` (long-poll, `PlugsCursor{epoch, seq}`). `PlugsScope{publish}`.
+  - **Accepted limits.** After a restart, the registry converges shortly after boot, because the index lags. A stale view can persist until the next `leave` event or restart. A crash between drawer creation and the stored id can leak one empty drawer after the 7-day command-ledger window.
+  - **P3 handoff.**
+    - Signature and accept rules go in `Registry::publish` (`src/big_plugs/registry.rs`), after `envelope.validate()`, beside the `first_seen` check in the first `query` closure, where `State` is available. A synced bad signature is marked in `fold_doc`.
+    - Per-namespace publishing goes in `PlugsScope`.
+    - Importing an existing author document uses `DrawersProtocol::AddDoc{capability, command, drawer_id, doc_id, access}` with a Write+ registry drawer capability minted from the plugs actor. The follower picks up any doc carrying the identity datum.
+  - **Traps.**
+    - `PollDatums` emits spurious `leave` events; never trust your own write until the follower confirms it.
+    - The datum index is eventual.
+    - The blob workers take a static drawer list at boot.
+    - Command ids expire after 7 days.
+    - Migration hashes are blake3.
+    - tokio `Mutex`/`RwLock` are banned; use an owning task or a `Semaphore`.
+    - `BigNode::boot` is at the 160-line budget.
 - 2026-11-04: Init follow-ups. Waiters are woken from `serve` on a not-ready to ready transition, matched by NSID. `NoduleInitStatus.waiting_on`. Verified 67/67.
 - 2026-11-04: Init (D7), `04681476`. Migration 003 `nodule_init_done` (one row per initializer, replaced per revision). `attempts` is per initializer and resets on success (Kubernetes `restartCount`). A foreign target whose provider is unknown or not ready waits (no attempt counted). Cycles are reported as `InitFailed` on both sides. Verified 66/66.
 - 2026-11-04: Slice 2c (D2e) plus gRPC deadline fail-fast.
