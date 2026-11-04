@@ -518,10 +518,7 @@ mod tests {
                     .await
                     .expect("create sqlite big repo store");
             let (evt_tx, _evt_rx) = async_channel::unbounded();
-            let listener = BigRepoKeyhiveListener {
-                evt_tx,
-                storage: BigRepoKeyhiveStorage::memory(),
-            };
+            let listener = BigRepoKeyhiveListener::new(evt_tx, BigRepoKeyhiveStorage::memory());
             let keyhive = BigKeyhiveHandle::new([7; 32], listener)
                 .await
                 .expect("boot keyhive handle");

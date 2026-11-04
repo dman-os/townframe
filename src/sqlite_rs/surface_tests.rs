@@ -677,3 +677,29 @@ async fn migration_status_is_read_only_and_embedded_migrations_apply() -> SqlRes
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn ephemeral_directory_is_removed_when_last_handle_drops() -> SqlResult<()> {
+    let runtime = SqliteRuntime::new(Default::default());
+    let database = runtime.ephemeral(MIGRATIONS).expect("ephemeral");
+    let directory = database
+        .inner
+        .path
+        .parent()
+        .expect("database path has a parent")
+        .to_path_buf();
+    database
+        .execute_batch("CREATE TABLE retained (id INTEGER)")
+        .await?;
+    let clone = database.clone();
+    assert_eq!(runtime.live_database_count(), 1);
+    drop(database);
+    assert!(directory.exists(), "a live clone retains the directory");
+    drop(clone);
+    assert_eq!(runtime.live_database_count(), 0);
+    assert!(
+        !directory.exists(),
+        "ephemeral directory leaked: {directory:?}"
+    );
+    Ok(())
+}

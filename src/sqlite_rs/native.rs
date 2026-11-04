@@ -872,6 +872,20 @@ impl SqliteRuntime {
         Ok(self.register(path, migrations, "_sqlite_rs_migrations", Some(directory)))
     }
 
+    /// Number of registered databases that still have a live handle (or lease).
+    /// A database whose last handle dropped is gone and does not count, so a
+    /// non-zero count after everything should have shut down names a retained
+    /// handle (and, for an ephemeral database, its retained temp directory).
+    pub fn live_database_count(&self) -> usize {
+        self.inner
+            .databases
+            .lock()
+            .expect(ERROR_MUTEX)
+            .iter()
+            .filter(|database| database.strong_count() > 0)
+            .count()
+    }
+
     pub fn open_connection_count(&self) -> usize {
         self.inner.open_connections.load(Ordering::SeqCst)
     }

@@ -11,10 +11,7 @@ async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_comp
 {
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
     let (evt_tx, evt_rx) = async_channel::unbounded();
-    let listener = BigRepoKeyhiveListener {
-        evt_tx,
-        storage: storage.clone(),
-    };
+    let listener = BigRepoKeyhiveListener::new(evt_tx, storage.clone());
     let seed = [40; 32];
     let owner = BigKeyhiveHandle::new(seed, listener.clone()).await?;
     let storage_id = subduction_keyhive::StorageHash::new(*owner.keyhive_peer_id().verifying_key());
@@ -82,10 +79,7 @@ async fn reserved_doc_finalization_creates_the_document_with_the_callers_coparen
     let (evt_tx, _evt_rx) = async_channel::unbounded();
     let owner = BigKeyhiveHandle::new(
         [43; 32],
-        BigRepoKeyhiveListener {
-            evt_tx,
-            storage: storage.clone(),
-        },
+        BigRepoKeyhiveListener::new(evt_tx, storage.clone()),
     )
     .await?;
     let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
@@ -143,10 +137,7 @@ async fn reserved_doc_finalization_creates_the_document_with_the_callers_coparen
 async fn authority_change_archive_immediately_restores_private_document_key() -> Res<()> {
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
     let (evt_tx, _evt_rx) = async_channel::unbounded();
-    let listener = BigRepoKeyhiveListener {
-        evt_tx,
-        storage: storage.clone(),
-    };
+    let listener = BigRepoKeyhiveListener::new(evt_tx, storage.clone());
     let owner_seed = [41; 32];
     let owner = BigKeyhiveHandle::new(owner_seed, listener.clone()).await?;
     owner.save_prekey_state(&storage).await?;
@@ -212,10 +203,10 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     let (clone_evt_tx, _clone_evt_rx) = async_channel::unbounded();
     let clone = BigKeyhiveHandle::new(
         [42; 32],
-        BigRepoKeyhiveListener {
-            evt_tx: clone_evt_tx,
-            storage: crate::keyhive_storage::BigRepoKeyhiveStorage::memory(),
-        },
+        BigRepoKeyhiveListener::new(
+            clone_evt_tx,
+            crate::keyhive_storage::BigRepoKeyhiveStorage::memory(),
+        ),
     )
     .await?;
     owner
@@ -341,10 +332,7 @@ async fn local_hive_and_unmaterialized_peer(
     let (owner_tx, _owner_rx) = async_channel::unbounded();
     let owner = BigKeyhiveHandle::new(
         [owner_seed; 32],
-        BigRepoKeyhiveListener {
-            evt_tx: owner_tx,
-            storage: storage.clone(),
-        },
+        BigRepoKeyhiveListener::new(owner_tx, storage.clone()),
     )
     .await?;
     let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
@@ -358,10 +346,7 @@ async fn local_hive_and_unmaterialized_peer(
     let (peer_tx, _peer_rx) = async_channel::unbounded();
     let peer = BigKeyhiveHandle::new(
         [peer_seed; 32],
-        BigRepoKeyhiveListener {
-            evt_tx: peer_tx,
-            storage: peer_storage.clone(),
-        },
+        BigRepoKeyhiveListener::new(peer_tx, peer_storage.clone()),
     )
     .await?;
     // The peer's own published prekey op: the material a sync would carry.

@@ -3749,3 +3749,43 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
     client.shutdown().await?;
     eyre::Ok(())
 }
+
+/// A document governed by a group makes the keyhive's `Arc` graph cyclic (the
+/// group's shared delegation store holds the delegation naming the group as its
+/// delegate), so keyhive state outlives the repo. Stopping the repo must still
+/// release its database, and with it an ephemeral database's temp directory.
+#[tokio::test]
+async fn stop_releases_the_database_despite_the_keyhive_reference_cycle() -> Res<()> {
+    let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
+    let (repo, stop) = BigRepo::boot(
+        Arc::clone(&sqlite_runtime),
+        Config {
+            node_identity_seed: [7_u8; 32],
+            storage: StorageConfig::Memory,
+            scope_key: Arc::from("big-repo-test"),
+            hidden_parts: HashSet::new(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+            keyhive_change_notifs: true,
+        },
+    )
+    .await?;
+    let group = repo.create_group_with_parents(vec![]).await?;
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "governed"))
+        .expect("failed seeding doc");
+    let handle = repo
+        .create_doc_with_parents(doc, vec![group.clone().into()])
+        .await?;
+    assert_eq!(sqlite_runtime.live_database_count(), 1);
+    drop((handle, group));
+    stop.stop().await?;
+    drop(repo);
+    assert_eq!(
+        sqlite_runtime.live_database_count(),
+        0,
+        "the stopped repo's database is still held by leaked keyhive state"
+    );
+    Ok(())
+}
