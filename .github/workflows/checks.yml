@@ -208,6 +208,7 @@ jobs:
       - name: builds
         run: |
           nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip3 --release
+          nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_nodule_guest --target wasm32-wasip3 --release
 
       - name: build plug OCI artifacts
         run: |
