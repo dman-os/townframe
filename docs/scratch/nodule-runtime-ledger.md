@@ -161,9 +161,10 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- Init follow-ups (same agent): wake waiters on any readiness transition; `NoduleInitStatus.waiting_on`.
+- All to-do items for this PR are done. What remains is the deferred list and the open questions below.
 ## Done
 
+- 2026-11-04: Init follow-ups. Waiters are woken from `serve` on a not-ready to ready transition, matched by NSID. `NoduleInitStatus.waiting_on`. Verified 67/67.
 - 2026-11-04: Init (D7), `04681476`. Migration 003 `nodule_init_done` (one row per initializer, replaced per revision). `attempts` is per initializer and resets on success (Kubernetes `restartCount`). A foreign target whose provider is unknown or not ready waits (no attempt counted). Cycles are reported as `InitFailed` on both sides. Verified 66/66.
 - 2026-11-04: Slice 2c (D2e) plus gRPC deadline fail-fast.
   - `NoduleGrants.operations` (`OperationGrants` datum record, arrays; `DispatchScope` uses `BTreeSet` with `deny_unknown_fields`, which datums reject). `SetNoduleOperationGrants` op, `NoduleRecord.operations` status, migration `002_applied_operations`.
