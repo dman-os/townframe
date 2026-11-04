@@ -3,14 +3,13 @@
 //! each component's statically-read manifest. A package's bytes are fetched only when an
 //! instance activates, and their digest is verified against the index before the browser
 //! engine (`wcmp`) ever sees them.
-use clay_micro_core::micros::MicroId;
-use clay_micro_core::micros::composition::ConfiguredMicro;
-use clay_micro_core::micros::composition::Enablement;
+use clay_mdk::native::CollectionBindings;
+use clay_mdk::native::factory;
 use dayframe_composition::CompositionRuntime;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
+use micro_settings_manifest::SECTIONS;
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use ui::ThemeMode;
 use ui::ThemeRoot;
 use wasm_bindgen::JsCast;
@@ -69,34 +68,40 @@ async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpP
     clay_rt_wcmp_web::load(package.bytes()).await
 }
 
-fn locked_settings() -> BTreeMap<String, ConfiguredMicro> {
-    BTreeMap::from([(
-        "settings".into(),
-        ConfiguredMicro {
-            provider: MicroId::new(micro_settings_manifest::ID),
-            enablement: Enablement::Enabled,
-            eager: true,
-            bindings: BTreeMap::new(),
-        },
-    )])
-}
-
+/// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
+/// is unusable without it. Sample is eager so its section is written at boot. What each may
+/// read or write is this catalog's decision, not the micro's.
 fn native_micros() -> Vec<InstalledMicro> {
     vec![
-        InstalledMicro::new(micro_settings_manifest::manifest(), |application| {
-            clay_mdk::native::provider(
-                application,
-                micro_settings_manifest::manifest(),
-                micro_settings::activate,
-            )
-        }),
-        InstalledMicro::new(micro_sample::manifest(), |application| {
-            clay_mdk::native::provider(
-                application,
-                micro_sample::manifest(),
-                micro_sample::activate,
-            )
-        }),
+        InstalledMicro {
+            eager: true,
+            locked: true,
+            ..InstalledMicro::new(micro_settings_manifest::manifest(), |resources| {
+                factory(
+                    resources,
+                    micro_settings_manifest::manifest(),
+                    CollectionBindings {
+                        read: vec![SECTIONS.into()],
+                        write: vec![],
+                    },
+                    micro_settings::activate,
+                )
+            })
+        },
+        InstalledMicro {
+            eager: true,
+            ..InstalledMicro::new(micro_sample::manifest(), |resources| {
+                factory(
+                    resources,
+                    micro_sample::manifest(),
+                    CollectionBindings {
+                        read: vec![],
+                        write: vec![SECTIONS.into()],
+                    },
+                    micro_sample::activate,
+                )
+            })
+        },
     ]
 }
 
@@ -110,11 +115,13 @@ async fn web_runtime() -> CompositionRuntime {
             Ok(entries) => {
                 for entry in entries {
                     let manifest = entry.manifest.clone();
-                    installed.push(InstalledMicro::new(manifest.clone(), move |application| {
-                        let entry = entry.clone();
-                        clay_mdk::wcmp::provider(application, manifest.clone(), move || {
-                            indexed_package(entry.clone())
-                        })
+                    installed.push(InstalledMicro::new(manifest.clone(), move |resources| {
+                        clay_mdk::wcmp::factory(
+                            resources,
+                            manifest,
+                            CollectionBindings::default(),
+                            move || indexed_package(entry.clone()),
+                        )
                     }));
                 }
             }
@@ -122,12 +129,12 @@ async fn web_runtime() -> CompositionRuntime {
         },
         Err(error) => errors.push(error),
     }
-    let mut runtime = CompositionRuntime::new(installed, locked_settings());
-    runtime.installation_errors = errors;
-    micro_sample::seed_mock_defaults(&runtime.application.documents());
+    let mut runtime = CompositionRuntime::new(installed).await;
+    runtime.installation_errors.extend(errors);
+    micro_sample::seed_mock_defaults(runtime.documents());
     // Demo seed for the counter package `x/dayframe-web.ts` installs: start its config
     // at zero so the guest renders its value instead of the absent-config notice.
-    runtime.application.mock_documents().seed(
+    runtime.documents().mock_documents().seed(
         clay_docs::FacetRoute {
             document: "counter-config".into(),
             branch: "main".into(),

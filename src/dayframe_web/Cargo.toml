@@ -8,7 +8,6 @@ dioxus = { workspace = true }
 ui = { workspace = true }
 dayframe_composition = { workspace = true }
 clay_dioxus = { workspace = true }
-clay_micro_core = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wcmp", "package"] }
 clay_rt_wcmp = { workspace = true }
 clay_rt_wcmp_web = { workspace = true }
