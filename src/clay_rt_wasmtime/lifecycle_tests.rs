@@ -138,3 +138,13 @@ async fn context_follows_a_provider() {
         .run_until(lifecycle_conformance::context_follows_a_provider(engine))
         .await;
 }
+
+/// `Capability::retain_call` in a guest on this engine: one incarnation across several calls,
+/// released when the binding drops.
+#[tokio::test]
+async fn context_retains_a_call() {
+    let engine = Wasmtime::load_fixture("context").await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::context_retains_a_call(engine))
+        .await;
+}

@@ -470,6 +470,8 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
                 call("rows", "org.example.clay.test.context.rows"),
                 call("attach", "org.example.clay.test.context.attach"),
                 call("follow", "org.example.clay.test.context.follow"),
+                call("hold", "org.example.clay.test.context.hold"),
+                call("release", "org.example.clay.test.context.release"),
                 presentation("detail"),
                 presentation("slot"),
             ],

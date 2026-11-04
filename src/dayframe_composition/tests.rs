@@ -8,6 +8,7 @@ use clay_mdk::Error;
 use clay_mdk::host::factory;
 use micro_settings_manifest::SECTIONS;
 use micro_settings_manifest::Section;
+use std::cell::RefCell;
 use std::future::Future;
 
 const COUNTER: &str = micro_counter_manifest::ID;
@@ -1249,16 +1250,21 @@ fn editor_sidecar() -> clay_mdk::Sidecar {
             min_revision: None,
         }],
     );
-    sidecar.manifest.publications = vec![clay_mdk::PublicationDeclaration {
-        name: "complete".into(),
-        kind: clay_mdk::PublicationKind::Call,
-        contract: Some(Nsid::literal("org.example.test.editor.complete")),
-    }];
+    sidecar.manifest.publications = ["complete", "focus", "blur"]
+        .into_iter()
+        .map(|name| clay_mdk::PublicationDeclaration {
+            name: name.into(),
+            kind: clay_mdk::PublicationKind::Call,
+            contract: Some(Nsid::literal(&format!("org.example.test.editor.{name}"))),
+        })
+        .collect();
     sidecar
 }
 
 /// The editor: it reads the completion-source rows, filters them locally on the typed text and
-/// calls only the providers whose trigger matches, collecting their candidates.
+/// calls only the providers whose trigger matches, collecting their candidates. While focused
+/// (`focus`) it holds a retained call per source row whose trigger the text matches, and a
+/// completion goes through the retained call of a row when there is one; `blur` drops them.
 fn editor() -> InstalledMicro {
     let sidecar = editor_sidecar();
     let manifest = sidecar.manifest.clone();
@@ -1269,16 +1275,56 @@ fn editor() -> InstalledMicro {
                 let sources = context
                     .collection::<String, Source>("sources")
                     .expect("configuration binds the sources collection");
+                let retained = Rc::new(RefCell::new(
+                    BTreeMap::<String, Rc<clay_mdk::CallBinding>>::new(),
+                ));
+                context.publish_call("focus", {
+                    let sources = sources.clone();
+                    let retained = Rc::clone(&retained);
+                    move |typed: String| {
+                        let sources = sources.clone();
+                        let retained = Rc::clone(&retained);
+                        async move {
+                            sources.bootstrapped().await;
+                            for row in sources.rows()?.iter() {
+                                if typed.starts_with(&row.value.trigger) {
+                                    let provider = &row.attachments[row.value.provider.index()];
+                                    let binding = provider.retain_call().await?;
+                                    retained
+                                        .borrow_mut()
+                                        .insert(row.key.clone(), Rc::new(binding));
+                                }
+                            }
+                            Ok(())
+                        }
+                    }
+                })?;
+                context.publish_call("blur", {
+                    let retained = Rc::clone(&retained);
+                    move |(): ()| {
+                        retained.borrow_mut().clear();
+                        async { Ok(()) }
+                    }
+                })?;
                 context.publish_call("complete", move |typed: String| {
                     let sources = sources.clone();
+                    let retained = Rc::clone(&retained);
                     async move {
                         sources.bootstrapped().await;
                         let mut candidates = Vec::<String>::new();
                         for row in sources.rows()?.iter() {
                             if typed.starts_with(&row.value.trigger) {
-                                let provider = &row.attachments[row.value.provider.index()];
-                                candidates
-                                    .extend(provider.call::<String, Vec<String>>(&typed).await?);
+                                // Clone the handle out: the map borrow must not span the await.
+                                let binding = retained.borrow().get(&row.key).cloned();
+                                candidates.extend(match binding {
+                                    Some(binding) => {
+                                        binding.call::<String, Vec<String>>(&typed).await?
+                                    }
+                                    None => {
+                                        let provider = &row.attachments[row.value.provider.index()];
+                                        provider.call::<String, Vec<String>>(&typed).await?
+                                    }
+                                });
                             }
                         }
                         Ok(candidates)
@@ -1365,7 +1411,9 @@ fn provider(name: &'static str, trigger: &'static str) -> (InstalledMicro, Serve
 // The editor provides a durable completion-source collection and two providers each contribute
 // one row with a lazy reference to their call. Completing a text filters the rows locally and
 // calls only the matching provider, which is started by the call and not before; a text that
-// matches nothing starts nobody.
+// matches nothing starts nobody. While the editor is focused it retains the matching provider's
+// call: several completions are then one activation of the provider, and blurring (dropping the
+// binding) lets it go idle.
 #[tokio::test(flavor = "current_thread")]
 async fn the_editor_calls_only_the_providers_whose_trigger_matches() {
     let (alpha, alpha_served) = provider("alpha", "a.");
@@ -1416,14 +1464,45 @@ async fn the_editor_calls_only_the_providers_whose_trigger_matches() {
             (1, 1)
         );
 
-        // Nothing retains a provider between calls (`Context` has no `retain-call` yet), so the
-        // call's own hold ends with it and the next call starts a new incarnation.
+        // Both providers' calls ended, so both go idle before the focus scenario starts.
+        for provider in ["tests.alpha", "tests.beta"] {
+            settle(|| runtime.state(&id(provider)) == MicroState::Idle).await;
+        }
+
+        // Focus: the editor retains the matching provider's call, which starts it once and
+        // keeps it up between completions. The editor itself is held live by the focused
+        // surface (a lease), since its retained bindings live and die with its incarnation.
+        let focused = runtime
+            .supervisor
+            .acquire(&supervised("tests.editor"), "complete")
+            .await
+            .unwrap();
+        call_publication::<_, ()>(runtime, "tests.editor", "focus", &"a.".to_owned()).await;
+        assert_eq!(runtime.state(&id("tests.alpha")), MicroState::Active);
+        assert_eq!(alpha_served.activations.get(), 2);
+        for typed in ["a.b", "a.bc", "a.bcd"] {
+            assert_eq!(complete(runtime, typed).await, [format!("alpha:{typed}")]);
+        }
+        assert_eq!(
+            (alpha_served.activations.get(), alpha_served.calls.get()),
+            (2, 4),
+            "three completions while focused are one activation"
+        );
+        assert_eq!(runtime.state(&id("tests.alpha")), MicroState::Active);
+        // A provider whose trigger the focus did not match is still called once per completion.
+        assert_eq!(complete(runtime, "b.z").await, ["beta:b.z"]);
+        assert_eq!(beta_served.activations.get(), 2);
+
+        // Blur drops the bindings, so the provider goes idle and the next completion starts it
+        // again.
+        call_publication::<_, ()>(runtime, "tests.editor", "blur", &()).await;
         settle(|| runtime.state(&id("tests.alpha")) == MicroState::Idle).await;
         assert_eq!(complete(runtime, "a.again").await, ["alpha:a.again"]);
         assert_eq!(
             (alpha_served.activations.get(), alpha_served.calls.get()),
-            (2, 2)
+            (3, 5)
         );
+        drop(focused);
     })
     .await;
 }

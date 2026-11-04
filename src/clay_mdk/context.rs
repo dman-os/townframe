@@ -173,8 +173,25 @@ impl Capability {
             #[cfg(feature = "guest")]
             CapabilityInner::Guest(reference) => reference.call(request).await?,
         };
-        ciborium::from_reader(response.as_slice())
-            .map_err(|error| Error::InvalidValue(error.to_string()))
+        decode(&response)
+    }
+
+    /// Retain the provider's call publication: the provider stays live (a lazy one is started
+    /// if none is) for as long as the returned [`CallBinding`] is held, so any number of calls
+    /// through it share one incarnation, and dropping it lets the provider go idle. This is how
+    /// a micro keeps a provider up while it is likely to be called again (a focused editor and
+    /// its completion providers), where [`Self::call`] holds it for one call only.
+    pub async fn retain_call(&self) -> Result<CallBinding, Error> {
+        Ok(CallBinding(match &self.0 {
+            #[cfg(feature = "in_process")]
+            CapabilityInner::InProcess(reference) => {
+                CallBindingInner::InProcess(reference.retain_call().await?)
+            }
+            #[cfg(feature = "guest")]
+            CapabilityInner::Guest(reference) => {
+                CallBindingInner::Guest(reference.retain_call().await?)
+            }
+        }))
     }
 
     /// Redeem the provider's presentation, activating the provider if the reference is lazy.
@@ -191,6 +208,35 @@ impl Capability {
                 PresentationInner::Guest(Rc::new(reference.redeem_presentation().await?))
             }
         }))
+    }
+}
+
+/// A retained call (see [`Capability::retain_call`]): the provider stays live while this is
+/// held, and dropping it releases the hold. Once the provider's incarnation ends, calls through
+/// it report [`Error::Revoked`] rather than starting another.
+pub struct CallBinding(CallBindingInner);
+
+enum CallBindingInner {
+    #[cfg(feature = "in_process")]
+    InProcess(clay_guest_session::capabilities::CallBinding),
+    #[cfg(feature = "guest")]
+    Guest(crate::capability_bank::CallBinding),
+}
+
+impl CallBinding {
+    /// One call of the retained publication, CBOR-encoded both ways.
+    pub async fn call<Req: Serialize, Resp: DeserializeOwned>(
+        &self,
+        request: &Req,
+    ) -> Result<Resp, Error> {
+        let request = encode(request);
+        let response = match &self.0 {
+            #[cfg(feature = "in_process")]
+            CallBindingInner::InProcess(binding) => binding.call(request).await?,
+            #[cfg(feature = "guest")]
+            CallBindingInner::Guest(binding) => binding.call(request).await?,
+        };
+        decode(&response)
     }
 }
 
@@ -291,6 +337,10 @@ impl PartialEq for Capability {
             _ => false,
         }
     }
+}
+
+fn decode<T: DeserializeOwned>(response: &[u8]) -> Result<T, Error> {
+    ciborium::from_reader(response).map_err(|error| Error::InvalidValue(error.to_string()))
 }
 
 pub(crate) fn encode<T: Serialize>(value: &T) -> Vec<u8> {

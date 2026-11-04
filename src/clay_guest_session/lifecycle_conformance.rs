@@ -1201,10 +1201,151 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
     host.close();
 }
 
+fn cbor_text(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(text, &mut bytes).unwrap();
+    bytes
+}
+
+/// A running `context` fixture beside a lazy host-side provider micro: the fixture's `feed`
+/// collection holds one row, `key`, attaching the provider's publication `publication` (of
+/// `contract`) as a lazy reference, and the supervisor serves its demand. `recipient` is the
+/// host's handle for calling the fixture's publications.
+struct ContextRig<E: Incarnations> {
+    host: Host,
+    registrations: BytesRegistrations,
+    world: Rc<ContextWorld>,
+    provider: MicroId,
+    supervisor: Rc<Supervisor<CapabilityPublication>>,
+    serving: tokio::task::AbortHandle,
+    instance: Instance,
+    runtime: E::Runtime,
+    driver: JoinHandle<()>,
+    recipient_instance: Instance,
+    recipient: CapabilitySession,
+}
+
+impl<E: Incarnations> ContextRig<E> {
+    async fn boot(
+        engine: E,
+        prefix: [u64; 2],
+        key: &str,
+        publication: &str,
+        contract: Nsid,
+    ) -> Self {
+        let host = Host::new();
+        let registrations = bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), prefix);
+        let provider = MicroId::new("provider");
+        CollectionSession::new(
+            host.clone(),
+            host.start("seeder"),
+            crate::collections::CollectionLimits::default(),
+        )
+        .grant_writer(clay_host::Grant {
+            collection: registrations.clone(),
+            micro: MicroId::new("seeder"),
+            writer: writer_of("seeder"),
+        })
+        .unwrap()
+        .put_value(
+            cbor_text(key),
+            clay_collection::WriteBasis::Concurrent,
+            crate::collections::CollectionValue {
+                body: cbor_text(key),
+                attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
+                    micro: provider.clone(),
+                    publication: publication.to_owned(),
+                    contract,
+                })],
+            },
+        )
+        .unwrap();
+        let world = Rc::new(ContextWorld::default());
+        let supervisor = Rc::new(Supervisor::<CapabilityPublication>::new(
+            host.clone(),
+            [ConfiguredMicro {
+                identity: provider.clone(),
+                eager: false,
+                enabled: true,
+                requirements: BTreeMap::new(),
+                unresolved_bindings: Vec::new(),
+                factory: world.clone(),
+            }],
+        ));
+        // Redeeming a lazy reference is served by the supervisor's driver.
+        let serving = tokio::task::spawn_local({
+            let supervisor = Rc::clone(&supervisor);
+            async move { supervisor.drive().await }
+        })
+        .abort_handle();
+        let instance = host.create("context").unwrap();
+        host.begin_initialization(&instance).unwrap();
+        let (runtime, driver) = Rc::new(engine)
+            .initialize(
+                host.clone(),
+                instance.clone(),
+                ContextWorld::granted(&registrations, &supervisor),
+            )
+            .await
+            .unwrap();
+        let driver = tokio::task::spawn_local(driver);
+        host.commit_initialization(&instance).unwrap();
+        let recipient_instance = host.start("recipient");
+        let recipient = CapabilitySession::new(
+            host.clone(),
+            recipient_instance.clone(),
+            CapabilityLimits::default(),
+        );
+        Self {
+            host,
+            registrations,
+            world,
+            provider,
+            supervisor,
+            serving,
+            instance,
+            runtime,
+            driver,
+            recipient_instance,
+            recipient,
+        }
+    }
+
+    /// Close the fixture in order: guest, then the provider and host.
+    async fn finish(self) {
+        assert!(self.host.begin_close(&self.instance).unwrap());
+        let (closed, residue) = E::close(self.runtime).await;
+        closed.unwrap();
+        assert_eq!(residue, GuestResidue::NONE);
+        self.driver.await.unwrap();
+        self.host.close_instance(&self.instance).unwrap();
+        self.host.close_instance(&self.recipient_instance).unwrap();
+        self.serving.abort();
+        self.supervisor.shutdown().await.unwrap();
+        self.host.close();
+    }
+}
+
 /// The host side of the `context` fixture's scenarios (`src/clay_mdk/context_fixture.rs`): what
-/// it grants the fixture, and a provider factory whose one presentation, `view`, the fixture
-/// follows.
-struct ContextWorld;
+/// it grants the fixture, and a provider factory whose presentation `view` the fixture follows
+/// and whose call `echo` (answering its request) it retains.
+#[derive(Default)]
+struct ContextWorld {
+    /// How many incarnations of the provider have started.
+    activations: Rc<std::cell::Cell<usize>>,
+}
+
+/// The provider's `echo` call.
+struct Echoes;
+
+impl CallTarget for Echoes {
+    fn call(&self, request: Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, CallError>> {
+        async move { Ok(request) }.boxed()
+    }
+}
+
+/// The contract of the provider's `echo` call.
+const ECHO_CONTRACT: &str = "org.example.clay.test.context.echo";
 
 impl ContextWorld {
     /// The `feed` registration collection and the publications the fixture's manifest declares,
@@ -1244,6 +1385,14 @@ impl ContextWorld {
                     "follow".to_owned(),
                     call("org.example.clay.test.context.follow"),
                 ),
+                (
+                    "hold".to_owned(),
+                    call("org.example.clay.test.context.hold"),
+                ),
+                (
+                    "release".to_owned(),
+                    call("org.example.clay.test.context.release"),
+                ),
                 ("detail".to_owned(), presentation()),
                 ("slot".to_owned(), presentation()),
             ]),
@@ -1255,7 +1404,7 @@ impl ContextWorld {
 }
 
 struct PresenterRoot {
-    _published: PublishedCapability,
+    _published: Vec<PublishedCapability>,
 }
 
 impl Factory<CapabilityPublication> for ContextWorld {
@@ -1266,12 +1415,21 @@ impl Factory<CapabilityPublication> for ContextWorld {
         _requirements: BTreeMap<String, CapabilityPublication>,
         _activator: Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
+        self.activations.set(self.activations.get() + 1);
         Box::pin(async move {
             let bank = CapabilitySession::new(host, instance, CapabilityLimits::default());
             let view = bank.publish_presentation("view").unwrap();
-            let publications = BTreeMap::from([("view".to_owned(), view.publication())]);
+            let echo = bank
+                .publish_call("echo", Nsid::literal(ECHO_CONTRACT), Arc::new(Echoes))
+                .unwrap();
+            let publications = BTreeMap::from([
+                ("view".to_owned(), view.publication()),
+                ("echo".to_owned(), echo.publication()),
+            ]);
             Ok(Initialized {
-                root: Box::new(PresenterRoot { _published: view }),
+                root: Box::new(PresenterRoot {
+                    _published: vec![view, echo],
+                }),
                 publications,
             })
         })
@@ -1296,77 +1454,14 @@ impl Root for PresenterRoot {
 ///
 /// A wake the host failed to deliver would leave the call parked, so the scenario would hang.
 pub async fn context_follows_a_provider<E: Incarnations>(engine: E) {
-    let host = Host::new();
-    let registrations = bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), [97, 98]);
-    let cbor = |text: &str| {
-        let mut bytes = Vec::new();
-        ciborium::into_writer(text, &mut bytes).unwrap();
-        bytes
-    };
-    let provider = MicroId::new("provider");
-    CollectionSession::new(
-        host.clone(),
-        host.start("seeder"),
-        crate::collections::CollectionLimits::default(),
-    )
-    .grant_writer(clay_host::Grant {
-        collection: registrations.clone(),
-        micro: MicroId::new("seeder"),
-        writer: writer_of("seeder"),
-    })
-    .unwrap()
-    .put_value(
-        cbor("view"),
-        clay_collection::WriteBasis::Concurrent,
-        crate::collections::CollectionValue {
-            body: cbor("view"),
-            attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
-                micro: provider.clone(),
-                publication: "view".to_owned(),
-                contract: presentation_component(),
-            })],
-        },
-    )
-    .unwrap();
-    let supervisor = Rc::new(Supervisor::<CapabilityPublication>::new(
-        host.clone(),
-        [ConfiguredMicro {
-            identity: provider.clone(),
-            eager: false,
-            enabled: true,
-            requirements: BTreeMap::new(),
-            unresolved_bindings: Vec::new(),
-            factory: Rc::new(ContextWorld),
-        }],
-    ));
-    // Redeeming a lazy reference is served by the supervisor's driver.
-    let serving = tokio::task::spawn_local({
-        let supervisor = Rc::clone(&supervisor);
-        async move { supervisor.drive().await }
-    });
-    supervisor.disable(&provider).await.unwrap();
-
-    let instance = host.create("context").unwrap();
-    host.begin_initialization(&instance).unwrap();
-    let (runtime, driver) = Rc::new(engine)
-        .initialize(
-            host.clone(),
-            instance.clone(),
-            ContextWorld::granted(&registrations, &supervisor),
-        )
-        .await
-        .unwrap();
-    let driver = tokio::task::spawn_local(driver);
-    host.commit_initialization(&instance).unwrap();
-
-    let recipient_instance = host.start("recipient");
-    let recipient = CapabilitySession::new(
-        host.clone(),
-        recipient_instance.clone(),
-        CapabilityLimits::default(),
-    );
-    let follow = recipient
-        .mint(&E::publications(&runtime).remove("follow").unwrap())
+    let rig = ContextRig::boot(engine, [97, 98], "view", "view", presentation_component()).await;
+    let (provider, supervisor) = (&rig.provider, &rig.supervisor);
+    let registrations = &rig.registrations;
+    supervisor.disable(provider).await.unwrap();
+    let cbor = cbor_text;
+    let follow = rig
+        .recipient
+        .mint(&E::publications(&rig.runtime).remove("follow").unwrap())
         .unwrap();
     let following = tokio::task::spawn_local(async move { follow.call(cbor("view")).await });
 
@@ -1397,26 +1492,69 @@ pub async fn context_follows_a_provider<E: Incarnations>(engine: E) {
         }
     };
     reached(0, "unavailable").await;
-    supervisor.enable(&provider);
+    supervisor.enable(provider);
     reached(1, "mounted").await;
-    assert_eq!(supervisor.state(&provider), MicroState::Active);
-    supervisor.disable(&provider).await.unwrap();
+    assert_eq!(supervisor.state(provider), MicroState::Active);
+    supervisor.disable(provider).await.unwrap();
     let steps = following.await.unwrap().unwrap();
     assert_eq!(
         ciborium::from_reader::<Vec<String>, _>(steps.as_slice()).unwrap(),
         ["unavailable", "mounted", "revoked"]
     );
+    rig.finish().await;
+}
 
-    assert!(host.begin_close(&instance).unwrap());
-    let (closed, residue) = E::close(runtime).await;
-    closed.unwrap();
-    assert_eq!(residue, GuestResidue::NONE);
-    driver.await.unwrap();
-    host.close_instance(&instance).unwrap();
-    host.close_instance(&recipient_instance).unwrap();
-    serving.abort();
-    supervisor.shutdown().await.unwrap();
-    host.close();
+/// `Capability::retain_call` through a guest (`hold` and `release` of the `context` fixture,
+/// against a real supervisor): a row attaches a lazy reference to a host-side provider's `echo`
+/// call; `hold` retains it and calls it twice, so the provider, which a plain call would start
+/// and release per call, is started once and still live after `hold` returned; `release` drops
+/// the binding, which the provider observes as going idle.
+pub async fn context_retains_a_call<E: Incarnations>(engine: E) {
+    let rig = ContextRig::boot(
+        engine,
+        [99, 100],
+        "echo",
+        "echo",
+        Nsid::literal(ECHO_CONTRACT),
+    )
+    .await;
+    let (provider, supervisor) = (&rig.provider, &rig.supervisor);
+    let call = |name: &str, request: Vec<u8>| {
+        let reference = rig
+            .recipient
+            .mint(&E::publications(&rig.runtime).remove(name).unwrap())
+            .unwrap();
+        async move { reference.call(request).await.unwrap() }
+    };
+    assert_eq!(supervisor.state(provider), MicroState::Idle);
+    assert_eq!(rig.world.activations.get(), 0);
+
+    let replies = call("hold", cbor_text("echo")).await;
+    assert_eq!(
+        ciborium::from_reader::<Vec<String>, _>(replies.as_slice()).unwrap(),
+        ["one", "two"]
+    );
+    assert_eq!(
+        rig.world.activations.get(),
+        1,
+        "two calls through the binding are one incarnation"
+    );
+    assert_eq!(
+        supervisor.state(provider),
+        MicroState::Active,
+        "the retained binding outlives the call that took it"
+    );
+
+    let mut unit = Vec::new();
+    ciborium::into_writer(&(), &mut unit).unwrap();
+    call("release", unit).await;
+    let mut changes = supervisor.changes();
+    changes
+        .wait_for(|_| supervisor.state(provider) == MicroState::Idle)
+        .await
+        .unwrap();
+    assert_eq!(rig.world.activations.get(), 1);
+    rig.finish().await;
 }
 
 /// A row written by a call, after `initialize` returned its publication handles to the host,
