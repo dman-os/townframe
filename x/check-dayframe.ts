@@ -39,7 +39,6 @@ for (const resolved of await Promise.all(resolutions)) {
 
 await $`cargo build --locked ${isolated} -p micro_counter --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p micro_collection_probe --target wasm32-wasip3`;
-await $`cargo build --locked ${isolated} -p clay_mdk --example slots --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example lifecycle --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example context --target wasm32-wasip3`;
@@ -56,7 +55,6 @@ const components: Record<string, [string, string]> = {
     "wasm32-wasip3/debug/micro_collection_probe.wasm",
     "collection-probe",
   ],
-  slots: ["wasm32-wasip3/debug/examples/slots.wasm", "slots"],
   sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
   lifecycle: ["wasm32-wasip3/debug/examples/lifecycle.wasm", "lifecycle"],
   context: ["wasm32-wasip3/debug/examples/context.wasm", "context"],

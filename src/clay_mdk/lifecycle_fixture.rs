@@ -284,7 +284,6 @@ impl presentation_events::Guest for Lifecycle {
     fn mount(
         _publication: String,
         placement: &presentation::MountPoint,
-        _components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {
         let role = ROLE.with_borrow(|role| {
             role.clone()

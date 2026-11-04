@@ -465,12 +465,7 @@ impl Runtime {
     pub fn mount(
         publication: &str,
         placement: &presentation::MountPoint,
-        components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {
-        assert!(
-            components.is_empty(),
-            "component slots are not routed to Dioxus guest micros yet"
-        );
         let runtime = Self::current();
         let surface = runtime
             .presentations

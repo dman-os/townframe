@@ -411,12 +411,11 @@ macro_rules! __export_guest_world {
             fn mount(
                 publication: ::std::string::String,
                 placement: &$crate::presentation::MountPoint,
-                components: ::std::vec::Vec<$crate::presentation::ComponentRef>,
             ) -> ::std::result::Result<
                 $crate::presentation::Surface,
                 $crate::presentation::PresentationError,
             > {
-                $crate::guest::Runtime::mount(&publication, placement, components)
+                $crate::guest::Runtime::mount(&publication, placement)
             }
 
             fn unmount(surface: &$crate::presentation::Surface) {

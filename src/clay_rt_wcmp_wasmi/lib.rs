@@ -14,8 +14,8 @@ impl WcmpPackage {
     }
 
     /// Load a component artifact prepared by `x/check-dayframe.ts`, named by the environment
-    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `slots` →
-    /// `DAYFRAME_SLOTS_COMPONENT`). Test and fixture code only: compositions that ship a package
+    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
+    /// `DAYFRAME_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
     /// embed or fetch it themselves.
     pub async fn from_env(name: &str) -> Result<Self, String> {
         let variable = format!(

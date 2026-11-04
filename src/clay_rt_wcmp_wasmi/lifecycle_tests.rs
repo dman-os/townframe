@@ -72,7 +72,7 @@ impl Incarnations for Wasmi {
     fn mount(runtime: &WcmpRuntime, publication: &str) -> Result<Box<dyn std::any::Any>, String> {
         let sink = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount(publication, Arc::clone(&sink) as _, &[])
+            .mount(publication, Arc::clone(&sink) as _)
             .map_err(|error| format!("{error:?}"))?;
         let rendered = sink.tree(SurfaceTree::text_content);
         if rendered != "lifecycle provider" {

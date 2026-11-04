@@ -78,7 +78,7 @@ impl Engine for Wasmtime {
         publication: &str,
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
     ) -> Result<SurfaceSession, PresentationError> {
-        runtime.mount(publication, writer, &[])
+        runtime.mount(publication, writer)
     }
 
     fn close(runtime: WasmRuntime) -> LocalFuture<'static, Result<(), String>> {

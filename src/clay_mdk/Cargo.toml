@@ -8,12 +8,6 @@ rust-version.workspace = true
 path = "lib.rs"
 
 [[example]]
-name = "slots"
-path = "slot_fixture.rs"
-crate-type = ["cdylib"]
-required-features = ["guest"]
-
-[[example]]
 name = "sleeper"
 path = "sleeper_fixture.rs"
 crate-type = ["cdylib"]

@@ -1216,7 +1216,7 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
         .push(Placement::synthetic(Arc::new(AtomicBool::new(false))))?;
     assert!(matches!(
         events
-            .call_mount(&mut store, "view", Resource::new_borrow(denied.rep()), &[])
+            .call_mount(&mut store, "view", Resource::new_borrow(denied.rep()))
             .await?,
         Err(PresentationError::Revoked)
     ));
@@ -1226,12 +1226,7 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
         .table
         .push(Placement::synthetic(first_lifetime.clone()))?;
     let surface = events
-        .call_mount(
-            &mut store,
-            "view",
-            Resource::new_borrow(placement.rep()),
-            &[],
-        )
+        .call_mount(&mut store, "view", Resource::new_borrow(placement.rep()))
         .await?
         .unwrap();
     let expected_batches = expected_counter_batches(4);
@@ -1264,7 +1259,6 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
             &mut store,
             "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1332,12 +1326,7 @@ async fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
             .push(Placement::synthetic(alive.clone()))?;
         let surface = guest
             .townframe_dayframe_presentation_events()
-            .call_mount(
-                &mut store,
-                "view",
-                Resource::new_borrow(placement.rep()),
-                &[],
-            )
+            .call_mount(&mut store, "view", Resource::new_borrow(placement.rep()))
             .await?
             .unwrap();
         Ok::<_, wasmtime::Error>((store, guest, surface))
@@ -1482,7 +1471,6 @@ async fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime:
             &mut rig.store,
             "view",
             Resource::new_borrow(placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1517,7 +1505,6 @@ async fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::R
             &mut rig.store,
             "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1526,7 +1513,6 @@ async fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::R
             &mut rig.store,
             "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1563,7 +1549,6 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
             &mut rig.store,
             "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1572,7 +1557,6 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
             &mut rig.store,
             "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1612,7 +1596,6 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
             &mut rig.store,
             "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1643,7 +1626,6 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
             &mut rig.store,
             "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1672,7 +1654,6 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
             &mut rig.store,
             "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1681,7 +1662,6 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
             &mut rig.store,
             "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1713,7 +1693,6 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
                 &mut rig.store,
                 "view",
                 Resource::new_borrow(first_placement.rep()),
-                &[]
             )
             .await?,
         Err(PresentationError::Revoked),
@@ -1724,7 +1703,6 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
             &mut rig.store,
             "view",
             Resource::new_borrow(replacement_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1761,7 +1739,6 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
             &mut rig.store,
             "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1771,7 +1748,6 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
             &mut rig.store,
             "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();

@@ -57,7 +57,7 @@ impl Engine for Wcmp {
         publication: &str,
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
     ) -> Result<SurfaceSession, PresentationError> {
-        runtime.mount(publication, writer, &[])
+        runtime.mount(publication, writer)
     }
 
     fn close(runtime: WcmpRuntime) -> LocalFuture<'static, Result<(), String>> {

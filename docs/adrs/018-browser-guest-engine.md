@@ -224,10 +224,10 @@ between `activate` and `mount`.
 
 ## Migration
 
-1. **Guest target on `wasm32-wasip3`:** `micro_counter`, `clay_mdk`'s
-   `slots` example, and `clay_mdk`'s `sleeper` fixture (§3's blocking guest)
+1. **Guest target on `wasm32-wasip3`:** `micro_counter` and `clay_mdk`'s
+   `sleeper` fixture (§3's blocking guest)
    build as components; `x/check-dayframe.ts` prepares them under
-   `DAYFRAME_COUNTER_COMPONENT` / `DAYFRAME_SLOTS_COMPONENT` /
+   `DAYFRAME_COUNTER_COMPONENT` /
    `DAYFRAME_SLEEPER_COMPONENT`.
    `clay_rt_wasmtime` drives them through wasmtime-wasi `p3`; `clay_rt_wcmp`
    registers the fail-loudly WASI host (§8). **Done.**

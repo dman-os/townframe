@@ -9,7 +9,6 @@ use clay_collection::Nsid;
 use clay_collection::ReplicaId;
 use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
-use clay_dioxus::SurfaceWriter;
 use clay_docs::DocumentService;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::DeclaredPublication;
@@ -21,7 +20,6 @@ use clay_host::Lease;
 use clay_host::MicroState;
 use clay_host::StartError;
 use clay_host::Supervisor;
-use clay_rt_wasmtime::WasmRuntime;
 use clay_surface::SurfaceTree;
 use dioxus::prelude::*;
 use dioxus_core::RenderTargetId;
@@ -228,76 +226,6 @@ fn click(dom: &mut VirtualDom, tree: &mut SurfaceTree) {
 
 async fn in_local_set<T>(future: impl Future<Output = T>) -> T {
     tokio::task::LocalSet::new().run_until(future).await
-}
-
-#[tokio::test]
-async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdrawal() {
-    let host = Host::new();
-    let native = NativeComponents::new(&host);
-    let viewer = host.start("viewer");
-    let child = host.start("counter child");
-    let layout = host.start("wasm layout");
-    let (counter, _counter_driver) = WasmRuntime::initialize(
-        &host,
-        child.clone(),
-        &counter_package().await,
-        declaring_view(),
-    )
-    .await
-    .unwrap();
-    let child_reference = native
-        .publish_surface(&child, move |_, writer| {
-            counter.mount("view", Arc::new(writer), &[])
-        })
-        .unwrap();
-    let package = super::component_package("slots")
-        .await
-        .expect("prepared slots component is valid");
-    let (runtime, _layout_driver) =
-        WasmRuntime::initialize(&host, layout.clone(), &package, InitialContext::default())
-            .await
-            .unwrap();
-    let foreign = Host::new();
-    let foreign_owner = foreign.start("foreign");
-    let foreign_reference = foreign.publish_component(&foreign_owner).unwrap();
-    let placement = host.publish_component(&viewer).unwrap();
-    let probe = SurfaceWriter::new(Arc::new(host.mount(&viewer, placement).unwrap()));
-    assert!(matches!(
-        runtime.mount("layout", Arc::new(probe.clone()), &[foreign_reference]),
-        Err(clay_surface::PresentationError::InvalidBatch(_))
-    ));
-    assert!(probe.is_live());
-    let layout_runtime = runtime.clone();
-    let reference = native
-        .publish_surface(&layout, move |_, writer| {
-            layout_runtime.mount("layout", Arc::new(writer), &[child_reference])
-        })
-        .unwrap();
-    let mut dom = VirtualDom::new_with_props(
-        mount_host_app,
-        MountProps {
-            components: native,
-            owner: viewer,
-            reference,
-        },
-    );
-    let mut tree = SurfaceTree::new();
-    dom.rebuild(&mut tree);
-    assert_eq!(tree.text_content(), "before0after");
-    click(&mut dom, &mut tree);
-    assert_eq!(tree.text_content(), "before1after");
-    host.close_instance(&child).unwrap();
-    assert!(matches!(
-        runtime.mount("layout", Arc::new(probe), &[child_reference]),
-        Err(clay_surface::PresentationError::Revoked)
-    ));
-    dom.wait_for_work().await;
-    dom.render_immediate(&mut tree);
-    assert_eq!(tree.text_content(), "beforeComponent withdrawn.after");
-    assert_eq!(host.check(&layout), Ok(()));
-    drop(dom);
-    host.close();
-    foreign.close();
 }
 
 #[tokio::test]
