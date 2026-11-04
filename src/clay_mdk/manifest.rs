@@ -14,8 +14,6 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub use clay_guest_session::capabilities::ContractIdentity;
-
 /// Version of the manifest vocabulary itself, written into [`MicroManifest::schema`].
 pub const MANIFEST_SCHEMA: u32 = 1;
 
@@ -31,6 +29,30 @@ impl MicroId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A contract a publication serves or a requirement consumes: for a Call, the request and
+/// response Lexicons. This is the manifest's wire vocabulary; the in-process backend converts
+/// it field for field into the capability bank's contract when it admits publications.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct ContractIdentity {
+    pub namespace: String,
+    pub name: String,
+    pub version: (u32, u32, u32),
+}
+
+impl ContractIdentity {
+    pub fn new(
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        version: (u32, u32, u32),
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            name: name.into(),
+            version,
+        }
     }
 }
 

@@ -60,11 +60,13 @@ pub struct PresentationSlotProps {
 /// cannot be redeemed renders its failure instead of a mount.
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn PresentationSlot(props: PresentationSlotProps) -> Element {
-    let reference = props.reference.0.share();
-    let redeemed = use_resource(move || {
-        let reference = reference.share();
+    // Reactive over the prop: a row that keeps its key but attaches another target redeems
+    // anew, and dropping the old redemption releases the previous provider.
+    let reference = props.reference.clone();
+    let redeemed = use_resource(use_reactive!(|(reference,)| {
+        let reference = reference.0.share();
         async move { reference.redeem_presentation().await }
-    });
+    }));
     let redeemed = redeemed.read();
     match &*redeemed {
         None => rsx! { p { role: "status", "Loading section…" } },

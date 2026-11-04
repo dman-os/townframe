@@ -17,7 +17,6 @@ clay_host = { workspace = true }
 clay_store = { workspace = true }
 clay_surface = { workspace = true }
 futures.workspace = true
-serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 ciborium = { workspace = true }

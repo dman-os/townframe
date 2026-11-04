@@ -508,7 +508,6 @@ dependencies = [
  "clay_store",
  "clay_surface",
  "futures",
- "serde",
  "thiserror 2.0.20",
  "tokio",
 ]

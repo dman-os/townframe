@@ -3,6 +3,7 @@ use crate::Entrypoints;
 use crate::MANIFEST_SCHEMA;
 use crate::MicroId as ManifestId;
 use crate::PublicationDeclaration;
+use clay_guest_session::capabilities::ContractIdentity as Admitted;
 use clay_guest_session::collections::bytes_registrations;
 use clay_host::CollectionContract;
 use clay_host::ConfiguredMicro;
@@ -375,11 +376,11 @@ fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
     assert_eq!(declared.len(), 2, "an unknown kind is not served");
     assert_eq!(
         declared["echo"].contract,
-        ContractIdentity::new("dayframe.lifecycle", "echo", (2, 0, 0))
+        Admitted::new("dayframe.lifecycle", "echo", (2, 0, 0))
     );
     assert_eq!(
         declared["view"].contract,
-        ContractIdentity::presentation_component()
+        Admitted::presentation_component()
     );
 }
 
@@ -426,7 +427,7 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
         [RowAttachment::Endpoint(PublicationEndpoint {
             micro: clay_host::MicroId::new("native.declares"),
             publication: "view".into(),
-            contract: ContractIdentity::presentation_component(),
+            contract: Admitted::presentation_component(),
         })]
     );
     assert_ne!(
