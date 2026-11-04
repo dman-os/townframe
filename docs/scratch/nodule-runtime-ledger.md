@@ -228,6 +228,28 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
     - **Not done.** Narrowing drawer/data grants by data requests; the SchemaRepo does not backfill reference edges for a datum registered after index backfill ran (new reference-declaring tags are indexed from new changes only); `set_enabled` does not fail on a Lexicon conflict as it does on an authority conflict (the record is Refused instead); the plug registry (catalogue) is not a feed, only enabled installs are; bad datum Lexicons surface at enable-time as `Refused`, not at `admit`.
 - After P2 and P4: send the Clay agent the concrete type and section names.
 
+### D14–D20. What a node is (operator, 2026-11-04; drafted as ADR 032)
+- **D14.** A node owns its data and is its sync identity. There are no checkouts. Drawers are the realms, and export is explicit. The analogy is a network filesystem.
+- **D15.** The generic `big_node` knows no users. User nodes and relay nodes are compositions in their own crates.
+- **D16.** Three layers: services, clients and attachments. Services and node- or Clay-side code see only `Client<Proto>` handles. Listeners (UDS, TCP) and the peer endpoint are attachments.
+- **D17.** Dispatch leaves `big_nodule` for `big_dispatch`, owned by `big_node`. It is the node's one router. Built-in services register as built-in providers under their existing XRPC NSIDs, and nodules register as now. The composition root wires services directly.
+- **D18.** There are three access paths: in-process, UDS with a node-issued token handshake, and the network with a capability per call.
+- **D19.** Nothing assumes one node per process, machine, directory or database:
+  - Nodes are values; booting and stopping many in one process is tested.
+  - No process-global node state.
+  - Services are handed storage bindings and never open paths.
+  - Services call each other only through clients, each as its own actor.
+  - Durable truth only, so a node can scale to zero.
+- **D20.** `big_node` e2e is the system test arena: harness, ladder, scale, seeded stress and nodules across nodes, driven through clients like a high-level user. The progress repo is out of scope.
+
+### Plan N (the node PR, branch `feat/big-node`)
+- **N1. `big_dispatch` crate.** Move the router, admission and provider registry out of `big_nodule`. Register docs, drawers, blobs, authority, plugs and nodule-management operations as built-in providers. `big_nodule` registers its Wasm providers into it. Tests: a built-in operation and a nodule operation are reached through the one router with the same admission.
+- **N2. Listeners.** Serve the node router over UDS (token handshake that yields a capability) and TCP (`service_utils_rs` already has TCP serving; add a UDS acceptor). A `Client` over XRPC/UDS drives a node end to end.
+- **N3. Resource bindings.** Node config moves from paths to bindings: a SQL handle with a scope key, a blob store, secrets. `big_repo` stops opening `StorageConfig::Disk` itself. Test: boot and stop 20 nodes in one process with nothing leaked (databases, files, tasks).
+- **N4. Network attachment.** Move the test-only `big_node/e2e/blob_discovery/network.rs` (Iroh endpoint, peer links, blob serving) into `big_node` as an attachment.
+- **N5. Harness and ladder suite.** An N-node harness that reuses `big_repo` test2's topology and nickname helpers. Port the scenarios of `daybook_core/sync/tests/ladder.rs` onto it.
+- **N6. Scale, stress and cross-node nodules.** 10k-document replication, a seeded randomized stress test (`long_test` names), and a plug published on node A then installed and invoked on node B.
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
