@@ -1,296 +1,343 @@
-//! Shared Dayframe composition: a catalog-driven composition root, its configuration source,
-//! lifecycle controls, and the `Application` shell UI. The root names no micro: launchers
-//! (desktop, web) hand it every installed micro as an [`InstalledMicro`] — a manifest plus
-//! the engine-specific provider factory for it — together with the locked boot entries.
-//! Engine-specific guest providers (Wasmtime on desktop, `wcmp` on the web) and native
-//! built-ins are both just catalog entries (ADR 018 §7). A fresh composition facet is seeded
-//! with one enabled, on-demand instance per installed micro, named by its full provider id,
-//! each requirement bound to the unique installed provider of that contract (left unbound,
-//! and reported by the reconciler, when there is not exactly one).
-use clay_dioxus::ComponentMount;
-use clay_dioxus::NativeComponents;
+//! Shared Dayframe composition: a catalog-driven composition root, its lifecycle controls, and
+//! the `Application` shell UI. The root names no micro: launchers (desktop, web) hand it every
+//! installed micro as an [`InstalledMicro`], a manifest plus its static configuration and the
+//! engine-specific factory for it. Engine-specific guest factories (Wasmtime on desktop, `wcmp`
+//! on the web) and native built-ins are both just catalog entries (ADR 018 §7).
+//!
+//! The catalog is explicit configuration, not a heuristic: each entry says whether the
+//! supervisor starts the micro eagerly, which provider satisfies each of its requirements, and
+//! which declared collections it may read or write. The root declares the collections the
+//! manifests name and mock-installs every manifest-declared row into the declaring micro's
+//! manifest installation scope (ADR 025 §4), so rows are visible while their micro is stopped.
+//! There is no supervisor reconfiguration yet: enablement and startup are fixed by the catalog
+//! except for the enable/disable/retry controls of the lifecycle panel.
 use clay_dioxus::use_component_recovery;
-use clay_docs::Operation;
-use clay_docs::OperationReceipt;
-use clay_micro_core::application::ApplicationRuntime;
-use clay_micro_core::micros::MicroFactory;
-use clay_micro_core::micros::MicroId;
-use clay_micro_core::micros::composition::ConfigurationError;
-use clay_micro_core::micros::composition::ConfigurationSnapshot;
-use clay_micro_core::micros::composition::ConfigurationSource;
-use clay_micro_core::micros::composition::ConfiguredMicro;
-use clay_micro_core::micros::composition::Enablement;
-use clay_micro_core::micros::composition::FacetConfiguration;
-use clay_micro_core::micros::composition::InstanceState;
+use clay_dioxus::NativeComponents;
+use clay_guest_session::collections::durable_bytes_registrations;
+use clay_guest_session::collections::BytesRegistrations;
+use clay_host::CollectionContract;
+use clay_host::ConfiguredMicro;
+use clay_host::Factory;
+use clay_host::Host;
+use clay_host::Instance;
+use clay_host::LocalFuture;
+use clay_host::MicroId;
+use clay_host::MicroState;
+use clay_host::Requirement;
+use clay_host::Supervisor;
+use clay_mdk::native::declared_rows;
+use clay_mdk::native::manifest_scope;
+use clay_mdk::native::CapabilityPublication;
+use clay_mdk::native::CollectionRegistry;
+use clay_mdk::native::CollectionWatch;
+use clay_mdk::native::DocumentService;
+use clay_mdk::native::Resources;
+use clay_mdk::native::RootRow;
+use clay_mdk::native::SHELL_ROOTS;
+use clay_mdk::view::use_rows;
+use clay_mdk::view::AttachedRef;
+use clay_mdk::view::PresentationSlot;
 use dioxus::prelude::*;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
+use std::rc::Rc;
+use std::sync::Arc;
+use tokio::sync::Notify;
 
-pub type CompositionApplication = ApplicationRuntime<NativeComponents>;
-
-/// One installed micro in the launcher-supplied catalog: its self-describing manifest and
-/// the factory that turns the composition application into its provider. Packaging (a
-/// component file a desktop scan read, an index entry a web shell fetched, a native
-/// built-in the launcher links) stays in the launcher; this crate sees only the catalog.
+/// One installed micro in the launcher-supplied catalog: its self-describing manifest, its
+/// static configuration, and the factory that turns the root's resources into its supervisor
+/// factory. Packaging (a component file a desktop scan read, an index entry a web shell
+/// fetched, a native built-in the launcher links) stays in the launcher; this crate sees only
+/// the catalog.
 pub struct InstalledMicro {
     pub manifest: clay_mdk::MicroManifest,
-    pub provider: Box<dyn FnOnce(&CompositionApplication) -> MicroFactory>,
+    /// Started at boot rather than on first use.
+    pub eager: bool,
+    /// Offered no enable/disable controls: the shell cannot run without it.
+    pub locked: bool,
+    /// Local requirement binding -> the provider's publication that satisfies it.
+    pub requirements: BTreeMap<String, Requirement>,
+    pub factory:
+        Box<dyn FnOnce(Resources<NativeComponents>) -> Rc<dyn Factory<CapabilityPublication>>>,
 }
 
 impl InstalledMicro {
+    /// An on-demand, unlocked micro with no requirements.
     pub fn new(
         manifest: clay_mdk::MicroManifest,
-        provider: impl FnOnce(&CompositionApplication) -> MicroFactory + 'static,
+        factory: impl FnOnce(Resources<NativeComponents>) -> Rc<dyn Factory<CapabilityPublication>>
+            + 'static,
     ) -> Self {
         Self {
             manifest,
-            provider: Box::new(provider),
+            eager: false,
+            locked: false,
+            requirements: BTreeMap::new(),
+            factory: Box::new(factory),
         }
     }
 }
 
-/// Runtime for one composition: the application with its registered providers, the in-memory
-/// configuration source, and the reconciled instance states.
+/// Runtime for one composition: the host, the supervisor over the catalog, and the shell's
+/// mirror of the declared `shell.roots` collection.
 #[derive(Clone)]
 pub struct CompositionRuntime {
-    pub application: CompositionApplication,
-    configuration: FacetConfiguration,
-    pub states: BTreeMap<String, InstanceState>,
-    /// Installation defects the launcher found while assembling the catalog (unreadable or
-    /// manifest-less package files, a failed package-index fetch). Shown in the lifecycle
-    /// panel; never fatal, because one bad package must not take the shell down.
+    host: Host,
+    supervisor: Rc<Supervisor<CapabilityPublication>>,
+    components: NativeComponents,
+    documents: DocumentService,
+    collections: CollectionRegistry<BytesRegistrations>,
+    micros: Vec<MicroId>,
+    locked: BTreeSet<MicroId>,
+    /// The shell's own instance: it mounts roots and owns the references minted from rows.
+    shell: Instance,
+    roots: CollectionWatch<String, RootRow>,
+    /// The roots mirror's feed loop, taken by the one [`Self::serve`].
+    feed: Rc<RefCell<Option<LocalFuture<'static, ()>>>>,
+    shutdown: Rc<Notify>,
+    /// Installation defects the launcher or the root found while assembling the catalog
+    /// (unreadable or manifest-less package files, a failed package-index fetch, a manifest
+    /// contributing to an undeclared collection). Shown in the lifecycle panel; never fatal,
+    /// because one bad package must not take the shell down.
     pub installation_errors: Vec<String>,
 }
 
+async fn declare(
+    collections: &CollectionRegistry<BytesRegistrations>,
+    store: &Arc<clay_store::MemoryStore>,
+    contract: CollectionContract,
+) -> Result<BytesRegistrations, clay_host::DeclareError> {
+    let registrations = durable_bytes_registrations(
+        Arc::clone(store),
+        contract.id.clone().into_bytes(),
+        NonZeroUsize::new(256).unwrap(),
+        [0, 0],
+    )
+    .await
+    .expect("the in-memory store does not fail");
+    collections.declare(contract, registrations.clone())?;
+    Ok(registrations)
+}
+
 impl CompositionRuntime {
-    /// Build the composition from the launcher's catalog: register every installed
-    /// provider, bind one mock configuration document per manifest configuration request
-    /// (`<name>-config`), and seed the composition facet — only when absent — with one
-    /// enabled on-demand instance per installed micro that `locked` does not already pin.
-    pub fn new(installed: Vec<InstalledMicro>, locked: BTreeMap<String, ConfiguredMicro>) -> Self {
-        let mut application = CompositionApplication::new();
-        let documents = application.mock_documents();
-        let manifests: Vec<clay_mdk::MicroManifest> = installed
-            .iter()
-            .map(|micro| micro.manifest.clone())
-            .collect();
-        for manifest in &manifests {
-            for request in &manifest.configuration_requests {
-                documents.bind_config(
+    /// Build the composition from the launcher's catalog: declare `shell.roots` and every
+    /// collection the manifests declare, bind one mock configuration document per manifest
+    /// configuration request (`<binding>-config`), mock-install each manifest's declared rows,
+    /// and configure the supervisor. Nothing runs until [`Self::serve`].
+    pub async fn new(installed: Vec<InstalledMicro>) -> Self {
+        let host = Host::new();
+        let components = NativeComponents::new(&host);
+        let documents = DocumentService::new(16);
+        let collections = CollectionRegistry::default();
+        let store = Arc::new(clay_store::MemoryStore::new());
+        let mut errors = Vec::new();
+
+        let roots_collection = declare(
+            &collections,
+            &store,
+            CollectionContract {
+                id: SHELL_ROOTS.into(),
+                key_schema: "dayframe.shell.root-key".into(),
+                value_schema: "dayframe.shell.root".into(),
+            },
+        )
+        .await
+        .expect("the root declares shell.roots first");
+        for micro in &installed {
+            for request in &micro.manifest.configuration_requests {
+                documents.mock_documents().bind_config(
                     request.binding.clone(),
                     format!("{}-config", request.binding),
                     "main".into(),
                 );
             }
-        }
-        for micro in installed {
-            let provider = (micro.provider)(&application);
-            application.register_provider(provider).unwrap();
-        }
-
-        let seeded = seeded_instances(&manifests, &locked);
-        let route = clay_docs::FacetRoute {
-            document: "composition-config".into(),
-            branch: "main".into(),
-            tag: "org.dayframe.composition.config".into(),
-            key_id: "main".into(),
-        };
-        documents.seed(route.clone(), serde_json::to_value(seeded).unwrap());
-        let access = application
-            .documents()
-            .grant_documents(
-                &application.host(),
-                &application.root(),
-                vec![clay_docs::DocumentGrant {
-                    document: route.document.clone(),
-                    branch: route.branch.clone(),
-                    facets: vec![daybook_types::manifest::RoutineFacetAccess {
-                        tag: route.tag.clone().into(),
-                        key_id: Some(route.key_id.clone()),
-                        read: true,
-                        write: true,
-                        ..Default::default()
-                    }],
-                }],
-            )
-            .unwrap();
-        let facet = access
-            .document(route.document, route.branch)
-            .unwrap()
-            .facet(route.tag, route.key_id)
-            .unwrap();
-        let configuration = FacetConfiguration::new(facet, locked);
-        application.install_configuration_source(configuration.clone());
-
-        Self {
-            application,
-            configuration,
-            states: BTreeMap::new(),
-            installation_errors: Vec::new(),
-        }
-    }
-
-    /// Reconcile configuration immediately on a current-thread runtime (tests and headless setup).
-    pub fn apply_now(&mut self) -> Result<(), ConfigurationError> {
-        let states = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(self.application.reconcile_configuration())?;
-        self.apply_states(states);
-        Ok(())
-    }
-
-    /// Every reconciler state is a legitimate shell state, `Failed`/`Faulted` included: the
-    /// reconciler retains a failure until configuration changes, and the shell's job is to show
-    /// it in the micro's status row rather than tear the whole application down (ADR 014
-    /// §Composition and lifecycle). Nothing is concealed behind an empty panel because a failed
-    /// micro publishes no root.
-    pub fn apply_states(&mut self, states: BTreeMap<String, InstanceState>) {
-        self.states = states;
-    }
-
-    pub fn desired(&self) -> BTreeMap<String, ConfiguredMicro> {
-        let ConfigurationSnapshot::Ready(desired) = self.configuration.current().unwrap() else {
-            unreachable!("in-memory composition configuration is always hydrated")
-        };
-        desired
-    }
-
-    pub fn is_enabled(&self, instance: &str) -> bool {
-        self.desired()
-            .get(instance)
-            .is_some_and(|entry| entry.enablement == Enablement::Enabled)
-    }
-
-    pub fn is_locked(&self, instance: &str) -> bool {
-        self.application.is_locked(instance)
-    }
-
-    pub fn set_enablement(
-        &mut self,
-        instance: &str,
-        enablement: Enablement,
-    ) -> Result<Operation, ConfigurationError> {
-        self.configuration.set_enablement(instance, enablement)
-    }
-
-    pub fn set_eager(&self, instance: &str, eager: bool) -> Result<Operation, ConfigurationError> {
-        self.configuration.set_eager(instance, eager)
-    }
-}
-
-/// The fresh-composition seed: one enabled, on-demand instance per installed micro that
-/// `locked` does not already pin a provider for, named by the full provider id. A
-/// requirement binds to the unique configured instance (locked or seeded) whose provider
-/// declares that contract; with zero or several candidates it stays unbound and the
-/// reconciler reports the instance blocked rather than guessing.
-fn seeded_instances(
-    manifests: &[clay_mdk::MicroManifest],
-    locked: &BTreeMap<String, ConfiguredMicro>,
-) -> BTreeMap<String, ConfiguredMicro> {
-    let by_id: BTreeMap<&str, &clay_mdk::MicroManifest> = manifests
-        .iter()
-        .map(|manifest| (manifest.id.as_str(), manifest))
-        .collect();
-    let locked_providers: std::collections::BTreeSet<&str> = locked
-        .values()
-        .map(|configured| configured.provider.as_str())
-        .collect();
-    let mut instances: Vec<(String, &clay_mdk::MicroManifest)> = locked
-        .iter()
-        .filter_map(|(name, configured)| {
-            by_id
-                .get(configured.provider.as_str())
-                .map(|manifest| (name.clone(), *manifest))
-        })
-        .collect();
-    for manifest in manifests {
-        if !locked_providers.contains(manifest.id.as_str()) {
-            instances.push((manifest.id.as_str().to_owned(), manifest));
-        }
-    }
-    instances
-        .iter()
-        .filter(|(name, _)| !locked.contains_key(name))
-        .map(|(name, manifest)| {
-            let mut bindings = BTreeMap::new();
-            for requirement in &manifest.requires {
-                let mut candidates = instances
-                    .iter()
-                    .filter(|(_, provider)| {
-                        provider
-                            .provides
-                            .iter()
-                            .any(|provided| provided.contract.id == requirement.contract.id)
-                    })
-                    .map(|(candidate, _)| candidate);
-                if let (Some(only), None) = (candidates.next(), candidates.next()) {
-                    bindings.insert(requirement.contract.id.clone(), only.clone());
+            for contract in &micro.manifest.collection_contracts {
+                let declared = declare(
+                    &collections,
+                    &store,
+                    CollectionContract {
+                        id: contract.id.clone(),
+                        key_schema: contract.key_schema.clone(),
+                        value_schema: contract.value_schema.clone(),
+                    },
+                )
+                .await;
+                if let Err(error) = declared {
+                    errors.push(format!("{}: {error}", micro.manifest.id.as_str()));
                 }
             }
-            (
-                name.clone(),
-                ConfiguredMicro {
-                    provider: MicroId::new(manifest.id.as_str()),
-                    enablement: Enablement::Enabled,
-                    eager: false,
-                    bindings,
-                },
-            )
-        })
-        .collect()
+        }
+        for micro in &installed {
+            let id = MicroId::new(micro.manifest.id.as_str());
+            let rows = match declared_rows(&micro.manifest) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    errors.push(format!("{id}: {error}"));
+                    continue;
+                }
+            };
+            for (collection, rows) in rows {
+                let Some(target) = collections.collection(&collection) else {
+                    errors.push(format!(
+                        "{id} contributes to undeclared collection {collection}"
+                    ));
+                    continue;
+                };
+                // The memory-backed store cannot fail; a durable one would report here.
+                target
+                    .install(
+                        &manifest_scope(&id),
+                        clay_collection::Retention::Installation,
+                        clay_collection::WriterId::new(id.as_str()),
+                        rows,
+                    )
+                    .await
+                    .expect("the in-memory store does not fail")
+                    .dispatch();
+            }
+        }
+
+        let resources = Resources {
+            registry: components.clone(),
+            documents: documents.clone(),
+            collections: collections.clone(),
+        };
+        let mut micros = Vec::new();
+        let mut locked = BTreeSet::new();
+        let mut configured = Vec::new();
+        for micro in installed {
+            let identity = MicroId::new(micro.manifest.id.as_str());
+            micros.push(identity.clone());
+            if micro.locked {
+                locked.insert(identity.clone());
+            }
+            configured.push(ConfiguredMicro {
+                identity,
+                eager: micro.eager,
+                requirements: micro.requirements,
+                factory: (micro.factory)(resources.clone()),
+            });
+        }
+        let supervisor = Rc::new(Supervisor::new(host.clone(), configured));
+        let shell = host.start("shell");
+        let (roots, feed) =
+            CollectionWatch::observe(&host, &shell, supervisor.activator(), &roots_collection)
+                .expect("the shell instance is live");
+        Self {
+            host,
+            supervisor,
+            components,
+            documents,
+            collections,
+            micros,
+            locked,
+            shell,
+            roots,
+            feed: Rc::new(RefCell::new(Some(Box::pin(feed)))),
+            shutdown: Rc::new(Notify::new()),
+            installation_errors: errors,
+        }
+    }
+
+    /// Run the composition until [`Self::request_shutdown`]: start the eager roots, serve the
+    /// supervisor's activations and idle closes, and mirror `shell.roots`. Micros and their
+    /// drivers spawn local tasks, so everything runs inside one `LocalSet`, which is why the
+    /// shell spawns this future itself rather than driving the supervisor from its UI tasks.
+    /// On shutdown the micros close first, then the host (ADR 024 §6). Runs once.
+    pub async fn serve(&self) {
+        let feed = self
+            .feed
+            .borrow_mut()
+            .take()
+            .expect("the composition is served once");
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                tokio::task::spawn_local(feed);
+                let supervisor = Rc::clone(&self.supervisor);
+                // A failed eager start is recorded as the micro's `Faulted` state, which the
+                // lifecycle panel shows; there is no other consumer for the report.
+                tokio::task::spawn_local(async move { supervisor.reconcile().await });
+                tokio::select! {
+                    never = self.supervisor.drive() => never,
+                    () = async {
+                        self.shutdown.notified().await;
+                        self.supervisor
+                            .shutdown()
+                            .await
+                            .expect("every micro closes in an orderly shutdown");
+                        self.host.close();
+                    } => {}
+                }
+            })
+            .await;
+    }
+
+    /// Ask [`Self::serve`] to shut the composition down. Safe to call before it starts.
+    pub fn request_shutdown(&self) {
+        self.shutdown.notify_one();
+    }
+
+    pub fn supervisor(&self) -> &Rc<Supervisor<CapabilityPublication>> {
+        &self.supervisor
+    }
+
+    pub fn host(&self) -> &Host {
+        &self.host
+    }
+
+    pub fn documents(&self) -> &DocumentService {
+        &self.documents
+    }
+
+    /// A declared collection, for inspection and tests.
+    pub fn collection(&self, id: &str) -> Option<BytesRegistrations> {
+        self.collections.collection(id)
+    }
+
+    /// The installed micros, in catalog order.
+    pub fn micros(&self) -> &[MicroId] {
+        &self.micros
+    }
+
+    pub fn state(&self, micro: &MicroId) -> MicroState {
+        self.supervisor.state(micro)
+    }
+
+    pub fn is_locked(&self, micro: &MicroId) -> bool {
+        self.locked.contains(micro)
+    }
 }
 
 #[component]
-pub fn Application(mut runtime: Signal<CompositionRuntime>) -> Element {
-    let host = runtime.read().application.host();
-    use_drop(move || host.close());
-    use_context_provider(|| runtime.read().application.renderer());
-    use_component_recovery(runtime.read().application.renderer());
-    let application = runtime.read().application.clone();
-    use_future(move || {
-        let application = application.clone();
-        async move { application.observe().await }
+pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
+    let shell = runtime.read().clone();
+    use_context_provider(|| shell.components.clone());
+    use_component_recovery(shell.components.clone());
+    // The composition outlives this scope's tasks: shutdown must keep being served after the
+    // scope is gone, so it is spawned forever and stopped by `request_shutdown`.
+    let serving = shell.clone();
+    use_hook(move || {
+        dioxus::core::spawn_forever(async move { serving.serve().await });
     });
-    let reports = runtime.read().application.reports();
+    let stopping = shell.clone();
+    use_drop(move || stopping.request_shutdown());
+
+    let mut states = use_signal(|| 0_u64);
+    let supervisor = Rc::clone(&shell.supervisor);
     use_future(move || {
-        let mut reports = reports.clone();
+        let mut changes = supervisor.changes();
         async move {
-            loop {
-                let states = reports
-                    .borrow_and_update()
-                    .clone()
-                    .expect("invalid micro configuration");
-                runtime.write().apply_states(states);
-                if reports.changed().await.is_err() {
-                    break;
-                }
+            while changes.changed().await.is_ok() {
+                states += 1;
             }
         }
     });
-
-    let mut receipt = use_signal(|| None::<OperationReceipt>);
-    let mut track = move |operation: Operation| {
-        let initial = operation.current();
-        receipt.set(Some(initial.clone()));
-        spawn(async move {
-            match operation.next(initial.revision).await.unwrap() {
-                Some(completed)
-                    if receipt
-                        .peek()
-                        .as_ref()
-                        .is_some_and(|current| current.id == completed.id) =>
-                {
-                    receipt.set(Some(completed));
-                }
-                _ => {}
-            }
-        });
-    };
+    let _ = states();
+    let mut failure = use_signal(|| None::<String>);
     let mut settings_open = use_signal(|| true);
-    let roots = clay_mdk::view::use_collection(&runtime.read().application.roots());
-
-    let configured_names: Vec<String> = runtime.read().desired().into_keys().collect();
+    let roots = use_rows(&shell.roots);
 
     rsx! {
         section { class: "flex flex-col gap-6 rounded-lg border border-border bg-surface p-6 text-foreground",
@@ -304,95 +351,89 @@ pub fn Application(mut runtime: Signal<CompositionRuntime>) -> Element {
                 }
             }
             if settings_open() {
-                for (id, root) in roots.query(&clay_mdk::Query::new()) {
-                    div { key: "{id}", "aria-label": "{root.title}",
-                        // Guest-written mounting micros (workspace layout, canvas) place other
-                        // components through the wire-level slot primitive of ADR 015 §10;
-                        // `ComponentMount` is its native backing.
-                        ComponentMount {
-                            owner: runtime.read().application.root(),
-                            reference: root.content,
+                for row in roots {
+                    div { key: "{row.key}", "aria-label": "{row.value.title}",
+                        // The root's presentation is a row attachment: a lazy endpoint the
+                        // shell redeems, which starts the micro that publishes it. Guest-written
+                        // mounting micros (workspace layout, canvas) place other components
+                        // through the wire-level slot primitive of ADR 015 §10.
+                        PresentationSlot {
+                            owner: shell.shell.clone(),
+                            reference: AttachedRef::new(
+                                row.attachments[row.value.content.index()].share(),
+                            ),
                         }
                     }
                 }
             }
             details { class: "rounded-md border border-border p-4",
-                summary { "Mock node and micro lifecycle controls" }
+                summary { "Micro lifecycle controls" }
                 p { "Configuration uses document facets backed by the in-memory mock node; it is not saved across restarts." }
-                for error in runtime.read().installation_errors.clone() {
+                for error in shell.installation_errors.clone() {
                     p { key: "install-{error}", role: "status", "Package installation failed: {error}" }
                 }
-                if let Some(receipt) = receipt() {
-                    p { role: "status", "Composition operation {receipt.id}: {receipt.status:?}" }
+                if let Some(problem) = failure() {
+                    p { role: "alert", "{problem}" }
                 }
-                for name in &configured_names {
+                for micro in shell.micros() {
                     p {
-                        key: "status-{name}",
+                        key: "status-{micro}",
                         role: "status",
                         {
-                            let state = runtime.read().states.get(name).cloned();
-                            let locked = runtime.read().is_locked(name);
-                            if locked {
-                                format!("{name} runtime (locked): {state:?}")
+                            let state = shell.state(micro);
+                            if shell.is_locked(micro) {
+                                format!("{micro} runtime (locked): {state:?}")
                             } else {
-                                format!("{name} runtime: {state:?}")
+                                format!("{micro} runtime: {state:?}")
                             }
                         }
                     }
                 }
                 div { class: "mt-4 flex flex-wrap gap-2",
-                    for name in configured_names {
-                        if !runtime.read().is_locked(&name) {
+                    for micro in shell.micros().to_vec() {
+                        if !shell.is_locked(&micro) {
                             {
-                                let target = name.clone();
-                                let startup_target = name.clone();
-                                let eager = runtime.read().desired()[&name].eager;
-                                let enabled = runtime.read().is_enabled(&name);
-                                let label = if enabled {
-                                    format!("Disable {name} micro")
+                                let supervisor = Rc::clone(&shell.supervisor);
+                                let state = shell.state(&micro);
+                                let toggle = micro.clone();
+                                let label = if state == MicroState::Disabled {
+                                    format!("Enable {micro} micro")
                                 } else {
-                                    format!("Enable {name} micro")
+                                    format!("Disable {micro} micro")
                                 };
+                                let retry = matches!(state, MicroState::Faulted(_)).then(|| {
+                                    (Rc::clone(&shell.supervisor), micro.clone())
+                                });
                                 rsx! {
                                     button {
-                                        key: "toggle-{name}",
+                                        key: "toggle-{micro}",
                                         class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                                         "aria-label": "{label}",
                                         onclick: move |_| {
-                                            let next = if runtime.read().is_enabled(&target) {
-                                                Enablement::Disabled
-                                            } else {
-                                                Enablement::Enabled
-                                            };
-                                            track(runtime.write().set_enablement(&target, next).unwrap());
+                                            let supervisor = Rc::clone(&supervisor);
+                                            let micro = toggle.clone();
+                                            spawn(async move {
+                                                if supervisor.state(&micro) == MicroState::Disabled {
+                                                    supervisor.enable(&micro);
+                                                } else if let Err(error) = supervisor.disable(&micro).await {
+                                                    failure.set(Some(error.to_string()));
+                                                }
+                                            });
                                         },
                                         "{label}"
                                     }
-                                    button {
-                                        class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                                        "aria-label": "Start {name} eagerly",
-                                        "aria-pressed": eager,
-                                        onclick: move |_| {
-                                            let next = !runtime.read().desired()[&startup_target].eager;
-                                            track(runtime.read().set_eager(&startup_target, next).unwrap());
-                                        },
-                                        if eager { "{name}: eager startup" } else { "{name}: start on demand" }
+                                    if let Some((supervisor, micro)) = retry {
+                                        button {
+                                            key: "retry-{micro}",
+                                            class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
+                                            "aria-label": "Retry {micro} micro",
+                                            onclick: move |_| supervisor.retry(&micro),
+                                            "Retry {micro} micro"
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    button {
-                        class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                        "aria-label": "Accept pending writes",
-                        onclick: move |_| runtime.read().application.mock_documents().settle(true),
-                        "Accept pending writes"
-                    }
-                    button {
-                        class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                        "aria-label": "Reject and roll back",
-                        onclick: move |_| runtime.read().application.mock_documents().settle(false),
-                        "Reject and roll back"
                     }
                 }
             }
