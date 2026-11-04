@@ -408,22 +408,12 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 ## To do (this PR)
 
-2. Apply the review's intended fixes:
-   - Narrow admission to services, facilities and lifecycle, with bindings carried opaquely.
-   - Two-level readiness.
-   - Upgrade-wedge fix: accept the upgrade with an `Invalid` settings slot.
-   - Stop swallowing reconcile errors (`state.rs:216-218`).
-   - Reconcile perf: cache admissions per `(plug, revision)`, reconcile only changed keys, serve reads from the last records.
-   - Remove `inventory::Inventory`.
-   - `resolve_entry` filters to the nodule contribution.
-   - Scope `NoduleScope.admit` per plug.
-4. Dispatch service contract in `big_nodule_core`: invocation, admission errors, provider kinds and readiness.
-5. Dispatch host in `big_nodule`: routing table, admission, `BuiltIn` provider.
-6. wash-runtime fork seam (`Ingress::dispatch_request`) in `../wasmCloud`, with a `[patch]`. **The operator must push it before CI can resolve.**
-7. Nodule artifacts fetched and pinned through big_blobs, so readiness moves past `ExecutorUnavailable`.
-8. `Wasm` provider: a wash workload per nodule revision, an instance per dispatch, the authority header, and the `dispatch.local` egress via `OutgoingHandler`.
-9. Init as a lifecycle binding (run modes per `rt/init.rs`).
-10. End-to-end test: an operator invokes a nodule operation, and a nodule calls another nodule's operation under caps (allowed and denied).
+Items 2 and 4–10 of the original list are done (see Done). Left before the PR is review-ready:
+1. **Operator:** push the `../wasmCloud` `townframe-changes` bookmark, bump the `wash-runtime` rev in `Cargo.toml`, and drop the `file://` `[patch]` block. CI can't resolve it until then.
+2. Dispatch admission I/O: an in-memory actor-row cache in the authority service (see the [perf] follow-up below).
+3. Orphan dispatch authority after a crash: persist it or sweep it at boot (slice 2c follow-up).
+4. Compare the heavy `big_cabinet` drawer test timings against an origin/main baseline (our 4th boot drawer).
+5. Small cleanups: unify `owns_nsid`/`under`; a separate egress message-size constant.
 
 ### Follow-ups found during the merge
 - [perf] `DatumStoreHandle`'s `seen_head_hashes` is a set of every head ever seen and grows without bound. It came over from the pre-merge code. Bound it, for example by keeping only the current frontier/ancestry.
