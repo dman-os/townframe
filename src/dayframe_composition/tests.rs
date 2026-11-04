@@ -1510,3 +1510,44 @@ async fn the_editor_calls_only_the_providers_whose_trigger_matches() {
     })
     .await;
 }
+
+// ADR 031 validation 1: installing a manifest makes a collection nobody has written to
+// bootstrap as known-empty, with its declaring micro never started. The editor declares the
+// sources collection and no provider has contributed to it, so the first read of it completes
+// (an empty bootstrap, not a wait for a writer) while the editor stays idle with no
+// incarnation.
+#[tokio::test(flavor = "current_thread")]
+async fn an_untouched_declared_collection_reads_known_empty_without_starting_its_micro() {
+    let mut micros = catalog(stub_counter());
+    micros.push(editor());
+    let runtime = CompositionRuntime::new(Arc::new(clay_store::MemoryStore::new()), micros)
+        .await
+        .unwrap();
+    assert!(
+        runtime.installation_errors.is_empty(),
+        "{:?}",
+        runtime.installation_errors
+    );
+    let editor = id("tests.editor");
+    served(&runtime, async {
+        let (sources, feed) = Collection::<String, Source>::observe(
+            &runtime.host,
+            runtime.shell(),
+            runtime.supervisor.activator(),
+            &runtime
+                .collection(&Nsid::literal(SOURCES))
+                .expect("the editor's manifest declared the collection"),
+        )
+        .unwrap();
+        tokio::task::spawn_local(feed);
+        sources.bootstrapped().await;
+        assert!(sources.rows().unwrap().is_empty());
+        assert_eq!(runtime.state(&editor), MicroState::Idle);
+        assert_eq!(
+            runtime.supervisor.instance(&supervised("tests.editor")),
+            None,
+            "reading a declared collection starts no incarnation"
+        );
+    })
+    .await;
+}

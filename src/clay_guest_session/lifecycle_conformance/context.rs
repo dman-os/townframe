@@ -10,9 +10,29 @@ use super::*;
 /// sees a guest collection read and a guest registration write; its `rows` call then answers
 /// through its own mirror, which holds the host's row and its own once the host commits it.
 /// Closing leaves the guest holding nothing and retracts its row.
+///
+/// It runs twice, over a volatile collection and over one backed by a durable store: both cross
+/// the same projection WIT, so the guest cannot tell them apart (ADR 031 validation 2).
 pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
+    let engine = Rc::new(engine);
+    let replay = std::num::NonZeroUsize::new(64).unwrap();
+    collections_and_calls_over(Rc::clone(&engine), bytes_registrations(replay, [93, 94])).await;
+    let durable = crate::collections::durable_bytes_registrations(
+        Arc::new(clay_store::MemoryStore::new()),
+        b"context.feed".to_vec(),
+        replay,
+        [93, 94],
+    )
+    .await
+    .expect("a memory store does not fail");
+    collections_and_calls_over(engine, durable).await;
+}
+
+async fn collections_and_calls_over<E: Incarnations>(
+    engine: Rc<E>,
+    registrations: BytesRegistrations,
+) {
     let host = Host::new();
-    let registrations = bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), [93, 94]);
     let cbor = |text: &str| {
         let mut bytes = Vec::new();
         ciborium::into_writer(text, &mut bytes).unwrap();
@@ -42,7 +62,7 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
     // late row's endpoint included, and a lazy reference needs the supervisor's demand handle.
     // No micro is configured, so nothing can be activated through it.
     let supervisor = clay_host::Supervisor::<CapabilityPublication>::new(host.clone(), []);
-    let (runtime, driver) = Rc::new(engine)
+    let (runtime, driver) = engine
         .initialize(
             host.clone(),
             instance.clone(),

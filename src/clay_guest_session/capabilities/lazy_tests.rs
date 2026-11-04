@@ -224,26 +224,40 @@ async fn reading_a_lazy_status_never_starts_the_provider() {
     assert_eq!(reference.status(), RefStatus::Disabled);
 }
 
+// ADR 031 validation 7: calls and a redemption demanded together, from three recipients while
+// the provider's initialization is parked, start one incarnation, and each of them gets the
+// publication `initialize` returned (the echo answers, the presentation redeems and mounts).
 #[tokio::test]
-async fn concurrent_lazy_calls_from_two_recipients_initialize_once() {
+async fn concurrent_lazy_calls_and_redemptions_from_three_recipients_initialize_once() {
     let world = World::new();
     world.script.gate_init.store(true, Ordering::SeqCst);
-    let (first, second) = (world.recipient("first"), world.recipient("second"));
+    let (first, second, third) = (
+        world.recipient("first"),
+        world.recipient("second"),
+        world.recipient("third"),
+    );
     let (a, b) = (
         world.lazy(&first, "echo", echo_contract()),
         world.lazy(&second, "echo", echo_contract()),
     );
-    let (from_a, from_b, ()) = world
+    let view = world.lazy(&third, "view", presentation_component());
+    let (from_a, from_b, redeemed, ()) = world
         .driven(async {
-            tokio::join!(a.call(b"a".to_vec()), b.call(b"b".to_vec()), async {
-                world.script.entered_init.notified().await;
-                assert_eq!(a.status(), RefStatus::Dormant);
-                world.script.init.notify_one();
-            })
+            tokio::join!(
+                a.call(b"a".to_vec()),
+                b.call(b"b".to_vec()),
+                view.redeem_presentation(),
+                async {
+                    world.script.entered_init.notified().await;
+                    assert_eq!(a.status(), RefStatus::Dormant);
+                    world.script.init.notify_one();
+                }
+            )
         })
         .await;
     assert_eq!(from_a, Ok(b"a".to_vec()));
     assert_eq!(from_b, Ok(b"b".to_vec()));
+    assert!(redeemed.unwrap().component().is_ok());
     assert_eq!(Script::count(&world.script.inits), 1);
 }
 
