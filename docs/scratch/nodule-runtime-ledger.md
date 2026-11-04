@@ -113,6 +113,12 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
   - 2b: `big_nodule_wasm`, the fork `[patch]`, the test guest and the e2e.
   - 2c: `dispatch.local` egress.
 
+### D2e. Slice 2c: nodule-to-nodule calls (manager, 2026-11-04)
+- **Grants:** `NoduleGrants` gains `operations`, a set of NSID authority prefixes (the same shape as `DispatchScope`). The nodule service mints one dispatch capability per nodule actor from it, delegated from its own operator-granted dispatch authority via `MintDispatchCapability`. It is applied, revoked and reconciled exactly like drawer grants (`applied_grants`): on grant change, disable, upgrade and uninstall.
+- **The guest learns its own capability per request:** each delivered request carries `x-nodule-capability: Capability <id>`, the nodule's own operations cap (absent if none is granted). The caller's `authorization` belongs to the caller, so the nodule cannot reuse it, which prevents a confused deputy.
+- **Egress:** `allow_outgoing_request` admits only `dispatch.local`, and `NoEgress` becomes the dispatch egress. `POST http://dispatch.local/xrpc/<nsid>` with `authorization` naming a cap. The caller identity is the workload's nodule actor (from the workload id, which is unforgeable). Dispatch checks that the cap's holder is that actor, then admits and invokes as usual. Deadline and idempotency headers pass through. Dispatch errors map back to XRPC statuses (the inverse of the provider mapping).
+- No other egress, ever, in this PR.
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
@@ -139,7 +145,8 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
-- Next: slice 2c (`dispatch.local` egress plus operation grants), with the small 2a follow-ups below.
+- Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
+- Slice 2c (fresh subagent, running). Design D2e below.
 ## Done
 
 - 2026-11-04: Slice 2b.
@@ -260,8 +267,8 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
   They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
 
 ### Slice 2b follow-ups
-- [design, operator] Zero-budget deadline: reject up front in dispatch (breaks the "provider entered once" contract) or keep the race? Manager leans keep.
-- [design] A failed workload start is retried on every reconcile; cache a negative result per (plug, revision, handler)? Manager leans retry for now (rare, and the reconcile perf work bounds it).
+- Decided (manager, operator delegated): keep the deadline race; no up-front zero-budget rejection.
+- Decided (manager): keep retrying a failed workload start on each reconcile; revisit with the reconcile perf work.
 - [limits] Handlers run with wash default resource limits; no memory/CPU caps yet.
 - [test] The late-bytes e2e polls `GetNodule` every 20ms because there is no reconciled signal to subscribe to.
 - [main] `big_blobs` and `big_node/e2e/blob_discovery/mod.rs` are not rustfmt-clean on main (from #77); fixed in its own commit.
