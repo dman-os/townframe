@@ -193,7 +193,10 @@ impl<R: RendererRegistry> Context<R> {
         contract: ContractIdentity,
         target: std::sync::Arc<dyn CallTarget>,
     ) -> Result<(), AccessError> {
-        self.stage(self.capabilities.publish_call(name, contract.admitted(), target))?;
+        self.stage(
+            self.capabilities
+                .publish_call(name, contract.admitted(), target),
+        )?;
         Ok(())
     }
 
