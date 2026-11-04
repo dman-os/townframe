@@ -409,3 +409,50 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   superseded by the C7a guest-slot test (a guest mounts another guest's presentation through a capability). Not covered any
   more: a mount refusing a component grant from another host (there are no grants). ADRs 029-031 never described pushing; the
   stale `ComponentSlot` mention in ADR 015's crate map and the `slots` fixture in ADR 018's migration list were updated.
+
+## C7c notes (2026-11-04): the Wasm layout micro
+
+- **Crates.** `micro_layout_manifest` (contract: `org.example.dayframe.layout.panels`, rows `Panel { title, content: Attachment }`,
+  key = the contributor's registration id; `LayoutConfig { visible: Vec<String> }`, facet `org.example.dayframe.layout.config` /
+  `main` of the `layout` configuration binding; manifest declares the collection, the config request and a pinned `shell.roots`
+  row; `examples/emit_manifest.rs` writes the sidecar) and `micro_layout` (MDK only, `cdylib + rlib` like the counter: a
+  wasm32-wasip3 guest through `export_micro!`, native `ACTIVATE` elsewhere; it links nowhere natively today, so there is no
+  workspace dependency entry for it). Clay learns nothing about layouts.
+- **View.** One toggle per installed panel row (`Show/Hide <title> panel`, writes the config facet), then one
+  `section[aria-label="<title> panel"]` per configured id, in configured order, each a `PresentationSlot` over the row's attachment.
+  An id with no row is `Panel <id> is not installed.` (`role="status"`); a provider that is disabled/faulted is the slot's own
+  `role="alert"` ("Section unavailable ..."). Only a mounted slot redeems, so hidden panels never activate their providers. The
+  layout never edits the configured list except through the viewer's toggles, so unregistered/unavailable ids stay put (and have no
+  remove control: see questions).
+- **Default arrangement = nothing visible** (`FacetState::Absent` reads as `LayoutConfig::default()`), not "all known panels":
+  with all panels shown by default the layout would hold every contributor live from boot, which breaks the idle-while-unheld
+  contract the existing desktop/Playwright scenarios assert (counter idle with Settings closed, toolbar press = one activation).
+  The viewer opts panels in with the toggles.
+- **Mounting.** Pinned root (like the toolbar): the arrangement is the main surface and should not disappear with the Settings
+  toggle. The package is a discovered one, so it is admitted disabled like the counter; the lifecycle panel enables it.
+- **Contributors.** The counter declares a `layout-panel` row (attachment = its `view`) through an optional write binding
+  `panels`; the sample declares one too (attachment = `detail`). The sample is eager, so the "hidden panel never activates" proof
+  uses the counter (guest, on demand) as the hidden one.
+- **`SHELL_ROOTS` moved** to `clay_mdk::manifest` (crate root export, gone from `clay_mdk::host`): a guest manifest cannot link
+  the `in_process`-only `host` module, and the layout's manifest names `shell.roots` in a request.
+- **Guest runtime bug found and fixed.** `wit_bindgen::spawn_local` only pushes onto a global list that the executor of the *next
+  polled component-model task* adopts. A task spawned from a synchronous entry (`mount`, `dispatch`, a document event: a view
+  creating a `PresentationSlot` while it renders, which the layout does at its first render) was not polled until an unrelated wake;
+  the only one a layout has is its collection feed's long poll, clamped to 30 s, so each first slot took 30 s (a 30 s clamp of
+  `CollectionLimits::max_poll_timeout` to 3 s made it 3 s: that is how it was confirmed). `Tasks` now keeps a doorbell task parked
+  in `initialize`'s scope and every spawn rings its waker. Pinned by `e2e::layout::a_hidden_panel_never_activates_its_provider_until_it_is_shown`,
+  which runs under `start_paused` and asserts the virtual clock did not advance 5 s (without the ring it reaches 60 s; verified by
+  disabling the ring). The existing clay_mdk guest-slot test did not catch it because the feed there had a change in flight.
+- **Replaced `slots` coverage.** Interactive children: `a_mounted_panel_is_interactive...` clicks the counter inside the layout and
+  the sample's flag; withdrawal isolation: disabling the counter turns only its panel into the placeholder while the sample's panel
+  keeps handling clicks, and enabling remounts in place on a new incarnation. Unregistered/unavailable placeholders and unchanged
+  arrangement: `an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangement_is_untouched`.
+- **Tests.** Desktop (`dayframe_desktop::e2e::layout`, Wasmtime, real `Application`, Settings folded so the counter has one holder);
+  Playwright `e2e/layout.spec.ts` (wcmp; the counter's runtime row reads `Idle` until its panel is shown, `Active` after, `Idle` after
+  hiding). `x/dayframe-web.ts` now indexes every `<name>.manifest.json` package of the prepared package directory;
+  `x/check-dayframe.ts` builds `micro_layout`, joins it to the wit-bindgen `std` feature check and emits its sidecar with the counter's.
+- **Open questions for the owner.** (1) Default arrangement: empty (chosen, see above) vs all panels in key order; the latter needs
+  the existing idle assertions reworked. (2) A configured id nothing registers has no remove control; adding one would be the only
+  way an id leaves the arrangement besides re-registering it. (3) Arrangement is order-of-show only (toggle appends); reordering
+  and removing unknown ids are not designed. (4) The slot's wording is "Section unavailable" for every presentation, including a
+  panel. (5) Whether the layout package should be enabled on admission like the native built-ins.
