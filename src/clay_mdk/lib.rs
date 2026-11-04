@@ -520,6 +520,15 @@ pub use mirror::MirrorWatch;
 #[cfg(feature = "package")]
 pub mod package;
 
+/// The `context` micro is one source file linked both as the `context` example crate and into
+/// this crate's tests (the native conformance run and the Wasmtime slot test's manifest), so it
+/// names the MDK as `clay_mdk` in both.
+#[cfg(all(test, feature = "view"))]
+extern crate self as clay_mdk;
+#[cfg(all(test, feature = "view"))]
+#[path = "context_micro.rs"]
+mod context_micro;
+
 #[cfg(feature = "in_process")]
 mod native;
 
