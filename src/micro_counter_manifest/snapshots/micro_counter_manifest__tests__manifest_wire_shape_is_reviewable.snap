@@ -21,7 +21,7 @@ publications:
     contract: org.example.dayframe.counter.count
   - name: increment
     kind: call
-    contract: org.example.dayframe.counter.increment
+    contract: org.example.dayframe.toolbar.action
 requires: []
 configuration_requests:
   - binding: counter

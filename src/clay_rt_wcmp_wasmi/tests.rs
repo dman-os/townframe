@@ -122,7 +122,7 @@ fn counter_context() -> InitialContext {
                 "increment".to_owned(),
                 DeclaredPublication {
                     kind: PublicationKind::Call,
-                    contract: Nsid::literal("org.example.dayframe.counter.increment"),
+                    contract: Nsid::literal("org.example.dayframe.toolbar.action"),
                 },
             ),
         ]),

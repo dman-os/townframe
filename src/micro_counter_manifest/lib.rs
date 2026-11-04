@@ -20,11 +20,12 @@ use clay_mdk::PublicationKind;
 use clay_mdk::Request;
 use clay_mdk::Sidecar;
 use micro_settings_manifest::SECTIONS;
+use micro_toolbar_manifest::ACTION_CONTRACT;
 use micro_toolbar_manifest::BUTTONS;
 
 pub const ID: &str = "dayframe.counter";
 pub const PACKAGE_VERSION: u32 = 1;
-/// The NSID prefix the counter holds: its call contract lies under it.
+/// The NSID prefix the counter holds: the contract of its [`COUNT`] call lies under it.
 pub const AUTHORITY: &str = "org.example.dayframe.counter";
 pub const CONFIG_NAME: &str = "counter";
 pub const CONFIG_TAG: &str = "org.example.dayframe.counter.config";
@@ -40,10 +41,8 @@ pub const COUNT_CONTRACT: &str = "org.example.dayframe.counter.count";
 /// The local binding name under which the counter registers its Settings section.
 pub const SECTIONS_BINDING: &str = "sections";
 /// The call the toolbar's Increment button performs (CBOR `()` in, CBOR `()` out): count one more.
+/// It implements the toolbar's action contract, which the toolbar owns.
 pub const INCREMENT: &str = "increment";
-/// The contract NSID of the [`INCREMENT`] call. The counter owns it: a call a button attaches is
-/// declared under its provider's authority like any other call.
-pub const INCREMENT_CONTRACT: &str = "org.example.dayframe.counter.increment";
 /// The local binding name under which the counter contributes its toolbar button.
 pub const TOOLBAR_BINDING: &str = "toolbar";
 
@@ -69,7 +68,7 @@ pub fn manifest() -> MicroManifest {
             PublicationDeclaration {
                 name: INCREMENT.into(),
                 kind: PublicationKind::Call,
-                contract: Some(Nsid::literal(INCREMENT_CONTRACT)),
+                contract: Some(Nsid::literal(ACTION_CONTRACT)),
             },
         ],
         requires: vec![],

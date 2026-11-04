@@ -58,7 +58,7 @@ fn declaring_view() -> InitialContext {
                 "increment".to_owned(),
                 DeclaredPublication {
                     kind: clay_guest_session::capabilities::PublicationKind::Call,
-                    contract: Nsid::literal("org.example.dayframe.counter.increment"),
+                    contract: Nsid::literal("org.example.dayframe.toolbar.action"),
                 },
             ),
         ]),
@@ -89,7 +89,7 @@ fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
             PublicationDeclaration {
                 name: "increment".into(),
                 kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.dayframe.counter.increment")),
+                contract: Some(Nsid::literal("org.example.dayframe.toolbar.action")),
             },
         ],
         requires: vec![],
