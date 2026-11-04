@@ -279,7 +279,7 @@ uniffi = { version = "0.31.0" }
 
 #
 # wasm
-wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "783ad10c0847597039a76cf741ee565530e61070" }
+wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
 # `default-features = false` matches wash-runtime's own wasmtime-wasi pin so the
 # two deps do not disagree on the p1/p2 (wiggle) surface; `p3` is what links the
 # WASI 0.3 imports a wasm32-wasip3 component brings in.
@@ -337,7 +337,7 @@ ui = { path = "./src/ui" }
 #
 
 [patch.crates-io]
-wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "783ad10c0847597039a76cf741ee565530e61070" }
+wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
