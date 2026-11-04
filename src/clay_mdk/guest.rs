@@ -14,6 +14,7 @@
 //! and reads the current state. Reads never cross the boundary; only events and explicit
 //! resyncs do.
 pub use dom::GuestDom;
+pub(crate) use dom::Slots;
 
 use crate::Access;
 use crate::Capability;
@@ -110,10 +111,29 @@ struct Tasks {
     idle: RefCell<Option<Waker>>,
 }
 
-/// An incarnation-owned task: polls `future` until it ends or the incarnation closes.
+/// Stops one task before the incarnation closes: the view that spawned it was dropped.
+#[derive(Default)]
+pub(crate) struct Cancel {
+    cancelled: Cell<bool>,
+    waker: RefCell<Option<Waker>>,
+}
+
+impl Cancel {
+    /// Drop the task's future at its next poll, which is now: the task is woken.
+    pub(crate) fn cancel(&self) {
+        self.cancelled.set(true);
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// An incarnation-owned task: polls `future` until it ends, is cancelled, or the incarnation
+/// closes.
 struct Owned {
     future: Option<Pin<Box<dyn Future<Output = ()>>>>,
     tasks: Rc<Tasks>,
+    cancel: Option<Rc<Cancel>>,
 }
 
 impl Future for Owned {
@@ -121,11 +141,15 @@ impl Future for Owned {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
         let tasks = Rc::clone(&self.tasks);
+        let cancelled = self.cancel.as_ref().is_some_and(|cancel| {
+            *cancel.waker.borrow_mut() = Some(cx.waker().clone());
+            cancel.cancelled.get()
+        });
         let future = self
             .future
             .as_mut()
             .expect("an ended task is not polled again");
-        let finished = if tasks.closing.get() {
+        let finished = if tasks.closing.get() || cancelled {
             true
         } else {
             let mut wakers = tasks.wakers.borrow_mut();
@@ -150,11 +174,16 @@ impl Future for Owned {
 }
 
 impl Tasks {
-    fn spawn(self: &Rc<Self>, future: Pin<Box<dyn Future<Output = ()>>>) {
+    fn spawn(
+        self: &Rc<Self>,
+        future: Pin<Box<dyn Future<Output = ()>>>,
+        cancel: Option<Rc<Cancel>>,
+    ) {
         self.live.set(self.live.get() + 1);
         wit_bindgen::spawn_local(Owned {
             future: Some(future),
             tasks: Rc::clone(self),
+            cancel,
         });
     }
 
@@ -221,7 +250,9 @@ impl micro_lifecycle::GuestInstanceRoot for GuestRoot {
 }
 
 impl Runtime {
-    fn current() -> Rc<Self> {
+    /// The running incarnation's runtime (a wasm store hosts exactly one), for the view
+    /// components that spawn tasks on it.
+    pub(crate) fn current() -> Rc<Self> {
         RUNTIME.with_borrow(|slot| {
             Rc::clone(
                 slot.as_ref()
@@ -563,7 +594,22 @@ impl Runtime {
     }
 
     pub(crate) fn spawn(&self, future: Pin<Box<dyn Future<Output = ()>>>) {
-        self.tasks.spawn(future);
+        self.tasks.spawn(future, None);
+    }
+
+    /// Run `future` for a view: like [`Self::spawn`], but the returned handle stops it (and so
+    /// releases whatever host resources it holds) when the view is dropped.
+    pub(crate) fn spawn_for_view(&self, future: Pin<Box<dyn Future<Output = ()>>>) -> Rc<Cancel> {
+        let cancel = Rc::default();
+        self.tasks.spawn(future, Some(Rc::clone(&cancel)));
+        cancel
+    }
+
+    /// A view's task changed what the view renders: push a tick into every presentation so its
+    /// components re-render. Nothing polls Dioxus tasks in a guest, so a view task reports
+    /// through the same dirty flag the mirrors do.
+    pub(crate) fn notify_views(&self) {
+        self.mutate(|| self.dirty.set(true));
     }
 }
 
@@ -784,6 +830,19 @@ impl From<capability_bank::RefStatus> for RefStatus {
             capability_bank::RefStatus::Faulted => Self::Faulted,
             capability_bank::RefStatus::Unavailable => Self::Unavailable,
             capability_bank::RefStatus::Revoked => Self::Revoked,
+        }
+    }
+}
+
+impl From<RefStatus> for capability_bank::RefStatus {
+    fn from(status: RefStatus) -> Self {
+        match status {
+            RefStatus::Live => Self::Live,
+            RefStatus::Dormant => Self::Dormant,
+            RefStatus::Disabled => Self::Disabled,
+            RefStatus::Faulted => Self::Faulted,
+            RefStatus::Unavailable => Self::Unavailable,
+            RefStatus::Revoked => Self::Revoked,
         }
     }
 }

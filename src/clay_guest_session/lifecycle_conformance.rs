@@ -1125,7 +1125,6 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
     .unwrap();
     let instance = host.create("context").unwrap();
     host.begin_initialization(&instance).unwrap();
-    let rows_contract = Nsid::literal("org.example.clay.test.context.rows");
     // The guest's mirror mints a reference for each attachment of the rows it sees, its own
     // late row's endpoint included, and a lazy reference needs the supervisor's demand handle.
     // No micro is configured, so nothing can be activated through it.
@@ -1134,43 +1133,7 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
         .initialize(
             host.clone(),
             instance.clone(),
-            InitialContext {
-                collections: BTreeMap::from([("feed".to_owned(), registrations.projection())]),
-                registrations: BTreeMap::from([(
-                    "feed".to_owned(),
-                    clay_host::Grant {
-                        collection: registrations.clone(),
-                        micro: MicroId::new("context"),
-                        writer: writer_of("context"),
-                    },
-                )]),
-                publications: BTreeMap::from([
-                    (
-                        "rows".to_owned(),
-                        DeclaredPublication {
-                            kind: PublicationKind::Call,
-                            contract: rows_contract,
-                        },
-                    ),
-                    (
-                        "attach".to_owned(),
-                        DeclaredPublication {
-                            kind: PublicationKind::Call,
-                            contract: Nsid::literal("org.example.clay.test.context.attach"),
-                        },
-                    ),
-                    (
-                        "detail".to_owned(),
-                        DeclaredPublication {
-                            kind: PublicationKind::Presentation,
-                            contract: presentation_component(),
-                        },
-                    ),
-                ]),
-                micro: Some(MicroId::new("context")),
-                activator: Some(supervisor.activator()),
-                ..InitialContext::default()
-            },
+            ContextWorld::granted(&registrations, &supervisor),
         )
         .await
         .unwrap();
@@ -1235,6 +1198,224 @@ pub async fn context_collections_and_calls<E: Incarnations>(engine: E) {
         "only the seed outlives the guest"
     );
     host.close_instance(&recipient_instance).unwrap();
+    host.close();
+}
+
+/// The host side of the `context` fixture's scenarios (`src/clay_mdk/context_fixture.rs`): what
+/// it grants the fixture, and a provider factory whose one presentation, `view`, the fixture
+/// follows.
+struct ContextWorld;
+
+impl ContextWorld {
+    /// The `feed` registration collection and the publications the fixture's manifest declares,
+    /// with `supervisor` behind the lazy references its mirror mints.
+    fn granted(
+        registrations: &BytesRegistrations,
+        supervisor: &Supervisor<CapabilityPublication>,
+    ) -> InitialContext {
+        let call = |contract: &str| DeclaredPublication {
+            kind: PublicationKind::Call,
+            contract: Nsid::literal(contract),
+        };
+        let presentation = || DeclaredPublication {
+            kind: PublicationKind::Presentation,
+            contract: presentation_component(),
+        };
+        InitialContext {
+            collections: BTreeMap::from([("feed".to_owned(), registrations.projection())]),
+            registrations: BTreeMap::from([(
+                "feed".to_owned(),
+                clay_host::Grant {
+                    collection: registrations.clone(),
+                    micro: MicroId::new("context"),
+                    writer: writer_of("context"),
+                },
+            )]),
+            publications: BTreeMap::from([
+                (
+                    "rows".to_owned(),
+                    call("org.example.clay.test.context.rows"),
+                ),
+                (
+                    "attach".to_owned(),
+                    call("org.example.clay.test.context.attach"),
+                ),
+                (
+                    "follow".to_owned(),
+                    call("org.example.clay.test.context.follow"),
+                ),
+                ("detail".to_owned(), presentation()),
+                ("slot".to_owned(), presentation()),
+            ]),
+            micro: Some(MicroId::new("context")),
+            activator: Some(supervisor.activator()),
+            ..InitialContext::default()
+        }
+    }
+}
+
+struct PresenterRoot {
+    _published: PublishedCapability,
+}
+
+impl Factory<CapabilityPublication> for ContextWorld {
+    fn initialize(
+        &self,
+        host: Host,
+        instance: Instance,
+        _requirements: BTreeMap<String, CapabilityPublication>,
+        _activator: Activator<CapabilityPublication>,
+    ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
+        Box::pin(async move {
+            let bank = CapabilitySession::new(host, instance, CapabilityLimits::default());
+            let view = bank.publish_presentation("view").unwrap();
+            let publications = BTreeMap::from([("view".to_owned(), view.publication())]);
+            Ok(Initialized {
+                root: Box::new(PresenterRoot { _published: view }),
+                publications,
+            })
+        })
+    }
+}
+
+impl Root for PresenterRoot {
+    fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// The two waits a guest slot follows its provider with, against a real supervisor. The guest
+/// (`context` fixture) reads a row attaching a lazy reference to a host-side provider's
+/// presentation, and its `follow` call redeems it, recording each step as a `progress/<n>` row:
+///
+/// - while the provider is disabled the redemption fails and the guest parks in
+///   `capability-ref.status-changed`; enabling the provider wakes it, and it redeems again,
+///   which starts the provider (`mounted`);
+/// - disabling the provider ends the incarnation the proxy was redeemed from, which completes
+///   `presentation-component.revoked` in the guest (`revoked`).
+///
+/// A wake the host failed to deliver would leave the call parked, so the scenario would hang.
+pub async fn context_follows_a_provider<E: Incarnations>(engine: E) {
+    let host = Host::new();
+    let registrations = bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), [97, 98]);
+    let cbor = |text: &str| {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(text, &mut bytes).unwrap();
+        bytes
+    };
+    let provider = MicroId::new("provider");
+    CollectionSession::new(
+        host.clone(),
+        host.start("seeder"),
+        crate::collections::CollectionLimits::default(),
+    )
+    .grant_writer(clay_host::Grant {
+        collection: registrations.clone(),
+        micro: MicroId::new("seeder"),
+        writer: writer_of("seeder"),
+    })
+    .unwrap()
+    .put_value(
+        cbor("view"),
+        clay_collection::WriteBasis::Concurrent,
+        crate::collections::CollectionValue {
+            body: cbor("view"),
+            attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
+                micro: provider.clone(),
+                publication: "view".to_owned(),
+                contract: presentation_component(),
+            })],
+        },
+    )
+    .unwrap();
+    let supervisor = Rc::new(Supervisor::<CapabilityPublication>::new(
+        host.clone(),
+        [ConfiguredMicro {
+            identity: provider.clone(),
+            eager: false,
+            enabled: true,
+            requirements: BTreeMap::new(),
+            unresolved_bindings: Vec::new(),
+            factory: Rc::new(ContextWorld),
+        }],
+    ));
+    // Redeeming a lazy reference is served by the supervisor's driver.
+    let serving = tokio::task::spawn_local({
+        let supervisor = Rc::clone(&supervisor);
+        async move { supervisor.drive().await }
+    });
+    supervisor.disable(&provider).await.unwrap();
+
+    let instance = host.create("context").unwrap();
+    host.begin_initialization(&instance).unwrap();
+    let (runtime, driver) = Rc::new(engine)
+        .initialize(
+            host.clone(),
+            instance.clone(),
+            ContextWorld::granted(&registrations, &supervisor),
+        )
+        .await
+        .unwrap();
+    let driver = tokio::task::spawn_local(driver);
+    host.commit_initialization(&instance).unwrap();
+
+    let recipient_instance = host.start("recipient");
+    let recipient = CapabilitySession::new(
+        host.clone(),
+        recipient_instance.clone(),
+        CapabilityLimits::default(),
+    );
+    let follow = recipient
+        .mint(&E::publications(&runtime).remove("follow").unwrap())
+        .unwrap();
+    let following = tokio::task::spawn_local(async move { follow.call(cbor("view")).await });
+
+    // The guest records each step in a row of its own; waiting on the collection's change
+    // stream is how the host learns the guest reached it.
+    let mut changes = registrations
+        .projection()
+        .acquire(Vec::new(), None)
+        .unwrap();
+    let mut through = None;
+    let mut reached = async |step: usize, expected: &str| {
+        let key = cbor(&format!("progress/{step}"));
+        loop {
+            let recorded = registrations
+                .snapshot()
+                .get(&key)
+                .and_then(|entry| entry.value.as_ref())
+                .map(|value| ciborium::from_reader::<String, _>(value.body.as_slice()).unwrap());
+            if let Some(recorded) = recorded {
+                assert_eq!(recorded, expected);
+                return;
+            }
+            let page = changes
+                .read(through.take(), ReadLimits::default())
+                .await
+                .unwrap();
+            through = Some(page.through);
+        }
+    };
+    reached(0, "unavailable").await;
+    supervisor.enable(&provider);
+    reached(1, "mounted").await;
+    assert_eq!(supervisor.state(&provider), MicroState::Active);
+    supervisor.disable(&provider).await.unwrap();
+    let steps = following.await.unwrap().unwrap();
+    assert_eq!(
+        ciborium::from_reader::<Vec<String>, _>(steps.as_slice()).unwrap(),
+        ["unavailable", "mounted", "revoked"]
+    );
+
+    assert!(host.begin_close(&instance).unwrap());
+    let (closed, residue) = E::close(runtime).await;
+    closed.unwrap();
+    assert_eq!(residue, GuestResidue::NONE);
+    driver.await.unwrap();
+    host.close_instance(&instance).unwrap();
+    host.close_instance(&recipient_instance).unwrap();
+    serving.abort();
+    supervisor.shutdown().await.unwrap();
     host.close();
 }
 

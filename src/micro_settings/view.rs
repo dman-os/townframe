@@ -125,7 +125,6 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
                         div { key: "{row.key}",
                             h3 { class: "mb-4 text-lg font-semibold", "{row.value.title}" }
                             PresentationSlot {
-                                owner: props.micro.instance.clone(),
                                 reference: row.attachments[row.value.detail.index()].clone(),
                             }
                         }

@@ -739,6 +739,20 @@ impl From<clay_guest_session::capabilities::RefStatus> for crate::RefStatus {
     }
 }
 
+impl From<crate::RefStatus> for clay_guest_session::capabilities::RefStatus {
+    fn from(status: crate::RefStatus) -> Self {
+        use crate::RefStatus;
+        match status {
+            RefStatus::Live => Self::Live,
+            RefStatus::Dormant => Self::Dormant,
+            RefStatus::Disabled => Self::Disabled,
+            RefStatus::Faulted => Self::Faulted,
+            RefStatus::Unavailable => Self::Unavailable,
+            RefStatus::Revoked => Self::Revoked,
+        }
+    }
+}
+
 impl From<clay_docs::OperationReceipt> for crate::OperationReceipt {
     fn from(receipt: clay_docs::OperationReceipt) -> Self {
         use clay_docs::OperationError;

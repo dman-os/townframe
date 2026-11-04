@@ -38,7 +38,7 @@ impl SettingsConfig {
 }
 
 /// What the Settings view reads: the sections collection, its preferences, and the instance
-/// that mounts section presentations.
+/// that identifies this activation (two views of one activation are equal).
 #[derive(Clone)]
 pub struct SettingsMicro {
     pub instance: Instance,

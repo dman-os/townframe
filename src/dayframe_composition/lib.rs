@@ -328,7 +328,7 @@ pub struct CompositionRuntime {
     /// Each micro's collection requests, which a configuration grants (`set_binding`).
     collection_requests: Rc<BTreeMap<MicroId, Vec<clay_mdk::Request>>>,
     locked: BTreeSet<MicroId>,
-    /// The shell's own instance: it mounts roots and owns the references minted from rows.
+    /// The shell's own instance: the recipient of the references minted from rows.
     shell: Instance,
     roots: Collection<String, RootRow>,
     /// Applies changes of the install document to the supervisor; taken by the one
@@ -684,6 +684,12 @@ impl CompositionRuntime {
         &self.replica
     }
 
+    /// The shell's own instance: the recipient of the references minted from rows (a slot
+    /// redeems them as the micro that mounts it), for a root that observes a collection.
+    pub fn shell(&self) -> &Instance {
+        &self.shell
+    }
+
     /// The installed micros, in catalog order.
     pub fn micros(&self) -> &[MicroId] {
         &self.micros
@@ -842,7 +848,6 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                         // mounting micros (workspace layout, canvas) place other components
                         // through the wire-level slot primitive of ADR 015 §10.
                         PresentationSlot {
-                            owner: shell.shell.clone(),
                             reference: row.attachments[row.value.content.index()].clone(),
                         }
                     }

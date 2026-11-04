@@ -5,6 +5,14 @@
 //! write), and serves a `rows` call that answers every row it can see once its own is among
 //! them. A second call, `attach`, writes a row after `activate` returned that attaches the
 //! declared presentation `detail` by name. Engine conformance runs it as `lifecycle_conformance::context_collections_and_calls`.
+//!
+//! It also follows another micro's presentation the way a slot does. The presentation `slot`
+//! renders a [`PresentationSlot`] over the attachment of the `feed` row keyed `view`; the call
+//! `follow` waits for that row, then redeems its attachment and reports each step (`mounted`
+//! when a redemption succeeded and the provider incarnation it holds then ended as `revoked`,
+//! `unavailable` for each failed redemption, after which it waits for the reference's status to
+//! change). Conformance runs it as `lifecycle_conformance::context_follows_a_provider`, the
+//! `clay_mdk` wasm tests mount `slot`.
 use clay_mdk::Access;
 use clay_mdk::BindingResolution;
 use clay_mdk::Context;
@@ -17,6 +25,12 @@ use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
 use clay_mdk::RowAttachment;
+use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::hooks::use_rows;
+use dioxus::prelude::*;
+
+/// The `feed` row whose attachment `slot` shows and `follow` waits for.
+const VIEW: &str = "view";
 
 fn manifest() -> MicroManifest {
     MicroManifest {
@@ -33,7 +47,17 @@ fn manifest() -> MicroManifest {
                 contract: Some(Nsid::literal("org.example.clay.test.context.attach")),
             },
             PublicationDeclaration {
+                name: "follow".into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal("org.example.clay.test.context.follow")),
+            },
+            PublicationDeclaration {
                 name: "detail".into(),
+                kind: PublicationKind::Presentation,
+                contract: None,
+            },
+            PublicationDeclaration {
+                name: "slot".into(),
                 kind: PublicationKind::Presentation,
                 contract: None,
             },
@@ -69,6 +93,63 @@ async fn activate(context: Context) -> Result<(), Error> {
     feed.put(&"guest".to_owned(), &seen, Vec::new()).await?;
     let collection = feed.collection().clone();
     context.publish_component("detail", dioxus_core::VNode::empty)?;
+    context.publish_component("slot", {
+        let collection = collection.clone();
+        move || {
+            let rows = use_rows(&collection);
+            rsx! {
+                for row in rows.iter().filter(|row| row.key == VIEW) {
+                    PresentationSlot { key: "{row.key}", reference: row.attachments[0].clone() }
+                }
+            }
+        }
+    })?;
+    context.publish_call("follow", {
+        let feed = feed.clone();
+        move |key: String| {
+            let feed = feed.clone();
+            let mut collection = feed.collection().clone();
+            async move {
+                let reference = loop {
+                    if let Some(row) = collection.rows()?.iter().find(|row| row.key == key) {
+                        break row.attachments[0].clone();
+                    }
+                    collection.changed().await?;
+                };
+                let mut steps = Vec::new();
+                // Each step is also a row, so a host waiting on the collection learns the call
+                // got there.
+                let step = async |steps: &mut Vec<String>, name: &str| -> Result<(), Error> {
+                    feed.put(
+                        &format!("progress/{}", steps.len()),
+                        &name.to_owned(),
+                        Vec::new(),
+                    )
+                    .await?;
+                    steps.push(name.to_owned());
+                    Ok(())
+                };
+                loop {
+                    // Read before redeeming: a change after the failure then still wakes the
+                    // wait, where reading afterwards could miss it.
+                    let before = reference.status();
+                    match reference.redeem_presentation().await {
+                        Ok(proxy) => {
+                            proxy.component()?;
+                            step(&mut steps, "mounted").await?;
+                            proxy.revoked().await;
+                            step(&mut steps, "revoked").await?;
+                            return Ok(steps);
+                        }
+                        Err(_) => {
+                            step(&mut steps, "unavailable").await?;
+                            reference.status_changed(before).await;
+                        }
+                    }
+                }
+            }
+        }
+    })?;
     // Runs long after `initialize` returned, when no handle to `detail` exists any more.
     context.publish_call("attach", move |publication: String| {
         let feed = feed.clone();
