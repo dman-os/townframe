@@ -167,3 +167,25 @@ async fn context_sees_a_closed_provider_revoked() {
         .run_until(lifecycle_conformance::context_sees_a_closed_provider_revoked(engine))
         .await;
 }
+
+/// Two guests retaining each other's calls close together once no outside lease reaches them,
+/// on this engine.
+#[tokio::test]
+async fn context_peers_retaining_each_other_close_together() {
+    let engine = Wasmtime::load_fixture("context").await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::context_peers_retaining_each_other_close_together(engine))
+        .await;
+}
+
+/// Two guests whose activations demand each other fail as unavailable instead of deadlocking,
+/// on this engine.
+#[tokio::test]
+async fn context_peers_demanding_each_other_fail_as_unavailable() {
+    let engine = Wasmtime::load_fixture("context").await;
+    tokio::task::LocalSet::new()
+        .run_until(
+            lifecycle_conformance::context_peers_demanding_each_other_fail_as_unavailable(engine),
+        )
+        .await;
+}

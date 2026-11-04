@@ -162,4 +162,6 @@ conformance! {
     context_follows_a_provider,
     context_retains_a_call,
     context_sees_a_closed_provider_revoked,
+    context_peers_retaining_each_other_close_together,
+    context_peers_demanding_each_other_fail_as_unavailable,
 }

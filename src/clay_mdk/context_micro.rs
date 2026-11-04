@@ -19,6 +19,11 @@
 //! (`lifecycle_conformance::context_retains_a_call`). Its call `probe` reports what the guest sees
 //! through a row's attachment: the reference's status, then what a call and a `retain_call`
 //! through it answer (`lifecycle_conformance::context_sees_a_closed_provider_revoked`).
+//!
+//! Two of these micros can depend on each other (`lifecycle_conformance::context_peers_*`): the
+//! call `echo` answers its request, and the `feed` row keyed `init`, if one exists when `activate`
+//! runs, is a call the micro makes before it finishes initializing, so an `init` row attaching a
+//! peer's `echo` makes this micro's activation wait on the peer's.
 use clay_mdk::Access;
 use clay_mdk::BindingResolution;
 use clay_mdk::CallBinding;
@@ -71,6 +76,11 @@ pub fn manifest() -> MicroManifest {
                 name: "release".into(),
                 kind: PublicationKind::Call,
                 contract: Some(Nsid::literal("org.example.clay.test.context.release")),
+            },
+            PublicationDeclaration {
+                name: "echo".into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal("org.example.clay.test.context.echo")),
             },
             PublicationDeclaration {
                 name: "probe".into(),
@@ -131,6 +141,17 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         .join(",");
     feed.put(&"guest".to_owned(), &seen, Vec::new()).await?;
     let collection = feed.collection().clone();
+    // An `init` row is a call this activation makes and waits for: through a lazy reference it
+    // demands the peer's activation, which is how two micros come to wait on each other.
+    let init = collection
+        .rows()?
+        .iter()
+        .find(|row| row.key == "init")
+        .map(|row| row.attachments[0].clone());
+    if let Some(peer) = init {
+        peer.call::<String, String>(&"init".to_owned()).await?;
+    }
+    context.publish_call("echo", |request: String| async move { Ok(request) })?;
     context.publish_component("detail", dioxus_core::VNode::empty)?;
     context.publish_component("slot", {
         let collection = collection.clone();

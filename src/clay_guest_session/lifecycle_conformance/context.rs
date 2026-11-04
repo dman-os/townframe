@@ -2,8 +2,6 @@
 //! `Context`'s collections, calls, slots and retained calls, against a host-side provider.
 use super::*;
 
-/// The fixture's `registrations` roles take `[role, key-prefix]` arguments and bind `a` and
-/// `b` to `micro`'s grant; the prefix namespaces the keys the incarnation writes.
 /// The shared authoring `Context` over this engine, run against the prepared `context` fixture
 /// (`src/clay_mdk/context_fixture.rs`): the guest reads the collection bound to `feed` (a row
 /// the host wrote before it started) and registers a row recording what it read, so the host
@@ -66,7 +64,7 @@ async fn collections_and_calls_over<E: Incarnations>(
         .initialize(
             host.clone(),
             instance.clone(),
-            ContextWorld::granted(&registrations, &supervisor),
+            ContextWorld::granted("context", &registrations, supervisor.activator()),
         )
         .await
         .unwrap();
@@ -134,6 +132,25 @@ async fn collections_and_calls_over<E: Incarnations>(
     host.close();
 }
 
+/// The host's writer of a `feed` collection, as the micro instance `name`.
+fn seeder(
+    host: &Host,
+    name: &str,
+    registrations: &BytesRegistrations,
+) -> crate::collections::RegistrationWriter {
+    CollectionSession::new(
+        host.clone(),
+        host.start(name),
+        crate::collections::CollectionLimits::default(),
+    )
+    .grant_writer(clay_host::Grant {
+        collection: registrations.clone(),
+        micro: MicroId::new(name),
+        writer: writer_of(name),
+    })
+    .unwrap()
+}
+
 fn cbor_text(text: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     ciborium::into_writer(text, &mut bytes).unwrap();
@@ -165,17 +182,7 @@ impl<E: Incarnations> ContextRig<E> {
         let host = Host::new();
         let registrations = bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), prefix);
         let provider = MicroId::new("provider");
-        let seeder = CollectionSession::new(
-            host.clone(),
-            host.start("seeder"),
-            crate::collections::CollectionLimits::default(),
-        )
-        .grant_writer(clay_host::Grant {
-            collection: registrations.clone(),
-            micro: MicroId::new("seeder"),
-            writer: writer_of("seeder"),
-        })
-        .unwrap();
+        let seeder = seeder(&host, "seeder", &registrations);
         let world = Rc::new(ContextWorld::default());
         let supervisor = Rc::new(Supervisor::<CapabilityPublication>::new(
             host.clone(),
@@ -200,7 +207,7 @@ impl<E: Incarnations> ContextRig<E> {
             .initialize(
                 host.clone(),
                 instance.clone(),
-                ContextWorld::granted(&registrations, &supervisor),
+                ContextWorld::granted("context", &registrations, supervisor.activator()),
             )
             .await
             .unwrap();
@@ -295,8 +302,9 @@ impl ContextWorld {
     /// The `feed` registration collection and the publications the fixture's manifest declares,
     /// with `supervisor` behind the lazy references its mirror mints.
     fn granted(
+        micro: &str,
         registrations: &BytesRegistrations,
-        supervisor: &Supervisor<CapabilityPublication>,
+        activator: Activator<CapabilityPublication>,
     ) -> InitialContext {
         let call = |contract: &str| DeclaredPublication {
             kind: PublicationKind::Call,
@@ -312,8 +320,8 @@ impl ContextWorld {
                 "feed".to_owned(),
                 clay_host::Grant {
                     collection: registrations.clone(),
-                    micro: MicroId::new("context"),
-                    writer: writer_of("context"),
+                    micro: MicroId::new(micro),
+                    writer: writer_of(micro),
                 },
             )]),
             publications: BTreeMap::from([
@@ -341,11 +349,15 @@ impl ContextWorld {
                     "probe".to_owned(),
                     call("org.example.clay.test.context.probe"),
                 ),
+                (
+                    "echo".to_owned(),
+                    call("org.example.clay.test.context.echo"),
+                ),
                 ("detail".to_owned(), presentation()),
                 ("slot".to_owned(), presentation()),
             ]),
-            micro: Some(MicroId::new("context")),
-            activator: Some(supervisor.activator()),
+            micro: Some(MicroId::new(micro)),
+            activator: Some(activator),
             ..InitialContext::default()
         }
     }
@@ -538,6 +550,248 @@ pub async fn context_sees_a_closed_provider_revoked<E: Incarnations>(engine: E) 
     assert_eq!(supervisor.state(provider), MicroState::Idle);
     assert_eq!(rig.world.activations.get(), 1);
     drop(probe);
+    rig.finish().await;
+}
+
+/// Two supervised `context` micros, `a` and `b`, each with a `feed` of its own holding one row,
+/// `key`, that attaches the other's `echo` call as a lazy reference. The supervisor serves their
+/// demands, and the factory hands each incarnation its own activator, so the leases a micro takes
+/// on its peer are held by that incarnation. `log` records `initialize <micro>` and `close
+/// <micro>` as the supervisor runs them.
+struct PeerRig {
+    host: Host,
+    supervisor: Rc<Supervisor<CapabilityPublication>>,
+    serving: tokio::task::AbortHandle,
+    log: Rc<RefCell<Vec<String>>>,
+    recipient_instance: Instance,
+    recipient: CapabilitySession,
+    _seeders: Vec<crate::collections::RegistrationWriter>,
+}
+
+/// One peer's factory: an incarnation of the `context` fixture on `E`.
+struct Peer<E: Incarnations> {
+    engine: Rc<E>,
+    identity: &'static str,
+    registrations: BytesRegistrations,
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+/// A running peer: its guest half closes with the root, and must leave nothing behind.
+struct PeerRoot<E: Incarnations> {
+    runtime: E::Runtime,
+    driver: JoinHandle<()>,
+    identity: &'static str,
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+impl<E: Incarnations> Factory<CapabilityPublication> for Peer<E> {
+    fn initialize(
+        &self,
+        host: Host,
+        instance: Instance,
+        _requirements: BTreeMap<String, CapabilityPublication>,
+        activator: Activator<CapabilityPublication>,
+    ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
+        let engine = Rc::clone(&self.engine);
+        let (identity, log) = (self.identity, Rc::clone(&self.log));
+        let context = ContextWorld::granted(identity, &self.registrations, activator);
+        Box::pin(async move {
+            log.borrow_mut().push(format!("initialize {identity}"));
+            let (runtime, driver) = engine.initialize(host, instance, context).await?;
+            let publications = E::publications(&runtime);
+            let root = Box::new(PeerRoot::<E> {
+                runtime,
+                driver: tokio::task::spawn_local(driver),
+                identity,
+                log,
+            });
+            Ok(Initialized { root, publications })
+        })
+    }
+}
+
+impl<E: Incarnations> Root for PeerRoot<E> {
+    fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
+        Box::pin(async move {
+            let Self {
+                runtime,
+                driver,
+                identity,
+                log,
+            } = *self;
+            let (closed, residue) = E::close(runtime).await;
+            assert_eq!(
+                residue,
+                GuestResidue::NONE,
+                "{identity} still held resources after its close"
+            );
+            driver.await.unwrap();
+            log.borrow_mut().push(format!("close {identity}"));
+            closed
+        })
+    }
+}
+
+impl PeerRig {
+    async fn boot<E: Incarnations>(engine: E, key: &str) -> Self {
+        let host = Host::new();
+        let engine = Rc::new(engine);
+        let log = Rc::<RefCell<Vec<String>>>::default();
+        let mut seeders = Vec::new();
+        let micros =
+            [("a", "b", [103, 104]), ("b", "a", [105, 106])].map(|(identity, peer, prefix)| {
+                let registrations =
+                    bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), prefix);
+                let writer = seeder(&host, &format!("seeder-{identity}"), &registrations);
+                writer
+                    .put_value(
+                        cbor_text(key),
+                        clay_collection::WriteBasis::Concurrent,
+                        crate::collections::CollectionValue {
+                            body: cbor_text(key),
+                            attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
+                                micro: MicroId::new(peer),
+                                publication: "echo".to_owned(),
+                                contract: Nsid::literal("org.example.clay.test.context.echo"),
+                            })],
+                        },
+                    )
+                    .unwrap();
+                seeders.push(writer);
+                ConfiguredMicro {
+                    identity: MicroId::new(identity),
+                    eager: false,
+                    enabled: true,
+                    requirements: BTreeMap::new(),
+                    unresolved_bindings: Vec::new(),
+                    factory: Rc::new(Peer::<E> {
+                        engine: Rc::clone(&engine),
+                        identity,
+                        registrations,
+                        log: Rc::clone(&log),
+                    }) as _,
+                }
+            });
+        let supervisor = Rc::new(Supervisor::<CapabilityPublication>::new(
+            host.clone(),
+            micros,
+        ));
+        let serving = tokio::task::spawn_local({
+            let supervisor = Rc::clone(&supervisor);
+            async move { supervisor.drive().await }
+        })
+        .abort_handle();
+        let recipient_instance = host.start("recipient");
+        let recipient = CapabilitySession::new(
+            host.clone(),
+            recipient_instance.clone(),
+            CapabilityLimits::default(),
+        );
+        Self {
+            host,
+            supervisor,
+            serving,
+            log,
+            recipient_instance,
+            recipient,
+            _seeders: seeders,
+        }
+    }
+
+    async fn finish(self) {
+        self.serving.abort();
+        self.supervisor.shutdown().await.unwrap();
+        self.host.close_instance(&self.recipient_instance).unwrap();
+        self.host.close();
+    }
+}
+
+/// ADR 030 validation 8 through guests. Two `context` micros each retain the other's `echo` call
+/// (`hold`, through a lazy reference minted by the incarnation, so the lease is held by it).
+/// While an outside lease reaches either, both stay up, and a lease on only one of them keeps the
+/// other, which it retains, up too; once the last outside lease drops, the pair is a disconnected
+/// cycle and closes together, one initialization and one close each.
+pub async fn context_peers_retaining_each_other_close_together<E: Incarnations>(engine: E) {
+    let rig = PeerRig::boot(engine, "peer").await;
+    let supervisor = &rig.supervisor;
+    let (a, b) = (MicroId::new("a"), MicroId::new("b"));
+    let hold = async |micro: &MicroId| {
+        let lease = supervisor.acquire(micro, "hold").await.unwrap();
+        let replies = rig
+            .recipient
+            .mint(&lease)
+            .unwrap()
+            .call(cbor_text("peer"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ciborium::from_reader::<Vec<String>, _>(replies.as_slice()).unwrap(),
+            ["one", "two"]
+        );
+        lease
+    };
+    let lease_a = hold(&a).await;
+    assert_eq!(
+        supervisor.state(&b),
+        MicroState::Active,
+        "a retains b's call, which started b"
+    );
+    let lease_b = hold(&b).await;
+
+    // Either outside lease reaches both: a's reaches b through a's binding, and b's reaches a
+    // through b's.
+    drop(lease_a);
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(supervisor.state(&a), MicroState::Active);
+    assert_eq!(supervisor.state(&b), MicroState::Active);
+    assert_eq!(*rig.log.borrow(), ["initialize a", "initialize b"]);
+
+    drop(lease_b);
+    supervisor
+        .changes()
+        .wait_for(|_| {
+            [&a, &b]
+                .into_iter()
+                .all(|micro| supervisor.state(micro) == MicroState::Idle)
+        })
+        .await
+        .unwrap();
+    let log = rig.log.borrow().clone();
+    assert_eq!(log[..2], ["initialize a", "initialize b"]);
+    let mut closes = log[2..].to_vec();
+    closes.sort();
+    assert_eq!(closes, ["close a", "close b"], "one close each: {log:?}");
+    rig.finish().await;
+}
+
+/// ADR 030 validation 8, the activation half, through guests: each `context` micro's `activate`
+/// calls the other's `echo` before it returns (the `init` row), so the first activation demands
+/// the second, which demands the first. The demand that would wait on its own staged outcome
+/// fails as `Unavailable` in the guest, which refuses its activation, and the other's demand of
+/// it fails the same way: both end faulted, nothing stays pending or live.
+pub async fn context_peers_demanding_each_other_fail_as_unavailable<E: Incarnations>(engine: E) {
+    let rig = PeerRig::boot(engine, "init").await;
+    let supervisor = &rig.supervisor;
+    let (a, b) = (MicroId::new("a"), MicroId::new("b"));
+    let refused = supervisor
+        .acquire(&a, "echo")
+        .await
+        .err()
+        .expect("an activation cycle cannot complete");
+    assert!(matches!(refused, StartError::Faulted(_)), "{refused:?}");
+    for micro in [&a, &b] {
+        let MicroState::Faulted(message) = supervisor.state(micro) else {
+            panic!("{micro:?} is {:?}", supervisor.state(micro));
+        };
+        assert!(
+            message.to_lowercase().contains("unavailable"),
+            "{micro:?} refused with {message:?}"
+        );
+        assert_eq!(supervisor.instance(micro), None);
+    }
+    assert_eq!(*rig.log.borrow(), ["initialize a", "initialize b"]);
     rig.finish().await;
 }
 
