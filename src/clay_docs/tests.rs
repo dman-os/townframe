@@ -931,3 +931,130 @@ async fn document_next_rechecks_revocation_after_pending_or_ready_notifications(
         host.close();
     }
 }
+
+/// Drops every handle of the service so its persist future sees the queue close, then drives
+/// the future to completion: everything the source changed has been written afterwards.
+async fn flush(service: DocumentService, persist: impl Future<Output = ()>) {
+    drop(service);
+    persist.await;
+}
+
+/// What the unrestricted `document` mirror observes in a service.
+fn observed(service: &DocumentService, documents: &[&str]) -> BTreeMap<FacetRoute, FacetValue> {
+    let host = Host::new();
+    let instance = host.start("observer");
+    let facets = grant(service, &host, &instance, documents, /*key_id*/ None)
+        .watch(selection(documents))
+        .unwrap()
+        .current()
+        .unwrap()
+        .facets;
+    host.close();
+    facets
+}
+
+#[tokio::test]
+async fn the_durable_source_survives_a_rebuild_and_persisted_values_beat_seeds() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    let node = service.mock_documents();
+    node.seed(route("a", "seeded"), json!(1));
+    node.seed(route("a", "written"), json!(1));
+    node.seed(route("a", "removed"), json!(1));
+    node.seed(route("a", "replaced"), json!(1));
+    node.external_change(route("a", "removed"), None);
+    node.external_change(route("a", "replaced"), Some(json!("external")));
+    // An accepted mutation persists; a rejected one leaves the stored value alone.
+    let host = Host::new();
+    let instance = host.start("writer");
+    let access = grant(&service, &host, &instance, &["a"], None);
+    let accepted = access
+        .mutate(route("a", "written"), FacetMutation::Write(json!(2)))
+        .unwrap();
+    let created = access
+        .mutate(route("a", "created"), FacetMutation::Create(json!(3)))
+        .unwrap();
+    let rejected = access
+        .mutate(route("a", "seeded"), FacetMutation::Write(json!(9)))
+        .unwrap();
+    node.complete(accepted.id(), Ok(()));
+    node.complete(created.id(), Ok(()));
+    node.complete(
+        rejected.id(),
+        Err(OperationError::Rejected {
+            message: "denied".into(),
+        }),
+    );
+    host.close();
+    drop((access, accepted, created, rejected, node));
+    flush(service, persist).await;
+
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    // Reseeding after a restart must not overwrite what the previous boot persisted.
+    let node = service.mock_documents();
+    node.seed(route("a", "written"), json!("seed"));
+    node.seed(route("a", "removed"), json!("seed"));
+    let after = observed(&service, &["a"]);
+    assert_eq!(
+        after.get(&route("a", "written")),
+        Some(&FacetValue::Present(json!(2)))
+    );
+    assert_eq!(
+        after.get(&route("a", "created")),
+        Some(&FacetValue::Present(json!(3)))
+    );
+    assert_eq!(
+        after.get(&route("a", "seeded")),
+        Some(&FacetValue::Present(json!(1)))
+    );
+    assert_eq!(
+        after.get(&route("a", "replaced")),
+        Some(&FacetValue::Present(json!("external")))
+    );
+    // The removal was persisted, so the reseed lands as a fresh insert this boot.
+    assert_eq!(
+        after.get(&route("a", "removed")),
+        Some(&FacetValue::Present(json!("seed")))
+    );
+    drop(node);
+    flush(service, persist).await;
+}
+
+#[tokio::test]
+async fn a_persisted_removal_stays_removed_after_a_rebuild() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    let node = service.mock_documents();
+    node.seed(route("a", "gone"), json!(1));
+    node.external_change(route("a", "gone"), None);
+    drop(node);
+    flush(service, persist).await;
+    assert!(store.scan_prefix(b"").await.unwrap().is_empty());
+    let (service, _persist) = DocumentService::durable(store, 32).await.unwrap();
+    assert!(observed(&service, &["a"]).is_empty());
+}
+
+#[test]
+fn route_keys_round_trip_and_stay_unambiguous() {
+    let a = FacetRoute {
+        document: "ab".into(),
+        branch: "c".into(),
+        tag: "".into(),
+        key_id: "\u{0}é".into(),
+    };
+    let b = FacetRoute {
+        document: "a".into(),
+        branch: "bc".into(),
+        tag: "".into(),
+        key_id: "\u{0}é".into(),
+    };
+    assert_ne!(a.encode(), b.encode());
+    assert_eq!(FacetRoute::decode(&a.encode()), a);
+    assert_eq!(FacetRoute::decode(&b.encode()), b);
+}

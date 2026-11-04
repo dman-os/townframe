@@ -4,6 +4,7 @@ dependency_reason = "dayframe microkernel layering: engine-neutral contracts at 
 allowed_dependencies = [
     "clay_collection",
     "clay_host",
+    "clay_store",
     "daybook_types",
 ]
 allow_external_api_types = false
