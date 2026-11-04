@@ -361,3 +361,15 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 - Kept per-key Lamport stamps. The operator notes a per-collection counter or the feed-position basis
   (option b) resembles big_sync core's keyed frontiers; expect these abstractions to collapse into one
   implementation later. Tombstone GC deferred (scope death retracts; permanent tombstones accumulate).
+
+## C9 done (2026-11-04)
+
+- C9a/C9b merged (e8ded252..10cae0f3), C9c ADRs b7ed9112. 309/309 across the clay crates, clippy,
+  guardrails lint/api clean. Supersedes the earlier ledger notes on the ADR 017 §9 materializer and
+  the §10 causal writer: both are gone; §10 is now "field-level merges are layers above the map".
+- Grants: `RegistrationGrant { micro, prefixes }` enforced in `clay_guest_session` (`forbidden`); test
+  mint sites pass a full grant until C5 manifest admission narrows it. Nothing mints installation
+  scopes yet, so the manifest/runtime two-scope rule lands with C5.
+- Tombstones count toward `rows_per_writer` (they are scope state). A micro's bindings share one
+  WriterId; equal stamps between them break by scope id.
+- Not compiled: native `clay_mdk` tests (known red from the `HostedCollection` removal, fixed in C2b).
