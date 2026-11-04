@@ -139,8 +139,8 @@ impl CompositionRuntime {
     /// live in disjoint subspaces (`collections` and `documents`), and a store written before
     /// that split (collections at the root) is orphaned, not migrated. The store is only
     /// needed while building (the collections and the document persister keep their own
-    /// handles), so the runtime is not generic over it. A store failure is an external error returned to the launcher, which owns how it is
-    /// shown; nothing has run by then.
+    /// handles), so the runtime is not generic over it. A store failure is an external error
+    /// returned to the launcher, which owns how it is shown; nothing has run by then.
     pub async fn new<St: OrderedStore + Send + Sync + 'static>(
         store: Arc<St>,
         installed: Vec<InstalledMicro>,
@@ -279,7 +279,7 @@ impl CompositionRuntime {
         tokio::task::LocalSet::new()
             .run_until(async {
                 tokio::task::spawn_local(feed);
-                tokio::task::spawn_local(persist_documents);
+                let persisting = tokio::task::spawn_local(persist_documents);
                 let supervisor = Rc::clone(&self.supervisor);
                 // A failed eager start is recorded as the micro's `Faulted` state, which the
                 // lifecycle panel shows; there is no other consumer for the report.
@@ -295,6 +295,12 @@ impl CompositionRuntime {
                         self.host.close();
                     } => {}
                 }
+                // Micros close first (above), so no document write can arrive once the queue
+                // closes; closing then lets the persister drain what is queued and finish, and
+                // awaiting it means everything written before shutdown is in the store when
+                // `serve` returns. A persister panic propagates through the join.
+                self.documents.close_persistence();
+                persisting.await.expect("the document persister panicked");
             })
             .await;
     }

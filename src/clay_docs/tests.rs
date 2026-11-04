@@ -1058,3 +1058,27 @@ fn route_keys_round_trip_and_stay_unambiguous() {
     assert_eq!(FacetRoute::decode(&a.encode()), a);
     assert_eq!(FacetRoute::decode(&b.encode()), b);
 }
+
+#[tokio::test]
+async fn closing_persistence_drains_writes_queued_just_before() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    service
+        .mock_documents()
+        .external_change(route("a", "late"), Some(json!(7)));
+    // The service stays alive: closing alone must end the future after it drains.
+    service.close_persistence();
+    persist.await;
+    assert_eq!(store.scan_prefix(b"").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[should_panic(expected = "document source changed after the composition shut down")]
+async fn a_source_write_after_closing_persistence_panics() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, _persist) = DocumentService::durable(store, 32).await.unwrap();
+    service.close_persistence();
+    service.mock_documents().seed(route("a", "x"), json!(1));
+}
