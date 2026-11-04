@@ -42,6 +42,7 @@ await $`cargo build --locked ${isolated} -p micro_collection_probe --target wasm
 await $`cargo build --locked ${isolated} -p clay_mdk --example slots --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example lifecycle --target wasm32-wasip3`;
+await $`cargo build --locked ${isolated} -p clay_mdk --example context --target wasm32-wasip3`;
 const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
   .json<{ target_directory: string; packages: { name: string }[] }>();
 const target = $.path(metadata.target_directory);
@@ -58,6 +59,7 @@ const components: Record<string, [string, string]> = {
   slots: ["wasm32-wasip3/debug/examples/slots.wasm", "slots"],
   sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
   lifecycle: ["wasm32-wasip3/debug/examples/lifecycle.wasm", "lifecycle"],
+  context: ["wasm32-wasip3/debug/examples/context.wasm", "context"],
 };
 const componentEnv: Record<string, string> = {};
 for (const name in components) {

@@ -157,3 +157,78 @@ fn badge(counter: Counter) -> Element {
     };
     rsx! { span { role: "status", "aria-label": "Wasm counter badge", "Count: {text}" } }
 }
+
+/// The isomorphism proof: the same crate, linked natively through its `ACTIVATE` entry, publishes
+/// what the manifest declares and serves its `count` call (the guest build is exercised by the
+/// engine tests over the wasm component).
+#[cfg(all(test, not(target_os = "wasi")))]
+mod tests {
+    use super::*;
+    use clay_dioxus::NativeComponents;
+    use clay_guest_session::capabilities::CapabilityLimits;
+    use clay_guest_session::capabilities::CapabilitySession;
+    use clay_host::ConfiguredMicro;
+    use clay_host::Host;
+    use clay_host::MicroId;
+    use clay_host::Supervisor;
+    use clay_mdk::MicroManifest;
+    use clay_mdk::host::CollectionBindings;
+    use clay_mdk::host::CollectionRegistry;
+    use clay_mdk::host::DocumentService;
+    use clay_mdk::host::Resources;
+    use clay_mdk::host::factory;
+    use std::collections::BTreeMap;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_native_entry_publishes_both_presentations_and_serves_the_count_call() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let host = Host::new();
+                let resources = Resources::new(
+                    NativeComponents::new(&host),
+                    DocumentService::new(16),
+                    CollectionRegistry::default(),
+                );
+                // Standalone: no configuration document granted, so the count lives in memory.
+                let manifest = MicroManifest {
+                    configuration_requests: vec![],
+                    ..micro_counter_manifest::manifest()
+                };
+                let counter = ConfiguredMicro {
+                    identity: MicroId::new(micro_counter_manifest::ID),
+                    eager: true,
+                    enabled: true,
+                    requirements: BTreeMap::new(),
+                    unresolved_bindings: Vec::new(),
+                    factory: factory(resources, manifest, CollectionBindings::default(), ACTIVATE),
+                };
+                let supervisor = Supervisor::new(host.clone(), [counter]);
+                let id = MicroId::new(micro_counter_manifest::ID);
+                assert!(supervisor.reconcile().await.is_empty());
+                for name in [VIEW, BADGE] {
+                    drop(supervisor.acquire(&id, name).await.unwrap());
+                }
+                let lease = supervisor.acquire(&id, COUNT).await.unwrap();
+                let recipient = host.start("recipient");
+                let reference = CapabilitySession::new(
+                    host.clone(),
+                    recipient.clone(),
+                    CapabilityLimits::default(),
+                )
+                .mint(&lease)
+                .unwrap();
+                let mut request = Vec::new();
+                ciborium::into_writer(&(), &mut request).unwrap();
+                let response = reference.call(request).await.unwrap();
+                assert_eq!(
+                    ciborium::from_reader::<u64, _>(response.as_slice()).unwrap(),
+                    0
+                );
+                drop((reference, lease));
+                supervisor.shutdown().await.unwrap();
+                host.close_instance(&recipient).unwrap();
+                host.close();
+            })
+            .await;
+    }
+}

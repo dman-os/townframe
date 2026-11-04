@@ -20,3 +20,10 @@ clay_mdk = { workspace = true, features = ["guest"] }
 
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
+
+[dev-dependencies]
+ciborium.workspace = true
+clay_dioxus = { workspace = true }
+clay_guest_session = { workspace = true }
+clay_host = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

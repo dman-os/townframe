@@ -20,10 +20,16 @@ struct Wasmi(WcmpPackage);
 
 impl Wasmi {
     async fn load() -> Self {
+        Self::load_fixture("lifecycle").await
+    }
+
+    /// A prepared fixture component by name (`lifecycle`, or `context` for the authoring
+    /// surface's scenario).
+    async fn load_fixture(name: &str) -> Self {
         Self(
-            WcmpPackage::from_env("lifecycle")
+            WcmpPackage::from_env(name)
                 .await
-                .expect("prepared lifecycle component is valid"),
+                .unwrap_or_else(|error| panic!("prepared {name} component is valid: {error}")),
         )
     }
 }
@@ -113,4 +119,14 @@ conformance! {
     disable_with_calls_in_flight_revokes_callers => disable_with_calls_in_flight_revokes_callers,
     shutdown_with_calls_in_flight_revokes_callers => shutdown_with_calls_in_flight_revokes_callers,
     dropped_call_finishes_in_the_guest_without_leaks => dropped_call_finishes_in_the_guest_without_leaks,
+}
+
+/// The shared authoring `Context` on this engine: a guest collection read and a guest
+/// registration write, through the `context` fixture built with `export_micro!`.
+#[tokio::test]
+async fn context_collections_and_calls() {
+    let engine = Wasmi::load_fixture("context").await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::context_collections_and_calls(engine))
+        .await;
 }

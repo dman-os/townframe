@@ -9217,9 +9217,14 @@ dependencies = [
 name = "micro_counter"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
+ "clay_dioxus",
+ "clay_guest_session",
+ "clay_host",
  "clay_mdk",
  "dioxus",
  "micro_counter_manifest",
+ "tokio",
 ]
 
 [[package]]
