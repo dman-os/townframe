@@ -1,66 +1,94 @@
 use super::*;
-use crate::Query;
-use clay_collection::DemandToken;
+use crate::native::CollectionWatch;
+use clay_collection::WriteBasis;
+use clay_guest_session::capabilities::CapabilityLimits;
+use clay_guest_session::capabilities::CapabilitySession;
+use clay_guest_session::collections::CollectionLimits;
+use clay_guest_session::collections::CollectionSession;
+use clay_guest_session::collections::RegistrationGrant;
+use clay_guest_session::collections::bytes_registrations;
 use clay_host::Host;
-use clay_host::HostedCollection;
+use clay_host::MicroId;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::task::Context as TaskContext;
-use std::task::Poll;
 use std::task::Waker;
 
-fn app(reader: CollectionReader<String>) -> Element {
-    let view = use_collection(&reader);
-    let query = Query::new().demand(DemandToken(serde_json::json!(null)));
-    let rows = view.query(&query);
-    let text = format!(
-        "{:?}:{}:{}",
-        view.query_coverage(&query),
-        view.is_closed(),
-        rows.len()
-    );
-    rsx! { "{text}" }
+fn cbor(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(text, &mut bytes).unwrap();
+    bytes
 }
 
-fn render(dom: &mut VirtualDom, tree: &mut clay_surface::SurfaceTree) {
+fn app(watch: CollectionWatch<String, String>) -> Element {
+    let rows = use_rows(&watch);
+    let text = rows
+        .iter()
+        .map(|row| format!("{}={}", row.key, row.value))
+        .collect::<Vec<_>>()
+        .join(",");
+    rsx! { "[{text}]" }
+}
+
+/// Let the feed task and the Dioxus runtime make the progress they can, then render.
+async fn settle(dom: &mut VirtualDom, tree: &mut clay_surface::SurfaceTree) {
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
     {
         let mut work = std::pin::pin!(dom.wait_for_work());
-        assert_eq!(
-            work.as_mut()
-                .poll(&mut TaskContext::from_waker(Waker::noop())),
-            Poll::Ready(())
-        );
+        let _pending = work
+            .as_mut()
+            .poll(&mut TaskContext::from_waker(Waker::noop()));
     }
     dom.render_immediate(tree);
 }
 
-#[test]
-fn collection_hook_renders_coverage_without_rows_and_withdraws_on_revocation() {
-    let host = Host::new();
-    let provider = host.start("provider");
-    let consumer = host.start("consumer");
-    let collection = HostedCollection::<String>::new(&host, &provider);
-    let mut dom = VirtualDom::new_with_props(app, collection.reader(&consumer));
-    let mut tree = clay_surface::SurfaceTree::new();
-    dom.rebuild(&mut tree);
-    assert_eq!(tree.text_content(), "Partial:false:0");
-    render(&mut dom, &mut tree);
-    assert_eq!(tree.text_content(), "Complete:false:0");
-    collection
-        .writer(&provider)
-        .unwrap()
-        .insert("row".into())
-        .unwrap();
-    render(&mut dom, &mut tree);
-    assert_eq!(tree.text_content(), "Complete:false:1");
-    host.close_instance(&consumer).unwrap();
-    render(&mut dom, &mut tree);
-    assert_eq!(tree.text_content(), "Unknown:true:0");
-    drop(dom);
+#[tokio::test(flavor = "current_thread")]
+async fn rows_hook_rerenders_on_each_change_and_hides_tombstones() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let host = Host::new();
+            let instance = host.start("viewer");
+            let registrations = bytes_registrations(NonZeroUsize::new(64).unwrap(), [0, 0]);
+            let sessions =
+                CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
+            let capabilities =
+                CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
+            let writer = sessions
+                .grant_writer(RegistrationGrant {
+                    registrations: registrations.clone(),
+                    micro: MicroId::new("writer"),
+                    prefixes: vec![Vec::new()],
+                })
+                .unwrap();
+            let reader = sessions.grant(registrations.projection()).unwrap();
+            let (watch, feed) = CollectionWatch::<String, String>::start(reader, capabilities);
+            tokio::task::spawn_local(feed);
 
-    let consumer = host.start("unmounted");
-    let mut dom = VirtualDom::new_with_props(app, collection.reader(&consumer));
-    dom.rebuild(&mut tree);
-    render(&mut dom, &mut tree);
-    drop(dom);
-    host.close();
+            let mut dom = VirtualDom::new_with_props(app, watch);
+            let mut tree = clay_surface::SurfaceTree::new();
+            dom.rebuild(&mut tree);
+            settle(&mut dom, &mut tree).await;
+            assert_eq!(tree.text_content(), "[]");
+
+            writer
+                .put(cbor("a"), WriteBasis::Concurrent, cbor("one"))
+                .unwrap();
+            settle(&mut dom, &mut tree).await;
+            assert_eq!(tree.text_content(), "[a=one]");
+
+            let stamp = writer
+                .put(cbor("b"), WriteBasis::Concurrent, cbor("two"))
+                .unwrap();
+            writer
+                .delete(cbor("b"), WriteBasis::Observed(stamp))
+                .unwrap();
+            settle(&mut dom, &mut tree).await;
+            assert_eq!(tree.text_content(), "[a=one]");
+
+            drop(dom);
+            host.close();
+        })
+        .await;
 }

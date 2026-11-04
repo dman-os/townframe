@@ -5,12 +5,12 @@
 //! Dioxus reactivity. Micro views reach both through this module and so never name a renderer
 //! crate (ADR 015 §3 dependency direction).
 use crate::ComponentRef;
-use crate::native::CollectionReader;
+use crate::native::CollectionWatch;
 use crate::native::Instance;
-use crate::native::ReadOnly;
-use crate::native::View;
+use crate::native::Row;
 use clay_dioxus::ComponentMount;
 use dioxus::prelude::*;
+use serde::de::DeserializeOwned;
 
 /// The view-side counterpart of [`crate::native::Context::publish_component`]: mounts a published
 /// component into the host tree, resolving the renderer registry from Dioxus context. Backend-owned
@@ -28,41 +28,29 @@ pub fn ComponentSlot(props: ComponentSlotProps) -> Element {
     rsx! { ComponentMount { owner: props.owner, reference } }
 }
 
-/// Bind a host collection reader to Dioxus reactivity: the returned view re-renders its component
-/// on every committed batch and reports closure once the host withdraws the collection. The
-/// reader's advance loop is owned by the calling component's scope, so dropping the view stops
-/// polling it.
-pub fn use_collection<T: Clone + PartialEq + Send + Sync + 'static>(
-    reader: &CollectionReader<T>,
-) -> View<u64, T, ReadOnly> {
-    let (view, binding, _listener, tick) = use_hook(|| {
-        let binding = reader
-            .view()
-            .expect("collection reader must be live on mount");
-        let view = binding.view().clone();
-        let tick = Signal::new(0_u64);
-        let listener = view.subscribe(move |_event| {
-            let mut tick = tick;
-            tick += 1;
-        });
-        (
-            view,
-            std::rc::Rc::new(std::cell::RefCell::new(Some(binding))),
-            std::rc::Rc::new(listener),
-            tick,
-        )
-    });
+/// Bind a collection mirror to Dioxus reactivity: the returned rows are the mirror's live rows
+/// at this render, and the calling component re-renders on every change the mirror folds in.
+/// The subscription belongs to the calling component's scope, so dropping it stops listening.
+pub fn use_rows<K, V>(watch: &CollectionWatch<K, V>) -> Vec<Row<K, V>>
+where
+    K: DeserializeOwned + 'static,
+    V: DeserializeOwned + 'static,
+{
+    let mut tick = use_signal(|| 0_u64);
+    let revisions = use_hook(|| watch.revisions());
     use_future(move || {
-        let binding = binding.clone();
+        let mut revisions = revisions.clone();
         async move {
-            let Some(mut binding) = binding.borrow_mut().take() else {
-                return;
-            };
-            while binding.advance().await {}
+            // The sender lives in the incarnation's feed task; it ends when the incarnation does.
+            while revisions.changed().await.is_ok() {
+                tick += 1;
+            }
         }
     });
     let _ = tick();
-    view
+    watch
+        .rows()
+        .expect("the collection mirror outlives the view that reads it")
 }
 
 #[cfg(test)]
