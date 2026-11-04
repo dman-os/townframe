@@ -1,7 +1,9 @@
 # ADR 030: Micro lifecycle, lazy activation, and manifest contract
 
-**Status:** Proposed. The lifecycle core is partially implemented; the WIT and revised
-manifest shape are not.
+**Status:** Proposed. The lifecycle contract, the WIT and the revised manifest shape are
+implemented and run on native, Wasmtime and WCMP micros; the validation list below is
+tracked in `docs/scratch/clay-pr-ledger.md` ("Validation matrix"), with dynamic retention
+cycles and a single conformance battery shared by native micros still open.
 
 **Amends:** ADR 014's binding-derived lifecycle and ADR 015 §§7–10. **Builds on:**
 ADR 017's projection leases and ADR 029's cross-guest capability bank.
@@ -644,28 +646,29 @@ Those are configuration or runtime facts.
 
 ## Implementation status
 
-Built today:
+Built:
 
 - stable configured identities and fresh incarnations;
-- enablement and per-instance `eager` startup;
-- configured requirement bindings and cycle rejection;
-- static manifest contribution declarations;
-- incarnation-owned `accept` / `accept_all` policy;
-- reachability from eager roots through requirements and accepted declarations;
-- idle eviction, fault retention, broker revocation, and staged provisions;
-- incarnation-owned local futures.
+- enablement (a durable install datum reconciled by the supervisor) and per-instance `eager` startup;
+- configured requirement bindings and precise cycle rejection;
+- manifest admission from a package sidecar, with contributions installed before any guest runs;
+- durable collection backing and installation registration scopes, with writer-handle versus
+  incarnation-scope ownership;
+- lazy activation attachments, named publication slots and leased/retained redemption;
+- resource-driven idle `Closing` sequencing and async `instance-root.close()` on Wasmtime and WCMP;
+- the context-centered MDK surface; and
+- reachability from eager roots through requirements, plus idle eviction, fault retention,
+  broker revocation and staged provisions.
 
 Not built:
 
-- manifest admission from the `big_plugs_core` envelope and a Clay desired-state/enablement service;
-- durable collection backing and installation registration scopes;
-- lazy activation attachments and named publication slots;
-- the unified writer-handle versus registration-scope ownership rule;
-- resource-driven idle `Closing` sequencing and async `instance-root.close()` across both engines;
-- the revised context-centered MDK surface; and
-- installer/enablement reconciliation.
-
-Built checkpoints include the leased collection WIT, owner-scoped registration writers with writer-owned cleanup (now to be revised to scope ownership), and ADR 029 capability attachments/redemption. Those checkpoints do not yet implement ADR 031's durable or lazy lifecycle.
+- manifest admission from the `big_plugs_core` envelope (a stand-in sidecar and local namespace
+  stand for it) and the installer/uninstall flow around it;
+- holder identity on lazy retention, so a cycle of retained leases between incarnations is
+  not computed unreachable (validation 8);
+- schema validation of collection keys and values (limits, attachment indices and selector
+  ceilings are enforced; Lexicon validation is not); and
+- a native micro run through the engine conformance battery.
 
 ## Consequences
 
