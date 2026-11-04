@@ -840,16 +840,16 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                     if settings_open() { "Close Settings" } else { "Open Settings" }
                 }
             }
-            if settings_open() {
-                for row in roots.iter() {
-                    div { key: "{row.key}", "aria-label": "{row.value.title}",
-                        // The root's presentation is a row attachment: a lazy endpoint the
-                        // shell redeems, which starts the micro that publishes it. Guest-written
-                        // mounting micros (workspace layout, canvas) place other components
-                        // through the wire-level slot primitive of ADR 015 §10.
-                        PresentationSlot {
-                            reference: row.attachments[row.value.content.index()].clone(),
-                        }
+            // A pinned root (the toolbar) shows however Settings is folded; the toggle covers
+            // every other root.
+            for row in roots.iter().filter(|row| row.value.pinned || settings_open()) {
+                div { key: "{row.key}", "aria-label": "{row.value.title}",
+                    // The root's presentation is a row attachment: a lazy endpoint the
+                    // shell redeems, which starts the micro that publishes it. Guest-written
+                    // mounting micros (workspace layout, canvas) place other components
+                    // through the wire-level slot primitive of ADR 015 §10.
+                    PresentationSlot {
+                        reference: row.attachments[row.value.content.index()].clone(),
                     }
                 }
             }

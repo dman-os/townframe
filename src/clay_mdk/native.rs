@@ -156,11 +156,14 @@ impl CollectionBindings {
 pub const SHELL_ROOTS: &str = "org.example.clay.shell.roots";
 
 /// One [`SHELL_ROOTS`] row, keyed by the registering micro's id: a title and the root
-/// presentation (an attachment of the row).
+/// presentation (an attachment of the row). A `pinned` root stays on screen however the shell
+/// folds its other roots (Settings can be closed; a toolbar cannot); an absent field is `false`.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RootRow {
     pub title: String,
     pub content: Attachment,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Local tasks an incarnation owns. Dropping them aborts them, so a failed initialization
