@@ -462,6 +462,7 @@ pub use manifest::Nsid;
 pub use manifest::PublicationDeclaration;
 pub use manifest::PublicationKind;
 pub use manifest::Request;
+pub use manifest::SHELL_ROOTS;
 pub use manifest::Sidecar;
 
 mod component;

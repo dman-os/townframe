@@ -10,7 +10,6 @@ pub use crate::native::DeclaredRows;
 pub use crate::native::DocumentService;
 pub use crate::native::Resources;
 pub use crate::native::RootRow;
-pub use crate::native::SHELL_ROOTS;
 pub use crate::native::declared_rows;
 pub use crate::native::factory;
 pub use crate::native::manifest_scope;

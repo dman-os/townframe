@@ -22,8 +22,8 @@ use clay_mdk::Nsid;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
+use clay_mdk::SHELL_ROOTS;
 use clay_mdk::Sidecar;
-use clay_mdk::host::SHELL_ROOTS;
 use serde::Deserialize;
 use serde::Serialize;
 

@@ -7,6 +7,7 @@ use crate::PublicationDeclaration;
 use crate::PublicationKind;
 use crate::Registration;
 use crate::Request;
+use crate::SHELL_ROOTS;
 use crate::Sidecar;
 use clay_collection::ReplicaId;
 use clay_guest_session::capabilities::PublicationEndpoint;
