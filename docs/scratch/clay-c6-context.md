@@ -557,7 +557,7 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   with its own `feed` holding one row (`peer` or `init`) that attaches the other's `echo` as a lazy reference; a `Peer<E>` factory hands each
   incarnation its own activator (so the leases it takes are incarnation-held) and a root that closes the engine incarnation, asserts
   `GuestResidue::NONE`, and joins the driver. The micro gained `echo` and the `init` row (a call `activate` makes and waits for).
-  `context_peers_retaining_each_other_close_together`: `hold` on each through an external lease; dropping either lease keeps both up
+  `context_peers_retaining_each_other_close_together`: `hold` on each through an external lease; dropping `a`'s lease keeps both up (b's binding reaches a)
   (32 yields, log unchanged), dropping the other closes both once. `context_peers_demanding_each_other_fail_as_unavailable`: acquiring `a`
   fails `Faulted`, both micros `Faulted` with an "unavailable" message and no instance, log `initialize a, initialize b`. All on native,
   Wasmtime and Wasmi.
