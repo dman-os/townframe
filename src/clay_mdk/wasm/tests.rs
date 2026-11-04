@@ -402,3 +402,204 @@ async fn guest_activation_failure_faults_the_micro_and_publishes_nothing() {
     })
     .await;
 }
+
+/// A guest micro (the `context` fixture) hosts a `PresentationSlot` over another guest's
+/// presentation (the counter's `view`): the slot redeems the row's lazy reference, the guest
+/// emits `mount-component` at its position, and the host renders the counter inside it.
+/// Disabling the provider ends its incarnation, which the slot shows as unavailable; enabling it
+/// mounts the next incarnation in the same slot, without remounting the consumer.
+#[tokio::test]
+async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_disable_and_enable()
+{
+    use clay_guest_session::capabilities::PublicationEndpoint;
+    use clay_guest_session::capabilities::RowAttachment;
+    use clay_guest_session::collections::CollectionLimits;
+    use clay_guest_session::collections::CollectionSession;
+    use clay_guest_session::collections::CollectionValue;
+    use clay_guest_session::collections::bytes_registrations;
+    use clay_host::CollectionContract;
+
+    in_local_set(async {
+        let host = Host::new();
+        let components = NativeComponents::new(&host);
+        let resources = Resources::new(
+            components.clone(),
+            DocumentService::new(16),
+            CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
+        );
+        let feed = Nsid::literal("org.example.clay.test.context.feed");
+        resources
+            .collections
+            .declare(
+                CollectionContract {
+                    id: feed.clone(),
+                    key_schema: Nsid::literal("org.example.clay.test.rowKey"),
+                    value_schema: Nsid::literal("org.example.clay.test.rowValue"),
+                },
+                bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), [0, 0]),
+            )
+            .unwrap();
+        let counter_id = clay_host::MicroId::new(MicroId::local("slot.counter").as_str());
+        let consumer_id = clay_host::MicroId::new(MicroId::local("slot.consumer").as_str());
+        let call = |name: &str, contract: &str| PublicationDeclaration {
+            name: name.into(),
+            kind: PublicationKind::Call,
+            contract: Some(Nsid::literal(contract)),
+        };
+        let presentation = |name: &str| PublicationDeclaration {
+            name: name.into(),
+            kind: PublicationKind::Presentation,
+            contract: None,
+        };
+        // The declaration of `src/clay_mdk/context_fixture.rs`.
+        let consumer_manifest = MicroManifest {
+            entrypoints: Entrypoints::micro_client(),
+            publications: vec![
+                call("rows", "org.example.clay.test.context.rows"),
+                call("attach", "org.example.clay.test.context.attach"),
+                call("follow", "org.example.clay.test.context.follow"),
+                presentation("detail"),
+                presentation("slot"),
+            ],
+            requires: vec![],
+            configuration_requests: vec![],
+            collection_contracts: vec![],
+            collection_requests: vec![crate::Request {
+                binding: "feed".into(),
+                contract: feed.clone(),
+                access: Some(crate::Access::Write),
+                necessity: crate::Necessity::Required,
+                resolution: crate::BindingResolution::Configured,
+                min_revision: None,
+            }],
+            contributions: vec![],
+            extra: BTreeMap::new(),
+        };
+        let counter_package = counter_package().await;
+        let consumer_package = super::component_package("context")
+            .await
+            .expect("prepared context component is valid");
+        let micro = |identity: &clay_host::MicroId,
+                     name: &str,
+                     manifest: MicroManifest,
+                     bindings: CollectionBindings,
+                     package: WasmPackage| {
+            ConfiguredMicro {
+                identity: identity.clone(),
+                eager: false,
+                enabled: true,
+                requirements: BTreeMap::new(),
+                unresolved_bindings: Vec::new(),
+                factory: factory(
+                    resources.clone(),
+                    MicroId::local(name),
+                    manifest,
+                    bindings,
+                    move || {
+                        let package = package.clone();
+                        async move { Ok(package) }
+                    },
+                ),
+            }
+        };
+        let supervisor = Rc::new(Supervisor::new(
+            host.clone(),
+            [
+                micro(
+                    &counter_id,
+                    "slot.counter",
+                    manifest("view", None),
+                    CollectionBindings::default(),
+                    counter_package,
+                ),
+                micro(
+                    &consumer_id,
+                    "slot.consumer",
+                    consumer_manifest,
+                    CollectionBindings::new([(
+                        "feed".to_owned(),
+                        crate::native::BoundCollection::write(feed.clone()),
+                    )]),
+                    consumer_package,
+                ),
+            ],
+        ));
+        // Redeeming a lazy reference is served by the supervisor's driver.
+        let serving = tokio::task::spawn_local({
+            let supervisor = Rc::clone(&supervisor);
+            async move { supervisor.drive().await }
+        });
+        // The row the consumer's `slot` shows: its attachment is the counter's `view`.
+        let cbor = |text: &str| {
+            let mut bytes = Vec::new();
+            ciborium::into_writer(text, &mut bytes).unwrap();
+            bytes
+        };
+        CollectionSession::new(
+            host.clone(),
+            host.start("seeder"),
+            CollectionLimits::default(),
+        )
+        .grant_writer(
+            resources
+                .collections
+                .grant(&feed, &clay_host::MicroId::new("seeder"))
+                .unwrap(),
+        )
+        .unwrap()
+        .put_value(
+            cbor("view"),
+            clay_collection::WriteBasis::Concurrent,
+            CollectionValue {
+                body: cbor("view"),
+                attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
+                    micro: counter_id.clone(),
+                    publication: "view".to_owned(),
+                    contract: presentation_component(),
+                })],
+            },
+        )
+        .unwrap();
+
+        let slot = supervisor.acquire(&consumer_id, "slot").await.unwrap();
+        let mut dom = VirtualDom::new_with_props(
+            mount_host_app,
+            MountProps {
+                components,
+                owner: host.start("viewer"),
+                reference: slot.component().expect("a presentation has a component"),
+            },
+        );
+        let mut tree = SurfaceTree::new();
+        dom.rebuild(&mut tree);
+        // Each wake is a task or signal of the slot, so a slot that never gets there hangs
+        // until the test runner's timeout.
+        async fn shows(dom: &mut VirtualDom, tree: &mut SurfaceTree, text: &str) {
+            loop {
+                dom.render_immediate(tree);
+                if tree.text_content().contains(text) {
+                    return;
+                }
+                dom.wait_for_work().await;
+            }
+        }
+        shows(&mut dom, &mut tree, "0").await;
+        // The counter inside the guest slot is interactive.
+        click(&mut dom, &mut tree);
+        assert_eq!(tree.text_content(), "1");
+        assert_eq!(supervisor.state(&counter_id), MicroState::Active);
+
+        supervisor.disable(&counter_id).await.unwrap();
+        shows(&mut dom, &mut tree, "Section unavailable").await;
+        supervisor.enable(&counter_id);
+        shows(&mut dom, &mut tree, "0").await;
+        assert_eq!(supervisor.state(&counter_id), MicroState::Active);
+
+        drop(dom);
+        drop(slot);
+        serving.abort();
+        supervisor.shutdown().await.unwrap();
+        host.close();
+    })
+    .await;
+}

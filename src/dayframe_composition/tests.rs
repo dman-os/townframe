@@ -171,7 +171,7 @@ fn section_refs(
 ) {
     Collection::observe(
         &runtime.host,
-        &runtime.shell,
+        runtime.shell(),
         runtime.supervisor.activator(),
         &runtime.collection(&sections()).unwrap(),
     )
@@ -913,13 +913,12 @@ async fn a_widened_request_is_unresolved_until_configured_again_and_enablement_i
 #[derive(Clone, PartialEq, Props)]
 struct SlotApp {
     components: NativeComponents,
-    owner: Instance,
     reference: Capability,
 }
 
 fn slot_app(props: SlotApp) -> Element {
     use_context_provider(|| props.components.clone());
-    rsx! { PresentationSlot { owner: props.owner, reference: props.reference } }
+    rsx! { PresentationSlot { reference: props.reference } }
 }
 
 /// A slot over the counter's section detail, rendered into a surface tree the way a shell
@@ -937,7 +936,6 @@ async fn counter_slot(runtime: &CompositionRuntime) -> (VirtualDom, clay_surface
         slot_app,
         SlotApp {
             components: runtime.components.clone(),
-            owner: runtime.shell.clone(),
             reference: counter.attachments[counter.value.detail.index()].clone(),
         },
     );

@@ -663,6 +663,14 @@ impl<T: 'static> capability_bank::HostCapabilityRefWithStore<T> for HasSelf<Test
     > {
         Ok(Err(capability_bank::CapabilityError::LimitExceeded))
     }
+
+    async fn status_changed(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<capability_bank::CapabilityRef>,
+        _seen: capability_bank::RefStatus,
+    ) -> wasmtime::Result<()> {
+        unreachable!("the counter fixture follows no provider");
+    }
 }
 
 impl capability_bank::HostCallBinding for TestHost {
@@ -698,6 +706,15 @@ impl capability_bank::HostPresentationComponent for TestHost {
     ) -> wasmtime::Result<()> {
         self.table.delete(proxy)?;
         Ok(())
+    }
+}
+
+impl<T: 'static> capability_bank::HostPresentationComponentWithStore<T> for HasSelf<TestHost> {
+    async fn revoked(
+        _accessor: &Accessor<T, Self>,
+        _proxy: Resource<capability_bank::PresentationComponent>,
+    ) -> wasmtime::Result<()> {
+        unreachable!("the counter fixture follows no provider");
     }
 }
 

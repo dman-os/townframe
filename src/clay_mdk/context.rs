@@ -117,6 +117,26 @@ impl Capability {
         Self(CapabilityInner::Guest(reference))
     }
 
+    /// Whether this reference belongs to a wasm guest rather than an in-process micro.
+    #[cfg(feature = "guest")]
+    pub(crate) fn is_guest(&self) -> bool {
+        match &self.0 {
+            #[cfg(feature = "in_process")]
+            CapabilityInner::InProcess(_) => false,
+            CapabilityInner::Guest(_) => true,
+        }
+    }
+
+    /// What tells two guest references apart for a component key: the held resource's address.
+    #[cfg(feature = "guest")]
+    pub(crate) fn identity(&self) -> usize {
+        match &self.0 {
+            #[cfg(feature = "in_process")]
+            CapabilityInner::InProcess(_) => unreachable!("only guest references have an address"),
+            CapabilityInner::Guest(reference) => Rc::as_ptr(reference) as usize,
+        }
+    }
+
     pub fn status(&self) -> RefStatus {
         match &self.0 {
             #[cfg(feature = "in_process")]
@@ -126,15 +146,17 @@ impl Capability {
         }
     }
 
-    /// Ticks whenever the provider's status may have changed; re-read [`Self::status`] on each
-    /// tick. `None` where the status can only end once (a reference to a live publication).
-    /// In-process only, like [`Self::redeem_presentation`].
-    #[cfg(feature = "in_process")]
-    pub fn status_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+    /// Completes once [`Self::status`] differs from `seen` (at once if it already does), so a
+    /// holder that saw a failure waits for its provider to change (a disabled micro enabled, an
+    /// unconfigured one configured) instead of retrying. Woken by the supervisor's status
+    /// ticks, never by polling. A reference to a live publication has no restart to follow and
+    /// never completes.
+    pub async fn status_changed(&self, seen: RefStatus) {
         match &self.0 {
-            CapabilityInner::InProcess(reference) => reference.status_changes(),
+            #[cfg(feature = "in_process")]
+            CapabilityInner::InProcess(reference) => reference.status_changed(seen.into()).await,
             #[cfg(feature = "guest")]
-            CapabilityInner::Guest(_) => unreachable!("guest references are not redeemable yet"),
+            CapabilityInner::Guest(reference) => reference.status_changed(seen.into()).await,
         }
     }
 
@@ -157,16 +179,85 @@ impl Capability {
 
     /// Redeem the provider's presentation, activating the provider if the reference is lazy.
     /// The returned proxy holds the provider live for as long as it is held, so a slot keeps it
-    /// for exactly the life of what it mounts (ADR 031 §9). In-process only: a guest has no way
-    /// to mount a redeemed component yet.
-    #[cfg(feature = "in_process")]
-    pub async fn redeem_presentation(
-        &self,
-    ) -> Result<clay_guest_session::capabilities::PresentationComponent, Error> {
-        match &self.0 {
-            CapabilityInner::InProcess(reference) => Ok(reference.redeem_presentation().await?),
+    /// for exactly the life of what it mounts (ADR 031 §9).
+    pub async fn redeem_presentation(&self) -> Result<PresentationComponent, Error> {
+        Ok(PresentationComponent(match &self.0 {
+            #[cfg(feature = "in_process")]
+            CapabilityInner::InProcess(reference) => {
+                PresentationInner::InProcess(reference.redeem_presentation().await?)
+            }
             #[cfg(feature = "guest")]
-            CapabilityInner::Guest(_) => unreachable!("guest references are not redeemable yet"),
+            CapabilityInner::Guest(reference) => {
+                PresentationInner::Guest(Rc::new(reference.redeem_presentation().await?))
+            }
+        }))
+    }
+}
+
+/// A redeemed presentation: the provider stays live while this is held. Mounted by the
+/// [`crate::hooks::PresentationSlot`] component.
+pub struct PresentationComponent(PresentationInner);
+
+enum PresentationInner {
+    #[cfg(feature = "in_process")]
+    InProcess(clay_guest_session::capabilities::PresentationComponent),
+    #[cfg(feature = "guest")]
+    Guest(Rc<crate::capability_bank::PresentationComponent>),
+}
+
+/// What a slot mounts for a redeemed presentation: the component reference the provider's
+/// publication renders as. In-process the host reference is mounted by the installed renderer
+/// on behalf of the micro that redeemed it; in a guest it is the `component-ref` resource, which
+/// the guest runtime sends to the host with `mount-component`.
+#[derive(Clone, PartialEq)]
+pub struct Mount(pub(crate) MountInner);
+
+#[derive(Clone)]
+pub(crate) enum MountInner {
+    #[cfg(feature = "in_process")]
+    InProcess(Instance, clay_host::ComponentRef),
+    #[cfg(feature = "guest")]
+    Guest(Rc<crate::presentation::ComponentRef>),
+}
+
+impl PartialEq for MountInner {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            #[cfg(feature = "in_process")]
+            (Self::InProcess(left, left_ref), Self::InProcess(right, right_ref)) => {
+                left == right && left_ref == right_ref
+            }
+            #[cfg(feature = "guest")]
+            (Self::Guest(left), Self::Guest(right)) => Rc::ptr_eq(left, right),
+            #[cfg(all(feature = "in_process", feature = "guest"))]
+            _ => false,
+        }
+    }
+}
+
+impl PresentationComponent {
+    /// The component to mount, or why there is none (the provider's incarnation ended, or the
+    /// incarnation holds as many component references as it may).
+    pub fn component(&self) -> Result<Mount, Error> {
+        Ok(Mount(match &self.0 {
+            #[cfg(feature = "in_process")]
+            PresentationInner::InProcess(proxy) => {
+                MountInner::InProcess(proxy.owner().clone(), proxy.component()?)
+            }
+            #[cfg(feature = "guest")]
+            PresentationInner::Guest(proxy) => MountInner::Guest(Rc::new(proxy.component()?)),
+        }))
+    }
+
+    /// Completes once the provider incarnation this was redeemed from has ended, after which
+    /// [`Self::component`] fails and a slot redeems again. Woken by the supervisor's status
+    /// ticks; a proxy of a live publication has no restart to follow and never completes.
+    pub async fn revoked(&self) {
+        match &self.0 {
+            #[cfg(feature = "in_process")]
+            PresentationInner::InProcess(proxy) => proxy.revocation().wait().await,
+            #[cfg(feature = "guest")]
+            PresentationInner::Guest(proxy) => proxy.revoked().await,
         }
     }
 }

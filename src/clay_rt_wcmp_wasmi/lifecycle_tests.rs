@@ -130,3 +130,13 @@ async fn context_collections_and_calls() {
         .run_until(lifecycle_conformance::context_collections_and_calls(engine))
         .await;
 }
+
+/// A guest slot's two waits on this engine: `status-changed` wakes a redemption that failed and
+/// `revoked` ends a mounted one, both driven by the supervisor's status ticks.
+#[tokio::test]
+async fn context_follows_a_provider() {
+    let engine = Wasmi::load_fixture("context").await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::context_follows_a_provider(engine))
+        .await;
+}

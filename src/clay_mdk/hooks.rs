@@ -1,24 +1,25 @@
 //! The view-side half of the authoring surface: Dioxus hooks that bind the handles a micro's
-//! `activate` captured to reactivity, and (in-process) the slot components that mount another
-//! micro's published component into the host tree *through the installed renderer*. Micro views
-//! reach both through this module and so never name a renderer crate (ADR 015 §3 dependency
-//! direction).
+//! `activate` captured to reactivity, and the slot components that mount another micro's
+//! published component into this micro's tree: in-process *through the installed renderer*, in a
+//! guest by emitting `mount-component` at the slot's position. Micro views reach both through
+//! this module and so never name a renderer crate (ADR 015 §3 dependency direction).
+use crate::Capability;
 use crate::Collection;
 use crate::Facet;
 use crate::FacetSnapshot;
 use crate::Row;
+use crate::context::Mount;
+use crate::context::MountInner;
 use dioxus::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::rc::Rc;
 
 #[cfg(feature = "view")]
-use crate::Capability;
-#[cfg(feature = "view")]
 use crate::ComponentRef;
 #[cfg(feature = "view")]
 use crate::Instance;
-#[cfg(feature = "view")]
+#[cfg(feature = "in_process")]
 use clay_dioxus::ComponentMount;
 
 /// The view-side counterpart of [`crate::Context::publish_component`]: mounts a published
@@ -37,90 +38,152 @@ pub fn ComponentSlot(props: ComponentSlotProps) -> Element {
     rsx! { ComponentMount { owner: props.owner, reference } }
 }
 
-#[cfg(feature = "view")]
 #[derive(Props, Clone, PartialEq)]
 pub struct PresentationSlotProps {
-    pub owner: Instance,
     pub reference: Capability,
 }
 
 /// What a slot shows: the presentation it redeemed, or why there is none right now.
-#[cfg(feature = "view")]
 enum SlotState {
     Loading,
     Unavailable(crate::Error),
-    Mounted(clay_host::ComponentRef),
+    Mounted(Mount),
 }
 
-/// Mount the presentation a row attaches. The redemption is asynchronous (a lazy reference
-/// activates its provider) and the redeemed proxy is held for exactly as long as this
-/// component lives, so unmounting it releases the provider (ADR 031 §9).
+/// Follow `reference`'s provider, reporting what the slot should show to `show`, until the
+/// slot is dropped. The redemption is asynchronous (a lazy reference activates its provider)
+/// and the redeemed proxy is held for exactly as long as it is mounted, so dropping the slot
+/// releases the provider (ADR 031 §9).
 ///
-/// The slot follows its provider rather than redeeming once. A redemption that fails renders
-/// its failure, and the next redemption waits for the reference's status to move off the
-/// status the failure left it in (a disabled micro enabled, an unconfigured one configured, a
-/// faulted one `retry`'d), so a provider that keeps failing is never redeemed in a loop. A
-/// mounted presentation whose incarnation ends renders as loading and is redeemed again, which
-/// demand-starts the provider's next incarnation. Both waits are woken by the supervisor's
-/// status ticks; nothing polls.
-#[cfg(feature = "view")]
+/// A redemption that fails shows its failure, and the next redemption waits for the
+/// reference's status to move off the status the failure left it in (a disabled micro enabled,
+/// an unconfigured one configured, a faulted one `retry`'d), so a provider that keeps failing is
+/// never redeemed in a loop. A mounted presentation whose incarnation ends shows as loading and
+/// is redeemed again, which demand-starts the provider's next incarnation. Both waits are woken
+/// by the supervisor's status ticks; nothing polls. They are the same two host waits in-process
+/// and in a guest (`status-changed`, `revoked`), so the slot is written once.
+async fn follow_provider(reference: Capability, mut show: impl FnMut(SlotState)) {
+    loop {
+        // Read before redeeming: a status change after the failure then still wakes the wait
+        // below, where reading it afterwards could miss a provider enabled in between.
+        let before = reference.status();
+        let failure = match reference.redeem_presentation().await {
+            Ok(proxy) => match proxy.component() {
+                Ok(component) => {
+                    show(SlotState::Mounted(component));
+                    proxy.revoked().await;
+                    show(SlotState::Loading);
+                    continue;
+                }
+                Err(failure) => failure,
+            },
+            Err(failure) => failure,
+        };
+        // Redeeming again before the status moves would only fail the same way.
+        show(SlotState::Unavailable(failure));
+        reference.status_changed(before).await;
+    }
+}
+
+/// Mount the presentation a row attaches (or any other [`Capability`] to a presentation),
+/// in-process and in a wasm guest alike. The backend decides only how the redeemed component
+/// reaches the tree: the installed renderer mounts it in-process, a guest emits
+/// `mount-component` at the slot's position.
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn PresentationSlot(props: PresentationSlotProps) -> Element {
-    let mut state = use_signal(|| SlotState::Loading);
-    // Reactive over the prop: a row that keeps its key but attaches another target redeems
-    // anew, and dropping the old future drops its redemption, releasing the previous provider.
-    let reference = props.reference.clone();
-    use_future(use_reactive!(|(reference,)| {
-        let reference = reference.clone();
-        async move {
-            state.set(SlotState::Loading);
-            // `None` for a reference to a live publication, which has no restart to follow.
-            let mut changes = reference.status_changes();
-            loop {
-                let failure = match reference.redeem_presentation().await {
-                    Ok(proxy) => match proxy.component() {
-                        Ok(component) => {
-                            state.set(SlotState::Mounted(component));
-                            // The proxy is revoked when its incarnation closes, which the
-                            // supervisor records as a status change right after.
-                            while !proxy.is_revoked() {
-                                let Some(changes) = changes.as_mut() else {
-                                    return std::future::pending().await;
-                                };
-                                if changes.changed().await.is_err() {
-                                    return;
-                                }
-                            }
-                            state.set(SlotState::Loading);
-                            continue;
-                        }
-                        Err(failure) => crate::Error::from(failure),
-                    },
-                    Err(failure) => failure,
-                };
-                // Redeeming again before the status moves would only fail the same way.
-                let failed_at = reference.status();
-                state.set(SlotState::Unavailable(failure));
-                while reference.status() == failed_at {
-                    let Some(changes) = changes.as_mut() else {
-                        return std::future::pending().await;
-                    };
-                    if changes.changed().await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    }));
-    match &*state.read() {
+    let reference = props.reference;
+    #[cfg(feature = "guest")]
+    if reference.is_guest() {
+        // Keyed by the reference: a row that keeps its key but attaches another target gets a
+        // fresh task, and dropping the old one releases the previous provider.
+        let key = reference.identity();
+        return rsx! { GuestSlot { key: "{key}", reference } };
+    }
+    #[cfg(feature = "view")]
+    return rsx! { InProcessSlot { reference } };
+    #[cfg(not(feature = "view"))]
+    unreachable!("without the `view` feature every reference belongs to a guest")
+}
+
+fn render_state(state: &SlotState) -> Element {
+    match state {
         SlotState::Loading => rsx! { p { role: "status", "Loading section…" } },
         SlotState::Unavailable(failure) => {
             rsx! { p { role: "alert", "Section unavailable: {failure:?}" } }
         }
-        SlotState::Mounted(reference) => {
-            rsx! { ComponentMount { owner: props.owner, reference: *reference } }
+        SlotState::Mounted(mount) => rsx! { MountedSlot { mount: mount.clone() } },
+    }
+}
+
+#[cfg(feature = "view")]
+#[component]
+fn InProcessSlot(reference: Capability) -> Element {
+    let mut state = use_signal(|| SlotState::Loading);
+    // Reactive over the prop: dropping the old future drops its redemption.
+    use_future(use_reactive!(|(reference,)| async move {
+        state.set(SlotState::Loading);
+        follow_provider(reference, |next| state.set(next)).await;
+    }));
+    render_state(&state.read())
+}
+
+/// A guest slot's state, shared between its component and the runtime task that follows the
+/// provider. Nothing polls Dioxus tasks in a guest, so the task cannot write a signal: it
+/// stores the state here and asks the runtime to tick every presentation, which re-renders the
+/// component that subscribed to the tick.
+#[cfg(feature = "guest")]
+#[component]
+fn GuestSlot(reference: Capability) -> Element {
+    let tick = use_context::<crate::guest::ChangeTick>().0;
+    let _ = tick();
+    let (state, cancel) = use_hook(|| {
+        let state = Rc::new(std::cell::RefCell::new(SlotState::Loading));
+        let runtime = crate::guest::Runtime::current();
+        let cancel = runtime.spawn_for_view(Box::pin({
+            let state = Rc::clone(&state);
+            let runtime = Rc::clone(&runtime);
+            follow_provider(reference, move |next| {
+                *state.borrow_mut() = next;
+                runtime.notify_views();
+            })
+        }));
+        (state, cancel)
+    });
+    use_drop(move || cancel.cancel());
+    render_state(&state.borrow())
+}
+
+#[component]
+fn MountedSlot(mount: Mount) -> Element {
+    match mount.0 {
+        #[cfg(feature = "in_process")]
+        MountInner::InProcess(owner, reference) => {
+            rsx! { ComponentMount { owner, reference } }
+        }
+        #[cfg(feature = "guest")]
+        MountInner::Guest(ref component) => {
+            // A changed component is another element, so the one that is written is never
+            // rewritten (see `wire::SLOT_ATTRIBUTE`).
+            let key = Rc::as_ptr(component) as usize;
+            rsx! { GuestMount { key: "{key}", mount } }
         }
     }
+}
+
+/// The element a guest emits for a mounted component: it carries the slot id and nothing else,
+/// and the wire writer turns the attribute into `mount-component`. `display: contents` keeps the
+/// element itself out of the layout, so the component lays out as if mounted in its place.
+#[cfg(feature = "guest")]
+#[component]
+fn GuestMount(mount: Mount) -> Element {
+    let MountInner::Guest(component) = mount.0 else {
+        unreachable!("guest slots mount guest components");
+    };
+    let slots = use_context::<Rc<crate::guest::Slots>>();
+    let id = use_hook(|| slots.hold(component));
+    use_drop(move || slots.retire(id));
+    let id = i64::try_from(id).expect("slot ids stay within i64");
+    rsx! { div { style: "display: contents", "data-clay-slot": id } }
 }
 
 /// What tells a hook its source changed. In-process, the source's own stream is awaited by a
