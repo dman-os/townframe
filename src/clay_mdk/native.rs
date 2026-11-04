@@ -1,19 +1,20 @@
-//! The in-process backend: one authoring API over the host's composition machinery. Native
-//! micros depend on this module, never on `clay_micro_core`, a renderer crate, or the host kernel
-//! directly (ADR 015 §3 dependency direction, §Boundary correction). The MDK adds ergonomics,
-//! never authority: every operation below still runs through the host's checked services.
+//! The in-process backend: one authoring API over the host's session machinery. Native micros
+//! depend on this module, never on a renderer crate or the host kernel directly (ADR 015 §3
+//! dependency direction). The MDK adds ergonomics, never authority: every operation below
+//! still runs through the same host sessions a guest's engine drives, so a native micro and a
+//! guest are interchangeable to every other micro (ADR 025 §5).
 //!
-//! Nothing here names a renderer. A [`Context`] is generic over the host's [`RendererRegistry`],
-//! so the same micro composes under whatever registry the composition root installed; publishing
-//! a component hands the registry a factory producing *its* element type. Presentation that does
-//! need a concrete renderer — the view-side slot component and the collection hook — lives in
-//! [`crate::view`].
+//! A native micro is one [`factory`]: a manifest plus an `activate` function. The supervisor
+//! runs it as an incarnation like any guest: `activate` stages publications through the
+//! [`Context`], and what it staged is admitted against the manifest's declared publications
+//! and handed back by name (ADR 025 §8). Nothing here names a renderer: a [`Context`] is
+//! generic over the host's [`RendererRegistry`].
+//!
+//! Incarnation-owned work (the collection mirrors, [`Context::own_future`]) runs as local
+//! tasks, so a supervisor driving native micros runs inside a `tokio::task::LocalSet`.
 
-pub use clay_collection::Batch;
-pub use clay_collection::Query;
-pub use clay_collection::ReadOnly;
-pub use clay_collection::RowChange;
-pub use clay_collection::View;
+mod collections;
+
 pub use clay_docs::DocumentRef;
 pub use clay_docs::DocumentService;
 pub use clay_docs::DocumentSnapshot;
@@ -24,194 +25,119 @@ pub use clay_docs::FacetValue;
 pub use clay_docs::Freshness;
 pub use clay_docs::Operation;
 pub use clay_docs::OperationReceipt;
+pub use clay_guest_session::capabilities::CallError;
+pub use clay_guest_session::capabilities::CallTarget;
+pub use clay_guest_session::capabilities::CapabilityFailure;
+pub use clay_guest_session::capabilities::CapabilityPublication;
+pub use clay_guest_session::capabilities::CapabilityRef;
+pub use clay_guest_session::capabilities::ContractIdentity;
+pub use clay_guest_session::capabilities::PresentationComponent;
+pub use clay_guest_session::collections::WriteFailure;
 pub use clay_host::AccessError;
-pub use clay_host::CollectionReader;
-pub use clay_host::CollectionSubscription;
-pub use clay_host::CollectionWriter;
-pub use clay_host::Entry;
+pub use clay_host::CollectionRegistry;
 pub use clay_host::Instance;
 pub use clay_host::RendererRegistry;
-pub use clay_micro_core::micros::Declaration;
+pub use collections::Attachment;
+pub use collections::CollectionWatch;
+pub use collections::Registration;
+pub use collections::Row;
 
 use crate::ComponentRef;
+use crate::manifest::ContractRef;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
-use crate::manifest::Provision;
-use clay_host::HostedCollection;
-use clay_host::RootMount;
-use clay_micro_core::application::ApplicationRuntime;
-use clay_micro_core::micros::MicroActivation;
-use clay_micro_core::micros::MicroDescriptor;
-use clay_micro_core::micros::MicroFactory;
-use clay_micro_core::micros::MicroId as ComposeMicroId;
-use clay_micro_core::micros::MicroProvision as ComposeMicroProvision;
-use std::any::Any;
+use crate::manifest::PublicationKind;
+use clay_guest_session::capabilities::CapabilityLimits;
+use clay_guest_session::capabilities::CapabilitySession;
+use clay_guest_session::capabilities::DeclaredPublication;
+use clay_guest_session::capabilities::PublishedCapability;
+use clay_guest_session::capabilities::admit_publications;
+use clay_guest_session::collections::BytesRegistrations;
+use clay_guest_session::collections::CollectionLimits;
+use clay_guest_session::collections::CollectionSession;
+use clay_host::Factory;
+use clay_host::Host;
+use clay_host::Initialized;
+use clay_host::LocalFuture;
+use clay_host::MicroId;
+use clay_host::Root;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::future::Future;
+use std::rc::Rc;
+use tokio::task::JoinHandle;
 
-/// A contract that accepts contributions from micros that cannot write its collection
-/// themselves — a wasm guest, whose manifest names this contract and carries the payload as data
-/// (see [`crate::ContributionDeclaration`]). The contract crate implements this next to its
-/// [`Provision`]; the micro providing it publishes with [`Context::publish_contributable`], and
-/// the backend routes each declared contribution here by contract id once the contributor has
-/// activated.
-pub trait Contributable: Provision {
-    /// Land one contribution. `contributor` is the activated incarnation making it, `surface`
-    /// the component it published; the payload's shape is the contract's own vocabulary. A
-    /// payload that violates the contract is a defect in the declaring micro's manifest — reject
-    /// it with [`AccessError::Denied`] so the activation rolls back, rather than panicking.
-    fn contribute(
-        &self,
-        contributor: &Instance,
-        payload: &serde_json::Value,
-        surface: ComponentRef,
-    ) -> Result<(), AccessError>;
-}
-
-#[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
-type Acceptor = Arc<
-    dyn Fn(&Instance, &serde_json::Value, ComponentRef) -> Result<(), AccessError> + Send + Sync,
->;
-
-/// What the MDK stores in the composition registry for one published provision: the contract
-/// value, and the acceptor when the contract is [`Contributable`]. Stored type-erased under the
-/// contract's id so a backend that only has the contract's *name* — a manifest's contribution
-/// target — can still reach the acceptor; [`Context::require`] and [`output`] downcast the value.
-struct Envelope {
-    value: Arc<dyn Any + Send + Sync>,
-    /// Contribution acceptor, only routed by an engine adapter (`wasmtime`/`wcmp`) or exercised
-    /// by this crate's own tests. Engine-less hosts publish the contract value alone.
-    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
-    accept: Option<Acceptor>,
-}
-
-impl Envelope {
-    fn open<T: Provision>(erased: Arc<dyn Any + Send + Sync>) -> T {
-        erased
-            .downcast_ref::<Self>()
-            .expect("MDK contract published outside the MDK")
-            .value
-            .downcast_ref::<T>()
-            .expect("contract identity mapped to two native types")
-            .clone()
-    }
-}
-
-/// A host-owned contribution collection provided by the activating incarnation (ADR 015 §6).
-/// Writers touch only their own entries; readers get snapshots; the host withdraws everything
-/// when the provider or a contributor closes.
+/// What a composition root hands every native micro it links: the renderer registry its
+/// components publish into, the document service its configuration is granted from, and the
+/// declared collections it may bind.
 #[derive(Clone)]
-pub struct Collection<T: Clone + Send + Sync + 'static> {
-    collection: HostedCollection<T>,
+pub struct Resources<R: RendererRegistry> {
+    pub registry: R,
+    pub documents: DocumentService,
+    pub collections: CollectionRegistry<BytesRegistrations>,
 }
 
-impl<T: Clone + Send + Sync + 'static> Collection<T> {
-    pub fn from_host(collection: HostedCollection<T>) -> Self {
-        Self { collection }
-    }
+/// The declared collections one micro is configured to use, by collection id. Configuration
+/// decides these, not the micro (ADR 025 §11); a collection in `write` is also readable.
+#[derive(Clone, Debug, Default)]
+pub struct CollectionBindings {
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+}
 
-    pub fn host(&self) -> &HostedCollection<T> {
-        &self.collection
-    }
+/// Local tasks an incarnation owns. Dropping them aborts them, so a failed initialization
+/// leaves no work behind; an orderly close aborts and joins them.
+#[derive(Default)]
+struct Tasks(Vec<JoinHandle<()>>);
 
-    pub fn reader(&self, consumer: &Instance) -> CollectionReader<T> {
-        self.collection.reader(consumer)
-    }
-
-    pub fn writer(&self, contributor: &Instance) -> Result<CollectionWriter<T>, AccessError> {
-        self.collection.writer(contributor)
+impl Tasks {
+    async fn close(mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+        for task in std::mem::take(&mut self.0) {
+            match task.await {
+                Ok(()) => {}
+                Err(error) if error.is_cancelled() => {}
+                // A task that panicked is a programming error, surfaced at the join.
+                Err(error) => std::panic::resume_unwind(error.into_panic()),
+            }
+        }
     }
 }
 
-/// The value surface one native activation may use: granted configuration documents, declared
-/// requirements resolved to typed provisions, this incarnation's collections, component
-/// publication, root mounting, publications, and owned-future registration. It never hands out
-/// the host or the registry (ADR 015 §7); the provider adapter below constructs it.
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+/// The value surface one native activation may use: granted configuration documents, resolved
+/// requirements, declared collections, component and call publication, and owned-task
+/// registration. It never hands out the host or the registry (ADR 015 §7); [`factory`]
+/// constructs it.
 pub struct Context<R: RendererRegistry> {
-    activation: MicroActivation,
-    broker: clay_micro_core::micros::CompositionBroker,
+    instance: Instance,
+    micro: MicroId,
     registry: R,
-    roots: HostedCollection<RootMount>,
     configs: BTreeMap<String, DocumentRef>,
+    requirements: BTreeMap<String, CapabilityRef>,
+    resources: Resources<R>,
+    bindings: CollectionBindings,
+    capabilities: CapabilitySession,
+    sessions: CollectionSession,
+    published: RefCell<Vec<(String, PublishedCapability)>>,
+    tasks: RefCell<Tasks>,
 }
 
 impl<R: RendererRegistry> Context<R> {
-    /// Assemble one activation's value surface. Only this crate's provider adapters call it: a
-    /// micro receives a context, it never builds one.
-    pub(crate) fn new(
-        activation: MicroActivation,
-        registry: R,
-        roots: HostedCollection<RootMount>,
-        configs: BTreeMap<String, DocumentRef>,
-    ) -> Self {
-        let broker = activation.broker().clone();
-        Self {
-            activation,
-            broker,
-            registry,
-            roots,
-            configs,
-        }
-    }
-
-    /// The composition activation this context mediates. Backend adapters (the wasm provider)
-    /// reach through it to stage controller publications; micro code does not.
-    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
-    pub(crate) fn activation(&self) -> &MicroActivation {
-        &self.activation
-    }
-
-    /// The renderer registry this activation publishes into. Backend adapters need it for
-    /// renderer-specific publication shapes; micro code publishes through
-    /// [`Context::publish_component`] instead.
-    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
-    pub(crate) fn registry(&self) -> &R {
-        &self.registry
-    }
-
-    /// The configuration documents granted for this activation, keyed by manifest binding name.
-    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
-    pub(crate) fn configs(&self) -> &BTreeMap<String, DocumentRef> {
-        &self.configs
-    }
-
-    /// Static contributions to a contract this micro provides, readable while their contributors
-    /// are idle. A shell micro (a toolbar, a settings list) renders these payloads and calls
-    /// [`Context::accept`] for the ones it shows; the host knows only that the row is accepted.
-    pub fn declarations(
-        &self,
-        contract: &str,
-    ) -> Result<Vec<clay_micro_core::micros::Declaration>, AccessError> {
-        self.broker.declarations(contract)
-    }
-
-    pub fn broker(&self) -> clay_micro_core::micros::CompositionBroker {
-        self.broker.clone()
-    }
-
-    /// The rows this activation currently accepts: contributor instance -> contract.
-    pub fn accepted(&self) -> Result<BTreeMap<String, String>, AccessError> {
-        self.broker.accepted()
-    }
-
-    /// Replace the rows this activation accepts. Accepting a declared row keeps its contributor
-    /// live; withdrawing the last reason to run evicts it. The host validates each row's contract
-    /// against the contributor's manifest and configured binding before accepting it.
-    pub fn accept(&self, rows: BTreeMap<String, String>) -> Result<(), AccessError> {
-        self.broker.accept(rows)
-    }
-
-    /// Accept every declared contribution to a contract this micro provides, now and in the
-    /// future. Use this when the micro renders a growing registry and has no per-row policy;
-    /// [`Context::accept`] is for the cases where it hides or orders individual rows.
-    pub fn accept_all(&self, contracts: &[&str]) -> Result<(), AccessError> {
-        self.broker
-            .accept_all(contracts.iter().map(|contract| (*contract).to_owned()))
-    }
-
     /// This activation's incarnation identity. Plain data; operations validate it host-side.
     pub fn instance(&self) -> Instance {
-        self.activation.instance()
+        self.instance.clone()
     }
 
     /// A configuration document granted from the manifest's declared ACL. `None` means the
@@ -220,204 +146,267 @@ impl<R: RendererRegistry> Context<R> {
         self.configs.get(name)
     }
 
-    /// A live provision for a declared requirement. Declarations are not authority: this
-    /// succeeds only while a compatible published provision exists.
-    pub fn require<T: Provision>(&self) -> Result<T, AccessError> {
-        self.activation
-            .require_erased(T::ID, T::VERSION)
-            .map(Envelope::open::<T>)
+    /// The reference that satisfies requirement `binding`, or `None` when configuration bound
+    /// nothing to it. Holding it keeps the provider incarnation live.
+    pub fn require(&self, binding: &str) -> Option<&CapabilityRef> {
+        self.requirements.get(binding)
     }
 
-    /// Stage a provision for commit when this activation succeeds. A failed or dropped
-    /// activation rolls back every staged publication.
-    pub fn publish<T: Provision>(&self, value: T) {
-        #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
-        let envelope = Envelope {
-            value: Arc::new(value),
-            accept: None,
-        };
-        #[cfg(not(any(test, feature = "wasmtime", feature = "wcmp")))]
-        let envelope = Envelope {
-            value: Arc::new(value),
-        };
-        self.activation
-            .publish_erased(T::ID, T::VERSION, Arc::new(envelope));
-    }
-
-    /// [`Context::publish`] for a contract that accepts declared contributions; the backend
-    /// routes a contributor's manifest entries to this value's [`Contributable::contribute`].
-    /// Without an engine adapter linked there is no backend to route them, so the contract
-    /// value is published alone (the trait bound still documents the contract's shape).
-    pub fn publish_contributable<T: Contributable>(&self, value: T) {
-        #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
-        let envelope = {
-            let acceptor = value.clone();
-            Envelope {
-                value: Arc::new(value),
-                accept: Some(Arc::new(move |contributor, payload, surface| {
-                    acceptor.contribute(contributor, payload, surface)
-                })),
-            }
-        };
-        #[cfg(not(any(test, feature = "wasmtime", feature = "wcmp")))]
-        let envelope = Envelope {
-            value: Arc::new(value),
-        };
-        self.activation
-            .publish_erased(T::ID, T::VERSION, Arc::new(envelope));
-    }
-
-    /// Land this incarnation's declared contributions (a backend step, run after the micro has
-    /// activated and published `surface`). Each names a declared requirement; the bound
-    /// provider must have published it as contributable.
-    #[cfg(any(test, feature = "wasmtime", feature = "wcmp"))]
-    pub(crate) fn contribute(
-        &self,
-        contributions: &[crate::ContributionDeclaration],
-        surface: ComponentRef,
-    ) -> Result<(), AccessError> {
-        let instance = self.instance();
-        for contribution in contributions {
-            let version = self
-                .activation
-                .descriptor()
-                .requirements
-                .iter()
-                .find(|requirement| requirement.id == contribution.extension_contract.id)
-                .expect("manifest contributes to a contract it does not require")
-                .version;
-            let target = self
-                .activation
-                .require_erased(&contribution.extension_contract.id, version)?;
-            let accept = target
-                .downcast_ref::<Envelope>()
-                .expect("MDK contract published outside the MDK")
-                .accept
-                .as_ref()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "contract {} accepts no contributions",
-                        contribution.extension_contract.id
-                    )
-                });
-            accept(&instance, &contribution.payload, surface)?;
-        }
-        Ok(())
-    }
-
-    /// A contribution collection provided by this incarnation.
-    pub fn collection<T: Clone + Send + Sync + 'static>(
-        &self,
-    ) -> Result<Collection<T>, AccessError> {
-        self.activation.collection().map(Collection::from_host)
-    }
-
-    /// Publish a render factory as a component of this incarnation. The factory produces the
-    /// installed registry's element type, so a micro with a native view constrains its context
-    /// to a renderer whose element it writes. The returned reference is transport data for
-    /// collection entries and mounts; rendering resolves the factory host-side.
+    /// Stage a presentation publication named `name` whose component renders `render`. The
+    /// name must be one the manifest declares as a presentation; admission checks that once
+    /// `activate` returns, and nothing is reachable by other micros before then.
     pub fn publish_component(
         &self,
+        name: &str,
         render: impl Fn() -> R::Render + 'static,
     ) -> Result<ComponentRef, AccessError> {
-        let instance = self.activation.instance();
-        self.registry
-            .publish(&instance, render)
-            .map(ComponentRef::from_host)
+        let component = self.registry.publish(&self.instance, render)?;
+        self.stage(self.capabilities.publish_component(name, component))?;
+        Ok(ComponentRef::from_host(component))
     }
 
-    /// Insert a root mount contribution for this incarnation. The host withdraws it when the
-    /// incarnation closes.
-    pub fn mount_root(
+    /// Stage a call publication named `name` served by `target` under `contract`.
+    pub fn publish_call(
         &self,
-        title: impl Into<String>,
-        content: ComponentRef,
+        name: &str,
+        contract: ContractIdentity,
+        target: std::sync::Arc<dyn CallTarget>,
     ) -> Result<(), AccessError> {
-        let instance = self.activation.instance();
-        let writer = self.roots.writer(&instance)?;
-        writer.insert(RootMount {
-            title: title.into(),
-            content: content.host(),
-        })?;
+        self.stage(self.capabilities.publish_call(name, contract, target))?;
         Ok(())
     }
 
-    /// Register incarnation-owned local work (D13). The composition driver polls it alongside
-    /// reconciliation and drops it when this instance closes.
+    fn stage(
+        &self,
+        published: Result<PublishedCapability, CapabilityFailure>,
+    ) -> Result<CapabilityPublication, AccessError> {
+        let published = published.map_err(|failure| match failure {
+            CapabilityFailure::Revoked => AccessError::Revoked,
+            CapabilityFailure::ContractMismatch
+            | CapabilityFailure::LimitExceeded
+            | CapabilityFailure::Unavailable => AccessError::Denied,
+        })?;
+        let publication = published.publication();
+        self.published
+            .borrow_mut()
+            .push((publication.name().to_owned(), published));
+        Ok(publication)
+    }
+
+    /// Mirror a collection this micro is configured to read. The feed task is incarnation-owned.
+    pub fn collection<K: DeserializeOwned + 'static, V: DeserializeOwned + 'static>(
+        &self,
+        id: &str,
+    ) -> Result<CollectionWatch<K, V>, AccessError> {
+        if !self.bindings.read.iter().chain(&self.bindings.write).any(|bound| bound == id) {
+            return Err(AccessError::Denied);
+        }
+        let projection = self
+            .resources
+            .collections
+            .collection(id)
+            .ok_or(AccessError::Denied)?
+            .projection();
+        let reader = self.sessions.grant(projection)?;
+        let (watch, feed) = CollectionWatch::start(reader, self.capabilities.clone());
+        self.own_future(feed)?;
+        Ok(watch)
+    }
+
+    /// Write authority over a collection this micro is configured to write, together with its
+    /// mirror. The writer's rows belong to this incarnation and are retracted when it closes.
+    pub fn registration<
+        K: Serialize + DeserializeOwned + 'static,
+        V: Serialize + DeserializeOwned + 'static,
+    >(
+        &self,
+        id: &str,
+    ) -> Result<Registration<K, V>, AccessError> {
+        if !self.bindings.write.iter().any(|bound| bound == id) {
+            return Err(AccessError::Denied);
+        }
+        let grant = self
+            .resources
+            .collections
+            .grant(id, &self.micro)
+            .map_err(|_| AccessError::Denied)?;
+        let writer = self.sessions.grant_writer(grant.into())?;
+        Ok(Registration::new(writer, self.collection(id)?))
+    }
+
+    /// Register incarnation-owned local work. It is dropped when this instance closes; a
+    /// panic in it is raised at the incarnation's close.
     pub fn own_future(
         &self,
         future: impl Future<Output = ()> + 'static,
     ) -> Result<(), AccessError> {
-        self.activation.own_future(future)
+        self.tasks
+            .borrow_mut()
+            .0
+            .push(tokio::task::spawn_local(future));
+        Ok(())
     }
 }
 
-/// Turn a native micro (manifest + activate function) into a composition provider. The
-/// composition root calls this; micro crates never build providers themselves. `activate` is
-/// generic over the registry the runtime carries, which is what keeps this module — and every
-/// micro authored against it — renderer-agnostic.
-pub fn provider<R: RendererRegistry + 'static>(
-    application: &ApplicationRuntime<R>,
+type Activate<R> = Rc<dyn Fn(&Context<R>) -> Result<(), AccessError>>;
+
+struct NativeFactory<R: RendererRegistry> {
+    resources: Resources<R>,
     manifest: MicroManifest,
+    declared: BTreeMap<String, DeclaredPublication>,
+    bindings: CollectionBindings,
+    activate: Activate<R>,
+}
+
+/// Turn a native micro (manifest + activate function) into a supervisor factory. The
+/// composition root calls this; micro crates never build factories themselves.
+pub fn factory<R: RendererRegistry + 'static>(
+    resources: Resources<R>,
+    manifest: MicroManifest,
+    bindings: CollectionBindings,
     activate: impl Fn(&Context<R>) -> Result<(), AccessError> + 'static,
-) -> MicroFactory {
-    let registry = application.renderer();
-    let roots = application.root_mounts();
-    let descriptor = compose_descriptor(&manifest);
-    let configuration_requests = manifest.configuration_requests.clone();
-    let activate = std::rc::Rc::new(activate);
-    let contributions = manifest
-        .contributions
-        .iter()
-        .map(|contribution| clay_micro_core::micros::MicroContribution {
-            provision: contribution.extension_contract.id.clone(),
-            payload: contribution.payload.clone(),
-        })
-        .collect();
-    MicroFactory::new(descriptor, move |activation| {
-        let mut configs = BTreeMap::new();
-        for request in &configuration_requests {
-            configs.extend(
-                activation.grant_config(&request.binding, routine_facets(&request.facets))?,
-            );
-        }
-        let context = Context::new(activation, registry.clone(), roots.clone(), configs);
-        activate(&context)
+) -> Rc<dyn Factory<CapabilityPublication>> {
+    let declared = declared_publications(&manifest);
+    Rc::new(NativeFactory {
+        resources,
+        manifest,
+        declared,
+        bindings,
+        activate: Rc::new(activate),
     })
-    .with_contributions(contributions)
 }
 
-/// Host-side retrieval of an MDK-published provision (composition roots and tests).
-pub fn output<T: Provision, R: RendererRegistry>(
-    application: &ApplicationRuntime<R>,
-    instance: &str,
-) -> Result<T, AccessError> {
-    application
-        .output_erased(instance, T::ID, T::VERSION)
-        .map(Envelope::open::<T>)
+/// Owns an incarnation's publication leases and tasks until the supervisor closes it.
+struct NativeRoot {
+    leases: BTreeMap<String, PublishedCapability>,
+    tasks: Tasks,
 }
 
-pub(crate) fn compose_descriptor(manifest: &MicroManifest) -> MicroDescriptor {
-    MicroDescriptor {
-        id: ComposeMicroId::new(manifest.id.as_str()),
-        version: manifest.package_version,
-        provisions: compose_provisions(manifest.provides.iter().map(|provided| &provided.contract)),
-        requirements: compose_provisions(
-            manifest.requires.iter().map(|required| &required.contract),
-        ),
+impl Root for NativeRoot {
+    fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
+        Box::pin(async move {
+            let Self { leases, tasks } = *self;
+            tasks.close().await;
+            // The leases drop with the root; the supervisor revokes the publications it
+            // handed out before it tears the incarnation down.
+            drop(leases);
+            Ok(())
+        })
     }
 }
 
-fn compose_provisions<'a>(
-    references: impl IntoIterator<Item = &'a crate::ContractRef>,
-) -> Vec<ComposeMicroProvision> {
-    references
-        .into_iter()
-        .map(|reference| ComposeMicroProvision {
-            id: reference.id.clone(),
-            version: reference.version,
+impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFactory<R> {
+    fn initialize(
+        &self,
+        host: Host,
+        instance: Instance,
+        requirements: BTreeMap<String, CapabilityPublication>,
+    ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
+        let resources = self.resources.clone();
+        let manifest = self.manifest.clone();
+        let declared = self.declared.clone();
+        let bindings = self.bindings.clone();
+        let activate = Rc::clone(&self.activate);
+        Box::pin(async move {
+            let capabilities =
+                CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
+            let sessions =
+                CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
+            let mut configs = BTreeMap::new();
+            for request in &manifest.configuration_requests {
+                configs.extend(
+                    resources
+                        .documents
+                        .grant_config(
+                            &host,
+                            &instance,
+                            &request.binding,
+                            routine_facets(&request.facets),
+                        )
+                        .map_err(|error| format!("config {}: {error}", request.binding))?,
+                );
+            }
+            let requirements = requirements
+                .iter()
+                .map(|(binding, publication)| {
+                    capabilities
+                        .mint(publication)
+                        .map(|reference| (binding.clone(), reference))
+                        .map_err(|failure| format!("requirement {binding}: {failure:?}"))
+                })
+                .collect::<Result<_, _>>()?;
+            let context = Context {
+                instance,
+                micro: MicroId::new(manifest.id.as_str()),
+                registry: resources.registry.clone(),
+                configs,
+                requirements,
+                resources,
+                bindings,
+                capabilities,
+                sessions,
+                published: RefCell::default(),
+                tasks: RefCell::default(),
+            };
+            activate(&context).map_err(|error| format!("activation refused: {error}"))?;
+            let Context {
+                published, tasks, ..
+            } = context;
+            let leases = admit_publications(&declared, published.into_inner())?;
+            let publications = leases
+                .iter()
+                .map(|(name, lease)| (name.clone(), lease.publication()))
+                .collect();
+            Ok(Initialized {
+                root: Box::new(NativeRoot {
+                    leases,
+                    tasks: tasks.into_inner(),
+                }),
+                publications,
+            })
+        })
+    }
+}
+
+/// The publications a manifest declares, in the session's terms. A kind this build does not
+/// know is not declared here, so an incarnation that returns it fails admission.
+pub(crate) fn declared_publications(
+    manifest: &MicroManifest,
+) -> BTreeMap<String, DeclaredPublication> {
+    manifest
+        .publications
+        .iter()
+        .filter_map(|publication| {
+            let (kind, contract) = match (&publication.kind, &publication.contract) {
+                (PublicationKind::Presentation, _) => (
+                    clay_guest_session::capabilities::PublicationKind::Presentation,
+                    ContractIdentity::presentation_component(),
+                ),
+                (PublicationKind::Call, Some(contract)) => (
+                    clay_guest_session::capabilities::PublicationKind::Call,
+                    contract_identity(contract),
+                ),
+                (PublicationKind::Call, None) => {
+                    unreachable!("a validated manifest gives every call a contract")
+                }
+                (PublicationKind::Other(_), _) => return None,
+            };
+            Some((
+                publication.name.clone(),
+                DeclaredPublication { kind, contract },
+            ))
         })
         .collect()
+}
+
+/// A manifest contract id `namespace.name` in the session's terms: the last dotted segment is
+/// the name, the rest the namespace, and the integer version is the major of `(major, 0, 0)`.
+fn contract_identity(contract: &ContractRef) -> ContractIdentity {
+    let (namespace, name) = contract
+        .id
+        .rsplit_once('.')
+        .unwrap_or(("", contract.id.as_str()));
+    ContractIdentity::new(namespace, name, (contract.version, 0, 0))
 }
 
 pub(crate) fn routine_facets(
