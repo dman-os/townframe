@@ -9,14 +9,14 @@ use super::*;
 use big_blobs::BlobService;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::datum::DatumMember;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
+use big_dispatch_core::NotReadyReason;
+use big_dispatch_core::Readiness;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::InvocationContext;
-use big_nodule_core::dispatch::Invoke;
-use big_nodule_core::dispatch::NotReadyReason;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
@@ -36,13 +36,13 @@ use std::time::Duration;
 
 /// One nodule running the test guest: the guest serves `echo` and `relay` under whatever
 /// authority the nodule owns, so the same component stands in for several nodules.
-struct Spec {
+pub(super) struct Spec {
     plug: PlugId,
-    authority: &'static str,
+    pub(super) authority: &'static str,
 }
 
 impl Spec {
-    fn echo(&self) -> String {
+    pub(super) fn echo(&self) -> String {
         format!("{}.echo", self.authority)
     }
 
@@ -56,7 +56,7 @@ impl Spec {
     }
 }
 
-fn caller() -> Spec {
+pub(super) fn caller() -> Spec {
     Spec {
         plug: example_plug!("wasm-test").parse().unwrap(),
         authority: "org.example.test",
@@ -70,7 +70,7 @@ fn callee() -> Spec {
     }
 }
 
-fn guest_bytes() -> Vec<u8> {
+pub(super) fn guest_bytes() -> Vec<u8> {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -107,7 +107,7 @@ fn procedure(nsid: &str) -> Value {
 /// the handler artifact `bytes`, and requests each of `calls` (operations of another nodule it
 /// relays to). The requests are optional: the nodule runs before its grant, and the tests
 /// exercise what the grant then permits.
-fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
+pub(super) fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
     let mut nodule = Nodule {
         requires: calls
             .iter()
@@ -148,7 +148,7 @@ fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
     plug
 }
 
-async fn put(node: &BigNode, bytes: &[u8]) {
+pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
     node.blobs
         .client
         .call(
@@ -163,7 +163,7 @@ async fn put(node: &BigNode, bytes: &[u8]) {
         .unwrap();
 }
 
-async fn admit(node: &BigNode, plug: Plug) -> NoduleRecord {
+pub(super) async fn admit(node: &BigNode, plug: Plug) -> NoduleRecord {
     node.nodules
         .client
         .call(
@@ -178,7 +178,7 @@ async fn admit(node: &BigNode, plug: Plug) -> NoduleRecord {
         .unwrap()
 }
 
-async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord {
+pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord {
     node.nodules
         .client
         .call(
@@ -222,7 +222,7 @@ async fn record(node: &BigNode, spec: &Spec) -> NoduleRecord {
         .unwrap()
 }
 
-async fn invoke(
+pub(super) async fn invoke(
     node: &BigNode,
     operation: &str,
     input: Value,
@@ -247,7 +247,7 @@ async fn invoke(
         })
 }
 
-async fn boot_node(secrets: &SecretStore) -> (BigNode, StopToken) {
+pub(super) async fn boot_node(secrets: &SecretStore) -> (BigNode, StopToken) {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
     BigNode::boot(config(secrets, &runtime, sql, StorageConfig::Memory))

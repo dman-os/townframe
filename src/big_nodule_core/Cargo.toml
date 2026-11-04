@@ -18,6 +18,7 @@ schemars = ["dep:schemars", "big_cabinet_core/schemars", "big_plugs_core/schemar
 [dependencies]
 big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
+big_dispatch_core.workspace = true
 big_plugs_core = { path = "../big_plugs_core", default-features = false }
 macros = { path = "../macros" }
 service_core_rs = { path = "../service_core_rs" }

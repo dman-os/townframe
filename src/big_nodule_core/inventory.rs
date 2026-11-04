@@ -10,6 +10,7 @@ use crate::Admitted;
 use crate::Nodule;
 use crate::NoduleError;
 use big_cabinet_core::datum::DatumMember;
+use big_dispatch_core::Readiness;
 use big_plugs_core::Artifact;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugError;
@@ -32,45 +33,6 @@ use std::collections::BTreeMap;
 pub enum ArtifactState {
     Unavailable,
     Available,
-}
-
-/// Whether an [`InstalledNodule`] can serve its handler, and if not the first reason in priority
-/// order: refused configuration, then disabled, then a required operation request no grant
-/// covers, then a required operation request no provider satisfies, then missing handler
-/// artifact bytes, then the
-/// absence of a handler executor, then initialization. [`Self::Ready`] is the executor's word
-/// that the handler can be called now and the node's word that every initializer of this
-/// revision and start has succeeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Readiness {
-    Ready,
-    Refused,
-    Disabled,
-    /// A required operation request has no covering grant. Not a fault: configuration (granting
-    /// the operation) makes the nodule ready. An optional request never causes this.
-    NeedsConfiguration,
-    /// A required operation request has no provider that satisfies it: none enabled, more than
-    /// one, a revision older than the request's `minRevision`, or a different plug than the one
-    /// the operator consented to. The record's `requests` say which and why. Not a fault: the
-    /// nodule is enabled and waits (as a Kubernetes pod waits on a missing dependency, a systemd
-    /// unit on `Requires=`), and becomes ready once a provider appears or the operator confirms.
-    /// An optional request never causes this.
-    ProviderMissing,
-    ArtifactsUnavailable,
-    ExecutorUnavailable,
-    /// The handler is hosted but an initializer of this revision and start is still running or
-    /// waiting on the provider of a foreign operation. Retryable: callers are not queued.
-    Initializing,
-    /// An initializer failed; the record carries the error. It runs again on the next reconcile
-    /// of the node (boot, config change, enable).
-    InitFailed,
-}
-
-impl Readiness {
-    pub fn is_ready(self) -> bool {
-        self == Self::Ready
-    }
 }
 
 /// The plug whose code fills a slot under a substitution, and the version of it that does.

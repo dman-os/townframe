@@ -1,13 +1,15 @@
-//! The dispatch service: the nodule runtime's XRPC reverse proxy (ADR 027 §3, §6), hosted on its
-//! own beside the nodule service. It owns an operations namespace in the authority service and
-//! knows nothing about nodules: whoever owns providers (the nodule reconciler, native code)
-//! registers them in the [`Router`] it is handed.
+//! The dispatch service: the node's XRPC reverse proxy (ADR 027 §3, §6; ADR 032 §4), hosted on
+//! its own beside the services it fronts. It owns an operations namespace in the authority
+//! service and knows nothing about nodules or any other provider: whoever owns providers (the
+//! nodule reconciler, the node's built-in services through [`ServiceProvider`]) registers them in
+//! the [`Router`] it is handed.
 //!
 //! One call: (1) the presented [`Authorization`] is verified and its scope must cover the NSID,
 //! (2) the NSID resolves to a provider that is ready, (3) the provider is called under the
 //! caller's deadline. Nothing is persisted and the routing lookup touches no database or disk.
 
 mod router;
+mod service;
 
 pub use router::Caller;
 pub use router::Provider;
@@ -16,6 +18,7 @@ pub use router::ProviderError;
 pub use router::ProviderKind;
 pub use router::ProviderState;
 pub use router::Router;
+pub use service::ServiceProvider;
 
 use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
@@ -27,14 +30,14 @@ use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::DispatchMessage;
-use big_nodule_core::dispatch::DispatchProtocol;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::Invoke;
-use big_nodule_core::dispatch::InvokeOutput;
-use big_nodule_core::dispatch::MintDispatchCapability;
-use big_nodule_core::dispatch::NotReadyReason;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::DispatchMessage;
+use big_dispatch_core::DispatchProtocol;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::Invoke;
+use big_dispatch_core::InvokeOutput;
+use big_dispatch_core::MintDispatchCapability;
+use big_dispatch_core::NotReadyReason;
 use service_utils_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
@@ -82,7 +85,7 @@ fn authority_error(error: ClientError<AuthorityServiceError>) -> DispatchError {
 }
 
 /// Time left until a wire deadline, saturating at zero.
-fn until(deadline_unix_ms: u64) -> Duration {
+pub(crate) fn until(deadline_unix_ms: u64) -> Duration {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock before UNIX epoch");
@@ -275,3 +278,6 @@ pub fn boot(config: DispatchConfig) -> (Dispatch, StopToken) {
         host_stop.then(domain_stop),
     )
 }
+
+#[cfg(test)]
+mod e2e;

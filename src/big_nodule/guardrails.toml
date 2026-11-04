@@ -5,6 +5,8 @@ allowed_dependencies = [
     "big_blobs_core",
     "big_cabinet",
     "big_cabinet_core",
+    "big_dispatch",
+    "big_dispatch_core",
     "big_nodule_core",
     "big_plugs_core",
     "big_repo",

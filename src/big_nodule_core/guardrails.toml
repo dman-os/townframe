@@ -1,7 +1,7 @@
 version = 1
 role = "domain"
 dependency_reason = "The nodule description is a Cabinet datum that admits operation and config Lexicons, and its inventory admits the nodule contribution from a catalogued Plug envelope, pins a selected revision, and validates mutable settings without depending on any execution engine or actor store. The management protocol is declared here so the node-side service and its clients share one wire contract."
-allowed_dependencies = ["big_blobs_core", "big_cabinet_core", "big_plugs_core", "macros", "service_core_rs"]
+allowed_dependencies = ["big_blobs_core", "big_cabinet_core", "big_dispatch_core", "big_plugs_core", "macros", "service_core_rs"]
 allow_external_api_types = false
 
 [api]

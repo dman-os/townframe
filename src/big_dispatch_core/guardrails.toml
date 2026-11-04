@@ -1,0 +1,12 @@
+version = 1
+role = "domain"
+dependency_reason = "The dispatch wire contract: the Invoke and MintDispatchCapability operations, the scopes a minted handle carries, the readiness a provider is reported in and the errors a call fails with. It is declared apart from the router so that nodule contracts and every client of the node's one router depend on the contract without the router."
+allowed_dependencies = ["big_cabinet_core", "service_core_rs"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]

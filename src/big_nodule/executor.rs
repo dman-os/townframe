@@ -11,12 +11,12 @@
 //! back). The executor does not touch the router: it calls [`Reensure::request`] on the handle
 //! in the spec and the state actor runs the reconcile that calls `ensure` again.
 
-use crate::dispatch::Provider;
 use async_trait::async_trait;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::datum::operation::OperationKind;
-use big_nodule_core::inventory::Readiness;
+use big_dispatch::Provider;
+use big_dispatch_core::Readiness;
 use big_plugs_core::Artifact;
 use big_plugs_core::PlugId;
 use big_plugs_core::Revision;

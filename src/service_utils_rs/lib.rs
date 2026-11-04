@@ -88,6 +88,7 @@ pub use operation::XrpcKind;
 pub use operation::XrpcOperation;
 pub use service_core_rs::Protocol;
 pub use service_core_rs::ProtocolOperations;
+pub use service_core_rs::UnaryVisitor;
 pub use service_core_rs::declare_service_protocol;
 pub use service_core_rs::service_operation;
 pub use xrpc::XrpcClient;

@@ -1,29 +1,24 @@
-//! Dispatch through `Client<DispatchProtocol>` against the same real authority the nodule tests
-//! use: operator and minted-handle admission, built-in providers, deadlines, and the nodule
-//! reconciler's registration of admitted `implements`.
+//! The nodule reconciler's registration of admitted `implements` in the dispatch router, seen
+//! through `Client<DispatchProtocol>` against the same real authority the nodule tests use. The
+//! router's own admission, built-in providers and deadlines are tested in `big_dispatch`.
 
 use super::Node;
 use super::id;
 use super::lexicon;
-use crate::dispatch::Caller;
-use crate::dispatch::Provider;
-use crate::dispatch::ProviderError;
-use crate::dispatch::ProviderKind;
-use crate::dispatch::ProviderState;
 use async_trait::async_trait;
 use big_cabinet_core::authority::Authorization;
-use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_dispatch::Caller;
+use big_dispatch::Provider;
+use big_dispatch::ProviderError;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
+use big_dispatch_core::NotReadyReason;
+use big_dispatch_core::Readiness;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::InvocationContext;
-use big_nodule_core::dispatch::Invoke;
-use big_nodule_core::dispatch::MintDispatchCapability;
-use big_nodule_core::dispatch::NotReadyReason;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::UninstallNodule;
 use big_plugs_core::Artifact;
@@ -32,15 +27,11 @@ use big_plugs_core::Digest;
 use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
 use big_plugs_core::example_plug;
-use futures::FutureExt;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
-use std::sync::Arc;
 use tokio::sync::Notify;
-
-const ECHO: &str = "org.example.echo.ping";
 
 /// Echoes its input, idempotency key and the caller dispatch verified; `{"invalid": ..}` and `{"fail": ..}` inputs make it
 /// refuse the way a provider does; `{"wait": true}` blocks on `release` after signalling
@@ -144,16 +135,6 @@ pub(super) fn serving_plug_of(
 }
 
 impl Node {
-    fn register_echo(&self) -> Arc<Echo> {
-        let echo = Arc::new(Echo::default());
-        self.dispatch.router.register(
-            "echo",
-            [(ECHO.to_owned(), Some(OperationKind::Query))],
-            ProviderState::Ready(ProviderKind::BuiltIn(Arc::clone(&echo) as Arc<dyn Provider>)),
-        );
-        echo
-    }
-
     async fn invoke_with(
         &self,
         authorization: Authorization,
@@ -190,33 +171,6 @@ impl Node {
             .await
     }
 
-    async fn mint_dispatch(
-        &self,
-        authorization: Authorization,
-        scope: DispatchScope,
-    ) -> Result<Authorization, DispatchError> {
-        let capability = self
-            .dispatch
-            .client
-            .call(
-                RequestContext::root(),
-                MintDispatchCapability {
-                    authorization,
-                    scope,
-                    rights: Rights::USE | Rights::NARROW,
-                },
-            )
-            .await
-            .map_err(|error| match error {
-                ClientError::Operation(error) => error,
-                ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
-            })?;
-        Ok(Authorization {
-            authority: capability.capability_id,
-            signer: authorization.signer,
-        })
-    }
-
     pub(super) async fn set_enabled(&self, plug_id: &str, enabled: bool) {
         self.call(SetNoduleEnabled {
             authorization: self.operator(),
@@ -228,161 +182,8 @@ impl Node {
     }
 }
 
-fn authorities(prefixes: &[&str]) -> DispatchScope {
-    DispatchScope {
-        authorities: prefixes.iter().map(|p| (*p).to_owned()).collect(),
-        ..Default::default()
-    }
-}
-
 pub(super) fn not_ready(reason: NotReadyReason) -> DispatchError {
     DispatchError::NotReady { reason }
-}
-
-#[tokio::test]
-async fn the_operator_invokes_a_built_in_provider_and_its_refusals_pass_through() {
-    let node = super::node().await;
-    node.register_echo();
-    let operator = node.operator();
-
-    let context = InvocationContext {
-        idempotency_key: Some("key-1".into()),
-        ..Default::default()
-    };
-    assert_eq!(
-        node.invoke_with(operator, ECHO, json!({ "n": 1 }), context)
-            .await,
-        Ok(json!({
-            "echo": { "n": 1 },
-            "idempotencyKey": "key-1",
-            "caller": {
-                "authorization": operator,
-                "actor": node.authority.service.operator_uuid(),
-                "scope": null,
-            },
-        }))
-    );
-    assert_eq!(
-        node.invoke(operator, ECHO, json!({ "invalid": "n" })).await,
-        Err(DispatchError::InvalidInput("\"n\"".into()))
-    );
-    assert_eq!(
-        node.invoke(operator, ECHO, json!({ "fail": { "error": "Teapot" } }))
-            .await,
-        Err(DispatchError::Provider {
-            status: 418,
-            body: json!({ "error": "Teapot" })
-        })
-    );
-    assert_eq!(
-        node.invoke(operator, "org.example.echo.missing", json!({}))
-            .await,
-        Err(DispatchError::UnknownOperation)
-    );
-    node.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_minted_scope_invokes_only_what_it_covers_and_only_narrows() {
-    let node = super::node().await;
-    node.register_echo();
-    let operator = node.operator();
-    let bystander = node.bystander().await;
-
-    let echo_only = node
-        .mint_dispatch(operator, authorities(&["org.example.echo"]))
-        .await
-        .unwrap();
-    assert!(node.invoke(echo_only, ECHO, json!({})).await.is_ok());
-    // Outside the scope is Denied whether or not the operation exists, so a handle cannot
-    // probe for operations it may not call.
-    for operation in ["org.example.other.ping", "org.example.echo2.ping"] {
-        assert_eq!(
-            node.invoke(echo_only, operation, json!({})).await,
-            Err(DispatchError::Denied)
-        );
-    }
-
-    // A handle mints only what it covers.
-    let one_op = node
-        .mint_dispatch(
-            echo_only,
-            DispatchScope {
-                operations: [ECHO.to_owned()].into(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(node.invoke(one_op, ECHO, json!({})).await.is_ok());
-    assert_eq!(
-        node.mint_dispatch(echo_only, authorities(&["org.example"]))
-            .await,
-        Err(DispatchError::Denied)
-    );
-
-    // Identity is not access: another actor's own capability is refused.
-    assert_eq!(
-        node.invoke(bystander, ECHO, json!({})).await,
-        Err(DispatchError::Denied)
-    );
-    assert_eq!(
-        node.mint_dispatch(bystander, DispatchScope::default())
-            .await,
-        Err(DispatchError::Denied)
-    );
-    node.shutdown().await;
-}
-
-#[tokio::test]
-async fn an_elapsed_deadline_fails_before_the_provider_and_a_running_call_is_cut_off() {
-    let node = super::node().await;
-    let echo = node.register_echo();
-    let operator = node.operator();
-
-    // The deadline is already behind us: the call fails without entering the provider. A
-    // provider that was entered would have signalled `started`, so an unconsumed permit here
-    // means it was.
-    let elapsed = InvocationContext {
-        deadline_unix_ms: Some(1),
-        ..Default::default()
-    };
-    assert_eq!(
-        node.invoke_with(operator, ECHO, json!({ "wait": true }), elapsed)
-            .await,
-        Err(DispatchError::DeadlineExceeded)
-    );
-    assert!(
-        echo.started.notified().now_or_never().is_none(),
-        "the provider was entered for a call whose deadline had passed"
-    );
-
-    // A deadline still ahead lets the call in; the provider parks on its gate until the deadline
-    // passes, which cuts it off. The gate is never released.
-    let soon = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-        + 1_000;
-    let future = InvocationContext {
-        deadline_unix_ms: Some(soon),
-        ..Default::default()
-    };
-    assert_eq!(
-        node.invoke_with(operator, ECHO, json!({ "wait": true }), future)
-            .await,
-        Err(DispatchError::DeadlineExceeded)
-    );
-    echo.started.notified().await;
-
-    // A call without a deadline completes once released.
-    echo.release.notify_one();
-    assert!(
-        node.invoke(operator, ECHO, json!({ "wait": true }))
-            .await
-            .is_ok()
-    );
-    node.shutdown().await;
 }
 
 #[tokio::test]

@@ -11,11 +11,11 @@ use async_trait::async_trait;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::Uuid7;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::InvocationContext;
-use big_nodule_core::dispatch::NotReadyReason;
-use big_nodule_core::inventory::Readiness;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::NotReadyReason;
+use big_dispatch_core::Readiness;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -65,8 +65,7 @@ pub enum ProviderKind {
     /// Native code registered in-process.
     BuiltIn(Arc<dyn Provider>),
     /// A nodule handler hosted by an executor. `kind` is the executor's provider type tag
-    /// ([`crate::executor::NoduleExecutor::kind`]), which dispatch needs for type-dependent
-    /// grants.
+    /// (`NoduleExecutor::kind` in `big_nodule`), which dispatch needs for type-dependent grants.
     Executor {
         kind: &'static str,
         provider: Arc<dyn Provider>,

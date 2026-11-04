@@ -5,8 +5,6 @@
 use crate::Nodules;
 use crate::NodulesConfig;
 use crate::boot;
-use crate::dispatch::Dispatch;
-use crate::dispatch::DispatchConfig;
 use crate::executor::NoduleExecutor;
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
@@ -42,12 +40,14 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_dispatch::Dispatch;
+use big_dispatch::DispatchConfig;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::MintDispatchCapability;
+use big_dispatch_core::Readiness;
 use big_nodule_core::Config;
 use big_nodule_core::Nodule;
 use big_nodule_core::config::NoduleSettings;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::MintDispatchCapability;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::ConfigureNodule;
 use big_nodule_core::protocol::GetNodule;
@@ -283,7 +283,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         .open_namespace(dispatch_actor.actor_id)
         .await
         .expect("dispatch namespace");
-    let (dispatch, dispatch_stop) = crate::dispatch::boot(DispatchConfig {
+    let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace: dispatch_namespace,
         operator: authority.service.operator_uuid(),

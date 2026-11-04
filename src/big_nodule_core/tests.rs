@@ -676,13 +676,13 @@ mod admission_tests {
     use crate::inventory::ArtifactState;
     use crate::inventory::InstalledNodule;
     use crate::inventory::InventoryError;
-    use crate::inventory::Readiness;
     use big_cabinet_core::DocId;
     use big_cabinet_core::doc::DatumRead;
     use big_cabinet_core::doc::DatumStore;
     use big_cabinet_core::doc::DatumVersion;
     use big_cabinet_core::doc::DatumsRead;
     use big_cabinet_core::drawer::DrawerAccess;
+    use big_dispatch_core::Readiness;
     use big_plugs_core::Artifact;
     use big_plugs_core::Contribution;
     use big_plugs_core::Digest;
@@ -866,7 +866,7 @@ mod admission_tests {
 
     #[test]
     fn operation_grants_resolve_beside_drawer_grants_and_revoke_to_absence() {
-        use crate::dispatch::DispatchScope;
+        use big_dispatch_core::DispatchScope;
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
         let id: PlugId = example_plug!("photos").parse().unwrap();

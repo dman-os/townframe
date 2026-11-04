@@ -10,7 +10,7 @@ use super::init::node_hosting;
 use super::init::with_requests;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::Dmeta;
-use big_nodule_core::inventory::Readiness;
+use big_dispatch_core::Readiness;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;

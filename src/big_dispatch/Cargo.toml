@@ -1,0 +1,32 @@
+[package]
+name = "big_dispatch"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# internal
+big_cabinet = { path = "../big_cabinet" }
+big_cabinet_core = { path = "../big_cabinet_core" }
+big_dispatch_core.workspace = true
+service_utils_rs.workspace = true
+
+# encoding
+serde_json.workspace = true
+irpc.workspace = true
+
+# errors and state
+futures.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+sqlite_rs.workspace = true
+secrets_rs.workspace = true
+keyring-core = { version = "1.0", default-features = false }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1546,6 +1546,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_dispatch"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_dispatch_core",
+ "futures",
+ "irpc",
+ "keyring-core",
+ "secrets_rs",
+ "serde_json",
+ "service_utils_rs",
+ "sqlite_rs",
+ "tokio",
+]
+
+[[package]]
+name = "big_dispatch_core"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "irpc",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "big_node"
 version = "0.1.0"
 dependencies = [
@@ -1553,6 +1584,8 @@ dependencies = [
  "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
+ "big_dispatch",
+ "big_dispatch_core",
  "big_nodule",
  "big_nodule_core",
  "big_nodule_wasm",
@@ -1584,6 +1617,8 @@ dependencies = [
  "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
+ "big_dispatch",
+ "big_dispatch_core",
  "big_nodule_core",
  "big_plugs_core",
  "big_repo",
@@ -1608,6 +1643,7 @@ version = "0.1.0"
 dependencies = [
  "big_blobs_core",
  "big_cabinet_core",
+ "big_dispatch_core",
  "big_plugs_core",
  "indexmap 2.14.2",
  "irpc",
@@ -1628,6 +1664,8 @@ dependencies = [
  "big_blobs",
  "big_blobs_core",
  "big_cabinet_core",
+ "big_dispatch",
+ "big_dispatch_core",
  "big_nodule",
  "big_nodule_core",
  "big_plugs_core",

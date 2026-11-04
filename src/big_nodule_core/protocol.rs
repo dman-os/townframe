@@ -8,11 +8,9 @@
 //! nodules. Nothing here serves a handler; a record reports readiness so a caller can see that
 //! execution is unavailable rather than be told a dispatch succeeded.
 
-use crate::dispatch::DispatchScope;
 use crate::inventory::ArtifactState;
 use crate::inventory::FilledBy;
 use crate::inventory::InventoryError;
-use crate::inventory::Readiness;
 use crate::providers::RequestStatus;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
@@ -23,6 +21,8 @@ use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::Readiness;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugId;
 use big_plugs_core::Revision;

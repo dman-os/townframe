@@ -14,6 +14,8 @@ path = "lib.rs"
 utils_rs.workspace = true
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+big_dispatch.workspace = true
+big_dispatch_core.workspace = true
 big_nodule_core = { workspace = true, features = ["schemars"] }
 big_plugs_core.workspace = true
 service_utils_rs.workspace = true

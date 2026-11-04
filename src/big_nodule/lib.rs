@@ -15,7 +15,6 @@ use sqlite_rs as sqlite_rs_alias;
 mod sqlite {
     include!("sqlite/gen.rs");
 }
-pub mod dispatch;
 pub mod executor;
 mod state;
 mod store;
@@ -49,9 +48,9 @@ use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
+use big_dispatch_core::DispatchProtocol;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::config_universe;
-use big_nodule_core::dispatch::DispatchProtocol;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::ConfigureNodule;
 use big_nodule_core::protocol::ConfirmNoduleResolution;
@@ -119,7 +118,7 @@ pub struct NodulesConfig {
     pub actor_path: String,
     pub namespace: Namespace,
     pub operator: Uuid7,
-    pub dispatch: Arc<dispatch::Router>,
+    pub dispatch: Arc<big_dispatch::Router>,
     pub dispatch_client: Client<DispatchProtocol>,
     pub dispatch_authority: CapId,
     pub executor: Option<Arc<dyn executor::NoduleExecutor>>,

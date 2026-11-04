@@ -1,4 +1,4 @@
-//! The dispatch wire contract (ADR 027 §3, §6): the nodule runtime's XRPC reverse proxy, seen
+//! The dispatch wire contract (ADR 027 §3, §6; ADR 032 §4): the node's XRPC reverse proxy, seen
 //! from its callers.
 //!
 //! A caller names an operation by NSID and hands dispatch JSON; dispatch admits the caller's
@@ -8,8 +8,6 @@
 //! [`DispatchScope`]. Nothing here serves a provider; routing, readiness and the providers
 //! themselves are the host's.
 
-use crate::Nodule;
-use crate::inventory::Readiness;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Capability;
@@ -40,13 +38,21 @@ impl DispatchScope {
         self.operations.is_empty() && self.authorities.is_empty()
     }
 
+    /// Whether `nsid` is `authority` itself or lives under `authority.`: the one NSID-prefix
+    /// rule for authorities, whole segments only (`org.example.photos` owns
+    /// `org.example.photos.list`, not `org.example.photosynthesis`).
+    pub fn authority_owns(authority: &str, nsid: &str) -> bool {
+        nsid.strip_prefix(authority)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+
     /// Whether a holder of this scope may invoke `nsid`.
     pub fn permits(&self, nsid: &str) -> bool {
         self.operations.contains(nsid)
             || self
                 .authorities
                 .iter()
-                .any(|a| Nodule::authority_owns(a, nsid))
+                .any(|a| Self::authority_owns(a, nsid))
     }
 
     /// Whether everything `other` permits is also permitted here: the attenuation check a mint
@@ -56,7 +62,7 @@ impl DispatchScope {
             && other.authorities.iter().all(|authority| {
                 self.authorities
                     .iter()
-                    .any(|a| Nodule::authority_owns(a, authority))
+                    .any(|a| Self::authority_owns(a, authority))
             })
     }
 }
@@ -67,6 +73,45 @@ pub struct MintDispatchCapability {
     pub authorization: Authorization,
     pub scope: DispatchScope,
     pub rights: Rights,
+}
+
+/// Whether a provider can serve a call, and if not the first reason in priority order. For a
+/// nodule's handler (the nodule inventory's `InstalledNodule`) the order is: refused configuration, then disabled, then a required operation request no grant
+/// covers, then a required operation request no provider satisfies, then missing handler
+/// artifact bytes, then the
+/// absence of a handler executor, then initialization. [`Self::Ready`] is the executor's word
+/// that the handler can be called now and the node's word that every initializer of this
+/// revision and start has succeeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Readiness {
+    Ready,
+    Refused,
+    Disabled,
+    /// A required operation request has no covering grant. Not a fault: configuration (granting
+    /// the operation) makes the nodule ready. An optional request never causes this.
+    NeedsConfiguration,
+    /// A required operation request has no provider that satisfies it: none enabled, more than
+    /// one, a revision older than the request's `minRevision`, or a different plug than the one
+    /// the operator consented to. The record's `requests` say which and why. Not a fault: the
+    /// nodule is enabled and waits (as a Kubernetes pod waits on a missing dependency, a systemd
+    /// unit on `Requires=`), and becomes ready once a provider appears or the operator confirms.
+    /// An optional request never causes this.
+    ProviderMissing,
+    ArtifactsUnavailable,
+    ExecutorUnavailable,
+    /// The handler is hosted but an initializer of this revision and start is still running or
+    /// waiting on the provider of a foreign operation. Retryable: callers are not queued.
+    Initializing,
+    /// An initializer failed; the record carries the error. It runs again on the next reconcile
+    /// of the node (boot, config change, enable).
+    InitFailed,
+}
+
+impl Readiness {
+    pub fn is_ready(self) -> bool {
+        self == Self::Ready
+    }
 }
 
 /// What travels with one call beside its input; providers receive it, and the host enforces
@@ -99,7 +144,7 @@ pub struct InvokeOutput {
 }
 
 /// Why an operation that is routed cannot be served right now. Provider readiness is the
-/// nodule inventory's [`Readiness`]; `Ambiguous` is dispatch's own, for an NSID that more than
+/// [`Readiness`]; `Ambiguous` is dispatch's own, for an NSID that more than
 /// one provider implements, which is never resolved by installation order (ADR 027 §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

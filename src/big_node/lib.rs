@@ -24,13 +24,14 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_dispatch::Dispatch;
+use big_dispatch::DispatchConfig;
+use big_dispatch::ServiceProvider;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::MintDispatchCapability;
 use big_nodule::Nodules;
 use big_nodule::NodulesConfig;
-use big_nodule::dispatch::Dispatch;
-use big_nodule::dispatch::DispatchConfig;
 use big_nodule::executor::NoduleExecutor;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::MintDispatchCapability;
 use big_nodule_wasm::WasmExecutor;
 use big_plugs::Plugs;
 use big_plugs::PlugsConfig;
@@ -211,7 +212,7 @@ impl BigNode {
             )
             .await?;
             stop.stages.push(Stage::Service(nodules_stop));
-            Ok(Self {
+            let node = Self {
                 repo,
                 authority,
                 docs_actor,
@@ -234,7 +235,9 @@ impl BigNode {
                 nodules,
                 plugs,
                 registry_drawer,
-            })
+            };
+            stop.stages.push(node.register_built_ins());
+            Ok(node)
         })
         .await;
         match boot {
@@ -243,6 +246,52 @@ impl BigNode {
                 Ok(()) => Err(error),
                 Err(shutdown) => Err(error.wrap_err(format!("boot cleanup failed: {shutdown:#}"))),
             },
+        }
+    }
+
+    /// Registers the node's own services in dispatch's router as built-in providers, under the NSIDs
+    /// their operations declare. They are reached through the same clients the composition root wired
+    /// them with, and keep checking the `Authorization` in each request themselves: dispatch admits
+    /// the caller to the NSID, it does not vouch for the call.
+    ///
+    /// A provider holds its service's client and the nodule service holds the router, so the
+    /// registrations are unbound first on stop (the returned stage runs before any service stops) to
+    /// break that cycle and to stop routing to services about to go away.
+    fn register_built_ins(&self) -> Stage {
+        let built_ins = [
+            (
+                "builtin:authority",
+                ServiceProvider::default().serve(&self.authority.client),
+            ),
+            (
+                "builtin:docs",
+                ServiceProvider::default().serve(&self.docs.client),
+            ),
+            (
+                "builtin:drawers",
+                ServiceProvider::default().serve(&self.drawers.client),
+            ),
+            (
+                "builtin:blobs",
+                ServiceProvider::default().serve(&self.blobs.client),
+            ),
+            (
+                "builtin:plugs",
+                ServiceProvider::default().serve(&self.plugs.client),
+            ),
+            (
+                "builtin:nodules",
+                ServiceProvider::default().serve(&self.nodules.client),
+            ),
+        ];
+        let mut provider_ids = Vec::with_capacity(built_ins.len());
+        for (provider_id, provider) in built_ins {
+            provider.register(&self.dispatch.router, provider_id);
+            provider_ids.push(provider_id);
+        }
+        Stage::BuiltIns {
+            router: Arc::clone(&self.dispatch.router),
+            provider_ids,
         }
     }
 }
@@ -387,7 +436,7 @@ async fn boot_dispatch(
     scope: DispatchScope,
     stop: &mut StopToken,
 ) -> Res<(Dispatch, CapId)> {
-    let (dispatch, dispatch_stop) = big_nodule::dispatch::boot(DispatchConfig {
+    let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace,
         operator: authority.service.operator_uuid(),
@@ -473,6 +522,11 @@ enum Stage {
         worker: DrawerWorker,
         stop: service_utils_rs::StopToken,
     },
+    /// The built-in providers registered in dispatch's router; stopping unbinds them.
+    BuiltIns {
+        router: Arc<big_dispatch::Router>,
+        provider_ids: Vec<&'static str>,
+    },
 }
 
 impl Stage {
@@ -484,6 +538,14 @@ impl Stage {
             Self::DrawerWorker { worker, stop } => {
                 stop.stop().await;
                 drop(worker);
+            }
+            Self::BuiltIns {
+                router,
+                provider_ids,
+            } => {
+                for provider_id in provider_ids {
+                    router.unbind(provider_id);
+                }
             }
         }
         Ok(())

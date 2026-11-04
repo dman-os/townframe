@@ -30,6 +30,7 @@ use std::collections::BTreeSet;
 
 mod blob_discovery;
 mod blobs;
+mod dispatch;
 mod nodule_wasm;
 mod plugs;
 
@@ -88,7 +89,7 @@ fn config<'a>(
         secrets,
         index_concurrency: NonZeroUsize::new(2).unwrap(),
         blob_storage: big_blobs::Storage::Memory,
-        nodule_operations: big_nodule_core::dispatch::DispatchScope {
+        nodule_operations: big_dispatch_core::DispatchScope {
             authorities: ["org.example".to_owned()].into(),
             ..Default::default()
         },

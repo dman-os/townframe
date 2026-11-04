@@ -1,6 +1,11 @@
+use crate::Envelope;
+use crate::Reply;
 use crate::Subscription;
 use crate::Unary;
 use crate::XrpcOperation;
+use irpc::Channels;
+use irpc::WithChannels;
+use irpc::channel::none::NoReceiver;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtocolOperations {
@@ -10,6 +15,25 @@ pub struct ProtocolOperations {
 
 pub trait Protocol: irpc::Service {
     const OPERATIONS: ProtocolOperations;
+
+    /// Calls `visitor` once per unary operation of this protocol, with the operation's type. A
+    /// `Client<Self>` can only call an operation whose type it names, so this is how code that
+    /// is generic over protocols (a by-NSID router) obtains one typed route per operation
+    /// without a hand-written list that could drift from the protocol declaration.
+    fn visit_unary<V: UnaryVisitor<Self>>(visitor: &mut V)
+    where
+        Self: Sized;
+}
+
+/// A callback over the unary operations of `Proto`; see [`Protocol::visit_unary`]. The bounds
+/// are exactly what `Client::call` needs, so an implementation can hold a client and call it.
+pub trait UnaryVisitor<Proto: irpc::Service> {
+    fn visit<P>(&mut self)
+    where
+        P: Unary,
+        Proto: From<Envelope<P>>,
+        Proto::Message: From<WithChannels<Envelope<P>, Proto>>,
+        Envelope<P>: Channels<Proto, Tx = Reply<P>, Rx = NoReceiver>;
 }
 
 pub trait UnaryOperation: Unary {
@@ -39,6 +63,9 @@ macro_rules! declare_service_protocol {
                 unary: &[$(<$params as $crate::protocol::UnaryOperation>::DECLARATION),*],
                 stream: &[$(<$stream_params as $crate::protocol::StreamOperation>::DECLARATION),*],
             };
+            fn visit_unary<V: $crate::protocol::UnaryVisitor<Self>>(visitor: &mut V) {
+                $( visitor.visit::<$params>(); )*
+            }
         }
         impl $protocol {
             pub const OPERATIONS: $crate::ProtocolOperations = <Self as $crate::Protocol>::OPERATIONS;

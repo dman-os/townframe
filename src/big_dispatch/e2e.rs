@@ -1,0 +1,426 @@
+//! Dispatch through `Client<DispatchProtocol>` against a real authority: operator and
+//! minted-handle admission, built-in providers, deadlines and the [`ServiceProvider`] adapter.
+//! Routing a node's services and nodules through one router is tested in `big_node`.
+
+use crate::Caller;
+use crate::Dispatch;
+use crate::DispatchConfig;
+use crate::Provider;
+use crate::ProviderError;
+use crate::ProviderKind;
+use crate::ProviderState;
+use crate::ServiceProvider;
+use async_trait::async_trait;
+use big_cabinet::Authority;
+use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::operation::OperationKind;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
+use big_dispatch_core::MintDispatchCapability;
+use futures::FutureExt;
+use secrets_rs::SecretStore;
+use serde_json::Value;
+use serde_json::json;
+use service_utils_rs::ClientError;
+use service_utils_rs::RequestContext;
+use service_utils_rs::StopToken;
+use std::sync::Arc;
+use tokio::sync::Notify;
+
+const ECHO: &str = "org.example.echo.ping";
+
+/// Echoes its input, idempotency key and the caller dispatch verified; `{"invalid": ..}` and
+/// `{"fail": ..}` inputs make it refuse the way a provider does; `{"wait": true}` blocks on
+/// `release` after signalling `started`, so a test decides when (and whether) the call finishes.
+#[derive(Default)]
+struct Echo {
+    started: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl Provider for Echo {
+    async fn call(
+        &self,
+        caller: &Caller,
+        _operation: &str,
+        context: &InvocationContext,
+        input: Value,
+    ) -> Result<Value, ProviderError> {
+        if let Some(reason) = input.get("invalid") {
+            return Err(ProviderError::InvalidInput(reason.to_string()));
+        }
+        if let Some(body) = input.get("fail") {
+            return Err(ProviderError::Failed {
+                status: 418,
+                body: body.clone(),
+            });
+        }
+        if input.get("wait").is_some() {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(json!({
+            "echo": input,
+            "idempotencyKey": context.idempotency_key,
+            "caller": {
+                "authorization": caller.authorization,
+                "actor": caller.actor,
+                "scope": caller.scope,
+            },
+        }))
+    }
+}
+
+struct Harness {
+    authority: Authority,
+    authority_stop: StopToken,
+    dispatch: Dispatch,
+    dispatch_stop: StopToken,
+}
+
+async fn harness() -> Harness {
+    let keyring = keyring_core::mock::Store::new().expect("mock keyring")
+        as Arc<keyring_core::CredentialStore>;
+    let secrets = SecretStore::boot_with_store(keyring)
+        .await
+        .expect("mock keyring");
+    let sql = sqlite_rs::test_support::db(&[]).expect("database");
+    let (authority, authority_stop) = big_cabinet::authority::boot(&secrets, sql.clone())
+        .await
+        .expect("authority boot");
+    let actor = authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: "dispatch".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await
+        .expect("dispatch actor");
+    let namespace = authority
+        .service
+        .open_namespace(actor.actor_id)
+        .await
+        .expect("dispatch namespace");
+    let (dispatch, dispatch_stop) = crate::boot(DispatchConfig {
+        authority: authority.client.clone(),
+        namespace,
+        operator: authority.service.operator_uuid(),
+    });
+    Harness {
+        authority,
+        authority_stop,
+        dispatch,
+        dispatch_stop,
+    }
+}
+
+fn authorities(prefixes: &[&str]) -> DispatchScope {
+    DispatchScope {
+        authorities: prefixes.iter().map(|p| (*p).to_owned()).collect(),
+        ..Default::default()
+    }
+}
+
+impl Harness {
+    async fn shutdown(self) {
+        self.dispatch_stop.stop().await;
+        self.authority_stop.stop().await;
+    }
+
+    fn operator(&self) -> Authorization {
+        Authorization::identity(self.authority.root)
+    }
+
+    async fn bystander(&self) -> Authorization {
+        let actor = self
+            .authority
+            .client
+            .call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: self.authority.root,
+                    path: "bystander".into(),
+                    rights: Rights::all(),
+                },
+            )
+            .await
+            .expect("bystander actor");
+        Authorization::identity(actor.capability)
+    }
+
+    fn register_echo(&self) -> Arc<Echo> {
+        let echo = Arc::new(Echo::default());
+        self.dispatch.router.register(
+            "echo",
+            [(ECHO.to_owned(), Some(OperationKind::Query))],
+            ProviderState::Ready(ProviderKind::BuiltIn(Arc::clone(&echo) as Arc<dyn Provider>)),
+        );
+        echo
+    }
+
+    async fn invoke_with(
+        &self,
+        authorization: Authorization,
+        operation: &str,
+        input: Value,
+        context: InvocationContext,
+    ) -> Result<Value, DispatchError> {
+        self.dispatch
+            .client
+            .call(
+                RequestContext::root(),
+                Invoke {
+                    authorization,
+                    operation: operation.to_owned(),
+                    input,
+                    context,
+                },
+            )
+            .await
+            .map(|output| output.output)
+            .map_err(|error| match error {
+                ClientError::Operation(error) => error,
+                ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
+            })
+    }
+
+    async fn invoke(
+        &self,
+        authorization: Authorization,
+        operation: &str,
+        input: Value,
+    ) -> Result<Value, DispatchError> {
+        self.invoke_with(authorization, operation, input, Default::default())
+            .await
+    }
+
+    async fn mint_dispatch(
+        &self,
+        authorization: Authorization,
+        scope: DispatchScope,
+    ) -> Result<Authorization, DispatchError> {
+        let capability = self
+            .dispatch
+            .client
+            .call(
+                RequestContext::root(),
+                MintDispatchCapability {
+                    authorization,
+                    scope,
+                    rights: Rights::USE | Rights::NARROW,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                ClientError::Operation(error) => error,
+                ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
+            })?;
+        Ok(Authorization {
+            authority: capability.capability_id,
+            signer: authorization.signer,
+        })
+    }
+}
+
+#[tokio::test]
+async fn the_operator_invokes_a_built_in_provider_and_its_refusals_pass_through() {
+    let h = harness().await;
+    h.register_echo();
+    let operator = h.operator();
+
+    let context = InvocationContext {
+        idempotency_key: Some("key-1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        h.invoke_with(operator, ECHO, json!({ "n": 1 }), context)
+            .await,
+        Ok(json!({
+            "echo": { "n": 1 },
+            "idempotencyKey": "key-1",
+            "caller": {
+                "authorization": operator,
+                "actor": h.authority.service.operator_uuid(),
+                "scope": null,
+            },
+        }))
+    );
+    assert_eq!(
+        h.invoke(operator, ECHO, json!({ "invalid": "n" })).await,
+        Err(DispatchError::InvalidInput("\"n\"".into()))
+    );
+    assert_eq!(
+        h.invoke(operator, ECHO, json!({ "fail": { "error": "Teapot" } }))
+            .await,
+        Err(DispatchError::Provider {
+            status: 418,
+            body: json!({ "error": "Teapot" })
+        })
+    );
+    assert_eq!(
+        h.invoke(operator, "org.example.echo.missing", json!({}))
+            .await,
+        Err(DispatchError::UnknownOperation)
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_minted_scope_invokes_only_what_it_covers_and_only_narrows() {
+    let h = harness().await;
+    h.register_echo();
+    let operator = h.operator();
+    let bystander = h.bystander().await;
+
+    let echo_only = h
+        .mint_dispatch(operator, authorities(&["org.example.echo"]))
+        .await
+        .unwrap();
+    assert!(h.invoke(echo_only, ECHO, json!({})).await.is_ok());
+    // Outside the scope is Denied whether or not the operation exists, so a handle cannot
+    // probe for operations it may not call.
+    for operation in ["org.example.other.ping", "org.example.echo2.ping"] {
+        assert_eq!(
+            h.invoke(echo_only, operation, json!({})).await,
+            Err(DispatchError::Denied)
+        );
+    }
+
+    // A handle mints only what it covers.
+    let one_op = h
+        .mint_dispatch(
+            echo_only,
+            DispatchScope {
+                operations: [ECHO.to_owned()].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(h.invoke(one_op, ECHO, json!({})).await.is_ok());
+    assert_eq!(
+        h.mint_dispatch(echo_only, authorities(&["org.example"]))
+            .await,
+        Err(DispatchError::Denied)
+    );
+
+    // Identity is not access: another actor's own capability is refused.
+    assert_eq!(
+        h.invoke(bystander, ECHO, json!({})).await,
+        Err(DispatchError::Denied)
+    );
+    assert_eq!(
+        h.mint_dispatch(bystander, DispatchScope::default()).await,
+        Err(DispatchError::Denied)
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_elapsed_deadline_fails_before_the_provider_and_a_running_call_is_cut_off() {
+    let h = harness().await;
+    let echo = h.register_echo();
+    let operator = h.operator();
+
+    // The deadline is already behind us: the call fails without entering the provider. A
+    // provider that was entered would have signalled `started`, so an unconsumed permit here
+    // means it was.
+    let elapsed = InvocationContext {
+        deadline_unix_ms: Some(1),
+        ..Default::default()
+    };
+    assert_eq!(
+        h.invoke_with(operator, ECHO, json!({ "wait": true }), elapsed)
+            .await,
+        Err(DispatchError::DeadlineExceeded)
+    );
+    assert!(
+        echo.started.notified().now_or_never().is_none(),
+        "the provider was entered for a call whose deadline had passed"
+    );
+
+    // A deadline still ahead lets the call in; the provider parks on its gate until the deadline
+    // passes, which cuts it off. The gate is never released.
+    let soon = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 1_000;
+    let future = InvocationContext {
+        deadline_unix_ms: Some(soon),
+        ..Default::default()
+    };
+    assert_eq!(
+        h.invoke_with(operator, ECHO, json!({ "wait": true }), future)
+            .await,
+        Err(DispatchError::DeadlineExceeded)
+    );
+    echo.started.notified().await;
+
+    // A call without a deadline completes once released.
+    echo.release.notify_one();
+    assert!(
+        h.invoke(operator, ECHO, json!({ "wait": true }))
+            .await
+            .is_ok()
+    );
+    h.shutdown().await;
+}
+
+/// The adapter, exercised on dispatch's own protocol: serving `Client<DispatchProtocol>` as a
+/// provider makes `mintCapability` reachable by NSID through an `Invoke`, whose outer admission
+/// (the invoker's handle) is separate from the inner request's own `Authorization`.
+#[tokio::test]
+async fn a_service_provider_routes_by_nsid_and_carries_the_services_own_errors() {
+    const MINT: &str = "org.example.daybook.dispatch.mintCapability";
+    let h = harness().await;
+    ServiceProvider::default()
+        .serve(&h.dispatch.client)
+        .register(&h.dispatch.router, "builtin:self");
+    assert_eq!(
+        h.dispatch.router.operations_of("builtin:self"),
+        ["org.example.daybook.dispatch.invoke", MINT]
+    );
+    let entry = h.dispatch.router.resolve(MINT).unwrap();
+    assert_eq!(entry.operation_kind, Some(OperationKind::Procedure));
+
+    let operator = h.operator();
+    let request = |authorization: Authorization| {
+        json!({
+            "authorization": authorization,
+            "scope": { "authorities": ["org.example"] },
+            "rights": Rights::USE,
+        })
+    };
+    // The inner call is the service's own: the operator's identity mints.
+    let minted = h.invoke(operator, MINT, request(operator)).await.unwrap();
+    assert!(minted.get("capabilityId").is_some(), "{minted}");
+
+    // The service refuses a bystander's identity itself, even though the outer admission (the
+    // operator's) let the call in. Its error travels in the XRPC domain envelope.
+    let bystander = h.bystander().await;
+    let Err(DispatchError::Provider { status, body }) =
+        h.invoke(operator, MINT, request(bystander)).await
+    else {
+        panic!("the service must refuse the bystander");
+    };
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "DispatchError");
+    assert_eq!(body["operationError"], json!("Denied"));
+
+    // Input that is not the operation's request is the caller's mistake, not the service's.
+    assert!(matches!(
+        h.invoke(operator, MINT, json!({ "scope": 7 })).await,
+        Err(DispatchError::InvalidInput(_))
+    ));
+    h.shutdown().await;
+}

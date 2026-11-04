@@ -14,6 +14,8 @@ big_blobs = { path = "../big_blobs" }
 big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }
+big_dispatch.workspace = true
+big_dispatch_core.workspace = true
 big_nodule.workspace = true
 big_nodule_wasm.workspace = true
 big_plugs.workspace = true

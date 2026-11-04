@@ -23,7 +23,6 @@
 //! prefix: a Lexicon file under it is the nodule's own, and one outside it is a vendored copy that
 //! must be the contract of a request or an operation the nodule implements.
 
-use crate::dispatch::DispatchScope;
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::datum::GrammarError;
 use big_cabinet_core::datum::is_nsid;
@@ -32,6 +31,7 @@ use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::datum::parse_ref;
 use big_cabinet_core::datum::validate_object_schema;
 use big_cabinet_core::datum::validate_object_value;
+use big_dispatch_core::DispatchScope;
 use big_plugs_core::PlugError;
 use big_plugs_core::request::Request;
 use indexmap::IndexMap;
@@ -42,7 +42,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 pub mod config;
-pub mod dispatch;
 pub mod inventory;
 pub mod protocol;
 pub mod providers;
@@ -259,14 +258,6 @@ type Result<T> = std::result::Result<T, NoduleError>;
 type Implemented = BTreeMap<String, Option<OperationKind>>;
 
 impl Nodule {
-    /// Whether `nsid` is `authority` itself or lives under `authority.`: the one NSID-prefix
-    /// rule for authorities, whole segments only (`org.example.photos` owns
-    /// `org.example.photos.list`, not `org.example.photosynthesis`).
-    pub fn authority_owns(authority: &str, nsid: &str) -> bool {
-        nsid.strip_prefix(authority)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-    }
-
     /// The requests that call an operation (no `access`): the ones a dispatch grant can satisfy.
     pub fn operation_requests(&self) -> impl Iterator<Item = &Request> {
         self.requires
@@ -305,7 +296,7 @@ impl Nodule {
                 .filter(|authority| {
                     !requested
                         .iter()
-                        .any(|nsid| Self::authority_owns(authority, nsid))
+                        .any(|nsid| DispatchScope::authority_owns(authority, nsid))
                 })
                 .cloned()
                 .collect(),
@@ -326,7 +317,7 @@ impl Nodule {
 
     /// The required requests, operation or data, whose `statuses` (by binding, see
     /// [`providers::RequestStatus::evaluate`]) say no provider satisfies them: while any exists
-    /// the nodule is held at [`inventory::Readiness::ProviderMissing`]. An optional request
+    /// the nodule is held at [`big_dispatch_core::Readiness::ProviderMissing`]. An optional request
     /// never appears.
     pub fn missing_providers<'a>(
         &'a self,
@@ -382,7 +373,9 @@ impl Nodule {
                 .and_then(|main| main.get("type"))
                 .and_then(Value::as_str)
                 == Some("record");
-            if is_record && authority.is_some_and(|authority| Self::authority_owns(authority, id)) {
+            if is_record
+                && authority.is_some_and(|authority| DispatchScope::authority_owns(authority, id))
+            {
                 split.held.push((id, file));
             } else {
                 split.carried.push(file);
@@ -522,7 +515,7 @@ impl<'a> Admission<'a> {
     /// prefixes).
     fn owns(&self, nsid: &str) -> bool {
         self.authority
-            .is_some_and(|authority| Nodule::authority_owns(authority, nsid))
+            .is_some_and(|authority| DispatchScope::authority_owns(authority, nsid))
     }
 
     /// Whether the nodule holds `nsid`: under its authority and declared in its Lexicons.

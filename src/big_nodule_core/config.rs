@@ -18,7 +18,6 @@
 //! never delete them, and resolves each nodule's desired state independently for the reconciler.
 
 use crate::Nodule;
-use crate::dispatch::DispatchScope;
 use crate::inventory::FilledBy;
 use crate::inventory::InstalledNodule;
 use crate::inventory::InventoryError;
@@ -35,6 +34,7 @@ use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::EntryAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_dispatch_core::DispatchScope;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugError;
 use big_plugs_core::PlugId;
@@ -1229,7 +1229,7 @@ fn authority_conflicts(
                 .filter_map(|(dot, _)| authorities.get_key_value(&id[..dot]));
             let same_or_descendants = authorities
                 .range::<str, _>((Bound::Included(id.as_str()), Bound::Unbounded))
-                .take_while(|(other, _)| Nodule::authority_owns(&id, other));
+                .take_while(|(other, _)| DispatchScope::authority_owns(&id, other));
             let (other_plug, other_authority) = ancestors
                 .chain(same_or_descendants)
                 .flat_map(|(other, holders)| {
@@ -1291,7 +1291,8 @@ fn lexicon_conflicts(
                 .expect("admission checked every Lexicon states its NSID");
             copies.entry(nsid).or_default().push(Copy {
                 plug_id,
-                held: authority.is_some_and(|authority| Nodule::authority_owns(authority, nsid)),
+                held: authority
+                    .is_some_and(|authority| DispatchScope::authority_owns(authority, nsid)),
                 revision: installed.nodule.lexicon_revision(nsid),
                 file,
             });

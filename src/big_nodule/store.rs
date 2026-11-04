@@ -17,7 +17,7 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use big_nodule_core::dispatch::DispatchScope;
+use big_dispatch_core::DispatchScope;
 use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::providers::LockedProvider;
 use big_plugs_core::PlugId;

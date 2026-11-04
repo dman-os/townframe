@@ -36,3 +36,4 @@ pub use operation::XrpcKind;
 pub use operation::XrpcOperation;
 pub use protocol::Protocol;
 pub use protocol::ProtocolOperations;
+pub use protocol::UnaryVisitor;
