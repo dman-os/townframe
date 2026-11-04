@@ -183,6 +183,7 @@ When an active incarnation loses its final external strong binding, is disabled,
 
 
 The host invokes `instance-root.close()` exactly once while the incarnation's existing dependencies remain retained. The guest uses it to finish or cancel asynchronous owned work; returning does not grant authority to publish new outward resources. After it returns, traps, or is cancelled by host supervision, the host drops the incarnation scope and its resources. Abrupt engine loss may skip guest cleanup, so correctness still relies on host-owned RAII cleanup rather than on `close()` completing.
+Author code has no close callback and a micro never closes itself: `close()` is the host's mechanism into the guest, which an authoring library answers by dropping what the incarnation owns (its tasks, call handlers, bindings and handles) before it returns, so a micro's cleanup is the `Drop` of values it owns, run while the dependencies they use are still retained.
 This naturally closes dependents before providers. Mandatory configured dependency
 cycles are rejected. A dynamically formed unreachable strongly connected component
 closes as a group; members must tolerate peers becoming revoked during cleanup.
