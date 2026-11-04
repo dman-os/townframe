@@ -384,6 +384,8 @@ pub use bindings::townframe::dayframe::presentation;
 #[cfg(feature = "wit")]
 pub mod mirror;
 #[cfg(feature = "wit")]
+pub mod registration;
+#[cfg(feature = "wit")]
 pub use mirror::ConfigDocument;
 #[cfg(feature = "wit")]
 pub use mirror::FacetState;

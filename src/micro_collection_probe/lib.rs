@@ -5,7 +5,9 @@ use clay_collection::Cursor;
 use clay_collection::Mirror;
 use clay_collection::Page;
 use clay_collection::RowEvidence;
+use clay_collection::Stamped;
 use clay_collection::Version;
+use clay_collection::WriteBasis;
 use clay_mdk::bindings;
 use clay_mdk::capability_bank;
 use clay_mdk::collection_registration;
@@ -17,6 +19,7 @@ use clay_mdk::presentation;
 use clay_mdk::presentation_events::Event;
 use clay_mdk::presentation_events::EventResponse;
 use clay_mdk::presentation_events::{self};
+use clay_mdk::registration::RegistrationWriter;
 use clay_mdk::wire::WireMutations;
 use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
@@ -29,11 +32,19 @@ struct GuestValue {
     capabilities: Vec<capability_bank::CapabilityRef>,
 }
 
+/// A registration writer whose default basis reads the probe's own replica of the collection.
+type Writer = RegistrationWriter<Box<dyn Fn(&Vec<u8>) -> WriteBasis>>;
+
+type Replica = Mirror<Vec<u8>, Stamped<Option<Rc<GuestValue>>>>;
+
 struct State {
     reader: Rc<collections::CollectionReader>,
     selector: Vec<u8>,
     lease: Option<Rc<collections::ProjectionLease>>,
-    mirror: Mirror<Vec<u8>, Rc<GuestValue>>,
+    /// Shared with the writers' default-basis closures; never borrowed across an await.
+    mirror: Rc<RefCell<Replica>>,
+    /// Wakers of scenarios waiting for the read loop to apply a page.
+    applied: Vec<std::task::Waker>,
     surfaces: BTreeMap<u64, presentation::Surface>,
     status: &'static str,
     pages: u64,
@@ -45,12 +56,12 @@ struct State {
     resume_requested: bool,
     stop_requested: bool,
     running: bool,
-    writer_a: Option<Rc<collection_registration::RegistrationWriter>>,
-    writer_b: Option<Rc<collection_registration::RegistrationWriter>>,
-    cap_writer: Option<Rc<collection_registration::RegistrationWriter>>,
+    writer_a: Option<Rc<Writer>>,
+    writer_b: Option<Rc<Writer>>,
+    cap_writer: Option<Rc<Writer>>,
     cap_publication: Option<capability_bank::PublishedCapability>,
     cap_proxy: Option<capability_bank::PresentationComponent>,
-    cap_version: Option<collections::Version>,
+    cap_stamp: Option<collections::Stamp>,
     scenario: &'static str,
     log: Vec<String>,
 }
@@ -83,6 +94,15 @@ impl micro_lifecycle::Guest for CollectionProbe {
                 "collection probe expects exactly one collection binding".into(),
             ));
         }
+        let mirror = Rc::new(RefCell::new(Mirror::empty()));
+        let writer = |binding: collection_registration::RegistrationBinding| {
+            let replica = Rc::clone(&mirror);
+            Rc::new(RegistrationWriter::new(
+                binding.writer,
+                Box::new(move |key: &Vec<u8>| replica.borrow().write_basis(key))
+                    as Box<dyn Fn(&Vec<u8>) -> WriteBasis>,
+            ))
+        };
         let mut registrations = registrations.into_iter();
         let (writer_a, writer_b, cap_writer) = match (
             registrations.next(),
@@ -91,9 +111,9 @@ impl micro_lifecycle::Guest for CollectionProbe {
         ) {
             (None, None, None) => (None, None, None),
             (Some(a), Some(b), None) if a.name == "a" && b.name == "b" => {
-                (Some(Rc::new(a.writer)), Some(Rc::new(b.writer)), None)
+                (Some(writer(a)), Some(writer(b)), None)
             }
-            (Some(cap), None, None) if cap.name == "cap" => (None, None, Some(Rc::new(cap.writer))),
+            (Some(cap), None, None) if cap.name == "cap" => (None, None, Some(writer(cap))),
             _ => {
                 return Err(InitializationError::InvalidConfiguration(
                     "collection probe expects no registrations, exactly `a` and `b`, or exactly `cap`"
@@ -115,7 +135,8 @@ impl micro_lifecycle::Guest for CollectionProbe {
             reader: Rc::new(binding.reader),
             selector,
             lease: Some(Rc::new(lease)),
-            mirror: Mirror::empty(),
+            mirror,
+            applied: Vec::new(),
             surfaces: BTreeMap::new(),
             status: "reading",
             pages: 0,
@@ -132,7 +153,7 @@ impl micro_lifecycle::Guest for CollectionProbe {
             cap_writer,
             cap_publication: None,
             cap_proxy: None,
-            cap_version: None,
+            cap_stamp: None,
             scenario: "idle",
             log: Vec::new(),
         }));
@@ -341,9 +362,9 @@ impl State {
             self.replays,
             self.resumes,
             self.resets,
-            self.mirror.len()
+            self.mirror.borrow().live_rows().len()
         );
-        for (key, value) in self.mirror.rows() {
+        for (key, value) in self.mirror.borrow().live_rows() {
             text.push('\n');
             text.push_str(&decode_key(&key));
             text.push('=');
@@ -394,30 +415,15 @@ fn encode(value: &str) -> Vec<u8> {
 fn decode_key(key: &[u8]) -> String {
     match ciborium::from_reader(key).expect("collection key is not CBOR") {
         ciborium::Value::Text(key) => key,
-        ciborium::Value::Array(pair) => match &pair[..] {
-            [
-                ciborium::Value::Integer(writer),
-                ciborium::Value::Bytes(local),
-            ] => {
-                format!("{}:{}", u64::try_from(*writer).unwrap(), decode(local))
-            }
-            _ => panic!("registration key is not a [writer, local-key] pair"),
-        },
-        _ => panic!("collection key is neither a string nor a registration pair"),
+        _ => panic!("collection key is not a string"),
     }
 }
 
 fn accepted(
-    result: Result<
-        collection_registration::MutationAccepted,
-        collection_registration::MutationError,
-    >,
-) -> (String, Option<collections::Version>) {
+    result: Result<collections::Stamp, collection_registration::MutationError>,
+) -> (String, Option<collections::Stamp>) {
     match result {
-        Ok(accepted) => (
-            format!("ok@{}", accepted.row_version.sequence),
-            Some(accepted.row_version),
-        ),
+        Ok(stamp) => (format!("ok@{}", stamp.lamport), Some(stamp)),
         Err(error) => (failure(error), None),
     }
 }
@@ -425,9 +431,10 @@ fn accepted(
 fn failure(error: collection_registration::MutationError) -> String {
     match error {
         collection_registration::MutationError::Conflict(Some(current)) => {
-            format!("conflict@{}", current.sequence)
+            format!("conflict@{}", current.lamport)
         }
         collection_registration::MutationError::Conflict(None) => "conflict@none".into(),
+        collection_registration::MutationError::Forbidden => "forbidden".into(),
         collection_registration::MutationError::Revoked => "revoked".into(),
         collection_registration::MutationError::KeyTooLarge => "key-too-large".into(),
         collection_registration::MutationError::ValueTooLarge => "value-too-large".into(),
@@ -437,19 +444,25 @@ fn failure(error: collection_registration::MutationError) -> String {
     }
 }
 
-fn removed(
-    result: Result<
-        Option<collection_registration::MutationAccepted>,
-        collection_registration::MutationError,
-    >,
-) -> String {
-    match result {
-        Ok(Some(accepted)) => format!("ok@{}", accepted.row_version.sequence),
-        Ok(None) => "absent".into(),
-        Err(error) => failure(error),
-    }
+/// Resolves once the read loop has applied a page that leaves the replica holding `stamp` for
+/// `key`. Writers default their basis from the replica, so a scenario step that depends on a
+/// previous write waits for it to arrive instead of racing the read loop.
+async fn replica_holds(state: &Rc<RefCell<State>>, key: &[u8], stamp: &collections::Stamp) {
+    let held = WriteBasis::Observed(stamp.clone().into());
+    std::future::poll_fn(|context| {
+        let mut state = state.borrow_mut();
+        if state.mirror.borrow().write_basis(&key.to_vec()) == held {
+            std::task::Poll::Ready(())
+        } else {
+            state.applied.push(context.waker().clone());
+            std::task::Poll::Pending
+        }
+    })
+    .await;
 }
 
+/// Two scopes of one micro write the same keys. Their default bases come from the replica,
+/// so each ordinary write supersedes what the probe has seen, deletions included.
 async fn write_scenario(state: Rc<RefCell<State>>) {
     let value = |body: &str| collections::EncodedValue {
         body: encode(body),
@@ -467,44 +480,63 @@ async fn write_scenario(state: Rc<RefCell<State>>) {
         state.log.push(line);
         render(&mut state);
     };
+    let (x, y) = (encode("x"), encode("y"));
+    let stamp = |stamp: Option<collections::Stamp>| stamp.expect("the write was accepted");
 
-    let (outcome, a_x) = accepted(a.put(encode("x"), None, value("a1")).await);
+    let (outcome, a_x) = accepted(a.put(x.clone(), value("a1")).await);
     log(format!("a-put-x={outcome}"));
-    let (outcome, b_x) = accepted(b.put(encode("x"), None, value("b1")).await);
+    let a_x = stamp(a_x);
+    replica_holds(&state, &x, &a_x).await;
+    let (outcome, b_x) = accepted(b.put(x.clone(), value("b1")).await);
     log(format!("b-put-x={outcome}"));
-    let (outcome, _) = accepted(a.put(encode("x"), None, value("blind")).await);
-    log(format!("a-blind-put-x={outcome}"));
-    let (outcome, a_x2) = accepted(a.put(encode("x"), a_x, value("a2")).await);
-    log(format!("a-cas-put-x={outcome}"));
-    log(format!(
-        "a-stale-remove-x={}",
-        removed(a.remove(encode("x"), a_x).await)
-    ));
-    let (outcome, _) = accepted(b.put(encode("x"), a_x2, value("stolen")).await);
-    log(format!("b-put-with-a-version-x={outcome}"));
-    let (outcome, a_y) = accepted(a.put(encode("y"), None, value("a3")).await);
-    log(format!("a-put-y={outcome}"));
-    log(format!(
-        "b-remove-y={}",
-        removed(b.remove(encode("y"), None).await)
-    ));
-    log(format!(
-        "b-remove-with-a-version-y={}",
-        removed(b.remove(encode("y"), a_y).await)
-    ));
-    let (outcome, _) = accepted(a.put(vec![0; 1025], None, value("big-key")).await);
+    replica_holds(&state, &x, &stamp(b_x)).await;
+    // Compare-and-set against the superseded stamp reports the visible one.
+    let (outcome, _) = accepted(
+        a.put_with(
+            x.clone(),
+            collection_registration::WriteBasis::CompareAndSet(Some(a_x)),
+            value("stale"),
+        )
+        .await,
+    );
+    log(format!("a-stale-cas-x={outcome}"));
+    let (outcome, a_x2) = accepted(a.put(x.clone(), value("a2")).await);
+    log(format!("a-put-x-again={outcome}"));
+    let a_x2 = stamp(a_x2);
+    replica_holds(&state, &x, &a_x2).await;
+
+    // A delete of a key the replica has never held is a concurrent tombstone. A blind write
+    // loses to it; the replica now holds the tombstone's stamp, so the default basis wins.
+    let (outcome, b_y) = accepted(b.delete(y.clone()).await);
+    log(format!("b-delete-y={outcome}"));
+    let b_y = stamp(b_y);
+    replica_holds(&state, &y, &b_y).await;
+    let (outcome, _) = accepted(
+        a.put_with(
+            y.clone(),
+            collection_registration::WriteBasis::Concurrent,
+            value("blind"),
+        )
+        .await,
+    );
+    log(format!("a-blind-put-y={outcome}"));
+    let (outcome, a_y) = accepted(a.put(y.clone(), value("a3")).await);
+    log(format!("a-recreate-y={outcome}"));
+    replica_holds(&state, &y, &stamp(a_y.clone())).await;
+
+    let (outcome, _) = accepted(a.put(vec![0; 1025], value("big-key")).await);
     log(format!("a-put-big-key={outcome}"));
     let big = collections::EncodedValue {
         body: vec![0; 64 * 1024 + 1],
         capabilities: Vec::new(),
     };
-    let (outcome, _) = accepted(a.put(encode("y"), a_y, big).await);
+    let (outcome, _) = accepted(a.put(y.clone(), big).await);
     log(format!("a-put-big-value-y={outcome}"));
-    log(format!(
-        "b-remove-x={}",
-        removed(b.remove(encode("x"), b_x).await)
-    ));
-    let (outcome, _) = accepted(b.put(encode("x"), None, value("b2")).await);
+
+    let (outcome, b_x_del) = accepted(b.delete(x.clone()).await);
+    log(format!("b-delete-x={outcome}"));
+    replica_holds(&state, &x, &stamp(b_x_del)).await;
+    let (outcome, _) = accepted(b.put(x.clone(), value("b2")).await);
     log(format!("b-put-x-again={outcome}"));
     drop((a, b));
     let mut state = state.borrow_mut();
@@ -537,7 +569,6 @@ async fn cap_write_scenario(state: Rc<RefCell<State>>) {
         writer
             .put(
                 encode("cap"),
-                None,
                 collections::EncodedValue {
                     body: cap_tagged_body(),
                     capabilities: Vec::new(),
@@ -556,11 +587,10 @@ async fn cap_write_scenario(state: Rc<RefCell<State>>) {
             return;
         }
     };
-    let (outcome, version) = accepted(
+    let (outcome, stamp) = accepted(
         writer
             .put(
                 encode("cap"),
-                None,
                 collections::EncodedValue {
                     body: cap_tagged_body(),
                     capabilities: vec![reference],
@@ -570,9 +600,9 @@ async fn cap_write_scenario(state: Rc<RefCell<State>>) {
     );
     log(format!("cap-put={outcome}"));
     let mut state = state.borrow_mut();
-    if version.is_some() {
+    if stamp.is_some() {
         state.cap_publication = Some(published);
-        state.cap_version = version;
+        state.cap_stamp = stamp;
     }
     state.scenario = "done";
     render(&mut state);
@@ -583,7 +613,8 @@ async fn cap_redeem(state: Rc<RefCell<State>>, identity: u64) {
         let state = state.borrow();
         state
             .mirror
-            .rows()
+            .borrow()
+            .live_rows()
             .into_iter()
             .map(|(_, value)| value)
             .find(|value| !value.capabilities.is_empty())
@@ -635,13 +666,17 @@ async fn cap_redeem(state: Rc<RefCell<State>>, identity: u64) {
 }
 
 async fn cap_close_scenario(state: Rc<RefCell<State>>) {
-    let (writer, version) = {
+    let (writer, stamp) = {
         let state = state.borrow();
         (
             state.cap_writer.clone().expect("cap writer is bound"),
-            state.cap_version,
+            state.cap_stamp.clone(),
         )
     };
+    // The default basis comes from the replica, so wait until it holds the row being deleted.
+    if let Some(stamp) = &stamp {
+        replica_holds(&state, &encode("cap"), stamp).await;
+    }
     let log = |line: String| {
         let mut state = state.borrow_mut();
         state.log.push(line);
@@ -649,7 +684,7 @@ async fn cap_close_scenario(state: Rc<RefCell<State>>) {
     };
     log(format!(
         "cap-remove={}",
-        removed(writer.remove(encode("cap"), version).await)
+        accepted(writer.delete(encode("cap")).await).0
     ));
     let published = state.borrow_mut().cap_publication.take();
     drop(published);
@@ -668,7 +703,7 @@ async fn cap_close_scenario(state: Rc<RefCell<State>>) {
         None => log("cap-proxy=absent".into()),
     }
     let mut state = state.borrow_mut();
-    state.cap_version = None;
+    state.cap_stamp = None;
     state.scenario = "done";
     render(&mut state);
 }
@@ -705,7 +740,7 @@ async fn read_loop(state: Rc<RefCell<State>>) {
                 state.resume_requested = false;
                 state.lease = None;
                 state.status = "resuming";
-                let cursor = state.mirror.cursor().cloned();
+                let cursor = state.mirror.borrow_mut().cursor().cloned();
                 render(&mut state);
                 Some(cursor)
             } else {
@@ -723,7 +758,10 @@ async fn read_loop(state: Rc<RefCell<State>>) {
                 render(&mut state);
                 return;
             }
-            state.mirror.begin_lease(acquired_resume.as_ref());
+            state
+                .mirror
+                .borrow_mut()
+                .begin_lease(acquired_resume.as_ref());
             state.resumes += 1;
             state.lease = Some(Rc::new(lease));
             state.status = "reading";
@@ -732,13 +770,13 @@ async fn read_loop(state: Rc<RefCell<State>>) {
         }
 
         let (lease, ticket, committed) = {
-            let mut state = state.borrow_mut();
+            let state = state.borrow();
             let lease = state
                 .lease
                 .as_ref()
                 .expect("collection lease missing")
                 .clone();
-            let ticket = state.mirror.begin_read();
+            let ticket = state.mirror.borrow_mut().begin_read();
             let committed = ticket.committed().cloned();
             (lease, ticket, committed)
         };
@@ -753,9 +791,9 @@ async fn read_loop(state: Rc<RefCell<State>>) {
             )
             .await;
         {
-            let mut state = state.borrow_mut();
+            let state = state.borrow();
             if state.stop_requested || state.resume_requested {
-                assert!(state.mirror.cancel_read(&ticket));
+                assert!(state.mirror.borrow_mut().cancel_read(&ticket));
                 continue;
             }
         }
@@ -774,11 +812,14 @@ async fn read_loop(state: Rc<RefCell<State>>) {
                 }
                 if nonempty && state.drop_next {
                     state.drop_next = false;
-                    assert!(state.mirror.cancel_read(&ticket));
+                    assert!(state.mirror.borrow_mut().cancel_read(&ticket));
                     state.replays += 1;
                 } else {
-                    assert!(state.mirror.apply(&ticket, &page));
-                    state.status = if state.mirror.bootstrap_complete() {
+                    assert!(state.mirror.borrow_mut().apply(&ticket, &page));
+                    for waker in std::mem::take(&mut state.applied) {
+                        waker.wake();
+                    }
+                    state.status = if state.mirror.borrow_mut().bootstrap_complete() {
                         "live"
                     } else {
                         "reading"
@@ -790,7 +831,7 @@ async fn read_loop(state: Rc<RefCell<State>>) {
                 {
                     let mut state = state.borrow_mut();
                     state.lease = None;
-                    state.mirror.clear();
+                    state.mirror.borrow_mut().clear();
                     state.resets += 1;
                     state.status = "reading";
                     render(&mut state);
@@ -848,7 +889,7 @@ async fn acquire(
                 if state.stop_requested {
                     return None;
                 }
-                state.mirror.clear();
+                state.mirror.borrow_mut().clear();
                 state.resets += 1;
                 state.status = "reading";
                 resume = None;
@@ -881,7 +922,7 @@ fn finish_with_status(state: &Rc<RefCell<State>>, status: &'static str) {
     render(&mut state);
 }
 
-fn decode_page(page: collections::Page) -> Page<Vec<u8>, Rc<GuestValue>> {
+fn decode_page(page: collections::Page) -> Page<Vec<u8>, Stamped<Option<Rc<GuestValue>>>> {
     Page {
         transactions: page
             .transactions
@@ -893,15 +934,21 @@ fn decode_page(page: collections::Page) -> Page<Vec<u8>, Rc<GuestValue>> {
                     .map(|change| match change {
                         collections::Change::Upsert(upsert) => {
                             decode_key(&upsert.key.body);
-                            let value = Rc::new(GuestValue {
-                                body: upsert.value.body,
-                                capabilities: upsert.value.capabilities,
+                            let value = upsert.value.map(|value| {
+                                let value = Rc::new(GuestValue {
+                                    body: value.body,
+                                    capabilities: value.capabilities,
+                                });
+                                decode_value(&value);
+                                value
                             });
-                            decode_value(&value);
                             Change::Upsert {
                                 key: upsert.key.body,
                                 row_version: version(upsert.row_version),
-                                value,
+                                value: Stamped {
+                                    stamp: upsert.stamp.into(),
+                                    value,
+                                },
                                 evidence: match upsert.evidence {
                                     collections::RowEvidence::Authoritative => {
                                         RowEvidence::Authoritative

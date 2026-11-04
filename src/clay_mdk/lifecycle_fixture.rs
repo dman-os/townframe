@@ -84,12 +84,24 @@ impl micro_lifecycle::Guest for Lifecycle {
     async fn initialize(
         context: micro_lifecycle::InitialContext,
     ) -> Result<micro_lifecycle::Initialized, InitializationError> {
-        let role: String =
-            ciborium::from_reader(context.arguments.as_slice()).map_err(|error| {
-                InitializationError::InvalidConfiguration(format!(
-                    "lifecycle fixture arguments must be one CBOR text role: {error}"
-                ))
-            })?;
+        // The role, as one CBOR text, or `[role, key-prefix]` for the registration roles: the
+        // prefix is the key prefix the host granted this incarnation's writers.
+        let (role, prefix) = match ciborium::from_reader(context.arguments.as_slice()) {
+            Ok(ciborium::Value::Text(role)) => (role, Vec::new()),
+            Ok(ciborium::Value::Array(arguments)) => match <[_; 2]>::try_from(arguments) {
+                Ok([ciborium::Value::Text(role), ciborium::Value::Bytes(prefix)]) => (role, prefix),
+                _ => {
+                    return Err(InitializationError::InvalidConfiguration(
+                        "lifecycle fixture arguments must be [role, key-prefix]".into(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(InitializationError::InvalidConfiguration(
+                    "lifecycle fixture arguments must be a CBOR role or [role, key-prefix]".into(),
+                ));
+            }
+        };
         let initialized = match role.as_str() {
             "provider" => {
                 let peer = context
@@ -148,7 +160,7 @@ impl micro_lifecycle::Guest for Lifecycle {
                 }
             }
             "registrations" | "failing-registrations" => {
-                register(context.registrations).await;
+                register(&prefix, context.registrations).await;
                 if role == "failing-registrations" {
                     return Err(InitializationError::Rejected(
                         "registration fixture rejects its initialization".into(),
@@ -188,7 +200,14 @@ impl micro_lifecycle::Guest for Lifecycle {
     }
 }
 
-async fn register(bindings: Vec<collection_registration::RegistrationBinding>) {
+/// Exercise the causal-map write surface through `a` and `b`, two scopes of one micro under
+/// the granted key `prefix`. The sequence has the same outcome whether the scopes are still
+/// staged or already published (a scope sees its own staged candidates but not another's, so
+/// only `Observed` bases and own-candidate comparisons are used across scopes). It leaves the
+/// visible rows `b`'s `x` and `a`'s `y`.
+async fn register(prefix: &[u8], bindings: Vec<collection_registration::RegistrationBinding>) {
+    use collection_registration::MutationError;
+    use collection_registration::WriteBasis;
     let [first, second]: [_; 2] = bindings.try_into().unwrap();
     assert_eq!((&*first.name, &*second.name), ("a", "b"));
     let (first, second) = (first.writer, second.writer);
@@ -200,50 +219,56 @@ async fn register(bindings: Vec<collection_registration::RegistrationBinding>) {
             capabilities: Vec::new(),
         }
     };
-    let first_x = first
-        .put(b"x".to_vec(), None, value("a-x"))
+    let [x, y] = ["x", "y"].map(|name| [prefix, name.as_bytes()].concat());
+    let a_x = first
+        .put(x.clone(), WriteBasis::Concurrent, value("a-x"))
         .await
-        .unwrap()
-        .row_version;
-    let first_y = first
-        .put(b"y".to_vec(), None, value("a-y"))
+        .unwrap();
+    let a_y = first
+        .put(y.clone(), WriteBasis::Concurrent, value("a-y"))
         .await
-        .unwrap()
-        .row_version;
-    let second_x = second
-        .put(b"x".to_vec(), None, value("b-x"))
+        .unwrap();
+    assert_eq!(a_x.lamport, 1);
+    assert!(!a_x.writer.is_empty());
+    // A write that observed a stamp supersedes it, whichever scope wrote it.
+    let b_x = second
+        .put(x.clone(), WriteBasis::Observed(a_x.clone()), value("b-x"))
         .await
-        .unwrap()
-        .row_version;
+        .unwrap();
+    assert_eq!(b_x.lamport, 2);
+    assert_eq!(b_x.writer, a_x.writer);
+    // Compare-and-set against a superseded stamp fails with the visible one.
     assert!(matches!(
-        second.put(b"x".to_vec(), Some(first_x), value("stolen")).await,
-        Err(collection_registration::MutationError::Conflict(Some(current)))
-            if (current.incarnation, current.sequence)
-                == (second_x.incarnation, second_x.sequence)
-    ));
-    assert!(matches!(
-        second.remove(b"y".to_vec(), Some(first_y)).await,
-        Err(collection_registration::MutationError::Conflict(None))
-    ));
-    assert!(second.remove(b"y".to_vec(), None).await.unwrap().is_none());
-    assert!(
-        first
-            .remove(b"y".to_vec(), Some(first_y))
-            .await
-            .unwrap()
-            .is_some()
-    );
-    first.put(b"y".to_vec(), None, value("a-y")).await.unwrap();
-    first.clear().await.unwrap();
-    first.clear().await.unwrap();
-    assert!(matches!(
-        first
-            .put(b"x".to_vec(), Some(first_x), value("stale"))
+        second
+            .put(x.clone(), WriteBasis::CompareAndSet(Some(a_x.clone())), value("stolen"))
             .await,
-        Err(collection_registration::MutationError::Conflict(None))
+        Err(MutationError::Conflict(Some(current)))
+            if (current.lamport, &current.writer) == (b_x.lamport, &b_x.writer)
     ));
-    first.put(b"x".to_vec(), None, value("a-x")).await.unwrap();
-    first.put(b"y".to_vec(), None, value("a-y")).await.unwrap();
+    // Deleting is a stamped write too; `a` supersedes the tombstone because it was handed the
+    // delete's stamp.
+    let b_y = second
+        .delete(y.clone(), WriteBasis::Observed(a_y))
+        .await
+        .unwrap();
+    assert_eq!(b_y.lamport, 2);
+    let a_y2 = first
+        .put(y.clone(), WriteBasis::Observed(b_y), value("a-y"))
+        .await
+        .unwrap();
+    assert_eq!(a_y2.lamport, 3);
+    // Keys outside the granted prefix are refused for both writers and both verbs.
+    let outside = b"\xffoutside".to_vec();
+    assert!(matches!(
+        first
+            .put(outside.clone(), WriteBasis::Concurrent, value("no"))
+            .await,
+        Err(MutationError::Forbidden)
+    ));
+    assert!(matches!(
+        second.delete(outside, WriteBasis::Concurrent).await,
+        Err(MutationError::Forbidden)
+    ));
     drop((first, second));
 }
 
