@@ -9,7 +9,6 @@ allowed_dependencies = [
     "clay_store",
     "clay_host",
     "clay_mdk",
-    "clay_surface",
     "micro_counter_manifest",
     "micro_sample",
     "micro_settings",
