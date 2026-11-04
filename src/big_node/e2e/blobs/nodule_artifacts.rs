@@ -21,9 +21,10 @@ use big_plugs_core::Contribution;
 use big_plugs_core::Digest;
 use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
+use big_plugs_core::example_plug;
 use std::time::Duration;
 
-const PLUG: &str = "@example/artifacts";
+const PLUG: &str = example_plug!("artifacts");
 
 async fn retained(sql: &Database, document: &DocId) -> BTreeSet<String> {
     sql.query(

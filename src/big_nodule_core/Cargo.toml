@@ -30,3 +30,6 @@ thiserror.workspace = true
 # `Extra`, carried Lexicon files and trigger policies keep the member order a peer sent.
 indexmap = { version = "2", features = ["serde"] }
 schemars = { version = "1.2", features = ["indexmap2"], optional = true }
+
+[dev-dependencies]
+big_plugs_core = { path = "../big_plugs_core", default-features = false, features = ["test-support"] }

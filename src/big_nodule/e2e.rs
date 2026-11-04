@@ -66,6 +66,7 @@ use big_plugs_core::Contribution;
 use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugId;
+use big_plugs_core::example_plug;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::StorageConfig;
@@ -620,10 +621,10 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     let operator = node.operator();
 
     let record = node
-        .admit(operator, plug("@example/photos", "1.0.0", true))
+        .admit(operator, plug(example_plug!("photos"), "1.0.0", true))
         .await
         .unwrap();
-    assert_eq!(record.plug_id, id("@example/photos"));
+    assert_eq!(record.plug_id, id(example_plug!("photos")));
     assert_eq!(record.nodule_id.as_deref(), Some("org.example.photos"));
     assert!(!record.enabled);
     assert_eq!(record.readiness, Readiness::Disabled);
@@ -640,7 +641,7 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     let enabled = node
         .call(SetNoduleEnabled {
             authorization: operator,
-            plug_id: id("@example/photos"),
+            plug_id: id(example_plug!("photos")),
             enabled: true,
         })
         .await
@@ -649,7 +650,7 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     let configured = node
         .call(ConfigureNodule {
             authorization: operator,
-            plug_id: id("@example/photos"),
+            plug_id: id(example_plug!("photos")),
             settings: settings_of(false),
         })
         .await
@@ -658,7 +659,7 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     assert!(matches!(
         node.call(ConfigureNodule {
             authorization: operator,
-            plug_id: id("@example/photos"),
+            plug_id: id(example_plug!("photos")),
             settings: [("thumbnails".to_owned(), json!("no"))]
                 .into_iter()
                 .collect(),
@@ -666,26 +667,26 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
         .await,
         Err(NodulesError::Rejected(_))
     ));
-    node.admit(operator, plug("@example/schema", "0.1.0", false))
+    node.admit(operator, plug(example_plug!("schema"), "0.1.0", false))
         .await
         .unwrap();
     assert!(matches!(
         node.call(ConfigureNodule {
             authorization: operator,
-            plug_id: id("@example/schema"),
+            plug_id: id(example_plug!("schema")),
             settings: IndexMap::new(),
         })
         .await,
         Err(NodulesError::NoConfigSchema(_))
     ));
     assert!(matches!(
-        node.get(operator, "@example/missing").await,
+        node.get(operator, example_plug!("missing")).await,
         Err(NodulesError::UnknownPlug(_))
     ));
 
     // An upgrade keeps the nodule's actor and the operator's settings.
     let upgraded = node
-        .admit(operator, plug("@example/photos", "1.1.0", true))
+        .admit(operator, plug(example_plug!("photos"), "1.1.0", true))
         .await
         .unwrap();
     assert_eq!(upgraded.version, Some("1.1.0".parse().unwrap()));
@@ -697,13 +698,13 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     assert_eq!(upgraded.config, Some(settings_of(false)));
 
     node.restart_nodules().await.unwrap();
-    let recovered = node.get(operator, "@example/photos").await.unwrap();
+    let recovered = node.get(operator, example_plug!("photos")).await.unwrap();
     assert_eq!(recovered, upgraded);
     assert_eq!(
         node.list(operator).await.unwrap(),
-        vec![id("@example/photos"), id("@example/schema")]
+        vec![id(example_plug!("photos")), id(example_plug!("schema"))]
     );
-    let schema = node.get(operator, "@example/schema").await.unwrap();
+    let schema = node.get(operator, example_plug!("schema")).await.unwrap();
     assert!(!schema.enabled);
     assert_eq!(schema.config, None);
     node.shutdown().await;
@@ -714,15 +715,15 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     let node = node().await;
     let operator = node.operator();
     let bystander = node.bystander().await;
-    node.admit(operator, plug("@example/photos", "1.0.0", true))
+    node.admit(operator, plug(example_plug!("photos"), "1.0.0", true))
         .await
         .unwrap();
-    node.admit(operator, plug("@example/schema", "0.1.0", false))
+    node.admit(operator, plug(example_plug!("schema"), "0.1.0", false))
         .await
         .unwrap();
 
     assert_eq!(
-        node.admit(bystander, plug("@example/intruder", "1.0.0", false))
+        node.admit(bystander, plug(example_plug!("intruder"), "1.0.0", false))
             .await,
         Err(NodulesError::Denied)
     );
@@ -735,29 +736,29 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     let photos_only = node
         .mint(
             operator,
-            scope(false, &["@example/photos"]),
+            scope(false, &[example_plug!("photos")]),
             Rights::USE | Rights::NARROW,
         )
         .await
         .unwrap();
     assert_eq!(
         node.list(photos_only).await.unwrap(),
-        vec![id("@example/photos")]
+        vec![id(example_plug!("photos"))]
     );
-    assert!(node.get(photos_only, "@example/photos").await.is_ok());
+    assert!(node.get(photos_only, example_plug!("photos")).await.is_ok());
     assert_eq!(
-        node.get(photos_only, "@example/schema").await,
+        node.get(photos_only, example_plug!("schema")).await,
         Err(NodulesError::Denied)
     );
     assert_eq!(
-        node.admit(photos_only, plug("@example/photos", "1.1.0", true))
+        node.admit(photos_only, plug(example_plug!("photos"), "1.1.0", true))
             .await,
         Err(NodulesError::Denied)
     );
     assert!(
         node.call(SetNoduleEnabled {
             authorization: photos_only,
-            plug_id: id("@example/photos"),
+            plug_id: id(example_plug!("photos")),
             enabled: true,
         })
         .await
@@ -766,26 +767,34 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
 
     // A handle narrows to what it covers and nothing wider.
     assert_eq!(
-        node.mint(photos_only, scope(true, &["@example/photos"]), Rights::USE)
-            .await,
+        node.mint(
+            photos_only,
+            scope(true, &[example_plug!("photos")]),
+            Rights::USE
+        )
+        .await,
         Err(NodulesError::Denied)
     );
     assert_eq!(
         node.mint(
             photos_only,
-            scope(false, &["@example/photos", "@example/schema"]),
+            scope(false, &[example_plug!("photos"), example_plug!("schema")]),
             Rights::USE
         )
         .await,
         Err(NodulesError::Denied)
     );
     let read_only = node
-        .mint(photos_only, scope(false, &["@example/photos"]), Rights::USE)
+        .mint(
+            photos_only,
+            scope(false, &[example_plug!("photos")]),
+            Rights::USE,
+        )
         .await
         .unwrap();
     assert_eq!(
         node.list(read_only).await.unwrap(),
-        vec![id("@example/photos")]
+        vec![id(example_plug!("photos"))]
     );
     assert!(matches!(
         node.mint(read_only, scope(false, &[]), Rights::USE).await,
@@ -794,7 +803,7 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     assert_eq!(
         node.call(SetNoduleDrawerGrants {
             authorization: photos_only,
-            plug_id: id("@example/schema"),
+            plug_id: id(example_plug!("schema")),
             drawers: BTreeMap::new(),
         })
         .await,
@@ -803,7 +812,7 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     assert_eq!(
         node.call(UninstallNodule {
             authorization: photos_only,
-            plug_id: id("@example/schema"),
+            plug_id: id(example_plug!("schema")),
         })
         .await,
         Err(NodulesError::Denied)
@@ -818,34 +827,37 @@ async fn an_admit_scoped_handle_admits_only_its_own_plugs() {
     let photos_admin = node
         .mint(
             operator,
-            scope(true, &["@example/photos"]),
+            scope(true, &[example_plug!("photos")]),
             Rights::USE | Rights::NARROW,
         )
         .await
         .unwrap();
 
     // Install and upgrade of the named plug pass; any other plug id is denied, installed or not.
-    node.admit(photos_admin, plug("@example/photos", "1.0.0", true))
+    node.admit(photos_admin, plug(example_plug!("photos"), "1.0.0", true))
         .await
         .unwrap();
-    node.admit(photos_admin, plug("@example/photos", "1.1.0", true))
+    node.admit(photos_admin, plug(example_plug!("photos"), "1.1.0", true))
         .await
         .unwrap();
     assert_eq!(
-        node.admit(photos_admin, plug("@example/schema", "0.1.0", false))
+        node.admit(photos_admin, plug(example_plug!("schema"), "0.1.0", false))
             .await,
         Err(NodulesError::Denied)
     );
-    node.admit(operator, plug("@example/schema", "0.1.0", false))
+    node.admit(operator, plug(example_plug!("schema"), "0.1.0", false))
         .await
         .unwrap();
     assert_eq!(
-        node.admit(photos_admin, plug("@example/schema", "0.2.0", false))
+        node.admit(photos_admin, plug(example_plug!("schema"), "0.2.0", false))
             .await,
         Err(NodulesError::Denied)
     );
     assert_eq!(
-        node.get(operator, "@example/schema").await.unwrap().version,
+        node.get(operator, example_plug!("schema"))
+            .await
+            .unwrap()
+            .version,
         Some("0.1.0".parse().unwrap())
     );
     node.shutdown().await;
@@ -881,7 +893,7 @@ async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_lo
     let v1 = node
         .call(AdmitNodule {
             authorization: operator,
-            plug: plug("@example/photos", "1.0.0", true),
+            plug: plug(example_plug!("photos"), "1.0.0", true),
             drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
         })
         .await
@@ -890,7 +902,7 @@ async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_lo
     assert!(v1.drawers[&present].granted);
     node.call(ConfigureNodule {
         authorization: operator,
-        plug_id: id("@example/photos"),
+        plug_id: id(example_plug!("photos")),
         settings: settings_of(false),
     })
     .await
@@ -900,7 +912,7 @@ async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_lo
     let refused = node
         .admit(
             operator,
-            plug_requiring_endpoint("@example/photos", "2.0.0"),
+            plug_requiring_endpoint(example_plug!("photos"), "2.0.0"),
         )
         .await
         .unwrap();
@@ -918,7 +930,7 @@ async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_lo
     let record = node
         .call(ConfigureNodule {
             authorization: operator,
-            plug_id: id("@example/photos"),
+            plug_id: id(example_plug!("photos")),
             settings: repaired.clone(),
         })
         .await
@@ -944,7 +956,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     let blocked = node
         .call(AdmitNodule {
             authorization: operator,
-            plug: plug("@example/photos", "1.0.0", true),
+            plug: plug(example_plug!("photos"), "1.0.0", true),
             drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
         })
         .await
@@ -989,7 +1001,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
         node.nodules_actor.actor_id,
     )
     .await;
-    let applied = node.get(operator, "@example/photos").await.unwrap();
+    let applied = node.get(operator, example_plug!("photos")).await.unwrap();
     assert_eq!(applied.error, None);
     assert_eq!(
         applied.applied_heads.as_ref(),
@@ -1043,7 +1055,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     let downgraded = node
         .call(SetNoduleDrawerGrants {
             authorization: operator,
-            plug_id: id("@example/photos"),
+            plug_id: id(example_plug!("photos")),
             drawers: BTreeMap::from([(present.clone(), DrawerAccess::Read)]),
         })
         .await
@@ -1107,20 +1119,20 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
 
     // Restarting nodules preserves the applied Read grant across restarts.
     node.restart_nodules().await.unwrap();
-    let after_restart = node.get(operator, "@example/photos").await.unwrap();
+    let after_restart = node.get(operator, example_plug!("photos")).await.unwrap();
     assert_eq!(after_restart, downgraded);
 
     // Uninstalling removes the config datums and retracts the Read grant capability, while
     // re-admitting the same plug reopens the same durable actor.
     node.call(UninstallNodule {
         authorization: operator,
-        plug_id: id("@example/photos"),
+        plug_id: id(example_plug!("photos")),
     })
     .await
     .unwrap();
     assert!(node.list(operator).await.unwrap().is_empty());
     assert!(matches!(
-        node.get(operator, "@example/photos").await,
+        node.get(operator, example_plug!("photos")).await,
         Err(NodulesError::UnknownPlug(_))
     ));
     assert!(matches!(
@@ -1140,7 +1152,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
         Err(ClientError::Operation(DocsError::Denied))
     ));
     let readmitted = node
-        .admit(operator, plug("@example/photos", "1.0.0", true))
+        .admit(operator, plug(example_plug!("photos"), "1.0.0", true))
         .await
         .unwrap();
     assert_eq!(
@@ -1158,10 +1170,10 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
 async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     let node = node().await;
     let operator = node.operator();
-    node.admit(operator, plug("@example/photos", "1.0.0", true))
+    node.admit(operator, plug(example_plug!("photos"), "1.0.0", true))
         .await
         .unwrap();
-    node.admit(operator, plug("@example/schema", "0.1.0", false))
+    node.admit(operator, plug(example_plug!("schema"), "0.1.0", false))
         .await
         .unwrap();
 
@@ -1183,7 +1195,7 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
         )
         .await
         .unwrap();
-    let bad_settings_key: DatumKey = format!("{}/@example/photos", NoduleSettings::ID)
+    let bad_settings_key: DatumKey = format!("{}/{}", NoduleSettings::ID, example_plug!("photos"))
         .parse()
         .unwrap();
     let bad_receipt = node
@@ -1210,7 +1222,7 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
         .unwrap();
 
     let refused = loop {
-        let record = node.get(operator, "@example/photos").await.unwrap();
+        let record = node.get(operator, example_plug!("photos")).await.unwrap();
         if record.observed_heads == bad_receipt.heads {
             break record;
         }
@@ -1218,7 +1230,7 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     };
     assert_eq!(refused.readiness, Readiness::Refused);
     assert!(refused.error.is_some());
-    let healthy = node.get(operator, "@example/schema").await.unwrap();
+    let healthy = node.get(operator, example_plug!("schema")).await.unwrap();
     assert_eq!(healthy.readiness, Readiness::Disabled);
     assert_eq!(healthy.error, None);
 
@@ -1226,7 +1238,7 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     let repaired = node
         .call(ConfigureNodule {
             authorization: operator,
-            plug_id: id("@example/photos"),
+            plug_id: id(example_plug!("photos")),
             settings: settings_of(false),
         })
         .await

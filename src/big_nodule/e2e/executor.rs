@@ -38,6 +38,7 @@ use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::UninstallNodule;
 use big_plugs_core::Digest;
 use big_plugs_core::PlugId;
+use big_plugs_core::example_plug;
 use serde_json::json;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
@@ -47,7 +48,7 @@ use std::sync::Mutex;
 use tokio::sync::watch;
 
 const OWN: &str = "org.example.photos.list";
-const PHOTOS: &str = "@example/photos";
+const PHOTOS: &str = example_plug!("photos");
 
 /// Hosts nothing: it answers `ensure` with the readiness a test sets, serves a shared [`Echo`]
 /// once ready, and logs each workload it starts or stops. Like any executor it treats `ensure`

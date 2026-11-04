@@ -216,8 +216,8 @@ const ARTIFACT_SLOT_PREFIX: &str = "nodule.artifact/";
 /// `org.example.daybook.blob/nodule.artifact/<plugId>/<artifactKey>`: the [`Blob`] datum that
 /// references one artifact of an installed plug. big_blobs retains and fetches the bytes of every
 /// `Blob` in the document, so this is the nodule's artifact pin. A plug id is exactly
-/// `@namespace/name` (no further `/`), so the artifact key, which may contain `/`, is whatever
-/// follows the second `/`.
+/// `<did>/<name>` (neither part contains `/`), so the artifact key, which may contain `/`, is
+/// whatever follows the second `/`. The DID's `:` and `%` are legal in a key slot as they are.
 pub fn artifact_key(plug_id: &PlugId, artifact: &str) -> DatumKey {
     DatumKey::from_text(
         Blob::ID,

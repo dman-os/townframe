@@ -28,6 +28,7 @@ use big_plugs_core::Digest;
 use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugId;
+use big_plugs_core::example_plug;
 use service_utils_rs::ClientError;
 use std::time::Duration;
 
@@ -55,14 +56,14 @@ impl Spec {
 
 fn caller() -> Spec {
     Spec {
-        plug: "@example/wasm-test".parse().unwrap(),
+        plug: example_plug!("wasm-test").parse().unwrap(),
         authority: "org.example.test",
     }
 }
 
 fn callee() -> Spec {
     Spec {
-        plug: "@example/wasm-callee".parse().unwrap(),
+        plug: example_plug!("wasm-callee").parse().unwrap(),
         authority: "org.example.callee",
     }
 }

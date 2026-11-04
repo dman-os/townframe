@@ -31,6 +31,7 @@ use big_plugs_core::Contribution;
 use big_plugs_core::Digest;
 use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
+use big_plugs_core::example_plug;
 use futures::FutureExt;
 use serde_json::Value;
 use serde_json::json;
@@ -388,7 +389,7 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
     let mut node = super::node().await;
     let operator = node.operator();
     let own = "org.example.photos.list";
-    node.admit(operator, serving_plug("@example/photos", own))
+    node.admit(operator, serving_plug(example_plug!("photos"), own))
         .await
         .unwrap();
 
@@ -397,7 +398,7 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
         node.invoke(operator, own, json!({})).await,
         Err(DispatchError::UnknownOperation)
     );
-    node.set_enabled("@example/photos", true).await;
+    node.set_enabled(example_plug!("photos"), true).await;
     // Its handler artifact is not fetched and there is no executor, so the operation is known
     // but not serving.
     assert_eq!(
@@ -407,10 +408,10 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
         )))
     );
     let entry = node.dispatch.router.resolve(own).unwrap();
-    assert_eq!(entry.provider_id, "@example/photos");
+    assert_eq!(entry.provider_id, example_plug!("photos"));
     assert_eq!(entry.operation_kind, Some(OperationKind::Query));
     // The nodule's record reports the readiness dispatch answers with.
-    let record = node.get(operator, "@example/photos").await.unwrap();
+    let record = node.get(operator, example_plug!("photos")).await.unwrap();
     assert_eq!(record.readiness, entry.state.readiness());
     assert_eq!(record.readiness, Readiness::ArtifactsUnavailable);
 
@@ -421,15 +422,15 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
         Err(DispatchError::NotReady { .. })
     ));
 
-    node.set_enabled("@example/photos", false).await;
+    node.set_enabled(example_plug!("photos"), false).await;
     assert_eq!(
         node.invoke(operator, own, json!({})).await,
         Err(DispatchError::UnknownOperation)
     );
-    node.set_enabled("@example/photos", true).await;
+    node.set_enabled(example_plug!("photos"), true).await;
     node.call(UninstallNodule {
         authorization: operator,
-        plug_id: id("@example/photos"),
+        plug_id: id(example_plug!("photos")),
     })
     .await
     .unwrap();
@@ -445,7 +446,7 @@ async fn two_nodules_implementing_one_operation_are_ambiguous_until_one_is_disab
     let node = super::node().await;
     let operator = node.operator();
     let shared = "org.example.shared.ping";
-    for plug_id in ["@example/alpha", "@example/beta"] {
+    for plug_id in [example_plug!("alpha"), example_plug!("beta")] {
         node.admit(operator, serving_plug(plug_id, shared))
             .await
             .unwrap();
@@ -455,9 +456,9 @@ async fn two_nodules_implementing_one_operation_are_ambiguous_until_one_is_disab
         node.invoke(operator, shared, json!({})).await,
         Err(not_ready(NotReadyReason::Ambiguous))
     );
-    node.set_enabled("@example/alpha", false).await;
+    node.set_enabled(example_plug!("alpha"), false).await;
     let entry = node.dispatch.router.resolve(shared).unwrap();
-    assert_eq!(entry.provider_id, "@example/beta");
+    assert_eq!(entry.provider_id, example_plug!("beta"));
     assert_eq!(entry.operation_kind, None);
     assert_eq!(
         node.invoke(operator, shared, json!({})).await,

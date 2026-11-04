@@ -480,6 +480,7 @@ mod admission_tests {
     use big_plugs_core::NoduleContribution;
     use big_plugs_core::Plug;
     use big_plugs_core::PlugId;
+    use big_plugs_core::example_plug;
     use std::sync::Arc;
 
     fn plug_with(id: &str, version: &str, nodule: Nodule) -> Plug {
@@ -520,8 +521,8 @@ mod admission_tests {
     fn admits_plug_tracks_readiness_and_configures_settings() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
-        let plug = plug_with("@example/photos", "1.0.0", photos());
-        let id: PlugId = "@example/photos".parse().unwrap();
+        let plug = plug_with(example_plug!("photos"), "1.0.0", photos());
+        let id: PlugId = example_plug!("photos").parse().unwrap();
 
         let installed = config.admit(&cache, &plug, None).unwrap();
         assert_eq!(installed.plug_id, id);
@@ -577,8 +578,8 @@ mod admission_tests {
                 }
             }
         })));
-        let plug = plug_with("@example/schema", "0.1.0", nodule);
-        let id: PlugId = "@example/schema".parse().unwrap();
+        let plug = plug_with(example_plug!("schema"), "0.1.0", nodule);
+        let id: PlugId = example_plug!("schema").parse().unwrap();
 
         let installed = config.admit(&cache, &plug, None).unwrap();
         assert!(installed.artifacts.is_empty());
@@ -596,15 +597,15 @@ mod admission_tests {
     fn upgrades_preserve_state_and_validate_configured_settings() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
-        let id: PlugId = "@example/photos".parse().unwrap();
-        let v1 = plug_with("@example/photos", "1.0.0", photos());
+        let id: PlugId = example_plug!("photos").parse().unwrap();
+        let v1 = plug_with(example_plug!("photos"), "1.0.0", photos());
         config.admit(&cache, &v1, None).unwrap();
         config.set_enabled(&id, true).unwrap();
 
         // Unconfigured upgrade adopts the new version's defaults and keeps `enabled`.
         let mut nodule_v2 = photos();
         nodule_v2.config.as_mut().unwrap().defaults = Some(settings(json!(false)));
-        let v2 = plug_with("@example/photos", "1.1.0", nodule_v2);
+        let v2 = plug_with(example_plug!("photos"), "1.1.0", nodule_v2);
         let upgraded = config.admit(&cache, &v2, None).unwrap();
         assert!(upgraded.enabled);
         assert_eq!(upgraded.version, "1.1.0".parse().unwrap());
@@ -613,7 +614,7 @@ mod admission_tests {
         // Explicit configuration is preserved across a compatible upgrade and rejected if the
         // new version's schema breaks it.
         config.configure(&id, settings(json!(true))).unwrap();
-        let v3 = plug_with("@example/photos", "1.2.0", photos());
+        let v3 = plug_with(example_plug!("photos"), "1.2.0", photos());
         let upgraded = config.admit(&cache, &v3, None).unwrap();
         assert_eq!(upgraded.config, Some(settings(json!(true))));
 
@@ -640,7 +641,7 @@ mod admission_tests {
             .into_iter()
             .collect(),
         );
-        let v4_bad = plug_with("@example/photos", "2.0.0", incompatible);
+        let v4_bad = plug_with(example_plug!("photos"), "2.0.0", incompatible);
         // The upgrade is admitted even though it invalidates the explicit settings; resolution
         // refuses the nodule until the settings are rewritten (see the wedge test below).
         config.admit(&cache, &v4_bad, None).unwrap();
@@ -655,12 +656,12 @@ mod admission_tests {
         use crate::dispatch::DispatchScope;
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
-        let id: PlugId = "@example/photos".parse().unwrap();
+        let id: PlugId = example_plug!("photos").parse().unwrap();
         let drawer = DocId::random();
         config
             .admit(
                 &cache,
-                &plug_with("@example/photos", "1.0.0", photos()),
+                &plug_with(example_plug!("photos"), "1.0.0", photos()),
                 Some(BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])),
             )
             .unwrap();
@@ -713,12 +714,12 @@ mod admission_tests {
     fn an_upgrade_that_invalidates_settings_is_admitted_refused_and_repaired_by_configure() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
-        let id: PlugId = "@example/photos".parse().unwrap();
+        let id: PlugId = example_plug!("photos").parse().unwrap();
         let drawer = DocId::random();
         config
             .admit(
                 &cache,
-                &plug_with("@example/photos", "1.0.0", photos()),
+                &plug_with(example_plug!("photos"), "1.0.0", photos()),
                 Some(BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])),
             )
             .unwrap();
@@ -753,7 +754,7 @@ mod admission_tests {
         config
             .admit(
                 &cache,
-                &plug_with("@example/photos", "2.0.0", v2_nodule.clone()),
+                &plug_with(example_plug!("photos"), "2.0.0", v2_nodule.clone()),
                 None,
             )
             .unwrap();
@@ -806,7 +807,7 @@ mod admission_tests {
 
         // An upgrade to a revision with no config schema at all is refused the same way. Settings
         // can then no longer be rewritten, which `configure` reports as `NoConfigSchema`.
-        let schemaless = plug_with("@example/photos", "3.0.0", {
+        let schemaless = plug_with(example_plug!("photos"), "3.0.0", {
             let mut nodule = photos();
             nodule.config = None;
             nodule.lexicons.truncate(5);
@@ -827,8 +828,11 @@ mod admission_tests {
     #[test]
     fn unchanged_envelopes_are_admitted_once_and_changed_ones_again() {
         let cache = AdmissionCache::new();
-        let id: PlugId = "@example/photos".parse().unwrap();
-        let v1 = NoduleInstall::from_plug(&plug_with("@example/photos", "1.0.0", photos()), false);
+        let id: PlugId = example_plug!("photos").parse().unwrap();
+        let v1 = NoduleInstall::from_plug(
+            &plug_with(example_plug!("photos"), "1.0.0", photos()),
+            false,
+        );
         let first = cache.admission(&id, &v1);
         assert!(matches!(&*first, Admission::Admitted { .. }));
         assert!(
@@ -840,7 +844,10 @@ mod admission_tests {
         let mut enabled = v1.clone();
         enabled.enabled = true;
         assert!(Arc::ptr_eq(&first, &cache.admission(&id, &enabled)));
-        let v2 = NoduleInstall::from_plug(&plug_with("@example/photos", "1.1.0", photos()), false);
+        let v2 = NoduleInstall::from_plug(
+            &plug_with(example_plug!("photos"), "1.1.0", photos()),
+            false,
+        );
         assert!(!Arc::ptr_eq(&first, &cache.admission(&id, &v2)));
 
         // A tampered envelope under an unchanged revision pin is not served from the cache and
@@ -863,11 +870,11 @@ mod admission_tests {
             datums: BTreeMap::new(),
         };
         for (plug_id, authority) in [
-            ("@example/a", "org.example.a"),
-            ("@example/b", "org.example.a.b"),
-            ("@example/c", "org.example.ab"),
-            ("@example/d", "org.example.d"),
-            ("@example/e", "org.example.d"),
+            (example_plug!("a"), "org.example.a"),
+            (example_plug!("b"), "org.example.a.b"),
+            (example_plug!("c"), "org.example.ab"),
+            (example_plug!("d"), "org.example.d"),
+            (example_plug!("e"), "org.example.d"),
         ] {
             let plug = plug_with(plug_id, "1.0.0", Nodule::new(authority));
             read.datums.insert(
@@ -887,21 +894,28 @@ mod admission_tests {
             )
         };
         // `org.example.a` owns `org.example.a.b` but not the sibling `org.example.ab`.
-        assert!(refused("@example/a") && refused("@example/b") && !refused("@example/c"));
-        assert!(refused("@example/d") && refused("@example/e"));
+        assert!(
+            refused(example_plug!("a"))
+                && refused(example_plug!("b"))
+                && !refused(example_plug!("c"))
+        );
+        assert!(refused(example_plug!("d")) && refused(example_plug!("e")));
     }
 
     #[test]
     fn refuses_missing_contribution_bad_schema_missing_artifact_and_authority_conflicts() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
-        let empty = Plug::new("@example/empty".parse().unwrap(), "0.1.0".parse().unwrap());
+        let empty = Plug::new(
+            example_plug!("empty").parse().unwrap(),
+            "0.1.0".parse().unwrap(),
+        );
         assert!(matches!(
             config.admit(&cache, &empty, None),
             Err(InventoryError::MissingContribution(_))
         ));
 
-        let mut bad_schema = plug_with("@example/photos", "1.0.0", photos());
+        let mut bad_schema = plug_with(example_plug!("photos"), "1.0.0", photos());
         if let Contribution::Nodule(n) = &mut bad_schema.contributions[0] {
             n.schema = "org.example.other.nodule".into();
         }
@@ -910,7 +924,7 @@ mod admission_tests {
             Err(InventoryError::UnsupportedSchema { .. })
         ));
 
-        let mut bad_payload = plug_with("@example/photos", "1.0.0", photos());
+        let mut bad_payload = plug_with(example_plug!("photos"), "1.0.0", photos());
         if let Contribution::Nodule(n) = &mut bad_payload.contributions[0] {
             n.description.insert("id".into(), json!(123));
         }
@@ -919,13 +933,13 @@ mod admission_tests {
             Err(InventoryError::InvalidContribution { .. })
         ));
 
-        let mut no_artifact = plug_with("@example/photos", "1.0.0", photos());
+        let mut no_artifact = plug_with(example_plug!("photos"), "1.0.0", photos());
         no_artifact.artifacts.clear();
         assert!(matches!(
             config.admit(&cache, &no_artifact, None),
             Err(InventoryError::MissingArtifact { artifact, .. }) if artifact == "handler"
         ));
-        let mut no_size = plug_with("@example/photos", "1.0.0", photos());
+        let mut no_size = plug_with(example_plug!("photos"), "1.0.0", photos());
         no_size.artifacts[0].size = None;
         assert!(matches!(
             config.admit(&cache, &no_size, None),
@@ -936,24 +950,24 @@ mod admission_tests {
             "refused admissions install nothing"
         );
 
-        let valid = plug_with("@example/photos", "1.0.0", photos());
+        let valid = plug_with(example_plug!("photos"), "1.0.0", photos());
         config.admit(&cache, &valid, None).unwrap();
 
-        let duplicate_authority = plug_with("@example/other-photos", "1.0.0", photos());
+        let duplicate_authority = plug_with(example_plug!("other-photos"), "1.0.0", photos());
         assert!(matches!(
             config.admit(&cache, &duplicate_authority, None),
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
         let sub_authority = Nodule::new("org.example.photos.sub");
-        let sub_plug = plug_with("@example/sub-photos", "1.0.0", sub_authority);
+        let sub_plug = plug_with(example_plug!("sub-photos"), "1.0.0", sub_authority);
         assert!(matches!(
             config.admit(&cache, &sub_plug, None),
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
         let changed_plug = plug_with(
-            "@example/photos",
+            example_plug!("photos"),
             "2.0.0",
             Nodule::new("org.example.gallery"),
         );
@@ -1079,6 +1093,7 @@ mod config_tests {
     use big_plugs_core::NoduleContribution;
     use big_plugs_core::Plug;
     use big_plugs_core::PlugId;
+    use big_plugs_core::example_plug;
 
     fn sample_plug(id: &str, version: &str) -> Plug {
         let mut plug = Plug::new(id.parse().unwrap(), version.parse().unwrap());
@@ -1102,7 +1117,7 @@ mod config_tests {
 
     #[test]
     fn config_datums_preserve_unknown_fields_and_vocabulary_on_round_trip() {
-        let plug = sample_plug("@example/photos", "1.0.0");
+        let plug = sample_plug(example_plug!("photos"), "1.0.0");
         let plug_id = plug.id.clone();
 
         let install = NoduleInstall::from_plug(&plug, true);
@@ -1159,7 +1174,7 @@ mod config_tests {
     fn refused_entries_take_the_nodule_id_from_the_nodule_contribution_only() {
         // A micro precedes the nodule and carries a string `description.id` of its own; the
         // nodule's schema is wrong so admission refuses and the id must come from the raw envelope.
-        let mut plug = sample_plug("@example/photos", "1.0.0");
+        let mut plug = sample_plug(example_plug!("photos"), "1.0.0");
         let mut micro_description = IndexMap::new();
         micro_description.insert("id".to_owned(), json!("ui-button"));
         plug.contributions.insert(
@@ -1198,11 +1213,11 @@ mod config_tests {
 
     #[test]
     fn datum_store_hydrates_diffs_and_isolates_invalid_or_orphan_entries() {
-        let photos_plug = sample_plug("@example/photos", "1.0.0");
+        let photos_plug = sample_plug(example_plug!("photos"), "1.0.0");
         let photos_id = photos_plug.id.clone();
 
-        let broken_id: PlugId = "@example/broken".parse().unwrap();
-        let orphan_id: PlugId = "@example/orphan".parse().unwrap();
+        let broken_id: PlugId = example_plug!("broken").parse().unwrap();
+        let orphan_id: PlugId = example_plug!("orphan").parse().unwrap();
         let drawer = DocId::random();
 
         let unowned_key = DatumKey::from_text("org.example.daybook.drawer", "main").unwrap();
@@ -1282,7 +1297,7 @@ mod config_tests {
         ));
         assert!(before.entry(&orphan_id).unwrap().install.is_absent());
 
-        // Resolve admits `@example/photos`, refuses `@example/broken`, and ignores `@example/orphan`.
+        // Resolve admits `example/photos`, refuses `example/broken`, and ignores `example/orphan`.
         let resolved = before.resolve(&Default::default());
         assert!(matches!(
             resolved.get(&photos_id),
@@ -1294,7 +1309,7 @@ mod config_tests {
         ));
         assert!(!resolved.contains_key(&orphan_id));
 
-        // Mutating `@example/photos` leaves broken, orphan, malformed, and unowned keys untouched.
+        // Mutating `example/photos` leaves broken, orphan, malformed, and unowned keys untouched.
         let mut after = before.clone();
         after.set_enabled(&photos_id, true).unwrap();
         after
@@ -1329,7 +1344,7 @@ mod config_tests {
             json!("Read")
         );
 
-        // Uninstalling `@example/photos` removes all three datums in one patch.
+        // Uninstalling `example/photos` removes all three datums in one patch.
         let mut uninstalled = after.clone();
         uninstalled.uninstall(&photos_id).unwrap();
         let uninstall_patch = NoduleConfig::diff(&after, &uninstalled).unwrap();
@@ -1369,11 +1384,15 @@ mod config_tests {
 
     #[test]
     fn handler_artifacts_are_referenced_by_blob_datums_that_follow_the_install() {
-        let id: PlugId = "@example/photos".parse().unwrap();
+        let id: PlugId = example_plug!("photos").parse().unwrap();
         let slot = artifact_key(&id, "handler");
         assert_eq!(
             slot.to_string(),
-            "org.example.daybook.blob/nodule.artifact/@example/photos/handler"
+            concat!(
+                "org.example.daybook.blob/nodule.artifact/",
+                example_plug!("photos"),
+                "/handler"
+            )
         );
         let foreign = DatumKey::from_text(big_blobs_core::Blob::ID, "avatar").unwrap();
         let malformed =
@@ -1384,7 +1403,7 @@ mod config_tests {
 
         // Admitting writes the install and the reference in the same patch, and the reference
         // is the datum wire form big_blobs reads (no `null` for the unset options).
-        let v1 = sample_plug("@example/photos", "1.0.0");
+        let v1 = sample_plug(example_plug!("photos"), "1.0.0");
         let cache = AdmissionCache::new();
         let mut config = NoduleConfig::new();
         config.admit(&cache, &v1, None).unwrap();
@@ -1429,7 +1448,7 @@ mod config_tests {
         assert_eq!(patch.remove, BTreeSet::from([stale.clone()]));
 
         // Upgrading to a revision with another handler swaps the reference in place.
-        let mut v2 = sample_plug("@example/photos", "1.1.0");
+        let mut v2 = sample_plug(example_plug!("photos"), "1.1.0");
         v2.artifacts[0].digest = Digest::of(b"other-wasm-bytes");
         v2.artifacts[0].size = Some(16);
         let mut upgraded = stored.clone();

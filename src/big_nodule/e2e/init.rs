@@ -36,6 +36,7 @@ use big_plugs_core::Contribution;
 use big_plugs_core::Digest;
 use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
+use big_plugs_core::example_plug;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -46,7 +47,7 @@ use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::watch;
 
-const ALPHA: &str = "@example/alpha";
+const ALPHA: &str = example_plug!("alpha");
 const PING: &str = "org.example.alpha.ping";
 const SETUP: &str = "org.example.alpha.setup";
 const WARM: &str = "org.example.alpha.warm";
@@ -163,7 +164,7 @@ fn query(nsid: &str) -> serde_json::Map<String, Value> {
     .clone()
 }
 
-/// A package `@example/<name>` whose nodule `org.example.<name>` serves `serves` (all under its
+/// A package `<example did>/<name>` whose nodule `org.example.<name>` serves `serves` (all under its
 /// authority), requires `requires`, and declares `inits` as `(key, target, mode)` in order.
 /// Each `version` has a handler of its own, so each is a revision of its own.
 fn init_plug(
@@ -195,7 +196,7 @@ fn init_plug(
         .collect();
     let bytes = format!("{name}-{version}");
     let mut plug = Plug::new(
-        format!("@example/{name}").parse().unwrap(),
+        big_plugs_core::test_support::plug_id(name),
         version.parse().unwrap(),
     );
     plug.artifacts.push(Artifact {
@@ -609,7 +610,7 @@ async fn initializers_that_wait_on_each_other_are_reported_as_a_dependency_cycle
     .await
     .unwrap();
     node.set_enabled(ALPHA, true).await;
-    node.set_enabled("@example/beta", true).await;
+    node.set_enabled(example_plug!("beta"), true).await;
 
     // Each saw the other unregistered or not blocked yet; the next reconcile sees both waiting
     // on each other, and each reports it.
@@ -654,7 +655,7 @@ async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_p
     // Enabling beta is the only change: its transition to ready wakes alpha, whose
     // initializer then runs through dispatch (alpha sorts before beta, so a plain reconcile
     // would have looked at beta too early).
-    node.set_enabled("@example/beta", true).await;
+    node.set_enabled(example_plug!("beta"), true).await;
     node.until(ALPHA, Readiness::Ready).await;
     assert_eq!(probe.operations(), [beta_ping]);
     node.shutdown().await;

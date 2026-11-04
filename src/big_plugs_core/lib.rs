@@ -275,24 +275,85 @@ impl PlugError {
     }
 }
 
-/// The package identity, `@namespace/name`, stable across every revision. The same spelling the
-/// legacy manifests use, so an existing package keeps its identity when it is catalogued here.
+/// The package identity, `<did>/<name>`, stable across every revision (ADR 028 §2). The namespace
+/// is the publisher's DID, of any method, and the name is a lowercase segment. A DID is a
+/// valid datum key slot as it stands (`:` and `%` need no escaping there), and neither a DID nor a
+/// name contains `/`, so the first `/` always splits the text form back into its two parts. That
+/// text form is the one spelling used in datum key slots (`nodule.install/<plug>`,
+/// `nodule.artifact/<plug>/<key>`), persisted rows and workload ids; there is no second encoding.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlugId {
     pub namespace: String,
     pub name: String,
 }
 
+/// A DID as a plug namespace is bounded to this many bytes. The DID grammar sets no limit, but a
+/// plug id is embedded in every datum key, persisted row and workload id, so an unbounded
+/// publisher string would be an unbounded key. 512 holds every `did:key` and `did:plc`, and a
+/// `did:web` whose host alone may be a full 253-octet DNS name plus a path.
+const MAX_DID_OCTETS: usize = 512;
+
 impl PlugId {
+    /// Both parts are validated here; `namespace` is a DID per the W3C DID Core syntax.
     pub fn new(namespace: &str, name: &str) -> Result<Self, InvalidPlugId> {
-        if !is_segment(namespace) || !is_segment(name) {
-            return Err(InvalidPlugId(format!("@{namespace}/{name}")));
+        if !is_did(namespace) || !is_segment(name) {
+            return Err(InvalidPlugId(format!("{namespace}/{name}")));
         }
         Ok(Self {
             namespace: namespace.to_owned(),
             name: name.to_owned(),
         })
     }
+}
+
+/// W3C DID Core syntax: `did:` method-name `:` method-specific-id, where the method is
+/// `1*(a-z / 0-9)` and the id is `*( *idchar ":" ) 1*idchar` with
+/// `idchar = ALPHA / DIGIT / "." / "-" / "_" / pct-encoded`. That is: non-empty, may contain `:`
+/// (empty `::` segments included), may not end in `:`, and `%` must start a two-hex-digit escape.
+/// Escapes must use uppercase hex, the RFC 3986 §6.2.2.1 canonical form: accepting `%3a` beside
+/// `%3A` would give one DID two plug ids, and an id must name exactly one publisher.
+/// Methods are open: whether a method is known is a resolution concern, not a syntax one.
+fn is_did(did: &str) -> bool {
+    if did.len() > MAX_DID_OCTETS {
+        return false;
+    }
+    let Some(rest) = did.strip_prefix("did:") else {
+        return false;
+    };
+    let Some((method, id)) = rest.split_once(':') else {
+        return false;
+    };
+    if method.is_empty()
+        || !method
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let bytes = id.as_bytes();
+    if bytes.is_empty() || bytes.last() == Some(&b':') {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':') => {
+                index += 1
+            }
+            b'%' => {
+                let is_escape = bytes.get(index + 1..index + 3).is_some_and(|hex| {
+                    hex.iter()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
+                });
+                if !is_escape {
+                    return false;
+                }
+                index += 3;
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn is_segment(segment: &str) -> bool {
@@ -307,12 +368,12 @@ fn is_segment(segment: &str) -> bool {
 
 impl fmt::Display for PlugId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "@{}/{}", self.namespace, self.name)
+        write!(formatter, "{}/{}", self.namespace, self.name)
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("`{0}` is not a plug id: expected `@namespace/name` in lowercase ascii")]
+#[error("`{0}` is not a plug id: expected `<did>/<name>`, a DID and a lowercase ascii name")]
 pub struct InvalidPlugId(pub String);
 
 impl FromStr for PlugId {
@@ -320,10 +381,42 @@ impl FromStr for PlugId {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let (namespace, name) = value
-            .strip_prefix('@')
-            .and_then(|rest| rest.split_once('/'))
+            .split_once('/')
             .ok_or_else(|| InvalidPlugId(value.to_owned()))?;
         Self::new(namespace, name).map_err(|_| InvalidPlugId(value.to_owned()))
+    }
+}
+
+/// The DID namespace test fixtures publish under, as a literal so [`example_plug!`] can `concat!`
+/// it into const contexts.
+#[cfg(any(test, feature = "test-support"))]
+#[macro_export]
+macro_rules! example_namespace {
+    () => {
+        "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+    };
+}
+
+/// The text form of the fixture plug `<name>` (`<example namespace>/<name>`), usable in `const`s
+/// and string positions so fixtures do not repeat DID literals.
+#[cfg(any(test, feature = "test-support"))]
+#[macro_export]
+macro_rules! example_plug {
+    ($name:literal) => {
+        concat!($crate::example_namespace!(), "/", $name)
+    };
+}
+
+/// Plug ids for tests across the crates that consume them.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::PlugId;
+
+    pub const EXAMPLE_NAMESPACE: &str = example_namespace!();
+
+    /// `EXAMPLE_NAMESPACE/<name>`.
+    pub fn plug_id(name: &str) -> PlugId {
+        PlugId::new(EXAMPLE_NAMESPACE, name).expect("fixture plug ids are valid")
     }
 }
 
@@ -456,244 +549,4 @@ impl FromStr for VersionReq {
 text_wire!(VersionReq);
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use big_cabinet_core::datum::DatumMember;
-    use serde_json::json;
-
-    fn plug() -> Plug {
-        let mut plug = Plug::new("@example/photos".parse().unwrap(), "1.2.3".parse().unwrap());
-        plug.title = Some("Photos".into());
-        plug.dependencies.push(Dependency {
-            id: "@example/search-api".parse().unwrap(),
-            version: "^2".parse().unwrap(),
-            extra: Default::default(),
-        });
-        plug.artifacts.push(Artifact {
-            key: "routines".into(),
-            digest: Digest::of(b"wasm"),
-            size: Some(4),
-            media_type: Some("application/wasm".into()),
-            extra: Default::default(),
-        });
-        plug.contributions
-            .push(Contribution::Nodule(NoduleContribution {
-                schema: "org.example.daybook.nodule".into(),
-                description: [("id".to_owned(), json!("org.example.photos"))]
-                    .into_iter()
-                    .collect(),
-                extra: Default::default(),
-            }));
-        plug.contributions
-            .push(Contribution::Micro(MicroContribution {
-                key: "gallery".into(),
-                schema: "org.example.clay.micro".into(),
-                description: [("entry".to_owned(), json!("gallery.js"))]
-                    .into_iter()
-                    .collect(),
-                extra: Default::default(),
-            }));
-        plug
-    }
-
-    #[test]
-    fn the_envelope_spells_ids_versions_and_digests_as_text() {
-        let plug = plug();
-        plug.validate().unwrap();
-        let value = serde_json::to_value(&plug).unwrap();
-        assert_eq!(value["id"], "@example/photos");
-        assert_eq!(value["version"], "1.2.3");
-        assert_eq!(value["dependencies"][0]["version"], "^2");
-        let digest = value["artifacts"][0]["digest"].as_str().unwrap();
-        assert!(digest.starts_with('z'), "{digest}");
-        assert_eq!(digest.parse::<Digest>().unwrap(), Digest::of(b"wasm"));
-        assert_eq!(value["contributions"][0]["$type"], NoduleContribution::ID);
-        assert_eq!(value["contributions"][1]["$type"], MicroContribution::ID);
-        assert_eq!(serde_json::from_value::<Plug>(value).unwrap(), plug);
-        assert_eq!(plug.nodule().unwrap().schema, "org.example.daybook.nodule");
-        assert_eq!(plug.micros().count(), 1);
-        assert_eq!(
-            plug.artifact("routines").unwrap().media_type.as_deref(),
-            Some("application/wasm")
-        );
-    }
-
-    #[test]
-    fn a_plug_id_is_lowercase_namespace_and_name() {
-        assert_eq!(
-            "@example/photos".parse::<PlugId>().unwrap().to_string(),
-            "@example/photos"
-        );
-        for bad in [
-            "example/photos",
-            "@Example/photos",
-            "@example/",
-            "@/x",
-            "@a b/c",
-            "@a/b/c",
-        ] {
-            assert!(bad.parse::<PlugId>().is_err(), "{bad}");
-        }
-        assert!("1.2".parse::<Version>().is_err());
-        assert!("nonsense".parse::<VersionReq>().is_err());
-    }
-
-    #[test]
-    fn the_revision_is_the_content_hash_and_sees_unknown_members() {
-        let plug = plug();
-        let revision = plug.revision();
-        assert_eq!(plug.clone().revision(), revision);
-        let mut carried = plug.clone();
-        carried.extra.insert("futureField".into(), json!(1));
-        assert_ne!(carried.revision(), revision);
-        let text = revision.to_string();
-        assert_eq!(text.parse::<Revision>().unwrap(), revision);
-        assert!("z".parse::<Revision>().is_err());
-    }
-
-    #[test]
-    fn an_unknown_contribution_is_carried_not_refused() {
-        let value = json!({
-            "id": "@example/photos",
-            "version": "0.1.0",
-            "contributions": [
-                { "$type": "org.example.daybook.plug.theme", "palette": ["#fff"] },
-            ],
-            "futureField": true,
-        });
-        let plug: Plug = serde_json::from_value(value.clone()).unwrap();
-        plug.validate().unwrap();
-        assert!(matches!(plug.contributions[0], Contribution::Unknown(_)));
-        assert_eq!(plug.nodule(), None);
-        assert_eq!(serde_json::to_value(&plug).unwrap(), value);
-    }
-
-    #[test]
-    fn validation_owns_distribution_not_contribution_content() {
-        let mut two_nodules = plug();
-        two_nodules
-            .contributions
-            .push(two_nodules.contributions[0].clone());
-        let error = two_nodules.validate().unwrap_err().to_string();
-        assert!(error.contains("one node-facing nodule"), "{error}");
-
-        let mut duplicate_micro = plug();
-        duplicate_micro
-            .contributions
-            .push(duplicate_micro.contributions[1].clone());
-        let error = duplicate_micro.validate().unwrap_err().to_string();
-        assert!(error.contains("micro key `gallery`"), "{error}");
-
-        let mut duplicate_artifact = plug();
-        duplicate_artifact
-            .artifacts
-            .push(duplicate_artifact.artifacts[0].clone());
-        let error = duplicate_artifact.validate().unwrap_err().to_string();
-        assert!(error.contains("artifact key `routines`"), "{error}");
-
-        let mut self_dependency = plug();
-        self_dependency.dependencies[0].id = self_dependency.id.clone();
-        let error = self_dependency.validate().unwrap_err().to_string();
-        assert!(error.contains("depend on itself"), "{error}");
-
-        let mut bad_schema = plug();
-        let Contribution::Nodule(nodule) = &mut bad_schema.contributions[0] else {
-            unreachable!()
-        };
-        nodule.schema = "not an nsid".into();
-        let error = bad_schema.validate().unwrap_err().to_string();
-        assert!(error.contains("contributions[0].schema"), "{error}");
-
-        // The description is a consumer's business: nonsense passes the catalog.
-        let mut nonsense_description = plug();
-        let Contribution::Nodule(nodule) = &mut nonsense_description.contributions[0] else {
-            unreachable!()
-        };
-        nodule.description = [("anything".to_owned(), json!(null))].into_iter().collect();
-        nonsense_description.validate().unwrap();
-    }
-
-    #[cfg(feature = "schemars")]
-    mod declaration {
-        use super::*;
-        use big_cabinet_core::datum::Bundle;
-        use big_cabinet_core::datum::Declaration;
-        use big_cabinet_core::datum::Universe;
-
-        #[test]
-        fn the_envelope_datums_declare_publish_and_admit() {
-            let universe = Universe::collect([
-                Declaration::of::<Plug>().unwrap(),
-                Declaration::of::<NoduleContribution>().unwrap(),
-                Declaration::of::<MicroContribution>().unwrap(),
-            ]);
-            let ids: Vec<&str> = universe
-                .datums
-                .iter()
-                .map(|datum| datum.id.as_str())
-                .collect();
-            assert_eq!(
-                ids,
-                [
-                    "org.example.daybook.plug",
-                    "org.example.daybook.plug.nodule",
-                    "org.example.daybook.plug.micro",
-                ]
-            );
-            let bundle = Bundle::new(&universe, Vec::new());
-            let lexicons = bundle.lexicons().unwrap();
-            assert_eq!(lexicons.len(), 3);
-            let plug = &lexicons[0].file;
-            let contributions = &plug["defs"]["main"]["properties"]["contributions"]["items"];
-            assert_eq!(contributions["type"], "union", "{plug}");
-            assert_eq!(contributions.get("closed"), None, "{plug}");
-            assert_eq!(
-                contributions["refs"],
-                json!([NoduleContribution::ID, MicroContribution::ID]),
-                "{plug}"
-            );
-            // A description is `unknown` to the catalog's Lexicon: any data object.
-            let nodule = &lexicons[1].file;
-            assert_eq!(
-                nodule["defs"]["main"]["properties"]["description"]["type"], "unknown",
-                "{nodule}"
-            );
-            for (index, lexicon) in lexicons.iter().enumerate() {
-                let carried: Vec<&serde_json::Value> = lexicons
-                    .iter()
-                    .enumerate()
-                    .filter(|(other, _)| *other != index)
-                    .map(|(_, other)| &other.file)
-                    .collect();
-                let compiled = bundle
-                    .validate_lexicon(&lexicon.id, &lexicon.file, &carried)
-                    .unwrap_or_else(|error| panic!("{}: {error}", lexicon.id));
-                if lexicon.id == Plug::ID {
-                    let mut value = serde_json::to_value(super::plug()).unwrap();
-                    value["$type"] = json!(Plug::ID);
-                    for size in [json!(null), json!(0), json!(4), json!(i64::MAX)] {
-                        value["artifacts"][0]["size"] = size;
-                        let stored =
-                            big_cabinet_core::datum::Stored::check(&compiled, value.clone())
-                                .unwrap()
-                                .into_value();
-                        assert_eq!(stored, value);
-                        let envelope: Plug = serde_json::from_value(stored).unwrap();
-                        envelope.validate().unwrap();
-                        assert_eq!(
-                            serde_json::to_value(envelope.artifacts[0].size).unwrap(),
-                            value["artifacts"][0]["size"]
-                        );
-                    }
-                    for size in [json!(-1), json!(0.5), json!(u64::MAX), json!("4")] {
-                        value["artifacts"][0]["size"] = size;
-                        assert!(
-                            big_cabinet_core::datum::Stored::check(&compiled, value.clone())
-                                .is_err()
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
+mod tests;

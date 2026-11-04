@@ -85,7 +85,7 @@ use wasmtime_wasi_http::WasiBody;
 const KIND: &str = "wasm";
 
 /// The authority every request is addressed to. The workload is picked by id, not by `Host`
-/// (a plug id like `@example/photos` is not a valid URI authority), so this is only what the
+/// (a plug id like `did:key:z6Mk.../photos` is not a valid URI authority), so this is only what the
 /// guest sees in its `Host` header.
 const AUTHORITY: &str = "nodule.local";
 

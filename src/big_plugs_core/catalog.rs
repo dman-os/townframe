@@ -89,7 +89,10 @@ mod tests {
     use serde_json::json;
 
     fn plug(version: &str) -> Plug {
-        let mut plug = Plug::new("@example/photos".parse().unwrap(), version.parse().unwrap());
+        let mut plug = Plug::new(
+            crate::example_plug!("photos").parse().unwrap(),
+            version.parse().unwrap(),
+        );
         plug.artifacts.push(Artifact {
             key: "routines".into(),
             digest: Digest::of(b"wasm"),
@@ -136,7 +139,7 @@ mod tests {
         let mut republished = plug("1.2.3");
         republished.title = Some("Photos, republished".into());
         let error = catalog.import(republished).unwrap_err().to_string();
-        assert!(error.contains("@example/photos"), "{error}");
+        assert!(error.contains(crate::example_plug!("photos")), "{error}");
         assert!(error.contains("1.2.3"), "{error}");
         assert!(error.contains("already catalogued"), "{error}");
         // A later version is an ordinary upgrade, not a conflict.
@@ -146,7 +149,7 @@ mod tests {
     #[test]
     fn resolution_picks_the_highest_matching_version() {
         let catalog = catalog(&["1.2.3", "2.0.0", "1.10.0"]);
-        let id: PlugId = "@example/photos".parse().unwrap();
+        let id: PlugId = crate::example_plug!("photos").parse().unwrap();
         let resolved = |requirement: &str| {
             catalog
                 .resolve(&id, &requirement.parse().unwrap())
@@ -156,7 +159,7 @@ mod tests {
         assert_eq!(resolved("=1.2.3"), Some("1.2.3".into()));
         assert_eq!(resolved("^3"), None);
         assert_eq!(resolved("^2"), Some("2.0.0".into()));
-        let absent: PlugId = "@example/absent".parse().unwrap();
+        let absent: PlugId = crate::example_plug!("absent").parse().unwrap();
         assert!(catalog.resolve(&absent, &"^1".parse().unwrap()).is_none());
     }
 }
