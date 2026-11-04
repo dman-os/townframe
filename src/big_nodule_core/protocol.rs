@@ -1,4 +1,4 @@
-//! The nodule management protocol (ADR 023 §4, §6): the wire contract between the node-side
+//! The nodule management protocol (ADR 027 §4, §6): the wire contract between the node-side
 //! nodule service and whoever administers it.
 //!
 //! Every operation names its caller by an [`Authorization`]: either the operator's own identity

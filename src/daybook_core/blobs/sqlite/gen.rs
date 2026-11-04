@@ -76,40 +76,6 @@ pub async fn insert_plug_pin(db: &impl crate::sqlite_rs_alias::Executor, plug_id
     db.execute(INSERT_PLUG_PIN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(blob_hash), crate::sqlite_rs_alias::IntoValue::into_value(length_octets)]).await
 }
 
-pub const PAIR_ROOT_CLEAR_SQL: &str = include_str!("queries/pair_root_clear.sql");
-pub async fn pair_root_clear(db: &impl crate::sqlite_rs_alias::Executor, cipher_hash: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(PAIR_ROOT_CLEAR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cipher_hash)]).await
-}
-
-pub const PAIR_ROOT_RECORD_SQL: &str = include_str!("queries/pair_root_record.sql");
-pub async fn pair_root_record(db: &impl crate::sqlite_rs_alias::Executor, cipher_hash: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(PAIR_ROOT_RECORD_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cipher_hash)]).await
-}
-
-pub const PAIR_ROOT_SET_PROVENANCE_SQL: &str = include_str!("queries/pair_root_set_provenance.sql");
-pub async fn pair_root_set_provenance(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, branch_path: String, cipher_hash: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(PAIR_ROOT_SET_PROVENANCE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(branch_path), crate::sqlite_rs_alias::IntoValue::into_value(cipher_hash)]).await
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PairRootsUnresolvedRow {
-    pub cipher_hash: String,
-    pub doc_id: Option<String>,
-    pub branch_path: Option<String>,
-}
-impl crate::sqlite_rs_alias::FromRow for PairRootsUnresolvedRow {
-    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
-        row.require_width(3)?;
-        Ok(PairRootsUnresolvedRow { cipher_hash: row.get::<String>("cipher_hash")?, doc_id: row.get::<Option<String>>("doc_id")?, branch_path: row.get::<Option<String>>("branch_path")? })
-    }
-}
-
-pub const PAIR_ROOTS_UNRESOLVED_SQL: &str = include_str!("queries/pair_roots_unresolved.sql");
-pub async fn pair_roots_unresolved(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<PairRootsUnresolvedRow>> {
-    let set = db.query(PAIR_ROOTS_UNRESOLVED_SQL, &[]).await?;
-    set.all()
-}
-
 pub const PLUG_PIN_HASHES_SQL: &str = include_str!("queries/plug_pin_hashes.sql");
 pub async fn plug_pin_hashes(db: &impl crate::sqlite_rs_alias::QueryExecutor, plug_id: String) -> SqlResult<Vec<String>> {
     let set = db.query(PLUG_PIN_HASHES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)]).await?;

@@ -4,25 +4,26 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
-use big_cabinet_core::doc::DatumObserved;
+use big_cabinet_core::doc::DatumEvent;
+use big_cabinet_core::doc::DatumPage;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumStore;
-use big_cabinet_core::doc::DatumVersion;
 use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocAvailability;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::LocalDocUsability;
-use big_cabinet_core::doc::ObserveDatums;
 use big_cabinet_core::doc::ObserveDocAvailability;
-use big_cabinet_core::doc::ObserveScope;
 use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::doc::StoreSnapshot;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 use futures::FutureExt;
 use futures::StreamExt;
 use service_utils_rs::Client;
@@ -39,6 +40,9 @@ use std::future::Future;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+
+/// How long the server may hold an empty poll; an expiry is an ordinary empty page.
+const POLL_HOLD_MS: u32 = 5_000;
 
 type EditFn<S> = Box<dyn FnOnce(&mut S) -> Result<(), StoreError> + Send + 'static>;
 type SnapshotReply<S> = oneshot::Sender<(u64, Result<StoreSnapshot<S>, StoreError>)>;
@@ -87,21 +91,6 @@ impl<S: DatumStore> DatumStoreHandle<S> {
     ) -> Result<(Self, StopToken), StoreError> {
         context.validate()?;
         let stream_context = RequestContext::root();
-        let mut observe_datums = with_context(
-            context,
-            docs.subscribe(
-                stream_context.child(),
-                ObserveDatums {
-                    capability,
-                    scope: ObserveScope::Doc {
-                        doc_id: doc_id.clone(),
-                    },
-                    after: 0,
-                },
-            ),
-        )
-        .await?
-        .map_err(map_client_error)?;
         let observe_availability = with_context(
             context,
             docs.subscribe(
@@ -115,7 +104,10 @@ impl<S: DatumStore> DatumStoreHandle<S> {
         .await?
         .map_err(map_client_error)?;
 
-        consume_replay(context, &mut observe_datums).await?;
+        // The cursor comes from the replay itself, taken before the read below: a write that
+        // lands between the two is past `after`, so the first live poll redelivers it and
+        // `should_apply_observed` folds it into the already-read state.
+        let after = replay_cursor(context, &docs, capability, &doc_id).await?;
 
         let raw = read_owned::<S>(context, &docs, capability, &doc_id, At::Current, None).await?;
         let seen_head_hashes: HashSet<ChangeHash> = raw.heads.iter().copied().collect();
@@ -124,26 +116,41 @@ impl<S: DatumStore> DatumStoreHandle<S> {
             value: S::hydrate(&raw),
         };
         let (version_tx, _version_rx) = watch::channel(0u64);
-        let mut owner = StoreOwner {
+        let (page_sender, pages) = mpsc::channel(1);
+        let owner = StoreOwner {
             docs: docs.clone(),
             capability,
             doc_id: doc_id.clone(),
             raw,
             current,
             seen_head_hashes,
-            last_observed_heads: None,
             needs_full_refresh: false,
             terminal_error: None,
             version: 0,
             version_tx,
-            observe_datums,
+            pages,
             observe_availability,
             availability_ended: false,
         };
-        owner.drain_ready_observations(context).await?;
 
         let (stop_token, tasks) = StopToken::new();
         let (sender, receiver) = mpsc::channel(32);
+        if tasks
+            .spawn(poll_pages(
+                docs.clone(),
+                capability,
+                doc_id.clone(),
+                after,
+                stream_context.child(),
+                tasks.clone(),
+                page_sender,
+            ))
+            .is_none()
+        {
+            return Err(StoreError::Docs(DocsError::Context(
+                ContextError::Cancelled,
+            )));
+        }
         let loop_tasks = tasks.clone();
         if tasks
             .spawn(async move {
@@ -279,12 +286,11 @@ struct StoreOwner<S> {
     raw: DatumsRead,
     current: StoreSnapshot<S>,
     seen_head_hashes: HashSet<ChangeHash>,
-    last_observed_heads: Option<Vec<ChangeHash>>,
     needs_full_refresh: bool,
     terminal_error: Option<StoreError>,
     version: u64,
     version_tx: watch::Sender<u64>,
-    observe_datums: ClientStream<ObserveDatums>,
+    pages: mpsc::Receiver<Result<DatumPage, StoreError>>,
     observe_availability: ClientStream<ObserveDocAvailability>,
     availability_ended: bool,
 }
@@ -317,8 +323,8 @@ impl<S: DatumStore> StoreOwner<S> {
                     Some(request) => self.handle_request(request).await,
                     None => requests_open = false,
                 },
-                observed = self.observe_datums.next() => {
-                    self.handle_datum_observed(observed).await;
+                page = self.pages.recv() => {
+                    self.handle_page(page).await;
                 }
                 availability = self.observe_availability.next(), if !self.availability_ended => {
                     self.handle_availability_observed(availability).await;
@@ -485,14 +491,10 @@ impl<S: DatumStore> StoreOwner<S> {
         context: &RequestContext,
     ) -> Result<(), StoreError> {
         let mut batch = Vec::new();
-        while let Some(item) = self.observe_datums.next().now_or_never().flatten() {
-            match item {
-                Ok(DatumObserved::ReplayComplete { .. }) => {}
-                Ok(DatumObserved::Entry {
-                    datum_key, datum, ..
-                }) => batch.push((datum_key, datum)),
-                Err(error) => return Err(map_stream_error(error)),
-            }
+        // A disconnected channel only follows a delivered error or a shutdown, so there is
+        // nothing further to drain from it.
+        while let Ok(page) = self.pages.try_recv() {
+            batch.extend(self.page_batch(page?));
         }
         if !batch.is_empty() {
             self.apply_observed_batch(context, batch).await?;
@@ -505,39 +507,21 @@ impl<S: DatumStore> StoreOwner<S> {
         Ok(())
     }
 
-    async fn handle_datum_observed(
-        &mut self,
-        first: Option<Result<DatumObserved, ClientError<DocsError>>>,
-    ) {
-        let mut batch = Vec::new();
-        let Some(first) = first else {
-            self.fail(StoreError::DocsUnavailable(
-                "datum observation stream ended unexpectedly".into(),
-            ));
-            return;
-        };
-        match first {
-            Ok(DatumObserved::ReplayComplete { .. }) => {}
-            Ok(DatumObserved::Entry {
-                datum_key, datum, ..
-            }) => batch.push((datum_key, datum)),
-            Err(error) => {
-                self.fail(map_stream_error(error));
+    async fn handle_page(&mut self, page: Option<Result<DatumPage, StoreError>>) {
+        let page = match page {
+            Some(Ok(page)) => page,
+            Some(Err(error)) => {
+                self.fail(error);
                 return;
             }
-        }
-        while let Some(next) = self.observe_datums.next().now_or_never().flatten() {
-            match next {
-                Ok(DatumObserved::ReplayComplete { .. }) => {}
-                Ok(DatumObserved::Entry {
-                    datum_key, datum, ..
-                }) => batch.push((datum_key, datum)),
-                Err(error) => {
-                    self.fail(map_stream_error(error));
-                    return;
-                }
+            None => {
+                self.fail(StoreError::DocsUnavailable(
+                    "datum poll task ended unexpectedly".into(),
+                ));
+                return;
             }
-        }
+        };
+        let batch = self.page_batch(page);
         if !batch.is_empty()
             && let Err(error) = self
                 .apply_observed_batch(&RequestContext::root(), batch)
@@ -545,6 +529,26 @@ impl<S: DatumStore> StoreOwner<S> {
         {
             self.fail(error);
         }
+    }
+
+    /// Flattens a page into observed datums. An `enter` restates the document's whole selected
+    /// state, which `should_apply_observed` dedups against what is already read.
+    fn page_batch(&self, page: DatumPage) -> Vec<(DatumKey, ObservedDatum)> {
+        let mut batch = Vec::new();
+        for event in page.events {
+            match event {
+                DatumEvent::Enter { datums, .. } => batch.extend(datums),
+                DatumEvent::Datum {
+                    datum_key, datum, ..
+                } => batch.push((datum_key, datum)),
+                DatumEvent::Leave { doc_id, .. } => unreachable!(
+                    "poll of the single document {} sent leave for {doc_id}: an `IsDoc` poll \
+                     matches its own document and drops every other document's entries",
+                    self.doc_id
+                ),
+            }
+        }
+        batch
     }
 
     async fn handle_availability_observed(
@@ -587,120 +591,47 @@ impl<S: DatumStore> StoreOwner<S> {
         .map_err(map_post_load_read_error)
     }
 
+    /// Converges to the document's current state when a page carries anything not already
+    /// read. One current read subsumes every event of the page, which is why the page's own
+    /// per-datum heads are only a freshness test and never a read position: an `enter` lists
+    /// each datum at the heads that last changed *it*, and reading at those would roll the
+    /// state back behind a newer datum.
     async fn apply_observed_batch(
         &mut self,
         context: &RequestContext,
         batch: Vec<(DatumKey, ObservedDatum)>,
     ) -> Result<(), StoreError> {
-        let mut keys_to_read = BTreeSet::new();
-        let mut latest_heads: Option<Vec<ChangeHash>> = None;
-        let mut unowned_advanced = false;
-
-        for (datum_key, datum) in batch {
-            match datum {
-                ObservedDatum::AccessLost => return Err(StoreError::AccessLost),
-                ObservedDatum::Present { doc_heads, version } => {
-                    if !self.should_apply_observed(&datum_key, Some(&doc_heads), Some(&version)) {
-                        continue;
-                    }
-                    self.record_observed_heads(&doc_heads);
-                    if S::owns(&datum_key) {
-                        keys_to_read.insert(datum_key);
-                    } else {
-                        unowned_advanced = true;
-                    }
-                    latest_heads = Some(doc_heads);
-                }
-                ObservedDatum::Removed { doc_heads, version } => {
-                    if !self.should_apply_observed(&datum_key, doc_heads.as_deref(), Some(&version))
-                    {
-                        continue;
-                    }
-                    if let Some(heads) = &doc_heads {
-                        self.record_observed_heads(heads);
-                        latest_heads = Some(heads.clone());
-                    }
-                    if S::owns(&datum_key) {
-                        keys_to_read.insert(datum_key);
-                    } else {
-                        unowned_advanced = true;
-                    }
-                }
+        let fresh = batch.iter().any(|(key, datum)| match datum {
+            ObservedDatum::Present { doc_heads, .. } => {
+                self.should_apply_observed(key, Some(doc_heads))
             }
-        }
-
-        if self.has_non_accepted_datums() && (unowned_advanced || !keys_to_read.is_empty()) {
-            self.collect_non_accepted_keys(&mut keys_to_read);
-        }
-
-        if keys_to_read.is_empty() {
-            if unowned_advanced
-                && let Some(heads) = latest_heads
-                && self.raw.heads != heads
-            {
-                self.raw.heads = heads.clone();
-                self.current.heads = heads;
-                self.publish_current();
+            ObservedDatum::Removed { doc_heads, .. } => {
+                self.should_apply_observed(key, doc_heads.as_deref())
             }
-            return Ok(());
+        });
+        if fresh {
+            self.refresh_full(context).await?;
         }
-
-        let at = match latest_heads {
-            Some(heads) => At::Heads(heads),
-            None => At::Current,
-        };
-        let partial = read_owned::<S>(
-            context,
-            &self.docs,
-            self.capability,
-            &self.doc_id,
-            at,
-            Some(keys_to_read),
-        )
-        .await
-        .map_err(map_post_load_read_error)?;
-        self.merge_partial_read(partial);
         Ok(())
     }
 
+    /// Whether an observed datum says something the state has not read: heads it has never
+    /// seen, or a removal of a key it still holds.
     fn should_apply_observed(
         &self,
         datum_key: &DatumKey,
         doc_heads: Option<&[ChangeHash]>,
-        version: Option<&DatumVersion>,
     ) -> bool {
         match doc_heads {
-            Some(heads) => {
-                if heads
-                    .iter()
-                    .any(|hash| !self.seen_head_hashes.contains(hash))
-                {
-                    return true;
-                }
-                if self.last_observed_heads.as_deref() == Some(heads) && S::owns(datum_key) {
-                    return match version {
-                        Some(version) => {
-                            let existing = self.raw.datums.get(datum_key);
-                            datum_read_version(existing) != Some(version)
-                                || !matches!(existing, Some(DatumRead::Accepted { .. }))
-                        }
-                        None => self.raw.datums.contains_key(datum_key),
-                    };
-                }
-                false
-            }
+            Some(heads) => heads
+                .iter()
+                .any(|hash| !self.seen_head_hashes.contains(hash)),
             None => S::owns(datum_key) && self.raw.datums.contains_key(datum_key),
         }
     }
 
-    fn record_observed_heads(&mut self, heads: &[ChangeHash]) {
-        self.seen_head_hashes.extend(heads.iter().copied());
-        self.last_observed_heads = Some(heads.to_vec());
-    }
-
     fn record_local_heads(&mut self, heads: &[ChangeHash]) {
         self.seen_head_hashes.extend(heads.iter().copied());
-        self.last_observed_heads = None;
     }
 
     fn has_non_accepted_datums(&self) -> bool {
@@ -716,23 +647,6 @@ impl<S: DatumStore> StoreOwner<S> {
                 keys.insert(key.clone());
             }
         }
-    }
-
-    fn merge_partial_read(&mut self, partial: DatumsRead) {
-        self.record_observed_heads(&partial.heads);
-        self.raw.heads = partial.heads;
-        for (key, read) in partial.datums {
-            if matches!(read, DatumRead::Absent { .. }) {
-                self.raw.datums.remove(&key);
-            } else {
-                self.raw.datums.insert(key, read);
-            }
-        }
-        self.current = StoreSnapshot {
-            heads: self.raw.heads.clone(),
-            value: S::hydrate(&self.raw),
-        };
-        self.publish_current();
     }
 
     async fn refresh_keys_at_heads(
@@ -831,25 +745,72 @@ impl<S: DatumStore> StoreOwner<S> {
     }
 }
 
-async fn consume_replay(
+/// The poll request for the store's one document. `IsDoc` anchors it on a `Read` check of that
+/// document, and `All` delivers every datum, owned or not, because an unowned datum still moves
+/// the document's heads.
+fn poll_request(capability: CapId, doc_id: &DocId, after: u64, hold_ms: u32) -> PollDatums {
+    PollDatums {
+        capability,
+        predicate: Predicate::IsDoc {
+            doc_id: doc_id.clone(),
+        },
+        datums: DatumSelection::All,
+        after,
+        limit: 0,
+        hold_ms,
+    }
+}
+
+/// Pages the document's frontier from the start without holding, and returns the cursor of its
+/// end. The events are discarded: the caller reads the state itself and resumes from the cursor.
+async fn replay_cursor(
     context: &RequestContext,
-    observe_datums: &mut ClientStream<ObserveDatums>,
-) -> Result<(), StoreError> {
+    docs: &Client<DocsProtocol>,
+    capability: CapId,
+    doc_id: &DocId,
+) -> Result<u64, StoreError> {
+    let mut after = 0;
     loop {
-        let item = with_context(context, observe_datums.next()).await?;
-        match item {
-            Some(Ok(DatumObserved::ReplayComplete { .. })) => return Ok(()),
-            Some(Ok(DatumObserved::Entry {
-                datum: ObservedDatum::AccessLost,
-                ..
-            })) => return Err(StoreError::AccessLost),
-            Some(Ok(DatumObserved::Entry { .. })) => {}
-            Some(Err(error)) => return Err(map_stream_error(error)),
-            None => {
-                return Err(StoreError::DocsUnavailable(
-                    "datum observation ended before replay completed".into(),
-                ));
-            }
+        let page = with_context(
+            context,
+            docs.call(context.child(), poll_request(capability, doc_id, after, 0)),
+        )
+        .await?
+        .map_err(map_client_error)?;
+        after = page.through;
+        if page.caught_up {
+            return Ok(after);
+        }
+    }
+}
+
+/// Long-polls the document from `after` and hands each page to the owner. The cursor is the only
+/// state; a poll error is delivered once and ends the task, and the owner dropping its receiver
+/// (shutdown) ends it too, which is why a failed send is not an error here.
+async fn poll_pages(
+    docs: Client<DocsProtocol>,
+    capability: CapId,
+    doc_id: DocId,
+    mut after: u64,
+    context: RequestContext,
+    tasks: Spawner,
+    pages: mpsc::Sender<Result<DatumPage, StoreError>>,
+) {
+    loop {
+        let page = tokio::select! {
+            biased;
+            _ = tasks.cancelled() => return,
+            page = docs.call(
+                context.child(),
+                poll_request(capability, &doc_id, after, POLL_HOLD_MS),
+            ) => page.map_err(map_stream_error),
+        };
+        let failed = page.is_err();
+        if let Ok(page) = &page {
+            after = page.through;
+        }
+        if pages.send(page).await.is_err() || failed {
+            return;
         }
     }
 }
@@ -891,16 +852,6 @@ where
         _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
         _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
         output = future => Ok(output),
-    }
-}
-
-fn datum_read_version(read: Option<&DatumRead>) -> Option<&DatumVersion> {
-    match read? {
-        DatumRead::Accepted { version, .. }
-        | DatumRead::Absent { version }
-        | DatumRead::Pending { version, .. }
-        | DatumRead::Undecodable { version, .. } => Some(version),
-        DatumRead::Rejected { .. } => None,
     }
 }
 

@@ -1,5 +1,4 @@
 use crate::DatumKey;
-use crate::DatumTag;
 use crate::authority::AuthorityServiceError;
 use crate::authority::Authorization;
 use crate::authority::CapId;
@@ -7,6 +6,8 @@ use crate::authority::Capability;
 use crate::authority::Rights;
 use crate::dmeta::DocId;
 use crate::drawer::DrawerAccess;
+use crate::query::DatumSelection;
+use crate::query::Predicate;
 pub use automerge::ChangeHash;
 use serde::Deserialize;
 use serde::Serialize;
@@ -325,31 +326,6 @@ pub struct ListDatums {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum DatumSelector {
-    All,
-    Doc { doc_id: DocId },
-    Tag { tag: DatumTag },
-    Route { doc_id: DocId, datum_key: DatumKey },
-    Key { datum_key: DatumKey },
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryDatums {
-    pub capability: CapId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drawer_id: Option<DocId>,
-    pub selector: DatumSelector,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueriedDatum {
-    pub doc_id: DocId,
-    pub datum_key: DatumKey,
-    pub doc_heads: Vec<ChangeHash>,
-    pub version: DatumVersion,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "by", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DatumRefSelector {
     Origin {
         doc_id: DocId,
@@ -381,25 +357,66 @@ pub struct QueriedDatumRef {
     pub ref_heads: Vec<ChangeHash>,
 }
 
+/// One long poll over the datum-set frontier (ADR 023, ADR 025).
+///
+/// The predicate selects documents and the selection names which of their datums are delivered.
+/// A current-state read is a poll from `after = 0` with `hold_ms = 0`, paged until `caught_up`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PollDatums {
+    pub capability: CapId,
+    pub predicate: Predicate,
+    pub datums: DatumSelection,
+    /// The cursor the caller last consumed. `0` replays the frontier's current state.
+    #[serde(default)]
+    pub after: u64,
+    /// The most entries one page carries. `0` asks for the default page size.
+    #[serde(default)]
+    pub limit: u32,
+    /// How long the server may hold an otherwise empty page. `0` answers at once.
+    #[serde(default)]
+    pub hold_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatumPage {
+    pub events: Vec<DatumEvent>,
+    /// The cursor to send next. Every event here is at or below it.
+    pub through: u64,
+    /// The replay boundary was reached, so the events cover every fact at or below `through`.
+    pub caught_up: bool,
+}
+
+/// One revision-stamped fact a poll delivers.
+///
+/// `enter` carries the document's current selected datums so a consumer that did not know the
+/// document converges from this event alone; `datum` is the cheaper form for a document the
+/// consumer already holds; `leave` is idempotent for a consumer that never held it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
-    tag = "scope",
+    tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-pub enum ObserveScope {
-    Doc {
+pub enum DatumEvent {
+    Enter {
+        revision: u64,
+        doc_id: DocId,
+        datums: BTreeMap<DatumKey, ObservedDatum>,
+    },
+    Datum {
+        revision: u64,
+        doc_id: DocId,
+        datum_key: DatumKey,
+        datum: ObservedDatum,
+    },
+    Leave {
+        revision: u64,
         doc_id: DocId,
     },
-    Tag {
-        tag: DatumTag,
-    },
-    Drawer {
-        drawer_id: DocId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tag: Option<DatumTag>,
-    },
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "state",
@@ -415,35 +432,7 @@ pub enum ObservedDatum {
         doc_heads: Option<Vec<ChangeHash>>,
         version: DatumVersion,
     },
-    AccessLost,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum DatumObserved {
-    Entry {
-        revision: u64,
-        doc_id: DocId,
-        datum_key: DatumKey,
-        datum: ObservedDatum,
-    },
-    ReplayComplete {
-        through: u64,
-    },
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ObserveDatums {
-    pub capability: CapId,
-    pub scope: ObserveScope,
-    #[serde(default)]
-    pub after: u64,
-}
-service_core_rs::service_operation!(ObserveDatums => stream DatumObserved, DocsError, "org.example.daybook.docs.observeDatums");
-
 macro_rules! operations {
     ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
         impl Operation for $request {
@@ -463,7 +452,7 @@ operations! {
     MergeDoc => WriteReceipt, procedure, "mergeDoc";
     ReadDatums => DatumsRead, procedure, "readDatums";
     ListDatums => DatumListing, procedure, "listDatums";
-    QueryDatums => Vec<QueriedDatum>, procedure, "queryDatums";
+    PollDatums => DatumPage, procedure, "pollDatums";
     QueryDatumRefs => Vec<QueriedDatumRef>, procedure, "queryDatumRefs";
     UnsafeInspectDatum => UnsafeDatumInspection, procedure, "unsafeInspectDatum";
     InspectDatumClaims => DatumClaimsInspection, procedure, "inspectDatumClaims";
@@ -480,14 +469,13 @@ declare_service_protocol! {
             MergeDoc(MergeDoc),
             ReadDatums(ReadDatums),
             ListDatums(ListDatums),
-            QueryDatums(QueryDatums),
+            PollDatums(PollDatums),
             QueryDatumRefs(QueryDatumRefs),
             UnsafeInspectDatum(UnsafeInspectDatum),
             InspectDatumClaims(InspectDatumClaims),
             GetDocAvailability(GetDocAvailability)
         }
         stream {
-            ObserveDatums(ObserveDatums),
             ObserveDocAvailability(ObserveDocAvailability)
         }
     }

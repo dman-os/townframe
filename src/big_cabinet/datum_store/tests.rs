@@ -196,9 +196,12 @@ impl TestHarness {
         .await
         .unwrap();
         let datum_set = Arc::new(
-            DatumSetStore::new(sqlite_rs::test_support::db(&[]).unwrap().clone())
-                .await
-                .unwrap(),
+            DatumSetStore::new(
+                sqlite_rs::test_support::db(&[]).unwrap().clone(),
+                test_schemas(),
+            )
+            .await
+            .unwrap(),
         );
         let (datum_stop, datum_tasks) = StopToken::new();
         {

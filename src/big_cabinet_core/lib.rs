@@ -7,6 +7,7 @@ pub mod datum;
 pub mod dmeta;
 pub mod doc;
 pub mod drawer;
+pub mod query;
 pub mod reference;
 pub mod schema_compat;
 

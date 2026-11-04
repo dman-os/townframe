@@ -1,4 +1,4 @@
-//! The nodule description: a plug's one node-facing facet (ADR 023 §2–3, §5–7).
+//! The nodule description: a plug's one node-facing facet (ADR 027 §2–3, §5–7).
 //!
 //! A [`Nodule`] carries the Lexicons a package declares, both its datums and its operation
 //! contracts (`query` | `procedure` | `subscription`), and the contributions built around those
@@ -91,7 +91,7 @@ pub struct Routine {
     pub extra: Extra,
 }
 
-/// How a routine runs. Wasm is the environment; `call` and `workflow` are the semantics (ADR 023
+/// How a routine runs. Wasm is the environment; `call` and `workflow` are the semantics (ADR 027
 /// §3). Open: a kind this build does not know is carried, and refused only at admission.
 #[macros::datum]
 #[derive(Debug, Clone, PartialEq)]
@@ -128,7 +128,7 @@ pub struct Workflow {
     pub extra: Extra,
 }
 
-/// An ordered, replayable revision stream (ADR 023 §7). `selector` and `entry` are Lexicon
+/// An ordered, replayable revision stream (ADR 027 §7). `selector` and `entry` are Lexicon
 /// references; `source`, when stated, is the routine that writes it, else the host does.
 #[macros::datum]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

@@ -1183,7 +1183,7 @@ mod tests {
         // heads (an empty-heads reference means "self, in this document").
         let (key_doc_id, key_heads) = crate::test_support::stage_key_doc(
             &test_context.drawer_repo,
-            &crate::blobs::encrypt::MasterKey::random(),
+            &big_blobs::encrypt::MasterKey::random(),
         )
         .await?;
         let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
@@ -1205,7 +1205,7 @@ mod tests {
                                 key_ref_heads: key_heads,
                                 encoding_parameters: serde_json::json!({
                                     "recordSize": 65_536,
-                                    "padding": "record",
+                                    "padding": "padme",
                                 }),
                             },
                         )),

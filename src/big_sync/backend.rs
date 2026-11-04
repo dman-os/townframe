@@ -20,7 +20,12 @@ pub trait SyncBackend: Send + Sync + 'static {
     /// Backend-owned part-membership eviction. The machine replays removal
     /// requests (subscription `Removed` events, remote tombstones) into this;
     /// the backend decides what eviction means for its domain. Idempotent.
-    async fn remove_obj_from_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()>;
+    async fn remove_obj_from_parts(
+        &self,
+        peer_id: PeerKey,
+        obj_id: ObjKey,
+        parts: Vec<PartKey>,
+    ) -> Res<()>;
 }
 
 pub mod contract {

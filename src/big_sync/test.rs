@@ -393,7 +393,7 @@ impl SyncBackend for MemorySyncBackend {
         Ok(SyncTaskRunOutcome::Completion(outcome))
     }
 
-    async fn remove_obj_from_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
+    async fn remove_obj_from_parts(&self, _peer_id: PeerKey, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
         for part_id in parts {
             self.local_part_store
                 .remove_obj_from_part(obj_id.clone(), part_id)

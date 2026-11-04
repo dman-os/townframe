@@ -13,12 +13,10 @@ use std::path::Component;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
-pub mod encrypt;
 pub mod permission_writer;
 pub(crate) use permission_writer::spawn_blob_inventory_permission_writer;
 pub mod encryption_worker;
 pub mod key_source;
-pub mod pair_roots;
 pub mod pin_worker;
 pub mod pins_part_worker;
 /// Repository-database tables owned by the blob pin worker and the pair-root
@@ -99,7 +97,7 @@ pub struct BlobsRepo {
     /// repo-wide, because it is also the registry of installed pairs: the worker
     /// that installs a representation and the store path that serves it must be
     /// the same object.
-    cipher_provider: Arc<crate::blobs::encrypt::CipherBlobProvider>,
+    cipher_provider: Arc<big_blobs::encrypt::CipherBlobProvider>,
     // FIXME: use surelock
     hash_locks: Arc<std::sync::Mutex<HashMap<BlobId, Arc<tokio::sync::Mutex<()>>>>>,
     sync_backend: Arc<surelock::mutex::Mutex<Option<crate::blobs::sync::BlobSyncBackend>>>,
@@ -332,7 +330,7 @@ impl BlobsRepo {
         )
         .await
         .map_err(|err| eyre::eyre!("error loading iroh fs store: {err:?}"))?;
-        let cipher_provider = Arc::new(crate::blobs::encrypt::CipherBlobProvider::new());
+        let cipher_provider = Arc::new(big_blobs::encrypt::CipherBlobProvider::new());
         cipher_provider
             .register(&virtual_providers)
             .map_err(|err| eyre::eyre!("registering the cipher blob provider: {err:?}"))?;
@@ -654,7 +652,7 @@ impl BlobsRepo {
     /// The repo's cipher blob provider: it serves `C` from `P` for entries the
     /// encryption worker installed (ADR 003 §12). Shared, not cloned per caller:
     /// the pairs it holds are the installed representations.
-    pub(crate) fn cipher_provider(&self) -> Arc<crate::blobs::encrypt::CipherBlobProvider> {
+    pub(crate) fn cipher_provider(&self) -> Arc<big_blobs::encrypt::CipherBlobProvider> {
         Arc::clone(&self.cipher_provider)
     }
 
@@ -680,7 +678,7 @@ impl BlobsRepo {
         if blobs.sync_reader(iroh_hash).await?.is_some() {
             return Ok(false);
         }
-        crate::blobs::encrypt::has_pair_tags(&self.iroh_store, iroh_hash).await
+        big_blobs::encrypt::has_pair_tags(&self.iroh_store, iroh_hash).await
     }
 
     pub async fn shutdown(&self) -> Res<()> {

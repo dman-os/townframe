@@ -528,6 +528,21 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
     Ok(())
 }
 
+/// Whether a sidecar `type` is a string position: a plain `"string"`, or the nullable spelling
+/// `["string", "null"]` an `Option` field's sidecar emits (the nullable overlay strips `null`).
+fn is_string_position(kind: Option<&Value>) -> bool {
+    match kind {
+        Some(Value::String(kind)) => kind == "string",
+        Some(Value::Array(kinds)) => {
+            kinds.iter().any(|kind| kind == "string")
+                && kinds
+                    .iter()
+                    .all(|kind| matches!(kind.as_str(), Some("string" | "null")))
+        }
+        _ => false,
+    }
+}
+
 /// The values a supplement position's own keywords may take: the storage markers, formats and
 /// encodings a native spelling uses, the `not`/`const`/vocabulary spellings a union or string
 /// vocabulary states, and the JSON types a position may declare. Its subschemas are the walk's
@@ -622,10 +637,12 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
         }
     }
     // A string vocabulary spells its values as `enum` (closed) or `knownValues` (open), the
-    // same list its Lexicon projection carries; the overlay holds the two to agreement.
+    // same list its Lexicon projection carries; the overlay holds the two to agreement. An
+    // optional field's sidecar is a nullable string (`type: ["string", "null"]`), which the
+    // nullable overlay already strips to the non-null branch before it reaches the primary.
     for key in ["enum", "knownValues"] {
         if let Some(values) = object.get(key)
-            && (object.get("type").and_then(Value::as_str) != Some("string")
+            && (!is_string_position(object.get("type"))
                 || !values.as_array().is_some_and(|values| {
                     !values.is_empty() && values.iter().all(Value::is_string)
                 }))
@@ -1034,6 +1051,8 @@ impl Overlay<'_> {
             }
             if marker == Some("float") {
                 primary["format"] = format.clone();
+            }
+            if marker == Some("float") {
                 primary[KEYWORD]["width"] = format.clone();
             }
             // `uuid` is not a storage form and not a `Constraint` format; it is the declaration's

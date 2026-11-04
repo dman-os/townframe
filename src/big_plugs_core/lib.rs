@@ -1,4 +1,4 @@
-//! The plug catalog's portable package envelope (ADR 023 §1–2).
+//! The plug catalog's portable package envelope (ADR 027 §1–2).
 //!
 //! A [`Plug`] is one immutable package revision as the catalog carries it: identity, version
 //! label, distribution dependencies, content-addressed artifacts, and the contributions the
@@ -9,7 +9,7 @@
 //! this build does not know survives a round trip untouched.
 //!
 //! Enablement, configuration, grants and readiness are not here by design: they belong to the
-//! runtime that consumes the contribution (ADR 023 §4), and a catalog boolean that claimed to
+//! runtime that consumes the contribution (ADR 027 §4), and a catalog boolean that claimed to
 //! summarize both consumers would state a fact neither owns.
 
 use big_cabinet_core::datum::DatumShape;
@@ -38,7 +38,7 @@ pub struct Plug {
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub id: PlugId,
     /// The semver label a release is discovered and depended upon by. Not an operation or
-    /// contract identity: a contract that changes meaning takes a new NSID (ADR 023 §6).
+    /// contract identity: a contract that changes meaning takes a new NSID (ADR 027 §6).
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub version: Version,
     #[serde(default, skip_serializing_if = "Option::is_none")]

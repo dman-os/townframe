@@ -121,7 +121,7 @@ impl Core {
         doc: &DocId,
         access: Access,
     ) -> Result<WriteReceipt, DrawersError> {
-        let (_meta, docs_group) = self.groups(drawer).await?;
+        let (_meta, docs_group, _sensitive) = self.groups(drawer).await?;
         let current = self.docs_group_level(&docs_group, doc).await?;
         let docs_group = &docs_group;
         let regrant = |access: Access| async move {

@@ -43,9 +43,9 @@ async fn wait_for_datum_set(node: &Node, actor: &Actor, doc_id: &DocId) {
     .await;
 }
 
-/// Wait until the `datum_ref` index records exactly `targets` out of the note of `doc_id`,
-/// each at the `/link` position: a stale edge set, or one still being rewritten, does not
-/// match. Every settle the index commits wakes the check.
+/// Wait until the reference index records exactly `targets` out of the note of `doc_id`, each at
+/// the `/link` position: a stale edge set, or one still being rewritten, does not match. The edges
+/// settle in the same datum-set transaction as the entries, so its settle counter wakes the check.
 async fn wait_for_datum_ref(node: &Node, doc_id: &DocId, targets: &[&DocId]) {
     let note_key = note("").0;
     let expected: BTreeSet<(String, DatumRoute)> = targets
@@ -60,7 +60,7 @@ async fn wait_for_datum_ref(node: &Node, doc_id: &DocId, targets: &[&DocId]) {
             )
         })
         .collect();
-    let mut settled = node.datum_ref.subscribe_settled();
+    let mut settled = node.datum_set.subscribe_settled();
     loop {
         let edges: BTreeSet<(String, DatumRoute)> = node
             .datum_ref
@@ -74,6 +74,45 @@ async fn wait_for_datum_ref(node: &Node, doc_id: &DocId, targets: &[&DocId]) {
             return;
         }
         settled.changed().await.unwrap();
+    }
+}
+
+/// Consume a poll until `expected` enters the predicate, asserting the enter carries a present
+/// datum. Events about other documents (the opening replay, or a concurrent change) are skipped.
+async fn next_enter(poll: &mut crate::test_poll::Poller, expected: &DocId) {
+    loop {
+        match poll
+            .next()
+            .await
+            .unwrap()
+            .expect("the poll ended before the expected enter")
+        {
+            DatumEvent::Enter { doc_id, datums, .. } if doc_id == *expected => {
+                assert!(
+                    datums
+                        .values()
+                        .any(|datum| matches!(datum, ObservedDatum::Present { .. })),
+                    "the enter for {expected:?} carried no present datum"
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Consume a poll until `expected` leaves the predicate.
+async fn next_leave(poll: &mut crate::test_poll::Poller, expected: &DocId) {
+    loop {
+        match poll
+            .next()
+            .await
+            .unwrap()
+            .expect("the poll ended before the expected leave")
+        {
+            DatumEvent::Leave { doc_id, .. } if doc_id == *expected => return,
+            _ => {}
+        }
     }
 }
 
@@ -276,8 +315,9 @@ impl Containment {
 async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_datum_queries() {
     let fx = Containment::boot().await;
 
-    // Carol holds only `Relay` on `parent`: she can `ListDocs`, but `QueryDatums` and
-    // `QueryDatumRefs` on `parent` are refused (`Denied`).
+    // Carol holds only `Relay` on `parent`: she can `ListDocs`, but `PollDatums` and
+    // `QueryDatumRefs` on `parent` are refused (`Denied`). The `InDrawer` anchor itself is
+    // below the `Read` a datum delivery needs, so the predicate cannot even be admitted.
     assert_eq!(
         fx.node
             .list_docs(&fx.carol, &fx.parent, 0, None)
@@ -286,20 +326,27 @@ async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_datum_querie
             .len(),
         4
     );
-    let carol_query = fx
-        .node
-        .docs()
-        .call(
-            RequestContext::root(),
-            QueryDatums {
-                capability: fx.parent_capability(&fx.carol, Access::Relay).await,
-                drawer_id: Some(fx.parent.clone()),
-                selector: DatumSelector::Tag {
+    let carol_query = crate::test_poll::query(
+        fx.node.docs(),
+        fx.parent_capability(&fx.carol, Access::Relay).await,
+        Predicate::And {
+            clauses: vec![
+                Predicate::InDrawer {
+                    drawer_id: fx.parent.clone(),
+                    transitive: true,
+                    at_least: Access::Read,
+                },
+                Predicate::HasTag {
                     tag: fx.note_tag.clone(),
                 },
-            },
-        )
-        .await;
+            ],
+        },
+        DatumSelection::Of {
+            tags: [fx.note_tag.clone()].into(),
+            keys: BTreeSet::new(),
+        },
+    )
+    .await;
     assert_eq!(
         carol_query.unwrap_err(),
         ClientError::Operation(DocsError::Denied)
@@ -312,133 +359,163 @@ async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_datum_querie
 async fn drawer_scoped_datum_queries_obey_containment_and_attenuation() {
     let fx = Containment::boot().await;
 
-    // Bob's drawer-scoped `QueryDatums` on `parent` returns ONLY `doc_direct` and
-    // `doc_in_child_read`: `doc_relay_entry` and `doc_in_child_relay` are attenuated to `Relay` in
-    // `parent`, and `doc_outside` is not in `parent` even though Bob can read it via `other`.
-    let bob_in_parent: BTreeSet<DocId> = fx
-        .node
-        .docs()
-        .call(
-            RequestContext::root(),
-            QueryDatums {
-                capability: fx.parent_capability(&fx.bob, Access::Read).await,
-                drawer_id: Some(fx.parent.clone()),
-                selector: DatumSelector::Tag {
+    // Bob's drawer-scoped query on `parent` returns ONLY `doc_direct` and `doc_in_child_read`:
+    // `doc_relay_entry` and `doc_in_child_relay` are attenuated to `Relay` in `parent`, and
+    // `doc_outside` is not in `parent` even though Bob can read it via `other`.
+    let note_selection = DatumSelection::Of {
+        tags: [fx.note_tag.clone()].into(),
+        keys: BTreeSet::new(),
+    };
+    let bob_in_parent: BTreeSet<DocId> = crate::test_poll::query(
+        fx.node.docs(),
+        fx.parent_capability(&fx.bob, Access::Read).await,
+        Predicate::And {
+            clauses: vec![
+                Predicate::InDrawer {
+                    drawer_id: fx.parent.clone(),
+                    transitive: true,
+                    at_least: Access::Read,
+                },
+                Predicate::HasTag {
                     tag: fx.note_tag.clone(),
                 },
-            },
-        )
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|f| f.doc_id)
-        .collect();
+            ],
+        },
+        note_selection.clone(),
+    )
+    .await
+    .unwrap()
+    .into_keys()
+    .collect();
     assert_eq!(
         bob_in_parent,
         BTreeSet::from([fx.doc_direct.clone(), fx.doc_in_child_read.clone()])
     );
 
-    // Unscoped `QueryDatums` by tag for Bob includes `doc_outside` and `doc_relay_entry` too,
-    // because Bob reaches them via `other`, while still hiding `doc_in_child_relay`.
-    let bob_unscoped: BTreeSet<DocId> = fx
-        .node
-        .docs()
-        .call(
-            RequestContext::root(),
-            QueryDatums {
-                capability: fx.bob_both_drawers().await,
-                drawer_id: None,
-                selector: DatumSelector::Tag {
-                    tag: fx.note_tag.clone(),
-                },
-            },
-        )
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|f| f.doc_id)
-        .collect();
+    // An unanchored tag predicate has no resource to authorize it, so a scoped caller may not make
+    // one: it would enumerate every document carrying the tag on the node.
+    let bob_unscoped = crate::test_poll::query(
+        fx.node.docs(),
+        fx.bob_both_drawers().await,
+        Predicate::HasTag {
+            tag: fx.note_tag.clone(),
+        },
+        note_selection.clone(),
+    )
+    .await;
     assert_eq!(
-        bob_unscoped,
-        BTreeSet::from([
-            fx.doc_direct.clone(),
-            fx.doc_in_child_read.clone(),
-            fx.doc_relay_entry.clone(),
-            fx.doc_outside.clone(),
-        ])
+        bob_unscoped.unwrap_err(),
+        ClientError::Operation(DocsError::Denied)
     );
 
-    // Observing the tag under the same reach replays exactly what the unscoped query returned.
-    let observation_capability = fx
-        .capability(
-            &fx.bob,
-            DocScope {
-                read: [fx.doc_outside.clone()].into(),
-                drawers: [
-                    (fx.parent.clone(), Access::Read),
-                    (fx.other.clone(), Access::Read),
-                ]
-                .into(),
-                ..Default::default()
-            },
-        )
-        .await;
-    let mut events = fx
-        .node
-        .docs()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability: observation_capability,
-                scope: ObserveScope::Tag {
+    // Through `other`, Bob reaches `doc_outside` and `doc_relay_entry`: the attenuation of
+    // `doc_relay_entry` in `parent` does not weaken its separate route through `other`.
+    let bob_in_other: BTreeSet<DocId> = crate::test_poll::query(
+        fx.node.docs(),
+        fx.bob_both_drawers().await,
+        Predicate::And {
+            clauses: vec![
+                Predicate::InDrawer {
+                    drawer_id: fx.other.clone(),
+                    transitive: true,
+                    at_least: Access::Read,
+                },
+                Predicate::HasTag {
                     tag: fx.note_tag.clone(),
                 },
-                after: 0,
+            ],
+        },
+        note_selection.clone(),
+    )
+    .await
+    .unwrap()
+    .into_keys()
+    .collect();
+    assert_eq!(
+        bob_in_other,
+        BTreeSet::from([fx.doc_outside.clone(), fx.doc_relay_entry.clone()])
+    );
+
+    // Opening replay is a poll from zero, so it delivers the same documents the current-state
+    // query folded out for the same anchored predicate.
+    let mut poll = crate::test_poll::Poller::new(
+        fx.node.docs(),
+        PollDatums {
+            capability: fx.parent_capability(&fx.bob, Access::Read).await,
+            predicate: Predicate::And {
+                clauses: vec![
+                    Predicate::InDrawer {
+                        drawer_id: fx.parent.clone(),
+                        transitive: true,
+                        at_least: Access::Read,
+                    },
+                    Predicate::HasTag {
+                        tag: fx.note_tag.clone(),
+                    },
+                ],
             },
-        )
-        .await
-        .unwrap();
+            datums: note_selection,
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    );
     let mut observed = BTreeSet::new();
-    while let DatumObserved::Entry { doc_id, datum, .. } = events.next().await.unwrap().unwrap() {
-        assert!(matches!(datum, ObservedDatum::Present { .. }));
-        observed.insert(doc_id);
+    loop {
+        let page = poll.page(0).await.unwrap();
+        for event in page.events {
+            if let DatumEvent::Enter { doc_id, datums, .. } = event {
+                assert!(
+                    datums
+                        .values()
+                        .all(|datum| matches!(datum, ObservedDatum::Present { .. }))
+                );
+                observed.insert(doc_id);
+            }
+        }
+        if page.caught_up {
+            break;
+        }
     }
-    assert_eq!(observed, bob_unscoped);
-    drop(events);
+    assert_eq!(observed, bob_in_parent);
 
     fx.node.stop().await;
 }
 
 #[tokio::test]
-async fn unscoped_queries_are_narrowed_to_the_capability_scope() {
+async fn anchored_queries_are_narrowed_to_the_capability_scope() {
     let fx = Containment::boot().await;
 
-    // A capability over `parent` alone narrows an unscoped key query to the docs `parent`
-    // reaches at `Read`, and hides the backlink from `doc_outside`.
+    // A capability over `parent` alone narrows a key query to the docs `parent` reaches at
+    // `Read`, and hides the backlink from `doc_outside`.
     let parent_only = fx.parent_capability(&fx.bob, Access::Read).await;
-    let narrowed_records = fx
-        .node
-        .docs()
-        .call(
-            RequestContext::root(),
-            QueryDatums {
-                capability: parent_only,
-                drawer_id: None,
-                selector: DatumSelector::Key {
-                    datum_key: fx.note_key.clone(),
+    let narrowed_records = crate::test_poll::query(
+        fx.node.docs(),
+        parent_only,
+        Predicate::And {
+            clauses: vec![
+                Predicate::InDrawer {
+                    drawer_id: fx.parent.clone(),
+                    transitive: true,
+                    at_least: Access::Read,
                 },
-            },
-        )
-        .await
-        .unwrap();
+                Predicate::HasKey {
+                    key: fx.note_key.clone(),
+                },
+            ],
+        },
+        DatumSelection::Of {
+            tags: BTreeSet::new(),
+            keys: [fx.note_key.clone()].into(),
+        },
+    )
+    .await
+    .unwrap();
     // The query returns the matching set; result order is not part of the contract.
     let expected_docs = BTreeSet::from([fx.doc_direct.clone(), fx.doc_in_child_read.clone()]);
     assert_eq!(
-        narrowed_records
-            .into_iter()
-            .map(|record| record.doc_id)
-            .collect::<BTreeSet<_>>(),
-        expected_docs,
+        narrowed_records.into_keys().collect::<BTreeSet<_>>(),
+        expected_docs
     );
     assert!(
         fx.node
@@ -592,6 +669,173 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
 }
 
 #[tokio::test]
+async fn non_transitive_poll_includes_self_doc_children_but_not_child_drawer_docs() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let bob = node.actor("bob").await;
+    let parent = node.collection(&alice, "poll-parent").await;
+    let child = node.collection(&alice, "poll-child").await;
+    let home = node.collection(&alice, "poll-home").await;
+    let direct = node.create_doc(&alice, &parent, "direct").await.unwrap();
+    let in_child = node.create_doc(&alice, &child, "in-child").await.unwrap();
+    let self_doc = node.create_doc(&alice, &home, "self-doc").await.unwrap();
+    for doc in [&direct, &in_child, &self_doc] {
+        wait_for_datum_set(&node, &alice, doc).await;
+    }
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            CreateDrawer {
+                capability: node.drawer_capability(&alice, &[&home]).await.unwrap(),
+                command: command("declare self-doc"),
+                layout: CreateLayout::SelfDoc {
+                    doc_id: self_doc.clone(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    node.grant(&alice, &parent, &bob, Access::Read).await;
+    for (doc_id, key) in [
+        (&parent, doc_entry_key(&direct)),
+        (&child, doc_entry_key(&in_child)),
+        (&home, doc_entry_key(&self_doc)),
+        (&self_doc, drawer_key()),
+    ] {
+        let expected_heads = heads(&node, &alice, doc_id).await;
+        node.wait_indexed(key.tag().as_str(), |route, membership| {
+            route.doc_id == *doc_id
+                && route.datum_key == key
+                && matches!(membership, DatumMembership::Present { doc_heads, .. } if *doc_heads == expected_heads)
+        })
+        .await;
+    }
+
+    // The ADR 026 §9 worker shape, with the harness note tag standing for its datum tags.
+    let note_tag = DatumTag::new(NOTE).unwrap();
+    let mut poll = crate::test_poll::Poller::new(
+        node.docs(),
+        PollDatums {
+            capability: node
+                .mint_doc(
+                    &bob,
+                    DocScope {
+                        drawers: [(parent.clone(), Access::Read)].into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            predicate: Predicate::And {
+                clauses: vec![
+                    Predicate::InDrawer {
+                        drawer_id: parent.clone(),
+                        transitive: false,
+                        at_least: Access::Read,
+                    },
+                    Predicate::HasTag {
+                        tag: note_tag.clone(),
+                    },
+                ],
+            },
+            datums: DatumSelection::Of {
+                tags: [note_tag].into(),
+                keys: BTreeSet::new(),
+            },
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    );
+    let mut entered = BTreeSet::new();
+    loop {
+        let page = poll.page(0).await.unwrap();
+        for event in page.events {
+            if let DatumEvent::Enter { doc_id, .. } = event {
+                entered.insert(doc_id);
+            }
+        }
+        if page.caught_up {
+            break;
+        }
+    }
+    assert_eq!(entered, BTreeSet::from([direct.clone()]));
+
+    // Linking a single-group child does not move its docs into a non-transitive poll:
+    // neither an enter on link nor a spurious leave on unlink.
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            AddChild {
+                capability: node
+                    .drawer_capability(&alice, &[&parent, &child])
+                    .await
+                    .unwrap(),
+                command: command("link child"),
+                parent_id: parent.clone(),
+                child_id: child.clone(),
+                access: Access::Read,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        poll.next().await.unwrap(),
+        None,
+        "grouped child link: parent {parent}, child {child}, direct {direct}, in-child {in_child}, self-doc {self_doc}",
+    );
+    // Linking a self-doc child moves exactly its doc in, and unlinking moves it out.
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            AddChild {
+                capability: node
+                    .drawer_capability(&alice, &[&parent, &self_doc])
+                    .await
+                    .unwrap(),
+                command: command("link self-doc"),
+                parent_id: parent.clone(),
+                child_id: self_doc.clone(),
+                access: Access::Read,
+            },
+        )
+        .await
+        .unwrap();
+    next_enter(&mut poll, &self_doc).await;
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            RemoveChild {
+                capability: node.drawer_capability(&alice, &[&parent]).await.unwrap(),
+                command: command("unlink child"),
+                parent_id: parent.clone(),
+                child_id: child.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        poll.next().await.unwrap(),
+        None,
+        "grouped child unlink: parent {parent}, child {child}, direct {direct}, in-child {in_child}, self-doc {self_doc}",
+    );
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            RemoveChild {
+                capability: node.drawer_capability(&alice, &[&parent]).await.unwrap(),
+                command: command("unlink self-doc"),
+                parent_id: parent.clone(),
+                child_id: self_doc.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    next_leave(&mut poll, &self_doc).await;
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_changes() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
@@ -616,54 +860,57 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         drawers: [(drawer.clone(), Access::Read)].into(),
         ..Default::default()
     };
-    let observation = ObserveDatums {
+    let note_tag = big_cabinet_core::DatumTag::new(NOTE).unwrap();
+    let observation = PollDatums {
         capability: node.mint_doc(&bob, doc_scope.clone()).await.unwrap(),
-        scope: ObserveScope::Drawer {
-            drawer_id: drawer.clone(),
-            tag: Some(big_cabinet_core::DatumTag::new(NOTE).unwrap()),
+        predicate: Predicate::And {
+            clauses: vec![
+                Predicate::InDrawer {
+                    drawer_id: drawer.clone(),
+                    transitive: true,
+                    at_least: Access::Read,
+                },
+                Predicate::HasTag {
+                    tag: note_tag.clone(),
+                },
+            ],
+        },
+        datums: DatumSelection::Of {
+            tags: [note_tag].into(),
+            keys: BTreeSet::new(),
         },
         after: 0,
+        limit: 0,
+        hold_ms: 0,
     };
-    let mut events = node
-        .docs()
-        .subscribe(RequestContext::root(), observation.clone())
-        .await
-        .unwrap();
+    let mut poll = crate::test_poll::Poller::new(node.docs(), observation.clone());
 
-    // 1. Opening replay delivers `doc_initial` and then `ReplayComplete`.
-    let first = events.next().await.unwrap().unwrap();
-    let DatumObserved::Entry {
-        doc_id,
-        datum: ObservedDatum::Present { .. },
-        ..
-    } = first
-    else {
-        panic!("expected initial Present entry, got {first:?}");
-    };
-    assert_eq!(doc_id, doc_initial);
-    let replay_done = events.next().await.unwrap().unwrap();
-    assert!(
-        matches!(replay_done, DatumObserved::ReplayComplete { .. }),
-        "expected ReplayComplete, got {replay_done:?}"
-    );
+    // 1. Opening replay delivers `doc_initial` and reaches `caughtUp`.
+    let first_page = poll.page(0).await.unwrap();
+    assert!(first_page.caught_up);
+    let mut entered = BTreeSet::new();
+    for event in first_page.events {
+        if let DatumEvent::Enter { doc_id, datums, .. } = event {
+            assert!(
+                datums
+                    .values()
+                    .any(|datum| matches!(datum, ObservedDatum::Present { .. })),
+                "the enter for {doc_id:?} carried no present datum"
+            );
+            entered.insert(doc_id);
+        }
+    }
+    assert_eq!(entered, BTreeSet::from([doc_initial.clone()]));
 
-    // 2. Adding an already-settled doc (`doc_added_later`) to `drawer` at `Read` emits `Present`
-    //    even though `doc_added_later` itself was not edited.
+    // 2. Adding an already-settled doc (`doc_added_later`) to `drawer` at `Read` enters it even
+    //    though `doc_added_later` itself was not edited.
     node.add_doc(&alice, "add-later", &drawer, &doc_added_later, Access::Read)
         .await
         .unwrap();
-    let added = events.next().await.unwrap().unwrap();
-    let DatumObserved::Entry {
-        doc_id,
-        datum: ObservedDatum::Present { .. },
-        ..
-    } = added
-    else {
-        panic!("expected Present for newly added doc, got {added:?}");
-    };
-    assert_eq!(doc_id, doc_added_later);
+    next_enter(&mut poll, &doc_added_later).await;
 
-    // 3. Narrowing `doc_added_later` to `Relay` in `drawer` emits `AccessLost`.
+    // 3. Narrowing `doc_added_later` to `Relay` in `drawer` makes the `Read` predicate stop
+    //    matching it, so the poll reports a `Leave`.
     node.add_doc(
         &alice,
         "narrow-later-to-relay",
@@ -673,20 +920,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     )
     .await
     .unwrap();
-    let narrowed = events.next().await.unwrap().unwrap();
-    assert!(
-        matches!(
-            narrowed,
-            DatumObserved::Entry {
-                ref doc_id,
-                datum: ObservedDatum::AccessLost,
-                ..
-            } if *doc_id == doc_added_later
-        ),
-        "expected AccessLost on narrowing to Relay, got {narrowed:?}"
-    );
+    next_leave(&mut poll, &doc_added_later).await;
 
-    // 4. Widening `doc_added_later` back to `Read` resumes observation (`Present`).
+    // 4. Widening `doc_added_later` back to `Read` re-enters it.
     node.add_doc(
         &alice,
         "widen-later-to-read",
@@ -696,38 +932,15 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     )
     .await
     .unwrap();
-    let widened = events.next().await.unwrap().unwrap();
-    assert!(
-        matches!(
-            widened,
-            DatumObserved::Entry {
-                ref doc_id,
-                datum: ObservedDatum::Present { .. },
-                ..
-            } if *doc_id == doc_added_later
-        ),
-        "expected Present on widening back to Read, got {widened:?}"
-    );
+    next_enter(&mut poll, &doc_added_later).await;
 
-    // 5. Removing `doc_added_later` from `drawer` emits `AccessLost`.
+    // 5. Removing `doc_added_later` from `drawer` leaves it.
     node.remove_doc(&alice, "remove-later", &drawer, &doc_added_later)
         .await
         .unwrap();
-    let removed = events.next().await.unwrap().unwrap();
-    assert!(
-        matches!(
-            removed,
-            DatumObserved::Entry {
-                ref doc_id,
-                datum: ObservedDatum::AccessLost,
-                ..
-            } if *doc_id == doc_added_later
-        ),
-        "expected AccessLost on RemoveDoc, got {removed:?}"
-    );
+    next_leave(&mut poll, &doc_added_later).await;
 
-    // 6. Linking `child` at `Read` emits `Present` for `doc_in_child`; unlinking `child` emits
-    //    `AccessLost` for `doc_in_child`.
+    // 6. Linking `child` at `Read` enters `doc_in_child`; unlinking `child` leaves it.
     node.drawers()
         .call(
             RequestContext::root(),
@@ -744,18 +957,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         )
         .await
         .unwrap();
-    let child_added = events.next().await.unwrap().unwrap();
-    assert!(
-        matches!(
-            child_added,
-            DatumObserved::Entry {
-                ref doc_id,
-                datum: ObservedDatum::Present { .. },
-                ..
-            } if *doc_id == doc_in_child
-        ),
-        "expected Present for child doc on AddChild, got {child_added:?}"
-    );
+    next_enter(&mut poll, &doc_in_child).await;
     node.drawers()
         .call(
             RequestContext::root(),
@@ -768,19 +970,10 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         )
         .await
         .unwrap();
-    let child_removed = events.next().await.unwrap().unwrap();
-    assert!(
-        matches!(
-            child_removed,
-            DatumObserved::Entry {
-                ref doc_id,
-                datum: ObservedDatum::AccessLost,
-                ..
-            } if *doc_id == doc_in_child
-        ),
-        "expected AccessLost for child doc on RemoveChild, got {child_removed:?}"
-    );
+    next_leave(&mut poll, &doc_in_child).await;
 
+    // 7. Revoking `bob`'s drawer grant makes every later poll answer `Denied` without moving the
+    //    cursor, and re-granting does not revive the withdrawn capability.
     node.drawers()
         .call(
             RequestContext::root(),
@@ -792,50 +985,36 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         )
         .await
         .unwrap();
+    let cursor = poll.cursor();
     assert_eq!(
-        events.next().await.unwrap(),
+        poll.next().await,
         Err(ClientError::Operation(DocsError::Denied))
     );
-    assert!(events.next().await.is_none());
-    drop(events);
+    assert_eq!(
+        poll.cursor(),
+        cursor,
+        "a denied poll must not move the cursor"
+    );
     assert_eq!(
         node.mint_doc(&bob, doc_scope.clone()).await.unwrap_err(),
         DocsError::Denied
     );
     node.grant(&alice, &drawer, &bob, Access::Read).await;
-    let refused = node
-        .docs()
-        .subscribe(RequestContext::root(), observation.clone())
+    let refused = crate::test_poll::Poller::new(node.docs(), observation.clone())
+        .page(0)
         .await;
     assert!(
         matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
-        "regrant must not revive the withdrawn observation capability"
+        "regrant must not revive the withdrawn capability"
     );
-    let mut events = node
-        .docs()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability: node.mint_doc(&bob, doc_scope).await.unwrap(),
-                ..observation
-            },
-        )
-        .await
-        .unwrap();
-    let regranted = events.next().await.unwrap().unwrap();
-    assert!(
-        matches!(
-            regranted,
-            DatumObserved::Entry {
-                ref doc_id,
-                datum: ObservedDatum::Present { .. },
-                ..
-            } if *doc_id == doc_initial
-        ),
-        "expected Present on re-granting drawer Read, got {regranted:?}"
+    let mut poll = crate::test_poll::Poller::new(
+        node.docs(),
+        PollDatums {
+            capability: node.mint_doc(&bob, doc_scope).await.unwrap(),
+            ..observation
+        },
     );
-
-    drop(events);
+    next_enter(&mut poll, &doc_initial).await;
     node.stop().await;
 }
 

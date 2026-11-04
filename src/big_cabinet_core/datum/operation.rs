@@ -1,5 +1,5 @@
 //! Operation Lexicons: `query`, `procedure` and `subscription` mains, the three XRPC kinds taken
-//! from AT Protocol unchanged (ADR 023 §3).
+//! from AT Protocol unchanged (ADR 027 §3).
 //!
 //! The datum compiler models record and object Lexicons and refuses an operation main, so the
 //! operation contracts a nodule carries are admitted here: the frame of the main definition

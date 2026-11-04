@@ -1,4 +1,4 @@
-//! The static plug catalog: which package revisions a node knows (ADR 023 §1, §4 "Known").
+//! The static plug catalog: which package revisions a node knows (ADR 027 §1, §4 "Known").
 //!
 //! The catalog is deliberately inert. It stores validated envelopes and answers version questions;
 //! it owns no actor, grant, enablement, configuration or readiness, and it does not touch artifact

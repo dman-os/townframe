@@ -64,6 +64,7 @@ pub impl service_core_rs::operation::Envelope < P >::fn set_transport (& mut sel
 pub impl service_core_rs::operation::Envelope < P >::fn transport (& self) -> & TransportContext
 pub impl service_core_rs::operation::Envelope < P >::fn with_metadata (context : RequestContext , metadata : HttpMetadata , params : P) -> Self
 pub impl service_core_rs::operation::XrpcKind::const fn transport_outcome_unknown (self) -> bool
+pub impl service_core_rs::operation::XrpcOperation::const fn long_poll (mut self) -> Self
 pub impl service_core_rs::operation::XrpcOperation::const fn procedure (nsid : & 'static str) -> Self
 pub impl service_core_rs::operation::XrpcOperation::const fn query (nsid : & 'static str) -> Self
 pub impl service_core_rs::operation::XrpcOperation::const fn subscription (nsid : & 'static str) -> Self
@@ -93,7 +94,7 @@ pub struct service_core_rs::context::TraceContext  {  }
 pub struct service_core_rs::operation::Envelope< P >  { context: RequestContext, metadata: HttpMetadata, params: P }
 pub struct service_core_rs::operation::ResponseEnvelope< T >  { output: T, metadata: ResponseMetadata }
 pub struct service_core_rs::operation::ResponseMetadata  { etag: Option < String >, location: Option < String >, retry_after: Option < String >, cache_control: Option < String >, warnings: Vec < String > }
-pub struct service_core_rs::operation::XrpcOperation  { nsid: & 'static str, kind: XrpcKind, method: HttpMethod, input: HttpInput, output_schema: & 'static str, error_schema: & 'static str }
+pub struct service_core_rs::operation::XrpcOperation  { nsid: & 'static str, kind: XrpcKind, method: HttpMethod, input: HttpInput, output_schema: & 'static str, error_schema: & 'static str, long_poll: bool }
 pub struct service_core_rs::protocol::ProtocolOperations  { unary: & 'static [XrpcOperation], stream: & 'static [XrpcOperation] }
 pub struct service_core_rs::xrpc::XrpcErrorEnvelope  {  }
 pub trait service_core_rs::operation::Operation { type Output; type Error; const XRPC: XrpcOperation }

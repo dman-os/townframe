@@ -1408,6 +1408,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_blobs"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "automerge",
+ "bao-tree",
+ "big_blobs_core",
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_repo",
+ "big_sync",
+ "big_sync_core",
+ "blake3",
+ "bytes",
+ "data-encoding",
+ "ed25519-dalek 2.2.0",
+ "fs4",
+ "futures",
+ "hkdf 0.12.4",
+ "iroh",
+ "iroh-blobs",
+ "irpc",
+ "proptest",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "service_utils_rs",
+ "sha2 0.10.9",
+ "sqlite_rs",
+ "subduction_iroh",
+ "surelock",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "utils_rs",
+]
+
+[[package]]
+name = "big_blobs_core"
+version = "0.1.0"
+dependencies = [
+ "automerge",
+ "big_cabinet_core",
+ "big_sync_core",
+ "bs58",
+ "irpc",
+ "macros",
+ "postcard",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "big_cabinet"
 version = "0.1.0"
 dependencies = [
@@ -1488,17 +1549,23 @@ dependencies = [
 name = "big_node"
 version = "0.1.0"
 dependencies = [
+ "big_blobs",
+ "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
  "big_nodule",
  "big_repo",
+ "big_sync",
  "big_sync_core",
  "futures",
+ "iroh",
+ "iroh-blobs",
  "keyring-core",
  "secrets_rs",
  "serde_json",
  "service_utils_rs",
  "sqlite_rs",
+ "subduction_iroh",
  "tempfile",
  "tokio",
  "utils_rs",
@@ -3927,7 +3994,6 @@ dependencies = [
 name = "daybook_core"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "am_utils_rs",
  "anyhow",
  "async-channel",
@@ -3935,7 +4001,7 @@ dependencies = [
  "atproto-dasl",
  "automerge",
  "autosurgeon",
- "bao-tree",
+ "big_blobs",
  "big_repo",
  "big_sync",
  "big_sync_core",
@@ -3951,7 +4017,6 @@ dependencies = [
  "futures",
  "futures-buffered",
  "garde",
- "hkdf 0.12.4",
  "image",
  "insta",
  "iroh",

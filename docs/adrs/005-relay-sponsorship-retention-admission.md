@@ -1,6 +1,12 @@
 # ADR 005: Relay Sponsorship, Retention, and Free-Tier Admission
 
-**Status:** Proposed.
+**Status:** Proposed, amended by [ADR 026](026-drawer-native-blobs.md).
+
+Sponsorship is now expressed as **one root sponsorship drawer per account** instead of a
+flat sponsorship group of documents (§1), and the adoption worker walks the drawer
+closure transitively and reads the inventories it finds there (§3). Blob retention
+follows [ADR 001](001-blob-inventories.md) as amended. Onboarding, the abuse limits,
+cursor acks, size accounting and the rejection taxonomy are unchanged.
 
 ## Context
 
@@ -43,7 +49,9 @@ relay to retain it — not the transport peer that happened to sync it.
   recovery/admin authority. Detailed in ADR 006; this ADR only depends on its
   existence as the relay's anchor identity.
 * **Sponsorship group** (`G_sponsor`): the account's Keyhive group listing
-  the documents the account wants the relay to retain.
+  the documents the account wants the relay to retain. **Amended:** replaced by the
+  **root sponsorship drawer**, one drawer per account per relay, whose child entries grow
+  the sponsored set (ADR 026 §8).
 * **Adopted set**: the relay's own Keyhive group mirroring which documents it
   has accepted and retained. The account can always observe this set.
 * **Adoption**: the relay's acceptance of a document into the adopted set.
@@ -81,10 +89,17 @@ when the account wants relay retention does it introduce the relay.
 
    ```text
    account meta doc (Keyhive document, repo agent writes, relay reads)
-     recovery_principal:  <Keyhive principal id>
-     sponsorship_group:   S_docs    documents to retain
-     repo_agents_group:   G_agents  agents considered members of this account
+     recovery_principal:      <Keyhive principal id>
+     sponsorship_drawer:      <DrawerId>   the root sponsorship drawer
+     repo_agents_group:       G_agents     agents considered members of this account
    ```
+
+   **Amended by ADR 026 §8:** `sponsorship_group: S_docs` becomes one root sponsorship
+   drawer. The account grows its sponsored set by adding child entries to that drawer,
+   which is an ordinary drawer write, rather than by maintaining a flat group of document
+   ids beside the drawer model. Two collaborators may sponsor the same drawer to
+   different relays without coordinating, because sponsorship is a private relationship
+   between an account and its relay.
 
 7. The relay watches a **private metadata group** it owns, into which it
    discovers account documents, and reacts to changes through the existing
@@ -107,9 +122,11 @@ when the account wants relay retention does it introduce the relay.
    document (new sponsorship group, new repo agents group, changed
    recovery principal) reach the relay through the same part machinery.
 
-The relay is never an Admin anywhere in the account graph. It is granted
-**Relay** access to the documents inside `S_docs`, which is all retention
-requires.
+The relay is never an Admin anywhere in the account graph. It is granted **Relay** access
+to the root sponsorship drawer, which is all retention requires: `Relay` on a child entry
+gives it Read on the child's metadata, so it can enumerate the canonical roster and read
+the drawer's inventories, and Relay on the child's docs, so it can retain ciphertext
+([ADR 019](019-cabinet-drawers-and-selective-mirroring.md) "Child entries").
 
 The recovery-principal onboarding detail — where the recovery key is created
 (a separate place, not the daybook app), how daybook_core adopts the contact
@@ -157,6 +174,15 @@ Two independent measures:
    separately; the relay policy declares the limits.)
 
 ### 3. The adoption worker: sponsorship parts to the adopted set
+
+**Amended by ADR 026 §8.** The adopted set is now the closure of the root sponsorship
+drawer, walked transitively: follow child meta groups, read each drawer's descriptor,
+roster and `metaDoc` slots, adopt the docs closure, and retain the union of the inventory
+pins found there. Because the relay reads child metadata it can tie each inventory to its
+drawer and dedupe across accounts sponsoring the same drawer, by drawer id and by
+representation digest. Drawers outside a sponsorship closure stay invisible. A self-doc
+drawer linked as a child contributes its doc and no blobs of its own; its ciphertext is
+pinned by the containing drawer's inventory (ADR 026 §6).
 
 The relay does **not** mirror `S_docs` wholesale. One **adoption worker** per
 sponsorship part subscribes to the peer's sponsorship group part and turns its

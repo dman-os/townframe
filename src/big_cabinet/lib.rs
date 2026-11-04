@@ -19,6 +19,8 @@ pub mod index;
 #[cfg(test)]
 mod peer_net;
 pub mod schema;
+#[cfg(test)]
+mod test_poll;
 
 pub use authority::Authority;
 pub use authority::AuthorityError;

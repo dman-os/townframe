@@ -27,6 +27,7 @@ pub mod access;
 mod add_child;
 mod add_doc;
 mod create;
+mod discovery;
 mod get;
 mod grant;
 mod keys;
@@ -39,6 +40,7 @@ mod remove_child;
 mod remove_doc;
 mod revoke;
 mod state;
+mod successor;
 mod sqlite {
     include!("drawer/sqlite/gen.rs");
 }
@@ -49,6 +51,8 @@ mod e2e;
 pub use self::access::DrawerAccess;
 pub use self::access::DrawerProvider;
 pub use self::access::DrawerWorker;
+pub use self::discovery::DrawerMetadataObservation;
+pub use self::discovery::MetadataRootStatus;
 pub use big_cabinet_core::drawer::Drawer;
 pub use big_cabinet_core::drawer::DrawerLayout;
 pub use big_cabinet_core::drawer::LayoutKind;
@@ -56,13 +60,17 @@ pub use big_cabinet_core::drawer::LayoutKind;
 use self::keys::child_entry_key;
 use self::keys::doc_entry_key;
 use self::keys::drawer_key;
-use self::keys::entry_target;
+pub(crate) use self::keys::entry_target;
 use self::keys::group_key;
 use self::keys::known_entry_key;
+use self::keys::meta_doc_key;
+use self::keys::meta_doc_slot;
 use self::keys::roster_key;
+use self::keys::successor_key;
 #[cfg(test)]
 use self::ledger::CrashPoint;
 use self::ledger::Ledger;
+use self::state::MetaDocRows;
 use self::state::State;
 use crate::authority::DomainAuthority;
 use crate::capability::DomainCapabilities;
@@ -91,12 +99,16 @@ use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::DrawerChildEntry;
 use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::drawer::DrawerGroups;
+use big_cabinet_core::drawer::DrawerMetaDoc;
+use big_cabinet_core::drawer::DrawerSuccessor;
 use big_cabinet_core::drawer::GroupKey;
+use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::protocol::AddChild;
 use big_cabinet_core::drawer::protocol::AddDoc;
 use big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
 use big_cabinet_core::drawer::protocol::CreateLayout;
+use big_cabinet_core::drawer::protocol::CreateMetaDoc;
 use big_cabinet_core::drawer::protocol::DrawerCreated;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerRecord;
@@ -116,14 +128,17 @@ use big_cabinet_core::drawer::protocol::ListKnownDrawers;
 use big_cabinet_core::drawer::protocol::ListedDoc;
 use big_cabinet_core::drawer::protocol::ListedDrawer;
 use big_cabinet_core::drawer::protocol::LocalDrawers;
+use big_cabinet_core::drawer::protocol::MetaDocCreated;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::Principal;
 use big_cabinet_core::drawer::protocol::RememberDrawer;
 use big_cabinet_core::drawer::protocol::RemoveChild;
 use big_cabinet_core::drawer::protocol::RemoveDoc;
+use big_cabinet_core::drawer::protocol::ResolveDrawerSuccessor;
 use big_cabinet_core::drawer::protocol::RevokeDrawer;
 use big_cabinet_core::drawer::protocol::RevokePrincipal;
 use big_cabinet_core::drawer::protocol::SetDrawerPolicy;
+use big_cabinet_core::drawer::protocol::SetDrawerSuccessor;
 use big_cabinet_core::drawer::protocol::drawer_object;
 #[cfg(test)]
 use big_cabinet_core::drawer::protocol::drawer_placement;
@@ -146,6 +161,7 @@ pub struct DrawerConfig<'a> {
     pub worker: &'a DrawerWorker,
 }
 
+#[derive(Clone)]
 pub struct DrawerService {
     core: Arc<Core>,
 }
@@ -161,6 +177,13 @@ pub(crate) struct Projection {
     pub(crate) datum_set: Arc<crate::index::DatumSetStore>,
     pub(crate) ledger: Ledger,
     pub(crate) commands: tokio::sync::mpsc::Sender<access::PolicyCommand>,
+}
+
+/// The projection rows a drawer doc's roster datums state.
+struct RosterRows {
+    docs: BTreeMap<DocId, Access>,
+    children: BTreeMap<DrawerId, Access>,
+    meta_docs: BTreeMap<String, DrawerMetaDoc>,
 }
 
 pub(crate) struct Core {
@@ -310,6 +333,7 @@ service_utils_rs::bind_service_protocol! {
         unary {
             MintDrawerCapability(MintDrawerCapability),
             CreateDrawer(CreateDrawer),
+            CreateMetaDoc(CreateMetaDoc),
             AddDoc(AddDoc),
             RemoveDoc(RemoveDoc),
             AddChild(AddChild),
@@ -320,6 +344,8 @@ service_utils_rs::bind_service_protocol! {
             ForgetDrawer(ForgetDrawer),
             ListKnownDrawers(ListKnownDrawers),
             SetDrawerPolicy(SetDrawerPolicy),
+            SetDrawerSuccessor(SetDrawerSuccessor),
+            ResolveDrawerSuccessor(ResolveDrawerSuccessor),
             ListDrawers(ListDrawers),
             GrantDrawer(GrantDrawer),
             RevokeDrawer(RevokeDrawer),
@@ -446,14 +472,16 @@ impl Projection {
         &self,
         context: &RequestContext,
         actor: Uuid7,
-        bounds: BTreeMap<DrawerId, Access>,
+        bounds: BTreeMap<DrawerId, state::Reach>,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
         let candidates: Vec<_> = bounds
             .iter()
             .flat_map(|(drawer, bound)| {
-                Access::ALL
-                    .into_iter()
-                    .map(move |access| (drawer_object(access, drawer), access.min(*bound)))
+                Access::ALL.into_iter().filter_map(move |access| {
+                    bound
+                        .apply(access)
+                        .map(|reached| (drawer_object(access, drawer), reached))
+                })
             })
             .collect();
         let proofs = self
@@ -505,7 +533,7 @@ impl Core {
                 .ancestors(state::ScopeTarget::Drawer(drawer))
                 .await?;
         }
-        bounds.insert(drawer.clone(), Access::Admin);
+        bounds.insert(drawer.clone(), state::Reach::ordinary(Access::Admin));
         self.granted(context, actor, bounds).await
     }
 
@@ -549,12 +577,12 @@ impl Core {
                     .state
                     .ancestors(state::ScopeTarget::Drawer(drawer))
                     .await?;
-                bounds.insert(drawer.clone(), Access::Admin);
+                bounds.insert(drawer.clone(), state::Reach::ordinary(Access::Admin));
                 Ok(scope
                     .drawers
                     .iter()
                     .filter_map(|(root, access)| {
-                        bounds.get(root).map(|bound| (*access).min(*bound))
+                        bounds.get(root).and_then(|bound| bound.apply(*access))
                     })
                     .max())
             }
@@ -578,7 +606,7 @@ impl Core {
                     .drawers
                     .iter()
                     .filter_map(|(root, access)| {
-                        bounds.get(root).map(|bound| (*access).min(*bound))
+                        bounds.get(root).and_then(|bound| bound.apply(*access))
                     })
                     .max())
             }
@@ -675,94 +703,50 @@ impl Core {
         .await
     }
 
-    /// Bring the projection of `drawer` back in line with its doc: the roster datums, read as
-    /// this service, replace the rows. A self-doc drawer has no roster and nothing to rescan.
-    /// This is how a change another node made to a shared roster becomes visible here; the
-    /// service's own writes update the rows directly.
-    pub(crate) async fn rescan(
-        &self,
-        context: &RequestContext,
-        record: &DrawerRecord,
-    ) -> Result<(DrawerRecord, big_cabinet_core::drawer::Drawer), DrawersError> {
-        let read = self
-            .as_signer(
-                context,
-                self.issuer,
-                DocScope {
-                    read: [record.drawer_id.clone()].into(),
-                    ..Default::default()
-                },
-                |capability| async move {
-                    self.docs()
-                        .call(
-                            context.child(),
-                            big_cabinet_core::doc::ReadDatums {
-                                capability,
-                                doc_id: record.drawer_id.clone(),
-                                at: big_cabinet_core::doc::At::Current,
-                                datums: None,
-                                optimistic: false,
-                            },
-                        )
-                        .await
-                        .map_err(docs_error)
-                },
-            )
-            .await?;
-        // The descriptor is re-read with the entries: a layout edited on another node — into
-        // another known layout, or into one this build does not know — replaces the stored rows
-        // with what the datum now states.
-        let descriptor_value = match read.datums.get(&drawer_key()) {
-            Some(big_cabinet_core::doc::DatumRead::Accepted { value, .. }) => value.clone(),
-            Some(big_cabinet_core::doc::DatumRead::Absent { .. }) => {
-                return Err(DrawersError::RosterUnreadable(format!(
-                    "{} carries no drawer descriptor",
-                    record.drawer_id
-                )));
-            }
-            Some(other) => {
-                return Err(DrawersError::RosterUnreadable(format!(
-                    "{} descriptor: {other:?}",
-                    record.drawer_id
-                )));
-            }
-            None => {
-                return Err(DrawersError::RosterUnreadable(format!(
-                    "{} carries no drawer descriptor",
-                    record.drawer_id
-                )));
-            }
-        };
-        let descriptor: big_cabinet_core::drawer::Drawer = serde_json::from_value(descriptor_value)
-            .map_err(|error| {
-                DrawersError::RosterUnreadable(format!("{} descriptor: {error}", record.drawer_id))
-            })?;
-        let record = crate::drawer::create::record_of(&record.drawer_id, &descriptor);
+    /// Split a drawer doc's datums into the rows the projection stores: doc entries, child
+    /// entries (both only at access levels this build knows), and meta-doc references by kind.
+    fn read_roster(
+        drawer_id: &DrawerId,
+        datums: BTreeMap<DatumKey, big_cabinet_core::doc::DatumRead>,
+    ) -> Result<RosterRows, DrawersError> {
         let mut docs = BTreeMap::new();
         let mut children = BTreeMap::new();
-        for (key, datum) in read.datums {
+        let mut meta_docs = BTreeMap::new();
+        for (key, datum) in datums {
             let tag = key.tag().as_str();
-            if tag != DrawerDocEntry::ID && tag != DrawerChildEntry::ID {
-                continue;
-            }
             let value = match datum {
                 big_cabinet_core::doc::DatumRead::Accepted { value, .. } => value,
                 big_cabinet_core::doc::DatumRead::Absent { .. } => continue,
                 other => {
                     return Err(DrawersError::RosterUnreadable(format!(
-                        "{key} on {}: {other:?}",
-                        record.drawer_id
+                        "{key} on {drawer_id}: {other:?}"
                     )));
                 }
             };
+            if tag == DrawerMetaDoc::ID {
+                // A slot this build cannot split back into `(kind, name)` — the old
+                // `metaDoc/<kind>` shape, or a spelling a writer invented — is skipped rather
+                // than fatal: it names no slot this build publishes, so there is nothing to
+                // admit or to drop.
+                let Some((kind, name)) = meta_doc_slot(&key) else {
+                    continue;
+                };
+                let entry: DrawerMetaDoc = serde_json::from_value(value).map_err(|error| {
+                    DrawersError::RosterUnreadable(format!("{key} on {drawer_id}: {error}"))
+                })?;
+                meta_docs.insert(format!("{kind}/{name}"), entry);
+                continue;
+            }
+            if tag != DrawerDocEntry::ID && tag != DrawerChildEntry::ID {
+                continue;
+            }
             let Some(target) = entry_target(&key) else {
                 return Err(DrawersError::RosterUnreadable(format!(
-                    "{key} on {} does not name a doc",
-                    record.drawer_id
+                    "{key} on {drawer_id} does not name a doc"
                 )));
             };
             let unreadable = |error: serde_json::Error| {
-                DrawersError::RosterUnreadable(format!("{key} on {}: {error}", record.drawer_id))
+                DrawersError::RosterUnreadable(format!("{key} on {drawer_id}: {error}"))
             };
             if tag == DrawerDocEntry::ID {
                 let entry: big_cabinet_core::drawer::DrawerDocEntry =
@@ -778,27 +762,101 @@ impl Core {
                 }
             }
         }
-        match record.layout_kind() {
-            Some(LayoutKind::SingleGroup) => {
-                self.state
-                    .replace_roster(&record.drawer_id, &docs, &children)
-                    .await?;
+        Ok(RosterRows {
+            docs,
+            children,
+            meta_docs,
+        })
+    }
+
+    /// Every datum `doc` currently carries, read as this service at current heads.
+    pub(crate) async fn read_all_datums(
+        &self,
+        context: &RequestContext,
+        doc: &DocId,
+    ) -> Result<BTreeMap<DatumKey, big_cabinet_core::doc::DatumRead>, DrawersError> {
+        let read = self
+            .as_signer(
+                context,
+                self.issuer,
+                DocScope {
+                    read: [doc.clone()].into(),
+                    ..Default::default()
+                },
+                |capability| async move {
+                    self.docs()
+                        .call(
+                            context.child(),
+                            big_cabinet_core::doc::ReadDatums {
+                                capability,
+                                doc_id: doc.clone(),
+                                at: big_cabinet_core::doc::At::Current,
+                                datums: None,
+                                optimistic: false,
+                            },
+                        )
+                        .await
+                        .map_err(docs_error)
+                },
+            )
+            .await?;
+        Ok(read.datums)
+    }
+
+    async fn admit_meta_docs(
+        &self,
+        groups: DrawerGroups,
+        roots: [(MetaRoot, BTreeMap<String, DrawerMetaDoc>); 2],
+        statuses: &mut BTreeMap<MetaRoot, MetadataRootStatus>,
+    ) -> Result<MetaDocRows, DrawersError> {
+        let mut admitted = MetaDocRows::new();
+        for (root, slots) in roots {
+            if slots.is_empty() {
+                continue;
             }
-            Some(LayoutKind::SelfDoc) => {
-                // A self-doc drawer has no roster; anything the descriptor once stated is stale.
-                self.state
-                    .replace_roster(&record.drawer_id, &BTreeMap::new(), &BTreeMap::new())
-                    .await?;
-            }
-            None => {
-                // A foreign layout is carried, not operated: its roster projection is left
-                // exactly as it was, because this build does not know where its entries live.
+            let named = match root {
+                MetaRoot::Public => groups.meta_group,
+                MetaRoot::Sensitive => groups.sensitive_group,
+            };
+            let Some(group) = self.big_repo.get_group_by_id(named.0).await else {
+                statuses.insert(
+                    root,
+                    MetadataRootStatus::Pending {
+                        reason: format!("metadata group {named} is not locally available"),
+                    },
+                );
+                continue;
+            };
+            for (slot, entry) in slots {
+                if self.meta_doc_admitted(&group, &entry.doc_id).await? {
+                    admitted.entry(root).or_default().insert(slot, entry.doc_id);
+                } else {
+                    statuses.insert(
+                        root,
+                        MetadataRootStatus::Pending {
+                            reason: format!("unadmitted metadata slot {slot} on {root:?}"),
+                        },
+                    );
+                }
             }
         }
-        self.state
-            .put_drawer(&record.drawer_id, &record.descriptor)
-            .await?;
-        Ok((record, descriptor))
+        Ok(admitted)
+    }
+
+    /// Bring the projection of `drawer` back in line with its doc: the roster datums, read as
+    /// this service, replace the rows. A self-doc drawer has no roster and nothing to rescan.
+    /// This is how a change another node made to a shared roster becomes visible here; the
+    /// service's own writes update the rows directly.
+    pub(crate) async fn rescan(
+        &self,
+        context: &RequestContext,
+        record: &DrawerRecord,
+    ) -> Result<(DrawerRecord, big_cabinet_core::drawer::Drawer), DrawersError> {
+        let observation = self.observe_metadata(context, &record.drawer_id).await?;
+        Ok((
+            crate::drawer::create::record_of(&record.drawer_id, &observation.descriptor),
+            observation.descriptor,
+        ))
     }
 
     /// Look up `drawer_id` in the local projection, or if it is not yet projected but its doc is
@@ -912,11 +970,20 @@ impl Core {
         Ok(())
     }
 
-    /// A known single-group drawer's groups, or why it cannot take entries.
+    /// One Keyhive group a layout names, or why it is not in Keyhive.
+    pub(crate) async fn group(&self, key: GroupKey) -> Result<BigKeyhiveGroup, DrawersError> {
+        self.big_repo
+            .get_group_by_id(key.0)
+            .await
+            .ok_or_else(|| DrawersError::Keyhive(format!("group {key} is not in keyhive")))
+    }
+
+    /// A known single-group drawer's three groups — public metadata, docs, sensitive metadata,
+    /// in that order — or why it cannot take entries.
     pub(crate) async fn groups(
         &self,
         drawer: &DrawerId,
-    ) -> Result<(BigKeyhiveGroup, BigKeyhiveGroup), DrawersError> {
+    ) -> Result<(BigKeyhiveGroup, BigKeyhiveGroup, BigKeyhiveGroup), DrawersError> {
         let record = self
             .ensure_drawer(&RequestContext::root(), drawer)
             .await?
@@ -924,6 +991,7 @@ impl Core {
         let DrawerGroups {
             meta_group,
             docs_group,
+            sensitive_group,
         } = record.groups().ok_or_else(|| match record.layout_kind() {
             None => DrawersError::ForeignLayout(
                 record
@@ -935,13 +1003,11 @@ impl Core {
             ),
             Some(_) => DrawersError::SelfDoc(drawer.clone()),
         })?;
-        let group = |key: GroupKey| async move {
-            self.big_repo
-                .get_group_by_id(key.0)
-                .await
-                .ok_or_else(|| DrawersError::Keyhive(format!("group {key} is not in keyhive")))
-        };
-        Ok((group(meta_group).await?, group(docs_group).await?))
+        Ok((
+            self.group(meta_group).await?,
+            self.group(docs_group).await?,
+            self.group(sensitive_group).await?,
+        ))
     }
 }
 
@@ -962,6 +1028,9 @@ impl DrawerService {
                 ledger::Op::Create { .. } => self.core.resume_create(&context, &row).await?,
                 ledger::Op::CreateSelfDoc { .. } => {
                     self.core.resume_create_self_doc(&context, &row).await?
+                }
+                ledger::Op::CreateMetaDoc { .. } => {
+                    self.core.resume_create_meta_doc(&context, &row).await?
                 }
                 ledger::Op::Invite { .. } | ledger::Op::Revoke { .. } => {
                     self.core.resume_membership(&context, &row).await?

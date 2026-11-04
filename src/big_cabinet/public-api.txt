@@ -22,7 +22,7 @@ pub enum big_cabinet::authority::DomainAuthority< S > { Identity (Uuid7), Scoped
 pub enum big_cabinet::doc::access::AccessError { # [error ("access policy is unavailable: {0}")] Unavailable (String), # [error ("access policy refused: {0}")] Refused (String) }
 pub enum big_cabinet::doc::access::AccessRequest< 'a > { Read (& 'a DocId), Write (& 'a DocId), Create { placement : & 'a str } }
 pub enum big_cabinet::grants::GrantError { # [error ("grant storage failed: {0}")] Storage (# [from] SqlError), # [error ("grant capability failed: {0}")] Authority (# [from] ClientError < AuthorityServiceError >) }
-pub enum big_cabinet::index::datum_ref::DatumRefQuery { # [doc = " Every edge out of one datum route."] Origin (DatumRoute), # [doc = " Every edge out of any datum in one document."] OriginDoc (big_cabinet_core :: DocId), # [doc = " Every edge pointing at one datum route."] Target (DatumRoute), # [doc = " Every edge pointing at any datum in one document."] TargetDoc (big_cabinet_core :: DocId) }
+pub enum big_cabinet::index::datum_ref::DatumRefQuery { # [doc = " Every edge out of one datum route."] Origin (DatumRoute), # [doc = " Every edge out of any datum in one document."] OriginDoc (DocId), # [doc = " Every edge pointing at one datum route."] Target (DatumRoute), # [doc = " Every edge pointing at any datum in one document."] TargetDoc (DocId) }
 pub enum big_cabinet::index::datum_set::DatumMembership { Present { doc_heads : Vec < ChangeHash > , datum_heads : Vec < ChangeHash > , # [doc = " Lamport clock of `datum_heads`: the greatest `max_op` among the"] # [doc = " introducing changes. See `DatumVersion` in the DocsRepo protocol."] clock : u64 , }, Removed { doc_heads : Option < Vec < ChangeHash > > , datum_heads : Vec < ChangeHash > , clock : u64 , } }
 pub enum big_cabinet::index::datum_set::DatumSetQuery { Doc (DocId), Tag (DatumTag), Route (DatumRoute), # [doc = " Every live route with exactly this datum key, across documents."] Key (DatumKey) }
 pub enum big_cabinet::schema::SchemaRepoError { # [error ("known datum schema tag is empty")] EmptyDatumTag, # [error ("known datum schema tag `{0}` is configured more than once")] DuplicateDatumTag (String), # [error ("sidecar bundle is invalid: {source}")] SidecarInvalid { # [source] source : UniverseError , }, # [error ("schema pair for datum `{tag}` is invalid: {source}")] Admission { tag : String , # [source] source : Box < LexiconAdmissionError > , }, # [error ("datum `{tag}` is not known to this SchemaRepo")] UnknownDatum { tag : String } }
@@ -61,12 +61,16 @@ pub impl big_cabinet::index::Indexes::fn live_tasks (& self) -> usize
 pub impl big_cabinet::index::StopToken::async fn stop (self)
 pub impl big_cabinet::index::datum_ref::DatumRefStore::async fn new (sql : Database) -> Res < Self >
 pub impl big_cabinet::index::datum_ref::DatumRefStore::async fn query (& self , selector : DatumRefQuery) -> Res < Vec < DatumRefEdge > >
-pub impl big_cabinet::index::datum_ref::DatumRefStore::async fn run (& self , repo : SharedBigRepo , schemas : Arc < SchemaRepo > , datum_set : DatumSetStore ,) -> Res < () >
-pub impl big_cabinet::index::datum_set::DatumSetStore::async fn new (sql : Database) -> Res < Self >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn drawer_ancestors (& self , drawer_id : & DocId) -> Res < BTreeSet < DocId > >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn is_self_doc (& self , drawer_id : & DocId) -> Res < bool >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn matching_docs (& self , predicate : & Predicate , docs : & BTreeSet < DocId > ,) -> Res < BTreeSet < DocId > >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn new (sql : Database , schemas : Arc < SchemaRepo >) -> Res < Self >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn open_all (& self , after : u64 ,) -> Result < KeyedFrontierRevisionReader < '_ , DatumRoute , DatumMembership > , KeyedFrontierError >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn open_tags (& self , tags : impl IntoIterator < Item = (DatumTag , u64) > ,) -> Result < KeyedFrontierRevisionReader < '_ , DatumRoute , DatumMembership > , KeyedFrontierError >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn query (& self , selector : DatumSetQuery) -> Res < Vec < DatumRecord > >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn query_docs (& self , docs : & BTreeSet < DocId > , tag : Option < & DatumTag > , key : Option < & DatumKey > ,) -> Res < Vec < DatumRecord > >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn query_predicate (& self , predicate : & Predicate) -> Res < Vec < DatumRecord > >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn reachable_docs (& self , drawer_id : & DocId , transitive : bool , at_least : DrawerAccess ,) -> Res < BTreeSet < DocId > >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn run (& self , repo : SharedBigRepo , concurrency : NonZeroUsize) -> Res < () >
 pub impl big_cabinet::index::datum_set::DatumSetStore::async fn source_revision (& self) -> Res < u64 >
 pub impl big_cabinet::schema::SchemaHandle::fn compiled (& self) -> & CompiledSchema
@@ -79,7 +83,7 @@ pub impl big_cabinet::schema::SchemaRepo::fn open < 'a > (groups : impl IntoIter
 pub impl big_cabinet::schema::SchemaRepo::fn reference_tags (& self) -> Vec < String >
 pub impl big_cabinet::schema::SchemaRepo::fn require_for_write (& self , datum_tag : & str) -> Result < SchemaHandle , SchemaRepoError >
 pub impl big_cabinet::schema::SchemaRepo::fn resolve_for_read (& self , datum_tag : & str) -> Option < SchemaHandle >
-pub impl big_cabinet::schema::SchemaRepo::fn with_group (& self , group : SchemaRegistrationGroup < '_ >) -> Result < Self , SchemaRepoError >
+pub impl big_cabinet::schema::SchemaRepo::fn with_groups < 'a > (& self , groups : impl IntoIterator < Item = SchemaRegistrationGroup < 'a > > ,) -> Result < Self , SchemaRepoError >
 pub mod big_cabinet::authority
 pub mod big_cabinet::capability
 pub mod big_cabinet::datum_store
@@ -170,6 +174,8 @@ pub use big_cabinet::drawer::big_cabinet_core :: drawer :: LayoutKind
 pub use big_cabinet::drawer::self :: access :: DrawerAccess
 pub use big_cabinet::drawer::self :: access :: DrawerProvider
 pub use big_cabinet::drawer::self :: access :: DrawerWorker
+pub use big_cabinet::drawer::self :: discovery :: DrawerMetadataObservation
+pub use big_cabinet::drawer::self :: discovery :: MetadataRootStatus
 pub use big_cabinet::index :: datum_ref :: DatumRefStore
 pub use big_cabinet::index :: datum_set :: DatumSetStore
 pub use big_cabinet::index::datum_ref :: DatumRefEdge

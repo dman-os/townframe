@@ -1,0 +1,791 @@
+//! On-demand serving of virtual ciphertext entries.
+//!
+//! [`CipherBlobProvider`] is the registry behind iroh-blobs' virtual entries:
+//! a ciphertext `C` was never stored anywhere, so when the store is asked for
+//! `C`'s bytes, `reader_for(C)` looks up the registered pair `(key, plaintext
+//! reader)` and returns a random-access source that encrypts only the records
+//! overlapping each requested byte window. The plaintext is not held in
+//! memory — the pair reads it back through a synchronous reader over the
+//! store's own storage for `P` — so serving a multi-gigabyte blob costs one
+//! RFC 8188 record of memory, and serving is exactly as durable as `P` is.
+//!
+//! Two lifecycle facts to keep in mind:
+//!
+//! - Registering a pair is what it means to serve `C` at all, so
+//!   [`CipherBlobProvider::register_pair`] also roots both entries under the
+//!   `ct:`/`pt:` named tags (see [`super::store::set_pair_tags`]). Installing
+//!   a virtual entry without registering leaves an unnamed entry the store
+//!   serves as not-found — [`CipherBlobProvider::install`] does both acts.
+//! - The pair holds no bytes, only a reader into the store; if `P` is later
+//!   collected, reads fail rather than serve stale bytes.
+
+use crate::interlude::*;
+use crate::pair_roots::PairRoots;
+use crate::pair_roots::VirtualPair;
+
+use bao_tree::io::mixed::ReadBytesAt as _;
+use bytes::Bytes;
+use iroh_blobs::Hash;
+use iroh_blobs::api::Store;
+use iroh_blobs::store::virtual_blob::SyncReader;
+use std::io;
+use std::sync::Mutex;
+
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
+
+use super::Res;
+use super::codec::Cipher;
+use super::codec::HEADER_LEN;
+use super::codec::RECORD_OVERHEAD;
+use super::codec::ciphertext_len;
+use super::codec::header;
+use super::codec::encoded_record_count;
+use super::codec::payload_size;
+use super::keys::MasterKey;
+use super::params::EncodingParams;
+
+use super::store::PROVIDER_NAME;
+use super::store::PreparedCiphertext;
+use super::store::prepare_virtual_encrypted;
+use super::store::set_pair_tags;
+/// Serves virtual ciphertext entries by encrypting stored plaintext on demand.
+///
+/// `reader_for(C)` looks up a pair `(key, plaintext reader)` registered via
+/// [`CipherBlobProvider::register_pair`] and returns a random-access source
+/// that encrypts only the records overlapping each requested byte window.
+///
+/// The plaintext is not held in memory: the pair reads it back through a
+/// synchronous reader over the store's own storage for `P`, so serving `C`
+/// costs one record of memory no matter how large `P` is. Serving is therefore
+/// only as durable as `P` is - see [`register_pair`] for the lifecycle
+/// requirement.
+///
+/// [`register_pair`]: CipherBlobProvider::register_pair
+pub struct CipherBlobProvider {
+    pairs: RwLock<HashMap<Hash, Arc<PlainPair>>>,
+}
+
+/// A registered `C -> P` binding with everything a window read needs derived
+/// once, at registration: the record cipher, the wire header, the plaintext
+/// reader, and the framing facts. The crypto state is a pure function of
+/// `(key, plaintext digest, padding)`, and deriving it per window would make
+/// serving cost a whole-plaintext hash plus HKDF per requested window -
+/// thousands of windows for a streamed video.
+struct PlainPair {
+    cipher: Cipher,
+    header: [u8; HEADER_LEN],
+    /// The plaintext side of the binding, kept for diagnostics: the map is
+    /// keyed by `C`, so a failed read would otherwise not say which plaintext
+    /// went missing.
+    p_hash: Hash,
+    /// Synchronous random-access reads over the stored plaintext. Never
+    /// awaited: serving runs inside the store's own export path, which is
+    /// already calling into us.
+    reader: SyncReader,
+    /// Plaintext length as the reader reports it. Every framing fact below is
+    /// derived from it, so they cannot disagree with what we can read.
+    p_len: u64,
+    /// The framing this pair serves. `rs` is not a constant here: a
+    /// representation built with a different record size is a different wire
+    /// format, and serving it at the wrong stride would produce bytes that
+    /// cannot verify against the outboard the entry was installed with.
+    encoding: EncodingParams,
+    payload_max: u64,
+    n_records: u64,
+    target_final_payload: u64,
+    total_c_len: u64,
+    /// Most recently encrypted record, as `(index, ciphertext)`. See
+    /// [`PlainPair::record`] for why one entry is the whole win.
+    cache: Mutex<Option<(u64, Bytes)>>,
+    /// Test-only: how many records this pair has encrypted. Serving is a pure
+    /// function of the stored bytes, so this is the whole cost of serving and
+    /// a test can pin it (see `record_cache_avoids_re_encrypting`).
+    #[cfg(test)]
+    encryptions: AtomicU64,
+}
+
+impl PlainPair {
+    fn new(key: &MasterKey, p_hash: Hash, reader: SyncReader, encoding: EncodingParams) -> Self {
+        let salt = key.salt_for(&p_hash, &encoding);
+        let payload_max = payload_size(encoding.record_size);
+        let p_len = reader.len();
+        let total_c_len = ciphertext_len(p_len, encoding);
+        let n_records = encoded_record_count(total_c_len, encoding.record_size);
+        let base = HEADER_LEN as u64 + (n_records - 1) * encoding.record_size;
+        let target_final_payload = total_c_len - base - RECORD_OVERHEAD as u64;
+        Self {
+            cipher: key.cipher_for(&p_hash, &encoding),
+            header: header(&salt, encoding.record_size),
+            p_hash,
+            reader,
+            p_len,
+            encoding,
+            payload_max,
+            n_records,
+            target_final_payload,
+            total_c_len: ciphertext_len(p_len, encoding),
+            cache: Mutex::new(None),
+            #[cfg(test)]
+            encryptions: AtomicU64::new(0),
+        }
+    }
+
+    /// The ciphertext of record `idx`, encrypted on first use and kept for
+    /// the reads that follow it.
+    ///
+    /// Records are `rs` octets of ciphertext (64 KiB); the store's bao leaves
+    /// are 16 KiB, so four leaf reads out of five land in the record just
+    /// encrypted, and one in four straddles into the next. Without this cache
+    /// every leaf read re-encrypts each record it overlaps *and* re-reads its
+    /// plaintext: serving is then 4x the encryption work and 4x the plaintext
+    /// I/O for the same window. One entry is enough because reads arrive in
+    /// offset order - the record that just went cold is the one the next read
+    /// wants.
+    ///
+    /// Encryption runs outside the lock, so concurrent readers cannot
+    /// serialize on it. Two readers missing the same record both compute it;
+    /// RFC 8188 encryption is deterministic, so they agree, and the loser's
+    /// work is wasted but never wrong.
+    fn record(&self, idx: u64) -> io::Result<Bytes> {
+        if let Some((cached, ct)) = self.cache.lock().expect("cache lock poisoned").as_ref()
+            && *cached == idx
+        {
+            return Ok(ct.clone());
+        }
+        #[cfg(test)]
+        self.encryptions.fetch_add(1, Ordering::Relaxed);
+        let ct = Bytes::from(self.encrypt_record(idx)?);
+        *self.cache.lock().expect("cache lock poisoned") = Some((idx, ct.clone()));
+        Ok(ct)
+    }
+
+    /// Encrypt a single record straight from the stored plaintext.
+    fn encrypt_record(&self, idx: u64) -> io::Result<Vec<u8>> {
+        let last = idx == self.n_records - 1;
+        let capacity = if last {
+            self.target_final_payload
+        } else {
+            self.payload_max
+        };
+        let pt_start = idx * self.payload_max;
+        let pt_end = (pt_start + self.payload_max).min(self.p_len);
+        let want = pt_end.saturating_sub(pt_start) as usize;
+        let mut plain = if want == 0 {
+            Vec::new()
+        } else {
+            let plain = self.reader.read_bytes_at(pt_start, want)?;
+            if plain.len() != want {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("plaintext {} unreadable at {pt_start}: {} of {want} octets", self.p_hash, plain.len()),
+                ));
+            }
+            plain.to_vec()
+        };
+        let pad_zeros = capacity as usize - plain.len();
+
+        self.cipher
+            .encrypt_record_in_place(idx, last, &mut plain, pad_zeros);
+        Ok(plain)
+    }
+}
+
+impl CipherBlobProvider {
+    pub fn remove(&self, ciphertext: &Hash) {
+        self.pairs.write().unwrap().remove(ciphertext);
+    }
+
+    pub fn new() -> Self {
+        Self {
+            pairs: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register the binding for ciphertext `c`: key + the plaintext it was
+    /// derived from + the padding policy the ciphertext was framed with.
+    ///
+    /// `p_hash` must be the digest the store holds those plaintext bytes
+    /// under, because it is what the reader is resolved from. Passing it in
+    /// rather than hashing the plaintext here is deliberate: in production
+    /// `p_hash` is the entry's own identity, so registering a 2 GB plaintext
+    /// costs no read at all.
+    ///
+    /// Fails if `P` has no readable stored data - absent, incomplete, or a
+    /// virtual entry that keeps an outboard but no bytes.
+    ///
+    /// Registering is what it means to serve `c` at all, so this also roots
+    /// both entries under the `ct:`/`pt:` named tags (see [`set_pair_tags`]):
+    /// a pair whose plaintext has been collected is not a pair. Installing and
+    /// registering are therefore one act - see [`CipherBlobProvider::install`].
+    ///
+    /// Lifecycle: the reader reads the store's storage for `P`, so the pair is
+    /// only meaningful while that entry is alive. The named tags set here root
+    /// it durably, but a caller who only holds a `TempTag` must keep holding it
+    /// until this returns. If `P` is collected anyway, reads fail rather than
+    /// serving stale bytes; on Unix a duplicated file handle keeps the inode
+    /// readable, so there the pair keeps working while holding the only
+    /// reference to the bytes.
+    ///
+    /// A provider serves one store's storage: register pairs for the store the
+    /// provider was created against.
+    pub async fn register_pair(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        c_hash: Hash,
+        key: &MasterKey,
+        p_hash: Hash,
+        encoding: EncodingParams,
+    ) -> Res<()> {
+        self.register_local_pair(
+            store,
+            roots,
+            VirtualPair {
+                cipher: c_hash,
+                plaintext: p_hash,
+                key: key.clone(),
+                encoding,
+                source: serde_json::json!({"kind": "local"}).to_string(),
+                claimed_by: None,
+            },
+        )
+        .await
+    }
+
+    /// Register a pair with the document whose cipherBlob facet is expected to
+    /// name it. Recording that provenance in the same transaction as the root
+    /// row closes the crash window between rooting and the facet write.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct pipeline input (context, capability, doc identity, datum keys, cursors); a params struct would only hide the flow"
+    )]
+    pub async fn register_pair_with_provenance(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        c_hash: Hash,
+        key: &MasterKey,
+        p_hash: Hash,
+        encoding: EncodingParams,
+        doc_id: &str,
+        branch_path: &str,
+    ) -> Res<()> {
+        self.register_local_pair(
+            store,
+            roots,
+            VirtualPair {
+                cipher: c_hash,
+                plaintext: p_hash,
+                key: key.clone(),
+                encoding,
+                source: serde_json::json!({
+                    "kind": "local-document",
+                    "document": doc_id,
+                    "branch": branch_path,
+                })
+                .to_string(),
+                claimed_by: Some((doc_id.to_owned(), branch_path.to_owned())),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn register_local_pair(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        pair: VirtualPair,
+    ) -> Res<()> {
+        let prepared = if store.blobs().has(pair.cipher).await? {
+            None
+        } else {
+            Some(prepare_virtual_encrypted(store, &pair.key, pair.plaintext, pair.encoding).await?)
+        };
+        self.register_prepared_pair(store, roots, pair, prepared)
+            .await
+    }
+
+    async fn register_prepared_pair(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        pair: VirtualPair,
+        prepared: Option<PreparedCiphertext>,
+    ) -> Res<()> {
+        if let Some(prepared) = &prepared {
+            eyre::ensure!(
+                prepared.hash == pair.cipher,
+                "reconstructed ciphertext differs from accepted digest"
+            );
+        }
+        let Some(reader) = store.sync_reader(pair.plaintext).await? else {
+            eyre::bail!(
+                "cannot serve {}: plaintext {} has no readable stored data",
+                pair.cipher,
+                pair.plaintext
+            );
+        };
+        roots.record_virtual(&pair).await?;
+        if let Some(prepared) = prepared {
+            prepared.install(store).await?;
+        }
+        self.register_pair_recorded(store, &pair, reader).await
+    }
+
+    pub(crate) async fn restore(&self, store: &Store, roots: &PairRoots) -> Res<()> {
+        for (pair, preclaim, owned, managed_pin) in roots.virtual_pairs().await? {
+            let external_pin = !managed_pin
+                && store
+                    .tags()
+                    .get(format!("pin:{}", pair.cipher))
+                    .await?
+                    .is_some();
+            if !preclaim && !owned && !external_pin {
+                super::store::drop_pair_tags(store, pair.cipher).await?;
+                roots.forget_virtual(pair.cipher).await?;
+                continue;
+            }
+            let Some(reader) = store.sync_reader(pair.plaintext).await? else {
+                eyre::bail!(
+                    "cannot serve {}: plaintext {} has no readable stored data",
+                    pair.cipher,
+                    pair.plaintext
+                );
+            };
+            if !store.blobs().has(pair.cipher).await? {
+                let prepared =
+                    prepare_virtual_encrypted(store, &pair.key, pair.plaintext, pair.encoding)
+                        .await?;
+                eyre::ensure!(
+                    prepared.hash == pair.cipher,
+                    "reconstructed ciphertext differs from accepted digest"
+                );
+                prepared.install(store).await?;
+            }
+            self.register_pair_recorded(store, &pair, reader).await?;
+        }
+        Ok(())
+    }
+
+    async fn register_pair_recorded(
+        &self,
+        store: &Store,
+        pair: &VirtualPair,
+        reader: SyncReader,
+    ) -> Res<()> {
+        set_pair_tags(store, pair.cipher, pair.plaintext).await?;
+        let binding = Arc::new(PlainPair::new(
+            &pair.key,
+            pair.plaintext,
+            reader,
+            pair.encoding,
+        ));
+        self.pairs
+            .write()
+            .expect("pairs lock poisoned")
+            .insert(pair.cipher, binding);
+        Ok(())
+    }
+
+    /// Make `c` servable in one step: run the encrypt pass over the stored
+    /// plaintext ([`prepare_virtual_encrypted`]), persist its provenance, and
+    /// install the prepared outboard before registering and rooting `C` and `P`.
+    ///
+    /// Returns the computed representation digest, a pure function of
+    /// `(key, p_hash, padding)`.
+    ///
+    /// This is the only way a caller should install an encrypted
+    /// representation: installing without registering leaves a virtual entry
+    /// that names [`PROVIDER_NAME`] while the provider holds no data for it,
+    /// so the store serves it as not found.
+    pub async fn install(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        key: &MasterKey,
+        p_hash: Hash,
+        encoding: EncodingParams,
+    ) -> Res<Hash> {
+        let prepared = prepare_virtual_encrypted(store, key, p_hash, encoding).await?;
+        let c_hash = prepared.hash;
+        self.register_prepared_pair(
+            store,
+            roots,
+            VirtualPair {
+                cipher: c_hash,
+                plaintext: p_hash,
+                key: key.clone(),
+                encoding,
+                source: serde_json::json!({"kind": "local"}).to_string(),
+                claimed_by: None,
+            },
+            Some(prepared),
+        )
+        .await?;
+        Ok(c_hash)
+    }
+
+    /// Install and root a representation whose expected cipherBlob owner is known.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct pipeline input (context, capability, doc identity, datum keys, cursors); a params struct would only hide the flow"
+    )]
+    pub async fn install_with_provenance(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        key: &MasterKey,
+        p_hash: Hash,
+        encoding: EncodingParams,
+        doc_id: &str,
+        branch_path: &str,
+    ) -> Res<Hash> {
+        let prepared = prepare_virtual_encrypted(store, key, p_hash, encoding).await?;
+        let c_hash = prepared.hash;
+        self.register_prepared_pair(
+            store,
+            roots,
+            VirtualPair {
+                cipher: c_hash,
+                plaintext: p_hash,
+                key: key.clone(),
+                encoding,
+                source: serde_json::json!({
+                    "kind": "local-document",
+                    "document": doc_id,
+                    "branch": branch_path,
+                })
+                .to_string(),
+                claimed_by: Some((doc_id.to_owned(), branch_path.to_owned())),
+            },
+            Some(prepared),
+        )
+        .await?;
+        Ok(c_hash)
+    }
+
+    /// Register this provider under [`PROVIDER_NAME`] on a live registry.
+    pub fn register(
+        self: &Arc<Self>,
+        virtuals: &iroh_blobs::store::virtual_blob::VirtualProviders,
+    ) -> std::io::Result<()> {
+        let this = std::sync::Arc::clone(self);
+        virtuals.register(PROVIDER_NAME, this)
+    }
+}
+
+impl Default for CipherBlobProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl iroh_blobs::store::virtual_blob::Provider for CipherBlobProvider {
+    fn reader_for(&self, hash: &Hash) -> Option<iroh_blobs::store::virtual_blob::DynVirtualSource> {
+        let pairs = self.pairs.read().expect("pairs lock poisoned");
+        let pair = pairs.get(hash)?;
+        Some(Arc::new(CipherSource {
+            pair: std::sync::Arc::clone(pair),
+        }))
+    }
+}
+
+/// Random-access ciphertext view over one registered pair. Purely
+/// synchronous: RFC 8188 records are independently computable given
+/// key + salt + record index, so only overlapping records are encrypted.
+/// The pair's derived state is shared, not copied: building a reader is one
+/// refcount bump. The plaintext for those records is read from the pair's
+/// reader as it is needed, so no plaintext is held here either.
+struct CipherSource {
+    pair: Arc<PlainPair>,
+}
+
+impl CipherSource {
+    fn read_window(&self, offset: u64, size: usize) -> io::Result<Bytes> {
+        let pair = &self.pair;
+        let end = offset + size as u64;
+        let mut pos = offset;
+        let mut out = Vec::with_capacity(size);
+
+        // RFC 8188 header precedes the record stream.
+        if pos < HEADER_LEN as u64 {
+            let take = ((HEADER_LEN as u64 - pos) as usize).min(size);
+            out.extend_from_slice(&pair.header[pos as usize..pos as usize + take]);
+            pos += take as u64;
+        }
+        if pos >= end {
+            return Ok(out.into());
+        }
+
+        // Under `Padding::Padme` observer-visible lengths are rounded; under
+        // Padmé keeps the final frame representable for RFC 8188 framing.
+        let wire = pair.encoding.record_size;
+        let n_records = pair.n_records;
+        let end = end.min(pair.total_c_len);
+
+        if pos < end {
+            // At this point `pos` is at or past the header: if the window began
+            // inside it, the header branch above either consumed the rest of
+            // the window or moved `pos` to exactly `HEADER_LEN`.
+            let rel = pos - HEADER_LEN as u64;
+            let idx = rel / wire;
+            let within = (rel % wire) as usize;
+            let want = (end - pos) as usize;
+            // Fast path: the window is an interior slice of a single record,
+            // and the header contributed nothing to it. This is the common case
+            // for bao leaf reads, and it is served as a slice of the cached
+            // record: no encryption, no copy, no allocation. A window that
+            // began inside the header already holds those octets in `out`, so
+            // it must go the general way.
+            if out.is_empty() && idx < n_records {
+                let rec_ct = pair.record(idx)?;
+                if within + want <= rec_ct.len() {
+                    return Ok(rec_ct.slice(within..within + want));
+                }
+            }
+            // General path: the window crosses at least one record boundary,
+            // so its pieces are gathered into one buffer.
+            while pos < end {
+                let rel = pos - HEADER_LEN as u64;
+                let idx = rel / wire;
+                let within = (rel % wire) as usize;
+                let rec_ct = pair.record(idx)?;
+                let avail = rec_ct.len().saturating_sub(within);
+                // `pos < end <= total_c_len` and the record covers `pos`, so
+                // there is always at least one octet to take.
+                let take = avail.min((end - pos) as usize);
+                debug_assert!(take > 0, "record {idx} does not cover {pos}");
+                out.extend_from_slice(&rec_ct[within..within + take]);
+                pos += take as u64;
+            }
+        }
+        Ok(out.into())
+    }
+}
+
+impl bao_tree::io::mixed::ReadBytesAt for CipherSource {
+    fn read_bytes_at(&self, offset: u64, size: usize) -> io::Result<Bytes> {
+        self.read_window(offset, size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use super::super::RECORD_SIZE;
+    use super::super::encrypt_with_rs;
+
+    use super::super::Padding;
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provenance_failure_never_registers_or_roots_a_virtual_pair() -> Res<()> {
+        for rejected_table in ["big_blobs_virtual_pairs", "blob_pair_root"] {
+            let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+            let sql = runtime.ephemeral(&[])?;
+            let roots = PairRoots::boot(sql.clone()).await?;
+            sql.execute_batch(&format!(
+                "CREATE TRIGGER reject_virtual_provenance BEFORE INSERT ON {rejected_table}
+                 BEGIN
+                     SELECT RAISE(ABORT, 'rejected local provenance');
+                 END;"
+            ))
+            .await?;
+            let (memory, virtuals) =
+                iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+            let store = Store::from(memory);
+            let provider = Arc::new(CipherBlobProvider::new());
+            provider.register(&virtuals)?;
+            let tag = store
+                .blobs()
+                .add_bytes(b"local durable provenance".as_slice())
+                .temp_tag()
+                .await?;
+            let key = MasterKey::random();
+            let expected =
+                encrypt_with_rs(&key, b"local durable provenance", 4096, Padding::Padme);
+            let cipher = Hash::new(&expected);
+            let encoding = EncodingParams::new(4096, Padding::Padme)?;
+            for path in ["accepted", "local", "local-document"] {
+                let result = match path {
+                    "accepted" => {
+                        provider
+                            .register_pair_with_provenance(
+                                &store,
+                                &roots,
+                                cipher,
+                                &key,
+                                tag.hash(),
+                                encoding,
+                                "accepted-document",
+                                "main",
+                            )
+                            .await
+                    }
+                    "local" => provider
+                        .install(&store, &roots, &key, tag.hash(), encoding)
+                        .await
+                        .map(|_| ()),
+                    "local-document" => provider
+                        .install_with_provenance(
+                            &store,
+                            &roots,
+                            &key,
+                            tag.hash(),
+                            encoding,
+                            "local-document",
+                            "main",
+                        )
+                        .await
+                        .map(|_| ()),
+                    _ => unreachable!(),
+                };
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("rejected local provenance"));
+                assert!(
+                    !store.blobs().has(cipher).await?,
+                    "{path} installed before provenance"
+                );
+                assert!(!provider.pairs.read().unwrap().contains_key(&cipher));
+                assert!(!super::super::has_pair_tags(&store, cipher).await?);
+                assert!(roots.unresolved().await?.is_empty());
+                assert_eq!(
+                    sql.query("SELECT count(*) FROM big_blobs_virtual_pairs", ())
+                        .await?
+                        .one::<i64>()?,
+                    0
+                );
+            }
+            store.shutdown().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepted_digest_mismatch_never_installs_or_records_a_virtual_pair() -> Res<()> {
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[])?;
+        let roots = PairRoots::boot(sql).await?;
+        let (memory, virtuals) =
+            iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+        let store = Store::from(memory);
+        let provider = Arc::new(CipherBlobProvider::new());
+        provider.register(&virtuals)?;
+        let plain = b"accepted digest mismatch";
+        let tag = store.blobs().add_bytes(plain.as_slice()).temp_tag().await?;
+        let key = MasterKey::random();
+        let encoding = EncodingParams::new(4096, Padding::Padme)?;
+        let actual = Hash::new(encrypt_with_rs(
+            &key,
+            plain,
+            encoding.record_size,
+            encoding.padding,
+        ));
+        let accepted = Hash::new(b"different accepted ciphertext");
+        let error = provider
+            .register_pair_with_provenance(
+                &store,
+                &roots,
+                accepted,
+                &key,
+                tag.hash(),
+                encoding,
+                "accepted-document",
+                "main",
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("differs from accepted digest"));
+        assert!(!store.blobs().has(actual).await?);
+        assert!(!store.blobs().has(accepted).await?);
+        assert!(provider.pairs.read().unwrap().is_empty());
+        assert!(roots.virtual_pairs().await?.is_empty());
+        assert!(roots.unresolved().await?.is_empty());
+        store.shutdown().await?;
+        Ok(())
+    }
+
+    /// The store's bao leaf size: the granularity its export path reads the
+    /// ciphertext at, and therefore the reads a server actually issues.
+    /// `iroh_blobs::store::IROH_BLOCK_SIZE` is chunk-log 4, so 2^14 octets.
+    const BAO_LEAF_SIZE: usize = 16 * 1024;
+
+    /// Serving must not re-encrypt what it just encrypted: bao leaf reads are
+    /// 16 KiB against 64 KiB records, so consecutive leaf reads land in the
+    /// record just encrypted. Without the cache every leaf read re-encrypts
+    /// each record it overlaps and re-reads its plaintext - 4x the encryption
+    /// work and 4x the plaintext I/O for the same window. Pinned by counting
+    /// the encryptions the pair actually performs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn record_cache_avoids_re_encrypting() -> Res<()> {
+        let (store, _virtuals) =
+            iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+        let store = Store::from(store);
+        let key = MasterKey::random();
+        // Spans three records, so record 1 is a full, non-final frame under
+        // both padding policies.
+        let plain = vec![0x5Au8; 2 * (RECORD_SIZE as usize) + 17];
+        let p_hash = Hash::new(&plain);
+        let _p_tag = store.blobs().add_bytes(plain.clone()).temp_tag().await?;
+        let reader = store
+            .sync_reader(p_hash)
+            .await?
+            .expect("the stored plaintext has a reader");
+        let encryptions = |p: &PlainPair| p.encryptions.load(Ordering::Relaxed);
+
+        for padding in [Padding::Padme] {
+            let expected = encrypt_with_rs(&key, &plain, RECORD_SIZE, padding);
+            let rec_len = RECORD_SIZE as usize;
+            let start = HEADER_LEN + rec_len;
+
+            // One entry is enough because reads arrive in offset order, so the
+            // cache must never change the bytes it serves.
+            let encoding = EncodingParams {
+                padding,
+                ..EncodingParams::DEFAULT
+            };
+            let pair = PlainPair::new(&key, p_hash, reader.clone(), encoding);
+            assert_eq!(pair.record(1)?, &expected[start..start + rec_len]);
+            assert_eq!(encryptions(&pair), 1);
+            assert_eq!(
+                pair.record(1)?,
+                &expected[start..start + rec_len],
+                "a repeat read must be the cached bytes"
+            );
+            assert_eq!(encryptions(&pair), 1, "a repeat read must not re-encrypt");
+            // Reading another record evicts; the evicted record is recomputed
+            // when it is asked for again.
+            let _evictor = pair.record(0)?;
+            assert_eq!(encryptions(&pair), 2);
+            assert_eq!(pair.record(1)?, &expected[start..start + rec_len]);
+            assert_eq!(encryptions(&pair), 3);
+
+            // Sweep the whole ciphertext in store-sized bao leaves: every
+            // record is encrypted exactly once, however many leaves it spans.
+            let pair = Arc::new(PlainPair::new(&key, p_hash, reader.clone(), encoding));
+            let src = CipherSource {
+                pair: Arc::clone(&pair),
+            };
+            let total = expected.len() as u64;
+            let mut off = 0;
+            while off < total {
+                let got = src.read_window(off, BAO_LEAF_SIZE)?;
+                assert_eq!(
+                    got.as_ref(),
+                    &expected[off as usize..off as usize + got.len()],
+                    "leaf read at {off} under {padding:?}"
+                );
+                assert!(!got.is_empty());
+                off += got.len() as u64;
+            }
+            assert_eq!(
+                encryptions(&pair),
+                pair.n_records,
+                "serving must encrypt each record once, not once per leaf read"
+            );
+        }
+        Ok(())
+    }
+}

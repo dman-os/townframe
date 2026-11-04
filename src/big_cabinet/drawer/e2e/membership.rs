@@ -1,6 +1,7 @@
 //! What a drawer holds: entries, children, self-doc drawers, listings, and foreign roster values.
 
 use super::*;
+use big_cabinet_core::drawer::MetaRoot;
 
 #[tokio::test]
 async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
@@ -35,7 +36,7 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
     // The roster doc agrees with the projection, and the docs group holds the grant.
     let roster = node.roster_datums(&drawer).await;
     assert_eq!(roster[&doc_entry_key(&doc)], json!({"access": "Admin"}));
-    let (_, docs_group) = groups_of(&view);
+    let (_, docs_group, _) = groups_of(&view);
     assert_eq!(
         node.keyhive_level(docs_group, doc.to_bytes32().unwrap())
             .await,
@@ -257,8 +258,10 @@ async fn a_child_drawer_confers_access_through_its_parent() {
         DocsError::Denied
     );
 
-    let (parent_meta, parent_docs) = groups_of(&node.view(&alice, &parent).await.unwrap());
-    let (child_meta, child_docs) = groups_of(&node.view(&alice, &child).await.unwrap());
+    let (parent_meta, parent_docs, parent_sensitive) =
+        groups_of(&node.view(&alice, &parent).await.unwrap());
+    let (child_meta, child_docs, child_sensitive) =
+        groups_of(&node.view(&alice, &child).await.unwrap());
 
     let err = node
         .drawers()
@@ -308,6 +311,13 @@ async fn a_child_drawer_confers_access_through_its_parent() {
         node.keyhive_level(parent_meta, child_meta.0).await,
         Some(KeyhiveAccess::Read)
     );
+    // The Read entry also reaches the child's sensitive group: Read-and-up is that group's
+    // audience, and the parent's sensitive group is the route.
+    assert_eq!(
+        node.keyhive_level(parent_sensitive, child_sensitive.0)
+            .await,
+        Some(KeyhiveAccess::Read)
+    );
     // Bob's Write on the parent is Read on the child: the entry is the weakest link.
     assert!(node.read_note(&bob, &doc).await.is_ok());
     assert_eq!(
@@ -351,6 +361,11 @@ async fn a_child_drawer_confers_access_through_its_parent() {
     assert_eq!(node.keyhive_level(parent_docs, child_docs.0).await, None);
     assert_eq!(node.keyhive_level(parent_meta, child_meta.0).await, None);
     assert_eq!(
+        node.keyhive_level(parent_sensitive, child_sensitive.0)
+            .await,
+        None
+    );
+    assert_eq!(
         op(node
             .drawers()
             .call(
@@ -364,6 +379,126 @@ async fn a_child_drawer_confers_access_through_its_parent() {
             .unwrap_err()),
         DrawersError::Denied
     );
+    assert_eq!(
+        node.read_note(&bob, &doc).await.unwrap_err(),
+        DocsError::Denied
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_self_doc_child_takes_only_a_doc_grant_at_the_entry_level() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let bob = node.actor("bob").await;
+    let parent = node.collection(&alice, "team").await;
+    let home = node.collection(&alice, "home").await;
+    let doc = node.create_doc(&alice, &home, "letter").await.unwrap();
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            CreateDrawer {
+                capability: node.drawer_capability(&alice, &[&home]).await.unwrap(),
+                command: command("declare letter"),
+                layout: CreateLayout::SelfDoc {
+                    doc_id: doc.clone(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    // A self-doc parent has no docs group to delegate, so it cannot adopt children.
+    let err = node
+        .drawers()
+        .call(
+            RequestContext::root(),
+            AddChild {
+                capability: node
+                    .drawer_capability(&alice, &[&doc, &parent])
+                    .await
+                    .unwrap(),
+                command: command("self-doc adopts"),
+                parent_id: doc.clone(),
+                child_id: parent.clone(),
+                access: Access::Read,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(op(err), DrawersError::SelfDoc(doc.clone()));
+
+    node.grant(&alice, &parent, &bob, Access::Read).await;
+    assert_eq!(
+        node.read_note(&bob, &doc).await.unwrap_err(),
+        DocsError::Denied
+    );
+
+    let (_, parent_docs, _) = groups_of(&node.view(&alice, &parent).await.unwrap());
+    let doc_bytes = doc.to_bytes32().unwrap();
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            AddChild {
+                capability: node
+                    .drawer_capability(&alice, &[&parent, &doc])
+                    .await
+                    .unwrap(),
+                command: command("adopt letter"),
+                parent_id: parent.clone(),
+                child_id: doc.clone(),
+                access: Access::Read,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        node.roster_datums(&parent).await[&child_entry_key(&doc)],
+        json!({"access": "Read"})
+    );
+    assert_eq!(
+        node.view(&alice, &parent).await.unwrap().children,
+        BTreeMap::from([(doc.clone(), Access::Read)])
+    );
+    // Exactly `Read` on the doc itself: no meta widening and no group delegation exists.
+    assert_eq!(
+        node.keyhive_level(parent_docs, doc_bytes).await,
+        Some(KeyhiveAccess::Read)
+    );
+    assert!(node.read_note(&bob, &doc).await.is_ok());
+    assert_eq!(
+        node.write_note(&bob, &doc, "edit").await.unwrap_err(),
+        DocsError::Denied
+    );
+    assert_eq!(
+        node.list_docs(&bob, &parent, 0, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|listed| listed.doc_id.clone())
+            .collect::<Vec<_>>(),
+        vec![doc.clone()]
+    );
+
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            RemoveChild {
+                capability: node.drawer_capability(&alice, &[&parent]).await.unwrap(),
+                command: command("disown letter"),
+                parent_id: parent.clone(),
+                child_id: doc.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !node
+            .roster_datums(&parent)
+            .await
+            .contains_key(&child_entry_key(&doc))
+    );
+    assert_eq!(node.keyhive_level(parent_docs, doc_bytes).await, None);
     assert_eq!(
         node.read_note(&bob, &doc).await.unwrap_err(),
         DocsError::Denied
@@ -803,5 +938,747 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
         node.roster_datums(&shared).await[&doc_entry_key(&foreign_doc)],
         json!({"access": "Pull", "future": 1})
     );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_meta_doc_is_created_granted_and_projected() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let home = node.collection(&alice, "home").await;
+    let capability = node.drawer_capability(&alice, &[&home]).await.unwrap();
+    let request = CreateMetaDoc {
+        capability,
+        command: command("meta-1"),
+        drawer_id: home.clone(),
+        kind: "notes".to_owned(),
+        name: "main".to_owned(),
+        root: MetaRoot::Public,
+    };
+
+    let created = node
+        .drawers()
+        .call(RequestContext::root(), request.clone())
+        .await
+        .unwrap();
+    assert_ne!(created.doc_id, home, "a meta doc has its own id");
+    assert_eq!(created.kind, request.kind);
+    assert_eq!(created.name, request.name);
+    assert_eq!(created.root, request.root);
+    assert_eq!(created.drawer_id, home);
+    let view = node.view(&alice, &home).await.unwrap();
+    let mut expected = BTreeMap::from([(
+        MetaRoot::Public,
+        BTreeMap::from([("notes/main".to_owned(), created.doc_id.clone())]),
+    )]);
+    assert_eq!(view.meta_docs, expected);
+
+    let replayed = node
+        .drawers()
+        .call(RequestContext::root(), request.clone())
+        .await
+        .unwrap();
+    assert_eq!(replayed, created);
+    assert_eq!(node.view(&alice, &home).await.unwrap().meta_docs, expected);
+
+    for (kind, name) in [("..", "main"), ("notes", "..")] {
+        let error = node
+            .drawers()
+            .call(
+                RequestContext::root(),
+                CreateMetaDoc {
+                    command: command(&format!("invalid {kind}/{name}")),
+                    kind: kind.to_owned(),
+                    name: name.to_owned(),
+                    ..request.clone()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            op(error),
+            DrawersError::InvalidMetaDocSlot(format!("{kind}/{name}"))
+        );
+        assert_eq!(node.view(&alice, &home).await.unwrap().meta_docs, expected);
+    }
+
+    for (root, kind, name) in [
+        (MetaRoot::Sensitive, "notes", "main"),
+        (MetaRoot::Public, "notes", "archive"),
+        (MetaRoot::Sensitive, "notes", "archive"),
+        (MetaRoot::Public, "audit", "main"),
+        (MetaRoot::Sensitive, "audit", "main"),
+    ] {
+        let created = node
+            .drawers()
+            .call(
+                RequestContext::root(),
+                CreateMetaDoc {
+                    command: command(&format!("{root:?} {kind}/{name}")),
+                    kind: kind.to_owned(),
+                    name: name.to_owned(),
+                    root,
+                    ..request.clone()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.drawer_id, home);
+        assert_eq!(created.root, root);
+        assert_eq!(created.kind, kind);
+        assert_eq!(created.name, name);
+        assert!(
+            expected
+                .values()
+                .all(|slots| !slots.values().any(|doc| *doc == created.doc_id))
+        );
+        assert!(
+            expected
+                .entry(root)
+                .or_default()
+                .insert(format!("{kind}/{name}"), created.doc_id)
+                .is_none()
+        );
+        assert_eq!(node.view(&alice, &home).await.unwrap().meta_docs, expected);
+    }
+
+    let view = node.view(&alice, &home).await.unwrap();
+    assert!(view.docs.is_empty());
+    assert!(view.children.is_empty());
+    assert!(
+        node.list_docs(&alice, &home, 0, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let (public_group, docs_group, sensitive_group) = groups_of(&view);
+    for (root, slots) in &expected {
+        let (root_doc, backing, other) = match root {
+            MetaRoot::Public => (home.clone(), public_group, sensitive_group),
+            MetaRoot::Sensitive => (
+                view.descriptor.sensitive_root().unwrap(),
+                sensitive_group,
+                public_group,
+            ),
+        };
+        let references = node
+            .roster_datums(&root_doc)
+            .await
+            .into_iter()
+            .filter(|(key, _)| key.tag().as_str() == DrawerMetaDoc::ID)
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            references,
+            slots
+                .iter()
+                .map(|(slot, doc)| (
+                    format!("{}/{slot}", DrawerMetaDoc::ID).parse().unwrap(),
+                    json!({"docId": doc.to_string()}),
+                ))
+                .collect()
+        );
+        for doc in slots.values() {
+            let target = doc.to_bytes32().unwrap();
+            assert_eq!(
+                node.keyhive_level(backing, target).await,
+                Some(KeyhiveAccess::Admin)
+            );
+            assert_eq!(node.keyhive_level(other, target).await, None);
+            assert_eq!(node.keyhive_level(docs_group, target).await, None);
+        }
+    }
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn meta_doc_projection_requires_admin_delegation_from_the_referencing_root() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let bob = node.actor("bob").await;
+    let home = node.collection(&alice, "home").await;
+    let source = node.collection(&alice, "source").await;
+    node.grant(&alice, &home, &bob, Access::Read).await;
+    let view = node.view(&alice, &home).await.unwrap();
+    let (public_group, _, sensitive_group) = groups_of(&view);
+    let context = RequestContext::root();
+    let mut expected = BTreeMap::new();
+    for root in [MetaRoot::Public, MetaRoot::Sensitive] {
+        let doc = node
+            .create_doc(&alice, &source, &format!("{root:?} note"))
+            .await
+            .unwrap();
+        let (root_doc, backing, other) = match root {
+            MetaRoot::Public => (home.clone(), public_group, sensitive_group),
+            MetaRoot::Sensitive => (
+                view.descriptor.sensitive_root().unwrap(),
+                sensitive_group,
+                public_group,
+            ),
+        };
+        node.core()
+            .write_roster(
+                &context,
+                &root_doc,
+                None,
+                BTreeMap::from([(
+                    meta_doc_key("notes", "main").unwrap(),
+                    json!({"docId": doc.to_string(), "future": {"revision": 2}}),
+                )]),
+                BTreeSet::new(),
+            )
+            .await
+            .unwrap();
+        for delegation in [
+            None,
+            Some((other, KeyhiveAccess::Admin)),
+            Some((backing, KeyhiveAccess::Relay)),
+            Some((backing, KeyhiveAccess::Read)),
+            Some((backing, KeyhiveAccess::Edit)),
+        ] {
+            if let Some((group, access)) = delegation {
+                node.repo
+                    .grant_doc_access(doc.clone(), node.core().group(group).await.unwrap(), access)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(node.view(&alice, &home).await.unwrap().meta_docs, expected);
+            assert!(
+                !node
+                    .core()
+                    .state
+                    .ancestors(state::ScopeTarget::Doc(&doc))
+                    .await
+                    .unwrap()
+                    .contains_key(&home)
+            );
+            assert_eq!(
+                node.read_note(&bob, &doc).await.unwrap_err(),
+                DocsError::Denied
+            );
+            assert_eq!(
+                node.roster_datums(&root_doc).await[&meta_doc_key("notes", "main").unwrap()],
+                json!({"docId": doc.to_string(), "future": {"revision": 2}})
+            );
+        }
+        node.repo
+            .grant_doc_access(
+                doc.clone(),
+                node.core().group(backing).await.unwrap(),
+                KeyhiveAccess::Admin,
+            )
+            .await
+            .unwrap();
+        assert!(
+            expected
+                .insert(
+                    root,
+                    BTreeMap::from([("notes/main".to_owned(), doc.clone())])
+                )
+                .is_none()
+        );
+        assert_eq!(node.view(&bob, &home).await.unwrap().meta_docs, expected);
+        assert_eq!(
+            node.core()
+                .state
+                .ancestors(state::ScopeTarget::Doc(&doc))
+                .await
+                .unwrap()
+                .get(&home)
+                .and_then(|reach| reach.apply(Access::Read)),
+            Some(Access::Read)
+        );
+        assert_eq!(
+            node.read_note(&bob, &doc).await.unwrap(),
+            json!({"$type": NOTE, "value": format!("{root:?} note")})
+        );
+    }
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn metadata_protocol_respects_root_and_child_audiences() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let mut drawers = Vec::new();
+    for name in ["root", "child", "grandchild", "relay leaf"] {
+        drawers.push(node.collection(&alice, name).await);
+    }
+    let ceilings = [Access::Admin, Access::Write, Access::Read, Access::Relay];
+    for (pair, access) in drawers.windows(2).zip(ceilings[1..].iter().copied()) {
+        node.drawers()
+            .call(
+                RequestContext::root(),
+                AddChild {
+                    capability: node
+                        .drawer_capability(&alice, &[&pair[0], &pair[1]])
+                        .await
+                        .unwrap(),
+                    command: command(&format!("link {}", pair[1])),
+                    parent_id: pair[0].clone(),
+                    child_id: pair[1].clone(),
+                    access,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let mut documents = Vec::new();
+    for (drawer, ceiling) in drawers.iter().zip(ceilings) {
+        let capability = node.drawer_capability(&alice, &[drawer]).await.unwrap();
+        for root in [MetaRoot::Public, MetaRoot::Sensitive] {
+            let created = node
+                .drawers()
+                .call(
+                    RequestContext::root(),
+                    CreateMetaDoc {
+                        capability,
+                        command: command(&format!("{drawer} {root:?}")),
+                        drawer_id: drawer.clone(),
+                        kind: "notes".into(),
+                        name: "main".into(),
+                        root,
+                    },
+                )
+                .await
+                .unwrap();
+            documents.push((created.doc_id.clone(), root, ceiling));
+            let view = node.view(&alice, drawer).await.unwrap();
+            let root_doc = match root {
+                MetaRoot::Public => drawer.clone(),
+                MetaRoot::Sensitive => view.descriptor.sensitive_root().unwrap(),
+            };
+            node.wait_indexed(DrawerMetaDoc::ID, |route, _| route.doc_id == root_doc)
+                .await;
+            documents.push((root_doc, root, ceiling));
+            node.write_note(&alice, &created.doc_id, "metadata target")
+                .await
+                .unwrap();
+            node.wait_indexed(NOTE, |route, _| route.doc_id == created.doc_id)
+                .await;
+        }
+    }
+    for held in Access::ALL {
+        let actor = node.actor(&format!("holder-{held:?}")).await;
+        node.grant(&alice, &drawers[0], &actor, held).await;
+        let bounded = node
+            .mint_doc(
+                &alice,
+                DocScope {
+                    drawers: BTreeMap::from([(drawers[0].clone(), held)]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let scoped = node
+            .mint_drawer(
+                &alice,
+                DrawerScope {
+                    drawers: BTreeMap::from([(drawers[0].clone(), held)]),
+                    create: false,
+                },
+            )
+            .await
+            .unwrap();
+        let narrowed = node
+            .core()
+            .invocation(&RequestContext::root(), scoped)
+            .await
+            .unwrap()
+            .authority;
+        for (doc, root, ceiling) in &documents {
+            let attenuated = held.min(*ceiling);
+            let expected = match root {
+                MetaRoot::Public => Some(attenuated.max(Access::Read)),
+                MetaRoot::Sensitive => (attenuated >= Access::Read).then_some(attenuated),
+            };
+            assert_eq!(
+                node.core()
+                    .doc_level(&RequestContext::root(), &narrowed, doc)
+                    .await
+                    .unwrap(),
+                expected,
+            );
+            assert_eq!(
+                node.core()
+                    .reach(&RequestContext::root(), actor.actor_id, doc)
+                    .await
+                    .unwrap()
+                    .map(|(access, _)| access),
+                expected,
+            );
+            let minted = node
+                .mint_doc(
+                    &actor,
+                    DocScope {
+                        read: BTreeSet::from([doc.clone()]),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            let capability = if expected.is_some() {
+                minted.unwrap()
+            } else {
+                assert_eq!(minted.unwrap_err(), DocsError::Denied);
+                bounded
+            };
+            let read = node
+                .docs()
+                .call(
+                    RequestContext::root(),
+                    ReadDatums {
+                        capability,
+                        doc_id: doc.clone(),
+                        at: At::Current,
+                        datums: None,
+                        optimistic: false,
+                    },
+                )
+                .await;
+            let polled = crate::test_poll::query(
+                node.docs(),
+                capability,
+                Predicate::IsDoc {
+                    doc_id: doc.clone(),
+                },
+                DatumSelection::All,
+            )
+            .await;
+            if expected.is_some() {
+                let read = read.unwrap();
+                assert!(!read.datums.is_empty());
+                assert!(
+                    read.datums
+                        .values()
+                        .all(|datum| matches!(datum, DatumRead::Accepted { .. }))
+                );
+                let mut polled = polled.unwrap();
+                assert_eq!(polled.len(), 1);
+                let datums = polled.remove(doc).unwrap();
+                assert_eq!(
+                    datums.keys().collect::<Vec<_>>(),
+                    read.datums.keys().collect::<Vec<_>>()
+                );
+                assert!(
+                    datums
+                        .values()
+                        .all(|datum| matches!(datum, ObservedDatum::Present { .. }))
+                );
+            } else {
+                assert_eq!(docs_op(read.unwrap_err()), DocsError::Denied);
+                assert_eq!(docs_op(polled.unwrap_err()), DocsError::Denied);
+            }
+            let writable = node
+                .mint_doc(
+                    &actor,
+                    DocScope {
+                        write: BTreeSet::from([doc.clone()]),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            if expected.is_some_and(|access| access >= Access::Write) {
+                writable.unwrap();
+            } else {
+                assert_eq!(writable.unwrap_err(), DocsError::Denied);
+            }
+        }
+    }
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn metadata_only_capability_does_not_grant_drawer_or_content() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let holder = node.actor("metadata-only").await;
+    let home = node.collection(&alice, "home").await;
+    let content = node.create_doc(&alice, &home, "content").await.unwrap();
+    for root in [MetaRoot::Public, MetaRoot::Sensitive] {
+        let created = node
+            .drawers()
+            .call(
+                RequestContext::root(),
+                CreateMetaDoc {
+                    capability: node.drawer_capability(&alice, &[&home]).await.unwrap(),
+                    command: command(&format!("metadata {root:?}")),
+                    drawer_id: home.clone(),
+                    kind: "notes".into(),
+                    name: "main".into(),
+                    root,
+                },
+            )
+            .await
+            .unwrap();
+        node.view(&alice, &home).await.unwrap();
+        node.write_note(&alice, &created.doc_id, "shared metadata")
+            .await
+            .unwrap();
+        node.wait_indexed(NOTE, |route, _| route.doc_id == created.doc_id)
+            .await;
+        let cap = node
+            .docs()
+            .call(
+                RequestContext::root(),
+                MintDocCapability {
+                    authorization: Authorization {
+                        authority: alice.capability,
+                        signer: holder.capability,
+                    },
+                    scope: DocScope {
+                        read: BTreeSet::from([created.doc_id.clone()]),
+                        ..Default::default()
+                    },
+                    rights: Rights::USE | Rights::NARROW,
+                },
+            )
+            .await
+            .unwrap()
+            .capability_id;
+        let read = node
+            .docs()
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability: cap,
+                    doc_id: created.doc_id.clone(),
+                    at: At::Current,
+                    datums: None,
+                    optimistic: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            read.datums[&note("").0],
+            DatumRead::Accepted { .. }
+        ));
+        let polled = crate::test_poll::query(
+            node.docs(),
+            cap,
+            Predicate::IsDoc {
+                doc_id: created.doc_id.clone(),
+            },
+            DatumSelection::All,
+        )
+        .await
+        .unwrap();
+        assert_eq!(polled.len(), 1);
+        assert_eq!(
+            polled[&created.doc_id].keys().collect::<Vec<_>>(),
+            read.datums.keys().collect::<Vec<_>>(),
+        );
+        for doc in [&home, &content] {
+            assert_eq!(
+                docs_op(
+                    node.docs()
+                        .call(
+                            RequestContext::root(),
+                            ReadDatums {
+                                capability: cap,
+                                doc_id: doc.clone(),
+                                at: At::Current,
+                                datums: None,
+                                optimistic: false,
+                            },
+                        )
+                        .await
+                        .unwrap_err()
+                ),
+                DocsError::Denied,
+            );
+            assert_eq!(
+                docs_op(
+                    crate::test_poll::query(
+                        node.docs(),
+                        cap,
+                        Predicate::IsDoc {
+                            doc_id: doc.clone(),
+                        },
+                        DatumSelection::All,
+                    )
+                    .await
+                    .unwrap_err()
+                ),
+                DocsError::Denied,
+            );
+        }
+        for scope in [
+            DocScope {
+                drawers: BTreeMap::from([(home.clone(), Access::Read)]),
+                ..Default::default()
+            },
+            DocScope {
+                read: BTreeSet::from([home.clone()]),
+                ..Default::default()
+            },
+            DocScope {
+                read: BTreeSet::from([content.clone()]),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                docs_op(
+                    node.docs()
+                        .call(
+                            RequestContext::root(),
+                            MintDocCapability {
+                                authorization: Authorization {
+                                    authority: cap,
+                                    signer: holder.capability
+                                },
+                                scope,
+                                rights: Rights::USE,
+                            },
+                        )
+                        .await
+                        .unwrap_err()
+                ),
+                DocsError::Denied
+            );
+        }
+    }
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn get_drawer_withholds_sensitive_meta_docs_from_relay_scopes() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let parent = node.collection(&alice, "parent").await;
+    let child = node.collection(&alice, "child").await;
+    let grandchild = node.collection(&alice, "grandchild").await;
+    for (parent_id, child_id) in [(&parent, &child), (&child, &grandchild)] {
+        node.drawers()
+            .call(
+                RequestContext::root(),
+                AddChild {
+                    capability: node
+                        .drawer_capability(&alice, &[parent_id, child_id])
+                        .await
+                        .unwrap(),
+                    command: command(&format!("link {parent_id} {child_id}")),
+                    parent_id: parent_id.clone(),
+                    child_id: child_id.clone(),
+                    access: Access::Admin,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let mut expected = BTreeMap::new();
+    for drawer in [&parent, &child, &grandchild] {
+        let capability = node.drawer_capability(&alice, &[drawer]).await.unwrap();
+        let mut meta_docs = BTreeMap::new();
+        for (root, name) in [
+            (MetaRoot::Public, "public"),
+            (MetaRoot::Sensitive, "private"),
+        ] {
+            let created = node
+                .drawers()
+                .call(
+                    RequestContext::root(),
+                    CreateMetaDoc {
+                        capability,
+                        command: command(&format!("{drawer} {name}")),
+                        drawer_id: drawer.clone(),
+                        kind: "notes".to_owned(),
+                        name: name.to_owned(),
+                        root,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                meta_docs
+                    .insert(
+                        root,
+                        BTreeMap::from([(format!("notes/{name}"), created.doc_id)])
+                    )
+                    .is_none()
+            );
+        }
+        assert!(expected.insert(drawer.clone(), meta_docs).is_none());
+    }
+    for access in [Access::Relay, Access::Read, Access::Write, Access::Admin] {
+        let capability = node
+            .mint_drawer(
+                &alice,
+                DrawerScope {
+                    drawers: BTreeMap::from([(parent.clone(), access)]),
+                    create: false,
+                },
+            )
+            .await
+            .unwrap();
+        for (drawer, meta_docs) in &expected {
+            let view = node
+                .drawers()
+                .call(
+                    RequestContext::root(),
+                    GetDrawer {
+                        capability,
+                        drawer_id: drawer.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(view.access, access);
+            assert_eq!(
+                node.core().state.meta_docs_of(drawer).await.unwrap(),
+                *meta_docs
+            );
+            let mut visible = meta_docs.clone();
+            if access == Access::Relay {
+                visible.remove(&MetaRoot::Sensitive);
+                let wire = serde_json::to_string(&view).unwrap();
+                assert!(!wire.contains("notes/private"));
+                for doc in meta_docs[&MetaRoot::Sensitive].values() {
+                    assert!(!wire.contains(&doc.to_string()));
+                }
+            }
+            assert_eq!(view.meta_docs, visible);
+            let authority = DomainAuthority::Scoped(DrawerScope {
+                drawers: BTreeMap::from([(parent.clone(), access)]),
+                create: false,
+            });
+            let sensitive = view.descriptor.sensitive_root().unwrap();
+            assert_eq!(
+                node.core()
+                    .doc_level(&RequestContext::root(), &authority, &sensitive)
+                    .await
+                    .unwrap(),
+                (access >= Access::Read).then_some(access),
+            );
+            assert_eq!(
+                node.core()
+                    .doc_level(&RequestContext::root(), &authority, drawer)
+                    .await
+                    .unwrap(),
+                Some(access.max(Access::Read)),
+            );
+            for (root, slots) in meta_docs {
+                for doc in slots.values() {
+                    assert_eq!(
+                        node.core()
+                            .doc_level(&RequestContext::root(), &authority, doc)
+                            .await
+                            .unwrap(),
+                        match root {
+                            MetaRoot::Public => Some(access.max(Access::Read)),
+                            MetaRoot::Sensitive => (access >= Access::Read).then_some(access),
+                        },
+                    );
+                    assert_eq!(
+                        node.core()
+                            .level(&RequestContext::root(), &authority, doc)
+                            .await
+                            .unwrap(),
+                        None,
+                    );
+                }
+            }
+        }
+    }
     node.stop().await;
 }

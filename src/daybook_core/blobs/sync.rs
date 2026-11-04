@@ -117,7 +117,7 @@ impl SyncBackend for BlobSyncBackend {
         &self,
         peer_id: PeerKey,
         obj_id: ObjKey,
-        parts: Vec<PartKey>,
+        parts: Vec<big_sync_core::PartKey>,
         remote_payload: Option<big_sync_core::part_store::ObjPayload>,
     ) -> Res<SyncTaskRunOutcome> {
         // The key was written by whichever peer holds this part, so a key that
@@ -195,6 +195,7 @@ impl SyncBackend for BlobSyncBackend {
 
     async fn remove_obj_from_parts(
         &self,
+        _peer_id: PeerKey,
         obj_id: big_sync_core::ObjKey,
         parts: Vec<big_sync_core::PartKey>,
     ) -> Res<()> {
@@ -213,10 +214,7 @@ mod tests {
 
     use big_sync::HostPartStore;
     use big_sync::MemoryPartStore;
-    use big_sync::backend::contract::SyncBackendHarness;
-    use big_sync::backend::contract::SyncBackendOutcome;
-    use big_sync::backend::contract::SyncBackendScenario;
-    use big_sync::backend::contract::{self};
+    mod contract;
     use tempfile::tempdir;
 
     fn test_part() -> PartKey {
@@ -260,89 +258,6 @@ mod tests {
         Ok((backend, part_store, blobs_repo, temp_root))
     }
 
-    struct BlobSyncBackendContractHarness {
-        backend: Arc<dyn SyncBackend>,
-        store: Arc<dyn HostPartStore>,
-    }
-
-    #[async_trait]
-    impl SyncBackendHarness for BlobSyncBackendContractHarness {
-        fn backend(&self) -> &dyn SyncBackend {
-            self.backend.as_ref()
-        }
-
-        fn store(&self) -> &dyn HostPartStore {
-            self.store.as_ref()
-        }
-    }
-
-    fn blob_sync_backend_cases(
-        noop_blob_id: BlobId,
-        noop_missing_remote_blob_id: BlobId,
-        changed_blob_id: BlobId,
-        changed_empty_hints_blob_id: BlobId,
-        changed_multi_hints_blob_id: BlobId,
-        added_blob_id: BlobId,
-    ) -> Vec<SyncBackendScenario> {
-        let parts = test_parts();
-        let extra_part = extra_part();
-        let noop_payload = serde_json::json!({"kind": "noop"});
-        let old_payload = serde_json::json!({"kind": "old"});
-        let new_payload = serde_json::json!({"kind": "new"});
-        vec![
-            SyncBackendScenario::noop(
-                "noop_when_membership_and_payload_match",
-                PeerKey::new([2; 32]),
-                ObjKey::from(noop_blob_id),
-                noop_payload.clone(),
-                parts.clone(),
-            ),
-            SyncBackendScenario {
-                name: "noop_when_remote_payload_is_missing_and_blob_exists",
-                peer_id: PeerKey::new([2; 32]),
-                obj_id: ObjKey::from(noop_missing_remote_blob_id),
-                initial_payload: Some(noop_payload.clone()),
-                initial_parts: parts.clone(),
-                remote_payload: None,
-                expected_outcome: SyncBackendOutcome::Completion(
-                    big_sync_core::SyncCompletionDeets::Noop,
-                ),
-                expected_parts: parts.clone(),
-            },
-            SyncBackendScenario::changed_object(
-                "changed_object_applies_remote_payload",
-                PeerKey::new([2; 32]),
-                ObjKey::from(changed_blob_id),
-                old_payload.clone(),
-                new_payload.clone(),
-                parts.clone(),
-            ),
-            SyncBackendScenario::changed_object(
-                "changed_object_with_empty_part_hints",
-                PeerKey::new([2; 32]),
-                ObjKey::from(changed_empty_hints_blob_id),
-                old_payload.clone(),
-                new_payload.clone(),
-                vec![],
-            ),
-            SyncBackendScenario::changed_object(
-                "changed_object_with_multiple_part_hints",
-                PeerKey::new([2; 32]),
-                ObjKey::from(changed_multi_hints_blob_id),
-                old_payload.clone(),
-                new_payload.clone(),
-                vec![parts[0].clone(), extra_part],
-            ),
-            SyncBackendScenario::added_member(
-                "added_member_materializes_missing_blob",
-                PeerKey::new([2; 32]),
-                ObjKey::from(added_blob_id),
-                new_payload.clone(),
-                parts.clone(),
-            ),
-        ]
-    }
-
     /// The blob part store is synced from peers, so an object key in it is
     /// whatever the peer wrote. A key that names no digest names no blob: it
     /// must be an error, never a path built outside the blob root.
@@ -376,39 +291,6 @@ mod tests {
             escape_blob.display()
         );
         Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn blob_sync_backend_contract() -> Res<()> {
-        let (backend, part_store, blobs_repo, _temp_root) = build_blob_backend().await?;
-        let noop_blob_id = blobs_repo.put(b"blob-sync-contract-noop").await?;
-        let noop_missing_remote_blob_id = blobs_repo
-            .put(b"blob-sync-contract-noop-missing-remote")
-            .await?;
-        let changed_blob_id = blobs_repo.put(b"blob-sync-contract-changed").await?;
-        let changed_empty_hints_blob_id = blobs_repo
-            .put(b"blob-sync-contract-changed-empty-hints")
-            .await?;
-        let changed_multi_hints_blob_id = blobs_repo
-            .put(b"blob-sync-contract-changed-multi-hints")
-            .await?;
-        let added_blob_id = blobs_repo.put(b"blob-sync-contract-added").await?;
-        let harness = BlobSyncBackendContractHarness {
-            backend,
-            store: part_store,
-        };
-        contract::assert_sync_backend_scenarios(
-            &harness,
-            &blob_sync_backend_cases(
-                noop_blob_id,
-                noop_missing_remote_blob_id,
-                changed_blob_id,
-                changed_empty_hints_blob_id,
-                changed_multi_hints_blob_id,
-                added_blob_id,
-            ),
-        )
-        .await
     }
 
     #[tokio::test]
@@ -554,7 +436,7 @@ mod tests {
             .sync_obj(
                 peer_id_a.clone(),
                 obj_id_added.clone(),
-                Vec::new(),
+                Default::default(),
                 Some(remote_payload.clone()),
             )
             .await?;
@@ -576,7 +458,12 @@ mod tests {
 
         // Case 2: Subsequent sync_obj when blob is already materialized locally returns Noop
         let noop_outcome = backend_b
-            .sync_obj(peer_id_a, obj_id_added, Vec::new(), Some(remote_payload))
+            .sync_obj(
+                peer_id_a,
+                obj_id_added,
+                Default::default(),
+                Some(remote_payload),
+            )
             .await?;
         match noop_outcome {
             big_sync::SyncTaskRunOutcome::Completion(comp) => {
@@ -683,7 +570,12 @@ mod tests {
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[1]
                 .backend
-                .sync_obj(peer_0.clone(), obj_id, Vec::new(), Some(remote_meta))
+                .sync_obj(
+                    peer_0.clone(),
+                    obj_id,
+                    Default::default(),
+                    Some(remote_meta),
+                )
                 .await?;
             match outcome {
                 big_sync::SyncTaskRunOutcome::Completion(comp) => {
@@ -714,7 +606,12 @@ mod tests {
             let remote_meta = serde_json::json!({ "mime": "text/plain" });
             let outcome = nodes[2]
                 .backend
-                .sync_obj(peer_1.clone(), obj_id, Vec::new(), Some(remote_meta))
+                .sync_obj(
+                    peer_1.clone(),
+                    obj_id,
+                    Default::default(),
+                    Some(remote_meta),
+                )
                 .await?;
             match outcome {
                 big_sync::SyncTaskRunOutcome::Completion(_) => {}
@@ -754,17 +651,17 @@ mod tests {
     async fn blob_sync_obj_settles_for_a_virtually_possessed_cipher_representation() -> Res<()> {
         let (backend, _part_store, blobs_repo, _temp_root) = build_blob_backend().await?;
         let runtime = sqlite_rs::SqliteRuntime::new(default());
-        let pair_roots = crate::blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
-        let key = crate::blobs::encrypt::MasterKey::random();
+        let pair_roots = big_blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
+        let key = big_blobs::encrypt::MasterKey::random();
         // The full add pass installs and registers as one act: P gets stored
         // bytes, C gets the virtual entry, and the pair roots both under the
         // `ct:`/`pt:` tags.
-        let (c, p_hash) = crate::blobs::encrypt::add_encrypted(
+        let (c, p_hash) = big_blobs::encrypt::add_encrypted(
             &blobs_repo.iroh_store(),
             &blobs_repo.cipher_provider(),
             &pair_roots,
             &key,
-            crate::blobs::encrypt::EncodingParams::DEFAULT,
+            big_blobs::encrypt::EncodingParams::DEFAULT,
             b"cipherblob virtual possession",
         )
         .await?;
@@ -867,14 +764,14 @@ mod tests {
         );
 
         let runtime = sqlite_rs::SqliteRuntime::new(default());
-        let pair_roots = crate::blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
-        let key = crate::blobs::encrypt::MasterKey::random();
-        let (c, _p_hash) = crate::blobs::encrypt::add_encrypted(
+        let pair_roots = big_blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
+        let key = big_blobs::encrypt::MasterKey::random();
+        let (c, _p_hash) = big_blobs::encrypt::add_encrypted(
             &blobs_repo_a.iroh_store(),
             &blobs_repo_a.cipher_provider(),
             &pair_roots,
             &key,
-            crate::blobs::encrypt::EncodingParams::DEFAULT,
+            big_blobs::encrypt::EncodingParams::DEFAULT,
             b"ciphertext served on demand to a pairless relay",
         )
         .await?;
@@ -884,7 +781,7 @@ mod tests {
             "the object identity is the ciphertext digest itself"
         );
         assert!(
-            !crate::blobs::encrypt::has_pair_tags(&blobs_repo_b.iroh_store(), c).await?,
+            !big_blobs::encrypt::has_pair_tags(&blobs_repo_b.iroh_store(), c).await?,
             "the relay holds no pair: nothing of its own is virtual"
         );
 

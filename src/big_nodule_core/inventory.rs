@@ -1,4 +1,4 @@
-//! Standalone nodule admission and inventory over [`Plug`] envelopes (ADR 023 §2–4, §6–8).
+//! Standalone nodule admission and inventory over [`Plug`] envelopes (ADR 027 §2–4, §6–8).
 //!
 //! [`Inventory`] validates the carrying [`Plug`] envelope, extracts its [`Nodule`] contribution,
 //! checks the contribution schema and nodule admission rules, verifies that every artifact a

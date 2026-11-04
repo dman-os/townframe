@@ -41,6 +41,7 @@ pub struct XrpcOperation {
     pub input: HttpInput,
     pub output_schema: &'static str,
     pub error_schema: &'static str,
+    pub long_poll: bool,
 }
 
 impl XrpcOperation {
@@ -52,6 +53,7 @@ impl XrpcOperation {
             input: HttpInput::Query,
             output_schema: "",
             error_schema: "",
+            long_poll: false,
         }
     }
 
@@ -63,6 +65,7 @@ impl XrpcOperation {
             input: HttpInput::JsonBody,
             output_schema: "",
             error_schema: "",
+            long_poll: false,
         }
     }
 
@@ -74,6 +77,7 @@ impl XrpcOperation {
             input: HttpInput::Query,
             output_schema: "",
             error_schema: "",
+            long_poll: false,
         }
     }
 
@@ -84,6 +88,14 @@ impl XrpcOperation {
     ) -> Self {
         self.output_schema = output_schema;
         self.error_schema = error_schema;
+        self
+    }
+
+    /// Marks the operation as a long poll. A held poll keeps its request permit
+    /// for up to the hold, so the XRPC router admits it through the long-poll
+    /// pool instead of consuming an ordinary unary slot.
+    pub const fn long_poll(mut self) -> Self {
+        self.long_poll = true;
         self
     }
 }

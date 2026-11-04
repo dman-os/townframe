@@ -3,7 +3,7 @@
 Status: Implemented
 Owner: Townframe maintainers
 Updated: 2026-10-31
-Scope: ADR 023 host-side nodule management, node config drawer, portable desired state, and a facet-store-inspired datum store; no big_blobs or big_tasks dependency
+Scope: ADR 027 host-side nodule management, node config drawer, portable desired state, and a facet-store-inspired datum store; no big_blobs or big_tasks dependency
 
 ## Agreed direction
 
@@ -171,7 +171,7 @@ resource effects belong in the service reconciler, not in an edit closure.
   independently read current versions of install, settings, and grants.
 - Watch delivers the current snapshot followed by coherent refreshed snapshots.
   It may coalesce intermediate desired states: it is not an audit/version log,
-  a durable cursor, or the future ADR 023 management-observation API. Changes that
+  a durable cursor, or the future ADR 027 management-observation API. Changes that
   arrive during reconciliation schedule a subsequent pass; the snapshot already
   being applied is not modified underneath the pass.
 - Treat docs observation as an invalidation signal, not a typed accepted value or
@@ -264,6 +264,6 @@ relay sponsorship, the durable cursored management feed, and multi-provider pins
 Catalog hosting and GUI are deferred for scope, not technically blocked by
 big_blobs/big_tasks. Existing install envelopes are enough for this PR.
 
-See [ADR 023](../adrs/023-plugs-nodules-and-operation-contracts.md) for the larger
+See [ADR 027](../adrs/027-plugs-nodules-and-operation-contracts.md) for the larger
 runtime contract. This scratch note records the agreed design and implementation
 for datum-backed nodule configuration and host reconciliation.

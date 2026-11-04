@@ -17,7 +17,7 @@ impl Core {
         drawer: &DrawerId,
         doc: &DocId,
     ) -> Result<Option<WriteReceipt>, DrawersError> {
-        let (_meta, docs_group) = self.groups(drawer).await?;
+        let (_meta, docs_group, _sensitive) = self.groups(drawer).await?;
         let listed = self.state.doc_entry(drawer, doc).await?.is_some();
         let granted = self.docs_group_level(&docs_group, doc).await?.is_some();
         if !listed && !granted {

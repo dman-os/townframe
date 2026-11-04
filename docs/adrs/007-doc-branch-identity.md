@@ -1,6 +1,6 @@
 # ADR 007: Doc and Branch Identity
 
-**Status:** Partially implemented — `DocumentId` unification, `db+datum` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` core datum with concrete parent references and pinned fork heads, and `dmeta.docUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
+**Status:** Partially implemented — `DocumentId` unification, `db+datum` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` core datum with concrete parent references and pinned fork heads, and `dmeta.docUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred. Amended by [ADR 026](026-drawer-native-blobs.md) §4: the branch datum gains an optional open-vocabulary `reason` (not implemented).
 
 ## Context
 
@@ -74,6 +74,23 @@ when this datum travels between documents. The pinned heads are the selected for
 not A's current frontier when the announcement is written. The initial branch change is the
 durable source of this value during crash recovery. `from` is optional for root metadata;
 like every datum reference it is a weak address and does not assert the parent datum exists.
+
+An optional `reason` records why the branch exists, as an open string vocabulary that
+Cabinet stores without interpreting:
+
+```json
+{
+  "path": "/draft",
+  "from": { "datumRef": "db+datum:/<A>/org.example.daybook.branch/<A>", "heads": ["<fork-head>"] },
+  "reason": "readOnlyOrigin"
+}
+```
+
+The first motivating value is `readOnlyOrigin`, from
+[ADR 026](026-drawer-native-blobs.md) §4: sponsoring or encrypting a doc you cannot write
+means branching it, and a tool that sees the reason can offer "your writable copy of A"
+and re-sync from the origin. Branching needs nothing from this field, so it stays
+optional and uninterpreted; a node that does not know a reason still carries the branch.
 
 Keying B's datum by `<B>` (`org.example.daybook.branch/<B>`) rather than `/main` keeps the
 datum merge-safe: when B is merged back into A, or a nested branch C is merged into B, the

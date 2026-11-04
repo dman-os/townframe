@@ -1,3 +1,5 @@
+mod blob_boot;
+
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
 use big_cabinet::DocsConfig;
@@ -40,6 +42,7 @@ pub struct Config<'a> {
     pub schemas: Arc<SchemaRepo>,
     pub secrets: &'a SecretStore,
     pub index_concurrency: NonZeroUsize,
+    pub blob_storage: big_blobs::Storage,
 }
 
 pub struct BigNode {
@@ -49,6 +52,10 @@ pub struct BigNode {
     pub docs_namespace: Namespace,
     pub drawers_actor: Actor,
     pub drawers_namespace: Namespace,
+    pub blobs_actor: Actor,
+    pub blobs_namespace: Namespace,
+    pub blobs: big_blobs::Blobs,
+    pub blob_workers: big_blobs::workers::BlobWorkers,
     pub nodules_actor: Actor,
     pub indexes: Arc<Indexes>,
     pub drawer_access: Arc<DrawerAccess>,
@@ -61,6 +68,10 @@ impl BigNode {
     pub async fn boot(config: Config<'_>) -> Res<(Self, StopToken)> {
         let mut stop = StopToken::default();
         let boot: Res<Self> = async {
+            let schemas = Arc::new(config.schemas.with_groups([
+                big_blobs::schema::registration(),
+                big_nodule::schema_group(),
+            ])?);
             let (authority, authority_stop) =
                 big_cabinet::authority::boot(config.secrets, config.sql.clone()).await?;
             stop.stages.push(Stage::Service(authority_stop));
@@ -77,6 +88,11 @@ impl BigNode {
             let docs_actor = open("documents").await?;
             let drawers_actor = open("drawers").await?;
             let nodules_actor = open("nodules").await?;
+            let blobs_actor = open("blobs").await?;
+            let blobs_namespace = authority
+                .service
+                .open_namespace(blobs_actor.actor_id)
+                .await?;
             let docs_namespace = authority
                 .service
                 .open_namespace(docs_actor.actor_id)
@@ -92,7 +108,14 @@ impl BigNode {
 
             let (repo, repo_stop) = BigRepo::boot(config.sqlite_runtime, config.repo).await?;
             stop.stages.push(Stage::Repo(repo_stop));
-            let schemas = Arc::new(config.schemas.with_group(big_nodule::schema_group())?);
+            let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
+                storage: config.blob_storage,
+                sql: config.sql.clone(),
+                authority: authority.client.clone(),
+                namespace: blobs_namespace,
+            })
+            .await?;
+            stop.stages.push(Stage::Service(blobs_stop));
             let (indexes, index_stop) = Indexes::boot(
                 Arc::clone(&repo),
                 Arc::clone(&schemas),
@@ -141,33 +164,20 @@ impl BigNode {
             let (drawers, drawers_stop) =
                 big_cabinet::boot_drawers(DrawerConfig { worker }).await?;
             stop.stages.push(Stage::Service(drawers_stop));
+            let (blob_workers, blob_stop) = blob_boot::boot(
+                config.sql.clone(),
+                &blobs,
+                &docs,
+                &drawers,
+                &drawer_access,
+                &repo,
+                Arc::clone(&indexes.datum_set),
+                drawers_actor.capability,
+            )
+            .await?;
+            stop.stages.push(Stage::Service(blob_stop));
             let config_drawer = drawers.local().config_id.clone();
-            let config_drawer_cap = drawers
-                .client
-                .call(
-                    RequestContext::root(),
-                    MintDrawerCapability {
-                        authorization: Authorization::identity(drawers_actor.capability),
-                        scope: DrawerScope {
-                            drawers: BTreeMap::from([(config_drawer.clone(), EntryAccess::Admin)]),
-                            create: false,
-                        },
-                        rights: Rights::USE | Rights::DELEGATE,
-                    },
-                )
-                .await?;
-            drawers
-                .client
-                .call(
-                    RequestContext::root(),
-                    GrantDrawer {
-                        capability: config_drawer_cap.capability_id,
-                        drawer_id: config_drawer.clone(),
-                        subject_id: nodules_actor.actor_id,
-                        access: EntryAccess::Admin,
-                    },
-                )
-                .await?;
+            grant_config_drawer(&drawers, &drawers_actor, &nodules_actor, &config_drawer).await?;
             let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
                 authority: authority.client.clone(),
                 docs: docs.client.clone(),
@@ -188,6 +198,10 @@ impl BigNode {
                 docs_namespace,
                 drawers_actor,
                 drawers_namespace,
+                blobs_actor,
+                blobs_namespace,
+                blobs,
+                blob_workers,
                 nodules_actor,
                 indexes,
                 drawer_access,
@@ -205,6 +219,43 @@ impl BigNode {
             },
         }
     }
+}
+
+/// Mints the drawers actor's admin capability over the node's config drawer and grants it to the
+/// nodules actor, which is how nodule config datums become writable by the nodule service.
+async fn grant_config_drawer(
+    drawers: &Drawers,
+    issuer: &Actor,
+    nodules_actor: &Actor,
+    config_drawer: &big_cabinet_core::dmeta::DocId,
+) -> Res<()> {
+    let cap = drawers
+        .client
+        .call(
+            RequestContext::root(),
+            MintDrawerCapability {
+                authorization: Authorization::identity(issuer.capability),
+                scope: DrawerScope {
+                    drawers: BTreeMap::from([(config_drawer.clone(), EntryAccess::Admin)]),
+                    create: false,
+                },
+                rights: Rights::USE | Rights::DELEGATE,
+            },
+        )
+        .await?;
+    drawers
+        .client
+        .call(
+            RequestContext::root(),
+            GrantDrawer {
+                capability: cap.capability_id,
+                drawer_id: config_drawer.clone(),
+                subject_id: nodules_actor.actor_id,
+                access: EntryAccess::Admin,
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 enum Stage {

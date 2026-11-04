@@ -62,7 +62,7 @@ fn test_cipherblob_facet_schema() -> Res<()> {
         key_ref_heads: ChangeHashSet(Arc::from([automerge::ChangeHash([1u8; 32])])),
         encoding_parameters: serde_json::json!({
             "recordSize": 65_536,
-            "padding": "record",
+            "padding": "padme",
         }),
     };
 
@@ -78,7 +78,7 @@ fn test_cipherblob_facet_schema() -> Res<()> {
             "contentEncoding": "aes128gcm",
             "keyRef": "db+facet:///abc123/org.example.daybook.jwk/relay",
             "keyRefHeads": [head],
-            "encodingParameters": {"recordSize": 65_536, "padding": "record"},
+            "encodingParameters": {"recordSize": 65_536, "padding": "padme"},
         }),
         "the cipherBlob facet JSON is the wire contract (ADR 003 §3)"
     );

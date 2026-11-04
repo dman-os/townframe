@@ -376,7 +376,8 @@ impl DrawerModel {
         assert_eq!(actual_known, self.known, "{context}: ListKnownDrawers");
 
         for d in 0..DRAWERS {
-            let (_meta, docs_group) = node.core().groups(&self.drawers[d]).await.unwrap();
+            let (_meta, docs_group, _sensitive) =
+                node.core().groups(&self.drawers[d]).await.unwrap();
             for doc_idx in 0..DOCS {
                 let doc_id = &self.docs[doc_idx];
                 assert_eq!(
@@ -561,7 +562,12 @@ impl ScriptRun {
                 let reached = match point {
                     CrashPoint::DocGranted => entry.is_none_or(|held| held < access),
                     CrashPoint::RosterWritten => entry != Some(access),
-                    CrashPoint::RosterRemoved | CrashPoint::DocsMembershipAdded => false,
+                    CrashPoint::RosterRemoved
+                    | CrashPoint::DocsMembershipAdded
+                    | CrashPoint::MetadataDocCreated
+                    | CrashPoint::MetadataDocGranted
+                    | CrashPoint::MetadataDocRecorded
+                    | CrashPoint::MetadataDocPublished => false,
                 };
                 let recorded = RecordedCommand::AddDoc(AddDoc {
                     capability,

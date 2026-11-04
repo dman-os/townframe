@@ -1,5 +1,5 @@
 //! Portable nodule configuration datums and the [`DatumStore`] projection over a node's config
-//! document (ADR 023 §4, §6).
+//! document (ADR 027 §4, §6).
 //!
 //! Each installed nodule's desired state is stored across up to three independently addressed
 //! datums keyed by its [`PlugId`] slot:

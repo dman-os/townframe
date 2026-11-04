@@ -14,7 +14,7 @@ fn call(artifact: &str, export: &str) -> Execution {
     })
 }
 
-/// The photo browser of ADR 023 §3: declares its own datum, query and subscription, requires
+/// The photo browser of ADR 027 §3: declares its own datum, query and subscription, requires
 /// the search vocabulary, and presents search hits through a stateless view.
 fn photos() -> Nodule {
     let mut nodule = Nodule::new("org.example.photos");

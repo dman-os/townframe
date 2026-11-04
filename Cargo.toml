@@ -7,6 +7,8 @@ members = [
   "./src/big_plugs_core/",
   "./src/big_nodule_core/",
   "./src/big_nodule/",
+  "./src/big_blobs/",
+  "./src/big_blobs_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",

@@ -1,4 +1,4 @@
-//! The nodule service: the node-side runtime management surface of ADR 023 §4, §6, and §8,
+//! The nodule service: the node-side runtime management surface of ADR 027 §4, §6, and §8,
 //! without an executor.
 //!
 //! Portable desired state (installed envelopes, enablement, settings, and local drawer grants)
