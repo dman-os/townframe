@@ -1,10 +1,10 @@
 # C6 proposal: one `clay_mdk::Context` for native and guest micros
 
-Status: C6b implemented for the in-process backend (see "C6b notes"); guest parity is C6c. Grounded in `clay_mdk/{native,guest,engine,wasm,wcmp,mirror}.rs`,
+Status: C6b (in-process backend) and C6c (guest parity, isomorphic `export_micro!`) implemented; see "C6b notes" and "C6c notes". Grounded in `clay_mdk/{native,guest,engine,wasm,wcmp,mirror}.rs`,
 `clay_guest_session/wit/*.wit`, `micro_{settings,sample,counter}`.
 Owner: Claude (C6 subagent); manager reviews.
 Scope: `clay_mdk` authoring surface, `micro_*` crates and their composition call sites.
-Updated: 2026-11-04 (C6b: shared `Context` + in-process backend landed)
+Updated: 2026-11-04 (C6c: guest backend for the shared `Context` landed)
 
 ## 1. Author-facing API
 
@@ -181,3 +181,47 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   explicit argument, because the erased publisher cannot attach wire surfaces.
 - Not done in C6b: `export_micro!` still emits only the guest exports; the native `ACTIVATE` entry and the guest
   `Context` come with C6c, which is why `micro_counter` still uses `clay_mdk::guest`.
+
+## C6c notes (2026-11-04): guest parity
+
+- **Shape.** `Context`, `Config`, `Facet`, `Operation`, `Capability`, `Publication` are single façade types
+  in `context.rs`; each method delegates to the arm of a private enum for the enabled backend feature
+  (`in_process`, `guest`, or both: a build holds either in a `Context`). `Collection`/`Registration`/`Row`/
+  `Attachment` moved to `rows.rs` and are backend-neutral: only the page feed, attachment minting
+  (`Minter`/`Stored`) and the write crossing (`Writer`) differ per backend. `Collection::changed` no longer
+  uses tokio `watch`; an own change counter (`Observer`) serves both. Feature `dioxus` became `guest`.
+- **Manifest in the macro.** `export_micro!(activate, manifest_fn)`. A guest has no manifest at runtime and
+  the WIT `publish-call` takes a contract, so the macro is given the same `fn() -> MicroManifest` the host
+  admits against; the guest takes call contracts and checks binding names (collection access, requirements)
+  from it. One source of truth, no WIT change. Under `in_process` the macro also emits
+  `pub const ACTIVATE` (boxed-future `fn(Context)`), which `host::factory` takes directly.
+- **Registration needs a reader.** `engine.rs` already grants a collection reader for every bound binding and
+  a writer for each `write` one, so a registration always has its mirror source; nothing host-side changed.
+- **Guest runtime.** `Runtime` holds one `GuestDom` per published presentation (by name), the surface ->
+  publication map, call handlers by name, staged publications and owned tasks. Every mirror/feed change sets a
+  dirty flag; `mutate` then bumps each presentation's tick signal inside its Dioxus runtime (hooks read it via
+  `ChangeTick`: nothing polls Dioxus tasks in a guest). Feeds long-poll `projection-lease.read` with
+  `poll_timeout_ms = u32::MAX`; the host clamps it (30 s), and an empty page neither bumps the revision nor
+  re-renders. `spawn` is `wit_bindgen::spawn_local` wrapped so `instance-root.close` cancels each task at its
+  next poll (dropping the future cancels the host call it was parked in) and waits for them; close then clears
+  views, handlers and bindings, which also breaks the runtime -> view -> context -> runtime cycle. The new
+  conformance scenario asserts `GuestResidue::NONE` after close.
+- **Deviations / limits.**
+  - A guest `Publication` can attach to rows only while `activate` runs: the bank's `published-capability`
+    moves to the host when `initialize` returns and `reference()` is the only way to mint an attachable ref.
+    Later writes attaching it fail with `Revoked`. Manifest-declared rows (as the counter's Settings row) are
+    unaffected.
+  - Guest `Capability` has `status` and `call`; `redeem_presentation`/`PresentationSlot` stay in-process
+    (guest slots need the `mount-component` GuestDom work in section 2.2). `Context::instance()` is in-process
+    only.
+  - `Facet::write` in a guest also resyncs the mirror (the host sends no event for the guest's own write); the
+    counter's "mirror lagged / released" texts are gone (lag auto-resyncs; revoked watches make `use_facet`
+    panic like in-process).
+  - Added `Error::Lagged`; `OperationReceipt/Status/Error` and `RefStatus` are now crate types (converted from
+    `clay_docs`/WIT), so both backends return the same values.
+  - A standalone counter's `badge` shows the in-memory count as of its last render (only `view` is notified).
+- **Proof.** `clay_mdk/context_fixture.rs` (example `context`, built via `export_micro!`) reads a host-written
+  row and registers one recording it, serves a typed `rows` call from its own mirror;
+  `lifecycle_conformance::context_collections_and_calls` runs it on Wasmtime and wcmp/Wasmi.
+  `micro_counter` (view + badge presentations, `count` call) builds as the guest and links natively (unit test
+  through `ACTIVATE`).
