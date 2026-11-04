@@ -57,30 +57,10 @@ module wflow_authority {
   }
 
   // How far a job had got when its current run was granted. `waiting` is the
-  // step number of the held wait, or -1 for Rust's `None`. Entering cleanup
-  // is progress too: the restart budget starts over for the cleanup phase.
+  // step number of the held wait, or -1 for Rust's `None`.
   type Progress = {
     steps: int,
     waiting: int,
-    cleanup: bool,
-  }
-
-  // The phase a job entered when it stopped forward work. `cause` is
-  // "cancelled" (an operator cancel, `reason` carries its reason), "failed"
-  // (the lease holder hit a terminal error, `reason` carries it), or
-  // "retries-exhausted" (the holder's transient failure found the forward
-  // retry budget spent, `reason` carries that error). `steps` is the
-  // committed-step count the boundary sits at; `has_lease`/`lease` is the
-  // lease held when cleanup began: interrupted by a cancel (and then the only
-  // one whose in-flight effect may still commit at `steps`), reporting the
-  // failure, or released by the exhausted retry.
-  type Cleanup = {
-    cause: str,
-    reason: str,
-    steps: int,
-    has_lease: bool,
-    lease: Lease,
-    position: int,
   }
 
   type Message = {
@@ -112,8 +92,6 @@ module wflow_authority {
     progress: Progress,
     has_fault: bool,
     fault: Fault,
-    has_cleanup: bool,
-    cleanup: Cleanup,
   }
 
   type Intent = {
@@ -125,7 +103,6 @@ module wflow_authority {
     wait: Wait,
     terminal: Terminal,
     fault: Fault,
-    cleanup: Cleanup,
   }
 
   type Outcome = {
@@ -149,7 +126,6 @@ module wflow_authority {
   // `resolution` is only meaningful for "wait_resolved" records: "timer",
   // "queued" (the oldest undelivered inbox message), or "delivered" (`message`
   // arrived while the job waited for one and is accepted in the same record).
-  // `cleanup` is only meaningful for "cleanup_started" records.
   type Record = {
     kind: str,
     key: str,
@@ -165,7 +141,6 @@ module wflow_authority {
     progress: Progress,
     retry: RetryWait,
     fault: Fault,
-    cleanup: Cleanup,
   }
 
   var state: State
@@ -236,16 +211,6 @@ module wflow_authority {
   def emptyProgress: Progress = {
     steps: 0,
     waiting: -1,
-    cleanup: false,
-  }
-
-  def emptyCleanup: Cleanup = {
-    cause: "",
-    reason: "",
-    steps: 0,
-    has_lease: false,
-    lease: emptyLease,
-    position: 0,
   }
 
   def emptyMessage: Message = {
@@ -277,8 +242,6 @@ module wflow_authority {
     progress: emptyProgress,
     has_fault: false,
     fault: emptyFault,
-    has_cleanup: false,
-    cleanup: emptyCleanup,
   }
 
   def emptyIntent: Intent = {
@@ -290,7 +253,6 @@ module wflow_authority {
     wait: emptyWait,
     terminal: emptyTerminal,
     fault: emptyFault,
-    cleanup: emptyCleanup,
   }
 
   def emptyRecord: Record = {
@@ -308,7 +270,6 @@ module wflow_authority {
     progress: emptyProgress,
     retry: emptyRetryWait,
     fault: emptyFault,
-    cleanup: emptyCleanup,
   }
 
   def outcome(kind: str, position: int, disposition: str, reason: str): Outcome = {
@@ -334,8 +295,6 @@ module wflow_authority {
   def hasJob(jobs: List[Job], key: str): bool = findJob(jobs, key).key == key
 
   def replaceJob(jobs: List[Job], replacement: Job): List[Job] = jobs.foldl([], (result, job) => result.append(if (job.key == replacement.key) replacement else job))
-
-  def removeJob(jobs: List[Job], key: str): List[Job] = jobs.foldl([], (result, job) => if (job.key == key) result else result.append(job))
 
   def clearLeases(jobs: List[Job]): List[Job] = jobs.foldl([], (result, job) => result.append({ ...job, leased: false, lease: emptyLease }))
 
@@ -386,15 +345,6 @@ module wflow_authority {
     fault: fault,
   }
 
-  def cleanupIntent(key: str, cleanup: Cleanup): Intent = {
-    ...emptyIntent,
-    kind: "cleanup",
-    key: key,
-    cleanup: cleanup,
-  }
-
-  // The job reached a final outcome, successful (`terminal`) or a classified
-  // authority-side failure (`fault`).
   def isSettled(job: Job): bool = job.has_terminal or job.has_fault
 
   // The disposition a duplicate acknowledgement reports for the job's current
@@ -408,7 +358,6 @@ module wflow_authority {
   def jobProgress(job: Job): Progress = {
     steps: job.steps.length(),
     waiting: if (job.waiting) job.wait.step else -1,
-    cleanup: job.has_cleanup,
   }
 
   // The restart count a grant would record: a due-retry re-run keeps the
@@ -424,19 +373,6 @@ module wflow_authority {
   // the resolved step up from its replay when it is next granted.
   def resolvedIntents(job: Job, resolved: Step): List[Intent] =
     if (job.leased) [continueIntent(job.key, resolved)] else []
-
-  // Whether a step of `kind` at `step_id` under `lease` belongs to the job's
-  // phase, mirroring Rust's `step_in_phase`: cleanup ("defer") steps exist
-  // only once cleanup began; forward effects stop there, except the one the
-  // cancelled lease was already executing, which may still commit at the
-  // boundary. A terminal failure interrupts nothing, so it admits none.
-  def stepInPhase(job: Job, kind: str, lease: Lease, step_id: int): bool =
-    if (not(job.has_cleanup)) kind != "defer"
-    else if (kind == "defer") true
-    else job.cleanup.cause == "cancelled"
-      and job.cleanup.has_lease
-      and job.cleanup.lease == lease
-      and step_id == job.cleanup.steps
 
   def applyToJob(job: Job, record: Record): Job =
     if (record.kind == "grant") {
@@ -500,22 +436,6 @@ module wflow_authority {
       has_fault: true,
       fault: record.fault,
     }
-    else if (record.kind == "cleanup_started") {
-      // The pending wait, if any, is abandoned: the woken invocation never
-      // resolves it and the cleanup steps take its slot. A parked retry
-      // stays, but no longer gates the grant that runs the cleanup. Entering
-      // cleanup is progress, so the retry budget starts over for the phase;
-      // an exhausted forward retry also releases the lease it was reported
-      // under, like the retry it stands in for.
-      ...job,
-      waiting: false,
-      wait: emptyWait,
-      retry_attempts: 0,
-      leased: job.leased and record.cleanup.cause != "retries-exhausted",
-      lease: if (record.cleanup.cause == "retries-exhausted") emptyLease else job.lease,
-      has_cleanup: true,
-      cleanup: record.cleanup,
-    }
     else {
       ...job,
       inbox: job.inbox.append(record.message),
@@ -539,10 +459,6 @@ module wflow_authority {
         incarnation: record.incarnation,
         submission_position: position,
       }),
-    }
-    else if (record.kind == "expire") {
-      ...applied,
-      jobs: before.jobs.removeJob(record.key),
     }
     else {
       ...applied,
@@ -631,12 +547,9 @@ module wflow_authority {
         state.jobs.hasJob(key),
         val job = state.jobs.findJob(key)
         // The host clock the driver passes with this grant is 0: a job parked
-        // on a retry with a positive deadline is not due yet, unless it has
-        // cleanup to run (`grantCleanupThroughRetry`).
-        if (job.retrying) all {
-          not(job.has_cleanup),
-          quiet(state, outcome("rejected", 0, "", "retry-pending")),
-        }
+        // on a retry with a positive deadline is not due yet.
+        if (job.retrying)
+          quiet(state, outcome("rejected", 0, "", "retry-pending"))
         else all {
           not(isSettled(job)),
           not(job.leased),
@@ -645,28 +558,8 @@ module wflow_authority {
       }
   }
 
-  // Cleanup does not wait for a retry deadline: the retry budget was charged
-  // when the retry was scheduled, and granting the parked job early (host
-  // clock still 0) to run its cleanup is that same re-run, not a restart.
-  action grantCleanupThroughRetry = {
-    nondet key = KEYS.oneOf()
-    nondet worker = WORKERS.oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.retrying,
-          job.has_cleanup,
-          not(isSettled(job)),
-          not(job.leased),
-          grantRun(key, job, worker),
-        }
-      }
-  }
-
   // The host fires a due retry by re-granting with its clock at the deadline.
-  // The due re-run is paid from the retry budget, so it keeps the restart
-  // count instead of charging one.
+  // The due re-run is paid from the retry budget, so it keeps the restart count.
   action grantDueRetry = {
     nondet key = KEYS.oneOf()
     nondet worker = WORKERS.oneOf()
@@ -709,52 +602,24 @@ module wflow_authority {
       }
   }
 
-  // Forward work ran out of its transient-error retry budget: instead of
-  // parking another retry the authority moves the job into cleanup, releasing
-  // the lease so the next grant runs the registered compensation on a fresh
-  // budget.
+  // Exhaustion rejects without mutation or publication. The lease remains
+  // current so the runtime can settle through the normal completion path.
   action retryExhausted = {
     nondet key = KEYS.oneOf()
     all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          not(job.waiting),
-          not(job.has_cleanup),
-          job.retry_attempts >= MAX_RETRIES,
-          cleanupStarted(key, job, {
-            cause: "retries-exhausted",
-            reason: "transient",
-            steps: job.steps.length(),
-            has_lease: true,
-            lease: job.lease,
-            position: state.revision + 1,
-          }, "park"),
-        }
+      state.jobs.hasJob(key),
+      val job = state.jobs.findJob(key)
+      all {
+        job.leased,
+        not(job.waiting),
+        job.retry_attempts >= MAX_RETRIES,
+        quiet(state, outcome("rejected", 0, "", "retries-exhausted")),
       }
+    }
   }
 
-  // The cleanup phase ran out of its retry budget too: the authority refuses
-  // to park another retry and the lease holder must settle the job with a
-  // failure, leaving the remaining compensation outstanding.
-  action cleanupRetryExhausted = {
-    nondet key = KEYS.oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          not(job.waiting),
-          job.has_cleanup,
-          job.retry_attempts >= MAX_RETRIES,
-          quiet(state, outcome("rejected", 0, "", "retries-exhausted"))
-        }
-      }
-  }
-
-  // A transient failure reported while the job is durably suspended: the wait
-  // owns the resumption, so the retry is an ordering violation.
+  // A failure reported while durably suspended is an ordering violation:
+  // the wait owns resumption.
   action retryWhileWaiting = {
     nondet key = KEYS.oneOf()
     all {
@@ -768,60 +633,42 @@ module wflow_authority {
       }
   }
 
-  // The durable entry into cleanup shared by `cancel`, `fail`, and
-  // `retryExhausted` (mirrors Rust's `cleanup_started`): the record, the intent that interrupts the
-  // held lease or wakes an unleased job, and the acknowledgement at the
-  // cleanup's position.
-  action cleanupStarted(key: str, job: Job, cleanup: Cleanup, disposition: str): bool =
-    commit(
-      state,
-      { ...emptyRecord, kind: "cleanup_started", key: key, incarnation: job.incarnation, cleanup: cleanup },
-      [cleanupIntent(key, cleanup)],
-      outcome("accepted", cleanup.position, disposition, ""),
-    )
-
-  // An operator cancels an unsettled job that is not yet cleaning up. It
-  // needs no lease: a running job records the lease it interrupts, a job
-  // parked on a wait abandons it, and a parked retry or unleased job is
-  // woken for cleanup by the next grant.
+  // Cancellation atomically removes the active job, fences its lease and
+  // publishes a permanent fault receipt before host-side teardown.
   action cancel = {
     nondet key = KEYS.oneOf()
     all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          not(isSettled(job)),
-          not(job.has_cleanup),
-          cleanupStarted(key, job, {
-            cause: "cancelled",
-            reason: "operator",
-            steps: job.steps.length(),
-            has_lease: job.leased,
-            lease: job.lease,
-            position: state.revision + 1,
-          }, "admitted"),
-        }
+      state.jobs.hasJob(key),
+      val job = state.jobs.findJob(key)
+      all {
+        not(isSettled(job)),
+        val fault = { failure: "cancelled", restarts: 0, position: state.revision + 1 }
+        commit(
+          state,
+          { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, fault: fault },
+          [faultIntent(key, fault)],
+          outcome("accepted", state.revision + 1, "completed", ""),
+        ),
       }
+    }
   }
 
-  // A second cancel (or a cancel of a job already cleaning up after a
-  // terminal failure) acknowledges the existing cleanup without interrupting
-  // it again.
+  // A later cancel of a cancelled receipt is rejected at the permanent
+  // terminal boundary; cancellation is not a duplicate command.
   action duplicateCancel = {
     nondet key = KEYS.oneOf()
     all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          not(isSettled(job)),
-          job.has_cleanup,
-          quiet(state, outcome("duplicate", job.cleanup.position, disposition(job), "")),
-        }
+      state.jobs.hasJob(key),
+      val job = state.jobs.findJob(key)
+      all {
+        job.has_fault,
+        job.fault.failure == "cancelled",
+        quiet(state, outcome("rejected", 0, "", "already-terminal")),
       }
+    }
   }
 
-  // A cancel of a settled job is rejected before the cleanup check, whether
-  // or not it ever entered cleanup.
+  // Every other terminal receipt has the same permanent cancellation boundary.
   action cancelSettled = {
     nondet key = KEYS.oneOf()
     all {
@@ -829,68 +676,13 @@ module wflow_authority {
         val job = state.jobs.findJob(key)
         all {
           isSettled(job),
+          not(job.has_fault and job.fault.failure == "cancelled"),
           quiet(state, outcome("rejected", 0, "", "already-terminal")),
         }
       }
   }
 
-  // The leased invocation hit a terminal error with compensation registered:
-  // the cause is recorded before any cleanup step runs, so a crash
-  // mid-cleanup resumes it instead of re-running forward work. (`fail` is a
-  // Quint built-in, hence the name.)
-  action failJob = {
-    nondet key = KEYS.oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          not(job.has_cleanup),
-          not(job.waiting),
-          cleanupStarted(key, job, {
-            cause: "failed",
-            reason: "boom",
-            steps: job.steps.length(),
-            has_lease: true,
-            lease: job.lease,
-            position: state.revision + 1,
-          }, "continue"),
-        }
-      }
-  }
-
-  // The lease holder reports a terminal error for a job already in cleanup
-  // (cancelled under this lease, or replaying a deterministic failure): it
-  // continues with the durable cause.
-  action duplicateFail = {
-    nondet key = KEYS.oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          job.has_cleanup,
-          quiet(state, outcome("duplicate", job.cleanup.position, "continue", "")),
-        }
-      }
-  }
-
-  // A terminal failure reported while the job is durably suspended: the lease
-  // holder cannot be parked on a wait while reporting it.
-  action failWhileWaiting = {
-    nondet key = KEYS.oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          job.waiting,
-          quiet(state, outcome("rejected", 0, "", "out-of-order")),
-        }
-      }
-  }
-
-  // The step record a lease holder commits at the job's next step.
+  // The effect record a lease holder commits at the job's next step.
   def nextStep(job: Job, kind: str, name: str, value: str, position: int): Step = {
     id: job.steps.length(),
     kind: kind,
@@ -901,8 +693,7 @@ module wflow_authority {
     position: position,
   }
 
-  // The leased invocation commits a forward effect at its next step. Forward
-  // work stops once cleanup began; `effectAfterCleanup` covers that phase.
+  // The leased invocation commits an effect at its next step.
   action commitStep = {
     nondet key = KEYS.oneOf()
     nondet name = STEP_NAMES.oneOf()
@@ -913,7 +704,6 @@ module wflow_authority {
           job.leased,
           not(isSettled(job)),
           not(job.waiting),
-          not(job.has_cleanup),
           val committed = nextStep(job, "effect", name, "value", state.revision + 1)
           commit(
             state,
@@ -925,81 +715,8 @@ module wflow_authority {
       }
   }
 
-  // The leased invocation commits a cleanup ("defer") step: the registered
-  // compensation it ran once cleanup began.
-  action commitDefer = {
-    nondet key = KEYS.oneOf()
-    nondet name = STEP_NAMES.oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          not(isSettled(job)),
-          job.has_cleanup,
-          val committed = nextStep(job, "defer", name, "undo", state.revision + 1)
-          commit(
-            state,
-            { ...emptyRecord, kind: "step", key: key, step: committed },
-            [continueIntent(key, committed)],
-            outcome("accepted", state.revision + 1, "continue", ""),
-          )
-        }
-      }
-  }
-
-  // A cleanup step reported while the job is still doing forward work: the
-  // phase check runs after the ordering and attempt checks, so a job that
-  // is not waiting reaches it and is rejected on phase.
-  action deferBeforeCleanup = {
-    nondet key = KEYS.oneOf()
-    nondet name = STEP_NAMES.oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          not(isSettled(job)),
-          not(job.waiting),
-          not(job.has_cleanup),
-          quiet(state, outcome("rejected", 0, "", "wrong-phase")),
-        }
-      }
-  }
-
-  // A forward effect reported once cleanup began. Exactly one may still
-  // commit: the effect the cancelled lease was executing when the cancel
-  // landed, at the boundary step under that same lease. Anything else (a
-  // second effect, another lease, or a terminal failure's cleanup) is a
-  // phase violation.
-  action effectAfterCleanup = {
-    nondet key = KEYS.oneOf()
-    nondet name = STEP_NAMES.oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          not(isSettled(job)),
-          job.has_cleanup,
-          if (stepInPhase(job, "effect", job.lease, job.steps.length())) {
-            val committed = nextStep(job, "effect", name, "value", state.revision + 1)
-            commit(
-              state,
-              { ...emptyRecord, kind: "step", key: key, step: committed },
-              [continueIntent(key, committed)],
-              outcome("accepted", state.revision + 1, "continue", ""),
-            )
-          } else
-            quiet(state, outcome("rejected", 0, "", "wrong-phase")),
-        }
-      }
-  }
-
-  // The last committed step is re-issued verbatim: an effect or defer step is
-  // acknowledged as a duplicate under its recorded lease; a wait-protocol
-  // step can never be committed by a step command, so a current lease learns
-  // its replay diverged and a stale one that its lease is gone.
+  // Only effects can be duplicated through CommitStep. Sleep and receive
+  // records belong to the wait protocol and therefore diverge here.
   action duplicateStep = {
     nondet key = KEYS.oneOf()
     all {
@@ -1008,7 +725,7 @@ module wflow_authority {
         all {
           job.steps.length() > 0,
           val committed = job.steps[job.steps.length() - 1]
-          if (committed.kind == "effect" or committed.kind == "defer")
+          if (committed.kind == "effect")
             quiet(state, outcome("duplicate", committed.position, "park", ""))
           else if (job.leased)
             quiet(state, outcome("rejected", 0, "", "nondeterministic"))
@@ -1143,7 +860,6 @@ module wflow_authority {
           job.leased,
           not(isSettled(job)),
           not(job.waiting),
-          not(job.has_cleanup),
           val wait = {
             step: job.steps.length(),
             timer: true,
@@ -1172,7 +888,6 @@ module wflow_authority {
           job.leased,
           not(isSettled(job)),
           not(job.waiting),
-          not(job.has_cleanup),
           if (job.delivered < job.inbox.length()) {
             val resolved = {
               id: job.steps.length(),
@@ -1208,27 +923,7 @@ module wflow_authority {
       }
   }
 
-  // A fresh wait (timer or receive) at the next step once cleanup began: a
-  // wait is forward work, so the replayed invocation is interrupted here
-  // instead of suspending again. The phase check sits before the queued
-  // inbox resolution, so even an undelivered message cannot resolve it.
-  action waitInCleanup = {
-    nondet key = KEYS.oneOf()
-    nondet timer = Set(true, false).oneOf()
-    all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.leased,
-          job.has_cleanup,
-          quiet(state, outcome("rejected", 0, "", "wrong-phase")),
-        }
-      }
-  }
-
-  // The current lease re-issues the wait it is suspended on, as a re-granted
-  // invocation does after replaying up to it. The durable wait (and its
-  // deadline) stands.
+  // A re-granted invocation re-attaches to the durable wait at the same step.
   action reattachWait = {
     nondet key = KEYS.oneOf()
     all {
@@ -1307,9 +1002,6 @@ module wflow_authority {
   }
 
   // The host fires a due timer, whether or not the job is currently leased.
-  // A settled job can still hold a stale wait (a fault keeps it and the
-  // deadline wheel re-arms every recovered wait), so the fire is rejected
-  // after the duplicate branch instead of resolving into a settled job.
   action fireTimer = {
     nondet key = KEYS.oneOf()
     all {
@@ -1357,8 +1049,6 @@ module wflow_authority {
   }
 
   // A timer fires at an uncommitted step when the job holds no timer wait.
-  // Settled jobs take the same rejection path as `fireTimer` (the settled
-  // check sits between the duplicate branch and the wait lookup).
   action staleFire = {
     nondet key = KEYS.oneOf()
     all {
@@ -1374,19 +1064,18 @@ module wflow_authority {
       }
   }
 
-  // The deadline wheel fires the timer a cancel abandoned: the wait is gone,
-  // so the fire finds nothing to resolve.
+  // A timer from before cancellation is fenced by the permanent receipt.
   action fireAfterCancel = {
     nondet key = KEYS.oneOf()
     all {
-        state.jobs.hasJob(key),
-        val job = state.jobs.findJob(key)
-        all {
-          job.has_cleanup,
-          not(isSettled(job)),
-          quiet(state, outcome("rejected", 0, "", "not-waiting")),
-        }
+      state.jobs.hasJob(key),
+      val job = state.jobs.findJob(key)
+      all {
+        job.has_fault,
+        job.fault.failure == "cancelled",
+        quiet(state, outcome("rejected", 0, "", "already-terminal")),
       }
+    }
   }
 
   // A message with a fresh id (its payload is the id) is sent to `key`.
@@ -1402,8 +1091,6 @@ module wflow_authority {
         quiet(state, outcome("rejected", 0, "", "unknown-job"))
       else if (isSettled(job))
         quiet(state, outcome("rejected", 0, "", "already-terminal"))
-      else if (job.has_cleanup)
-        quiet(state, outcome("rejected", 0, "", "wrong-phase"))
       else if (job.waiting and not(job.wait.timer)) {
         val resolved = {
           id: job.wait.step,
@@ -1430,25 +1117,7 @@ module wflow_authority {
     }
   }
 
-  // A message with a fresh id sent to a job in cleanup: its wait was abandoned
-  // and no new one may begin, so admitting the message would promise a
-  // delivery that cannot happen. The settled check still runs first, and a
-  // resent id still deduplicates (`duplicateMessage`).
-  action sendInCleanup = {
-    nondet key = KEYS.oneOf()
-    nondet id = MESSAGE_IDS.oneOf()
-    val job = state.jobs.findJob(key)
-    all {
-      state.jobs.hasJob(key),
-      not(job.inbox.hasMessage(id)),
-      not(isSettled(job)),
-      job.has_cleanup,
-      quiet(state, outcome("rejected", 0, "", "wrong-phase")),
-    }
-  }
-
-  // An accepted message is resent with the same payload, including to a
-  // job that has since completed.
+  // An accepted message is resent with the same payload while the job is active.
   action duplicateMessage = {
     nondet key = KEYS.oneOf()
     nondet id = MESSAGE_IDS.oneOf()
@@ -1469,41 +1138,7 @@ module wflow_authority {
     }
   }
 
-  // A settled job receipt expires at or after its retention deadline,
-  // releasing the key for a fresh incarnation on the next submit.
-  action expire = {
-    nondet key = KEYS.oneOf()
-    all {
-      state.jobs.hasJob(key),
-      val job = state.jobs.findJob(key)
-      all {
-        isSettled(job),
-        val position = state.revision + 1
-        commit(
-          state,
-          { ...emptyRecord, kind: "expire", key: key, incarnation: job.incarnation },
-          [],
-          outcome("accepted", position, "completed", ""),
-        )
-      }
-    }
-  }
-
-  // An expiry command before the retention deadline is rejected without
-  // mutating the receipt.
-  action expireBeforeDeadline = {
-    nondet key = KEYS.oneOf()
-    all {
-      state.jobs.hasJob(key),
-      val job = state.jobs.findJob(key)
-      all {
-        isSettled(job),
-        quiet(state, outcome("rejected", 0, "", "retention-pending")),
-      }
-    }
-  }
-
-  // Recovery keeps waits and inboxes; only leases are volatile.
+  // Recovery retains receipts, waits and inboxes; only leases are volatile.
   action crash = {
     val recovered = durable.foldl(initial, (before, record) => before.applyRecord(record))
     all {
@@ -1534,31 +1169,22 @@ module wflow_authority {
     duplicateSubmit,
     grant,
     grantDueRetry,
-    grantCleanupThroughRetry,
     commitStep,
-    commitDefer,
-    deferBeforeCleanup,
-    effectAfterCleanup,
     duplicateStep,
     staleResult,
     renamedStep,
     renamedWait,
     retry,
     retryExhausted,
-    cleanupRetryExhausted,
     retryWhileWaiting,
     cancel,
     duplicateCancel,
     cancelSettled,
-    failJob,
-    duplicateFail,
-    failWhileWaiting,
     complete,
     duplicateComplete,
     revoke,
     beginTimerWait,
     beginMessageWait,
-    waitInCleanup,
     reattachWait,
     reattachResolvedWait,
     conflictingWait,
@@ -1569,11 +1195,8 @@ module wflow_authority {
     staleFire,
     fireAfterCancel,
     sendMessage,
-    sendInCleanup,
     duplicateMessage,
     conflictingMessage,
-    expire,
-    expireBeforeDeadline,
     crash,
     snapshotRestart,
   }
@@ -1581,7 +1204,7 @@ module wflow_authority {
   val contiguousCommittedPrefix = state.jobs.foldl(true, (valid, job) => valid and
     job.steps.indices().forall(index =>
       job.steps[index].id == index
-        and Set("effect", "sleep", "recv", "defer").contains(job.steps[index].kind)
+        and Set("effect", "sleep", "recv").contains(job.steps[index].kind)
         and job.steps[index].position <= state.revision
         and (index == 0 or job.steps[index - 1].position < job.steps[index].position)
     )
@@ -1610,10 +1233,8 @@ module wflow_authority {
   )
 
   // Retries and restarts stay inside the submission budget, a parked retry is
-  // never leased and was charged to the budget (unless cleanup began after it
-  // was parked and reset the count), progress is only recorded by a grant,
-  // and a settled job carries at most one settlement (a fault clears any
-  // parked retry).
+  // never leased and has been charged to the budget, progress is only recorded
+  // by a grant, and settlement clears any parked retry.
   val retrySafety = state.jobs.foldl(true, (valid, job) => valid and
     job.restarts <= MAX_RESTARTS + 1
       and job.retry_attempts <= MAX_RETRIES
@@ -1621,7 +1242,7 @@ module wflow_authority {
         not(job.leased)
         and not(isSettled(job))
         and job.retry.fire_at >= 0
-        and (job.retry_attempts >= 1 or (job.has_cleanup and job.cleanup.position > job.retry.position))
+        and job.retry_attempts >= 1
       ))
       and (not(job.has_progress) or job.progress.steps <= job.steps.length())
       and (not(job.has_fault) or (not(job.retrying) and job.fault.position <= state.revision))
@@ -1642,37 +1263,8 @@ module wflow_authority {
 
   val rejectionHasNoIntents = state.outcome.kind != "rejected" or state.intents == []
 
-  // Cleanup abandons the held wait and ends forward work: cleanup ("defer")
-  // steps exist only after cleanup began, and the only forward step that may
-  // follow it is the one effect the cancelled lease was already executing,
-  // committed at the boundary under that lease. A cleanup the lease holder
-  // began (failure or exhausted retry) records that lease.
-  val cleanupSafety = state.jobs.foldl(true, (valid, job) => valid and
-    if (job.has_cleanup) and {
-      not(job.waiting),
-      job.cleanup.position <= state.revision,
-      job.cleanup.steps <= job.steps.length(),
-      job.cleanup.cause == "cancelled" or job.cleanup.cause == "failed" or job.cleanup.cause == "retries-exhausted",
-      job.cleanup.cause == "cancelled" or job.cleanup.has_lease,
-      job.steps.indices().forall(index =>
-        val committed = job.steps[index]
-        if (committed.kind == "defer") committed.position > job.cleanup.position
-        else committed.position < job.cleanup.position or and {
-          committed.id == job.cleanup.steps,
-          job.cleanup.has_lease,
-          committed.lease == job.cleanup.lease,
-          job.cleanup.cause == "cancelled",
-        }
-      ),
-    } else and {
-      job.steps.indices().forall(index => job.steps[index].kind != "defer"),
-      job.cleanup == emptyCleanup,
-    }
-  )
-
-  // Settled jobs retain only their compact receipt: active step history,
-  // leases, waits, retries, progress, cleanup, and inboxes are dropped at
-  // settlement.
+  // Settled jobs retain only their compact permanent receipt: active step
+  // history, leases, waits, retries, progress, and inboxes are dropped.
   val receiptSafety = state.jobs.foldl(true, (valid, job) => valid and
     (not(isSettled(job)) or and {
       not(job.has_terminal and job.has_fault),
@@ -1689,8 +1281,6 @@ module wflow_authority {
       job.restarts == 0,
       not(job.has_progress),
       job.progress == emptyProgress,
-      not(job.has_cleanup),
-      job.cleanup == emptyCleanup,
     })
   )
 
@@ -1702,7 +1292,6 @@ module wflow_authority {
     waitSafety,
     inboxSafety,
     retrySafety,
-    cleanupSafety,
     receiptSafety,
     rejectionHasNoIntents,
     durabilityBoundary,
