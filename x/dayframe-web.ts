@@ -77,22 +77,31 @@ await $`wasm-bindgen --target web --no-typescript --out-dir ${site} --out-name d
   target.join("wasm32-unknown-unknown/wasm-release/dayframe_web.wasm")
 }`;
 await Deno.mkdir(site.join("packages").toString(), { recursive: true });
+// One index entry per `<name>.manifest.json` beside its `<name>.component.wasm`, in name order
+// (the order the desktop shell scans them in).
+const packageNames = [...Deno.readDirSync(packageDirectory)]
+  .flatMap((entry) => entry.name.match(/^(.+)\.manifest\.json$/)?.[1] ?? [])
+  .sort();
+let guestBytes = 0;
 {
-  const counterBytes = await Deno.readFile(
-    `${packageDirectory}/counter.component.wasm`,
-  );
-  const sidecar = JSON.parse(
-    await Deno.readTextFile(`${packageDirectory}/counter.manifest.json`),
-  );
-  const index = [{
-    location: "packages/counter.component.wasm",
-    digest: await blake3Hex(counterBytes),
-    sidecar,
-  }];
-  await Deno.writeFile(
-    site.join("packages/counter.component.wasm").toString(),
-    counterBytes,
-  );
+  const index = [];
+  for (const name of packageNames) {
+    const bytes = await Deno.readFile(
+      `${packageDirectory}/${name}.component.wasm`,
+    );
+    guestBytes += bytes.length;
+    index.push({
+      location: `packages/${name}.component.wasm`,
+      digest: await blake3Hex(bytes),
+      sidecar: JSON.parse(
+        await Deno.readTextFile(`${packageDirectory}/${name}.manifest.json`),
+      ),
+    });
+    await Deno.writeFile(
+      site.join(`packages/${name}.component.wasm`).toString(),
+      bytes,
+    );
+  }
   await site.join("packages/index.json").writeText(JSON.stringify(index));
 }
 // `ui::ThemeRoot` loads `asset!("/assets/tailwind.css")`. Without `dx` the manganis
@@ -180,9 +189,7 @@ const gzip = new Deno.Command("gzip", {
   stdout: "piped",
 }).outputSync().stdout;
 console.log(
-  `bundle-size dayframe_web host=${hostBytes} gzip=${gzip.length} guest=${
-    (await Deno.stat(`${packageDirectory}/counter.component.wasm`)).size
-  }`,
+  `bundle-size dayframe_web host=${hostBytes} gzip=${gzip.length} guests=${guestBytes}`,
 );
 
 await site.join("index.html").writeText(`<!doctype html>

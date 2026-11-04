@@ -845,9 +845,9 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
             for row in roots.iter().filter(|row| row.value.pinned || settings_open()) {
                 div { key: "{row.key}", "aria-label": "{row.value.title}",
                     // The root's presentation is a row attachment: a lazy endpoint the
-                    // shell redeems, which starts the micro that publishes it. Guest-written
-                    // mounting micros (workspace layout, canvas) place other components
-                    // through the wire-level slot primitive of ADR 015 §10.
+                    // shell redeems, which starts the micro that publishes it. A micro that
+                    // arranges other micros' presentations (the layout, ADR 031 §13) redeems
+                    // them itself through slots of its own; the shell never pushes components.
                     PresentationSlot {
                         reference: row.attachments[row.value.content.index()].clone(),
                     }
