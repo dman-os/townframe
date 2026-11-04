@@ -7,6 +7,8 @@
 //! `parent_path`, and applies or revokes service-owned local drawer grants within the nodules
 //! actor's delegated authority.
 
+use crate::dispatch::ProviderState;
+use crate::dispatch::Router;
 use crate::store;
 use big_cabinet::DatumStoreHandle;
 use big_cabinet_core::authority::Actor;
@@ -32,6 +34,7 @@ use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
+use big_nodule_core::inventory::InstalledNodule;
 use big_nodule_core::inventory::InventoryError;
 use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::NoduleActor;
@@ -67,6 +70,7 @@ pub(crate) struct Stores {
     pub(crate) datum_store: DatumStoreHandle<NoduleConfig>,
     pub(crate) parent: Actor,
     pub(crate) parent_path: String,
+    pub(crate) dispatch: Arc<Router>,
 }
 
 pub(crate) enum Command {
@@ -583,6 +587,7 @@ impl State {
                     config,
                     reason,
                 } => {
+                    self.stores.dispatch.unbind(&plug_id.to_string());
                     let error = match revoke_errors.get(&plug_id) {
                         Some(revoke_err) => format!("{reason}; {revoke_err}"),
                         None => reason,
@@ -610,6 +615,7 @@ impl State {
                     installed,
                     desired_grants,
                 } => {
+                    self.register_operations(&installed);
                     let record = self
                         .reconcile_admitted(
                             context,
@@ -624,9 +630,34 @@ impl State {
             }
         }
 
+        // A plug that left the config (uninstall) has no resolution to unbind it from above.
+        for plug_id in self.records.keys() {
+            if !new_records.contains_key(plug_id) {
+                self.stores.dispatch.unbind(&plug_id.to_string());
+            }
+        }
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
+    }
+
+    /// Makes an admitted nodule's `implements` visible through dispatch under its plug id, as
+    /// not ready for the reason [`InstalledNodule::readiness`] reports (today the handler
+    /// artifact is unavailable and there is no executor). A disabled nodule is unbound instead:
+    /// two providers of one operation are ambiguous, and disabling one is how an operator
+    /// resolves that, which a registered-but-disabled claim would keep blocking. Registering is
+    /// a no-op when nothing changed, so every reconcile may call this.
+    fn register_operations(&self, installed: &InstalledNodule) {
+        let provider_id = installed.plug_id.to_string();
+        if installed.enabled {
+            self.stores.dispatch.register(
+                &provider_id,
+                installed.admitted.operations.clone(),
+                ProviderState::NotReady(installed.readiness()),
+            );
+        } else {
+            self.stores.dispatch.unbind(&provider_id);
+        }
     }
 
     async fn ensure_nodule_actor(
@@ -660,7 +691,7 @@ impl State {
         context: &RequestContext,
         heads: &[ChangeHash],
         on_boot: bool,
-        installed: big_nodule_core::inventory::InstalledNodule,
+        installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
     ) -> Res<NoduleRecord> {
         let plug_id = installed.plug_id.clone();

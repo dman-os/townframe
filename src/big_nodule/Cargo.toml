@@ -28,7 +28,8 @@ indexmap = { version = "2", features = ["serde"] }
 # errors and state
 futures.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync"] }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 big_repo.workspace = true

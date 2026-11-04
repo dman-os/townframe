@@ -84,6 +84,13 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 - A store `source` names an implemented operation; absent means the host writes the store. Initializer targets are implemented or required operations, and never a known subscription.
 - Workflows have no manifest section until the wflow service PR.
 
+### D2c. Dispatch slice 1 decisions (manager, 2026-11-04)
+- The router entry state is `ProviderState::{Ready(ProviderKind), NotReady(Readiness)}`, so a not-ready provider is uncallable by construction.
+- A nodule registers its `implements` with its own `InstalledNodule::readiness()`, which is `ArtifactsUnavailable` today; there is no hardcoded reason.
+- A **disabled nodule is unbound**, not registered `NotReady(Disabled)`. Disabling is how an operator resolves two providers of one NSID (`NotReady(Ambiguous)`). Cost: callers can't tell "disabled" from "unknown".
+- `Denied` is decided before lookup, so callers can't probe which operations exist. Authority prefixes match whole NSID segments.
+- `InvocationContext.deadline_unix_ms` keeps the wall-clock form used by `RequestContext`.
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
@@ -110,8 +117,14 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
-- Next: dispatch (contract in `big_nodule_core`, host in `big_nodule`: routing table, ocap admission, `BuiltIn` provider, e2e).
+- Next: dispatch slice 2, the Wasm provider (see To do).
 ## Done
+
+- 2026-11-04: Dispatch slice 1.
+  - `big_nodule_core::dispatch` contract; `big_nodule::dispatch` service, with a `RwLock<Arc<Table>>` router and a reverse index.
+  - Ambiguity is reported as `NotReady(Ambiguous)`; the `BuiltIn` provider; deadline via `tokio::time::timeout`.
+  - Nodule `implements` are registered from the reconciler. big_node boots dispatch before nodules, and dispatch has its own actor and namespace.
+  - Manager verified: 48/48, clippy, fmt, lint and api clean.
 
 - 2026-11-04: Batch 3, admission narrowed and manifest reshaped (D2b). Manager verified: clippy clean, 35/35, lint and api clean.
 
@@ -181,6 +194,11 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 - [main] `src/big_node/e2e/blob_discovery/mod.rs` is not rustfmt-clean on origin/main (byte-identical here), so the flake `rust-fmt` check fails on it.
 - [main] The big_node `blob_discovery` e2e tests take about 95–105s alone. Under a parallel run they exceed the default nextest kill (60s × 2) and aren't named `long_test`. Pinned 2026-11-04; they don't involve nodules.
+
+- [perf] Dispatch admission makes 2–3 in-process authority IRPC calls per invoke (`ResolveAuthority`/`ResolveActor`), each a pooled SQLite point read in the authority service. That contradicts D6 "no I/O on admission". Fix with an in-memory actor-row cache in the authority service (main's code), invalidated on actor changes. To do before the PR is review-ready.
+- [slice 2] `Provider::call` currently gets only `InvocationContext`. The Wasm provider needs the **caller identity/authority** (for the authority header). Pass the verified caller into providers. Dropping the future on deadline is the cancellation path.
+- [cleanup] `owns_nsid` (`big_nodule/state.rs`) and `under` (`big_nodule/dispatch.rs`) duplicate the NSID-prefix check. Unify in `big_nodule_core`.
+- [perf, minor] `Router::register` rebuilds the whole table per provider. Reconcile registers per nodule, so it's O(n²) per pass. Fine at today's scale; batch registration if it grows.
 
 ## Deferred
 

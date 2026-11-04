@@ -21,6 +21,8 @@ use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_nodule::Nodules;
 use big_nodule::NodulesConfig;
+use big_nodule::dispatch::Dispatch;
+use big_nodule::dispatch::DispatchConfig;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::SharedBigRepo;
@@ -57,10 +59,12 @@ pub struct BigNode {
     pub blobs: big_blobs::Blobs,
     pub blob_workers: big_blobs::workers::BlobWorkers,
     pub nodules_actor: Actor,
+    pub dispatch_actor: Actor,
     pub indexes: Arc<Indexes>,
     pub drawer_access: Arc<DrawerAccess>,
     pub docs: DocsRepo,
     pub drawers: Drawers,
+    pub dispatch: Dispatch,
     pub nodules: Nodules,
 }
 
@@ -85,26 +89,17 @@ impl BigNode {
                     },
                 )
             };
+            let namespace_of = |actor: &Actor| authority.service.open_namespace(actor.actor_id);
             let docs_actor = open("documents").await?;
             let drawers_actor = open("drawers").await?;
             let nodules_actor = open("nodules").await?;
+            let dispatch_actor = open("dispatch").await?;
             let blobs_actor = open("blobs").await?;
-            let blobs_namespace = authority
-                .service
-                .open_namespace(blobs_actor.actor_id)
-                .await?;
-            let docs_namespace = authority
-                .service
-                .open_namespace(docs_actor.actor_id)
-                .await?;
-            let drawers_namespace = authority
-                .service
-                .open_namespace(drawers_actor.actor_id)
-                .await?;
-            let nodules_namespace = authority
-                .service
-                .open_namespace(nodules_actor.actor_id)
-                .await?;
+            let blobs_namespace = namespace_of(&blobs_actor).await?;
+            let docs_namespace = namespace_of(&docs_actor).await?;
+            let drawers_namespace = namespace_of(&drawers_actor).await?;
+            let nodules_namespace = namespace_of(&nodules_actor).await?;
+            let dispatch_namespace = namespace_of(&dispatch_actor).await?;
 
             let (repo, repo_stop) = BigRepo::boot(config.sqlite_runtime, config.repo).await?;
             stop.stages.push(Stage::Repo(repo_stop));
@@ -176,19 +171,24 @@ impl BigNode {
             )
             .await?;
             stop.stages.push(Stage::Service(blob_stop));
-            let config_drawer = drawers.local().config_id.clone();
-            grant_config_drawer(&drawers, &drawers_actor, &nodules_actor, &config_drawer).await?;
-            let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
+            // Dispatch boots first: the nodule service registers its providers in dispatch's
+            // router, so it must stop first and dispatch last (reverse of construction).
+            let (dispatch, dispatch_stop) = big_nodule::dispatch::boot(DispatchConfig {
                 authority: authority.client.clone(),
-                docs: docs.client.clone(),
-                drawers: drawers.client.clone(),
-                config_drawer,
-                actor: nodules_actor.clone(),
-                actor_path: "nodules".into(),
-                namespace: nodules_namespace,
+                namespace: dispatch_namespace,
                 operator: authority.service.operator_uuid(),
-                sql: config.sql,
-            })
+            });
+            stop.stages.push(Stage::Service(dispatch_stop));
+            let (nodules, nodules_stop) = boot_nodules(
+                &authority,
+                &docs,
+                &drawers,
+                &drawers_actor,
+                &nodules_actor,
+                nodules_namespace,
+                Arc::clone(&dispatch.router),
+                config.sql,
+            )
             .await?;
             stop.stages.push(Stage::Service(nodules_stop));
             Ok(Self {
@@ -203,10 +203,12 @@ impl BigNode {
                 blobs,
                 blob_workers,
                 nodules_actor,
+                dispatch_actor,
                 indexes,
                 drawer_access,
                 docs,
                 drawers,
+                dispatch,
                 nodules,
             })
         }
@@ -219,6 +221,39 @@ impl BigNode {
             },
         }
     }
+}
+
+/// Grants the nodules actor admin over the node's config drawer, then boots the nodule service
+/// on it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "boot wiring of already-built services"
+)]
+async fn boot_nodules(
+    authority: &Authority,
+    docs: &DocsRepo,
+    drawers: &Drawers,
+    drawers_actor: &Actor,
+    nodules_actor: &Actor,
+    namespace: Namespace,
+    dispatch: Arc<big_nodule::dispatch::Router>,
+    sql: Database,
+) -> Res<(Nodules, service_utils_rs::StopToken)> {
+    let config_drawer = drawers.local().config_id.clone();
+    grant_config_drawer(drawers, drawers_actor, nodules_actor, &config_drawer).await?;
+    Ok(big_nodule::boot(NodulesConfig {
+        authority: authority.client.clone(),
+        docs: docs.client.clone(),
+        drawers: drawers.client.clone(),
+        config_drawer,
+        actor: nodules_actor.clone(),
+        actor_path: "nodules".into(),
+        namespace,
+        operator: authority.service.operator_uuid(),
+        dispatch,
+        sql,
+    })
+    .await?)
 }
 
 /// Mints the drawers actor's admin capability over the node's config drawer and grants it to the

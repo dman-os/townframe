@@ -14,6 +14,7 @@ use sqlite_rs as sqlite_rs_alias;
 mod sqlite {
     include!("sqlite/gen.rs");
 }
+pub mod dispatch;
 mod state;
 mod store;
 
@@ -94,7 +95,8 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
 /// drawers services it reads config from and applies grants through, the node's config drawer,
 /// the subsystem actor it provisions nodule actors under and that actor's registry path, the
 /// namespace it mints management handles in, the operator whose identity administers nodules,
-/// and its database.
+/// the dispatch router it registers each admitted nodule's implemented operations in, and its
+/// database.
 pub struct NodulesConfig {
     pub authority: Client<AuthorityProtocol>,
     pub docs: Client<DocsProtocol>,
@@ -104,6 +106,7 @@ pub struct NodulesConfig {
     pub actor_path: String,
     pub namespace: Namespace,
     pub operator: Uuid7,
+    pub dispatch: Arc<dispatch::Router>,
     pub sql: Database,
 }
 
@@ -419,6 +422,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         datum_store,
         parent: config.actor,
         parent_path: config.actor_path,
+        dispatch: config.dispatch,
     })
     .await
     {

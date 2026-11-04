@@ -5,6 +5,9 @@
 use crate::Nodules;
 use crate::NodulesConfig;
 use crate::boot;
+use crate::dispatch::Dispatch;
+use crate::dispatch::DispatchConfig;
+use crate::dispatch::Router;
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
 use big_cabinet::DocsConfig;
@@ -84,6 +87,8 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+mod dispatch;
+
 const NODULES_PATH: &str = "nodules";
 const NOTE: &str = "org.example.note";
 
@@ -159,6 +164,8 @@ struct Node {
     docs: DocsRepo,
     drawers: Drawers,
     sql: TestDb,
+    dispatch: Dispatch,
+    dispatch_stop: StopToken,
     nodules: Nodules,
     stop: Option<StopToken>,
 }
@@ -187,6 +194,17 @@ async fn node() -> Node {
     let docs_actor = open("documents").await.expect("docs actor");
     let drawers_actor = open("drawers").await.expect("drawers actor");
     let nodules_actor = open(NODULES_PATH).await.expect("nodules actor");
+    let dispatch_actor = open("dispatch").await.expect("dispatch actor");
+    let dispatch_namespace = authority
+        .service
+        .open_namespace(dispatch_actor.actor_id)
+        .await
+        .expect("dispatch namespace");
+    let (dispatch, dispatch_stop) = crate::dispatch::boot(DispatchConfig {
+        authority: authority.client.clone(),
+        namespace: dispatch_namespace,
+        operator: authority.service.operator_uuid(),
+    });
     let docs_namespace = authority
         .service
         .open_namespace(docs_actor.actor_id)
@@ -277,9 +295,16 @@ async fn node() -> Node {
         nodules_actor.actor_id,
     )
     .await;
-    let (nodules, stop) = boot_nodules(&authority, &docs, &drawers, &nodules_actor, &sql)
-        .await
-        .expect("nodule service boot");
+    let (nodules, stop) = boot_nodules(
+        &authority,
+        &docs,
+        &drawers,
+        &nodules_actor,
+        &dispatch.router,
+        &sql,
+    )
+    .await
+    .expect("nodule service boot");
     Node {
         authority,
         authority_stop,
@@ -295,6 +320,8 @@ async fn node() -> Node {
         docs,
         drawers,
         sql,
+        dispatch,
+        dispatch_stop,
         nodules,
         stop: Some(stop),
     }
@@ -341,6 +368,7 @@ async fn boot_nodules(
     docs: &DocsRepo,
     drawers: &Drawers,
     nodules_actor: &Actor,
+    dispatch: &Arc<Router>,
     sql: &TestDb,
 ) -> Result<(Nodules, StopToken), NodulesError> {
     let namespace = authority
@@ -357,6 +385,7 @@ async fn boot_nodules(
         actor_path: NODULES_PATH.into(),
         namespace,
         operator: authority.service.operator_uuid(),
+        dispatch: Arc::clone(dispatch),
         sql: (**sql).clone(),
     })
     .await
@@ -371,6 +400,7 @@ impl Node {
             &self.docs,
             &self.drawers,
             &self.nodules_actor,
+            &self.dispatch.router,
             &self.sql,
         )
         .await?;
@@ -390,6 +420,7 @@ impl Node {
         self.policy_stop.stop().await;
         self.index_stop.stop().await;
         self.repo_stop.stop().await.expect("repo stop");
+        self.dispatch_stop.stop().await;
         self.authority_stop.stop().await;
     }
 

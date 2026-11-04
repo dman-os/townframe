@@ -19,6 +19,8 @@ pub enum big_nodule_core::StoreMode { Frontier, Log, # [datum (other)] Unknown (
 pub enum big_nodule_core::config::Admission { Admitted { version : Version , nodule : Nodule , admitted : crate :: Admitted , artifacts : BTreeMap < String , (big_plugs_core :: Artifact , crate :: inventory :: ArtifactState) > , }, # [doc = " The envelope cannot be installed; `version` and `nodule_id` are best-effort reads of the"] # [doc = " raw envelope for the refusal record."] Refused { version : Option < Version > , nodule_id : Option < String > , reason : String , } }
 pub enum big_nodule_core::config::DatumSlot< T > { # [default] Absent, Accepted { value : T , raw : Option < Value > , }, Invalid { raw : Option < Value > , reason : String , } }
 pub enum big_nodule_core::config::NoduleResolution { Admitted { installed : InstalledNodule , desired_grants : BTreeMap < DrawerId , DrawerAccess > , }, Refused { plug_id : PlugId , version : Option < Version > , revision : Option < Revision > , nodule_id : Option < String > , enabled : bool , config : Option < IndexMap < String , Value > > , reason : String , } }
+pub enum big_nodule_core::dispatch::DispatchError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("no provider implements the operation")] UnknownOperation, # [doc = " Retryable: the provider exists but is not serving yet."] # [error ("the operation's provider is not ready: {reason:?}")] NotReady { reason : NotReadyReason }, # [error ("the provider refused the input: {0}")] InvalidInput (String), # [error ("the call exceeded its deadline")] DeadlineExceeded, # [doc = " The provider's own XRPC error, passed through untouched."] # [error ("the provider failed with status {status}")] Provider { status : u16 , body : Value } }
+pub enum big_nodule_core::dispatch::NotReadyReason { Provider (Readiness), Ambiguous }
 pub enum big_nodule_core::inventory::ArtifactState { Unavailable }
 pub enum big_nodule_core::inventory::InventoryError { # [error (transparent)] Plug (# [from] PlugError), # [error (transparent)] Nodule (# [from] NoduleError), # [error ("plug `{0}` carries no nodule contribution")] MissingContribution (PlugId), # [error ("plug `{id}` nodule contribution has unsupported schema `{schema}`")] UnsupportedSchema { id : PlugId , schema : String }, # [error ("plug `{id}` nodule contribution is not a valid nodule datum: {reason}")] InvalidContribution { id : PlugId , reason : String }, # [error ("plug `{id}` handler requires artifact `{artifact}` not declared in plug envelope")] MissingArtifact { id : PlugId , artifact : String }, # [error ("nodule `{nodule_id}` in plug `{id}` conflicts with authority `{existing_nodule}` owned by `{existing_plug}`")] AuthorityConflict { id : PlugId , nodule_id : String , existing_plug : Box < PlugId > , existing_nodule : String , }, # [error ("plug `{id}` cannot change nodule authority from `{existing}` to `{incoming}`")] AuthorityChanged { id : PlugId , existing : String , incoming : String , }, # [error ("nodule for plug `{0}` is not installed")] UnknownPlug (PlugId), # [error ("nodule for plug `{0}` declares no config schema")] NoConfigSchema (PlugId) }
 pub enum big_nodule_core::inventory::Readiness { Refused, Disabled, ArtifactsUnavailable, ExecutorUnavailable }
@@ -48,11 +50,14 @@ pub impl big_nodule_core::config::NoduleGrants::fn from_drawers (drawers : BTree
 pub impl big_nodule_core::config::NoduleInstall::fn decode_plug (& self) -> Result < Plug , String >
 pub impl big_nodule_core::config::NoduleInstall::fn from_plug (plug : & Plug , enabled : bool) -> Self
 pub impl big_nodule_core::config::NoduleSettings::fn new (values : IndexMap < String , Value >) -> Self
+pub impl big_nodule_core::dispatch::DispatchScope::fn covers (& self , other : & Self) -> bool
+pub impl big_nodule_core::dispatch::DispatchScope::fn permits (& self , nsid : & str) -> bool
 pub impl big_nodule_core::inventory::InstalledNodule::fn is_configured (& self) -> bool
 pub impl big_nodule_core::inventory::InstalledNodule::fn readiness (& self) -> Readiness
 pub impl big_nodule_core::inventory::Readiness::fn is_ready (self) -> bool
 pub impl big_nodule_core::protocol::NoduleScope::fn covers (& self , other : & Self) -> bool
 pub mod big_nodule_core::config
+pub mod big_nodule_core::dispatch
 pub mod big_nodule_core::inventory
 pub mod big_nodule_core::protocol
 pub struct big_nodule_core::Admitted  { operations: BTreeMap < String , Option < OperationKind > >, artifacts: BTreeSet < String > }
@@ -68,6 +73,11 @@ pub struct big_nodule_core::config::NoduleEntry  { install: DatumSlot < NoduleIn
 pub struct big_nodule_core::config::NoduleGrants  { drawers: BTreeMap < DrawerId , EntryAccess >, extra: Extra }
 pub struct big_nodule_core::config::NoduleInstall  { envelope: IndexMap < String , Value >, revision: Revision, enabled: bool, extra: Extra }
 pub struct big_nodule_core::config::NoduleSettings  { values: IndexMap < String , Value >, extra: Extra }
+pub struct big_nodule_core::dispatch::DispatchScope  { operations: BTreeSet < String >, authorities: BTreeSet < String > }
+pub struct big_nodule_core::dispatch::InvocationContext  { deadline_unix_ms: Option < u64 >, idempotency_key: Option < String > }
+pub struct big_nodule_core::dispatch::Invoke  { authorization: Authorization, operation: String, input: Value, context: InvocationContext }
+pub struct big_nodule_core::dispatch::InvokeOutput  { output: Value }
+pub struct big_nodule_core::dispatch::MintDispatchCapability  { authorization: Authorization, scope: DispatchScope, rights: Rights }
 pub struct big_nodule_core::inventory::InstalledNodule  { plug_id: PlugId, version: Version, revision: Revision, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, config: Option < IndexMap < String , Value > > }
 pub struct big_nodule_core::protocol::AdmitNodule  { authorization: Authorization, plug: Plug, drawers: Option < BTreeMap < DrawerId , DrawerAccess > > }
 pub struct big_nodule_core::protocol::ConfigureNodule  { authorization: Authorization, plug_id: PlugId, settings: IndexMap < String , Value > }
