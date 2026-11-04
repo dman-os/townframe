@@ -7,9 +7,11 @@ use micro_settings_manifest::Section;
 
 // The package directory must install the Wasmtime counter beside the shell's native
 // built-ins, and its manifest-declared section must be there before the guest ever runs.
-#[test]
-fn desktop_runtime_installs_the_counter_section_from_its_package_manifest() {
-    let runtime = desktop_runtime();
+#[tokio::test(flavor = "current_thread")]
+async fn desktop_runtime_installs_the_counter_section_from_its_package_manifest() {
+    let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
+        .await
+        .unwrap();
     assert!(
         runtime.installation_errors.is_empty(),
         "{:?}",
@@ -49,7 +51,9 @@ fn desktop_runtime_installs_the_counter_section_from_its_package_manifest() {
 // supervisor close the guest again.
 #[tokio::test(flavor = "current_thread")]
 async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
-    let runtime = desktop_runtime();
+    let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
+        .await
+        .unwrap();
     let counter = MicroId::new(micro_counter_manifest::ID);
     tokio::task::LocalSet::new()
         .run_until(async {
