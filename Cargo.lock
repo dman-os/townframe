@@ -2599,6 +2599,7 @@ version = "0.1.0"
 dependencies = [
  "clay_collection",
  "clay_host",
+ "clay_store",
  "daybook_types",
  "serde",
  "serde_json",
@@ -4081,6 +4082,7 @@ dependencies = [
  "clay_host",
  "clay_mdk",
  "clay_store",
+ "daybook_types",
  "dioxus",
  "dioxus-core",
  "dioxus-html",

@@ -490,6 +490,7 @@ version = "0.1.0"
 dependencies = [
  "clay_collection",
  "clay_host",
+ "clay_store",
  "daybook_types",
  "serde",
  "serde_json",

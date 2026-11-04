@@ -98,6 +98,8 @@ pub struct CompositionRuntime {
     roots: CollectionWatch<String, RootRow>,
     /// The roots mirror's feed loop, taken by the one [`Self::serve`].
     feed: Rc<RefCell<Option<LocalFuture<'static, ()>>>>,
+    /// Writes the mock document source back to the store; taken by the one [`Self::serve`].
+    persist_documents: Rc<RefCell<Option<LocalFuture<'static, ()>>>>,
     shutdown: Rc<Notify>,
     /// Installation defects the launcher or the root found while assembling the catalog
     /// (unreadable or manifest-less package files, a failed package-index fetch, a manifest
@@ -132,9 +134,12 @@ impl CompositionRuntime {
     /// and configure the supervisor. Nothing runs until [`Self::serve`].
     ///
     /// Collections load from, and manifest rows install into, `store`: reinstalling rows a
-    /// previous boot already persisted keeps their stamps. The store is only needed while
-    /// building (the collections keep their own handles), so the runtime is not generic over
-    /// it. A store failure is an external error returned to the launcher, which owns how it is
+    /// previous boot already persisted keeps their stamps. The mock document source persists
+    /// in the same store, so documents survive a restart until the node replaces it; the two
+    /// live in disjoint subspaces (`collections` and `documents`), and a store written before
+    /// that split (collections at the root) is orphaned, not migrated. The store is only
+    /// needed while building (the collections and the document persister keep their own
+    /// handles), so the runtime is not generic over it. A store failure is an external error returned to the launcher, which owns how it is
     /// shown; nothing has run by then.
     pub async fn new<St: OrderedStore + Send + Sync + 'static>(
         store: Arc<St>,
@@ -142,7 +147,10 @@ impl CompositionRuntime {
     ) -> Result<Self, StoreError> {
         let host = Host::new();
         let components = NativeComponents::new(&host);
-        let documents = DocumentService::new(16);
+        let (documents, persist_documents) =
+            DocumentService::durable(Arc::new(Arc::clone(&store).subspace("documents")), 16)
+                .await?;
+        let store = Arc::new(store.subspace("collections"));
         let collections = CollectionRegistry::default();
         let mut errors = Vec::new();
 
@@ -246,6 +254,7 @@ impl CompositionRuntime {
             shell,
             roots,
             feed: Rc::new(RefCell::new(Some(Box::pin(feed)))),
+            persist_documents: Rc::new(RefCell::new(Some(Box::pin(persist_documents)))),
             shutdown: Rc::new(Notify::new()),
             installation_errors: errors,
         })
@@ -262,9 +271,15 @@ impl CompositionRuntime {
             .borrow_mut()
             .take()
             .expect("the composition is served once");
+        let persist_documents = self
+            .persist_documents
+            .borrow_mut()
+            .take()
+            .expect("the composition is served once");
         tokio::task::LocalSet::new()
             .run_until(async {
                 tokio::task::spawn_local(feed);
+                tokio::task::spawn_local(persist_documents);
                 let supervisor = Rc::clone(&self.supervisor);
                 // A failed eager start is recorded as the micro's `Faulted` state, which the
                 // lifecycle panel shows; there is no other consumer for the report.

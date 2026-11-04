@@ -339,3 +339,84 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
     assert_eq!(second.lamport, 2);
     assert_eq!(third, second);
 }
+
+// Documents live in the same store as collections but in their own subspace. Boot 1 changes a
+// document and runs the composition until the persister has written it; boot 2 over the same
+// store sees the value, and its seed (which a fresh install would apply) does not overwrite it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_document_written_in_one_boot_is_read_in_the_next() {
+    use clay_docs::DocumentGrant;
+    use clay_docs::FacetRoute;
+    use clay_docs::FacetSelection;
+    use clay_docs::FacetValue;
+    use clay_docs::WatchSelection;
+    use clay_store::OrderedStore as _;
+
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let route = FacetRoute {
+        document: "notes".into(),
+        branch: "main".into(),
+        tag: "org.example.note".into(),
+        key_id: "main".into(),
+    };
+    let boot = || async {
+        CompositionRuntime::new(
+            Arc::clone(&store),
+            catalog(InstalledMicro::new(
+                micro_counter_manifest::manifest(),
+                |_| Rc::new(Unfetchable),
+            )),
+        )
+        .await
+        .unwrap()
+    };
+
+    let first = boot().await;
+    first
+        .documents()
+        .mock_documents()
+        .external_change(route.clone(), Some(serde_json::json!("from boot one")));
+    let documents = Arc::new(Arc::clone(&store).subspace("documents"));
+    tokio::join!(first.serve(), async {
+        // The persister runs inside `serve`; wait until its write reached the store.
+        while documents.scan_prefix(b"").await.unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        first.request_shutdown();
+    });
+
+    let second = boot().await;
+    second
+        .documents()
+        .mock_documents()
+        .seed(route.clone(), serde_json::json!("seed"));
+    let instance = second.host.start("observer");
+    let access = second
+        .documents()
+        .grant_documents(
+            &second.host,
+            &instance,
+            vec![DocumentGrant {
+                document: "notes".into(),
+                branch: "main".into(),
+                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                    tag: "org.example.note".into(),
+                    read: true,
+                    ..Default::default()
+                }],
+            }],
+        )
+        .unwrap();
+    let mirror = access
+        .watch(WatchSelection {
+            documents: ["notes".into()].into(),
+            branch: "main".into(),
+            facets: FacetSelection::Tags(["org.example.note".into()].into()),
+        })
+        .unwrap();
+    assert_eq!(
+        mirror.current().unwrap().facets.get(&route),
+        Some(&FacetValue::Present(serde_json::json!("from boot one")))
+    );
+    second.host.close();
+}

@@ -19,6 +19,7 @@ tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 [dev-dependencies]
 ciborium.workspace = true
 clay_docs = { workspace = true }
+daybook_types = { workspace = true, default-features = false, features = ["manifest"] }
 micro_counter_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_settings = { workspace = true }
