@@ -1168,12 +1168,18 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
         published.record.id.to_string(),
         format!("{}/dayframe.counter", node.plugs.publisher)
     );
+    // The NSID is the format identity, so a manifest without the old integer `schema` imports.
+    let unversioned = CLAY_MANIFEST
+        .replace("\"schema\": 1,", "")
+        .replace("\"counter\"", "\"counter-next\"");
+    assert!(!unversioned.contains("\"schema\""));
+    micro_pair(&node, COMPONENT, &unversioned).await.unwrap();
     let invalid = CLAY_MANIFEST.replace("\"counter\"", "\"Counter\"");
     assert!(matches!(
         micro_pair(&node, COMPONENT, &invalid).await,
         Err(ImportError::Manifest(reason)) if reason.contains("plug name")
     ));
-    assert_eq!(list(&node).await.len(), 2);
+    assert_eq!(list(&node).await.len(), 3);
     shutdown(node, stop).await;
 }
 

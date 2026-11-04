@@ -26,9 +26,10 @@ use service_utils_rs::RequestContext;
 /// The artifact key a micro's component is published under.
 pub const MICRO_COMPONENT_ARTIFACT: &str = "component";
 
-/// The description schema of a micro contribution built from Clay's manifest. The manifest's own
-/// `schema` member is a bare revision integer (`1`), which is not a datum id, so the integer
-/// stays in `description.schema` and this NSID names the vocabulary it is a revision of.
+/// The description schema of a micro contribution built from Clay's manifest. Following ADR 028
+/// (compatibility lives in the NSID), this NSID is the manifest format's identity: a breaking
+/// manifest change mints a new NSID rather than bumping a revision. Clay's older manifests also
+/// carry an integer `schema` member; it is not read, and stays in the description if present.
 pub const CLAY_MICRO_MANIFEST_SCHEMA: &str = "org.example.clay.micro.manifest";
 
 const WASM_MEDIA_TYPE: &str = "application/wasm";
@@ -59,13 +60,14 @@ fn registry_error(error: ClientError<PlugsError>) -> ImportError {
 /// Clay's stand-in package, a `<name>.component.wasm` beside its `<name>.manifest.json`
 /// (`clay_mdk::Package`), published as one plug version under the node's own publisher DID.
 ///
-/// The manifest is read generically, with no dependency on Clay's crates, and only three members
+/// The manifest is read generically, with no dependency on Clay's crates, and only two members
 /// are interpreted:
 /// - `id` becomes the plug name, so the plug id is `<node publisher DID>/<id>`. The id must
 ///   already be a valid plug name segment; it is refused rather than rewritten, because a
 ///   rewrite (such as `.` to `-`) could make two micro ids one plug.
 /// - `package_version`, an integer, becomes the semver `<n>.0.0`.
-/// - `schema` stays in the description (see [`CLAY_MICRO_MANIFEST_SCHEMA`]).
+///
+/// The contribution's schema is always [`CLAY_MICRO_MANIFEST_SCHEMA`].
 ///
 /// The component is imported into big_blobs and referenced as the artifact
 /// [`MICRO_COMPONENT_ARTIFACT`] by its BLAKE3 digest. Every other member of the manifest is the
@@ -92,9 +94,6 @@ pub async fn micro_pair(
         .and_then(|value| value.as_u64())
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| ImportError::Manifest("`package_version` is not a u32".into()))?;
-    if !manifest.get("schema").is_some_and(|schema| schema.is_u64()) {
-        return Err(ImportError::Manifest("`schema` is not an integer".into()));
-    }
     if !component.starts_with(b"\0asm") {
         return Err(ImportError::Component("not a WebAssembly binary".into()));
     }
