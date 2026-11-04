@@ -371,3 +371,4 @@ Verification policy for the implementation waves: workers run only narrow compil
 ### Fleet events
 
 - 2026-11-04: Audit accepted; baseline commit `967e24bd`. First scouting wave commissioned on the exact source seams above.
+- 2026-11-04: Scout workflow `e1a21bee-7195-488f-8c9f-96afb41e6dc1` launched with four fresh-context `openai-codex/gpt-5.6-sol:high` lanes. Revisit trigger: native workflow completion notification.
