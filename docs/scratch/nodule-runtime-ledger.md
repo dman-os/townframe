@@ -250,9 +250,16 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs: P1–P5 done. P6 (substitution) is running on the P5 agent; then P7 (schema registry).
+- big_plugs: P1–P6 done. Next: fix the ephemeral-SQLite temp-dir leak, then P7 (schema registry).
 ## Done
 
+- 2026-11-04: P6 substitution, `eee4f9b9`.
+  - The `org.example.daybook.nodule.substitution/<slot>` datum and `SetNoduleSubstitution` (manage on both X and Y). Y runs in X's slot, and `NoduleRecord.filled_by` shows it.
+  - Authority conflicts are judged among enabled slots at enablement (ADR 028 §5); installing a rival no longer fails. Dependents see no provider change.
+  - Manager fix: the agent rewrote stored grants on substitution, which silently discarded operator config. Now `substituted_grants` computes them at resolve: shared requests keep any covering grant, filler additions need an exact operation grant (a prefix is consent for X's code), and clearing restores exactly what was stored.
+  - Data and drawer request narrowing waits for P7.
+- 2026-11-04: Clay wire fixes, `11e2d155`. `Request` necessity/resolution default to required/configured and are skipped on the wire when default. `micro_pair` maps sidecar `authority` to `Plug.authority`.
+- **Bug found:** `sqlite_rs::ephemeral` test databases leak their `TempDir` (about 60 `.tmp*` dirs of about 4.6 MB per nodule test run, even when tests pass; it filled `/`). Being fixed before P7.
 - 2026-11-04: P5 resolution and lockfile.
   - The lockfile is SQLite `nodule_resolution_lock` (node-local per D8; the consent is this node's) and appears on `NoduleRecord.requests`.
   - Resolution comes from the config snapshot plus router-native providers (a provider is a string; native ones have no version or revision). Built-in providers register at boot by contract, so router registration does not trigger reconciles.
