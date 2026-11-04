@@ -1043,3 +1043,161 @@ async fn a_slot_does_not_redeem_a_faulted_micro_again_until_it_is_retried() {
     })
     .await;
 }
+
+/// The catalog the toolbar scenarios run: Settings, Sample and the Toolbar as the desktop links
+/// them, and the real counter (its native `ACTIVATE` entry, the same source the Wasm guest is
+/// built from), counting how many times it is activated.
+fn toolbar_catalog(activations: Rc<std::cell::Cell<usize>>) -> Vec<InstalledMicro> {
+    let counter = InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(
+            id(micro_counter_manifest::ID),
+            micro_counter_manifest::sidecar(),
+            move |id, resources, bindings| {
+                factory(
+                    resources,
+                    id,
+                    micro_counter_manifest::manifest(),
+                    bindings,
+                    move |context| {
+                        activations.set(activations.get() + 1);
+                        micro_counter::ACTIVATE(context)
+                    },
+                )
+            },
+        )
+    };
+    let toolbar = InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(
+            id(micro_toolbar_manifest::ID),
+            micro_toolbar_manifest::sidecar(),
+            |id, resources, bindings| {
+                factory(
+                    resources,
+                    id,
+                    micro_toolbar_manifest::manifest(),
+                    bindings,
+                    micro_toolbar::activate,
+                )
+            },
+        )
+    };
+    let mut catalog = catalog(counter);
+    catalog.push(toolbar);
+    catalog
+}
+
+/// The counter's current count as its `count` call answers it, asked by a fresh recipient.
+async fn counted(runtime: &CompositionRuntime) -> u64 {
+    let lease = runtime
+        .supervisor
+        .acquire(&supervised(COUNTER), micro_counter_manifest::COUNT)
+        .await
+        .unwrap();
+    let recipient = runtime.host.start("count-asker");
+    let reference = clay_guest_session::capabilities::CapabilitySession::new(
+        runtime.host.clone(),
+        recipient.clone(),
+        clay_guest_session::capabilities::CapabilityLimits::default(),
+    )
+    .mint(&lease)
+    .unwrap();
+    let mut request = Vec::new();
+    ciborium::into_writer(&(), &mut request).unwrap();
+    let response = reference.call(request).await.unwrap();
+    drop((reference, lease));
+    runtime.host.close_instance(&recipient).unwrap();
+    ciborium::from_reader(response.as_slice()).unwrap()
+}
+
+// The counter's Increment button is a manifest-declared row whose action is a lazy endpoint:
+// the toolbar view renders it, and `status()` reads it, without the counter ever starting. A
+// press calls the attachment, which starts the counter once for the length of the call; the
+// increment lands and the counter idles again.
+#[tokio::test(flavor = "current_thread")]
+async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press_starts_it_once() {
+    let activations = Rc::<std::cell::Cell<usize>>::default();
+    let runtime = CompositionRuntime::new(
+        Arc::new(clay_store::MemoryStore::new()),
+        toolbar_catalog(Rc::clone(&activations)),
+    )
+    .await
+    .expect("a memory store does not fail");
+    assert!(runtime.installation_errors.is_empty());
+    runtime.documents().mock_documents().seed(
+        clay_docs::FacetRoute {
+            document: "counter-config".into(),
+            branch: "main".into(),
+            tag: micro_counter_manifest::CONFIG_TAG.into(),
+            key_id: micro_counter_manifest::CONFIG_KEY.into(),
+        },
+        serde_json::json!(0),
+    );
+    served(&runtime, async {
+        // The shell mounts the toolbar through its pinned root row.
+        let mut roots = runtime.roots.clone();
+        while runtime.roots.rows().unwrap().len() < 2 {
+            roots.changed().await.unwrap();
+        }
+        let rows = runtime.roots.rows().unwrap();
+        let root = rows
+            .iter()
+            .find(|row| row.key == micro_toolbar_manifest::ID)
+            .unwrap();
+        assert!(root.value.pinned);
+        let toolbar = root.attachments[root.value.content.index()].clone();
+        let mut dom = VirtualDom::new_with_props(
+            slot_app,
+            SlotApp {
+                components: runtime.components.clone(),
+                reference: toolbar,
+            },
+        );
+        let mut tree = clay_surface::SurfaceTree::new();
+        dom.rebuild(&mut tree);
+        slot_shows(&mut dom, &mut tree, "Increment").await;
+
+        // The button is rendered, and its lazy reference read, with the counter never started.
+        let (buttons, feed) = Collection::<String, micro_toolbar_manifest::Button>::observe(
+            &runtime.host,
+            runtime.shell(),
+            runtime.supervisor.activator(),
+            &runtime
+                .collection(&Nsid::literal(micro_toolbar_manifest::BUTTONS))
+                .unwrap(),
+        )
+        .unwrap();
+        tokio::task::spawn_local(feed);
+        let mut changes = buttons.clone();
+        while buttons.rows().unwrap().is_empty() {
+            changes.changed().await.unwrap();
+        }
+        let rows = buttons.rows().unwrap();
+        let [button] = &*rows else {
+            panic!("only the counter contributes a button")
+        };
+        assert_eq!(button.key, micro_counter_manifest::INCREMENT);
+        assert_eq!(button.value.label, "Increment");
+        assert_eq!(button.value.icon, "plus");
+        let action = &button.attachments[button.value.action.index()];
+        assert_eq!(action.status(), clay_mdk::RefStatus::Dormant);
+        assert_eq!(runtime.state(&id(COUNTER)), MicroState::Idle);
+        assert_eq!(activations.get(), 0);
+
+        // What the toolbar's press performs: one call of the attachment.
+        action.call::<(), ()>(&()).await.unwrap();
+        assert_eq!(activations.get(), 1);
+        // Nothing holds the counter once the call returned, so idle shutdown follows, and the
+        // increment outlives the incarnation that made it.
+        settle(|| runtime.state(&id(COUNTER)) == MicroState::Idle).await;
+        assert_eq!(counted(&runtime).await, 1);
+        assert_eq!(
+            activations.get(),
+            2,
+            "the count read is the second activation"
+        );
+        drop(dom);
+    })
+    .await;
+}

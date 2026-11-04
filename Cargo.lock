@@ -4090,10 +4090,13 @@ dependencies = [
  "dioxus-core",
  "dioxus-html",
  "getrandom 0.4.3",
+ "micro_counter",
  "micro_counter_manifest",
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_toolbar",
+ "micro_toolbar_manifest",
  "serde",
  "serde_json",
  "sqlite_rs",
@@ -4130,6 +4133,8 @@ dependencies = [
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_toolbar",
+ "micro_toolbar_manifest",
  "serde",
  "serde_json",
  "sqlite_rs",
@@ -4187,6 +4192,8 @@ dependencies = [
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_toolbar",
+ "micro_toolbar_manifest",
  "serde",
  "serde_json",
  "ui",
@@ -9238,6 +9245,7 @@ dependencies = [
  "clay_mdk",
  "insta",
  "micro_settings_manifest",
+ "micro_toolbar_manifest",
  "serde_json",
 ]
 
@@ -9274,6 +9282,31 @@ dependencies = [
 
 [[package]]
 name = "micro_settings_manifest"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clay_mdk",
+ "insta",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro_toolbar"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clay_dioxus",
+ "clay_guest_session",
+ "clay_host",
+ "clay_mdk",
+ "dioxus",
+ "micro_toolbar_manifest",
+ "tokio",
+]
+
+[[package]]
+name = "micro_toolbar_manifest"
 version = "0.1.0"
 dependencies = [
  "ciborium",

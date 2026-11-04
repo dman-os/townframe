@@ -19,6 +19,8 @@ clay_store = { workspace = true }
 sqlite_rs = { workspace = true }
 micro_settings = { workspace = true }
 micro_settings_manifest = { workspace = true }
+micro_toolbar = { workspace = true }
+micro_toolbar_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_counter_manifest = { workspace = true }
 daybook_types = { workspace = true }

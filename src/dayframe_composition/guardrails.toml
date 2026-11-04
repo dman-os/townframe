@@ -11,10 +11,13 @@ allowed_dependencies = [
     "daybook_types",
     "clay_host",
     "clay_mdk",
+    "micro_counter",
     "micro_counter_manifest",
     "micro_sample",
     "micro_settings",
     "micro_settings_manifest",
+    "micro_toolbar",
+    "micro_toolbar_manifest",
     "sqlite_rs",
 ]
 allow_external_api_types = false
