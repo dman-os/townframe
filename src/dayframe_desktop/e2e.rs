@@ -1,35 +1,30 @@
+use crate::composition::desktop_runtime;
 use crate::composition::Application;
 use crate::composition::CompositionRuntime;
-use crate::composition::desktop_runtime;
+use blitz_dom::ns;
 use blitz_dom::BaseDocument;
 use blitz_dom::DocumentConfig;
 use blitz_dom::LocalName;
 use blitz_dom::NodeId;
 use blitz_dom::QualName;
-use blitz_dom::ns;
-use clay_dioxus::NativeComponents;
-use clay_host::AccessError;
-use clay_mdk::wasm::WasmMicro;
-use clay_micro_core::application::ApplicationRuntime;
-use clay_micro_core::micros::composition::InstanceState;
+use clay_host::MicroId;
+use clay_host::MicroState;
 use dioxus::prelude::*;
 use dioxus_core::ElementId;
 use dioxus_core::RenderTargetId;
 use dioxus_core::VirtualDom;
-use dioxus_html::EventData;
-use dioxus_html::Modifiers;
-use dioxus_html::SerializedHtmlEventConverter;
-use dioxus_html::SerializedMouseData;
 use dioxus_html::geometry::ClientPoint;
 use dioxus_html::geometry::Coordinates;
 use dioxus_html::geometry::ElementPoint;
 use dioxus_html::geometry::PagePoint;
 use dioxus_html::geometry::ScreenPoint;
-use dioxus_html::input_data::MouseButton;
 use dioxus_html::input_data::decode_mouse_button_set;
+use dioxus_html::input_data::MouseButton;
+use dioxus_html::EventData;
+use dioxus_html::Modifiers;
+use dioxus_html::SerializedHtmlEventConverter;
+use dioxus_html::SerializedMouseData;
 use dioxus_native_dom::DioxusState;
-use micro_sample::SampleMicro;
-use micro_settings::SettingsMicro;
 
 struct HeadlessDom {
     dom: VirtualDom,
@@ -201,22 +196,14 @@ const SETTINGS: &str = "section[aria-label=\"Settings\"]";
 const SAMPLE: &str = "button[aria-label=\"Open Sample micro settings\"]";
 const COUNTER: &str = "button[aria-label=\"Open Counter (Wasm) settings\"]";
 const COUNTER_VALUE: &str = "button[aria-label=\"Increment Wasm counter\"]";
-const COUNTER_STATUS: &str = "section[aria-label=\"Settings\"] h3 + div p[role=\"status\"]";
 
-type DesktopApplication = ApplicationRuntime<NativeComponents>;
-
-struct SettingsFixture {
-    application: DesktopApplication,
+struct Shell {
+    runtime: CompositionRuntime,
     ui: HeadlessDom,
-    mock: clay_docs::MockDocuments,
-    counter_facet: clay_docs::Facet<u64>,
-    counter_route: clay_docs::FacetRoute,
-    settings: SettingsMicro,
-    sample: SampleMicro,
-    first_counter: WasmMicro,
+    counter: MicroId,
 }
 
-impl SettingsFixture {
+impl Shell {
     async fn start() -> Self {
         fn composed(runtime: CompositionRuntime) -> Element {
             let runtime = use_signal(move || runtime);
@@ -224,178 +211,55 @@ impl SettingsFixture {
         }
 
         let runtime = desktop_runtime();
-        let application = runtime.application.clone();
-        let mock = application.mock_documents();
-        let counter_facet = application
-            .grant_config(
-                &application.root(),
-                "counter",
-                vec![daybook_types::manifest::RoutineFacetAccess {
-                    tag: micro_counter_manifest::CONFIG_TAG.into(),
-                    key_id: Some(micro_counter_manifest::CONFIG_KEY.into()),
-                    read: true,
-                    ..Default::default()
-                }],
-            )
-            .unwrap()
-            .remove("counter")
-            .unwrap()
-            .facet::<u64>(
-                micro_counter_manifest::CONFIG_TAG.into(),
-                micro_counter_manifest::CONFIG_KEY.into(),
-            )
-            .unwrap();
-        let counter_route = clay_docs::FacetRoute {
-            document: "counter-config".into(),
-            branch: "main".into(),
-            tag: micro_counter_manifest::CONFIG_TAG.into(),
-            key_id: micro_counter_manifest::CONFIG_KEY.into(),
-        };
-        let mut ui = HeadlessDom::new(composed, runtime);
-        ui.wait_until("Settings contributions mounted", |ui| {
+        let mut ui = HeadlessDom::new(composed, runtime.clone());
+        ui.wait_until("Settings sections listed", |ui| {
             ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
         })
         .await;
-        let settings =
-            clay_mdk::native::output::<SettingsMicro, _>(&application, "settings").unwrap();
-        let sample =
-            clay_mdk::native::output::<SampleMicro, _>(&application, "dayframe.sample").unwrap();
-        let first_counter = application.output::<WasmMicro>("dayframe.counter").unwrap();
         Self {
-            application,
+            runtime,
             ui,
-            mock,
-            counter_facet,
-            counter_route,
-            settings,
-            sample,
-            first_counter,
+            counter: MicroId::new(micro_counter_manifest::ID),
         }
     }
 }
 
+// Opening the counter's Settings section is what starts its Wasm guest: the section is a
+// manifest-declared row whose presentation is a lazy endpoint (ADR 025 §7).
 #[tokio::test(flavor = "current_thread")]
-async fn settings_preferences_drive_navigation_demand_and_startup_controls() {
-    let SettingsFixture {
-        application,
+async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_guest() {
+    let Shell {
+        runtime,
         mut ui,
-        mock,
-        settings,
-        sample,
-        ..
-    } = SettingsFixture::start().await;
-    let reports = application.reports();
-    let show = "button[aria-label=\"Show Sample micro section\"]";
-    let eager = "button[aria-label=\"Start dayframe.sample eagerly\"]";
-    let status = "section[aria-label=\"Settings\"] details p[role=\"status\"]";
-    let first_section = "nav[aria-label=\"Settings sections\"] button:first-child";
+        counter,
+    } = Shell::start().await;
+    // Sections sort by micro id, so the counter's opens first; select the sample's to start
+    // with the counter's section unmounted and its guest idle.
     ui.click(SAMPLE);
-    ui.wait_until("sample selected", |ui| {
+    ui.wait_until("sample section selected, counter idle", |ui| {
         ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
-    })
-    .await;
-    ui.click("button[aria-label=\"Move Sample micro first\"]");
-    ui.wait_until(
-        "preference reordered navigation without changing selection",
-        |ui| {
-            ui.attribute(first_section, "aria-label").as_deref()
-                == Some("Open Sample micro settings")
-                && ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
-                && ui.text(status).contains("LocallyApplied")
-        },
-    )
-    .await;
-    mock.settle(true);
-    ui.wait_until("order accepted", |ui| ui.text(status).contains("Accepted"))
-        .await;
-    ui.click(show);
-    ui.wait_until("hidden sample evicted", |ui| {
-        ui.find(SAMPLE).is_none()
-            && ui.attribute(show, "aria-pressed").as_deref() == Some("false")
-            && reports.borrow().as_ref().unwrap().get("dayframe.sample")
-                == Some(&InstanceState::Idle)
+            && runtime.state(&counter) == MicroState::Idle
     })
     .await;
     assert_eq!(
-        application.host().check(&sample.instance),
-        Err(AccessError::Revoked)
+        runtime.state(&MicroId::new(micro_sample::ID)),
+        MicroState::Active
     );
-    mock.settle(false);
-    ui.wait_until("rejected hide restored the section and order", |ui| {
-        ui.find(SAMPLE).is_some()
-            && ui.text(status).contains("RolledBack")
-            && ui.attribute(first_section, "aria-label").as_deref()
-                == Some("Open Sample micro settings")
-    })
-    .await;
-    let replacement =
-        clay_mdk::native::output::<SampleMicro, _>(&application, "dayframe.sample").unwrap();
-    assert_ne!(replacement.instance, sample.instance);
-    ui.click(eager);
-    ui.wait_until("eager startup selected", |ui| {
-        ui.attribute(eager, "aria-pressed").as_deref() == Some("true")
-    })
-    .await;
-    ui.click(show);
-    ui.wait_until("hidden eager sample remains active", |ui| {
-        ui.find(SAMPLE).is_none()
-            && ui.attribute(show, "aria-pressed").as_deref() == Some("false")
-            && reports.borrow().as_ref().unwrap().get("dayframe.sample")
-                == Some(&InstanceState::Active)
-    })
-    .await;
-    assert_eq!(application.host().check(&replacement.instance), Ok(()));
-    mock.settle(true);
-    ui.click(eager);
-    ui.wait_until("on-demand startup evicts the hidden sample", |ui| {
-        ui.attribute(eager, "aria-pressed").as_deref() == Some("false")
-            && reports.borrow().as_ref().unwrap().get("dayframe.sample")
-                == Some(&InstanceState::Idle)
-    })
-    .await;
-    mock.settle(true);
-    ui.click(show);
-    ui.wait_until("shown sample starts again on demand", |ui| {
-        ui.find(SAMPLE).is_some()
-            && reports.borrow().as_ref().unwrap().get("dayframe.sample")
-                == Some(&InstanceState::Active)
-    })
-    .await;
-    assert_eq!(application.host().check(&settings.instance), Ok(()));
-    assert_eq!(
-        settings
-            .preferences(&settings.config.watch.current().unwrap())
-            .unwrap()
-            .order,
-        vec!["dayframe.sample"]
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn composed_settings_wasm_dom_flow() {
-    let SettingsFixture {
-        application,
-        mut ui,
-        mock,
-        counter_facet,
-        counter_route,
-        first_counter,
-        ..
-    } = SettingsFixture::start().await;
 
     ui.click(COUNTER);
-    ui.wait_until("Wasm section selected", |ui| {
-        assert_eq!(application.host().check(&first_counter.instance), Ok(()));
+    ui.wait_until("counter section mounted", |ui| {
         ui.attribute(COUNTER, "aria-pressed").as_deref() == Some("true")
             && ui.find(COUNTER_VALUE).is_some()
     })
     .await;
+    assert_eq!(runtime.state(&counter), MicroState::Active);
     assert_eq!(
         ui.text("section[aria-label=\"Settings\"] h3"),
         "Counter (Wasm)"
     );
     assert_eq!(ui.text(COUNTER_VALUE), "0");
 
+    // A click on the button's label child reaches the guest exactly once.
     let button = ui.one(COUNTER_VALUE);
     let child = *ui
         .document
@@ -410,109 +274,72 @@ async fn composed_settings_wasm_dom_flow() {
     })
     .await;
     assert_eq!(ui.one(COUNTER_VALUE), button);
-    let pending = counter_facet.watch.current().unwrap();
-    assert_eq!(counter_facet.value(&pending), Some(1));
-    assert_eq!(pending.pending.len(), 1);
-    mock.settle(false);
-    ui.wait_until(
-        "rejected Wasm write rolled back and delivered its receipt",
-        |ui| ui.text(COUNTER_VALUE) == "0" && ui.text(COUNTER_STATUS).contains("RolledBack"),
-    )
-    .await;
-
     ui.click(COUNTER_VALUE);
     ui.wait_until("button-targeted host click reached guest once", |ui| {
-        ui.text(COUNTER_VALUE) == "1"
-    })
-    .await;
-    mock.settle(true);
-    ui.wait_until("accepted Wasm write delivered its receipt", |ui| {
-        ui.text(COUNTER_STATUS).contains("Accepted")
-    })
-    .await;
-    assert!(counter_facet.watch.current().unwrap().pending.is_empty());
-    mock.external_change(counter_route.clone(), Some(serde_json::json!(41)));
-    ui.wait_until("external document update reached the guest mirror", |ui| {
-        ui.text(COUNTER_VALUE) == "41"
-    })
-    .await;
-    ui.click(COUNTER_VALUE);
-    ui.wait_until("uncertain write was initially optimistic", |ui| {
-        ui.text(COUNTER_VALUE) == "42"
-    })
-    .await;
-    let id = *counter_facet
-        .watch
-        .current()
-        .unwrap()
-        .pending
-        .first()
-        .unwrap();
-    mock.complete(
-        id,
-        Err(clay_docs::OperationError::Transport {
-            message: "response was lost".into(),
-            outcome_unknown: true,
-        }),
-    );
-    ui.wait_until("transport uncertainty survived the WIT receipt", |ui| {
-        assert_eq!(application.host().check(&first_counter.instance), Ok(()));
-        let value = ui.text(COUNTER_VALUE);
-        let status = ui.text(COUNTER_STATUS);
-        value == "41" && status.contains("Transport") && status.contains("outcome-unknown: true")
-    })
-    .await;
-    ui.click("button[aria-label=\"Refresh Wasm counter\"]");
-    assert_eq!(ui.text(COUNTER_VALUE), "41");
-    mock.external_change(counter_route, Some(serde_json::json!(2)));
-    ui.wait_until("refreshed guest remains subscribed", |ui| {
         ui.text(COUNTER_VALUE) == "2"
+    })
+    .await;
+
+    ui.click(SAMPLE);
+    ui.wait_until("switched away from the counter section", |ui| {
+        ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
+            && ui.find(COUNTER_VALUE).is_none()
+    })
+    .await;
+    ui.wait_until("nothing holds the counter, so it idles", |_| {
+        runtime.state(&counter) == MicroState::Idle
+    })
+    .await;
+
+    ui.click(COUNTER);
+    ui.wait_until("counter section mounted again", |ui| {
+        ui.find(COUNTER_VALUE).is_some()
+    })
+    .await;
+    assert_eq!(runtime.state(&counter), MicroState::Active);
+    let before = ui.text(COUNTER_VALUE).parse::<u64>().unwrap();
+    ui.click(COUNTER_VALUE);
+    ui.wait_until("the restarted guest is interactive", |ui| {
+        ui.text(COUNTER_VALUE) == (before + 1).to_string()
     })
     .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn composed_settings_wasm_lifecycle_flow() {
-    let SettingsFixture {
-        application,
-        mut ui,
-        mock,
-        counter_facet,
-        counter_route,
-        settings,
-        sample,
-        first_counter,
-    } = SettingsFixture::start().await;
-    let reports = application.reports();
-
+async fn external_document_changes_reach_the_counter_guest() {
+    let Shell {
+        runtime, mut ui, ..
+    } = Shell::start().await;
     ui.click(COUNTER);
-    ui.wait_until("Wasm section mounted", |ui| {
+    ui.wait_until("counter section mounted", |ui| {
         ui.find(COUNTER_VALUE).is_some()
     })
     .await;
-    let button = ui.one(COUNTER_VALUE);
-    ui.click(SAMPLE);
-    ui.wait_until("switched away from Wasm section", |ui| {
-        ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
-            && ui.find(COUNTER_VALUE).is_none()
+    runtime.documents().mock_documents().external_change(
+        clay_docs::FacetRoute {
+            document: "counter-config".into(),
+            branch: "main".into(),
+            tag: micro_counter_manifest::CONFIG_TAG.into(),
+            key_id: micro_counter_manifest::CONFIG_KEY.into(),
+        },
+        Some(serde_json::json!(41)),
+    );
+    ui.wait_until("external document update reached the guest mirror", |ui| {
+        ui.text(COUNTER_VALUE) == "41"
     })
     .await;
-    assert!(!ui.connected_descendant(button));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
+    let Shell {
+        runtime,
+        mut ui,
+        counter,
+    } = Shell::start().await;
     ui.click(COUNTER);
-    ui.wait_until("Wasm section remounted after switching back", |ui| {
-        assert_eq!(
-            application.host().check(&first_counter.instance),
-            Ok(()),
-            "switching sections must not trap or revoke the counter incarnation"
-        );
-        ui.attribute(COUNTER, "aria-pressed").as_deref() == Some("true")
-            && ui.find(COUNTER_VALUE).is_some()
-    })
-    .await;
-    let before = ui.text(COUNTER_VALUE).parse::<u64>().unwrap();
-    ui.click(COUNTER_VALUE);
-    ui.wait_until("remounted section remains interactive", |ui| {
-        ui.text(COUNTER_VALUE) == (before + 1).to_string()
+    ui.wait_until("counter section mounted", |ui| {
+        ui.find(COUNTER_VALUE).is_some()
     })
     .await;
 
@@ -521,124 +348,68 @@ async fn composed_settings_wasm_lifecycle_flow() {
         ui.find(SETTINGS).is_none() && ui.find("button[aria-label=\"Open Settings\"]").is_some()
     })
     .await;
-    mock.settle(true);
-    mock.external_change(counter_route, Some(serde_json::json!(17)));
     ui.click("button[aria-label=\"Open Settings\"]");
     ui.wait_until("Settings reopened", |ui| {
         ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
     })
     .await;
-    ui.click(COUNTER);
-    ui.wait_until("Wasm section remounted after reopening Settings", |ui| {
-        assert_eq!(
-            application.host().check(&first_counter.instance),
-            Ok(()),
-            "reopening Settings must not trap or revoke the counter incarnation"
-        );
-        ui.find(COUNTER_VALUE).is_some() && ui.text(COUNTER_VALUE) == "17"
-    })
-    .await;
-    let before = ui.text(COUNTER_VALUE).parse::<u64>().unwrap();
-    ui.click(COUNTER_VALUE);
-    ui.wait_until("reopened Settings remains interactive", |ui| {
-        ui.text(COUNTER_VALUE) == (before + 1).to_string()
-    })
-    .await;
-
-    mock.settle(true);
-    ui.wait_until(
-        "accepted edits persisted before disabling the guest",
-        |ui| {
-            counter_facet.watch.current().unwrap().pending.is_empty()
-                && ui.text(COUNTER_STATUS).contains("Accepted")
-        },
-    )
-    .await;
-    let persisted_count = before + 1;
-    assert_eq!(
-        counter_facet.value(&counter_facet.watch.current().unwrap()),
-        Some(persisted_count)
-    );
 
     ui.click("button[aria-label=\"Disable dayframe.counter micro\"]");
-    ui.wait_until(
-        "disabled counter withdrew its rendered contribution",
-        |ui| {
-            ui.find(COUNTER).is_none()
-                && ui.find(COUNTER_VALUE).is_none()
-                && reports.borrow().as_ref().unwrap().get("dayframe.counter")
-                    == Some(&InstanceState::Disabled)
-        },
-    )
+    ui.wait_until("disabled counter withdrew its rendered section", |ui| {
+        ui.find(COUNTER_VALUE).is_none()
+            && ui
+                .find("button[aria-label=\"Enable dayframe.counter micro\"]")
+                .is_some()
+    })
     .await;
+    assert_eq!(runtime.state(&counter), MicroState::Disabled);
+    // The manifest row outlives the micro's incarnations: the section is still listed.
+    assert!(ui.find(COUNTER).is_some());
     assert_eq!(
-        application.host().check(&first_counter.instance),
-        Err(AccessError::Revoked)
-    );
-    assert_eq!(application.host().check(&sample.instance), Ok(()));
-    assert_eq!(application.host().check(&settings.instance), Ok(()));
-    assert_eq!(
-        ui.attribute(SAMPLE, "aria-pressed").as_deref(),
-        Some("true")
+        runtime.state(&MicroId::new(micro_sample::ID)),
+        MicroState::Active
     );
 
     ui.click("button[aria-label=\"Enable dayframe.counter micro\"]");
-    ui.wait_until("reenabled counter republished its contribution", |ui| {
-        ui.find(COUNTER).is_some()
-            && reports.borrow().as_ref().unwrap().get("dayframe.counter")
-                == Some(&InstanceState::Active)
+    ui.wait_until("reenabled counter can be disabled again", |ui| {
+        ui.find("button[aria-label=\"Disable dayframe.counter micro\"]")
+            .is_some()
     })
     .await;
-    let second_counter = application.output::<WasmMicro>("dayframe.counter").unwrap();
-    assert!(second_counter.instance != first_counter.instance);
+    assert_eq!(runtime.state(&counter), MicroState::Idle);
+    // Reopening the section starts a fresh incarnation.
+    ui.click(SAMPLE);
+    ui.wait_until("switched to the sample section", |ui| {
+        ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
+    })
+    .await;
     ui.click(COUNTER);
-    ui.wait_until("new Wasm incarnation mounted", |ui| {
+    ui.wait_until("new counter incarnation mounted", |ui| {
         ui.find(COUNTER_VALUE).is_some()
     })
     .await;
-    assert_eq!(ui.text(COUNTER_VALUE), persisted_count.to_string());
+    assert_eq!(runtime.state(&counter), MicroState::Active);
+    let before = ui.text(COUNTER_VALUE).parse::<u64>().unwrap();
     ui.click(COUNTER_VALUE);
-    ui.wait_until("new Wasm incarnation is interactive", |ui| {
-        ui.text(COUNTER_VALUE) == (persisted_count + 1).to_string()
+    ui.wait_until("new incarnation is interactive", |ui| {
+        ui.text(COUNTER_VALUE) == (before + 1).to_string()
     })
     .await;
+}
 
-    second_counter.exhaust_fuel();
-    ui.click(COUNTER_VALUE);
-    ui.wait_until("guest trap withdrew only the failed contribution", |ui| {
-        ui.find(COUNTER).is_none()
-            && ui.find(COUNTER_VALUE).is_none()
-            && reports.borrow().as_ref().unwrap().get("dayframe.counter")
-                == Some(&InstanceState::Faulted)
+#[tokio::test(flavor = "current_thread")]
+async fn the_sample_section_edits_its_configuration() {
+    let Shell { mut ui, .. } = Shell::start().await;
+    ui.click(SAMPLE);
+    ui.wait_until("sample section mounted", |ui| {
+        ui.find("button[aria-label=\"Disable sample configuration flag\"]")
+            .is_some()
     })
     .await;
-    assert_eq!(
-        application.host().check(&second_counter.instance),
-        Err(AccessError::Revoked)
-    );
-    assert_eq!(application.host().check(&sample.instance), Ok(()));
-    assert_eq!(application.host().check(&settings.instance), Ok(()));
-    assert_eq!(
-        ui.attribute(SAMPLE, "aria-pressed").as_deref(),
-        Some("true")
-    );
-    assert_eq!(settings.sections.snapshot().unwrap().len(), 1);
-    assert_eq!(counter_facet.watch.current().unwrap().pending.len(), 1);
-    mock.settle(true);
-    assert_eq!(
-        counter_facet.value(&counter_facet.watch.current().unwrap()),
-        Some(persisted_count + 1)
-    );
-
     ui.click("button[aria-label=\"Disable sample configuration flag\"]");
-    ui.wait_until(
-        "native sibling remains interactive after guest trap",
-        |ui| {
-            ui.find("button[aria-label=\"Enable sample configuration flag\"]")
-                .is_some()
-        },
-    )
+    ui.wait_until("sample flag toggled", |ui| {
+        ui.find("button[aria-label=\"Enable sample configuration flag\"]")
+            .is_some()
+    })
     .await;
-    assert_eq!(application.host().check(&sample.instance), Ok(()));
-    assert_eq!(application.host().check(&settings.instance), Ok(()));
 }
