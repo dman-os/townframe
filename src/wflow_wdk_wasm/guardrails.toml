@@ -1,0 +1,13 @@
+version = 1
+role = "interface"
+dependency_reason = "wasm adapter for wflow_wdk"
+allowed_dependencies = [
+    "utils_rs",
+    "wasm_utils_rs",
+    "wflow_wdk",
+]
+allow_external_api_types = false
+
+[builds.native]
+
+[builds.wasm32-wasip3]

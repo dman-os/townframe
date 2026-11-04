@@ -25,6 +25,7 @@ pub use wflow_tokio;
 
 use crate::interlude::*;
 
+use sqlite_rs as sqlite_rs_alias;
 use sqlite_rs::Database;
 use wash_runtime::*;
 use wflow_core::r#gen::types::PartitionId;
@@ -100,6 +101,24 @@ pub async fn start_partition_worker(
     wflow_tokio::partition::TokioPartitionWorkerHandle,
     Arc<wflow_tokio::partition::state::PartitionWorkingState>,
 )> {
+    start_partition_worker_with_native_host(
+        wcx,
+        wflow_plugin,
+        Arc::new(wflow_tokio::local_native_host::LocalNativeHost::new()),
+        partition_id,
+    )
+    .await
+}
+
+pub async fn start_partition_worker_with_native_host(
+    wcx: &Ctx,
+    wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
+    local_native_host: Arc<wflow_tokio::local_native_host::LocalNativeHost>,
+    partition_id: PartitionId,
+) -> Res<(
+    wflow_tokio::partition::TokioPartitionWorkerHandle,
+    Arc<wflow_tokio::partition::state::PartitionWorkingState>,
+)> {
     // Load state from snapshot if available
     let (next_entry_id, initial_jobs_state, initial_effects) =
         match wcx.snapstore.load_latest_snapshot(partition_id).await? {
@@ -123,7 +142,7 @@ pub async fn start_partition_worker(
         Arc::clone(&wcx.logstore),
         next_entry_id,
         wflow_plugin,
-        Arc::new(wflow_tokio::local_native_host::LocalNativeHost {}),
+        local_native_host,
     );
 
     let last_applied_entry_id = next_entry_id.saturating_sub(1);

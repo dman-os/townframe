@@ -19,7 +19,8 @@ plug_plabels_manifest.workspace = true
 utils_rs.workspace = true
 wasm_utils_rs.workspace = true
 am_utils_rs.workspace = true
-wflow_sdk.workspace = true
+wflow_wdk.workspace = true
+wflow_wdk_wasm.workspace = true
 sqlite_rs.workspace = true
 daybook_types = { workspace = true, features = ["wit"] }
 serde_json.workspace = true

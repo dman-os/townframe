@@ -11,8 +11,19 @@ interface types {
         job-id: job-id,
     }
 
+    record fixed-retry-policy {
+        delay-ms: u64,
+    }
+
+    record capped-exponential-retry-policy {
+        base-ms: u64,
+        cap-ms: u64,
+    }
+
     variant retry-policy {
-        immediate
+        immediate,
+        fixed(fixed-retry-policy),
+        capped-exponential(capped-exponential-retry-policy),
     }
     
     record transient-job-error {
@@ -50,6 +61,49 @@ interface host {
 
     type step-id = u64;
 
+    enum step-kind {
+        effect,
+        sleep,
+        recv,
+        defer,
+    }
+
+    record step-meta {
+        kind: step-kind,
+        name: option<string>,
+    }
+
+    record nondeterministic-replay-error {
+        step-id: step-id,
+        expected: step-meta,
+        found: step-meta,
+    }
+
+    // Forward work used up the transient-retry budget; `last-error` is the
+    // error json of the failure that exhausted it.
+    record retries-exhausted {
+        retries: u64,
+        max-retries: u64,
+        last-error: json,
+    }
+
+    // Why the job left forward work for cleanup: an operator cancel carrying
+    // its reason, the terminal error the workflow failed with, or the retry
+    // budget its forward work exhausted.
+    variant cleanup-cause {
+        cancelled(string),
+        failed(json),
+        retries-exhausted(retries-exhausted),
+    }
+
+    variant host-error {
+        // Forward work was interrupted for cleanup; the registered defers run
+        // under this cause. Never returned to a defer step.
+        interrupted(cleanup-cause),
+        nondeterministic-replay(nondeterministic-replay-error),
+        protocol(string),
+    }
+
     variant step-state {
         active(active-step-state),
         completed(completed-step-state)
@@ -64,10 +118,14 @@ interface host {
         id: step-id,
     }
 
-    next-step: func(job-id: job-id) -> result<step-state, string>;
-    persist-step: func(job-id: job-id, step-id: step-id, value-json: json) -> result<_, string>;
-    sleep: func(job-id: job-id, step-id: step-id, duration-ms: u64) -> result<_, string>;
-    recv-message: func(job-id: job-id, step-id: step-id) -> result<json, string>;
+    next-step: async func(job-id: job-id, meta: step-meta) -> result<step-state, host-error>;
+    persist-step: async func(job-id: job-id, step-id: step-id, value-json: json) -> result<_, host-error>;
+    sleep: async func(job-id: job-id, step-id: step-id, duration-ms: u64) -> result<_, host-error>;
+    recv-message: async func(job-id: job-id, step-id: step-id) -> result<json, host-error>;
+    // Durably records that forward work ended in the terminal `error-json`
+    // with compensation registered and returns the cause cleanup runs under;
+    // a cancel that landed first wins.
+    begin-cleanup: async func(job-id: job-id, error-json: json) -> result<cleanup-cause, host-error>;
 }
 
 // for starting invocations

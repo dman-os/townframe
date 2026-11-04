@@ -1,5 +1,7 @@
 use crate::interlude::*;
 
+pub mod atomic;
+pub mod journal;
 pub mod log;
 pub mod metastore;
 pub mod snapstore;

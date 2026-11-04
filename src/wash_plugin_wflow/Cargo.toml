@@ -20,6 +20,7 @@ path = "lib.rs"
 #
 # internal
 wflow_core.workspace = true
+wflow_wdk.workspace = true
 wflow_tokio.workspace = true
 utils_rs.workspace = true
 
@@ -36,7 +37,7 @@ anyhow.workspace = true
 
 # wasm
 wasmtime.workspace = true
-wash-runtime.workspace = true
+wash-runtime = { workspace = true, default-features = true }
 
 #
 # log

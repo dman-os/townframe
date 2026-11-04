@@ -43,7 +43,8 @@ utils_rs = { path = "../utils_rs", default-features = false }
 am_utils_rs = { path = "../am_utils_rs", default-features = false }
 daybook_types = { path = "../daybook_types", default-features = false }
 daybook_pdk = { path = "../daybook_pdk", default-features = false }
-wflow_sdk = { path = "../wflow_sdk", default-features = false }
+wflow_wdk = { path = "../wflow_wdk", default-features = false }
+wflow_wdk_wasm = { path = "../wflow_wdk_wasm", default-features = false }
 daybook_core = { path = "../daybook_core", default-features = false }
 sqlite_rs = { path = "../sqlite_rs", default-features = false }
 automerge = "0.11.0"

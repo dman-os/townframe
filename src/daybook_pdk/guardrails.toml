@@ -1,7 +1,7 @@
 version = 1
 role = "interface"
 dependency_reason = "initial guardrail baseline"
-allowed_dependencies = ["wflow_sdk"]
+allowed_dependencies = ["wflow_wdk"]
 allow_external_api_types = false
 
 [builds.native]

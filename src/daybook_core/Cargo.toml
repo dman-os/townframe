@@ -103,7 +103,7 @@ oci-spec = "0.8.4"
 
 #
 # wasm
-wash-runtime = { workspace = true }
+wash-runtime = { workspace = true, default-features = true }
 wasmtime = { workspace = true }
 
 #

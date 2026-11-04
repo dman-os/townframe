@@ -1,6 +1,6 @@
-package townframe:wflow-sdk;
+package townframe:wflow-wdk;
 
-world sdk {
+world wdk {
     include townframe:api-utils/imports;
 
     import townframe:wflow/types;

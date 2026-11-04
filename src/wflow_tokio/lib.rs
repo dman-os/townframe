@@ -2,6 +2,10 @@ mod interlude {
     pub use utils_rs::prelude::*;
 }
 
+#[cfg(test)]
+mod tests;
+
+pub mod authority_runtime;
 pub mod local_native_host;
 pub mod partition;
 

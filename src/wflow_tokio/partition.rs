@@ -35,6 +35,7 @@ pub struct PartitionCtx {
     pub metadata: Arc<dyn metastore::MetdataStore>,
     pub processed_entries_offset: u64,
     pub log: Arc<dyn wflow_core::log::LogStore>,
+    log_ref: PartitionLogRef,
     pub local_wasmcloud_host: Arc<
         dyn self::service::WflowServiceHost<ExtraArgs = metastore::WasmcloudWflowServiceMeta>
             + Sync
@@ -56,24 +57,27 @@ impl PartitionCtx {
         >,
         local_native_host: Arc<dyn self::service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
     ) -> Self {
+        let log_ref = PartitionLogRef::new(Arc::clone(&log));
         Self {
             id,
             metadata,
             processed_entries_offset,
             log,
+            log_ref,
             local_wasmcloud_host,
             local_native_host,
         }
     }
 
     pub fn log_ref(&self) -> PartitionLogRef {
-        PartitionLogRef::new(Arc::clone(&self.log))
+        self.log_ref.clone()
     }
 }
 
 pub struct PartitionLogRef {
     buffer: Vec<u8>,
     log: Arc<dyn wflow_core::log::LogStore>,
+    append_lock: Arc<futures::lock::Mutex<()>>,
 }
 
 impl Clone for PartitionLogRef {
@@ -81,14 +85,32 @@ impl Clone for PartitionLogRef {
         Self {
             buffer: default(),
             log: Arc::clone(&self.log),
+            append_lock: Arc::clone(&self.append_lock),
         }
     }
 }
 impl PartitionLogRef {
     pub fn new(log: Arc<dyn wflow_core::log::LogStore>) -> Self {
+        static APPEND_LOCKS: std::sync::LazyLock<
+            std::sync::Mutex<HashMap<usize, std::sync::Weak<futures::lock::Mutex<()>>>>,
+        > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+        let key = Arc::as_ptr(&log) as *const () as usize;
+        let append_lock = {
+            let mut locks = APPEND_LOCKS.lock().unwrap();
+            locks.retain(|_, weak| weak.strong_count() > 0);
+            if let Some(existing) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
+                existing
+            } else {
+                let lock = Arc::new(futures::lock::Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
         Self {
             buffer: vec![],
             log,
+            append_lock,
         }
     }
     #[tracing::instrument(skip(self))]
@@ -96,6 +118,7 @@ impl PartitionLogRef {
         self.buffer.clear();
         debug!("appending");
         serde_json::to_writer(&mut self.buffer, entry).expect(ERROR_JSON);
+        let _guard = self.append_lock.lock().await;
         self.log.append(&self.buffer).await
     }
 

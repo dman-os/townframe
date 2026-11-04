@@ -6,9 +6,9 @@ use plug_dayledger_manifest::hledger::projection::map_posting_type;
 use plug_dayledger_manifest::hledger::projection::map_txn_status;
 use plug_dayledger_manifest::types;
 use types::Claim;
-use wflow_sdk::WflowCtx;
+use wflow_wdk::WflowCtx;
 
-pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_wdk::JobErrorX> {
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::WellKnownFacet;
@@ -24,28 +24,28 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .iter()
         .find(|tag| tag.key() == note_facet_key_str && tag.rights().contains(FacetRights::READ))
         .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("note facet token with read rights not found"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("note facet token with read rights not found"))
         })?;
 
     let note_raw = note_token.get().await.map_err(|err| {
-        wflow_sdk::JobErrorX::Terminal(ferr!("error reading note facet: {err:?}"))
+        wflow_wdk::JobErrorX::Terminal(ferr!("error reading note facet: {err:?}"))
     })?;
     let note_json: daybook_types::doc::FacetRaw =
         serde_json::from_str(&note_raw).map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("error parsing note facet json: {err}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("error parsing note facet json: {err}"))
         })?;
     let note = match WellKnownFacet::from_json(note_json, WellKnownFacetTag::Note)
-        .map_err(|err| wflow_sdk::JobErrorX::Terminal(err.wrap_err("input facet is not note")))?
+        .map_err(|err| wflow_wdk::JobErrorX::Terminal(err.wrap_err("input facet is not note")))?
     {
         WellKnownFacet::Note(value) => value,
         _ => unreachable!("expected WellKnownFacet::Note here for parse-hledger"),
     };
 
     let transactions = hledger::parse::journal::parse_journal(&note.content)
-        .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("hledger parse error: {err:?}")))?;
+        .map_err(|err| wflow_wdk::JobErrorX::Terminal(ferr!("hledger parse error: {err:?}")))?;
 
     let note_heads = note_token.heads().map_err(|err| {
-        wflow_sdk::JobErrorX::Terminal(ferr!("error reading note heads: {err:?}"))
+        wflow_wdk::JobErrorX::Terminal(ferr!("error reading note heads: {err:?}"))
     })?;
     let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note);
     let note_url_str = format!(
@@ -54,7 +54,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     );
     let note_url: url::Url = note_url_str
         .parse()
-        .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("invalid facet url: {err}")))?;
+        .map_err(|err| wflow_wdk::JobErrorX::Terminal(ferr!("invalid facet url: {err}")))?;
     let src_ref = daybook_types::doc::FacetRef {
         r#ref: note_url,
         heads: note_heads,
@@ -69,7 +69,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .iter()
         .find(|tag| tag.tag() == claim_tag_str && tag.rights().contains(FacetRights::CREATE))
         .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("claim tag token with create rights not found"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("claim tag token with create rights not found"))
         })?;
 
     let mut existing_claims: HashMap<String, Claim> = HashMap::new();
@@ -80,10 +80,10 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         }
 
         let claim_raw = claim_token.get().await.map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("error reading claim facet: {err:?}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("error reading claim facet: {err:?}"))
         })?;
         let claim = serde_json::from_str(&claim_raw).map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("error parsing claim facet json: {err}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("error parsing claim facet json: {err}"))
         })?;
         let claim_id = facet_key.id;
         existing_claims.insert(claim_id, claim);
@@ -96,14 +96,14 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let mut claim_txn_pairs: Vec<(String, usize)> = Vec::with_capacity(matched_claims.len());
     for (txn_index, (claim_id, claim)) in matched_claims.iter().enumerate() {
         let claim_json = serde_json::to_string(&claim).map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing claim: {err}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("serde error serializing claim: {err}"))
         })?;
 
         claim_tag_token
             .create(claim_id.clone(), claim_json)
             .await
             .map_err(|err| {
-                wflow_sdk::JobErrorX::Terminal(ferr!(
+                wflow_wdk::JobErrorX::Terminal(ferr!(
                     "error creating/updating claim facet: {err:?}"
                 ))
             })?;
@@ -118,7 +118,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .iter()
         .find(|tag| tag.tag() == txn_tag_str && tag.rights().contains(FacetRights::CREATE))
         .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("txn tag token with create rights not found"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("txn tag token with create rights not found"))
         })?;
 
     let claim_facet_tag = daybook_types::doc::FacetKey::from(claim_tag_str).tag;
@@ -130,18 +130,18 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             args.doc_id, claim_facet_tag, claim_id
         )
         .parse()
-        .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("invalid claim ref url: {err}")))?;
+        .map_err(|err| wflow_wdk::JobErrorX::Terminal(ferr!("invalid claim ref url: {err}")))?;
 
         let dayledger_txn = project_txn(claim_id.clone(), txn, claim_ref_url);
         let txn_json = serde_json::to_string(&dayledger_txn).map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing txn: {err}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("serde error serializing txn: {err}"))
         })?;
 
         txn_tag_token
             .create(claim_id.clone(), txn_json)
             .await
             .map_err(|err| {
-                wflow_sdk::JobErrorX::Terminal(ferr!("error creating txn facet: {err:?}"))
+                wflow_wdk::JobErrorX::Terminal(ferr!("error creating txn facet: {err:?}"))
             })?;
     }
 
@@ -153,7 +153,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .iter()
         .find(|tag| tag.tag() == account_tag_str && tag.rights().contains(FacetRights::CREATE))
         .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("account tag token with create rights not found"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("account tag token with create rights not found"))
         })?;
 
     // Collect unique accounts with their commodities.
@@ -184,7 +184,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
                 })
                 .transpose()
                 .map_err(|err| {
-                    wflow_sdk::JobErrorX::Terminal(ferr!("invalid parent account ref url: {err}"))
+                    wflow_wdk::JobErrorX::Terminal(ferr!("invalid parent account ref url: {err}"))
                 })?
         };
 
@@ -199,14 +199,14 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         };
 
         let account_json = serde_json::to_string(&account).map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing account: {err}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("serde error serializing account: {err}"))
         })?;
 
         account_tag_token
             .create(account_name.clone(), account_json)
             .await
             .map_err(|err| {
-                wflow_sdk::JobErrorX::Terminal(ferr!("error creating account facet: {err:?}"))
+                wflow_wdk::JobErrorX::Terminal(ferr!("error creating account facet: {err:?}"))
             })?;
     }
 
@@ -218,7 +218,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .iter()
         .find(|tag| tag.tag() == meta_tag_str && tag.rights().contains(FacetRights::CREATE))
         .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("meta tag token with create rights not found"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("meta tag token with create rights not found"))
         })?;
 
     let meta_facet_key = daybook_types::doc::FacetKey {
@@ -255,7 +255,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .map(|(claim_id, _)| {
             format!("db+facet:///{}/{}/{}", args.doc_id, txn_facet_tag, claim_id)
                 .parse()
-                .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("invalid txn ref url: {err}")))
+                .map_err(|err| wflow_wdk::JobErrorX::Terminal(ferr!("invalid txn ref url: {err}")))
         })
         .collect::<Result<_, _>>()?;
 
@@ -268,7 +268,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
                 args.doc_id, account_facet_tag, account_name
             )
             .parse()
-            .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("invalid account ref url: {err}")))
+            .map_err(|err| wflow_wdk::JobErrorX::Terminal(ferr!("invalid account ref url: {err}")))
         })
         .collect::<Result<_, _>>()?;
 
@@ -280,7 +280,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         transaction_refs,
     };
     let meta_json = serde_json::to_string(&ledger_meta).map_err(|err| {
-        wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing ledger meta: {err}"))
+        wflow_wdk::JobErrorX::Terminal(ferr!("serde error serializing ledger meta: {err}"))
     })?;
 
     // Update the existing facet if present, otherwise create a new one.
@@ -291,22 +291,22 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .find(|facet| facet.key() == meta_facet_key_str)
     {
         if !existing.rights().contains(FacetRights::UPDATE) {
-            return Err(wflow_sdk::JobErrorX::Terminal(ferr!(
+            return Err(wflow_wdk::JobErrorX::Terminal(ferr!(
                 "existing ledger meta facet missing UPDATE right"
             )));
         }
         let update_result = existing.update(meta_json.clone()).await.map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("denied updating ledger meta facet: {err:?}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("denied updating ledger meta facet: {err:?}"))
         })?;
         update_result.map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("error updating ledger meta facet: {err:?}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("error updating ledger meta facet: {err:?}"))
         })?;
     } else {
         meta_tag_token
             .create(daybook_types::doc::DEFAULT_FACET_ID.to_string(), meta_json)
             .await
             .map_err(|err| {
-                wflow_sdk::JobErrorX::Terminal(ferr!("error creating ledger meta facet: {err:?}"))
+                wflow_wdk::JobErrorX::Terminal(ferr!("error creating ledger meta facet: {err:?}"))
             })?;
     }
 

@@ -19,7 +19,8 @@ path = "lib.rs"
 # internal
 utils_rs.workspace = true
 wasm_utils_rs.workspace = true
-wflow_sdk.workspace = true
+wflow_wdk.workspace = true
+wflow_wdk_wasm.workspace = true
 
 #
 # encoding

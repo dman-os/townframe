@@ -23,8 +23,8 @@ mod wit {
             "wasi:config/runtime@0.2.0-draft": wasm_utils_rs::wit::wasi::config::runtime,
 
             "townframe:api-utils/utils": wasm_utils_rs::wit::utils,
-            "townframe:wflow/types": wflow_sdk::wit::townframe::wflow::types,
-            "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
+            "townframe:wflow/types": wflow_wdk_wasm::wit::townframe::wflow::types,
+            "townframe:wflow/host": wflow_wdk_wasm::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
 
             "townframe:sqlite/types": generate,
@@ -53,7 +53,7 @@ mod wasm_runtime {
     impl crate::wit::exports::townframe::wflow::bundle::Guest for Component {
         async fn run(args: crate::wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
             use crate::wflows::*;
-            wflow_sdk::route_wflows!(args, {
+            wflow_wdk_wasm::route_wflows!(args, {
                 "parse-hledger" => |cx, _args: serde_json::Value| async move {
                     parse_hledger::run(cx).await
                 },

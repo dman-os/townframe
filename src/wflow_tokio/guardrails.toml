@@ -4,6 +4,8 @@ dependency_reason = "initial guardrail baseline"
 allowed_dependencies = [
     "utils_rs",
     "wflow_core",
+    "wflow_wdk",
+    "wflow_wdk_native",
 ]
 allow_external_api_types = false
 

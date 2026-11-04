@@ -5,6 +5,7 @@ _: {
     { pkgs, ... }:
     let
       tools = import ./toolchains.nix { inherit pkgs; };
+      formalTools = import ./formal-tools.nix { inherit pkgs; };
       inherit (tools) rustRust rustAndroid rustFull;
 
       androidBuildToolsVersion = "37.0.0";
@@ -195,6 +196,7 @@ _: {
         cargo-udeps
         cargo-nextest
         cargo-machete
+        formalTools
       ];
 
       kotliLintTools = with pkgs; [

@@ -1,0 +1,22 @@
+[package]
+name = "wflow_wdk_native"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+utils_rs.workspace = true
+wflow_core.workspace = true
+wflow_wdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+async-channel.workspace = true
+futures.workspace = true
+tracing.workspace = true

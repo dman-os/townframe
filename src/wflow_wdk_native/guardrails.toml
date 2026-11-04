@@ -1,0 +1,11 @@
+version = 1
+role = "runtime"
+dependency_reason = "in-process native workflow backend and local task driver for wflow_wdk"
+allowed_dependencies = [
+    "utils_rs",
+    "wflow_core",
+    "wflow_wdk",
+]
+allow_external_api_types = false
+
+[builds.native]

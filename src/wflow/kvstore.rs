@@ -1,3 +1,5 @@
+pub mod atomic;
+
 use crate::interlude::*;
 
 use sqlite_rs::Database;

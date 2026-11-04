@@ -216,7 +216,9 @@ checking remains a tracked follow-up.
 - `./src/wflow/`: Top level crate for wflow, a durable workflows impl.
   - `./src/wflow_core/`: Core types and logic.
   - `./src/wflow_tokio/`: Tokio implementation for the wflow engine.
-  - `./src/wflow_sdk/`: Sdk for writing wflows.
+  - `./src/wflow_wdk/`: Shared async workflow development kit.
+  - `./src/wflow_wdk_native/`: Native in-process backend for `wflow_wdk`.
+  - `./src/wflow_wdk_wasm/`: Wasm WIT backend for `wflow_wdk`.
   - `./src/test_wflows/`: Wflows used for tests in `wflow`.
 - `./src/mltools/`: ML abstractions.
 - `./src/pauperfuse/`: Worktrees and FUSE.

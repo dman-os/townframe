@@ -105,6 +105,15 @@ impl WasiKeyvalue {
             None => Err(anyhow::anyhow!("bucket '{}' does not exist", bucket)),
         }
     }
+
+    pub async fn get_value(&self, workload_id: &str, bucket: &str, key: &str) -> Option<Vec<u8>> {
+        let storage = self.storage.read().await;
+        storage
+            .get(workload_id)
+            .and_then(|buckets| buckets.get(bucket))
+            .and_then(|bucket_data| bucket_data.data.get(key))
+            .cloned()
+    }
 }
 
 // Implementation for the store interface
