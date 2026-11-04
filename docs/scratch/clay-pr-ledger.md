@@ -421,3 +421,17 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 - Verified: check-dayframe 455/455; dayframe_web Playwright passed on b4ad0d34 (before 527a27fe).
 - Part 2 (reload e2e in Playwright) moves to C5: needs persisted enablement to have a visible
   durable fact.
+
+## C5 decisions (2026-11-04, user)
+
+- No key-level write authority until collections have a query language (JSON-style selection and
+  filtering, one engine in guest and host); the grant will be the query. Prefix grants are removed
+  (agent running), not narrowed.
+- Admitted packages start disabled; nothing auto-enables an incoming package. Locked shell micros
+  are part of the shell and always run.
+- Desired state (install, enabled) is a config datum in a document, shaped like big_nodule's
+  `nodule.install/<plug>`. Until the node is wired, the mock `DocumentService` source is backed by
+  `clay_store`, so the datum survives a reload and the Playwright reload check (C4c part 2) can
+  observe it.
+- Plan: C5a prefix removal → C5b durable mock document source → C5c install datum + reconcile into
+  the supervisor, lifecycle panel writes the datum → C5d reload e2e.
