@@ -6,6 +6,7 @@ use clay_host::ConfiguredMicro;
 use clay_host::Host;
 use clay_host::MicroState;
 use clay_host::Supervisor;
+use clay_mdk::native::BoundCollection;
 use clay_mdk::native::CollectionBindings;
 use clay_mdk::native::CollectionRegistry;
 use clay_mdk::native::RendererRegistry;
@@ -54,13 +55,14 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
                 eager: true,
                 enabled: true,
                 requirements: BTreeMap::new(),
+                unresolved_bindings: Vec::new(),
                 factory: factory(
                     resources,
                     manifest(),
-                    CollectionBindings {
-                        read: vec![],
-                        write: vec![SECTIONS.into()],
-                    },
+                    CollectionBindings::new([(
+                        SECTIONS_BINDING.to_owned(),
+                        BoundCollection::write(SECTIONS),
+                    )]),
                     activate,
                 ),
             };

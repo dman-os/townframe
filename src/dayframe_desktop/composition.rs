@@ -5,45 +5,41 @@ pub use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
 
 use clay_mdk::native::factory;
-use clay_mdk::native::CollectionBindings;
 use clay_store::OrderedStore;
 use dayframe_composition::InstalledMicro;
-use micro_settings_manifest::SECTIONS;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
-/// is unusable without it. Sample is eager so its section is written at boot. What each may
-/// read or write is this catalog's decision, not the micro's.
+/// is unusable without it. Sample is eager so its section is written at boot. Collection access
+/// is resolved by the composition from each manifest's requests and configuration, not
+/// hand-written here.
 fn native_micros() -> Vec<InstalledMicro> {
     vec![
         InstalledMicro {
             eager: true,
             locked: true,
-            ..InstalledMicro::new(micro_settings_manifest::manifest(), |resources| {
-                factory(
-                    resources,
-                    micro_settings_manifest::manifest(),
-                    CollectionBindings {
-                        read: vec![SECTIONS.into()],
-                        write: vec![],
-                    },
-                    micro_settings::activate,
-                )
-            })
+            ..InstalledMicro::new(
+                micro_settings_manifest::manifest(),
+                |resources, bindings| {
+                    factory(
+                        resources,
+                        micro_settings_manifest::manifest(),
+                        bindings,
+                        micro_settings::activate,
+                    )
+                },
+            )
         },
         InstalledMicro {
             eager: true,
             enabled_on_admission: true,
-            ..InstalledMicro::new(micro_sample::manifest(), |resources| {
+            ..InstalledMicro::new(micro_sample::manifest(), |resources, bindings| {
                 factory(
                     resources,
                     micro_sample::manifest(),
-                    CollectionBindings {
-                        read: vec![],
-                        write: vec![SECTIONS.into()],
-                    },
+                    bindings,
                     micro_sample::activate,
                 )
             })
@@ -147,17 +143,15 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
             Ok(package) => {
                 let manifest = package.manifest().clone();
                 let bytes = package.bytes().to_vec();
-                installed.push(InstalledMicro::new(manifest.clone(), move |resources| {
-                    clay_mdk::wasm::factory(
-                        resources,
-                        manifest,
-                        CollectionBindings::default(),
-                        move || {
+                installed.push(InstalledMicro::new(
+                    manifest.clone(),
+                    move |resources, bindings| {
+                        clay_mdk::wasm::factory(resources, manifest, bindings, move || {
                             let bytes = bytes.clone();
                             async move { clay_mdk::wasm::WasmPackage::from_bytes(bytes).await }
-                        },
-                    )
-                }));
+                        })
+                    },
+                ));
             }
             Err(error) => errors.push(error),
         }

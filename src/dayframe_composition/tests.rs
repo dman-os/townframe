@@ -3,7 +3,6 @@ use clay_collection::Stamped;
 use clay_host::StartError;
 use clay_mdk::native::factory;
 use clay_mdk::native::CapabilityFailure;
-use clay_mdk::native::CollectionBindings;
 use clay_mdk::native::RowAttachment;
 use micro_settings_manifest::Section;
 use micro_settings_manifest::SECTIONS;
@@ -27,29 +26,26 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
     let settings = InstalledMicro {
         eager: true,
         locked: true,
-        ..InstalledMicro::new(micro_settings_manifest::manifest(), |resources| {
-            factory(
-                resources,
-                micro_settings_manifest::manifest(),
-                CollectionBindings {
-                    read: vec![SECTIONS.into()],
-                    write: vec![],
-                },
-                micro_settings::activate,
-            )
-        })
+        ..InstalledMicro::new(
+            micro_settings_manifest::manifest(),
+            |resources, bindings| {
+                factory(
+                    resources,
+                    micro_settings_manifest::manifest(),
+                    bindings,
+                    micro_settings::activate,
+                )
+            },
+        )
     };
     let sample = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
-        ..InstalledMicro::new(micro_sample::manifest(), |resources| {
+        ..InstalledMicro::new(micro_sample::manifest(), |resources, bindings| {
             factory(
                 resources,
                 micro_sample::manifest(),
-                CollectionBindings {
-                    read: vec![],
-                    write: vec![SECTIONS.into()],
-                },
+                bindings,
                 micro_sample::activate,
             )
         })
@@ -61,11 +57,11 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
 fn stub_counter() -> InstalledMicro {
     InstalledMicro {
         enabled_on_admission: true,
-        ..InstalledMicro::new(micro_counter_manifest::manifest(), |resources| {
+        ..InstalledMicro::new(micro_counter_manifest::manifest(), |resources, bindings| {
             factory(
                 resources,
                 micro_counter_manifest::manifest(),
-                CollectionBindings::default(),
+                bindings,
                 |context| {
                     context.publish_component(micro_counter_manifest::VIEW, || {
                         rsx! { p { "stub counter" } }
@@ -95,9 +91,10 @@ impl Factory<CapabilityPublication> for Unfetchable {
 fn unfetchable_counter() -> InstalledMicro {
     InstalledMicro {
         enabled_on_admission: true,
-        ..InstalledMicro::new(micro_counter_manifest::manifest(), |_resources| {
-            Rc::new(Unfetchable)
-        })
+        ..InstalledMicro::new(
+            micro_counter_manifest::manifest(),
+            |_resources, _bindings| Rc::new(Unfetchable),
+        )
     }
 }
 
@@ -290,7 +287,7 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
 async fn a_manifest_contributing_to_an_undeclared_collection_is_an_installation_error() {
     let mut manifest = micro_counter_manifest::manifest();
     manifest.contributions[0].collection = "nobody.declared.this".into();
-    let counter = InstalledMicro::new(manifest, |_resources| Rc::new(Unfetchable));
+    let counter = InstalledMicro::new(manifest, |_resources, _bindings| Rc::new(Unfetchable));
     let runtime = memory_runtime(counter).await;
     assert_eq!(runtime.installation_errors.len(), 1);
     assert!(runtime.installation_errors[0].contains("nobody.declared.this"));
@@ -322,7 +319,7 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
             manifest.contributions[0].payload["title"] = title.into();
             let runtime = CompositionRuntime::new(
                 Arc::new(store),
-                catalog(InstalledMicro::new(manifest, |_resources| {
+                catalog(InstalledMicro::new(manifest, |_resources, _bindings| {
                     Rc::new(Unfetchable)
                 })),
             )
@@ -369,7 +366,7 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
             Arc::clone(&store),
             catalog(InstalledMicro::new(
                 micro_counter_manifest::manifest(),
-                |_| Rc::new(Unfetchable),
+                |_, _| Rc::new(Unfetchable),
             )),
         )
         .await
@@ -432,9 +429,10 @@ fn install_datum_of(runtime: &CompositionRuntime, micro: &str) -> Option<serde_j
 // links is admitted enabled, and the locked root has no datum at all.
 #[tokio::test(flavor = "current_thread")]
 async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
-    let package = InstalledMicro::new(micro_counter_manifest::manifest(), |_resources| {
-        Rc::new(Unfetchable)
-    });
+    let package = InstalledMicro::new(
+        micro_counter_manifest::manifest(),
+        |_resources, _bindings| Rc::new(Unfetchable),
+    );
     let runtime = memory_runtime(package).await;
     let version = micro_counter_manifest::manifest().package_version;
     assert_eq!(
@@ -458,7 +456,7 @@ async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
 async fn the_install_datum_drives_the_supervisor() {
     let runtime = memory_runtime(InstalledMicro::new(
         micro_counter_manifest::manifest(),
-        |_resources| Rc::new(Unfetchable),
+        |_resources, _bindings| Rc::new(Unfetchable),
     ))
     .await;
     served(&runtime, async {
@@ -507,4 +505,227 @@ async fn a_disabled_micro_stays_disabled_across_a_reboot() {
     assert_eq!(install_datum_of(&second, "dayframe.settings"), None);
     assert_eq!(second.state(&id("dayframe.settings")), MicroState::Idle);
     second.host.close();
+}
+
+// ── collection binding resolution (ADR 025 §11) ──────────────────────────────────────────────
+
+const ROWS: &str = "tests.rows";
+const MISSING: &str = "tests.missing";
+const BOOK: &str = "book";
+const PROBE: &str = "tests.probe";
+
+fn probe_manifest(
+    micro: &str,
+    contracts: &[&str],
+    requests: Vec<clay_mdk::CollectionRequest>,
+) -> clay_mdk::MicroManifest {
+    clay_mdk::MicroManifest {
+        schema: clay_mdk::MANIFEST_SCHEMA,
+        id: clay_mdk::MicroId::new(micro),
+        package_version: 1,
+        entrypoints: clay_mdk::Entrypoints::micro_client(),
+        publications: vec![],
+        requires: vec![],
+        configuration_requests: vec![],
+        collection_contracts: contracts
+            .iter()
+            .map(|contract| clay_mdk::CollectionContract {
+                id: (*contract).into(),
+                selector_schema: "dayframe.collection.whole".into(),
+                key_schema: "text".into(),
+                value_schema: "text".into(),
+                write_context_schema: None,
+                offered: vec![clay_mdk::CollectionCapability::Read],
+            })
+            .collect(),
+        collection_requests: requests,
+        contributions: vec![],
+        extra: BTreeMap::new(),
+    }
+}
+
+/// Declares the `tests.rows` collection and nothing else.
+fn rows_owner() -> InstalledMicro {
+    InstalledMicro::new(
+        probe_manifest("tests.owner", &[ROWS], vec![]),
+        |resources, bindings| {
+            factory(
+                resources,
+                probe_manifest("tests.owner", &[ROWS], vec![]),
+                bindings,
+                |_| Ok(()),
+            )
+        },
+    )
+}
+
+/// An eager micro requesting `BOOK` of `contract`; each activation reports whether the binding
+/// was bound to it.
+fn probe(
+    contract: &str,
+    necessity: clay_mdk::Necessity,
+) -> (InstalledMicro, watch::Receiver<Vec<bool>>) {
+    let manifest = probe_manifest(
+        PROBE,
+        &[],
+        vec![clay_mdk::CollectionRequest {
+            binding: BOOK.into(),
+            contract: contract.into(),
+            access: clay_mdk::CollectionAccess::Read,
+            necessity,
+            resolution: clay_mdk::BindingResolution::Configured,
+        }],
+    );
+    let (activations, seen) = watch::channel(Vec::new());
+    let micro = InstalledMicro {
+        eager: true,
+        enabled_on_admission: true,
+        ..InstalledMicro::new(manifest.clone(), move |resources, bindings| {
+            factory(resources, manifest, bindings, move |context| {
+                let bound = context.collection::<String, String>(BOOK).is_ok();
+                activations.send_modify(|seen| seen.push(bound));
+                Ok(())
+            })
+        })
+    };
+    (micro, seen)
+}
+
+async fn probe_runtime(
+    store: &Arc<clay_store::MemoryStore>,
+    probe: InstalledMicro,
+) -> CompositionRuntime {
+    let mut micros = catalog(stub_counter());
+    micros.push(rows_owner());
+    micros.push(probe);
+    CompositionRuntime::new(Arc::clone(store), micros)
+        .await
+        .unwrap()
+}
+
+/// Wait for the supervisor to record `state` for `micro`, woken by its change ticks.
+async fn reaches(runtime: &CompositionRuntime, micro: &MicroId, state: MicroState) {
+    let mut changes = runtime.supervisor.changes();
+    while runtime.state(micro) != state {
+        changes.changed().await.unwrap();
+    }
+}
+
+async fn activations(seen: &mut watch::Receiver<Vec<bool>>, count: usize) -> Vec<bool> {
+    seen.wait_for(|seen| seen.len() >= count)
+        .await
+        .unwrap()
+        .clone()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_contract_with_one_declared_collection_binds_by_default() {
+    let (probe, mut seen) = probe(ROWS, clay_mdk::Necessity::Required);
+    let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
+    served(&runtime, async {
+        assert_eq!(activations(&mut seen, 1).await, [true]);
+        // The built-ins resolved their sections binding the same way.
+        reaches(&runtime, &id(micro_sample::ID), MicroState::Active).await;
+        reaches(&runtime, &id("dayframe.settings"), MicroState::Active).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_required_binding_that_resolves_to_nothing_is_never_started() {
+    let (probe, seen) = probe(MISSING, clay_mdk::Necessity::Required);
+    let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
+    let micro = id(PROBE);
+    let unconfigured = MicroState::Unconfigured(vec![BOOK.into()]);
+    assert_eq!(runtime.state(&micro), unconfigured);
+    served(&runtime, async {
+        // Eager reconcile has run once the other eager roots are up.
+        reaches(&runtime, &id(micro_sample::ID), MicroState::Active).await;
+        assert_eq!(runtime.state(&micro), unconfigured);
+        // Redeeming one of its publications is refused, not a fault.
+        let refused = runtime
+            .supervisor
+            .acquire(&micro, "none")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            refused,
+            StartError::Unconfigured(micro.clone(), vec![BOOK.into()])
+        );
+        assert_eq!(runtime.state(&micro), unconfigured);
+    })
+    .await;
+    assert!(seen.borrow().is_empty(), "the micro was started");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_optional_binding_that_resolves_to_nothing_starts_with_the_binding_absent() {
+    let (probe, mut seen) = probe(MISSING, clay_mdk::Necessity::Optional);
+    let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
+    served(&runtime, async {
+        assert_eq!(activations(&mut seen, 1).await, [false]);
+        reaches(&runtime, &id(PROBE), MicroState::Active).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn changing_the_binding_datum_restarts_the_micro_with_the_new_binding() {
+    let (probe, mut seen) = probe(ROWS, clay_mdk::Necessity::Optional);
+    let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
+    let micro = id(PROBE);
+    served(&runtime, async {
+        assert_eq!(activations(&mut seen, 1).await, [true]);
+        // An explicit value is final even where the default would bind.
+        runtime.set_binding(&micro, BOOK, None).await;
+        assert_eq!(activations(&mut seen, 2).await, [true, false]);
+        runtime.clear_binding(&micro, BOOK).await;
+        assert_eq!(activations(&mut seen, 3).await, [true, false, true]);
+        reaches(&runtime, &micro, MicroState::Active).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn configuring_a_required_binding_starts_a_waiting_micro_and_unconfiguring_stops_it() {
+    let (probe, mut seen) = probe(ROWS, clay_mdk::Necessity::Required);
+    let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
+    let micro = id(PROBE);
+    let unconfigured = MicroState::Unconfigured(vec![BOOK.into()]);
+    served(&runtime, async {
+        assert_eq!(activations(&mut seen, 1).await, [true]);
+        runtime.set_binding(&micro, BOOK, None).await;
+        reaches(&runtime, &micro, unconfigured.clone()).await;
+        runtime.clear_binding(&micro, BOOK).await;
+        assert_eq!(activations(&mut seen, 2).await, [true, true]);
+        reaches(&runtime, &micro, MicroState::Active).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_binding_datum_survives_a_reboot() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (first_probe, mut seen) = probe(ROWS, clay_mdk::Necessity::Required);
+    let first = probe_runtime(&store, first_probe).await;
+    let micro = id(PROBE);
+    served(&first, async {
+        assert_eq!(activations(&mut seen, 1).await, [true]);
+        first.set_binding(&micro, BOOK, None).await;
+        reaches(&first, &micro, MicroState::Unconfigured(vec![BOOK.into()])).await;
+    })
+    .await;
+
+    let (second_probe, seen) = probe(ROWS, clay_mdk::Necessity::Required);
+    let second = probe_runtime(&store, second_probe).await;
+    assert_eq!(
+        second.state(&micro),
+        MicroState::Unconfigured(vec![BOOK.into()])
+    );
+    served(&second, async {
+        reaches(&second, &id(micro_sample::ID), MicroState::Active).await;
+    })
+    .await;
+    assert!(seen.borrow().is_empty(), "the micro was started");
 }

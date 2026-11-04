@@ -4,12 +4,16 @@
 mod tests;
 mod view;
 
+use clay_mdk::BindingResolution;
+use clay_mdk::CollectionAccess;
+use clay_mdk::CollectionRequest;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::Entrypoints;
 use clay_mdk::FacetAccess;
 use clay_mdk::MANIFEST_SCHEMA;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
+use clay_mdk::Necessity;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::native::AccessError;
@@ -30,6 +34,8 @@ pub const CONFIG_TAG: &str = "org.dayframe.sample.config";
 pub const CONFIG_KEY: &str = "main";
 /// The one publication: the presentation Settings mounts for this micro's section.
 pub const DETAIL: &str = "detail";
+/// The local binding name under which the sample registers its Settings section.
+pub const SECTIONS_BINDING: &str = "sections";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SampleConfig {
@@ -63,6 +69,13 @@ pub fn manifest() -> MicroManifest {
             }],
         }],
         collection_contracts: vec![],
+        collection_requests: vec![CollectionRequest {
+            binding: SECTIONS_BINDING.into(),
+            contract: SECTIONS.into(),
+            access: CollectionAccess::Write,
+            necessity: Necessity::Required,
+            resolution: BindingResolution::Configured,
+        }],
         contributions: vec![],
         extra: Default::default(),
     }
@@ -84,7 +97,7 @@ pub fn activate<R: RendererRegistry<Render = Element>>(
         dioxus::prelude::rsx! { view::SampleDetail { config: content.clone() } }
     })?;
     context
-        .registration::<String, Section>(SECTIONS)?
+        .registration::<String, Section>(SECTIONS_BINDING)?
         .put(
             &ID.to_owned(),
             &Section {

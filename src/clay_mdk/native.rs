@@ -86,12 +86,53 @@ pub struct Resources<R: RendererRegistry> {
     pub collections: CollectionRegistry<BytesRegistrations>,
 }
 
-/// The declared collections one micro is configured to use, by collection id. Configuration
-/// decides these, not the micro (ADR 025 §11); a collection in `write` is also readable.
+/// One local collection binding resolved to a declared collection (ADR 025 §11).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundCollection {
+    /// The declared collection's id.
+    pub id: String,
+    /// Whether the micro may also register rows; a writable binding is always readable.
+    pub write: bool,
+}
+
+impl BoundCollection {
+    pub fn read(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            write: false,
+        }
+    }
+
+    pub fn write(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            write: true,
+        }
+    }
+}
+
+/// What configuration resolved each of one micro's collection requests to, by the micro's
+/// local binding name; a binding absent from the map is unbound. Configuration decides these,
+/// not the micro (ADR 025 §11). It is a shared handle: the composition replaces the resolution
+/// when the micro's binding datum changes, and the factory snapshots it at each `initialize`,
+/// so an incarnation sees exactly the resolution current when it started and never changes
+/// under it (there is no hot rebinding).
 #[derive(Clone, Debug, Default)]
-pub struct CollectionBindings {
-    pub read: Vec<String>,
-    pub write: Vec<String>,
+pub struct CollectionBindings(Rc<RefCell<BTreeMap<String, BoundCollection>>>);
+
+impl CollectionBindings {
+    pub fn new(bound: impl IntoIterator<Item = (String, BoundCollection)>) -> Self {
+        Self(Rc::new(RefCell::new(bound.into_iter().collect())))
+    }
+
+    /// Replace the resolution; incarnations already running keep the one they started with.
+    pub fn replace(&self, bound: BTreeMap<String, BoundCollection>) {
+        *self.0.borrow_mut() = bound;
+    }
+
+    pub fn snapshot(&self) -> BTreeMap<String, BoundCollection> {
+        self.0.borrow().clone()
+    }
 }
 
 /// The declared registration collection a shell reads its roots from: micros register a
@@ -147,7 +188,7 @@ pub struct Context<R: RendererRegistry> {
     configs: BTreeMap<String, DocumentRef>,
     requirements: BTreeMap<String, CapabilityRef>,
     resources: Resources<R>,
-    bindings: CollectionBindings,
+    bindings: BTreeMap<String, BoundCollection>,
     capabilities: CapabilitySession,
     sessions: CollectionSession,
     published: RefCell<Vec<(String, PublishedCapability)>>,
@@ -217,24 +258,18 @@ impl<R: RendererRegistry> Context<R> {
         Ok(publication)
     }
 
-    /// Mirror a collection this micro is configured to read. The feed task is incarnation-owned.
+    /// Mirror the collection bound to `binding`, which the manifest declares as a collection
+    /// request. `Denied` when configuration left the binding unbound (an optional request
+    /// nothing resolved). The feed task is incarnation-owned.
     pub fn collection<K: DeserializeOwned + 'static, V: DeserializeOwned + 'static>(
         &self,
-        id: &str,
+        binding: &str,
     ) -> Result<CollectionWatch<K, V>, AccessError> {
-        if !self
-            .bindings
-            .read
-            .iter()
-            .chain(&self.bindings.write)
-            .any(|bound| bound == id)
-        {
-            return Err(AccessError::Denied);
-        }
+        let bound = self.bindings.get(binding).ok_or(AccessError::Denied)?;
         let projection = self
             .resources
             .collections
-            .collection(id)
+            .collection(&bound.id)
             .ok_or(AccessError::Denied)?
             .projection();
         let reader = self.sessions.grant(projection)?;
@@ -243,25 +278,28 @@ impl<R: RendererRegistry> Context<R> {
         Ok(watch)
     }
 
-    /// Write authority over a collection this micro is configured to write, together with its
-    /// mirror. The writer's rows belong to this incarnation and are retracted when it closes.
+    /// Write authority over the collection bound to `binding`, together with its mirror. The
+    /// binding must be a write request; `Denied` when it is unbound or read-only. The writer's
+    /// rows belong to this incarnation and are retracted when it closes.
     pub fn registration<
         K: Serialize + DeserializeOwned + 'static,
         V: Serialize + DeserializeOwned + 'static,
     >(
         &self,
-        id: &str,
+        binding: &str,
     ) -> Result<Registration<K, V>, AccessError> {
-        if !self.bindings.write.iter().any(|bound| bound == id) {
-            return Err(AccessError::Denied);
-        }
+        let bound = self
+            .bindings
+            .get(binding)
+            .filter(|bound| bound.write)
+            .ok_or(AccessError::Denied)?;
         let grant = self
             .resources
             .collections
-            .grant(id, &self.micro)
+            .grant(&bound.id, &self.micro)
             .map_err(|_| AccessError::Denied)?;
         let writer = self.sessions.grant_writer(grant)?;
-        Ok(Registration::new(writer, self.collection(id)?))
+        Ok(Registration::new(writer, self.collection(binding)?))
     }
 
     /// Register incarnation-owned local work. It is dropped when this instance closes; a
@@ -336,7 +374,7 @@ impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFac
         let resources = self.resources.clone();
         let manifest = self.manifest.clone();
         let declared = self.declared.clone();
-        let bindings = self.bindings.clone();
+        let bindings = self.bindings.snapshot();
         let activate = Rc::clone(&self.activate);
         Box::pin(async move {
             let capabilities =

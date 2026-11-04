@@ -102,6 +102,7 @@ impl Controls {
             eager: false,
             enabled: true,
             requirements: BTreeMap::new(),
+            unresolved_bindings: Vec::new(),
             factory: Rc::new(Fake {
                 name: identity.to_owned(),
                 controls: self.clone(),
@@ -241,6 +242,72 @@ fn assert_quiescent(host: &Host) {
     );
     assert!(state.dependencies.is_empty(), "a binding outlived shutdown");
     assert!(state.tearing_down.is_empty());
+}
+
+fn unconfigured(
+    mut micro: ConfiguredMicro<Provision>,
+    bindings: &[&str],
+) -> ConfiguredMicro<Provision> {
+    micro.unresolved_bindings = bindings
+        .iter()
+        .map(|binding| (*binding).to_owned())
+        .collect();
+    micro
+}
+
+#[tokio::test]
+async fn an_unconfigured_micro_is_never_started_and_is_not_a_fault() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let solo = id("solo");
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [unconfigured(eager(controls.micro("solo")), &["sections"])],
+    );
+    assert_eq!(
+        supervisor.state(&solo),
+        MicroState::Unconfigured(vec!["sections".into()])
+    );
+    // An eager reconcile skips it without reporting a start failure.
+    assert!(supervisor.reconcile().await.is_empty());
+    // Demand is refused with the missing bindings, and starts nothing.
+    assert_eq!(
+        supervisor.acquire(&solo, PRESENTATION).await.err(),
+        Some(StartError::Unconfigured(
+            solo.clone(),
+            vec!["sections".into()]
+        ))
+    );
+    assert!(controls.log().is_empty());
+    assert_eq!(
+        supervisor.activator().status(&solo),
+        Some(MicroState::Unconfigured(vec!["sections".into()]))
+    );
+}
+
+#[tokio::test]
+async fn reconfiguring_closes_the_micro_and_a_resolved_one_starts() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let solo = id("solo");
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
+    let lease = supervisor.acquire(&solo, PRESENTATION).await.unwrap();
+    drop(lease);
+    // Reconfiguring a running micro closes it; the new resolution applies to its next start.
+    supervisor
+        .reconfigure(&solo, vec!["sections".into()])
+        .await
+        .unwrap();
+    assert_eq!(controls.log(), ["init solo", "close solo"]);
+    assert_eq!(
+        supervisor.state(&solo),
+        MicroState::Unconfigured(vec!["sections".into()])
+    );
+    supervisor.reconfigure(&solo, vec![]).await.unwrap();
+    assert_eq!(supervisor.state(&solo), MicroState::Idle);
+    supervisor.acquire(&solo, PRESENTATION).await.unwrap();
+    assert_eq!(controls.count("init solo"), 2);
+    supervisor.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -79,7 +79,7 @@ pub fn activate<R: RendererRegistry<Render = Element>>(
 ) -> Result<(), AccessError> {
     let micro = SettingsMicro {
         instance: context.instance(),
-        sections: context.collection(contract::SECTIONS)?,
+        sections: context.collection(contract::SECTIONS_BINDING)?,
         config: context
             .config(contract::CONFIG_NAME)
             .expect("manifest declares Settings configuration")
@@ -102,6 +102,7 @@ mod tests {
     use clay_host::Host;
     use clay_host::MicroId;
     use clay_host::Supervisor;
+    use clay_mdk::native::BoundCollection;
     use clay_mdk::native::CollectionBindings;
     use clay_mdk::native::CollectionRegistry;
     use clay_mdk::native::DocumentService;
@@ -151,13 +152,14 @@ mod tests {
                     eager: false,
                     enabled: true,
                     requirements: BTreeMap::new(),
+                    unresolved_bindings: Vec::new(),
                     factory: factory(
                         resources,
                         contract::manifest(),
-                        CollectionBindings {
-                            read: vec![contract::SECTIONS.into()],
-                            write: vec![],
-                        },
+                        CollectionBindings::new([(
+                            contract::SECTIONS_BINDING.to_owned(),
+                            BoundCollection::read(contract::SECTIONS),
+                        )]),
                         activate,
                     ),
                 };

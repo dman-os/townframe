@@ -105,6 +105,11 @@ pub struct ConfiguredMicro<P> {
     pub enabled: bool,
     /// Local requirement binding -> what satisfies it.
     pub requirements: BTreeMap<String, Requirement>,
+    /// Required collection bindings that configuration left unresolved. While any remain the
+    /// micro is not startable and shows as [`MicroState::Unconfigured`]: that is a
+    /// configuration state, not a fault, so neither an eager reconcile nor demand starts it
+    /// (ADR 025 §11). [`Supervisor::reconfigure`] changes it later.
+    pub unresolved_bindings: Vec<String>,
     pub factory: Rc<dyn Factory<P>>,
 }
 
@@ -121,6 +126,8 @@ pub enum StartError {
     Unknown(MicroId),
     #[error("{0} is disabled")]
     Disabled(MicroId),
+    #[error("{0} needs configuration of {1:?}")]
+    Unconfigured(MicroId, Vec<String>),
     #[error("requirement cycle through {0}")]
     Cycle(MicroId),
     #[error("requirement {binding} unavailable: {cause}")]
@@ -152,6 +159,8 @@ pub enum MicroState {
     Disabled,
     Idle,
     Blocked(Vec<String>),
+    /// Enabled but not startable until the named required collection bindings are configured.
+    Unconfigured(Vec<String>),
     Initializing,
     Active,
     Closing,
@@ -295,14 +304,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         }
         let mirror = nodes
             .iter()
-            .map(|(identity, node)| {
-                let state = if node.config.enabled {
-                    MicroState::Idle
-                } else {
-                    MicroState::Disabled
-                };
-                (identity.clone(), state)
-            })
+            .map(|(identity, node)| (identity.clone(), node.micro_state()))
             .collect();
         let (requests, served) = mpsc::unbounded_channel();
         Self {
@@ -335,8 +337,13 @@ impl<P: Clone + 'static> Supervisor<P> {
             .borrow()
             .nodes
             .iter()
-            // A disabled root stays down; that is its recorded state, not a start failure.
-            .filter(|(_, node)| node.config.eager && !matches!(node.state, NodeState::Disabled))
+            // A disabled or unconfigured root stays down; that is its recorded state, not a
+            // start failure.
+            .filter(|(_, node)| {
+                node.config.eager
+                    && !matches!(node.state, NodeState::Disabled)
+                    && node.config.unresolved_bindings.is_empty()
+            })
             .map(|(identity, _)| identity.clone())
             .collect::<Vec<_>>();
         let mut failures = BTreeMap::new();
@@ -583,6 +590,27 @@ impl<P: Clone + 'static> Supervisor<P> {
         }
     }
 
+    /// Replace the required collection bindings `identity` is missing and close it, so its next
+    /// start sees the new configuration (there is no hot rebinding). Dependents close first,
+    /// as for any close. Nothing is started here: an eager root is started again by
+    /// [`Self::reconcile`], any other micro by demand.
+    pub async fn reconfigure(
+        &self,
+        identity: &MicroId,
+        unresolved: Vec<String>,
+    ) -> Result<(), CloseError> {
+        let result = self.close(identity.clone()).await;
+        self.inner
+            .borrow_mut()
+            .nodes
+            .get_mut(identity)
+            .expect("unknown micro")
+            .config
+            .unresolved_bindings = unresolved;
+        self.refresh(identity);
+        result
+    }
+
     /// Clear a recorded fault so demand may start the micro again.
     pub fn retry(&self, identity: &MicroId) {
         if self.is_in(identity, |state| matches!(state, NodeState::Faulted(_))) {
@@ -622,7 +650,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         {
             return MicroState::Faulted("incarnation ended outside supervision".into());
         }
-        node.state.micro_state()
+        node.micro_state()
     }
 
     pub fn instance(&self, identity: &MicroId) -> Option<Instance> {
@@ -669,6 +697,14 @@ impl<P: Clone + 'static> Supervisor<P> {
             .nodes
             .get(identity)
             .ok_or_else(|| StartError::Unknown(identity.clone()))?;
+        if matches!(node.state, NodeState::Idle | NodeState::Blocked(_))
+            && !node.config.unresolved_bindings.is_empty()
+        {
+            return Err(StartError::Unconfigured(
+                identity.clone(),
+                node.config.unresolved_bindings.clone(),
+            ));
+        }
         Ok(match &node.state {
             NodeState::Disabled => return Err(StartError::Disabled(identity.clone())),
             NodeState::Faulted(_) => unreachable!("handled above"),
@@ -775,12 +811,14 @@ impl<P: Clone + 'static> Supervisor<P> {
         failures
     }
 
-    fn set(&self, identity: &MicroId, state: NodeState<P>) {
-        self.mirror
-            .lock()
-            .unwrap()
-            .insert(identity.clone(), state.micro_state());
+    /// Re-record `identity`'s state in the mirror and tick the change counter.
+    fn refresh(&self, identity: &MicroId) {
+        let state = self.inner.borrow().nodes[identity].micro_state();
+        self.mirror.lock().unwrap().insert(identity.clone(), state);
         self.changes.send_modify(|ticks| *ticks += 1);
+    }
+
+    fn set(&self, identity: &MicroId, state: NodeState<P>) {
         let previous = std::mem::replace(
             &mut self
                 .inner
@@ -791,6 +829,7 @@ impl<P: Clone + 'static> Supervisor<P> {
                 .state,
             state,
         );
+        self.refresh(identity);
         if let NodeState::Starting(outcome) | NodeState::Initializing(_, outcome) = &previous {
             outcome.notify_waiters();
         }
@@ -800,6 +839,17 @@ impl<P: Clone + 'static> Supervisor<P> {
 }
 
 impl<P> Node<P> {
+    /// The state as shells see it: an enabled, idle micro with required bindings still
+    /// unresolved is `Unconfigured`, not `Idle`.
+    fn micro_state(&self) -> MicroState {
+        match &self.state {
+            NodeState::Idle if !self.config.unresolved_bindings.is_empty() => {
+                MicroState::Unconfigured(self.config.unresolved_bindings.clone())
+            }
+            state => state.micro_state(),
+        }
+    }
+
     fn live(&self) -> Option<&Instance> {
         match &self.state {
             NodeState::Initializing(instance, _)

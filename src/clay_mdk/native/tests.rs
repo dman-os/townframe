@@ -86,6 +86,7 @@ impl Rig {
             requires: vec![],
             configuration_requests: vec![],
             collection_contracts: vec![],
+            collection_requests: vec![],
             contributions: vec![],
             extra: BTreeMap::new(),
         };
@@ -95,6 +96,7 @@ impl Rig {
             eager,
             enabled: true,
             requirements,
+            unresolved_bindings: Vec::new(),
             factory: factory(self.resources.clone(), manifest, bindings, activate),
         }
     }
@@ -108,18 +110,15 @@ fn presentation(name: &str) -> PublicationDeclaration {
     }
 }
 
+/// The binding name the test micros use for the `ROWS` collection.
+const ROWS_BINDING: &str = "rows";
+
 fn writes_rows() -> CollectionBindings {
-    CollectionBindings {
-        read: vec![],
-        write: vec![ROWS.into()],
-    }
+    CollectionBindings::new([(ROWS_BINDING.to_owned(), BoundCollection::write(ROWS))])
 }
 
 fn reads_rows() -> CollectionBindings {
-    CollectionBindings {
-        read: vec![ROWS.into()],
-        write: vec![],
-    }
+    CollectionBindings::new([(ROWS_BINDING.to_owned(), BoundCollection::read(ROWS))])
 }
 
 async fn in_local_set<T>(future: impl Future<Output = T>) -> T {
@@ -175,7 +174,7 @@ async fn publishing_an_undeclared_name_fails_initialization() {
                 let ran = Rc::clone(&ran);
                 move |context| {
                     // A mirror task is registered before the rejected publication.
-                    context.collection::<String, String>(ROWS)?;
+                    context.collection::<String, String>(ROWS_BINDING)?;
                     context.publish_component("undeclared", || ())?;
                     ran.set(true);
                     Ok(())
@@ -210,7 +209,7 @@ async fn registration_rows_reach_a_reader_and_are_retracted_when_the_writer_clos
             {
                 let watched = Rc::clone(&watched);
                 move |context| {
-                    *watched.borrow_mut() = Some(context.collection(ROWS)?);
+                    *watched.borrow_mut() = Some(context.collection(ROWS_BINDING)?);
                     Ok(())
                 }
             },
@@ -222,7 +221,7 @@ async fn registration_rows_reach_a_reader_and_are_retracted_when_the_writer_clos
             true,
             BTreeMap::new(),
             |context| {
-                let registration = context.registration::<String, String>(ROWS)?;
+                let registration = context.registration::<String, String>(ROWS_BINDING)?;
                 registration
                     .put(&"counter".to_owned(), &"Counter".to_owned(), vec![])
                     .unwrap();
@@ -258,7 +257,7 @@ async fn registration_rows_reach_a_reader_and_are_retracted_when_the_writer_clos
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn collections_outside_the_configured_bindings_are_denied() {
+async fn bindings_the_manifest_resolved_nothing_for_are_denied() {
     in_local_set(async {
         let rig = Rig::new();
         let denied = Rc::new(Cell::new(0));
@@ -271,10 +270,10 @@ async fn collections_outside_the_configured_bindings_are_denied() {
             {
                 let denied = Rc::clone(&denied);
                 move |context| {
-                    // Read-only binding: no write authority; an unbound id: no read.
+                    // Read-only binding: no write authority; an unbound binding: no read.
                     denied.set(
                         usize::from(matches!(
-                            context.registration::<String, String>(ROWS).err(),
+                            context.registration::<String, String>(ROWS_BINDING).err(),
                             Some(AccessError::Denied)
                         )) + usize::from(matches!(
                             context.collection::<String, String>("other").err(),
@@ -288,6 +287,44 @@ async fn collections_outside_the_configured_bindings_are_denied() {
         let supervisor = Supervisor::new(rig.host.clone(), [micro]);
         assert!(supervisor.reconcile().await.is_empty());
         assert_eq!(denied.get(), 2);
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn each_incarnation_sees_the_binding_resolution_current_when_it_started() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let bindings = reads_rows();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let micro = rig.micro(
+            "native.rebound",
+            vec![],
+            bindings.clone(),
+            false,
+            BTreeMap::new(),
+            {
+                let seen = Rc::clone(&seen);
+                move |context| {
+                    seen.borrow_mut()
+                        .push(context.collection::<String, String>(ROWS_BINDING).is_ok());
+                    Ok(())
+                }
+            },
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [micro]);
+        let id = clay_host::MicroId::new("native.rebound");
+        supervisor.reconfigure(&id, vec![]).await.unwrap();
+        supervisor.acquire(&id, "none").await.err().unwrap();
+        // The binding changes while the incarnation runs: it keeps what it started with,
+        // and only the restart reads the new resolution.
+        bindings.replace(BTreeMap::new());
+        assert_eq!(*seen.borrow(), [true]);
+        supervisor.reconfigure(&id, vec![]).await.unwrap();
+        supervisor.acquire(&id, "none").await.err().unwrap();
+        assert_eq!(*seen.borrow(), [true, false]);
         supervisor.shutdown().await.unwrap();
         rig.host.close();
     })
@@ -370,6 +407,7 @@ fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
         requires: vec![],
         configuration_requests: vec![],
         collection_contracts: vec![],
+        collection_requests: vec![],
         contributions: vec![],
         extra: BTreeMap::new(),
     };
@@ -399,6 +437,7 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
         requires: vec![],
         configuration_requests: vec![],
         collection_contracts: vec![],
+        collection_requests: vec![],
         contributions: vec![ContributionDeclaration {
             id: "root".into(),
             collection: SHELL_ROOTS.into(),

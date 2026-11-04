@@ -11,7 +11,6 @@ use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
-use clay_guest_session::collections::BytesProjection;
 use clay_host::Activator;
 use clay_host::ComponentRef;
 use clay_host::Factory;
@@ -125,43 +124,36 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
         let resources = self.resources.clone();
         let manifest = self.manifest.clone();
         let declared = self.declared.clone();
-        let bindings = self.bindings.clone();
+        let bindings = self.bindings.snapshot();
         let package = Rc::clone(&self.package);
         Box::pin(async move {
             let package = package().await?;
             let micro = MicroId::new(manifest.id.as_str());
-            let projections =
-                |ids: &[String]| -> Result<BTreeMap<String, BytesProjection>, String> {
-                    ids.iter()
-                        .map(|id| {
-                            resources
-                                .collections
-                                .collection(id)
-                                .map(|registrations| (id.clone(), registrations.projection()))
-                                .ok_or_else(|| format!("collection {id} is not declared"))
-                        })
-                        .collect()
-                };
-            let readable: Vec<String> = bindings
-                .read
+            // Guests see their collections by the manifest's binding names, never by id.
+            let collections = bindings
                 .iter()
-                .chain(&bindings.write)
-                .cloned()
-                .collect();
-            let registrations = bindings
-                .write
-                .iter()
-                .map(|id| {
+                .map(|(binding, bound)| {
                     resources
                         .collections
-                        .grant(id, &micro)
-                        .map(|grant| (id.clone(), grant))
+                        .collection(&bound.id)
+                        .map(|registrations| (binding.clone(), registrations.projection()))
+                        .ok_or_else(|| format!("collection {} is not declared", bound.id))
+                })
+                .collect::<Result<_, _>>()?;
+            let registrations = bindings
+                .iter()
+                .filter(|(_, bound)| bound.write)
+                .map(|(binding, bound)| {
+                    resources
+                        .collections
+                        .grant(&bound.id, &micro)
+                        .map(|grant| (binding.clone(), grant))
                         .map_err(|error| error.to_string())
                 })
                 .collect::<Result<_, _>>()?;
             let context = InitialContext {
                 configs: grant_configs(&resources.documents, &host, &instance, &manifest)?,
-                collections: projections(&readable)?,
+                collections,
                 registrations,
                 requirements,
                 publications: declared,

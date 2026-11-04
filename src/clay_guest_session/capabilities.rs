@@ -659,7 +659,10 @@ impl CapabilityRef {
             Target::Bound(publication) if publication.is_revoked() => RefStatus::Revoked,
             Target::Bound(_) => RefStatus::Live,
             Target::Lazy(endpoint, activator) => match activator.status(&endpoint.micro) {
-                None | Some(MicroState::Blocked(_)) => RefStatus::Unavailable,
+                // An unconfigured micro is not startable until configuration changes.
+                None | Some(MicroState::Blocked(_) | MicroState::Unconfigured(_)) => {
+                    RefStatus::Unavailable
+                }
                 Some(MicroState::Active) => RefStatus::Live,
                 Some(MicroState::Idle | MicroState::Initializing | MicroState::Closing) => {
                     RefStatus::Dormant

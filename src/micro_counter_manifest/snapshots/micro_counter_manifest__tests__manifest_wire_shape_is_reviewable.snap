@@ -25,6 +25,7 @@ configuration_requests:
         create: false
         delete: false
 collection_contracts: []
+collection_requests: []
 contributions:
   - id: settings-section
     collection: settings.sections

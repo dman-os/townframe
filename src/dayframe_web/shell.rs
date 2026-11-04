@@ -4,11 +4,9 @@
 //! instance activates, and their digest is verified against the index before the browser
 //! engine (`wcmp`) ever sees them.
 use clay_mdk::native::factory;
-use clay_mdk::native::CollectionBindings;
 use dayframe_composition::CompositionRuntime;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
-use micro_settings_manifest::SECTIONS;
 use serde::Deserialize;
 use ui::ThemeMode;
 use ui::ThemeRoot;
@@ -64,36 +62,34 @@ async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpP
 }
 
 /// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
-/// is unusable without it. Sample is eager so its section is written at boot. What each may
-/// read or write is this catalog's decision, not the micro's.
+/// is unusable without it. Sample is eager so its section is written at boot. Collection access
+/// is resolved by the composition from each manifest's requests and configuration, not
+/// hand-written here.
 fn native_micros() -> Vec<InstalledMicro> {
     vec![
         InstalledMicro {
             eager: true,
             locked: true,
-            ..InstalledMicro::new(micro_settings_manifest::manifest(), |resources| {
-                factory(
-                    resources,
-                    micro_settings_manifest::manifest(),
-                    CollectionBindings {
-                        read: vec![SECTIONS.into()],
-                        write: vec![],
-                    },
-                    micro_settings::activate,
-                )
-            })
+            ..InstalledMicro::new(
+                micro_settings_manifest::manifest(),
+                |resources, bindings| {
+                    factory(
+                        resources,
+                        micro_settings_manifest::manifest(),
+                        bindings,
+                        micro_settings::activate,
+                    )
+                },
+            )
         },
         InstalledMicro {
             eager: true,
             enabled_on_admission: true,
-            ..InstalledMicro::new(micro_sample::manifest(), |resources| {
+            ..InstalledMicro::new(micro_sample::manifest(), |resources, bindings| {
                 factory(
                     resources,
                     micro_sample::manifest(),
-                    CollectionBindings {
-                        read: vec![],
-                        write: vec![SECTIONS.into()],
-                    },
+                    bindings,
                     micro_sample::activate,
                 )
             })
@@ -116,14 +112,14 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
             Ok(entries) => {
                 for entry in entries {
                     let manifest = entry.manifest.clone();
-                    installed.push(InstalledMicro::new(manifest.clone(), move |resources| {
-                        clay_mdk::wcmp::factory(
-                            resources,
-                            manifest,
-                            CollectionBindings::default(),
-                            move || indexed_package(entry.clone()),
-                        )
-                    }));
+                    installed.push(InstalledMicro::new(
+                        manifest.clone(),
+                        move |resources, bindings| {
+                            clay_mdk::wcmp::factory(resources, manifest, bindings, move || {
+                                indexed_package(entry.clone())
+                            })
+                        },
+                    ));
                 }
             }
             Err(error) => errors.push(format!("package index is not an index: {error}")),

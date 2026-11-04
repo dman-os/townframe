@@ -11,6 +11,11 @@
 //! manifest installation scope (ADR 025 §4), so rows are visible while their micro is stopped.
 //! There is no supervisor reconfiguration yet: enablement and startup are fixed by the catalog
 //! except for the enable/disable/retry controls of the lifecycle panel.
+mod bindings;
+
+use bindings::BindingsDatum;
+use bindings::DeclaredCollections;
+use bindings::Resolution;
 use clay_dioxus::use_component_recovery;
 use clay_dioxus::NativeComponents;
 use clay_docs::DocumentGrant;
@@ -34,6 +39,7 @@ use clay_host::Supervisor;
 use clay_mdk::native::declared_rows;
 use clay_mdk::native::manifest_scope;
 use clay_mdk::native::CapabilityPublication;
+use clay_mdk::native::CollectionBindings;
 use clay_mdk::native::CollectionRegistry;
 use clay_mdk::native::CollectionWatch;
 use clay_mdk::native::DocumentService;
@@ -76,15 +82,28 @@ pub struct InstalledMicro {
     pub locked: bool,
     /// Local requirement binding -> the provider's publication that satisfies it.
     pub requirements: BTreeMap<String, Requirement>,
-    pub factory:
-        Box<dyn FnOnce(Resources<NativeComponents>) -> Rc<dyn Factory<CapabilityPublication>>>,
+    /// Builds the supervisor factory from the root's resources and the micro's collection
+    /// bindings. The bindings handle is the composition's: it resolves the manifest's
+    /// collection requests from configuration and the factory reads it at each `initialize`.
+    pub factory: FactoryBuilder,
 }
+
+/// See [`InstalledMicro::factory`].
+pub type FactoryBuilder = Box<
+    dyn FnOnce(
+        Resources<NativeComponents>,
+        CollectionBindings,
+    ) -> Rc<dyn Factory<CapabilityPublication>>,
+>;
 
 impl InstalledMicro {
     /// An on-demand, unlocked micro with no requirements, admitted disabled.
     pub fn new(
         manifest: clay_mdk::MicroManifest,
-        factory: impl FnOnce(Resources<NativeComponents>) -> Rc<dyn Factory<CapabilityPublication>>
+        factory: impl FnOnce(
+                Resources<NativeComponents>,
+                CollectionBindings,
+            ) -> Rc<dyn Factory<CapabilityPublication>>
             + 'static,
     ) -> Self {
         Self {
@@ -173,7 +192,8 @@ fn admit_installs(
     enabled_at_boot
 }
 
-/// The shell's read-only watch of the install document.
+/// The shell's read-only watch of the install document: the install datums and the binding
+/// datums, which are both per-micro facets of it.
 fn watch_installs(documents: &DocumentService, host: &Host, shell: &Instance) -> DocumentWatch {
     documents
         .grant_documents(
@@ -182,55 +202,104 @@ fn watch_installs(documents: &DocumentService, host: &Host, shell: &Instance) ->
             vec![DocumentGrant {
                 document: INSTALLS_DOCUMENT.into(),
                 branch: INSTALLS_BRANCH.into(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
-                    tag: INSTALL_TAG.into(),
-                    read: true,
-                    ..Default::default()
-                }],
+                facets: [INSTALL_TAG, bindings::BINDINGS_TAG]
+                    .map(|tag| daybook_types::manifest::RoutineFacetAccess {
+                        tag: tag.into(),
+                        read: true,
+                        ..Default::default()
+                    })
+                    .into(),
             }],
         )
         .and_then(|access| {
             access.watch(WatchSelection {
                 documents: [INSTALLS_DOCUMENT.to_owned()].into(),
                 branch: INSTALLS_BRANCH.into(),
-                facets: FacetSelection::Tags([INSTALL_TAG.to_owned()].into()),
+                facets: FacetSelection::Tags(
+                    [INSTALL_TAG, bindings::BINDINGS_TAG]
+                        .map(str::to_owned)
+                        .into(),
+                ),
             })
         })
         .expect("the shell instance is live")
 }
 
+/// A micro as the install-document reconciler tracks it.
+struct ManagedMicro {
+    id: MicroId,
+    manifest: clay_mdk::MicroManifest,
+    /// Shared with the micro's factory.
+    bindings: CollectionBindings,
+    /// The binding resolution the factory and the supervisor currently reflect.
+    applied: Resolution,
+}
+
 /// Applies the install document to the supervisor for as long as it runs: every snapshot
-/// brings each micro's state in line with its datum. A disable is awaited before the next
-/// snapshot is read, and the next read returns the latest revision, so a quick disable then
-/// enable converges on the final datum. A close error is published for the lifecycle panel.
+/// brings each micro's state in line with its install datum, and its collection bindings in
+/// line with its binding datum. A disable is awaited before the next snapshot is read, and the
+/// next read returns the latest revision, so a quick disable then enable converges on the
+/// final datum. A changed binding resolution replaces the factory's bindings and closes the
+/// micro so its next start sees them (no hot rebinding); eager roots are then started again.
+/// A close error is published for the lifecycle panel.
 async fn reconcile_installs(
     installs: DocumentWatch,
     supervisor: Rc<Supervisor<CapabilityPublication>>,
-    micros: Vec<MicroId>,
+    micros: Vec<ManagedMicro>,
+    declared: DeclaredCollections,
     failure: watch::Sender<Option<String>>,
 ) {
     // Micros by key id, so a facet is matched without building a route or a MicroId.
-    let micros: BTreeMap<&str, &MicroId> =
-        micros.iter().map(|micro| (micro.as_str(), micro)).collect();
+    let mut micros: BTreeMap<String, ManagedMicro> = micros
+        .into_iter()
+        .map(|micro| (micro.id.as_str().to_owned(), micro))
+        .collect();
     let mut snapshot = installs.current().expect("the install watch is live");
     loop {
         for (route, value) in &snapshot.facets {
-            // The watch selects only the install tag; ids of micros no longer in the catalog
+            // The watch selects only this crate's tags; ids of micros no longer in the catalog
             // are left alone.
-            let (FacetValue::Present(datum), Some(micro)) =
-                (value, micros.get(route.key_id.as_str()))
-            else {
+            let Some(micro) = micros.get_mut(route.key_id.as_str()) else {
                 continue;
             };
-            let disabled = supervisor.state(micro) == MicroState::Disabled;
-            if InstallDatum::decode(datum.clone()).enabled {
-                if disabled {
-                    supervisor.enable(micro);
+            match route.tag.as_str() {
+                INSTALL_TAG => {
+                    let FacetValue::Present(datum) = value else {
+                        continue;
+                    };
+                    let disabled = supervisor.state(&micro.id) == MicroState::Disabled;
+                    if InstallDatum::decode(datum.clone()).enabled {
+                        if disabled {
+                            supervisor.enable(&micro.id);
+                        }
+                    } else if !disabled {
+                        if let Err(error) = supervisor.disable(&micro.id).await {
+                            failure.send_replace(Some(error.to_string()));
+                        }
+                    }
                 }
-            } else if !disabled {
-                if let Err(error) = supervisor.disable(micro).await {
-                    failure.send_replace(Some(error.to_string()));
+                bindings::BINDINGS_TAG => {
+                    let datum = match value {
+                        FacetValue::Present(datum) => Some(BindingsDatum::decode(datum.clone())),
+                        _ => None,
+                    };
+                    let resolution = bindings::resolve(&micro.manifest, datum.as_ref(), &declared);
+                    if resolution == micro.applied {
+                        continue;
+                    }
+                    micro.bindings.replace(resolution.bound.clone());
+                    if let Err(error) = supervisor
+                        .reconfigure(&micro.id, resolution.unresolved.clone())
+                        .await
+                    {
+                        failure.send_replace(Some(error.to_string()));
+                    }
+                    micro.applied = resolution;
+                    // A failed eager start is recorded as that micro's `Faulted` state, which
+                    // the lifecycle panel shows; there is no other consumer for the report.
+                    drop(supervisor.reconcile().await);
                 }
+                tag => unreachable!("the install watch selects no tag {tag}"),
             }
         }
         snapshot = installs
@@ -316,6 +385,8 @@ impl CompositionRuntime {
         let store = Arc::new(store.subspace("collections"));
         let collections = CollectionRegistry::default();
         let mut errors = Vec::new();
+        // A declared collection's id is its contract's id today (see `DeclaredCollections`).
+        let mut declared_collections = DeclaredCollections::default();
 
         let roots_collection = declare(
             &collections,
@@ -347,8 +418,9 @@ impl CompositionRuntime {
                     },
                 )
                 .await?;
-                if let Err(error) = declared {
-                    errors.push(format!("{}: {error}", micro.manifest.id.as_str()));
+                match declared {
+                    Ok(_) => declared_collections.declare(&contract.id, &contract.id),
+                    Err(error) => errors.push(format!("{}: {error}", micro.manifest.id.as_str())),
                 }
             }
         }
@@ -388,6 +460,7 @@ impl CompositionRuntime {
             collections: collections.clone(),
         };
         let mut micros = Vec::new();
+        let mut managed = Vec::new();
         let mut locked = BTreeSet::new();
         let mut configured = Vec::new();
         for micro in installed {
@@ -396,13 +469,32 @@ impl CompositionRuntime {
             if micro.locked {
                 locked.insert(identity.clone());
             }
+            // Collection bindings resolve from the stored datum (or, with none, the manifest's
+            // defaults); the factory reads the shared handle at each initialize.
+            let resolution = bindings::resolve(
+                &micro.manifest,
+                documents
+                    .mock_documents()
+                    .get(&bindings::bindings_route(&identity))
+                    .map(BindingsDatum::decode)
+                    .as_ref(),
+                &declared_collections,
+            );
+            let bindings = CollectionBindings::new(resolution.bound.clone());
             configured.push(ConfiguredMicro {
                 // Locked micros have no datum and are always enabled.
                 enabled: enabled_at_boot.get(&identity).copied().unwrap_or(true),
-                identity,
+                identity: identity.clone(),
                 eager: micro.eager,
                 requirements: micro.requirements,
-                factory: (micro.factory)(resources.clone()),
+                unresolved_bindings: resolution.unresolved.clone(),
+                factory: (micro.factory)(resources.clone(), bindings.clone()),
+            });
+            managed.push(ManagedMicro {
+                id: identity,
+                manifest: micro.manifest,
+                bindings,
+                applied: resolution,
             });
         }
         let supervisor = Rc::new(Supervisor::new(host.clone(), configured));
@@ -415,7 +507,8 @@ impl CompositionRuntime {
         let reconcile_installs = reconcile_installs(
             installs,
             Rc::clone(&supervisor),
-            micros.clone(),
+            managed,
+            declared_collections,
             lifecycle_failure.clone(),
         );
         Ok(Self {
@@ -542,6 +635,49 @@ impl CompositionRuntime {
         datum.enabled = enabled;
         installs.external_change(route, Some(datum.encode()));
         self.documents.persisted()
+    }
+
+    /// Configure `binding` of `micro` to the declared collection `collection`, or with `None`
+    /// leave it deliberately unbound; both override the manifest's default. The write happens
+    /// when this is called and the returned future resolves once it is stored (like
+    /// [`Self::set_enabled`]). The supervisor follows through the reconciler: the micro is
+    /// restarted with the new resolution, not rebound in place. The micro must be installed.
+    pub fn set_binding(
+        &self,
+        micro: &MicroId,
+        binding: &str,
+        collection: Option<&str>,
+    ) -> impl Future<Output = ()> + use<> {
+        self.edit_bindings(micro, |datum| {
+            datum
+                .bindings
+                .insert(binding.to_owned(), collection.map(str::to_owned));
+        });
+        self.documents.persisted()
+    }
+
+    /// Remove the explicit configuration of `binding`, so the manifest's default applies again.
+    pub fn clear_binding(
+        &self,
+        micro: &MicroId,
+        binding: &str,
+    ) -> impl Future<Output = ()> + use<> {
+        self.edit_bindings(micro, |datum| {
+            datum.bindings.remove(binding);
+        });
+        self.documents.persisted()
+    }
+
+    fn edit_bindings(&self, micro: &MicroId, edit: impl FnOnce(&mut BindingsDatum)) {
+        assert!(self.micros.contains(micro), "{micro} is not installed");
+        let installs = self.documents.mock_documents();
+        let route = bindings::bindings_route(micro);
+        let mut datum = installs
+            .get(&route)
+            .map(BindingsDatum::decode)
+            .unwrap_or_default();
+        edit(&mut datum);
+        installs.external_change(route, Some(datum.encode()));
     }
 
     /// Whether the install datum asks for `micro` to run: the desired state, which the

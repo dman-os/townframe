@@ -96,6 +96,7 @@
   ],
   "configuration_requests": [],
   "collection_contracts": [],
+  "collection_requests": [],
   "contributions": [
     {
       "id": "serve-host",
