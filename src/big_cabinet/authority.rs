@@ -71,7 +71,9 @@ pub type ActorPublicKey = [u8; 32];
 const NODE_SERVICE: &str = "big_cabinet.authority";
 const WRAPPING_KEY: &str = "wrapping";
 
-pub(crate) enum DomainAuthority<S> {
+/// Who a domain operation acts as: an actor presenting its own identity capability, or a
+/// handle the domain minted that carries a scope of its own.
+pub enum DomainAuthority<S> {
     Identity(Uuid7),
     Scoped(S),
 }
@@ -138,6 +140,13 @@ pub struct AuthorityService {
     ledger: tokio::sync::mpsc::Sender<cap::Command>,
     /// Bumped by the ledger after every retraction, so observers know to re-check.
     changes: tokio::sync::watch::Sender<u64>,
+    /// Registry rows already read, by actor. Rows are insert-only: nothing updates or deletes
+    /// one (no rotation or retirement exists; a retired actor's capability dies in the ledger,
+    /// which every lookup consults first). So a cached row can never be stale, and absence is
+    /// never cached, so an actor another instance just registered is still found by a read.
+    /// Resolution therefore costs no SQLite read once an actor has been seen. Unbounded, like
+    /// the registry itself, which holds one row per actor path.
+    actor_rows: std::sync::Mutex<std::collections::HashMap<Uuid7, Arc<ActorRow>>>,
 }
 
 impl AuthorityService {
@@ -249,6 +258,7 @@ impl AuthorityService {
                 actors_namespace,
                 ledger,
                 changes,
+                actor_rows: Default::default(),
             }),
             stop,
         ))
@@ -309,8 +319,28 @@ impl AuthorityService {
         self.operator
     }
 
-    fn node_public_key(&self) -> ActorPublicKey {
+    pub fn node_public_key(&self) -> ActorPublicKey {
         self.node_key.verifying_key().to_bytes()
+    }
+
+    /// Signs `domain || payload` with the node's own key. In-process only: it is deliberately not
+    /// an operation of the authority protocol, so only code the embedder hands this service to can
+    /// sign as the node. The same key issues attribution certificates, so this never signs bare
+    /// bytes: every signature is bound to a caller-named domain (a non-empty, NUL-terminated label
+    /// such as the plug registry's `org.example.daybook.plug.signature.v1\0`), and a signature made
+    /// here is never valid as an attribution certificate or as another domain's structure.
+    pub fn sign_as_node(&self, domain: &[u8], payload: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer;
+        assert!(
+            domain.len() > 1
+                && domain.last() == Some(&0)
+                && !domain[..domain.len() - 1].contains(&0),
+            "a node signing domain is a non-empty label terminated by one NUL"
+        );
+        let mut message = Vec::with_capacity(domain.len() + payload.len());
+        message.extend_from_slice(domain);
+        message.extend_from_slice(payload);
+        self.node_key.sign(&message).to_bytes()
     }
 
     /// The issuer a verifier must expect on this node's attribution certificates.
@@ -334,6 +364,22 @@ impl AuthorityService {
         Ok(store::actor(transaction, uuid)
             .await?
             .expect("an actor capability references a registered actor"))
+    }
+
+    /// The registry row of a registered actor, from memory when it was seen before and from one
+    /// read snapshot otherwise.
+    async fn cached_actor_row(&self, uuid: Uuid7) -> Result<Arc<ActorRow>, AuthorityError> {
+        if let Some(row) = self.actor_rows.lock().expect("actor row cache").get(&uuid) {
+            return Ok(Arc::clone(row));
+        }
+        let transaction = self.read().await?;
+        let row = Arc::new(Self::actor_row(&transaction, uuid).await?);
+        drop(transaction);
+        self.actor_rows
+            .lock()
+            .expect("actor row cache")
+            .insert(uuid, Arc::clone(&row));
+        Ok(row)
     }
 }
 

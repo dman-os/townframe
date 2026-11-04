@@ -1,0 +1,44 @@
+[package]
+name = "big_nodule"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# internal
+utils_rs.workspace = true
+big_cabinet = { path = "../big_cabinet" }
+big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+big_nodule_core = { workspace = true, features = ["schemars"] }
+big_plugs_core.workspace = true
+service_utils_rs.workspace = true
+sqlite_rs.workspace = true
+
+# identity
+blake3.workspace = true
+
+# encoding
+automerge.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap = { version = "2", features = ["serde"] }
+
+# errors and state
+futures.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+big_plugs_core = { workspace = true, features = ["test-support"] }
+big_blobs_core = { path = "../big_blobs_core" }
+big_repo.workspace = true
+secrets_rs.workspace = true
+irpc.workspace = true
+keyring-core = { version = "1.0", default-features = false }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

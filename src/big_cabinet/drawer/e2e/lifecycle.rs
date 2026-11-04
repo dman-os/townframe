@@ -234,8 +234,18 @@ async fn drawer_drop_and_stop_reclaim_state_and_recover_interrupted_placement() 
 #[tokio::test]
 async fn boot_creates_the_local_drawers_once() {
     let mut node = Node::boot().await;
+    let alice = node.creator("alice").await;
     let local = node.local();
-    assert_ne!(local.present_id, local.originated_id);
+    assert_eq!(
+        BTreeSet::from([
+            &local.present_id,
+            &local.originated_id,
+            &local.registry_id,
+            &local.config_id,
+        ])
+        .len(),
+        4
+    );
     // The service itself administers them: it created them.
     let view = node
         .view(&node.drawers_actor, &local.present_id)
@@ -247,6 +257,18 @@ async fn boot_creates_the_local_drawers_once() {
     let roster = node.roster_datums(&local.present_id).await;
     assert!(roster.contains_key(&drawer_key()), "{roster:?}");
     assert!(roster.contains_key(&roster_key()), "{roster:?}");
+
+    let config_view = node
+        .view(&node.drawers_actor, &local.config_id)
+        .await
+        .unwrap();
+    assert_eq!(config_view.access, Access::Admin);
+    assert_eq!(config_view.layout.known(), Some(LayoutKind::SelfDoc));
+    assert!(config_view.docs.is_empty(), "{config_view:?}");
+    assert_eq!(
+        node.view(&alice, &local.config_id).await.unwrap_err(),
+        DrawersError::Denied
+    );
 
     node.restart().await.unwrap();
     assert_eq!(node.local(), local, "a second boot finds the same drawers");
@@ -422,6 +444,15 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
     );
     assert_eq!(
         node.list_docs(&bob, &registry, 0, None).await.unwrap_err(),
+        DrawersError::Denied
+    );
+    let config = node.local().config_id;
+    assert_eq!(
+        node.view(&alice, &config).await.unwrap_err(),
+        DrawersError::Denied
+    );
+    assert_eq!(
+        node.list_docs(&bob, &config, 0, None).await.unwrap_err(),
         DrawersError::Denied
     );
     node.core()

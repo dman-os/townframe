@@ -30,8 +30,8 @@ use super::codec::RECORD_OVERHEAD;
 use super::codec::SALT_LEN;
 use super::codec::cipher_from_ikm;
 use super::codec::ciphertext_len;
-use super::codec::n_records_for;
 use super::codec::encoded_record_count;
+use super::codec::n_records_for;
 use super::codec::payload_size;
 use super::keys::CipherKeySource;
 use super::params::EncodingParams;
@@ -169,7 +169,9 @@ impl CipherReader {
                 // it against the caller's metadata is the only check that
                 // catches a length that is too small - `open` can only bound it
                 // from the other side.
-                let expected = self.p_len.saturating_sub((self.n_records - 1) * self.payload_max);
+                let expected = self
+                    .p_len
+                    .saturating_sub((self.n_records - 1) * self.payload_max);
                 eyre::ensure!(
                     payload.len() as u64 == expected,
                     "final record of {} holds {} plaintext octets, metadata claims {expected}",

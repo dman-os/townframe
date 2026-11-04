@@ -4,6 +4,11 @@ members = [
   "./src/am_utils_rs",
   "./src/big_cabinet/",
   "./src/big_cabinet_core/",
+  "./src/big_plugs_core/",
+  "./src/big_plugs/",
+  "./src/big_nodule_core/",
+  "./src/big_nodule/",
+  "./src/big_nodule_wasm/",
   "./src/big_blobs/",
   "./src/big_blobs_core/",
   "./src/big_sync/",
@@ -103,6 +108,11 @@ wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_sqlite = { path = "./src/wash_plugin_sqlite", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
+big_plugs_core = { path = "./src/big_plugs_core/", default-features = false }
+big_plugs = { path = "./src/big_plugs/" }
+big_nodule_core = { path = "./src/big_nodule_core/", default-features = false }
+big_nodule = { path = "./src/big_nodule/" }
+big_nodule_wasm = { path = "./src/big_nodule_wasm/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }
@@ -222,6 +232,7 @@ sha2 = "0.10"
 axum = { version = "0.8.9", default-features = false }
 axum-extra = { version = "0.12.6", default-features = false }
 http = "1"
+hyper = { version = "1", default-features = false }
 utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  "preserve_order"] }
 # utoipa-swagger-ui = "9"
 tower = "0.5"
@@ -275,7 +286,10 @@ wasmtime = "48.0.7"
 # two deps do not disagree on the p1/p2 (wiggle) surface; `p3` is what links the
 # WASI 0.3 imports a wasm32-wasip3 component brings in.
 wasmtime-wasi = { version = "48.0.7", default-features = false, features = ["p3"] }
-wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "1bcaebaeba509b8a59fd239e668abe6f02596794", default-features = false }
+# Our fork's `townframe-changes`: upstream 1bcaebae plus the in-process
+# `Ingress::dispatch_request` the nodule Wasm executor (`big_nodule_wasm`) calls.
+wash-runtime = { git = "https://github.com/dman-os/wasmCloud", rev = "e7648c6e939c50ba1be8d9c138ef6da3305a672e", default-features = false }
+wasmtime-wasi-http = { version = "48.0.7", default-features = false }
 wit-bindgen = "0.62.0"
 wstd = "0.6.8"
 # The browser guest engine (ADR 018). Upstream pins `wasm-bindgen = "=0.2.126"`

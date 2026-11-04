@@ -118,12 +118,18 @@ async fn migrations_reopen_existing_projection_and_local_drawers() {
     let runtime = SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[]).unwrap();
     sql.execute_batch(sqlite::MIGRATIONS[0].sql).await.unwrap();
-    let [present_id, originated_id, registry_id, announced_id] =
-        [10_u8, 11, 12, 13].map(|value| DocId::new([value; 32]));
+    let [
+        present_id,
+        originated_id,
+        registry_id,
+        config_id,
+        announced_id,
+    ] = [10_u8, 11, 12, 13, 14].map(|value| DocId::new([value; 32]));
     let local = LocalDrawers {
         present_id,
         originated_id,
         registry_id,
+        config_id,
     };
     let descriptor: Drawer = serde_json::from_value(serde_json::json!({
         "$type": "org.example.daybook.drawer",

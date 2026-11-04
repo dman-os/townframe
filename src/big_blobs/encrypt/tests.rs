@@ -6,8 +6,8 @@ use super::codec::SALT_LEN;
 use super::codec::StreamDecryptor;
 use super::codec::decrypt_bytes_ikm;
 
-use super::codec::payload_size;
 use super::codec::ciphertext_len;
+use super::codec::payload_size;
 use super::params::MAX_WIRE_RECORD_SIZE;
 use super::*;
 
@@ -268,7 +268,10 @@ fn max_wire_record_size_round_trips() -> Res<()> {
     let ct = encrypt_with_rs(&key, b"", MAX_WIRE_RECORD_SIZE, Padding::Padme);
     assert_eq!(
         ct.len(),
-        ciphertext_len(0, EncodingParams::new(MAX_WIRE_RECORD_SIZE, Padding::Padme).unwrap()) as usize,
+        ciphertext_len(
+            0,
+            EncodingParams::new(MAX_WIRE_RECORD_SIZE, Padding::Padme).unwrap()
+        ) as usize,
         "an empty Padmé record is one RECORD_OVERHEAD frame, whatever the rs"
     );
     assert_eq!(decrypt_bytes(&key, &ct)?, b"");

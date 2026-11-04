@@ -288,6 +288,7 @@ impl DocsService {
         }
         let drawers = predicate_drawers(predicate);
         let predicate_tags = predicate.tags();
+        let sole_doc = predicate.sole_doc();
         let mut changed: BTreeMap<DocId, Vec<FrontierEntry<DatumRoute, DatumMembership>>> =
             BTreeMap::new();
         let mut affected: BTreeSet<DocId> = BTreeSet::new();
@@ -309,6 +310,11 @@ impl DocsService {
                 {
                     continue;
                 }
+            }
+            // A predicate that names one document can only match that document, so the frontier
+            // entries of every other document on the node are not this poll's business.
+            if sole_doc.is_some_and(|only| *only != entry.key.doc_id) {
+                continue;
             }
             changed
                 .entry(entry.key.doc_id.clone())

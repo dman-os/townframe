@@ -48,6 +48,13 @@ pub const fn is_nsid(id: &str) -> bool {
     is_authority(authority) && is_name(name.split_at(1).1)
 }
 
+/// Whether `authority` is the authority part of an NSID: two or more reverse-DNS labels, the
+/// same rule [`is_nsid`] applies to the part before the name (`org.example` holds
+/// `org.example.note`).
+pub const fn is_nsid_authority(authority: &str) -> bool {
+    is_authority(authority.as_bytes())
+}
+
 const fn is_authority(authority: &[u8]) -> bool {
     if authority.is_empty() || authority.len() > 253 || !authority[0].is_ascii_alphabetic() {
         return false;

@@ -29,7 +29,6 @@
 //! Releasing never deletes bytes: dropping the two tags hands the pair back to
 //! the store's own GC, which reclaims exactly what nothing else roots.
 
-
 pub(crate) mod sqlite;
 use crate::encrypt::EncodingParams;
 use crate::encrypt::MasterKey;
@@ -74,9 +73,7 @@ impl PairRoots {
     /// over the same `Database`.
     pub async fn boot(sql: Database) -> Res<Self> {
         Self::init_schema(&sql).await?;
-        Ok(Self {
-            sql,
-        })
+        Ok(Self { sql })
     }
 
     async fn init_schema(sql: &Database) -> Res<()> {
@@ -89,9 +86,7 @@ impl PairRoots {
         Ok(())
     }
 
-
     pub(crate) async fn record_virtual(&self, pair: &VirtualPair) -> Res<()> {
-
         let tx = self.sql.begin_write().await?;
         let cipher = pair.cipher.to_hex().to_string();
         let changed = sqlite::queries::record_virtual(
@@ -129,18 +124,14 @@ impl PairRoots {
         let rows = sqlite::queries::virtual_pairs(&self.sql).await?;
         let mut pairs = Vec::with_capacity(rows.len());
         for row in rows {
-            let owned = !crate::ownership::sqlite::queries::owned_direct(
-                &self.sql,
-                row.digest.clone(),
-            )
-            .await?
-            .is_empty();
-            let managed_pin = !crate::ownership::sqlite::queries::managed_pin(
-                &self.sql,
-                row.digest.clone(),
-            )
-            .await?
-            .is_empty();
+            let owned =
+                !crate::ownership::sqlite::queries::owned_direct(&self.sql, row.digest.clone())
+                    .await?
+                    .is_empty();
+            let managed_pin =
+                !crate::ownership::sqlite::queries::managed_pin(&self.sql, row.digest.clone())
+                    .await?
+                    .is_empty();
             let key = row
                 .master_key
                 .try_into()
@@ -218,7 +209,6 @@ impl PairRoots {
     /// Deleting an absent row is a no-op, so both the boot drain and the pin
     /// worker may call this without coordinating.
     pub async fn clear(&self, c_hash: Hash) -> Res<()> {
-
         let tx = self.sql.begin_write().await?;
         sqlite::queries::delete_root(&tx, c_hash.to_hex().to_string()).await?;
         sqlite::queries::delete_virtual(&tx, c_hash.to_hex().to_string()).await?;
@@ -227,9 +217,11 @@ impl PairRoots {
     }
 
     pub(crate) async fn is_claimed(&self, c_hash: Hash) -> Res<bool> {
-        Ok(!sqlite::queries::preclaim(&self.sql, c_hash.to_hex().to_string())
-            .await?
-            .is_empty())
+        Ok(
+            !sqlite::queries::preclaim(&self.sql, c_hash.to_hex().to_string())
+                .await?
+                .is_empty(),
+        )
     }
 
     /// Every row a previous run left unresolved, with whatever the rooting path

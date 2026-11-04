@@ -9,8 +9,7 @@ impl AuthorityService {
         resolved.require(Rights::USE)?;
         let actor = match resolved.actor {
             Some(actor_id) => {
-                let transaction = self.read().await?;
-                let row = Self::actor_row(&transaction, actor_id).await?;
+                let row = self.cached_actor_row(actor_id).await?;
                 Some(actor::public_actor(
                     &self.node_public_key(),
                     &row,

@@ -161,10 +161,7 @@ mod tests {
         let (evt_tx, evt_rx) = async_channel::unbounded::<crate::runtime2::Runtime2Evt>();
         let keyhive = BigKeyhiveHandle::new(
             seed,
-            BigRepoKeyhiveListener {
-                evt_tx,
-                storage: BigRepoKeyhiveStorage::memory(),
-            },
+            BigRepoKeyhiveListener::new(evt_tx, BigRepoKeyhiveStorage::memory()),
         )
         .await
         .expect("boot a keyhive handle over in-memory storage");

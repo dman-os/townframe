@@ -167,6 +167,23 @@ impl Predicate {
         Ok(())
     }
 
+    /// The one document this predicate can ever match, when a top-level `IsDoc` (possibly inside
+    /// an `And`, whose children intersect) names it. A poll uses it to drop frontier entries of
+    /// every other document before they reach the predicate, so a single-document consumer is
+    /// not woken, nor sent a `leave`, by unrelated writes on the node.
+    pub fn sole_doc(&self) -> Option<&DocId> {
+        match self {
+            Self::IsDoc { doc_id } => Some(doc_id),
+            Self::And { clauses } => clauses.iter().find_map(Self::sole_doc),
+            Self::HasTag { .. }
+            | Self::HasKey { .. }
+            | Self::InDrawer { .. }
+            | Self::HasReferenceTo { .. }
+            | Self::Or { .. }
+            | Self::Not { .. } => None,
+        }
+    }
+
     fn negates(&self) -> bool {
         match self {
             Self::Not { .. } => true,
