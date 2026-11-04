@@ -1,6 +1,6 @@
 use super::*;
 
-mod cleanup;
+mod cancellation;
 
 fn commit(authority: &mut Authority, command: Command) -> (Ack, Vec<Intent>) {
     let Decision::Commit(proposal) = authority.prepare(command).unwrap() else {
@@ -17,7 +17,6 @@ fn submit_command() -> Command {
         args: "args".into(),
         policy: RetryPolicy::Immediate,
         budget: RetryBudget::default(),
-        retention_ms: DEFAULT_RETENTION_MS,
     }
 }
 
@@ -173,7 +172,6 @@ fn snapshot_suffix_and_full_replay_agree() {
             lease,
             expected_steps: 1,
             value: "done".into(),
-            now_ms: 0,
         },
     );
     let full_log = authority.suffix().to_vec();
@@ -193,7 +191,6 @@ fn snapshot_suffix_and_full_replay_agree() {
             submission_position: 1,
             policy: RetryPolicy::Immediate,
             budget: RetryBudget::default(),
-            retention_ms: DEFAULT_RETENTION_MS,
             steps: 1,
             outcome: Outcome::Completed(Terminal {
                 value: "done".into(),
@@ -205,7 +202,6 @@ fn snapshot_suffix_and_full_replay_agree() {
                     worker: 11,
                     position: 2,
                 },
-                expires_at_ms: DEFAULT_RETENTION_MS,
                 position: 4,
             }),
         }
@@ -213,7 +209,7 @@ fn snapshot_suffix_and_full_replay_agree() {
 }
 
 #[test]
-fn duplicate_terminal_receipt_is_stable() {
+fn terminal_receipt_is_permanent_and_submission_stays_idempotent() {
     let mut authority = Authority::new(7, 1);
     submit(&mut authority);
     let (lease, _) = grant(&mut authority, 11);
@@ -222,7 +218,6 @@ fn duplicate_terminal_receipt_is_stable() {
         lease: lease.clone(),
         expected_steps: 0,
         value: "done".into(),
-        now_ms: 100,
     };
     let (ack, intents) = commit(&mut authority, command.clone());
     assert_eq!(ack.disposition, Disposition::Completed);
@@ -234,35 +229,23 @@ fn duplicate_terminal_receipt_is_stable() {
         Err(Rejection::StaleLease)
     );
     assert_eq!(
-        authority.prepare(Command::Expire {
-            key: "job".into(),
-            incarnation: 1,
-            now_ms: 100 + DEFAULT_RETENTION_MS - 1,
-        }),
-        Err(Rejection::RetentionPending {
-            expires_at_ms: 100 + DEFAULT_RETENTION_MS,
-        })
-    );
-    let (expired, intents) = commit(
-        &mut authority,
-        Command::Expire {
-            key: "job".into(),
-            incarnation: 1,
-            now_ms: 100 + DEFAULT_RETENTION_MS,
-        },
-    );
-    assert_eq!(
-        expired,
-        Ack {
-            position: 4,
+        authority.prepare(submit_command()),
+        Ok(Decision::Duplicate(Ack {
+            position: 1,
             disposition: Disposition::Completed,
-        }
+        }))
     );
-    assert!(intents.is_empty());
-    assert!(authority.receipts().is_empty());
-    submit(&mut authority);
-    assert_eq!(authority.jobs()["job"].incarnation, 2);
-    assert_eq!(authority.revision(), 5);
+    let mut conflicting = submit_command();
+    let Command::Submit { args, .. } = &mut conflicting else {
+        unreachable!();
+    };
+    *args = "different".into();
+    assert_eq!(
+        authority.prepare(conflicting),
+        Err(Rejection::PayloadConflict)
+    );
+    assert_eq!(authority.next_job_incarnation(), 1);
+    assert_eq!(authority.revision(), 3);
 }
 
 fn begin_wait(lease: &Lease, step: u64, kind: WaitKind) -> Command {
@@ -491,7 +474,6 @@ fn messages_queue_deduplicate_and_resolve_waits() {
             lease,
             expected_steps: 2,
             value: "done".into(),
-            now_ms: 0,
         },
     );
     assert_eq!(
@@ -515,7 +497,6 @@ fn waiting_job_cannot_complete() {
             lease,
             expected_steps: 0,
             value: "done".into(),
-            now_ms: 0,
         }),
         Err(Rejection::OutOfOrder)
     );
@@ -534,14 +515,8 @@ enum Operation {
     Send(u8),
     /// A transient failure under the current lease, with host-supplied jitter.
     Retry(u8),
-    /// A cleanup step under the current lease; `WrongPhase` outside cleanup.
-    Defer(String),
     /// An operator cancel; needs no lease, so it also hits parked jobs.
     Cancel,
-    /// A terminal failure reported by the current lease holder.
-    Fail,
-    /// Expires a settled receipt once its retention deadline is due.
-    Expire,
 }
 
 fn operation() -> impl proptest::strategy::Strategy<Value = Operation> {
@@ -557,10 +532,7 @@ fn operation() -> impl proptest::strategy::Strategy<Value = Operation> {
         1 => Just(Operation::Fire),
         2 => (0..3_u8).prop_map(Operation::Send),
         3 => (0..4_u8).prop_map(Operation::Retry),
-        2 => "[a-z]{0,8}".prop_map(Operation::Defer),
         1 => Just(Operation::Cancel),
-        1 => Just(Operation::Fail),
-        1 => Just(Operation::Expire),
     ]
 }
 
@@ -587,9 +559,7 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
     let lease = job.and_then(|job| job.lease.clone());
     let key = String::from("job");
     match operation {
-        // Bounded budgets, so the sampled runs exhaust them: forward retries
-        // into cleanup, cleanup retries into a rejection, restarts into an
-        // authority-side fault.
+        // Bounded budgets exercise retry and restart exhaustion.
         Operation::Submit => Some(Command::Submit {
             key,
             args: "args".into(),
@@ -598,7 +568,6 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
                 max_retries: Some(1),
                 max_restarts: Some(2),
             },
-            retention_ms: 8,
         }),
         Operation::Grant(worker) => job.map(|job| Command::Grant {
             key,
@@ -615,21 +584,11 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
             kind: StepKind::Effect,
             name: None,
         }),
-        Operation::Defer(value) => lease.map(|lease| Command::CommitStep {
-            key,
-            lease,
-            step: job.unwrap().steps.len() as u64,
-            attempt: 0,
-            value,
-            kind: StepKind::Defer,
-            name: None,
-        }),
         Operation::Complete => lease.map(|lease| Command::Complete {
             key,
             lease,
             expected_steps: job.unwrap().steps.len() as u64,
             value: "done".into(),
-            now_ms,
         }),
         Operation::Revoke => lease.map(|lease| Command::Revoke { key, lease }),
         Operation::Wait(timer) => lease.map(|lease| Command::BeginWait {
@@ -669,19 +628,6 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
             incarnation: job.incarnation,
             reason: "operator".into(),
         }),
-        Operation::Fail => lease.map(|lease| Command::Fail {
-            key,
-            lease,
-            error: "terminal".into(),
-        }),
-        Operation::Expire => authority
-            .receipts()
-            .get("job")
-            .map(|receipt| Command::Expire {
-                key,
-                incarnation: receipt.incarnation,
-                now_ms,
-            }),
         Operation::Recover(_) => unreachable!("recovery replaces the authority"),
     }
 }

@@ -1,7 +1,5 @@
 use crate::interlude::*;
 
-use super::CleanupCause;
-pub use super::DEFAULT_RETENTION_MS;
 use super::JobFailure;
 use super::RetryBudget;
 use super::RetryPolicy;
@@ -41,7 +39,6 @@ pub struct Step {
 pub struct Terminal {
     pub value: String,
     pub lease: Lease,
-    pub expires_at_ms: u64,
     pub position: u64,
 }
 
@@ -94,7 +91,6 @@ pub struct RetryWait {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fault {
     pub failure: JobFailure,
-    pub expires_at_ms: u64,
     pub position: u64,
 }
 
@@ -106,13 +102,6 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub fn expires_at_ms(&self) -> u64 {
-        match self {
-            Self::Completed(terminal) => terminal.expires_at_ms,
-            Self::Faulted(fault) => fault.expires_at_ms,
-        }
-    }
-
     pub fn position(&self) -> u64 {
         match self {
             Self::Completed(terminal) => terminal.position,
@@ -121,12 +110,11 @@ impl Outcome {
     }
 }
 
-/// Compact terminal receipt retained after a job settles.
+/// Compact terminal receipt retained permanently after a job settles.
 ///
 /// Settling drops the job's replay step log, inbox, message deduplication map,
-/// waits, retry state, and cleanup state from live authority state and
-/// snapshots while preserving idempotent deduplication and result lookup until
-/// [`Command::Expire`] reclaims the key at or after `outcome.expires_at_ms()`.
+/// waits, and retry state from live authority state and snapshots while
+/// preserving idempotent submission identity and result lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt {
     pub args: String,
@@ -134,38 +122,17 @@ pub struct Receipt {
     pub submission_position: u64,
     pub policy: RetryPolicy,
     pub budget: RetryBudget,
-    pub retention_ms: u64,
     pub steps: u64,
     pub outcome: Outcome,
 }
 
 /// How far a job had got when its current run was granted. A re-run that
-/// starts from the same progress is a restart; any committed step, resolved
-/// wait or entry into cleanup since then resets the count.
+/// starts from the same progress is a restart; any committed step or resolved
+/// wait since then resets the count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub steps: u64,
     pub waiting: Option<u64>,
-    /// Entering cleanup is progress: the restart budget starts over for the
-    /// cleanup phase instead of inheriting what forward work used up.
-    pub cleanup: bool,
-}
-
-/// The phase a job entered when it stopped forward work: durable so a cold
-/// replay re-enters cleanup at the same boundary instead of running new
-/// forward effects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Cleanup {
-    pub cause: CleanupCause,
-    /// Committed steps when cleanup began: the boundary forward work stops at.
-    pub steps: u64,
-    /// The lease held when cleanup began, if any: the one a cancel
-    /// interrupted, the one that reported the terminal failure, or the one
-    /// exhausting the retry budget released. Only a cancelled lease's
-    /// in-flight effect may still commit at `steps` (so a defer registered
-    /// from its outcome is rebuilt on replay); no other forward step may.
-    pub lease: Option<Lease>,
-    pub position: u64,
 }
 
 /// An undelivered message in a job's FIFO inbox.
@@ -213,19 +180,14 @@ pub struct Job {
     pub policy: RetryPolicy,
     /// Finite bounds on the retry/restart loops; unbounded by default.
     pub budget: RetryBudget,
-    /// How long the compact terminal receipt is retained after settlement.
-    pub retention_ms: u64,
     /// The retry the job is parked on, if a transient failure scheduled one.
     pub retry: Option<RetryWait>,
-    /// Transient retries since the last progress; a committed step, a resolved
-    /// wait, or entering cleanup resets it.
+    /// Transient retries since the last committed step or resolved wait.
     pub retry_attempts: u64,
     /// Re-runs that started without new progress since the previous run.
     pub restarts: u64,
     /// The progress recorded when the current/last run was granted.
     pub progress: Option<Progress>,
-    /// The cleanup phase the job entered, if it stopped forward work.
-    pub cleanup: Option<Cleanup>,
 }
 
 impl Job {
@@ -234,7 +196,6 @@ impl Job {
         Progress {
             steps: self.steps.len() as u64,
             waiting: self.wait.as_ref().map(|wait| wait.step),
-            cleanup: self.cleanup.is_some(),
         }
     }
 
@@ -253,7 +214,6 @@ impl Job {
             submission_position: self.submission_position,
             policy: self.policy,
             budget: self.budget,
-            retention_ms: self.retention_ms,
             steps: self.steps.len() as u64,
             outcome,
         }
@@ -266,7 +226,6 @@ impl Job {
             submission_position: self.submission_position,
             policy: self.policy,
             budget: self.budget,
-            retention_ms: self.retention_ms,
             steps: self.steps.len() as u64,
             outcome,
         }
@@ -283,26 +242,6 @@ impl Job {
             self.restarts.checked_add(1).unwrap()
         } else {
             0
-        }
-    }
-
-    /// Whether a step of `kind` at `step_id` under `lease` belongs to the job's
-    /// phase. Cleanup (`Defer`) steps exist only once cleanup began. Forward
-    /// effects stop there too, with one exception: the effect the cancelled
-    /// lease was already executing when cleanup began may still commit at the
-    /// boundary, so a defer the workflow registers from that outcome is rebuilt
-    /// on replay instead of the acquired resource leaking. A terminal failure
-    /// interrupts nothing in flight, so it admits no forward effect at all.
-    /// Shared by `prepare_step` and the durable `StepCommitted` application.
-    fn step_in_phase(&self, kind: StepKind, lease: &Lease, step_id: u64) -> bool {
-        match (&self.cleanup, kind) {
-            (None, kind) => kind != StepKind::Defer,
-            (Some(_), StepKind::Defer) => true,
-            (Some(cleanup), _) => {
-                matches!(cleanup.cause, CleanupCause::Cancelled { .. })
-                    && cleanup.lease.as_ref() == Some(lease)
-                    && step_id == cleanup.steps
-            }
         }
     }
 
@@ -342,42 +281,36 @@ impl Job {
         Ok(())
     }
 
-    /// Validates a durable fault, which only `prepare_grant`'s restart-budget
-    /// exhaustion proposes (lease-holder failures settle through `Completed`
-    /// with a failure envelope instead). The exhaustion is recomputed from
-    /// log-derived state rather than trusted: the lease the proposing grant saw
-    /// cleared is re-held during replay, because `recover` drops leases only
-    /// after applying the suffix, so lease absence is not a durable fact and
-    /// cannot be checked.
+    /// Validates a durable fault. Cancellation can settle any active job, while
+    /// restart exhaustion is recomputed from log-derived state.
     fn validate_fault(&self, fault: &Fault, position: u64) -> Res<()> {
-        let recomputed = self.restarts_after(self.progress());
-        let JobFailure::RestartsExhausted {
-            restarts,
-            max_restarts,
-        } = fault.failure
-        else {
-            return Err(ferr!("invalid durable fault"));
-        };
-        if fault.position != position
-            || self.budget.max_restarts != Some(max_restarts)
-            || restarts != recomputed
-            || restarts <= max_restarts
-        {
+        if fault.position != position {
             return Err(ferr!("invalid durable fault"));
         }
-        Ok(())
+        match &fault.failure {
+            JobFailure::Cancelled { .. } => Ok(()),
+            JobFailure::RestartsExhausted {
+                restarts,
+                max_restarts,
+            } if self.budget.max_restarts == Some(*max_restarts)
+                && *restarts == self.restarts_after(self.progress())
+                && restarts > max_restarts =>
+            {
+                Ok(())
+            }
+            _ => Err(ferr!("invalid durable fault")),
+        }
     }
 
     /// Validates a durably accepted message against the job and queues it: a
     /// message that would have resolved a held wait is a resolution, not an
-    /// acceptance, and a job in cleanup never receives again.
+    /// acceptance.
     fn apply_message(&mut self, message: Message, position: u64) -> Res<()> {
         let waits_for_message = self
             .wait
             .as_ref()
             .is_some_and(|wait| wait.kind == WaitKind::Message);
-        if self.cleanup.is_some()
-            || waits_for_message
+        if waits_for_message
             || message.position != position
             || self.messages.contains_key(&message.id)
         {
@@ -391,44 +324,6 @@ impl Job {
             },
         );
         self.inbox.push_back(message);
-        Ok(())
-    }
-
-    /// Validates a durable entry into cleanup. The recorded lease is checked
-    /// against the job's: during recovery the suffix is replayed with leases
-    /// still held, so the lease recorded by the cancel is a log-derived fact
-    /// here. A terminal failure or an exhausted retry comes from the lease
-    /// holder itself, which cannot be parked on a wait while reporting it;
-    /// exhaustion also releases that lease, like the retry it stands in for.
-    /// The pending wait, if any, is abandoned: the woken invocation never
-    /// resolves it, and the cleanup steps take its slot. Entering cleanup is
-    /// progress, so the retry budget starts over for the cleanup phase.
-    fn apply_cleanup(&mut self, cleanup: Cleanup, position: u64) -> Res<()> {
-        let from_holder =
-            cleanup.lease.is_some() && cleanup.lease == self.lease && self.wait.is_none();
-        let holder_valid = match cleanup.cause {
-            // A cancel that found no lease holder is validated against the log
-            // alone: lease loss is never logged (a restart drops leases without
-            // a record), so on replay the job may still hold the lease the
-            // cancel saw already gone. Only a recorded holder is checked.
-            CleanupCause::Cancelled { .. } => {
-                cleanup.lease.is_none() || cleanup.lease == self.lease
-            }
-            CleanupCause::Failed { .. } | CleanupCause::RetriesExhausted { .. } => from_holder,
-        };
-        if self.cleanup.is_some()
-            || cleanup.steps != self.steps.len() as u64
-            || cleanup.position != position
-            || !holder_valid
-        {
-            return Err(ferr!("invalid durable cleanup"));
-        }
-        if matches!(cleanup.cause, CleanupCause::RetriesExhausted { .. }) {
-            self.lease = None;
-        }
-        self.wait = None;
-        self.retry_attempts = 0;
-        self.cleanup = Some(cleanup);
         Ok(())
     }
 
@@ -494,7 +389,6 @@ pub enum Command {
         args: String,
         policy: RetryPolicy,
         budget: RetryBudget,
-        retention_ms: u64,
     },
     Grant {
         key: String,
@@ -518,7 +412,6 @@ pub enum Command {
         lease: Lease,
         expected_steps: u64,
         value: String,
-        now_ms: u64,
     },
     Revoke {
         key: String,
@@ -556,30 +449,11 @@ pub enum Command {
         now_ms: u64,
         jitter_ms: u64,
     },
-    /// An operator cancels the job: forward work stops at the next cooperative
-    /// boundary and the registered cleanup runs. Needs no lease; a job parked
-    /// on a wait or retry is woken for cleanup.
+    /// Atomically fences active work and settles a permanent cancellation receipt.
     Cancel {
         key: String,
         incarnation: u64,
         reason: String,
-    },
-    /// The leased invocation hit a terminal error with compensation
-    /// registered: record the cause before any cleanup step runs, so a crash
-    /// mid-cleanup resumes it instead of re-running forward work whose
-    /// failure might not repeat.
-    Fail {
-        key: String,
-        lease: Lease,
-        error: String,
-    },
-    /// The host observed that the retention window for a settled receipt has
-    /// elapsed and reclaims the key so a subsequent submission can admit a new
-    /// incarnation.
-    Expire {
-        key: String,
-        incarnation: u64,
-        now_ms: u64,
     },
 }
 
@@ -591,7 +465,6 @@ pub enum Transition {
         incarnation: u64,
         policy: RetryPolicy,
         budget: RetryBudget,
-        retention_ms: u64,
     },
     Granted {
         key: String,
@@ -628,23 +501,11 @@ pub enum Transition {
         lease: Lease,
         retry: RetryWait,
     },
-    /// The authority settled the job with a classified failure. Proposed when
-    /// no lease exists (restart budget exhausted at grant time).
+    /// The authority settled the job with a classified failure.
     Faulted {
         key: String,
         incarnation: u64,
         fault: Fault,
-    },
-    /// The job left forward work for cleanup; a pending wait is abandoned.
-    CleanupStarted {
-        key: String,
-        incarnation: u64,
-        cleanup: Cleanup,
-    },
-    /// The compact terminal receipt expired after its retention window elapsed.
-    Expired {
-        key: String,
-        incarnation: u64,
     },
 }
 
@@ -678,14 +539,6 @@ pub enum Intent {
     Fault {
         key: String,
         fault: Fault,
-    },
-    /// The job entered cleanup. While the job stays leased, the host
-    /// interrupts that invocation (waking it if parked on a wait); once it is
-    /// unleased (no holder at the cancel, or the holder's exhausted retry
-    /// released it) the host grants it so the cleanup can run.
-    Cleanup {
-        key: String,
-        cleanup: Cleanup,
     },
 }
 
@@ -722,21 +575,11 @@ pub enum Rejection {
     RetryPending {
         fire_at_ms: u64,
     },
-    /// The cleanup phase's transient-error retry budget ran out; the lease
-    /// holder must settle the job with [`JobFailure::RetriesExhausted`].
-    /// (Forward work exhausting its budget enters cleanup instead.)
+    /// The transient-error retry budget ran out; the lease remains held so the
+    /// runtime can settle the job through the normal completion path.
     RetriesExhausted {
         retries: u64,
         max_retries: u64,
-    },
-    /// The step does not belong to the job's phase: a forward effect, wait or
-    /// message once cleanup began (other than the effect the interrupted lease
-    /// was already executing), or a cleanup step before it.
-    WrongPhase,
-    /// The settled receipt's retention window has not elapsed yet; the host
-    /// must wait until `expires_at_ms` before expiring the key.
-    RetentionPending {
-        expires_at_ms: u64,
     },
 }
 
@@ -866,8 +709,7 @@ impl Authority {
                 args,
                 policy,
                 budget,
-                retention_ms,
-            } => self.prepare_submit(key, args, policy, budget, retention_ms),
+            } => self.prepare_submit(key, args, policy, budget),
             Command::Grant {
                 key,
                 incarnation,
@@ -888,8 +730,7 @@ impl Authority {
                 lease,
                 expected_steps,
                 value,
-                now_ms,
-            } => self.prepare_complete(key, lease, expected_steps, value, now_ms),
+            } => self.prepare_complete(key, lease, expected_steps, value),
             Command::Revoke { key, lease } => self.prepare_revoke(key, lease),
             Command::BeginWait {
                 key,
@@ -918,12 +759,6 @@ impl Authority {
                 incarnation,
                 reason,
             } => self.prepare_cancel(key, incarnation, reason),
-            Command::Fail { key, lease, error } => self.prepare_fail(key, lease, error),
-            Command::Expire {
-                key,
-                incarnation,
-                now_ms,
-            } => self.prepare_expire(key, incarnation, now_ms),
         }
     }
 
@@ -940,14 +775,9 @@ impl Authority {
         args: String,
         policy: RetryPolicy,
         budget: RetryBudget,
-        retention_ms: u64,
     ) -> Result<Decision, Rejection> {
         if let Some(job) = self.jobs.get(&key) {
-            if job.args != args
-                || job.policy != policy
-                || job.budget != budget
-                || job.retention_ms != retention_ms
-            {
+            if job.args != args || job.policy != policy || job.budget != budget {
                 return Err(Rejection::PayloadConflict);
             }
             return Ok(Decision::Duplicate(Ack {
@@ -956,11 +786,7 @@ impl Authority {
             }));
         }
         if let Some(receipt) = self.receipts.get(&key) {
-            if receipt.args != args
-                || receipt.policy != policy
-                || receipt.budget != budget
-                || receipt.retention_ms != retention_ms
-            {
+            if receipt.args != args || receipt.policy != policy || receipt.budget != budget {
                 return Err(Rejection::PayloadConflict);
             }
             return Ok(Decision::Duplicate(Ack {
@@ -981,7 +807,6 @@ impl Authority {
                 incarnation,
                 policy,
                 budget,
-                retention_ms,
             },
             Vec::new(),
             ack,
@@ -996,12 +821,8 @@ impl Authority {
         now_ms: u64,
     ) -> Result<Decision, Rejection> {
         let job = self.active_job(&key, incarnation)?;
-        // Cleanup does not wait for a retry deadline: the retry budget was
-        // charged when the retry was scheduled, and granting it early to run
-        // the cleanup is that same re-run, not a restart.
         if let Some(retry) = &job.retry
             && retry.fire_at_ms > now_ms
-            && job.cleanup.is_none()
         {
             return Err(Rejection::RetryPending {
                 fire_at_ms: retry.fire_at_ms,
@@ -1029,7 +850,6 @@ impl Authority {
                     restarts,
                     max_restarts,
                 },
-                expires_at_ms: now_ms.saturating_add(job.retention_ms),
                 position: self.next_position(),
             };
             let intents = vec![Intent::Fault {
@@ -1118,7 +938,7 @@ impl Authority {
             return Err(Rejection::PayloadConflict);
         }
         self.require_current_lease(job, &lease)?;
-        if matches!(kind, StepKind::Sleep | StepKind::Recv) {
+        if kind != StepKind::Effect {
             return Err(Rejection::Nondeterministic);
         }
         if step_id != job.steps.len() as u64 || job.wait.is_some() {
@@ -1126,9 +946,6 @@ impl Authority {
         }
         if attempt != 0 {
             return Err(Rejection::InvalidAttempt);
-        }
-        if !job.step_in_phase(kind, &lease, step_id) {
-            return Err(Rejection::WrongPhase);
         }
         let step = Step {
             id: step_id,
@@ -1159,7 +976,6 @@ impl Authority {
         lease: Lease,
         expected_steps: u64,
         value: String,
-        now_ms: u64,
     ) -> Result<Decision, Rejection> {
         if let Some(receipt) = self.receipts.get(&key) {
             if receipt.incarnation != lease.job_incarnation {
@@ -1187,7 +1003,6 @@ impl Authority {
         let terminal = Terminal {
             value,
             lease,
-            expires_at_ms: now_ms.saturating_add(job.retention_ms),
             position: self.next_position(),
         };
         let intents = vec![Intent::Terminal {
@@ -1261,12 +1076,6 @@ impl Authority {
         }
         if step_id != job.steps.len() as u64 {
             return Err(Rejection::OutOfOrder);
-        }
-        // A wait is forward work; the cleanup phase runs compensation steps
-        // only, so a replayed invocation that reaches a never-resolved wait
-        // is interrupted here instead of suspending again.
-        if job.cleanup.is_some() {
-            return Err(Rejection::WrongPhase);
         }
         let position = self.next_position();
         if kind == WaitKind::Message
@@ -1363,12 +1172,6 @@ impl Authority {
                 disposition: Disposition::Admitted,
             }));
         }
-        // A job in cleanup never receives again: its wait was abandoned and no
-        // new one may begin, so admitting the message would promise a delivery
-        // that cannot happen.
-        if job.cleanup.is_some() {
-            return Err(Rejection::WrongPhase);
-        }
         let position = self.next_position();
         let message = Message {
             id,
@@ -1403,10 +1206,8 @@ impl Authority {
     }
 
     /// Releases the lease and parks the job on a durable retry computed from
-    /// its policy. The retry budget is charged here, once per phase: forward
-    /// work exhausting it enters cleanup, releasing the lease so the next
-    /// grant runs the registered compensation on a fresh budget; cleanup
-    /// exhausting it rejects so the lease holder settles the job instead.
+    /// its policy. Exhaustion rejects without releasing the current lease so the
+    /// runtime can settle through the normal completion path.
     fn prepare_retry(
         &self,
         key: String,
@@ -1424,23 +1225,10 @@ impl Authority {
         if let Some(max_retries) = job.budget.max_retries
             && job.retry_attempts >= max_retries
         {
-            if job.cleanup.is_some() {
-                return Err(Rejection::RetriesExhausted {
-                    retries: job.retry_attempts,
-                    max_retries,
-                });
-            }
-            let cleanup = Cleanup {
-                cause: CleanupCause::RetriesExhausted {
-                    retries: job.retry_attempts,
-                    max_retries,
-                    last_error: error,
-                },
-                steps: job.steps.len() as u64,
-                lease: Some(lease.clone()),
-                position: self.next_position(),
-            };
-            return self.cleanup_started(key, lease.job_incarnation, cleanup, Disposition::Park);
+            return Err(Rejection::RetriesExhausted {
+                retries: job.retry_attempts,
+                max_retries,
+            });
         }
         // A per-failure override steers this retry's delay only; the durable
         // submission policy is what every later retry falls back to.
@@ -1462,118 +1250,35 @@ impl Authority {
         ))
     }
 
-    /// Moves the job into cleanup on an operator's behalf. A second cancel
-    /// (or a cancel of a job already cleaning up after a terminal error)
-    /// acknowledges the existing cleanup without interrupting it again.
+    /// Atomically settles cancellation before any host-side session teardown.
+    /// Removing the live job fences every late lease result, wait resolution,
+    /// retry deadline, and message while the permanent receipt preserves the key.
     fn prepare_cancel(
         &self,
         key: String,
         incarnation: u64,
         reason: String,
     ) -> Result<Decision, Rejection> {
-        let job = self.active_job(&key, incarnation)?;
-        if let Some(cleanup) = &job.cleanup {
-            return Ok(Decision::Duplicate(Ack {
-                position: cleanup.position,
-                disposition: job.disposition(),
-            }));
-        }
-        let cleanup = Cleanup {
-            cause: CleanupCause::Cancelled { reason },
-            steps: job.steps.len() as u64,
-            lease: job.lease.clone(),
+        self.active_job(&key, incarnation)?;
+        let fault = Fault {
+            failure: JobFailure::Cancelled { reason },
             position: self.next_position(),
         };
-        self.cleanup_started(key, incarnation, cleanup, Disposition::Admitted)
-    }
-
-    /// Moves the job into cleanup at the lease holder's request, because its
-    /// forward work failed terminally with compensation registered. A job
-    /// already in cleanup (cancelled under this lease, or replaying a
-    /// deterministic terminal error) continues with the durable cause.
-    fn prepare_fail(
-        &self,
-        key: String,
-        lease: Lease,
-        error: String,
-    ) -> Result<Decision, Rejection> {
-        let job = self.job_for_lease(&key, lease.job_incarnation)?;
-        self.require_current_lease(job, &lease)?;
-        if let Some(cleanup) = &job.cleanup {
-            return Ok(Decision::Duplicate(Ack {
-                position: cleanup.position,
-                disposition: Disposition::Continue,
-            }));
-        }
-        if job.wait.is_some() {
-            return Err(Rejection::OutOfOrder);
-        }
-        let incarnation = lease.job_incarnation;
-        let cleanup = Cleanup {
-            cause: CleanupCause::Failed { error },
-            steps: job.steps.len() as u64,
-            lease: Some(lease),
-            position: self.next_position(),
-        };
-        self.cleanup_started(key, incarnation, cleanup, Disposition::Continue)
-    }
-
-    fn prepare_expire(
-        &self,
-        key: String,
-        incarnation: u64,
-        now_ms: u64,
-    ) -> Result<Decision, Rejection> {
-        if let Some(receipt) = self.receipts.get(&key) {
-            if receipt.incarnation != incarnation {
-                return Err(Rejection::IncarnationConflict);
-            }
-            let expires_at_ms = receipt.outcome.expires_at_ms();
-            if now_ms < expires_at_ms {
-                return Err(Rejection::RetentionPending { expires_at_ms });
-            }
-            let position = self.next_position();
-            return Ok(self.proposal(
-                Transition::Expired { key, incarnation },
-                Vec::new(),
-                Ack {
-                    position,
-                    disposition: Disposition::Completed,
-                },
-            ));
-        }
-        if let Some(job) = self.jobs.get(&key) {
-            if job.incarnation != incarnation {
-                return Err(Rejection::IncarnationConflict);
-            }
-            return Err(Rejection::WrongPhase);
-        }
-        Err(Rejection::UnknownJob)
-    }
-
-    fn cleanup_started(
-        &self,
-        key: String,
-        incarnation: u64,
-        cleanup: Cleanup,
-        disposition: Disposition,
-    ) -> Result<Decision, Rejection> {
-        let ack = Ack {
-            position: cleanup.position,
-            disposition,
-        };
-        let intents = vec![Intent::Cleanup {
+        let intents = vec![Intent::Fault {
             key: key.clone(),
-            cleanup: cleanup.clone(),
+            fault: fault.clone(),
         }];
         Ok(self.proposal(
-            Transition::CleanupStarted {
+            Transition::Faulted {
                 key,
                 incarnation,
-                cleanup,
+                fault,
             },
             intents,
-            ack,
+            Ack {
+                position: self.next_position(),
+                disposition: Disposition::Completed,
+            },
         ))
     }
 
@@ -1687,8 +1392,7 @@ impl Authority {
             if let Some(wait) = &job.wait
                 && (wait.step != job.steps.len() as u64
                     || wait.position > snapshot.cut
-                    || wait.lease.job_incarnation != job.incarnation
-                    || job.cleanup.is_some())
+                    || wait.lease.job_incarnation != job.incarnation)
             {
                 return Err(ferr!("invalid snapshot wait for {key}"));
             }
@@ -1696,11 +1400,6 @@ impl Authority {
                 && (retry.position > snapshot.cut || job.wait.is_some())
             {
                 return Err(ferr!("invalid snapshot retry for {key}"));
-            }
-            if let Some(cleanup) = &job.cleanup
-                && (cleanup.steps > job.steps.len() as u64 || cleanup.position > snapshot.cut)
-            {
-                return Err(ferr!("invalid snapshot cleanup for {key}"));
             }
         }
         for (key, receipt) in &snapshot.receipts {
@@ -1733,7 +1432,6 @@ impl Authority {
                 incarnation,
                 policy,
                 budget,
-                retention_ms,
             } => {
                 if incarnation != self.next_job_incarnation + 1
                     || self.jobs.contains_key(&key)
@@ -1756,12 +1454,10 @@ impl Authority {
                         messages: BTreeMap::new(),
                         policy,
                         budget,
-                        retention_ms,
                         retry: None,
                         retry_attempts: 0,
                         restarts: 0,
                         progress: None,
-                        cleanup: None,
                     },
                 );
                 assert!(old.is_none(), "fishy");
@@ -1772,12 +1468,11 @@ impl Authority {
             }
             Transition::StepCommitted { key, step } => {
                 let job = self.durable_job_mut(&key, step.lease.job_incarnation)?;
-                if !matches!(step.kind, StepKind::Effect | StepKind::Defer)
+                if step.kind != StepKind::Effect
                     || job.lease.as_ref() != Some(&step.lease)
                     || job.wait.is_some()
                     || step.id != job.steps.len() as u64
                     || step.position != position
-                    || !job.step_in_phase(step.kind, &step.lease, step.id)
                 {
                     return Err(ferr!("invalid durable step"));
                 }
@@ -1807,7 +1502,6 @@ impl Authority {
                 let job = self.durable_job_mut(&key, wait.lease.job_incarnation)?;
                 let inbox_drained = job.inbox.is_empty();
                 if job.lease.as_ref() != Some(&wait.lease)
-                    || job.cleanup.is_some()
                     || job.wait.is_some()
                     || wait.step != job.steps.len() as u64
                     || wait.position != position
@@ -1846,23 +1540,6 @@ impl Authority {
                 let job = self.jobs.remove(&key).expect("validated above");
                 self.receipts
                     .insert(key, job.settle(Outcome::Faulted(fault)));
-            }
-            Transition::CleanupStarted {
-                key,
-                incarnation,
-                cleanup,
-            } => {
-                let job = self.durable_job_mut(&key, incarnation)?;
-                job.apply_cleanup(cleanup, position)?;
-            }
-            Transition::Expired { key, incarnation } => {
-                let Some(receipt) = self.receipts.get(&key) else {
-                    return Err(ferr!("durable expiration names unknown receipt"));
-                };
-                if receipt.incarnation != incarnation {
-                    return Err(ferr!("durable expiration names obsolete incarnation"));
-                }
-                self.receipts.remove(&key);
             }
         }
         self.revision = position;

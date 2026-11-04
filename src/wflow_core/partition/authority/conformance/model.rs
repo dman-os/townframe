@@ -64,57 +64,17 @@ pub(super) struct ModelProgress {
     /// The held wait's step number, or -1 for `None` (the model cannot store
     /// an option inside a record it round-trips through JSON).
     pub(super) waiting: i64,
-    pub(super) cleanup: bool,
 }
 pub(super) fn model_progress(progress: &Progress) -> ModelProgress {
     ModelProgress {
         steps: progress.steps,
         waiting: progress.waiting.map_or(-1, |waiting| waiting as i64),
-        cleanup: progress.cleanup,
     }
 }
 pub(super) fn empty_progress() -> ModelProgress {
     ModelProgress {
         steps: 0,
         waiting: -1,
-        cleanup: false,
-    }
-}
-/// `Cleanup` with its cause flattened: `cause` names the [`CleanupCause`]
-/// variant and `reason` carries its payload (the cancel reason or the
-/// terminal error); the interrupted lease is `has_lease`/`lease`.
-#[derive(Debug, PartialEq, Eq, Deserialize)]
-pub(super) struct ModelCleanup {
-    pub(super) cause: String,
-    pub(super) reason: String,
-    pub(super) steps: u64,
-    pub(super) has_lease: bool,
-    pub(super) lease: Lease,
-    pub(super) position: u64,
-}
-pub(super) fn model_cleanup(cleanup: &Cleanup) -> ModelCleanup {
-    let (cause, reason) = match &cleanup.cause {
-        CleanupCause::Cancelled { reason } => ("cancelled", reason),
-        CleanupCause::Failed { error } => ("failed", error),
-        CleanupCause::RetriesExhausted { last_error, .. } => ("retries-exhausted", last_error),
-    };
-    ModelCleanup {
-        cause: cause.into(),
-        reason: reason.clone(),
-        steps: cleanup.steps,
-        has_lease: cleanup.lease.is_some(),
-        lease: cleanup.lease.clone().unwrap_or_else(empty_lease),
-        position: cleanup.position,
-    }
-}
-pub(super) fn empty_cleanup() -> ModelCleanup {
-    ModelCleanup {
-        cause: String::new(),
-        reason: String::new(),
-        steps: 0,
-        has_lease: false,
-        lease: empty_lease(),
-        position: 0,
     }
 }
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -123,18 +83,12 @@ pub(super) struct ModelFault {
     pub(super) restarts: u64,
     pub(super) position: u64,
 }
-/// Total projection of [`JobFailure`] onto the model's failure names; only
-/// `RestartsExhausted` carries a restart count (the sole authority-side fault
-/// the sampled traces can produce).
+/// Projection of the two durable faults the authority can produce.
 pub(super) fn failure_name(failure: &JobFailure) -> (&'static str, u64) {
     match failure {
         JobFailure::Cancelled { .. } => ("cancelled", 0),
-        JobFailure::CleanupFailed { .. } => ("cleanup-failed", 0),
-        JobFailure::ReplayDiverged { .. } => ("replay-diverged", 0),
-        JobFailure::Panicked(_) => ("panicked", 0),
-        JobFailure::RetriesExhausted { .. } => ("retries-exhausted", 0),
         JobFailure::RestartsExhausted { restarts, .. } => ("restarts-exhausted", *restarts),
-        JobFailure::Host(_) => ("host", 0),
+        _ => unreachable!("authority cannot persist this job failure"),
     }
 }
 pub(super) fn model_fault(fault: &Fault) -> ModelFault {
@@ -189,8 +143,6 @@ pub(super) struct ModelJob {
     pub(super) progress: ModelProgress,
     pub(super) has_fault: bool,
     pub(super) fault: ModelFault,
-    pub(super) has_cleanup: bool,
-    pub(super) cleanup: ModelCleanup,
 }
 pub(super) fn model_job(key: &str, job: &Job) -> ModelJob {
     let mut inbox: Vec<Message> = job
@@ -234,11 +186,6 @@ pub(super) fn model_job(key: &str, job: &Job) -> ModelJob {
             .map_or_else(empty_progress, model_progress),
         has_fault: false,
         fault: empty_fault(),
-        has_cleanup: job.cleanup.is_some(),
-        cleanup: job
-            .cleanup
-            .as_ref()
-            .map_or_else(empty_cleanup, model_cleanup),
     }
 }
 pub(super) fn model_receipt(key: &str, receipt: &Receipt) -> ModelJob {
@@ -269,8 +216,6 @@ pub(super) fn model_receipt(key: &str, receipt: &Receipt) -> ModelJob {
         progress: empty_progress(),
         has_fault,
         fault,
-        has_cleanup: false,
-        cleanup: empty_cleanup(),
     }
 }
 /// `Wait` with its kind flattened: a timer carries its `fire_at`, a message
@@ -293,7 +238,6 @@ pub(super) struct ModelIntent {
     pub(super) wait: ModelWait,
     pub(super) terminal: ModelTerminal,
     pub(super) fault: ModelFault,
-    pub(super) cleanup: ModelCleanup,
 }
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 pub(super) struct ModelOutcome {
@@ -323,7 +267,6 @@ pub(super) fn model_intent(intent: &Intent) -> ModelIntent {
         wait: empty_wait(),
         terminal: empty_terminal(),
         fault: empty_fault(),
-        cleanup: empty_cleanup(),
     };
     match intent {
         Intent::Execute { key, lease, replay } => {
@@ -356,11 +299,6 @@ pub(super) fn model_intent(intent: &Intent) -> ModelIntent {
             model.kind = "fault".into();
             model.key = key.clone();
             model.fault = model_fault(fault);
-        }
-        Intent::Cleanup { key, cleanup } => {
-            model.kind = "cleanup".into();
-            model.key = key.clone();
-            model.cleanup = model_cleanup(cleanup);
         }
     }
     model
@@ -426,7 +364,5 @@ pub(super) fn rejection_name(rejection: &Rejection) -> &'static str {
         Rejection::Nondeterministic => "nondeterministic",
         Rejection::RetryPending { .. } => "retry-pending",
         Rejection::RetriesExhausted { .. } => "retries-exhausted",
-        Rejection::RetentionPending { .. } => "retention-pending",
-        Rejection::WrongPhase => "wrong-phase",
     }
 }

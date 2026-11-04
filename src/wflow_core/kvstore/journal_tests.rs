@@ -330,7 +330,6 @@ fn authority_warm_step_has_one_commit_and_cold_replay_cannot_continue_old_lease(
                 args: "{}".into(),
                 policy: RetryPolicy::Immediate,
                 budget: RetryBudget::default(),
-                retention_ms: crate::partition::DEFAULT_RETENTION_MS,
             },
         )
         .await?;

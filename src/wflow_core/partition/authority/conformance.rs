@@ -27,8 +27,7 @@ const TIMER: WaitKind = WaitKind::Timer { fire_at_ms: 5 };
 /// is exactly `now_ms + RETRY_DELAY`).
 const RETRY_DELAY: u64 = 3;
 /// Mirrors the model's `MAX_RETRIES`: one transient failure may park a retry
-/// per phase; the next moves forward work into cleanup and is rejected
-/// `RetriesExhausted` once there.
+/// before the next transient failure is rejected as `RetriesExhausted`.
 const MAX_RETRIES: u64 = 1;
 /// Mirrors the model's `MAX_RESTARTS`: one progress-free re-run may restart,
 /// the next grant settles the job with `RestartsExhausted`.
@@ -108,55 +107,38 @@ impl Driver for AuthorityDriver {
             duplicateSubmit(key: String) => self.submit(key),
             grant(key: String, worker: u64) => self.grant(key, worker),
             grantDueRetry(key: String, worker: u64) => self.grant_due_retry(key, worker),
-            grantCleanupThroughRetry(key: String, worker: u64) => self.grant(key, worker),
-            commitStep(key: String, name: String) => self.commit_step(key, StepKind::Effect, name),
-            commitDefer(key: String, name: String) => self.commit_step(key, StepKind::Defer, name),
-            deferBeforeCleanup(key: String, name: String) => self.commit_step(key, StepKind::Defer, name),
-            effectAfterCleanup(key: String, name: String) => self.commit_step(key, StepKind::Effect, name),
+            commitStep(key: String, name: String) => self.commit_step(key, name),
             duplicateStep(key: String) => self.duplicate_step(key),
             staleResult(key: String) => self.stale_result(key),
             renamedStep(key: String) => self.renamed_step(key),
             renamedWait(key: String) => self.renamed_wait(key),
             retry(key: String) => self.retry(key),
             retryExhausted(key: String) => self.retry(key),
-            cleanupRetryExhausted(key: String) => self.retry(key),
             retryWhileWaiting(key: String) => self.retry(key),
             cancel(key: String) => self.cancel(key),
             duplicateCancel(key: String) => self.cancel(key),
             cancelSettled(key: String) => self.cancel(key),
-            failJob(key: String) => self.fail(key),
-            duplicateFail(key: String) => self.fail(key),
-            failWhileWaiting(key: String) => self.fail(key),
             complete(key: String) => self.complete(key),
             duplicateComplete(key: String) => self.duplicate_complete(key),
             revoke(key: String) => self.revoke(key),
             beginTimerWait(key: String) => self.begin_wait(key, TIMER),
             beginMessageWait(key: String) => self.begin_wait(key, WaitKind::Message),
-            waitInCleanup(key: String, timer: bool) => self.begin_wait(key, wait_kind(timer)),
             reattachWait(key: String) => self.reattach_wait(key, false),
             reattachResolvedWait(key: String, timer: bool) => self.reattach_resolved_wait(key, timer),
             conflictingWait(key: String) => self.reattach_wait(key, true),
-            stepWhileWaiting(key: String) => self.commit_step(key, StepKind::Effect, String::new()),
+            stepWhileWaiting(key: String) => self.commit_step(key, String::new()),
             completeWhileWaiting(key: String) => self.complete(key),
             fireTimer(key: String) => self.fire_timer(key),
             duplicateFire(key: String) => self.duplicate_fire(key),
             staleFire(key: String) => self.fire_timer(key),
             fireAfterCancel(key: String) => self.fire_timer(key),
             sendMessage(key: String, id: String) => self.send(key, id.clone(), id),
-            sendInCleanup(key: String, id: String) => self.send(key, id.clone(), id),
             duplicateMessage(key: String, id: String) => self.send(key, id.clone(), id),
             conflictingMessage(key: String, id: String) => self.send(key, id, "conflict".into()),
-            expire(key: String) => self.expire(key, DEFAULT_RETENTION_MS),
-            expireBeforeDeadline(key: String) => self.expire(key, 0),
             crash => self.crash(),
             snapshotRestart => self.snapshot_restart(),
         })
     }
-}
-
-/// The wait kind a model action's `timer` pick selects.
-fn wait_kind(timer: bool) -> WaitKind {
-    if timer { TIMER } else { WaitKind::Message }
 }
 
 impl State<AuthorityDriver> for ModelState {
@@ -220,7 +202,6 @@ impl AuthorityDriver {
                 max_retries: Some(MAX_RETRIES),
                 max_restarts: Some(MAX_RESTARTS),
             },
-            retention_ms: DEFAULT_RETENTION_MS,
         });
     }
 
@@ -250,23 +231,16 @@ impl AuthorityDriver {
         });
     }
 
-    /// Commits a step of `kind` at the job's next step under its current
-    /// lease. The model's `commitStep`/`effectAfterCleanup` report an effect,
-    /// `commitDefer`/`deferBeforeCleanup` a cleanup step; the guards differ,
-    /// the command does not.
-    fn commit_step(&mut self, key: String, kind: StepKind, name: String) {
+    /// Commits an effect at the job's next step under its current lease.
+    fn commit_step(&mut self, key: String, name: String) {
         let job = &self.authority.jobs()[&key];
-        let value = match kind {
-            StepKind::Defer => "undo",
-            _ => "value",
-        };
         self.execute(Command::CommitStep {
             key,
             lease: job.lease.clone().unwrap(),
             step: job.steps.len() as u64,
             attempt: 0,
-            value: value.into(),
-            kind,
+            value: "value".into(),
+            kind: StepKind::Effect,
             name: model_step_name(&name),
         });
     }
@@ -348,10 +322,8 @@ impl AuthorityDriver {
         });
     }
 
-    /// The transient failure the model's `retry`, `retryExhausted`,
-    /// `cleanupRetryExhausted`, and `retryWhileWaiting` actions all report;
-    /// the guards differ, the command does not (clock 0, no jitter, durable
-    /// policy).
+    /// The transient failure the model's retry actions report; their guards
+    /// differ, while the command uses clock 0, no jitter, and durable policy.
     fn retry(&mut self, key: String) {
         let job = &self.authority.jobs()[&key];
         self.execute(Command::Retry {
@@ -375,17 +347,6 @@ impl AuthorityDriver {
         });
     }
 
-    /// The terminal failure the model's `failJob`, `duplicateFail`, and
-    /// `failWhileWaiting` actions all report from the current lease.
-    fn fail(&mut self, key: String) {
-        let lease = self.authority.jobs()[&key].lease.clone().unwrap();
-        self.execute(Command::Fail {
-            key,
-            lease,
-            error: "boom".into(),
-        });
-    }
-
     fn complete(&mut self, key: String) {
         let job = &self.authority.jobs()[&key];
         self.execute(Command::Complete {
@@ -393,7 +354,6 @@ impl AuthorityDriver {
             lease: job.lease.clone().unwrap(),
             expected_steps: job.steps.len() as u64,
             value: "done".into(),
-            now_ms: 0,
         });
     }
 
@@ -407,7 +367,6 @@ impl AuthorityDriver {
             lease: terminal.lease.clone(),
             expected_steps: receipt.steps,
             value: terminal.value.clone(),
-            now_ms: 0,
         });
     }
 
@@ -483,15 +442,6 @@ impl AuthorityDriver {
 
     fn send(&mut self, key: String, id: String, payload: String) {
         self.execute(Command::SendMessage { key, id, payload });
-    }
-
-    fn expire(&mut self, key: String, now_ms: u64) {
-        let incarnation = self.incarnation(&key);
-        self.execute(Command::Expire {
-            key,
-            incarnation,
-            now_ms,
-        });
     }
 
     fn crash(&mut self) {
@@ -577,8 +527,8 @@ fn authority_conformance() {
             main: Some("bounded".into()),
             init: Some("init".into()),
             step: Some("step".into()),
-            // Wait resolutions and the cleanup paths sit behind submit,
-            // grant, and begin-wait or cancel, and the always-enabled
+            // Wait resolutions and terminal paths sit behind submit, grant,
+            // and begin-wait or cancel, and the always-enabled
             // restarts and rejections dilute the sampled actions; 200
             // traces of 32 steps is what it takes for every action in
             // `step` (down to a terminal failure reported from a held wait)
