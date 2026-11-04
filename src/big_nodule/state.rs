@@ -201,25 +201,41 @@ impl State {
         let (commands, mut inbox) = mpsc::channel(64);
         let (stop, tasks) = StopToken::new();
         let cancellation = tasks.clone();
-        tasks
-            .spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => break,
-                        command = inbox.recv() => match command {
-                            Some(command) => state.run(command).await,
-                            None => break,
-                        },
-                        event = watch.next() => match event {
-                            Some(Ok(snapshot)) => {
-                                drop(state.reconcile(&RequestContext::root(), snapshot, false).await);
-                            }
-                            Some(Err(_)) | None => break,
-                        },
-                    }
+        // The loop's failures are programming or lifecycle errors, not per-nodule outcomes
+        // (those live in the records `reconcile` builds), so the task unwraps its result: the
+        // process panic handler then brings everything down instead of leaving a dead actor
+        // that panics every later `Handle::ask` on a closed channel.
+        let run = async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break,
+                    command = inbox.recv() => match command {
+                        Some(command) => state.run(command).await,
+                        None => break,
+                    },
+                    event = watch.next() => match event {
+                        // Revoke failures come back as a map of per-plug outcomes that
+                        // `reconcile` already folded into the refused records, so only
+                        // an `Err` (storage, actor or capability failure) is fatal.
+                        Some(Ok(snapshot)) => {
+                            drop(state.reconcile(&RequestContext::root(), snapshot, false).await?);
+                        }
+                        Some(Err(err)) => return Err(crate::store_error(err)),
+                        // Shutdown stops this task before the datum store it watches, so a
+                        // closed watch while we are still running is a lifecycle break.
+                        None => {
+                            return Err(NodulesError::Storage(
+                                "nodule config watch closed while the state actor was running".into(),
+                            ));
+                        }
+                    },
                 }
-            })
+            }
+            Res::Ok(())
+        };
+        tasks
+            .spawn(async move { run.await.expect("nodule state actor failed") })
             .expect("nodule state task starts before shutdown");
         Ok((Handle { commands }, stop))
     }

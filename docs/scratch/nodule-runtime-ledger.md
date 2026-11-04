@@ -100,19 +100,22 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
-- ADR 027 and config scratch doc revision from D1–D6 (the merge subagent, reused). Review proposals go in a "pending operator review" subsection only.
-- Review fixes batch 1 (subagent):
-  - stop swallowing reconcile errors and silently exiting the actor;
-  - remove `Inventory`;
-  - `resolve_entry` filters to the nodule contribution;
-  - per-plug admit scope.
-  Next batches: the upgrade wedge plus reconcile perf, then admission narrowing (D1), then the dispatch work.
+- Review fixes batch 2 (next): the upgrade wedge (accept the upgrade and mark settings `Invalid`), then reconcile perf. After that, admission narrowing (D1), then the dispatch work.
 - wash-runtime fork seam (subagent) in `../wasmCloud`, a jj clone of `dman-os/wasmCloud`:
   - bookmark `townframe-changes`, based on the pinned `1bcaeba`;
   - adds pub `Ingress::dispatch_request` with a test;
   - not pushed.
 
 ## Done
+
+- 2026-11-04: Review fixes batch 1:
+  - Reconcile and watch failures now crash the state actor loudly instead of silently.
+  - `Inventory` removed, with its unique tests ported to `NoduleConfig`.
+  - `resolve_entry` reads the nodule id from the nodule contribution only.
+  - `admit` is scoped to `scope.plugs`.
+  - Open question for the operator: should admit and manage scopes be independent sets?
+
+- 2026-11-04: ADR 027 revised with D1–D6 (`01ea305b`). Review proposals are listed under "Proposed, pending operator review" (§10).
 
 - 2026-11-04: Merged `origin/main` as `a5f43a91`. The manager reran clippy on 8 crates (clean) and nextest on 6 crates (754/754).
   - datum_store was ported to PollDatums. A fresh page triggers one current read; the old read at enter-heads could roll state back (1 in 22 flake, now 60/60).
@@ -134,7 +137,6 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
    - Remove `inventory::Inventory`.
    - `resolve_entry` filters to the nodule contribution.
    - Scope `NoduleScope.admit` per plug.
-3. Revise ADR 027 (§2, §3, §4, §5, §8, §10) and the config scratch doc with D1–D6.
 4. Dispatch service contract in `big_nodule_core`: invocation, admission errors, provider kinds and readiness.
 5. Dispatch host in `big_nodule`: routing table, admission, `BuiltIn` provider.
 6. wash-runtime fork seam (`Ingress::dispatch_request`) in `../wasmCloud`, with a `[patch]`. **The operator must push it before CI can resolve.**
@@ -147,7 +149,7 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 - [perf] `DatumStoreHandle`'s `seen_head_hashes` is a set of every head ever seen and grows without bound. It came over from the pre-merge code. Bound it, for example by keeping only the current frontier/ancestry.
 - [test] There is no dedicated test for `Predicate::sole_doc` page filtering. Add one in `big_cabinet` doc observe tests: a single-doc poll is not woken by writes elsewhere.
 - [cleanup] Two ADRs are numbered 007 (`007-doc-branch-identity`, `007-plug-manifests-as-drawer-docs`), and lint doesn't flag it. Raise with the operator.
-- [cleanup] Remove the unused root workspace dependency `axum-extra`, if the operator agrees (it's main's).
+- [cleanup] The root `Cargo.toml` has many unused workspace dependencies flagged by cargo's `unused_workspace_dependencies` lint (`axum-extra`, `big_node`, `bon`, `clay_rt_wcmp_wasmi`, `micro_counter`, `once_cell`, `subduction_redb_storage`, `tower`, `tower-http`, `tracing-appender`, …). All come from main. Clean up if the operator agrees.
 
 ## Deferred
 

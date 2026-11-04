@@ -48,14 +48,6 @@ pub impl big_nodule_core::config::NoduleInstall::fn from_plug (plug : & Plug , e
 pub impl big_nodule_core::config::NoduleSettings::fn new (values : IndexMap < String , Value >) -> Self
 pub impl big_nodule_core::inventory::InstalledNodule::fn is_configured (& self) -> bool
 pub impl big_nodule_core::inventory::InstalledNodule::fn readiness (& self) -> Readiness
-pub impl big_nodule_core::inventory::Inventory::fn admit (& mut self , plug : & Plug) -> Result < & InstalledNodule >
-pub impl big_nodule_core::inventory::Inventory::fn clear (& mut self)
-pub impl big_nodule_core::inventory::Inventory::fn configure (& mut self , id : & PlugId , settings : IndexMap < String , Value > ,) -> Result < & InstalledNodule >
-pub impl big_nodule_core::inventory::Inventory::fn get (& self , id : & PlugId) -> Option < & InstalledNodule >
-pub impl big_nodule_core::inventory::Inventory::fn iter (& self) -> impl Iterator < Item = (& PlugId , & InstalledNodule) >
-pub impl big_nodule_core::inventory::Inventory::fn new () -> Self
-pub impl big_nodule_core::inventory::Inventory::fn remove (& mut self , id : & PlugId) -> Option < InstalledNodule >
-pub impl big_nodule_core::inventory::Inventory::fn set_enabled (& mut self , id : & PlugId , enabled : bool) -> Result < & InstalledNodule >
 pub impl big_nodule_core::inventory::Readiness::fn is_ready (self) -> bool
 pub impl big_nodule_core::protocol::NoduleScope::fn covers (& self , other : & Self) -> bool
 pub mod big_nodule_core::config
@@ -79,7 +71,6 @@ pub struct big_nodule_core::config::NoduleGrants  { drawers: BTreeMap < DrawerId
 pub struct big_nodule_core::config::NoduleInstall  { envelope: IndexMap < String , Value >, revision: Revision, enabled: bool, extra: Extra }
 pub struct big_nodule_core::config::NoduleSettings  { values: IndexMap < String , Value >, extra: Extra }
 pub struct big_nodule_core::inventory::InstalledNodule  { plug_id: PlugId, version: Version, revision: Revision, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, config: Option < IndexMap < String , Value > > }
-pub struct big_nodule_core::inventory::Inventory  {  }
 pub struct big_nodule_core::protocol::AdmitNodule  { authorization: Authorization, plug: Plug, drawers: Option < BTreeMap < DrawerId , DrawerAccess > > }
 pub struct big_nodule_core::protocol::ConfigureNodule  { authorization: Authorization, plug_id: PlugId, settings: IndexMap < String , Value > }
 pub struct big_nodule_core::protocol::GetNodule  { authorization: Authorization, plug_id: PlugId }

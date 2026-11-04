@@ -424,10 +424,12 @@ fn config_schema_must_be_local_object_and_defaults_must_conform() {
     );
 }
 
-mod inventory_tests {
+mod admission_tests {
     use super::*;
+    use crate::config::NoduleConfig;
+    use crate::config::NoduleResolution;
     use crate::inventory::ArtifactState;
-    use crate::inventory::Inventory;
+    use crate::inventory::InstalledNodule;
     use crate::inventory::InventoryError;
     use crate::inventory::Readiness;
     use big_plugs_core::Artifact;
@@ -457,13 +459,27 @@ mod inventory_tests {
         plug
     }
 
+    fn settings(thumbnails: Value) -> IndexMap<String, Value> {
+        [("thumbnails".to_owned(), thumbnails)]
+            .into_iter()
+            .collect()
+    }
+
+    /// The installed nodule `config` currently resolves for `id`, as the runtime would see it.
+    fn resolved(config: &NoduleConfig, id: &PlugId) -> InstalledNodule {
+        match config.resolve().remove(id) {
+            Some(NoduleResolution::Admitted { installed, .. }) => installed,
+            other => panic!("expected `{id}` to resolve admitted, got {other:?}"),
+        }
+    }
+
     #[test]
     fn admits_plug_tracks_readiness_and_configures_settings() {
-        let mut inventory = Inventory::new();
+        let mut config = NoduleConfig::new();
         let plug = plug_with("@example/photos", "1.0.0", photos());
         let id: PlugId = "@example/photos".parse().unwrap();
 
-        let installed = inventory.admit(&plug).unwrap();
+        let installed = config.admit(&plug, None).unwrap();
         assert_eq!(installed.plug_id, id);
         assert_eq!(installed.version, "1.0.0".parse().unwrap());
         assert_eq!(installed.revision, plug.revision());
@@ -474,56 +490,34 @@ mod inventory_tests {
             installed.artifacts.get("routines").map(|(_, s)| *s),
             Some(ArtifactState::Unavailable)
         );
-        assert_eq!(
-            installed.config,
-            Some(
-                [("thumbnails".to_owned(), json!(true))]
-                    .into_iter()
-                    .collect()
-            )
-        );
+        assert_eq!(installed.config, Some(settings(json!(true))));
+        assert_eq!(resolved(&config, &id), installed);
 
-        let enabled = inventory.set_enabled(&id, true).unwrap();
+        let enabled = config.set_enabled(&id, true).unwrap();
         assert!(enabled.enabled);
         assert_eq!(enabled.readiness(), Readiness::ArtifactsUnavailable);
         assert!(!enabled.readiness().is_ready());
 
-        let updated = inventory
-            .configure(
-                &id,
-                [("thumbnails".to_owned(), json!(false))]
-                    .into_iter()
-                    .collect(),
-            )
-            .unwrap();
-        assert_eq!(
-            updated.config,
-            Some(
-                [("thumbnails".to_owned(), json!(false))]
-                    .into_iter()
-                    .collect()
-            )
-        );
+        let updated = config.configure(&id, settings(json!(false))).unwrap();
+        assert_eq!(updated.config, Some(settings(json!(false))));
+        assert!(updated.is_configured());
 
-        let bad = inventory.configure(
-            &id,
-            [("thumbnails".to_owned(), json!("invalid"))]
-                .into_iter()
-                .collect(),
-        );
+        let bad = config.configure(&id, settings(json!("invalid")));
         assert!(matches!(bad, Err(InventoryError::Nodule(_))));
-        assert_eq!(inventory.iter().count(), 1);
-        assert!(inventory.get(&id).is_some());
+        assert_eq!(
+            resolved(&config, &id).config,
+            Some(settings(json!(false))),
+            "a refused configure leaves the accepted settings in place"
+        );
         assert!(!Readiness::Refused.is_ready());
 
-        let removed = inventory.remove(&id).unwrap();
-        assert_eq!(removed.plug_id, id);
-        assert!(inventory.get(&id).is_none());
+        config.uninstall(&id).unwrap();
+        assert!(config.resolve().is_empty());
     }
 
     #[test]
     fn lexicon_only_nodule_reaches_executor_unavailable_when_enabled() {
-        let mut inventory = Inventory::new();
+        let mut config = NoduleConfig::new();
         let mut nodule = Nodule::new("org.example.schema");
         nodule.lexicons.push(file(json!({
             "lexicon": 1,
@@ -539,67 +533,42 @@ mod inventory_tests {
         let plug = plug_with("@example/schema", "0.1.0", nodule);
         let id: PlugId = "@example/schema".parse().unwrap();
 
-        let installed = inventory.admit(&plug).unwrap();
+        let installed = config.admit(&plug, None).unwrap();
         assert!(installed.artifacts.is_empty());
         assert_eq!(installed.readiness(), Readiness::Disabled);
 
-        let enabled = inventory.set_enabled(&id, true).unwrap();
+        let enabled = config.set_enabled(&id, true).unwrap();
         assert_eq!(enabled.readiness(), Readiness::ExecutorUnavailable);
         assert!(!enabled.readiness().is_ready());
         assert!(matches!(
-            inventory.configure(&id, IndexMap::new()),
+            config.configure(&id, IndexMap::new()),
             Err(InventoryError::NoConfigSchema(_))
         ));
     }
 
     #[test]
     fn upgrades_preserve_state_and_validate_configured_settings() {
-        let mut inventory = Inventory::new();
+        let mut config = NoduleConfig::new();
         let id: PlugId = "@example/photos".parse().unwrap();
         let v1 = plug_with("@example/photos", "1.0.0", photos());
-        inventory.admit(&v1).unwrap();
-        inventory.set_enabled(&id, true).unwrap();
+        config.admit(&v1, None).unwrap();
+        config.set_enabled(&id, true).unwrap();
 
         // Unconfigured upgrade adopts the new version's defaults and keeps `enabled`.
         let mut nodule_v2 = photos();
-        nodule_v2.config.as_mut().unwrap().defaults = Some(
-            [("thumbnails".to_owned(), json!(false))]
-                .into_iter()
-                .collect(),
-        );
+        nodule_v2.config.as_mut().unwrap().defaults = Some(settings(json!(false)));
         let v2 = plug_with("@example/photos", "1.1.0", nodule_v2);
-        let upgraded = inventory.admit(&v2).unwrap();
+        let upgraded = config.admit(&v2, None).unwrap();
         assert!(upgraded.enabled);
         assert_eq!(upgraded.version, "1.1.0".parse().unwrap());
-        assert_eq!(
-            upgraded.config,
-            Some(
-                [("thumbnails".to_owned(), json!(false))]
-                    .into_iter()
-                    .collect()
-            )
-        );
+        assert_eq!(upgraded.config, Some(settings(json!(false))));
 
         // Explicit configuration is preserved across a compatible upgrade and rejected if the
         // new version's schema breaks it.
-        inventory
-            .configure(
-                &id,
-                [("thumbnails".to_owned(), json!(true))]
-                    .into_iter()
-                    .collect(),
-            )
-            .unwrap();
+        config.configure(&id, settings(json!(true))).unwrap();
         let v3 = plug_with("@example/photos", "1.2.0", photos());
-        let upgraded = inventory.admit(&v3).unwrap();
-        assert_eq!(
-            upgraded.config,
-            Some(
-                [("thumbnails".to_owned(), json!(true))]
-                    .into_iter()
-                    .collect()
-            )
-        );
+        let upgraded = config.admit(&v3, None).unwrap();
+        assert_eq!(upgraded.config, Some(settings(json!(true))));
 
         let mut incompatible = photos();
         incompatible.lexicons[5] = file(json!({
@@ -626,21 +595,18 @@ mod inventory_tests {
         );
         let v4_bad = plug_with("@example/photos", "2.0.0", incompatible);
         assert!(matches!(
-            inventory.admit(&v4_bad),
+            config.admit(&v4_bad, None),
             Err(InventoryError::Nodule(_))
         ));
-        assert_eq!(
-            inventory.get(&id).unwrap().version,
-            "1.2.0".parse().unwrap()
-        );
+        assert_eq!(resolved(&config, &id).version, "1.2.0".parse().unwrap());
     }
 
     #[test]
     fn refuses_missing_contribution_bad_schema_missing_artifact_and_authority_conflicts() {
-        let mut inventory = Inventory::new();
+        let mut config = NoduleConfig::new();
         let empty = Plug::new("@example/empty".parse().unwrap(), "0.1.0".parse().unwrap());
         assert!(matches!(
-            inventory.admit(&empty),
+            config.admit(&empty, None),
             Err(InventoryError::MissingContribution(_))
         ));
 
@@ -649,7 +615,7 @@ mod inventory_tests {
             n.schema = "org.example.other.nodule".into();
         }
         assert!(matches!(
-            inventory.admit(&bad_schema),
+            config.admit(&bad_schema, None),
             Err(InventoryError::UnsupportedSchema { .. })
         ));
 
@@ -658,30 +624,34 @@ mod inventory_tests {
             n.description.insert("id".into(), json!(123));
         }
         assert!(matches!(
-            inventory.admit(&bad_payload),
+            config.admit(&bad_payload, None),
             Err(InventoryError::InvalidContribution { .. })
         ));
 
         let mut no_artifact = plug_with("@example/photos", "1.0.0", photos());
         no_artifact.artifacts.clear();
         assert!(matches!(
-            inventory.admit(&no_artifact),
+            config.admit(&no_artifact, None),
             Err(InventoryError::MissingArtifact { artifact, .. }) if artifact == "routines"
         ));
+        assert!(
+            config.resolve().is_empty(),
+            "refused admissions install nothing"
+        );
 
         let valid = plug_with("@example/photos", "1.0.0", photos());
-        inventory.admit(&valid).unwrap();
+        config.admit(&valid, None).unwrap();
 
         let duplicate_authority = plug_with("@example/other-photos", "1.0.0", photos());
         assert!(matches!(
-            inventory.admit(&duplicate_authority),
+            config.admit(&duplicate_authority, None),
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
         let sub_authority = Nodule::new("org.example.photos.sub");
         let sub_plug = plug_with("@example/sub-photos", "1.0.0", sub_authority);
         assert!(matches!(
-            inventory.admit(&sub_plug),
+            config.admit(&sub_plug, None),
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
@@ -691,7 +661,7 @@ mod inventory_tests {
             Nodule::new("org.example.gallery"),
         );
         assert!(matches!(
-            inventory.admit(&changed_plug),
+            config.admit(&changed_plug, None),
             Err(InventoryError::AuthorityChanged { .. })
         ));
     }
@@ -897,6 +867,46 @@ mod config_tests {
         assert!(NoduleConfig::owns(&ik));
         assert!(NoduleConfig::owns(&sk));
         assert!(NoduleConfig::owns(&gk));
+    }
+
+    #[test]
+    fn refused_entries_take_the_nodule_id_from_the_nodule_contribution_only() {
+        // A micro precedes the nodule and carries a string `description.id` of its own; the
+        // nodule's schema is wrong so admission refuses and the id must come from the raw envelope.
+        let mut plug = sample_plug("@example/photos", "1.0.0");
+        let mut micro_description = IndexMap::new();
+        micro_description.insert("id".to_owned(), json!("ui-button"));
+        plug.contributions.insert(
+            0,
+            Contribution::Micro(big_plugs_core::MicroContribution {
+                key: "button".into(),
+                schema: "org.example.micro.button".into(),
+                description: micro_description,
+                extra: Default::default(),
+            }),
+        );
+        let Some(Contribution::Nodule(nodule)) = plug.contributions.get_mut(1) else {
+            panic!("sample plug carries its nodule after the micro");
+        };
+        nodule.schema = "org.example.other.nodule".into();
+
+        let mut read = DatumsRead {
+            heads: Vec::new(),
+            datums: BTreeMap::new(),
+        };
+        read.datums.insert(
+            install_key(&plug.id),
+            DatumRead::Accepted {
+                value: serde_json::to_value(NoduleInstall::from_plug(&plug, false)).unwrap(),
+                version: DatumVersion::default(),
+            },
+        );
+        let config = NoduleConfig::hydrate(&read);
+        let Some(NoduleResolution::Refused { nodule_id, .. }) = config.resolve().remove(&plug.id)
+        else {
+            panic!("a nodule with an unsupported schema is refused");
+        };
+        assert_eq!(nodule_id.as_deref(), Some("org.example.photos"));
     }
 
     #[test]

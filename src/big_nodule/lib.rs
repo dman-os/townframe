@@ -184,9 +184,12 @@ impl NoduleService {
         }
     }
 
-    fn require_admit(&self, caller: &Invocation<NoduleScope>) -> Res<()> {
+    /// A scoped handle admits only the plug ids in its `plugs`, and only with `admit` set.
+    fn require_admit(&self, caller: &Invocation<NoduleScope>, plug_id: &PlugId) -> Res<()> {
         match self.scope_of(caller)? {
-            Some(scope) if !scope.admit => Err(NodulesError::Denied),
+            Some(scope) if !(scope.admit && scope.plugs.contains(plug_id)) => {
+                Err(NodulesError::Denied)
+            }
             _ => Ok(()),
         }
     }
@@ -224,7 +227,7 @@ impl NoduleService {
 
     async fn admit(&self, context: &RequestContext, params: AdmitNodule) -> Res<NoduleRecord> {
         let caller = self.caller(context, params.authorization).await?;
-        self.require_admit(&caller)?;
+        self.require_admit(&caller, &params.plug.id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Admit {

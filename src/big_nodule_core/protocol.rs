@@ -35,9 +35,10 @@ use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-/// What a minted management handle may do. `admit` covers installing and upgrading any package;
-/// `plugs` names the installed packages whose enablement and settings the holder may read and
-/// change. The operator's identity holds both without a scope.
+/// What a minted management handle may do. `plugs` names the packages the holder may read, and
+/// whose enablement and settings it may change. `admit` additionally lets it install or upgrade
+/// those same packages and no others, so a handle can never introduce a plug id it was not minted
+/// for. The operator's identity is unrestricted without a scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NoduleScope {

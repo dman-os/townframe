@@ -709,6 +709,46 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
 }
 
 #[tokio::test]
+async fn an_admit_scoped_handle_admits_only_its_own_plugs() {
+    let node = node().await;
+    let operator = node.operator();
+    let photos_admin = node
+        .mint(
+            operator,
+            scope(true, &["@example/photos"]),
+            Rights::USE | Rights::NARROW,
+        )
+        .await
+        .unwrap();
+
+    // Install and upgrade of the named plug pass; any other plug id is denied, installed or not.
+    node.admit(photos_admin, plug("@example/photos", "1.0.0", true))
+        .await
+        .unwrap();
+    node.admit(photos_admin, plug("@example/photos", "1.1.0", true))
+        .await
+        .unwrap();
+    assert_eq!(
+        node.admit(photos_admin, plug("@example/schema", "0.1.0", false))
+            .await,
+        Err(NodulesError::Denied)
+    );
+    node.admit(operator, plug("@example/schema", "0.1.0", false))
+        .await
+        .unwrap();
+    assert_eq!(
+        node.admit(photos_admin, plug("@example/schema", "0.2.0", false))
+            .await,
+        Err(NodulesError::Denied)
+    );
+    assert_eq!(
+        node.get(operator, "@example/schema").await.unwrap().version,
+        Some("0.1.0".parse().unwrap())
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
 async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     let mut node = node().await;
     let operator = node.operator();

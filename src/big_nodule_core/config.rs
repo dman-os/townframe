@@ -26,6 +26,7 @@ use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::EntryAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugError;
 use big_plugs_core::PlugId;
@@ -794,6 +795,23 @@ fn owns_nsid(authority: &str, nsid: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('.'))
 }
 
+/// The nodule id as written in a raw envelope, for refusals whose envelope cannot be decoded.
+/// Only the nodule contribution names the nodule: a micro's `description.id` is a GUI key. The
+/// raw envelope tags each contribution with `$type`.
+fn envelope_nodule_id(envelope: &IndexMap<String, Value>) -> Option<String> {
+    envelope
+        .get("contributions")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|item| item.get("$type").and_then(Value::as_str) == Some(NoduleContribution::ID))
+        .find_map(|item| {
+            item.get("description")?
+                .get("id")?
+                .as_str()
+                .map(str::to_owned)
+        })
+}
+
 fn resolve_entry(plug_id: &PlugId, entry: &NoduleEntry) -> Option<NoduleResolution> {
     let install = match &entry.install {
         DatumSlot::Absent => return None,
@@ -816,18 +834,7 @@ fn resolve_entry(plug_id: &PlugId, entry: &NoduleEntry) -> Option<NoduleResoluti
         .get("version")
         .and_then(Value::as_str)
         .and_then(|v| v.parse::<Version>().ok());
-    let raw_nodule_id = install
-        .envelope
-        .get("contributions")
-        .and_then(Value::as_array)
-        .and_then(|items| {
-            items.iter().find_map(|item| {
-                item.get("description")?
-                    .get("id")?
-                    .as_str()
-                    .map(str::to_owned)
-            })
-        });
+    let raw_nodule_id = envelope_nodule_id(&install.envelope);
     let raw_config = entry.settings.accepted().map(|s| s.values.clone());
 
     let refuse = |version: Option<Version>,

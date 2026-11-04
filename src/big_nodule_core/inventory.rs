@@ -1,10 +1,10 @@
-//! Standalone nodule admission and inventory over [`Plug`] envelopes (ADR 027 §2–4, §6–8).
+//! Nodule admission over [`Plug`] envelopes (ADR 027 §2–4, §6–8).
 //!
-//! [`Inventory`] validates the carrying [`Plug`] envelope, extracts its [`Nodule`] contribution,
-//! checks the contribution schema and nodule admission rules, verifies that every artifact a
-//! routine names is declared in the envelope, enforces authority uniqueness across installed
-//! nodules and authority stability across revisions of the same [`PlugId`], and tracks standalone
-//! enablement, configuration, artifact availability, and readiness.
+//! [`admit_plug_nodule`] validates the carrying [`Plug`] envelope, extracts its [`Nodule`]
+//! contribution, checks the contribution schema and nodule admission rules, and verifies that
+//! every artifact a routine names is declared in the envelope. [`InstalledNodule`] is the admitted
+//! result that [`crate::config::NoduleConfig`] resolves, with its enablement, configuration,
+//! artifact availability, and readiness.
 
 use crate::Admitted;
 use crate::Nodule;
@@ -192,134 +192,4 @@ pub(crate) fn admit_plug_nodule(plug: &Plug) -> Result<AdmittedContribution> {
         artifacts.insert(key.clone(), (artifact.clone(), ArtifactState::Unavailable));
     }
     Ok((nodule, admitted, artifacts))
-}
-
-/// In-memory standalone inventory of admitted nodules, keyed by [`PlugId`].
-#[derive(Debug, Clone, Default)]
-pub struct Inventory {
-    nodules: BTreeMap<PlugId, InstalledNodule>,
-}
-
-impl Inventory {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Validates `plug`, admits its nodule contribution, checks artifact references and authority
-    /// ownership, and installs or upgrades the entry for `plug.id`.
-    pub fn admit(&mut self, plug: &Plug) -> Result<&InstalledNodule> {
-        let (nodule, admitted, artifacts) = admit_plug_nodule(plug)?;
-
-        for (existing_plug, existing) in &self.nodules {
-            if existing_plug != &plug.id
-                && (existing.nodule.owns(&nodule.id) || nodule.owns(&existing.nodule.id))
-            {
-                return Err(InventoryError::AuthorityConflict {
-                    id: plug.id.clone(),
-                    nodule_id: nodule.id,
-                    existing_plug: Box::new(existing_plug.clone()),
-                    existing_nodule: existing.nodule.id.clone(),
-                });
-            }
-        }
-
-        let revision = plug.revision();
-        let (enabled, config, configured) = if let Some(existing) = self.nodules.get(&plug.id) {
-            if existing.version == plug.version && existing.revision != revision {
-                return Err(InventoryError::Plug(PlugError::Conflict {
-                    id: plug.id.clone(),
-                    version: Box::new(plug.version.clone()),
-                    existing: existing.revision,
-                    incoming: revision,
-                }));
-            }
-            if existing.nodule.id != nodule.id {
-                return Err(InventoryError::AuthorityChanged {
-                    id: plug.id.clone(),
-                    existing: existing.nodule.id.clone(),
-                    incoming: nodule.id,
-                });
-            }
-            if existing.configured {
-                if nodule.config.is_none() {
-                    return Err(InventoryError::NoConfigSchema(plug.id.clone()));
-                }
-                let settings = existing
-                    .config
-                    .as_ref()
-                    .expect("configured nodule carries settings");
-                nodule.validate_config(settings, "config")?;
-                (existing.enabled, Some(settings.clone()), true)
-            } else {
-                let defaults = nodule
-                    .config
-                    .as_ref()
-                    .and_then(|config| config.defaults.clone());
-                (existing.enabled, defaults, false)
-            }
-        } else {
-            let defaults = nodule
-                .config
-                .as_ref()
-                .and_then(|config| config.defaults.clone());
-            (false, defaults, false)
-        };
-
-        let installed = InstalledNodule {
-            plug_id: plug.id.clone(),
-            version: plug.version.clone(),
-            revision,
-            nodule,
-            admitted,
-            artifacts,
-            enabled,
-            config,
-            configured,
-        };
-        self.nodules.insert(plug.id.clone(), installed);
-        Ok(self.nodules.get(&plug.id).expect("just inserted"))
-    }
-
-    pub fn get(&self, id: &PlugId) -> Option<&InstalledNodule> {
-        self.nodules.get(id)
-    }
-
-    pub fn remove(&mut self, id: &PlugId) -> Option<InstalledNodule> {
-        self.nodules.remove(id)
-    }
-
-    pub fn clear(&mut self) {
-        self.nodules.clear();
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&PlugId, &InstalledNodule)> {
-        self.nodules.iter()
-    }
-
-    /// Validates `settings` against the installed nodule's config schema and records them as the
-    /// active runtime configuration.
-    pub fn configure(
-        &mut self,
-        id: &PlugId,
-        settings: IndexMap<String, Value>,
-    ) -> Result<&InstalledNodule> {
-        let Some(installed) = self.nodules.get_mut(id) else {
-            return Err(InventoryError::UnknownPlug(id.clone()));
-        };
-        if installed.nodule.config.is_none() {
-            return Err(InventoryError::NoConfigSchema(id.clone()));
-        }
-        installed.nodule.validate_config(&settings, "config")?;
-        installed.config = Some(settings);
-        installed.configured = true;
-        Ok(installed)
-    }
-
-    pub fn set_enabled(&mut self, id: &PlugId, enabled: bool) -> Result<&InstalledNodule> {
-        let Some(installed) = self.nodules.get_mut(id) else {
-            return Err(InventoryError::UnknownPlug(id.clone()));
-        };
-        installed.enabled = enabled;
-        Ok(installed)
-    }
 }
