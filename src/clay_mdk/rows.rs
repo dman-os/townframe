@@ -1,5 +1,5 @@
 //! Typed access to declared registration collections, shared by every backend (ADR 017 §9,
-//! ADR 025 §4). Rows are the same CBOR bytes a guest reads and writes: an in-process micro and
+//! ADR 031 §4). Rows are the same CBOR bytes a guest reads and writes: an in-process micro and
 //! a guest see one collection through the same host sessions, so one reads rows the other wrote
 //! (attachments included).
 //!

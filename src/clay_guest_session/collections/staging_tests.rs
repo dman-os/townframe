@@ -1,4 +1,4 @@
-//! Staged initialization (ADR 024 §5) as seen through a collection session: rows and capability
+//! Staged initialization (ADR 030 §5) as seen through a collection session: rows and capability
 //! publications made while an incarnation initializes are invisible until it commits, appear
 //! together when it does, vanish unseen when it fails, and are withdrawn when it is torn down after closing.
 use super::*;
@@ -245,7 +245,7 @@ async fn closing_keeps_rows_through_cleanup_and_teardown_withdraws_them() {
 
     assert!(host.begin_close(&provider).unwrap());
     // Outward withdrawal alone keeps the scope: the incarnation's authority is intact until
-    // teardown (ADR 024 §6).
+    // teardown (ADR 030 §6).
     assert_eq!(shelf.snapshot().len(), 1);
     assert_eq!(host.check(&provider), Ok(()));
     writer

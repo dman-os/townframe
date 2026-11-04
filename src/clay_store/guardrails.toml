@@ -1,6 +1,6 @@
 version = 1
 role = "foundation"
-dependency_reason = "ADR 025 §2: durable Clay collections need an ordered key-value store with prefix scan and atomic batch; the native SQLite backend is the only in-repo dependency"
+dependency_reason = "ADR 031 §2: durable Clay collections need an ordered key-value store with prefix scan and atomic batch; the native SQLite backend is the only in-repo dependency"
 allowed_dependencies = ["sqlite_rs"]
 allow_external_api_types = false
 

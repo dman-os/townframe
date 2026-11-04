@@ -23,7 +23,7 @@ pub enum CloseReason {
     HostShutdown,
 }
 
-/// Where an incarnation is in its lifecycle (ADR 024 §§5–6). Only `Active` and `Closing`
+/// Where an incarnation is in its lifecycle (ADR 030 §§5–6). Only `Active` and `Closing`
 /// incarnations are visible to other micros: everything published while `Created` or
 /// `Initializing` stays staged until initialization commits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,7 +108,7 @@ pub trait RendererRegistry: Clone {
         F: Fn() -> Self::Render + 'static;
 }
 
-/// A strong runtime edge `consumer -> provider` (ADR 024 §2): while it exists the provider
+/// A strong runtime edge `consumer -> provider` (ADR 030 §2): while it exists the provider
 /// incarnation cannot be closed for lack of demand, and closing the provider closes the
 /// consumer first. Dropping it removes exactly this edge; edges are keyed by incarnation ids,
 /// which are never reused, so a stale binding cannot touch a replacement's edges.
@@ -239,7 +239,7 @@ impl Host {
         })
     }
 
-    /// Run one staged initialization (ADR 024 §5): create the incarnation, run `initialize`,
+    /// Run one staged initialization (ADR 030 §5): create the incarnation, run `initialize`,
     /// and commit it to `Active` only if that succeeds. On error, on [`Self::close_instance`]
     /// while pending, or when the returned future is dropped, the incarnation is closed and
     /// everything it owned or staged unwinds without ever having been visible.
@@ -320,7 +320,7 @@ impl Host {
         Ok(record.outward.clone())
     }
 
-    /// Withdraw outward visibility (ADR 024 §6 step 1): the incarnation becomes `Closing`,
+    /// Withdraw outward visibility (ADR 030 §6 step 1): the incarnation becomes `Closing`,
     /// its outward hooks observe `Closing`, and new publications and bindings to it are
     /// refused. Its own authority, owned effects, and dependencies stay intact until
     /// [`Self::close_instance`]. Returns `false` when the incarnation is already closing or
@@ -663,7 +663,7 @@ impl Host {
         }
     }
 
-    /// Create a strong edge `consumer -> provider` (ADR 024 §2). Refused when either side is
+    /// Create a strong edge `consumer -> provider` (ADR 030 §2). Refused when either side is
     /// closing or gone: a closing incarnation accepts no new strong acquisitions. Binding an
     /// incarnation to itself or closing a cycle is an invariant failure — mandatory
     /// configured cycles are rejected before anything is started.

@@ -1,4 +1,4 @@
-//! Collection binding resolution (ADR 025 §11): turning a manifest's collection requests plus
+//! Collection binding resolution (ADR 031 §11): turning a manifest's collection requests plus
 //! the micro's stored binding datum into the handles its factory reads at `initialize`.
 //!
 //! A micro declares requests per local binding naming a collection *contract*. Configuration

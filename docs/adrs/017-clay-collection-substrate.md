@@ -6,8 +6,8 @@ requirements are decided; the wire protocol remains proposed until the validatio
 criteria below pass through an actual component boundary.
 
 **Amends:** ADR 014's live-query and optimistic-state requirements and ADR 015's
-collection boundary. ADR 023 defines capability references carried by collection
-values. ADR 025 defines manifest-declared collections, durable registration scopes, and lazy capability attachments.
+collection boundary. ADR 029 defines capability references carried by collection
+values. ADR 031 defines manifest-declared collections, durable registration scopes, and lazy capability attachments.
 
 ## Context
 
@@ -48,7 +48,7 @@ features and guest libraries build richer behavior above it.
 A collection source exposes keyed projected current state. It is not a history API,
 event bus, CRDT change transport, blob transport, or persistence layer.
 
-A manifest-declared collection is a logical host facility independent of the declaring micro's activation. Once its plug definition is admitted, an untouched collection still exists and bootstraps as known-empty. Volatile, durable, and node-backed materializations share this read waist; backing and registration-scope lifetime are specified by ADR 025 rather than exposed through pages.
+A manifest-declared collection is a logical host facility independent of the declaring micro's activation. Once its plug definition is admitted, an untouched collection still exists and bootstraps as known-empty. Volatile, durable, and node-backed materializations share this read waist; backing and registration-scope lifetime are specified by ADR 031 rather than exposed through pages.
 
 A consumer acquires an immutable source-defined selector and receives a projection
 lease:
@@ -244,7 +244,7 @@ EncodedValue {
 }
 ```
 
-Copying the CBOR does not copy authority. ADR 023 specifies publication, typed
+Copying the CBOR does not copy authority. ADR 029 specifies publication, typed
 redemption, proxy ownership, revocation, and replacement of these references.
 
 ### 8. Reading and writing are orthogonal capabilities
@@ -296,7 +296,7 @@ The registration scope, not the writer handle, owns retention. Closing a writer 
 authority only. When a scope ends (an incarnation closes, a plug is uninstalled) its candidates,
 tombstones included, are retracted and only the keys it touched recompute their winner, so a
 contribution it hid resurfaces. A delete made by a scope that later ends is therefore undone; a
-delete meant to outlive its writer is written from a permanent scope. ADR 025 §4 specifies the
+delete meant to outlive its writer is written from a permanent scope. ADR 031 §4 specifies the
 scope classes.
 
 There is no key-level write authorization yet: any micro bound to a collection with Register may
@@ -442,7 +442,7 @@ programming/invariant failures and must not be silently recovered.
 - tombstone collection for permanent scopes, whose tombstones accumulate, and a collection-wide
   frontier in place of per-key stamps;
 - query planning beyond collection-specific typed IRs; and
-- backing adapters, durable registration scopes, and manifest admission are specified by ADR 025 and remain implementation work rather than changes to this read waist.
+- backing adapters, durable registration scopes, and manifest admission are specified by ADR 031 and remain implementation work rather than changes to this read waist.
 
 ## Validation before acceptance
 
@@ -456,7 +456,7 @@ This ADR becomes Accepted only after the same protocol validates:
    resurfaces what it hid;
 4. one node-backed datum projection with host-owned optimism and heads-based
    settlement;
-5. one capability-bearing toolbar or surface-mount row using ADR 023;
+5. one capability-bearing toolbar or surface-mount row using ADR 029;
 6. one real Wasm component crossing the WIT boundary, not only an in-process Rust
    adapter; and
 7. one durable manifest-declared collection that exists while its declaring micro is inactive, reloads after host restart, and removes one installation scope on uninstall.

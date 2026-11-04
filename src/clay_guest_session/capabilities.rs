@@ -1,4 +1,4 @@
-//! Host capability bank (ADR 023, ADR 024 §9, ADR 025 §§5-6): named publications of two kinds
+//! Host capability bank (ADR 029, ADR 030 §9, ADR 031 §§5-6): named publications of two kinds
 //! (Call and Presentation), recipient-local references, and typed redemption. Authority stays
 //! host-side; a [`CapabilityPublication`] stored in a collection value is only an `Arc` to the
 //! host publication record, never a serializable ID, and a [`CapabilityRef`] is minted per
@@ -33,7 +33,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-/// A publication's contract (ADR 025 §5). Owned because contracts arrive from manifests at
+/// A publication's contract (ADR 031 §5). Owned because contracts arrive from manifests at
 /// runtime; for a Call it names the request and response Lexicons. Every Presentation
 /// publication has the one [`ContractIdentity::presentation_component`] contract, and a Call
 /// can never have it, so a contract alone tells a redeemer which kind to expect.
@@ -84,7 +84,7 @@ impl From<CapabilityFailure> for CallError {
     }
 }
 
-/// What a reference reports without activating anything (ADR 024 §9 `ref-status`).
+/// What a reference reports without activating anything (ADR 030 §9 `ref-status`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefStatus {
     Live,
@@ -182,7 +182,7 @@ impl Drop for InFlightCall {
 }
 
 /// A publication the manifest declares: what an incarnation's returned publication of that
-/// name must be (ADR 025 §8).
+/// name must be (ADR 031 §8).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredPublication {
     pub kind: PublicationKind,
@@ -226,7 +226,7 @@ pub fn admit_publications(
     Ok(admitted)
 }
 
-/// A weak, name-only reference to a micro's publication (ADR 025 §6), as stored in a durable
+/// A weak, name-only reference to a micro's publication (ADR 031 §6), as stored in a durable
 /// row. `contract` is what the row promises; it is checked before anything is activated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicationEndpoint {
@@ -237,7 +237,7 @@ pub struct PublicationEndpoint {
 
 /// What one collection-value attachment slot holds. A bound attachment names a live
 /// publication and exists only in memory; an endpoint names where to find a publication and is
-/// the only form a durable row may store (ADR 025 §7: rows persist endpoints, never
+/// the only form a durable row may store (ADR 031 §7: rows persist endpoints, never
 /// references). Reading either mints a recipient-local [`CapabilityRef`]: bound for the first,
 /// lazy for the second.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -275,7 +275,7 @@ struct PublicationInner {
     behavior: Behavior,
     host: Host,
     /// The publishing incarnation. Until it commits initialization the publication is staged
-    /// (ADR 024 §5): only the owner itself may redeem it.
+    /// (ADR 030 §5): only the owner itself may redeem it.
     owner: Instance,
     revoked: AtomicBool,
 }
@@ -496,7 +496,7 @@ impl CapabilitySession {
     }
 
     /// The endpoint of the publication `name` that this incarnation's micro declares, which is
-    /// what a durable row stores to attach it (ADR 025 §7). It names the micro's publication
+    /// what a durable row stores to attach it (ADR 031 §7). It names the micro's publication
     /// rather than this incarnation's, so it needs no live publication and stays valid when the
     /// row is written after `initialize` returned. `None` when the manifest declares no such
     /// publication, which a write reports as an invalid attachment.

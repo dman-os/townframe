@@ -54,7 +54,7 @@ enum SlotState {
 
 /// Mount the presentation a row attaches. The redemption is asynchronous (a lazy reference
 /// activates its provider) and the redeemed proxy is held for exactly as long as this
-/// component lives, so unmounting it releases the provider (ADR 025 §9).
+/// component lives, so unmounting it releases the provider (ADR 031 §9).
 ///
 /// The slot follows its provider rather than redeeming once. A redemption that fails renders
 /// its failure, and the next redemption waits for the reference's status to move off the

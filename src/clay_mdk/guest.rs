@@ -1,7 +1,7 @@
 //! The guest backend: the same [`crate::Context`] as the in-process one, implemented over the WIT
 //! imports a wasm micro is linked against. A micro writes one `async fn activate(Context)` and
 //! Dioxus views; [`crate::export_micro!`] turns that into the `micro-client` world the host
-//! drives, running `activate` inside `micro-lifecycle.initialize` (ADR 024 §5). Initialization
+//! drives, running `activate` inside `micro-lifecycle.initialize` (ADR 030 §5). Initialization
 //! receives every already-granted binding (configuration, collections, registrations,
 //! requirements); the manifest the macro is given says which bindings the micro declared, so an
 //! undeclared name is a programming error exactly as in-process and an unresolved optional one is

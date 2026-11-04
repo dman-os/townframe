@@ -1,8 +1,8 @@
-# ADR 025: Manifest-declared collections and lazy capabilities
+# ADR 031: Manifest-declared collections and lazy capabilities
 
 **Status:** Proposed. The collection and capability waists exist; manifest admission, durable registration scopes, lazy activation references, and the Clay enablement service do not.
 
-**Builds on:** ADR 017's leased projection protocol, ADR 023's capability bank, ADR 024's micro lifecycle, and the plug envelope/catalog work in `big_plugs_core`.
+**Builds on:** ADR 017's leased projection protocol, ADR 029's capability bank, ADR 030's micro lifecycle, and the plug envelope/catalog work in `big_plugs_core`.
 
 ## Context
 
@@ -121,7 +121,7 @@ This supersedes ADR 017's earlier rule that dropping the `registration-writer` r
 
 ### 5. Publications are the only behavior a row can refer to
 
-Micros are singletons: a micro id names its package, its configured instance, and the at-most-one live incarnation. Every behavior one micro offers another is a **named publication** of that micro. A publication has exactly one of two kinds. The set is finite and grows additively, like ADR 023's typed bank methods:
+Micros are singletons: a micro id names its package, its configured instance, and the at-most-one live incarnation. Every behavior one micro offers another is a **named publication** of that micro. A publication has exactly one of two kinds. The set is finite and grows additively, like ADR 029's typed bank methods:
 
 ```text
 Publication {
@@ -136,11 +136,11 @@ Publication {
 
 A "lazy action" is therefore a lazy reference to a call publication, and a "lazy component" is a lazy reference to a presentation publication. There is no third lazy kind. A long-lived service relationship, such as a live completion session, is a retained call binding, not a new kind. A new kind is added only when an operation cannot be expressed as a call or a mount.
 
-Requirements (ADR 024 §12) resolve to publications as well. A required binding and a lazy endpoint differ only in retention: a requirement is strong for the requiring incarnation's lifetime, while a lazy endpoint is weak until used.
+Requirements (ADR 030 §12) resolve to publications as well. A required binding and a lazy endpoint differ only in retention: a requirement is strong for the requiring incarnation's lifetime, while a lazy endpoint is weak until used.
 
 ### 6. A capability reference is either bound or lazy
 
-ADR 023's `capability-ref` is the only attachment type. What it designates is a host fact:
+ADR 029's `capability-ref` is the only attachment type. What it designates is a host fact:
 
 ```text
 Bound(publication lease of one incarnation)
@@ -199,7 +199,7 @@ The manifest declares a micro's publications. `initialize` returns the publicati
 initialize(context) -> { root, publications: [(name, published-capability)] }
 ```
 
-This is ADR 024 §5's staged visibility: nothing is reachable through the publications until `initialize` returns successfully, and the host exposes all of them atomically. A demand that started the activation for publication `p` succeeds if `p` is among the returned publications with the declared kind and contract. Otherwise that demand fails with `Unavailable`, and the incarnation stays up for other users. Callers awaiting the lazy reference receive the activation result directly. No secondary collection is polled.
+This is ADR 030 §5's staged visibility: nothing is reachable through the publications until `initialize` returns successfully, and the host exposes all of them atomically. A demand that started the activation for publication `p` succeeds if `p` is among the returned publications with the declared kind and contract. Otherwise that demand fails with `Unavailable`, and the incarnation stays up for other users. Callers awaiting the lazy reference receive the activation result directly. No secondary collection is polled.
 
 A returned publication that the manifest does not declare, or that has a different kind or contract, is an initialization failure. A manifest publication that is not returned is simply not served by this incarnation.
 

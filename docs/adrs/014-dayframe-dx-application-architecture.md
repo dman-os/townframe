@@ -458,7 +458,7 @@ Configured enablement, dependency availability, implementation activation, and p
 are different facts. The design MUST permit enabled functionality to remain unloaded/inactive until
 needed.
 
-**Amendment (ADRs 024/025; core reachability mechanism implemented, lazy resource graph proposed):** the lifecycle unit is one configured micro identity with at most one live incarnation. Micros are supervised singleton services rather than process-tree children: there is no general guest spawn/stop API. Enabled instances remain dormant until an eager application root or lazy endpoint demand starts them, and become eligible for orderly idle shutdown after their final external strong binding drops. Reachability from external roots, rather than incoming-reference counts, prevents disconnected cycles from keeping themselves alive.
+**Amendment (ADRs 030/031; core reachability mechanism implemented, lazy resource graph proposed):** the lifecycle unit is one configured micro identity with at most one live incarnation. Micros are supervised singleton services rather than process-tree children: there is no general guest spawn/stop API. Enabled instances remain dormant until an eager application root or lazy endpoint demand starts them, and become eligible for orderly idle shutdown after their final external strong binding drops. Reachability from external roots, rather than incoming-reference counts, prevents disconnected cycles from keeping themselves alive.
 
 Reverse dependencies are durable, schema-bound collection rows installed without running the contributor. Their metadata and lazy endpoint attachments remain visible while the provider is inactive. Reading a lazy reference is weak; redeeming, invoking, or mounting it starts or joins staged activation and returns a concrete strong live resource. Static contributions therefore need neither a `TargetLive` host trigger nor an ephemeral announce-and-poll collection.
 
@@ -466,7 +466,7 @@ A micro initializes once per incarnation through the async lifecycle entrypoint.
 
 Every host-mediated effect has an attributable owner and disposal path. Resource contracts, not callers, determine `NoMicroRetention`, `Lazy`, `Weak`, `Strong`, or `OwnedEffect`. Durable rows and logical endpoints are lazy; redeemed presentations and in-flight invocations are strong; host-materialized projection leases retain no micro; incarnation registration scopes and publications are owned effects. Persistent configuration and installation registration scopes are host-owned state, not transient effects.
 
-Stable package revisions, configured identities, runtime incarnations, durable registration scopes, lazy endpoints, live bindings, and publications are never conflated. Stale cleanup cannot withdraw a replacement incarnation. ADR 024 defines lifecycle and manifest shape; ADR 025 defines declared collections, durable scopes, lazy activation, and the desired-state service boundary.
+Stable package revisions, configured identities, runtime incarnations, durable registration scopes, lazy endpoints, live bindings, and publications are never conflated. Stale cleanup cannot withdraw a replacement incarnation. ADR 030 defines lifecycle and manifest shape; ADR 031 defines declared collections, durable scopes, lazy activation, and the desired-state service boundary.
 
 ### Authority, portability, and verification
 

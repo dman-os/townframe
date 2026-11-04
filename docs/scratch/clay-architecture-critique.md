@@ -2,8 +2,8 @@
 
 
 > [!IMPORTANT]
-> ADRs 017, 023, 024, and 025 supersede this document where they conflict. In particular, the current collection design uses projection leases with transactional inline row pages and `bootstrap_complete`, not listing/hydration, `Subscription`, or `ReplayComplete`; ADR 024 supersedes the open lifecycle/configuration questions below. This file remains an audit trail and workstream index, not an implementation specification. The presentation targets are Dioxus Native and the browser DOM; React Native is not a target. A direct DOM backend is a later measured optimization, not a prerequisite for the collection/lifecycle work.
-Status: findings reviewed with the operator; W2 (sync/async boundary) landed, ADR 017's leased collection waist and ADR 023's capability boundary now cross both engines, and ADRs 024/025 capture the remaining lifecycle, manifest, durable-collection, and lazy-activation work. Historical implementation findings below retain their original dates and wording.
+> ADRs 017, 029, 030, and 031 supersede this document where they conflict. In particular, the current collection design uses projection leases with transactional inline row pages and `bootstrap_complete`, not listing/hydration, `Subscription`, or `ReplayComplete`; ADR 030 supersedes the open lifecycle/configuration questions below. This file remains an audit trail and workstream index, not an implementation specification. The presentation targets are Dioxus Native and the browser DOM; React Native is not a target. A direct DOM backend is a later measured optimization, not a prerequisite for the collection/lifecycle work.
+Status: findings reviewed with the operator; W2 (sync/async boundary) landed, ADR 017's leased collection waist and ADR 029's capability boundary now cross both engines, and ADRs 030/031 capture the remaining lifecycle, manifest, durable-collection, and lazy-activation work. Historical implementation findings below retain their original dates and wording.
 Owner: operator + dayframe track
 Updated: 2026-10-31
 Scope: ADRs 014, 015, 017, 018 and the `clay_*`, `micro_*`, `dayframe_*` crates. Findings are a
@@ -17,7 +17,7 @@ Related: `docs/scratch/dayframe-micros.md` (original design log), `docs/scratch/
 
 ## Current collection and lifecycle resolution (2026-11-03)
 
-The design discussion after this audit resolved the remaining collection/lifecycle shape in ADR 025:
+The design discussion after this audit resolved the remaining collection/lifecycle shape in ADR 031:
 
 - a collection declared by an installed plug exists as a host facility without activating its declaring micro;
 - every cross-plug collection names manifest Lexicons for selectors, keys, and values;

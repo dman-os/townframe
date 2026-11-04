@@ -175,7 +175,7 @@ impl NativeComponents {
 
     /// Bind an engine-driven surface to a component reference the host already issued to
     /// `owner`, such as the one a presentation publication minted when its incarnation
-    /// published it (ADR 025 §5). The reference was issued by this registry's host to `owner`;
+    /// published it (ADR 031 §5). The reference was issued by this registry's host to `owner`;
     /// a second factory for one reference is a programming error.
     pub fn attach_surface(
         &self,

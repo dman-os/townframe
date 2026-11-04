@@ -6,7 +6,7 @@
 //! sessions, whether the micro is linked in-process (feature `in_process`, built by
 //! [`crate::host::factory`]) or runs as a wasm guest (feature `guest`, exported by
 //! [`crate::export_micro!`]). A micro is interchangeable to every other micro either way
-//! (ADR 025 §5). Each public method here is written once and delegates to the backend's arm of
+//! (ADR 031 §5). Each public method here is written once and delegates to the backend's arm of
 //! one private enum, so the two backends cannot drift in signature; a build that enables both
 //! features holds either in a [`Context`] and every handle it mints stays with its backend.
 //!
@@ -57,7 +57,7 @@ pub enum Error {
     Rejected(String),
 }
 
-/// What a reference reports without activating anything (ADR 024 §9 `ref-status`).
+/// What a reference reports without activating anything (ADR 030 §9 `ref-status`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefStatus {
     Live,
@@ -157,7 +157,7 @@ impl Capability {
 
     /// Redeem the provider's presentation, activating the provider if the reference is lazy.
     /// The returned proxy holds the provider live for as long as it is held, so a slot keeps it
-    /// for exactly the life of what it mounts (ADR 025 §9). In-process only: a guest has no way
+    /// for exactly the life of what it mounts (ADR 031 §9). In-process only: a guest has no way
     /// to mount a redeemed component yet.
     #[cfg(feature = "in_process")]
     pub async fn redeem_presentation(
@@ -211,7 +211,7 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 /// What one row of a registration attaches to its value (indexed by [`crate::Attachment`]):
 /// one of this micro's own publications, named as the manifest declares it.
 ///
-/// A durable row persists endpoints, never references (ADR 025 §7), so the host turns the name
+/// A durable row persists endpoints, never references (ADR 031 §7), so the host turns the name
 /// into the endpoint `(micro, publication, contract)` when the row is written. That needs no
 /// live publication, so a row may be written at any time: from `activate`, from a spawned task
 /// or from a call handler, and a reader that redeems it activates the micro as for any lazy

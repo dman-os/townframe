@@ -2,10 +2,10 @@
 
 Status: Living ledger. Decisions are marked as decided; the in/out list is a proposal awaiting the operator.
 Owner: Claude (manager) with Sonnet subagents; operator reviews.
-Scope: Branch `feat/better-collections`, the `clay_*` / `micro_*` crates and ADRs 017/023/024/025.
+Scope: Branch `feat/better-collections`, the `clay_*` / `micro_*` crates and ADRs 017/029/030/031.
 Updated: 2026-11-03 (C0 found incomplete; C1 extended to finish the scope migration)
 
-Normative design: ADRs 017, 023, 024, 025. `clay-architecture-critique.md` is history and the
+Normative design: ADRs 017, 029, 030, 031. `clay-architecture-critique.md` is history and the
 findings index (F*, Q*, W*). This file is the live state of the PR: what is in scope, what is
 decided, what is running, what is open. Update it whenever a checkpoint lands or a decision is made.
 
@@ -20,9 +20,9 @@ decided, what is running, what is open. Update it whenever a checkpoint lands or
 ## Decisions taken in this PR (beyond the ADR text)
 
 - 2026-11-03: Publication kinds are Call and Presentation only. Refs are bound or lazy; every use
-  is async; mount is sync (ADR 025 §§5–8). Calls are served by one exported
+  is async; mount is sync (ADR 031 §§5–8). Calls are served by one exported
   `call(publication, request)` dispatched by name, not by per-publication exported resources.
-- 2026-11-03: Micros are singletons; the micro id is the only identity (ADR 024 §1).
+- 2026-11-03: Micros are singletons; the micro id is the only identity (ADR 030 §1).
 - 2026-11-03: Durable backing is an ordered KV store (prefix scan plus atomic batch): SQLite native,
   IndexedDB browser. `wflow_core::KvStore` is unsuitable (it has no scan or batch).
 - 2026-11-03: Collections are independent consistency domains. Per-collection atomic commit, reader
@@ -33,7 +33,7 @@ decided, what is running, what is open. Update it whenever a checkpoint lands or
 | # | Item | State |
 |---|---|---|
 | C0 | Recover gen-34 B (`9f19a2fb`, scope-owned registration rows) | was broken; completed by C1 |
-| C1 | Collapse `_deferred` (dispatch carries output `T`); migrate `clay_guest_session` + engines onto scopes | committed `e22f80b0`; 191/191 (clay_collection, clay_guest_session, clay_rt_wasmtime, clay_rt_wcmp_wasmi), clippy clean. Scopes close at teardown **after** `instance-root.close()` (ADR 024 §6), not at Closing |
+| C1 | Collapse `_deferred` (dispatch carries output `T`); migrate `clay_guest_session` + engines onto scopes | committed `e22f80b0`; 191/191 (clay_collection, clay_guest_session, clay_rt_wasmtime, clay_rt_wcmp_wasmi), clippy clean. Scopes close at teardown **after** `instance-root.close()` (ADR 030 §6), not at Closing |
 | C2 | Lifecycle core: evolve `clay_host::Supervisor` (see "Two controllers" below) | committed `b2f380df` (134/134, guardrails clean) |
 | C2b | Move MDK + shells (`dayframe_composition`, desktop, web) onto the Supervisor; delete `clay_micro_core` | committed (see "C2b done"); web Playwright spec updated, not yet run |
 | C3a | Host side, no WIT: `Send` activation bridge in `clay_host`; bank refs Bound/Lazy; Call + Presentation publication kinds; in-process tests | committed `a7df27a1` (92/92 host side; 7 engine tests stubbed until C3b/C3c) |
@@ -55,19 +55,19 @@ Wasm fixtures: `deno run --allow-all x/check-dayframe.ts --prepare-only`, then e
 `DAYFRAME_*` vars. `wit/deps` in a fresh worktree come from `deno run --allow-all x/wit-fetch.ts`.
 | C5 | Manifest/catalog admission + Clay enablement/config service on mock storage, shaped like big_nodule | after C4 |
 | C6 | Authoring foundation: one semantic `Context` (native + guest), OCI-owned manifest, drop `build.rs`/custom section, multi-presentation | after C3 |
-| C7 | Validation micros: toolbar → completion → layout, exercising ADR 025 validation list | last |
+| C7 | Validation micros: toolbar → completion → layout, exercising ADR 031 validation list | last |
 
 ## Two controllers (found 2026-11-03)
 
 - `clay_micro_core::micros::{composition, CompositionBroker, MicroActivation}` is the **old**
   controller and the one the shipped app uses: `clay_mdk::{native,wasm,wcmp}`,
-  `dayframe_composition`, `dayframe_desktop`, `dayframe_web/shell.rs`. Its model is pre-ADR-025:
+  `dayframe_composition`, `dayframe_desktop`, `dayframe_web/shell.rs`. Its model is pre-ADR-031:
   declarations plus `accept`/`accept_all`, and typed Rust `Provision` (`Any`) publications.
-- `clay_host::Supervisor` (`src/clay_host/supervisor.rs`, gen-33 A) is the **ADR 024** controller.
+- `clay_host::Supervisor` (`src/clay_host/supervisor.rs`, gen-33 A) is the **ADR 030** controller.
   It is engine-neutral, built on `Factory`/`Root`, has strong requirement `Binding`s, staged init,
   and ordered close. Only `clay_guest_session/lifecycle_conformance.rs` uses it.
 - Decision: evolve the Supervisor (C2) and delete the old controller (C2b). C2 deltas:
-  - `Root::provision(contract)` becomes named publications returned at init (ADR 025 §8).
+  - `Root::provision(contract)` becomes named publications returned at init (ADR 031 §8).
   - Remove `ActivationRegistration`/`RegistrationTemplate`/`install`/`uninstall`. Durable rows
     replace them (C4/C5).
   - Demand API: start-or-join one pending activation per micro, returning a strong lease. Dropping
@@ -167,7 +167,7 @@ the Supervisor directly.
   engine registers a `CallTarget` (a `Send` handle into the provider incarnation's driver, which runs
   the guest's exported `call(publication, request)`) when it publishes. In C3a, test with an
   in-process `CallTarget`.
-- **WIT (C3b).** `capabilities.wit` per ADR 024 §9; `micro-lifecycle.initialized { root,
+- **WIT (C3b).** `capabilities.wit` per ADR 030 §9; `micro-lifecycle.initialized { root,
   publications: list<named-publication> }` replaces `provisions`; export
   `call(publication, request)`; `presentation-events.mount` gains the publication name.
   `publish-presentation-component()` becomes `publish-presentation(name)` plus `publish-call(name)`.
@@ -240,14 +240,14 @@ abandons `serve`; a guest trap during `serve` means callers see `Revoked`.
 
 ## TLS hook finding (2026-11-04, under investigation)
 `clay_mdk/lib.rs` overrides `__wasilibc_task_hook` so every CM task shares one TLS block. This may be the
-real cause of the "one suspended async export" abort that ADR 024 §7a attributes to wasi-libc. An agent is
+real cause of the "one suspended async export" abort that ADR 030 §7a attributes to wasi-libc. An agent is
 verifying with a hook-free guest. Do not rely on the §7a TLS rationale until it reports.
 
 ## TLS hook finding: resolved (2026-11-04)
 - Root cause of the "one suspended async export" abort is **our** MDK `__wasilibc_task_hook` (shared TLS,
   needed so Dioxus/MDK thread-locals survive from `activate` into `mount`) combined with wit-bindgen 0.62
   p3+`std` keeping task state in a `thread_local!`. Stock wasi-libc v34 is per-task TLS and works.
-  ADR 024 §7a's toolchain rationale is **wrong**.
+  ADR 030 §7a's toolchain rationale is **wrong**.
 - Verified fix on Wasmtime 04bb391, in a scratch crate:
   - wit-bindgen with `default-features = false`. `std` is on today through the workspace dep's default
     features, reached via clay_mdk, micro_collection_probe and wasm_utils_rs.
@@ -325,9 +325,9 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   retracts its candidates, tombstones included, and recomputes only the touched keys.
 - A deleting micro that goes away un-deletes: accepted consequence of scope-owned tombstones.
 - No `clear` and no per-key withdraw for guests. Write authority is a key-prefix grant; it replaces
-  ADR 024 §13 `writer_policy`. Grants live in the host layer, not in `clay_collection`.
+  ADR 030 §13 `writer_policy`. Grants live in the host layer, not in `clay_collection`.
 - Plan: C9a core rework in `clay_collection` (worktree agent), C9b consumers + WIT + grants + MDK
-  `based_on` default after the per-call exports agent lands, C9c ADR 017 §9–11 / 024 §13 / 025 §4.
+  `based_on` default after the per-call exports agent lands, C9c ADR 017 §9–11 / 030 §13 / 031 §4.
 
 ## C9a status (2026-11-04)
 
@@ -344,7 +344,7 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 
 ## Per-call exports landed (2026-11-04)
 
-- Wasmtime 404cdd21, ADR 024 §7a 13b89a49, WCMP repin 1ebb05a7 (fork 7604dc8: `run_until_stalled`
+- Wasmtime 404cdd21, ADR 030 §7a 13b89a49, WCMP repin 1ebb05a7 (fork 7604dc8: `run_until_stalled`
   reports `Stalled::{Idle, Yielded}`; a yielded task starved later tasks), WCMP port a34f643e. Both
   engines run the same 15 conformance scenarios; 294/294 across the clay crates.
 - Open: browser (JSPI) lane untested for per-call exports, and `Resuming` still maps to `Idle`; the
@@ -482,10 +482,10 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
     "needs configuration"; unresolved optional → starts, `collection(binding)` is `None`; a binding
     change restarts the micro (no hot rebinding yet).
   - Generic micros: a binding may be "chosen at runtime" (Powerbox / Android SAF-style); the grant
-    lands in configuration and arrives as the same handle. Declared only; the picker is ADR 025 §11's
+    lands in configuration and arrives as the same handle. Declared only; the picker is ADR 031 §11's
     deferred dynamic consent.
 - Steps: C6-pkg sidecar manifest (running) → C6a collection requests + resolution + lifecycle +
-  ADR 025 §11 → C6b unified async `Context` (native; binding-based collection/registration,
+  ADR 031 §11 → C6b unified async `Context` (native; binding-based collection/registration,
   multi-presentation, publish_call, require) → C6c guest parity (counter: second presentation + a
   call; a guest registration write) → C7.
 
@@ -501,7 +501,7 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   minted-capability story across kinds, statically answerable incl. transitively through services;
   node configuration is node-local.
 - Answered: Clay needs list/get(section + component bytes by digest)/watch from the plug store;
-  enablement, bindings and grants stay in Clay's desired state (ADR 025 §12) — share request/grant
+  enablement, bindings and grants stay in Clay's desired state (ADR 031 §12) — share request/grant
   *types* across kinds, not datums. `MicroManifest` becomes the plug's `micro` section verbatim
   (sidecar JSON is its standalone form); willing to move contract/schema ids to NSIDs.
 - Open for the operator: micros requiring nodule operations by NSID (grant minted like a nodule's,
@@ -538,7 +538,7 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   resolved at enable time like a lockfile).
 - Alignment-step additions found by the dependency inventory:
   - `ContributionDeclaration.collection` is a concrete collection id; it must name a binding in
-    `collection_requests` (ADR 024 §14 says contributions target a local binding).
+    `collection_requests` (ADR 030 §14 says contributions target a local binding).
   - Drop `FacetAccess.owner_plug_id` (plug-id reference that breaks under substitution); the
     request names the datum NSID and configuration picks the document.
 - ADR numbering: origin/main has 023–026; the peer branch takes 027 (plugs/nodules) and 028 (plug

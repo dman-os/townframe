@@ -1,4 +1,4 @@
-//! Engine-neutral Counter declarations. The manifest is portable MDK vocabulary (ADR 024
+//! Engine-neutral Counter declarations. The manifest is portable MDK vocabulary (ADR 030
 //! §§11–15): identity, the presentations and call it publishes, the configuration it requests, and the
 //! Settings section row it declares into the `settings.sections` collection, whose attachment
 //! is a lazy endpoint to the counter's own presentation. The wasm guest reads only the
@@ -83,7 +83,7 @@ pub fn manifest() -> MicroManifest {
 mod tests {
     use super::*;
 
-    // ── manifest wire shape: the manifest is wire data (ADR 024 §11), including the declared
+    // ── manifest wire shape: the manifest is wire data (ADR 030 §11), including the declared
     //    contribution payload and its activation default; the snapshot follows the current
     //    shape so drift is a reviewable diff ─────────────────────────────────────────────────
 

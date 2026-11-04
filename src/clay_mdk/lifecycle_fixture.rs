@@ -1,5 +1,5 @@
 #![cfg(target_arch = "wasm32")]
-//! ADR 024 lifecycle fixture: one package that plays a provider/consumer activation graph, its
+//! ADR 030 lifecycle fixture: one package that plays a provider/consumer activation graph, its
 //! role picked by the configuration-supplied CBOR text in `initial-context.arguments`.
 //!
 //! * `provider` returns three named publications from `initialize`: the `presentation`

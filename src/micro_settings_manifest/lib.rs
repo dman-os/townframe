@@ -113,7 +113,7 @@ mod tests {
     use super::*;
     use clay_mdk::host::declared_rows;
 
-    // The manifest is wire data (ADR 024 §11); the snapshot follows the current shape so drift
+    // The manifest is wire data (ADR 030 §11); the snapshot follows the current shape so drift
     // is a reviewable diff.
     #[test]
     fn manifest_wire_shape_is_reviewable() {

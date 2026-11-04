@@ -10,7 +10,7 @@
 //! (`wcmp`, ADR 018) guest-engine factories. `guest` (feature `dioxus`) is the guest backend,
 //! still on its own `activate(&guest::Context)` shape over the WIT imports until it joins
 //! [`Context`], plus the Dioxus VirtualDom adapter and the `export_micro!` entry point that
-//! adapts it to `micro-lifecycle.initialize` (ADR 024). The MDK adds ergonomics, never
+//! adapts it to `micro-lifecycle.initialize` (ADR 030). The MDK adds ergonomics, never
 //! authority: capabilities are still the host-issued resources.
 #![cfg_attr(
     all(target_os = "wasi", target_env = "p3"),

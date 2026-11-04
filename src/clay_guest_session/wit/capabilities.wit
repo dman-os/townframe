@@ -1,6 +1,6 @@
 package townframe:dayframe@0.4.0;
 
-/// The capability bank (ADR 024 §9, ADR 025 §§5-6). A `capability-ref` is bound to one live
+/// The capability bank (ADR 030 §9, ADR 031 §§5-6). A `capability-ref` is bound to one live
 /// publication or lazy (it names a micro's publication and activates the micro on use);
 /// consumers cannot tell which except through `status`. Because using a lazy reference may
 /// activate its provider, every redemption and invocation is async. Presentation `mount`,
@@ -33,7 +33,7 @@ interface capability-bank {
         revoked,
     }
 
-    /// A publication's contract identity (ADR 025 §5). A call's contract names its request and
+    /// A publication's contract identity (ADR 031 §5). A call's contract names its request and
     /// response Lexicons.
     record contract {
         namespace: string,

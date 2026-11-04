@@ -25,7 +25,7 @@ for guests), `wcmp` (the browser-engine twin of that provider assembly, ADR 018)
 
 ## Manifests and contracts
 
-A micro's static declaration is a `MicroManifest` (ADR 024 §§11–15): schema, id, package
+A micro's static declaration is a `MicroManifest` (ADR 030 §§11–15): schema, id, package
 version, entrypoints, `provides` / `requires` (contract refs keyed by stable ids and local
 binding names), configuration requests, collection contracts, **contributions** — data
 (`ContributionDeclaration { target_binding, extension_contract, payload, .. }`) aimed at one of
