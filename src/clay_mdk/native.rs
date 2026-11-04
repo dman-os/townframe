@@ -150,12 +150,7 @@ impl CollectionBindings {
     }
 }
 
-/// The declared registration collection a shell reads its roots from: micros register a
-/// [`RootRow`] (usually as a manifest-declared row) and the shell redeems the presentation each
-/// one attaches.
-pub const SHELL_ROOTS: &str = "org.example.clay.shell.roots";
-
-/// One [`SHELL_ROOTS`] row, keyed by the registering micro's id: a title and the root
+/// One [`crate::SHELL_ROOTS`] row, keyed by the registering micro's id: a title and the root
 /// presentation (an attachment of the row). A `pinned` root stays on screen however the shell
 /// folds its other roots (Settings can be closed; a toolbar cannot); an absent field is `false`.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

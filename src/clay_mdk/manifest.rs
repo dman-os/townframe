@@ -20,6 +20,12 @@ use serde::Serialize;
 /// change to the format is a new NSID.
 pub const MANIFEST_NSID: &str = "org.example.clay.micro.manifest";
 
+/// The declared registration collection a shell reads its roots from: micros register a
+/// [`crate::host::RootRow`] (usually as a manifest-declared row) and the shell redeems the
+/// presentation each one attaches. It lives with the manifest vocabulary, not in `host`, because
+/// a guest micro's manifest names it in a request and a guest cannot link `host`.
+pub const SHELL_ROOTS: &str = "org.example.clay.shell.roots";
+
 /// The namespace the stand-in loaders and native built-ins install micros under, until Clay runs
 /// on the node and the node's own DID takes its place (`big_plugs`' importer maps a sidecar
 /// `id` to `<node did>/<id>`). `did:example` is the DID method the W3C reserves for
