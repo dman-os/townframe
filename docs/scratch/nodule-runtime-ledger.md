@@ -250,9 +250,15 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs: P1–P3 done (OCI import deferred). P4 (shared request shape for nodules) is next.
+- big_plugs: P1–P4 done. P4b (`Plug.authority`) is running on the P4 agent; then P5 (resolution and lockfile).
 ## Done
 
+- 2026-11-04: P4 shared request shape, `6431c8aa`.
+  - `big_plugs_core::request::Request{binding, contract, access, necessity, resolution, minRevision}`. An unknown necessity counts as required. `access: None` means an operation call.
+  - `Nodule.id` removed. Actor path segment = `<name>-<blake3(plug id)[..32 hex]>`. Migration 004 breaks pre-existing dev nodes (accepted: unreleased).
+  - Grants are bounded by requests (`NoduleOperationGrantStatus.unrequested`). A required request without a grant gives `Readiness::NeedsConfiguration`, and inits do not run. Self-calls are not expressible.
+  - Also: `micro_pair` no longer requires Clay's integer `schema` (`6be1c1f9`).
+  - Gap being fixed in P4b: removing `Nodule.id` also removed the NSID authority prefix, so "holds" became declaration-based and a plug could claim a vendored foreign Lexicon. P4b adds `Plug.authority` (the NSID prefix, ADR 028 §5), restores strict vendored-Lexicon checks and prefix-nesting conflicts.
 - 2026-11-04: P3b importers (OCI deferred).
   - One micro per plug. `big_plugs::import::micro_pair` maps Clay `id` to the plug name under the node DID and `package_version` n to `n.0.0`, with the component as artifact `component` (`application/wasm`). Contribution schema is `org.example.clay.micro.manifest` (pending Clay confirmation).
   - `ImportPlugDocument{doc_id, source_drawer}` uses `AddDoc` at Write, with handles retracted after. The registry actor must already reach the source drawer through an ordinary operator delegation.
