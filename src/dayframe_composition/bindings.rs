@@ -6,14 +6,20 @@
 //! about a `Configured` request does the manifest's default apply, which binds a contract that
 //! exactly one declared collection implements. A request that resolves to nothing leaves the
 //! binding unbound; if it was required the micro is not startable until configuration changes.
+//!
+//! A stored configuration records what it granted (the request's contract and access when the
+//! user bound it) and holds only for requests that grant still covers (ADR 028 §3): a package
+//! update that widens a request under the same binding name must be configured again, not
+//! inherit the old consent.
 use clay_docs::FacetRoute;
-use clay_host::MicroId;
+use clay_mdk::host::BoundCollection;
 use clay_mdk::Access;
 use clay_mdk::BindingResolution;
+use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
-use clay_mdk::host::BoundCollection;
+use clay_mdk::Request;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -31,13 +37,53 @@ pub(crate) fn bindings_route(micro: &MicroId) -> FacetRoute {
     }
 }
 
-/// One micro's explicit binding configuration: binding name -> the declared collection id (NSID) it is
-/// bound to, or `null` to leave it deliberately unbound. A binding with no entry is up to the
-/// manifest's defaults. Unknown fields ride along so a datum written by a newer build survives
-/// a rewrite by this one.
+/// One configured binding: the declared collection it is bound to and the request it was
+/// bound under, which is what the user consented to. Resolution honors it only while the
+/// manifest's current request is covered by `contract` and `access`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct BindingGrant {
+    pub collection: Nsid,
+    /// The contract NSID the request named when it was granted.
+    pub contract: Nsid,
+    pub access: Access,
+}
+
+impl BindingGrant {
+    /// Grant `collection` to `request`, which names the contract and access being consented to.
+    pub fn of(request: &Request, collection: Nsid) -> Self {
+        Self {
+            collection,
+            contract: request.contract.clone(),
+            access: request
+                .access
+                .clone()
+                .expect("a collection request declares an access"),
+        }
+    }
+
+    /// Whether `request` asks for no more than this grant gave: the same contract, and the
+    /// same access or a narrower one (write implies read). A contract is an NSID with no
+    /// order, so a different one is a different grant; an access this build does not know is
+    /// covered only by itself.
+    fn covers(&self, request: &Request) -> bool {
+        self.contract == request.contract
+            && match &request.access {
+                Some(requested) => {
+                    *requested == self.access
+                        || (self.access == Access::Write && *requested == Access::Read)
+                }
+                None => false,
+            }
+    }
+}
+
+/// One micro's explicit binding configuration: binding name -> the grant that bound it, or
+/// `null` to leave it deliberately unbound. A binding with no entry is up to the manifest's
+/// defaults. Unknown fields ride along so a datum written by a newer build survives a rewrite
+/// by this one.
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct BindingsDatum {
-    pub bindings: BTreeMap<String, Option<Nsid>>,
+    pub bindings: BTreeMap<String, Option<BindingGrant>>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -100,8 +146,12 @@ pub(crate) fn resolve(
         let configured = datum.and_then(|datum| datum.bindings.get(&request.binding));
         let target = match configured {
             // Configuration is final: an entry that names a collection the contract does not
-            // allow leaves the binding unbound rather than falling back to the default.
-            Some(Some(id)) => declared.implements(&request.contract, id).then_some(id),
+            // allow, or whose grant no longer covers the request (it widened since), leaves
+            // the binding unbound rather than falling back to the default or inheriting the
+            // old consent.
+            Some(Some(grant)) => (grant.covers(request)
+                && declared.implements(&request.contract, &grant.collection))
+            .then_some(&grant.collection),
             Some(None) => None,
             // A `Configured` request defaults; an `AtRuntime` one (or a resolution this build
             // does not know) is only ever bound by an explicit grant in the datum.
@@ -135,7 +185,6 @@ pub(crate) fn resolve(
 mod tests {
     use super::*;
     use clay_mdk::Entrypoints;
-    use clay_mdk::Request;
 
     fn request(binding: &str, necessity: Necessity, resolution: BindingResolution) -> Request {
         Request {
@@ -177,7 +226,14 @@ mod tests {
         BindingsDatum {
             bindings: entries
                 .iter()
-                .map(|(binding, id)| ((*binding).to_owned(), id.map(nsid)))
+                .map(|(binding, id)| {
+                    let grant = id.map(|id| BindingGrant {
+                        collection: nsid(id),
+                        contract: nsid("tallies"),
+                        access: Access::Write,
+                    });
+                    ((*binding).to_owned(), grant)
+                })
                 .collect(),
             extra: BTreeMap::new(),
         }
@@ -274,5 +330,84 @@ mod tests {
         );
         assert_eq!(resolution.bound["later"], BoundCollection::write(nsid("a")));
         assert!(resolution.unresolved.is_empty());
+    }
+
+    /// A stored grant holds only for requests it still covers (ADR 028 §3): the same request,
+    /// or a narrower access, keeps it; a widened access or another contract under the same
+    /// binding name is unresolved rather than inheriting the old consent, while a binding
+    /// with no stored grant still defaults.
+    #[test]
+    fn a_widened_request_does_not_inherit_the_granted_binding() {
+        let granted = |access: Access, contract: &str| BindingGrant {
+            collection: nsid("a"),
+            contract: nsid(contract),
+            access,
+        };
+        let stored = |grant: BindingGrant| BindingsDatum {
+            bindings: BTreeMap::from([("book".to_owned(), Some(grant))]),
+            extra: BTreeMap::new(),
+        };
+        let asking = |access: Access, contract: &str| {
+            manifest(vec![Request {
+                access: Some(access),
+                contract: nsid(contract),
+                ..request("book", Necessity::Required, BindingResolution::Configured)
+            }])
+        };
+        let mut declared = declared(&["a"]);
+        // The same collection also implements the other contract, so only the grant decides.
+        declared.declare(&nsid("other"), &nsid("a"));
+
+        // Identical and narrowed requests keep the grant, narrowed ones at the narrower access.
+        for (given, asked) in [
+            (Access::Write, Access::Write),
+            (Access::Read, Access::Read),
+            (Access::Write, Access::Read),
+        ] {
+            let resolution = resolve(
+                &asking(asked.clone(), "tallies"),
+                Some(&stored(granted(given, "tallies"))),
+                &declared,
+            );
+            assert!(resolution.unresolved.is_empty());
+            assert_eq!(
+                resolution.bound["book"],
+                match asked {
+                    Access::Read => BoundCollection::read(nsid("a")),
+                    _ => BoundCollection::write(nsid("a")),
+                }
+            );
+        }
+
+        // Widened access, another contract, or an access this build does not know that
+        // differs: unresolved, and the stale grant is not bound.
+        for (given, given_contract, asked, asked_contract) in [
+            (Access::Read, "tallies", Access::Write, "tallies"),
+            (Access::Write, "tallies", Access::Write, "other"),
+            (
+                Access::Read,
+                "tallies",
+                Access::Other("admin".into()),
+                "tallies",
+            ),
+            (
+                Access::Other("admin".into()),
+                "tallies",
+                Access::Read,
+                "tallies",
+            ),
+        ] {
+            let resolution = resolve(
+                &asking(asked, asked_contract),
+                Some(&stored(granted(given, given_contract))),
+                &declared,
+            );
+            assert!(resolution.bound.is_empty());
+            assert_eq!(resolution.unresolved, ["book"]);
+        }
+
+        // No stored grant: the default still applies, widened request or not.
+        let resolution = resolve(&asking(Access::Write, "tallies"), None, &declared);
+        assert_eq!(resolution.bound["book"], BoundCollection::write(nsid("a")));
     }
 }

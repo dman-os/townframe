@@ -1,8 +1,8 @@
 use super::*;
 use clay_guest_session::capabilities::RowAttachment;
-use clay_host::MicroId;
 use clay_host::MicroState;
 use clay_mdk::Collection;
+use clay_mdk::MicroId;
 use micro_settings_manifest::Section;
 
 // The package directory must install the Wasmtime counter beside the shell's native
@@ -21,9 +21,9 @@ async fn desktop_runtime_installs_the_counter_section_from_its_package_manifest(
     assert_eq!(
         micros,
         [
-            micro_settings_manifest::ID,
-            micro_sample::ID,
-            micro_counter_manifest::ID
+            "did:example:clay-local/dayframe.settings",
+            "did:example:clay-local/dayframe.sample",
+            "did:example:clay-local/dayframe.counter"
         ]
     );
     let mut key = Vec::new();
@@ -38,11 +38,11 @@ async fn desktop_runtime_installs_the_counter_section_from_its_package_manifest(
     assert!(matches!(
         row.attachments.as_slice(),
         [RowAttachment::Endpoint(endpoint)]
-            if endpoint.micro.as_str() == micro_counter_manifest::ID
+            if endpoint.micro.as_str() == MicroId::local(micro_counter_manifest::ID).as_str()
     ));
     // A discovered package is admitted disabled; nothing auto-enables it.
     assert_eq!(
-        runtime.state(&MicroId::new(micro_counter_manifest::ID)),
+        runtime.state(&MicroId::local(micro_counter_manifest::ID)),
         MicroState::Disabled
     );
     runtime.host().close();
@@ -55,7 +55,7 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
     let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
         .await
         .unwrap();
-    let counter = MicroId::new(micro_counter_manifest::ID);
+    let counter = MicroId::local(micro_counter_manifest::ID);
     // Packages are admitted disabled; enable through the install datum, which the reconciler
     // applies once the composition serves.
     // Before serving, nothing drives the persister, so the acknowledgement is dropped.

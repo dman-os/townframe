@@ -35,7 +35,6 @@ collection_requests:
     contract: org.example.dayframe.settings.sections
     access: write
     necessity: optional
-    resolution: configured
 contributions:
   - id: settings-section
     binding: sections

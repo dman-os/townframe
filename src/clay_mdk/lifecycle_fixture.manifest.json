@@ -27,27 +27,22 @@
   "requires": [
     {
       "binding": "presentation",
-      "contract": "org.example.clay.test.lifecycle.presentation",
-      "necessity": "required",
-      "resolution": "configured"
+      "contract": "org.example.clay.test.lifecycle.presentation"
     },
     {
       "binding": "service",
       "contract": "org.example.clay.test.lifecycle.echo",
-      "necessity": "optional",
-      "resolution": "configured"
+      "necessity": "optional"
     },
     {
       "binding": "peer",
       "contract": "org.example.clay.test.lifecycle.echo",
-      "necessity": "optional",
-      "resolution": "configured"
+      "necessity": "optional"
     },
     {
       "binding": "host",
       "contract": "org.example.clay.test.lifecycle.host",
-      "necessity": "optional",
-      "resolution": "configured"
+      "necessity": "optional"
     }
   ],
   "configuration_requests": [],
@@ -56,9 +51,7 @@
     {
       "binding": "host-rows",
       "contract": "org.example.clay.test.lifecycle.hostRows",
-      "access": "write",
-      "necessity": "required",
-      "resolution": "configured"
+      "access": "write"
     }
   ],
   "contributions": [

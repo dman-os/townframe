@@ -35,7 +35,13 @@ expose the complete lifecycle through WIT.
 
 ### 1. Lifecycle nodes are micros
 
-The graph node is the micro id, not a runtime incarnation. Micros are singletons, so the
+The graph node is the micro id, not a runtime incarnation. The micro id is the plug id the
+micro is installed *as* (ADR 028 §2): `<namespace>/<name>`, a DID and a plug name that may
+contain dots (`did:example:clay-local/dayframe.counter`; Clay runs on a fixed stand-in
+namespace, `clay_mdk::LOCAL_NAMESPACE`, until it runs on the node and takes the node's DID).
+It is validated at construction. The package's sidecar carries only the name; whoever installs
+the package supplies the namespace, and a substituted fork installed into the slot keeps the
+slot's id. Micros are singletons, so the
 micro id names the installed package, its configuration, and its at-most-one live
 incarnation. The configuration surface exposes no separate instance, generation, or
 enablement identity. The service may keep generations internally, for example to reject
@@ -499,7 +505,11 @@ JSON of the manifest's members plus `id`, `package_version` and `authority` (`Si
 `big_plugs`' micro importer reads the same JSON. **Authority.** A package may *declare* only
 NSIDs under its authority: its collection contracts, the schemas they name, and the contract of each
 call it publishes. Every other NSID it touches is a request, and admission refuses a package that
-declares outside its authority. NSIDs the runtime itself defines (`org.example.clay.*`: the
+declares outside its authority. A declared contract may still name a selector, key, value or
+write-context schema outside the authority when the package requests that schema (a request whose
+`contract` is the schema NSID): referencing someone else's schema is exactly what a request is
+for. The sidecar `id` is the plug *name* (`dayframe.counter`); the micro id adds the installer's
+namespace (§1). NSIDs the runtime itself defines (`org.example.clay.*`: the
 presentation-component contract, `org.example.clay.shell.roots`) are requested by micros and
 satisfied by the runtime, never declared by one. Dayframe's micros use `org.example.dayframe.<micro>`
 as authority and prefix.
@@ -517,12 +527,14 @@ Request {                        // the one request shape of ADR 028 §4, also u
     binding,
     contract: Nsid,
     access?,                     // absent for a requirement: the grant is "may call" / "may mount"
-    necessity: required | optional,
-    resolution: configured | atRuntime,
+    necessity: required | optional,      // omitted on the wire means required
+    resolution: configured | atRuntime,  // omitted on the wire means configured
     minRevision?,
 }
 ```
 
+`necessity` and `resolution` are skipped on serialization when they equal their default, exactly
+as `big_plugs_core::request::Request` does, so the canonical JSON of a manifest stays minimal.
 `binding` is the local stable name used by configured requirement bindings and
 `initial-context.require(binding)`. A requirement does not grant authority and a
 provider declaration is not a live provision. A contract is an NSID (AT Protocol syntax,
@@ -559,8 +571,8 @@ Request {                        // as `requires`, with `access` present
     binding,                     // unique local name; the only name guest code uses
     contract: Nsid,              // CollectionContract id
     access: read | write,        // open vocabulary; write implies read
-    necessity: required | optional,
-    resolution: configured | atRuntime,
+    necessity: required | optional,      // omitted: required
+    resolution: configured | atRuntime,  // omitted: configured
     minRevision?,
 }
 ```

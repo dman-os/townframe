@@ -414,6 +414,13 @@ struct NativeFactory {
     activate: Activate,
 }
 
+/// The supervisor's opaque name for an installed micro is its id text.
+impl From<&crate::MicroId> for MicroId {
+    fn from(micro: &crate::MicroId) -> Self {
+        Self::new(micro.as_str())
+    }
+}
+
 /// Turn a native micro (identity + manifest + `activate` function) into a supervisor factory.
 /// The identity is the package envelope's, not the manifest's. The composition root calls this;
 /// micro crates never build factories themselves.
@@ -427,7 +434,7 @@ pub fn factory<Fut: Future<Output = Result<(), Error>> + 'static>(
     let declared = declared_publications(&manifest);
     Rc::new(NativeFactory {
         resources,
-        micro: MicroId::new(micro.as_str()),
+        micro: (&micro).into(),
         manifest,
         declared,
         bindings,

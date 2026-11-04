@@ -20,28 +20,36 @@ fn native_micros() -> Vec<InstalledMicro> {
         InstalledMicro {
             eager: true,
             locked: true,
-            ..InstalledMicro::new(micro_settings_manifest::sidecar(), |resources, bindings| {
-                factory(
-                    resources,
-                    clay_mdk::MicroId::new(micro_settings_manifest::ID),
-                    micro_settings_manifest::manifest(),
-                    bindings,
-                    micro_settings::activate,
-                )
-            })
+            ..InstalledMicro::new(
+                clay_mdk::MicroId::local(micro_settings_manifest::ID),
+                micro_settings_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_settings_manifest::manifest(),
+                        bindings,
+                        micro_settings::activate,
+                    )
+                },
+            )
         },
         InstalledMicro {
             eager: true,
             enabled_on_admission: true,
-            ..InstalledMicro::new(micro_sample::sidecar(), |resources, bindings| {
-                factory(
-                    resources,
-                    clay_mdk::MicroId::new(micro_sample::ID),
-                    micro_sample::manifest(),
-                    bindings,
-                    micro_sample::activate,
-                )
-            })
+            ..InstalledMicro::new(
+                clay_mdk::MicroId::local(micro_sample::ID),
+                micro_sample::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_sample::manifest(),
+                        bindings,
+                        micro_sample::activate,
+                    )
+                },
+            )
         },
     ]
 }
@@ -135,7 +143,7 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
         };
         let package = read(&path).and_then(|json| {
             let bytes = read(&component)?;
-            clay_mdk::package::Package::from_json(&json, bytes)
+            clay_mdk::package::Package::from_json(clay_mdk::LOCAL_NAMESPACE, &json, bytes)
                 .map_err(|error| format!("{}: {error}", path.display()))
         });
         match package {
@@ -143,11 +151,12 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
                 let sidecar = package.sidecar().clone();
                 let bytes = package.bytes().to_vec();
                 installed.push(InstalledMicro::new(
+                    package.id().clone(),
                     sidecar.clone(),
-                    move |resources, bindings| {
+                    move |id, resources, bindings| {
                         clay_mdk::host::wasm_factory(
                             resources,
-                            sidecar.id,
+                            id,
                             sidecar.manifest,
                             bindings,
                             move || {

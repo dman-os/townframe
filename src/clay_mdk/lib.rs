@@ -454,6 +454,7 @@ pub use manifest::ContributionDeclaration;
 pub use manifest::Entrypoints;
 pub use manifest::FacetAccess;
 pub use manifest::InterfaceRef;
+pub use manifest::LOCAL_NAMESPACE;
 pub use manifest::MANIFEST_NSID;
 pub use manifest::MicroId;
 pub use manifest::MicroManifest;

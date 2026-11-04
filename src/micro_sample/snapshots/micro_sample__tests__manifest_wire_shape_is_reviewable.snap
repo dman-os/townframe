@@ -28,6 +28,4 @@ collection_requests:
   - binding: sections
     contract: org.example.dayframe.settings.sections
     access: write
-    necessity: required
-    resolution: configured
 contributions: []

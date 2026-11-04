@@ -259,9 +259,87 @@ fn validate_rejects_incoherent_manifests() {
 
 #[test]
 fn micro_id_is_a_bare_json_string() {
-    let id = MicroId::new("dayframe.counter");
-    assert_eq!(serde_json::to_string(&id).unwrap(), "\"dayframe.counter\"");
+    let id = MicroId::local("dayframe.counter");
+    assert_eq!(
+        serde_json::to_string(&id).unwrap(),
+        "\"did:example:clay-local/dayframe.counter\""
+    );
     insta::assert_snapshot!(serde_json::to_string_pretty(&id).unwrap());
+    let back: MicroId =
+        serde_json::from_str("\"did:example:clay-local/dayframe.counter\"").unwrap();
+    assert_eq!(back, id);
+}
+
+/// The text form is `<did>/<name>` and is checked wherever an id is made, deserialization
+/// included; the name is the plug-name grammar `big_plugs` enforces (dots allowed, never
+/// leading, trailing or doubled).
+#[test]
+fn micro_id_text_form_is_a_did_slash_a_plug_name() {
+    let id =
+        MicroId::parse("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK/dayframe.counter")
+            .unwrap();
+    assert_eq!(
+        id.namespace(),
+        "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+    );
+    assert_eq!(id.name(), "dayframe.counter");
+    assert_eq!(id.to_string(), id.as_str());
+    assert_eq!(MicroId::installed(id.namespace(), id.name()).unwrap(), id);
+    // Percent escapes are uppercase hex, `:` may appear in the method-specific id.
+    MicroId::parse("did:web:example.com%3A8080:users/photos").unwrap();
+    for bad in [
+        "dayframe.counter",
+        "/dayframe.counter",
+        "did:example:x/",
+        "example:x/dayframe.counter",
+        "did:Example:x/dayframe.counter",
+        "did:example:/dayframe.counter",
+        "did:example:x:/dayframe.counter",
+        "did:example:x%3a/dayframe.counter",
+        "did:example:x/.dayframe",
+        "did:example:x/dayframe.",
+        "did:example:x/day..frame",
+        "did:example:x/Dayframe",
+        "did:example:x/1dayframe",
+        "did:example:x/dayframe.counter/more",
+    ] {
+        assert!(MicroId::parse(bad).is_err(), "{bad:?} must be refused");
+        assert!(
+            serde_json::from_value::<MicroId>(serde_json::json!(bad)).is_err(),
+            "{bad:?} must not deserialize"
+        );
+    }
+    assert!(MicroId::installed(LOCAL_NAMESPACE, &"a".repeat(65)).is_err());
+}
+
+/// A request omits `necessity` when it is `required` and `resolution` when it is `configured`,
+/// exactly as `big_plugs_core::request::Request` does, so a canonical manifest stays minimal;
+/// an omitted member reads back as its default and a non-default one is kept.
+#[test]
+fn request_defaults_are_off_the_wire() {
+    let request = Request {
+        binding: "shelf".into(),
+        contract: shelf(),
+        access: Some(Access::Read),
+        necessity: Necessity::Required,
+        resolution: BindingResolution::Configured,
+        min_revision: None,
+    };
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"binding": "shelf", "contract": "org.example.test.shelf", "access": "read"})
+    );
+    assert_eq!(serde_json::from_value::<Request>(wire).unwrap(), request);
+    let explicit = Request {
+        necessity: Necessity::Optional,
+        resolution: BindingResolution::AtRuntime,
+        ..request
+    };
+    let wire = serde_json::to_value(&explicit).unwrap();
+    assert_eq!(wire["necessity"], "optional");
+    assert_eq!(wire["resolution"], "atRuntime");
+    assert_eq!(serde_json::from_value::<Request>(wire).unwrap(), explicit);
 }
 
 #[test]
@@ -300,6 +378,58 @@ fn sidecar_without_authority_omits_it_and_roundtrips() {
     let json = serde_json::to_value(&sidecar).unwrap();
     assert!(json.get("authority").is_none());
     assert_eq!(serde_json::from_value::<Sidecar>(json).unwrap(), sidecar);
+}
+
+/// A declared contract may use a schema outside the package's authority only by requesting it
+/// (ADR 028 §4): the request's `contract` names the schema. An unrequested one is refused.
+#[test]
+fn a_contract_may_reference_a_foreign_schema_it_requests() {
+    let foreign = Nsid::literal("org.other.tally.value");
+    let mut sidecar = canonical_sidecar();
+    sidecar.manifest.collection_contracts[0].value_schema = foreign.clone();
+    assert_eq!(
+        sidecar.validate().unwrap_err(),
+        "value schema org.other.tally.value is outside the package's authority \
+         org.example.test.counter"
+    );
+    sidecar.manifest.requires.push(Request {
+        binding: "tally-value".into(),
+        contract: foreign.clone(),
+        access: None,
+        necessity: Necessity::Required,
+        resolution: BindingResolution::Configured,
+        min_revision: None,
+    });
+    sidecar.validate().unwrap();
+    // The write-context schema is held to the same rule, and a request for another NSID does
+    // not stand in for it.
+    let context = Nsid::literal("org.other.tally.context");
+    sidecar.manifest.collection_contracts[0].write_context_schema = Some(context.clone());
+    assert!(
+        sidecar
+            .validate()
+            .unwrap_err()
+            .starts_with("write-context schema org.other.tally.context is outside")
+    );
+    sidecar.manifest.collection_requests.push(Request {
+        binding: "tally-context".into(),
+        contract: context,
+        access: Some(Access::Read),
+        necessity: Necessity::Optional,
+        resolution: BindingResolution::Configured,
+        min_revision: None,
+    });
+    sidecar.validate().unwrap();
+}
+
+#[test]
+fn a_package_id_is_a_plug_name() {
+    let mut sidecar = canonical_sidecar();
+    sidecar.id = "Dayframe.Counter".into();
+    assert_eq!(
+        sidecar.validate().unwrap_err(),
+        "package id \"Dayframe.Counter\" is not a plug name"
+    );
 }
 
 #[test]

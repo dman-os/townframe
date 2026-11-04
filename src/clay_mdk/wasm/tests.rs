@@ -6,6 +6,7 @@ use crate::MicroId;
 use crate::PublicationDeclaration;
 use crate::PublicationKind;
 use clay_collection::Nsid;
+use clay_collection::ReplicaId;
 use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
 use clay_dioxus::SurfaceWriter;
@@ -116,10 +117,10 @@ impl Rig {
         let resources = Resources::new(
             components.clone(),
             DocumentService::new(16),
-            CollectionRegistry::default(),
+            CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
         );
         let package = counter_package().await;
-        let id = clay_host::MicroId::new("test.wasm");
+        let id = clay_host::MicroId::new(MicroId::local("test.wasm").as_str());
         let micro = ConfiguredMicro {
             identity: id.clone(),
             eager: false,
@@ -128,7 +129,7 @@ impl Rig {
             unresolved_bindings: Vec::new(),
             factory: factory(
                 resources.clone(),
-                MicroId::new("test.wasm"),
+                MicroId::local("test.wasm"),
                 declared,
                 CollectionBindings::default(),
                 move || {

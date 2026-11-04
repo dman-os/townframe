@@ -8,6 +8,7 @@ use crate::PublicationKind;
 use crate::Registration;
 use crate::Request;
 use crate::Sidecar;
+use clay_collection::ReplicaId;
 use clay_guest_session::capabilities::PublicationEndpoint;
 use clay_guest_session::capabilities::presentation_component;
 use clay_guest_session::collections::bytes_registrations;
@@ -34,6 +35,11 @@ fn blank() -> Element {
 }
 
 /// One test micro's manifest-side declaration; `Rig::micro` pairs it with an `activate`.
+/// The supervisor-side id of the built-in micro named `name`, the one its factory is given.
+fn host_id(name: &str) -> clay_host::MicroId {
+    clay_host::MicroId::new(crate::MicroId::local(name).as_str())
+}
+
 #[derive(Default)]
 struct Spec {
     publications: Vec<PublicationDeclaration>,
@@ -55,7 +61,7 @@ impl Rig {
         let resources = Resources::new(
             NativeComponents::new(&host),
             DocumentService::new(16),
-            CollectionRegistry::default(),
+            CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
         );
         resources
             .collections
@@ -89,14 +95,14 @@ impl Rig {
         };
         manifest.validate().unwrap();
         ConfiguredMicro {
-            identity: clay_host::MicroId::new(id),
+            identity: host_id(id),
             eager: spec.eager,
             enabled: true,
             requirements: spec.requirements,
             unresolved_bindings: Vec::new(),
             factory: factory(
                 self.resources.clone(),
-                crate::MicroId::new(id),
+                crate::MicroId::local(id),
                 manifest,
                 spec.bindings,
                 activate,
@@ -188,7 +194,7 @@ async fn declared_presentations_are_published_by_name_and_leased() {
             },
         );
         let supervisor = Supervisor::new(rig.host.clone(), [micro]);
-        let id = clay_host::MicroId::new("native.shelf");
+        let id = host_id("native.shelf");
         let view = supervisor.acquire(&id, "view").await.unwrap();
         let detail = supervisor.acquire(&id, "detail").await.unwrap();
         assert_eq!(view.name(), "view");
@@ -234,7 +240,7 @@ async fn publishing_an_undeclared_name_fails_initialization() {
             },
         );
         let supervisor = Supervisor::new(rig.host.clone(), [micro]);
-        let id = clay_host::MicroId::new("native.rogue");
+        let id = host_id("native.rogue");
         let error = supervisor.acquire(&id, "view").await.err().unwrap();
         assert!(
             matches!(&error, StartError::Faulted(message) if message.contains("undeclared")),
@@ -284,10 +290,7 @@ async fn registration_rows_reach_a_reader_and_are_retracted_when_the_writer_clos
         while titles(&watch) != [("counter".to_owned(), "Counter".to_owned())] {
             watch.changed().await.unwrap();
         }
-        supervisor
-            .disable(&clay_host::MicroId::new("native.writer"))
-            .await
-            .unwrap();
+        supervisor.disable(&host_id("native.writer")).await.unwrap();
         while !titles(&watch).is_empty() {
             watch.changed().await.unwrap();
         }
@@ -404,7 +407,7 @@ async fn each_incarnation_sees_the_binding_resolution_current_when_it_started() 
             }
         });
         let supervisor = Supervisor::new(rig.host.clone(), [micro]);
-        let id = clay_host::MicroId::new("native.rebound");
+        let id = host_id("native.rebound");
         supervisor.reconfigure(&id, vec![]).await.unwrap();
         supervisor.acquire(&id, "none").await.err().unwrap();
         // The binding changes while the incarnation runs: it keeps what it started with,
@@ -485,7 +488,7 @@ fn required(binding: &str, necessity: Necessity) -> Request {
 
 fn provides(provider: &str, publication: &str) -> Requirement {
     Requirement {
-        provider: clay_host::MicroId::new(provider),
+        provider: host_id(provider),
         publication: publication.into(),
     }
 }
@@ -716,7 +719,8 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
             extra: BTreeMap::new(),
         },
     );
-    let rows = declared_rows(&sidecar).unwrap();
+    let micro = crate::MicroId::local("native.declares");
+    let rows = declared_rows(&micro, &sidecar).unwrap();
     let mut key = Vec::new();
     ciborium::into_writer("native.declares", &mut key).unwrap();
     let value = rows["roots"][&key].clone().unwrap();
@@ -732,18 +736,22 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
         value.attachments,
         [clay_guest_session::capabilities::RowAttachment::Endpoint(
             PublicationEndpoint {
-                micro: clay_host::MicroId::new("native.declares"),
+                micro: host_id(micro.name()),
                 publication: "view".into(),
                 contract: presentation_component(),
             }
         )]
     );
     assert_ne!(
-        manifest_scope(&clay_host::MicroId::new("native.declares")),
-        runtime_scope(&clay_host::MicroId::new("native.declares"))
+        manifest_scope(&host_id(micro.name())),
+        runtime_scope(&host_id(micro.name()))
     );
 
     // An attachment index that the contribution does not declare is refused.
     sidecar.manifest.contributions[0].attachments[0].index = 3;
-    assert!(declared_rows(&sidecar).unwrap_err().contains("index 3"));
+    assert!(
+        declared_rows(&micro, &sidecar)
+            .unwrap_err()
+            .contains("index 3")
+    );
 }

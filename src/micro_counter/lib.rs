@@ -175,6 +175,7 @@ mod tests {
     use clay_mdk::host::CollectionBindings;
     use clay_mdk::host::CollectionRegistry;
     use clay_mdk::host::DocumentService;
+    use clay_mdk::host::ReplicaId;
     use clay_mdk::host::Resources;
     use clay_mdk::host::factory;
     use std::collections::BTreeMap;
@@ -187,7 +188,7 @@ mod tests {
                 let resources = Resources::new(
                     NativeComponents::new(&host),
                     DocumentService::new(16),
-                    CollectionRegistry::default(),
+                    CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
                 );
                 // Standalone: no configuration document granted, so the count lives in memory.
                 let manifest = MicroManifest {
@@ -195,21 +196,21 @@ mod tests {
                     ..micro_counter_manifest::manifest()
                 };
                 let counter = ConfiguredMicro {
-                    identity: MicroId::new(micro_counter_manifest::ID),
+                    identity: MicroId::from(&clay_mdk::MicroId::local(micro_counter_manifest::ID)),
                     eager: true,
                     enabled: true,
                     requirements: BTreeMap::new(),
                     unresolved_bindings: Vec::new(),
                     factory: factory(
                         resources,
-                        clay_mdk::MicroId::new(micro_counter_manifest::ID),
+                        clay_mdk::MicroId::local(micro_counter_manifest::ID),
                         manifest,
                         CollectionBindings::default(),
                         ACTIVATE,
                     ),
                 };
                 let supervisor = Supervisor::new(host.clone(), [counter]);
-                let id = MicroId::new(micro_counter_manifest::ID);
+                let id = MicroId::from(&clay_mdk::MicroId::local(micro_counter_manifest::ID));
                 assert!(supervisor.reconcile().await.is_empty());
                 for name in [VIEW, BADGE] {
                     drop(supervisor.acquire(&id, name).await.unwrap());

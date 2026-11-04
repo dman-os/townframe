@@ -3,12 +3,13 @@
 // Build and serve the `dayframe_web` shell (ADR 018 migration steps 6–7): the shared
 // composition plus every package in `packages/index.json`. Each entry's manifest is the
 // sidecar `<name>.manifest.json` beside the component (STAND-IN until `big_plugs` delivers
-// manifests) and is pinned with the SHA-256 of the component bytes; the shell fetches a
+// manifests) and is pinned with the BLAKE3 digest of the component bytes; the shell fetches a
 // package only when an instance activates and verifies the digest before `wcmp` compiles it.
 //
 //   deno run --allow-all x/dayframe-web.ts            build, then serve on HOST:PORT
 //   deno run --allow-all x/dayframe-web.ts --build    build only
 
+import { crypto } from "jsr:@std/crypto@1.0.5";
 import { $, useDotenvTargetDir } from "./utils.ts";
 
 const buildOnly = Deno.args.includes("--build");
@@ -45,8 +46,10 @@ if (!packageDirectory) {
   );
 }
 
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+// BLAKE3, the digest big_blobs uses and `clay_mdk::package::Package::digest` computes (Deno's
+// Deno's own WebCrypto lacks it; `@std/crypto` adds it).
+async function blake3Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("BLAKE3", bytes.slice().buffer);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
@@ -83,7 +86,7 @@ await Deno.mkdir(site.join("packages").toString(), { recursive: true });
   );
   const index = [{
     location: "packages/counter.component.wasm",
-    digest: await sha256Hex(counterBytes),
+    digest: await blake3Hex(counterBytes),
     sidecar,
   }];
   await Deno.writeFile(

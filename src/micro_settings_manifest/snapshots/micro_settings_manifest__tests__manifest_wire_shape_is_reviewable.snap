@@ -36,13 +36,9 @@ collection_requests:
   - binding: sections
     contract: org.example.dayframe.settings.sections
     access: read
-    necessity: required
-    resolution: configured
   - binding: roots
     contract: org.example.clay.shell.roots
     access: write
-    necessity: required
-    resolution: configured
 contributions:
   - id: root
     binding: roots
