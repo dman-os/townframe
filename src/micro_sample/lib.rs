@@ -6,9 +6,11 @@ mod view;
 
 use clay_mdk::Access;
 use clay_mdk::Attachment;
+use clay_mdk::AttachmentDeclaration;
 use clay_mdk::BindingResolution;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::Context;
+use clay_mdk::ContributionDeclaration;
 use clay_mdk::Entrypoints;
 use clay_mdk::Error;
 use clay_mdk::FacetAccess;
@@ -22,6 +24,7 @@ use clay_mdk::RowAttachment;
 use clay_mdk::Sidecar;
 use clay_mdk::host::DocumentService;
 use dioxus::prelude::*;
+use micro_layout_manifest::PANELS;
 use micro_settings_manifest::SECTIONS;
 use micro_settings_manifest::Section;
 use serde::Deserialize;
@@ -38,6 +41,8 @@ pub const CONFIG_KEY: &str = "main";
 pub const DETAIL: &str = "detail";
 /// The local binding name under which the sample registers its Settings section.
 pub const SECTIONS_BINDING: &str = "sections";
+/// The local binding name under which the sample contributes its layout panel.
+pub const PANELS_BINDING: &str = "panels";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SampleConfig {
@@ -69,15 +74,39 @@ pub fn manifest() -> MicroManifest {
             }],
         }],
         collection_contracts: vec![],
-        collection_requests: vec![Request {
-            binding: SECTIONS_BINDING.into(),
-            contract: Nsid::literal(SECTIONS),
-            access: Some(Access::Write),
-            necessity: Necessity::Required,
-            resolution: BindingResolution::Configured,
-            min_revision: None,
+        collection_requests: vec![
+            Request {
+                binding: SECTIONS_BINDING.into(),
+                contract: Nsid::literal(SECTIONS),
+                access: Some(Access::Write),
+                necessity: Necessity::Required,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
+            Request {
+                binding: PANELS_BINDING.into(),
+                contract: Nsid::literal(PANELS),
+                access: Some(Access::Write),
+                necessity: Necessity::Optional,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
+        ],
+        // The layout panel is declared, not written at runtime: it is listed while the sample is
+        // stopped, and showing it starts the sample.
+        contributions: vec![ContributionDeclaration {
+            id: "layout-panel".into(),
+            binding: PANELS_BINDING.into(),
+            key: ID.into(),
+            payload: serde_json::json!({
+                "title": "Sample micro",
+                "content": { "$attachment": 0 },
+            }),
+            attachments: vec![AttachmentDeclaration {
+                index: 0,
+                publication: DETAIL.into(),
+            }],
         }],
-        contributions: vec![],
         extra: Default::default(),
     }
 }

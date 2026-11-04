@@ -50,6 +50,8 @@ members = [
   "./src/micro_settings",
   "./src/micro_toolbar_manifest",
   "./src/micro_toolbar",
+  "./src/micro_layout_manifest",
+  "./src/micro_layout",
   "./src/micro_sample",
   "./src/micro_counter",
   "./src/micro_collection_probe",
@@ -127,6 +129,7 @@ micro_settings_manifest = { path = "./src/micro_settings_manifest" }
 micro_settings = { path = "./src/micro_settings" }
 micro_toolbar_manifest = { path = "./src/micro_toolbar_manifest" }
 micro_toolbar = { path = "./src/micro_toolbar" }
+micro_layout_manifest = { path = "./src/micro_layout_manifest" }
 micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }

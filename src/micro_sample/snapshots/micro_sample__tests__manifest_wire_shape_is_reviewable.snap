@@ -28,4 +28,18 @@ collection_requests:
   - binding: sections
     contract: org.example.dayframe.settings.sections
     access: write
-contributions: []
+  - binding: panels
+    contract: org.example.dayframe.layout.panels
+    access: write
+    necessity: optional
+contributions:
+  - id: layout-panel
+    binding: panels
+    key: dayframe.sample
+    payload:
+      content:
+        $attachment: 0
+      title: Sample micro
+    attachments:
+      - index: 0
+        publication: detail

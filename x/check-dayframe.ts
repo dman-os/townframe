@@ -22,10 +22,11 @@ const isolated = ["--config", 'resolver.feature-unification="selected"'];
 // workspace has its own lockfile and resolution.
 const witBindgen = ["-e", "features", "-i", "wit-bindgen@0.62.0"];
 const resolutions = [
-  ...["micro_counter", "micro_collection_probe", "clay_mdk"].map((guest) =>
-    $`cargo tree --locked --offline ${isolated} -p ${guest} --target wasm32-wasip3 ${witBindgen}`
-      .text()
-  ),
+  ...["micro_counter", "micro_layout", "micro_collection_probe", "clay_mdk"]
+    .map((guest) =>
+      $`cargo tree --locked --offline ${isolated} -p ${guest} --target wasm32-wasip3 ${witBindgen}`
+        .text()
+    ),
   $`cargo tree --locked --offline --manifest-path src/wasm_utils_rs/Cargo.toml --workspace --target wasm32-wasip3 ${witBindgen}`
     .text(),
 ];
@@ -38,6 +39,7 @@ for (const resolved of await Promise.all(resolutions)) {
 }
 
 await $`cargo build --locked ${isolated} -p micro_counter --target wasm32-wasip3`;
+await $`cargo build --locked ${isolated} -p micro_layout --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p micro_collection_probe --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --target wasm32-wasip3`;
 await $`cargo build --locked ${isolated} -p clay_mdk --example lifecycle --target wasm32-wasip3`;
@@ -51,6 +53,7 @@ await Deno.mkdir(directory.toString(), { recursive: true });
 // Prepared guest components, keyed by the guest name `component_package`/env vars use.
 const components: Record<string, [string, string]> = {
   counter: ["wasm32-wasip3/debug/micro_counter.wasm", "counter"],
+  layout: ["wasm32-wasip3/debug/micro_layout.wasm", "layout"],
   collectionProbe: [
     "wasm32-wasip3/debug/micro_collection_probe.wasm",
     "collection-probe",
@@ -72,18 +75,25 @@ for (const name in components) {
   console.log(`${variable}=${artifact}`);
 }
 
-// The counter is also a package: the desktop shell scans a package directory for
+// The counter and the layout are also packages: the desktop shell scans a package directory for
 // `<name>.manifest.json` sidecars paired with `<name>.component.wasm`, so prepare that
-// directory beside the raw fixtures. STAND-IN until `big_plugs` delivers manifests; the
-// sidecar is emitted from the counter's manifest crate.
+// directory beside the raw fixtures. STAND-IN until `big_plugs` delivers manifests; each
+// sidecar is emitted from the package's manifest crate.
 const packagesDirectory = directory.join("packages");
 await Deno.mkdir(packagesDirectory.toString(), { recursive: true });
-await $`cp ${directory.join("counter.component.wasm")} ${
-  packagesDirectory.join("counter.component.wasm")
-}`;
-await $`cargo run --locked -q -p micro_counter_manifest --example emit_manifest -- ${
-  packagesDirectory.join("counter.manifest.json")
-}`;
+for (
+  const [name, manifestCrate] of [
+    ["counter", "micro_counter_manifest"],
+    ["layout", "micro_layout_manifest"],
+  ]
+) {
+  await $`cp ${directory.join(`${name}.component.wasm`)} ${
+    packagesDirectory.join(`${name}.component.wasm`)
+  }`;
+  await $`cargo run --locked -q -p ${manifestCrate} --example emit_manifest -- ${
+    packagesDirectory.join(`${name}.manifest.json`)
+  }`;
+}
 componentEnv["DAYFRAME_PACKAGE_DIR"] = packagesDirectory.toString();
 console.log(`DAYFRAME_PACKAGE_DIR=${packagesDirectory}`);
 
