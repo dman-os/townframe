@@ -57,6 +57,15 @@ impl AdmissionModel {
             .any(|source| source.seen && source.present)
     }
 
+    /// Whether admission may fetch this pair: its inventory is selected and readable, and the
+    /// digest is pinned and observed present at a source.
+    fn fetchable(&self, inventory: usize, digest: usize) -> bool {
+        self.selected(inventory)
+            && self.pairs[inventory][digest].pinned
+            && self.observed(inventory, digest)
+            && self.readable[inventory]
+    }
+
     fn invalidate_fetches(&mut self, inventory: usize) {
         for pair in &mut self.pairs[inventory] {
             pair.fetching = false;
@@ -417,10 +426,7 @@ async fn run_script(script: Vec<Command>) {
             } => {
                 let pair = model.pairs[inventory][digest_index];
                 let expected = pair.created
-                    && model.selected(inventory)
-                    && pair.pinned
-                    && model.observed(inventory, digest_index)
-                    && model.readable[inventory]
+                    && model.fetchable(inventory, digest_index)
                     && !pair.bytes
                     && !pair.fetching;
                 let actual = admission
@@ -445,10 +451,7 @@ async fn run_script(script: Vec<Command>) {
                 };
                 let expected = attempt_live
                     && authorized
-                    && model.selected(inventory_index)
-                    && model.pairs[inventory_index][digest_index].pinned
-                    && model.observed(inventory_index, digest_index)
-                    && model.readable[inventory_index]
+                    && model.fetchable(inventory_index, digest_index)
                     && model.pairs[inventory_index][digest_index].fetching;
                 let actual = admission
                     .complete(attempt, authorized)
