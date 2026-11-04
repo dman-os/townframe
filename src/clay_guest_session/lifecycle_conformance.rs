@@ -71,6 +71,7 @@ mod context;
 pub use context::context_collections_and_calls;
 pub use context::context_follows_a_provider;
 pub use context::context_retains_a_call;
+pub use context::context_sees_a_closed_provider_revoked;
 
 /// The manifest's names (`provides[].id`) for the fixture's two publications: a presentation
 /// and an `echo` call whose handler answers `echo:` plus the request.

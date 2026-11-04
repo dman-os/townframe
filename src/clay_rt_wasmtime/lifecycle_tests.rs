@@ -154,3 +154,13 @@ async fn context_retains_a_call() {
         .run_until(lifecycle_conformance::context_retains_a_call(engine))
         .await;
 }
+
+/// A guest's bound reference to a provider that idle-closed reads `revoked` through the WIT on
+/// this engine, and a call or retain through it fails as revoked without activating anything.
+#[tokio::test]
+async fn context_sees_a_closed_provider_revoked() {
+    let engine = Wasmtime::load_fixture("context").await;
+    tokio::task::LocalSet::new()
+        .run_until(lifecycle_conformance::context_sees_a_closed_provider_revoked(engine))
+        .await;
+}
