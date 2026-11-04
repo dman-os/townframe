@@ -31,6 +31,7 @@ use std::collections::BTreeSet;
 mod blob_discovery;
 mod blobs;
 mod dispatch;
+mod listeners;
 mod nodule_wasm;
 mod plugs;
 
@@ -93,6 +94,7 @@ fn config<'a>(
             authorities: ["org.example".to_owned()].into(),
             ..Default::default()
         },
+        listeners: Default::default(),
     }
 }
 

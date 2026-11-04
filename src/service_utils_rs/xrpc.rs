@@ -21,6 +21,8 @@ mod router;
 mod serve;
 #[cfg(test)]
 mod tests;
+#[cfg(unix)]
+mod unix;
 
 pub use client::XrpcClient;
 pub use client::XrpcClientError;
@@ -36,11 +38,21 @@ pub use router::XrpcOperationHandler;
 pub use router::XrpcRegistrationError;
 pub use router::XrpcRouter;
 pub use router::XrpcSubscriptionHandler;
+pub use serve::AcceptFuture;
+pub use serve::ConnectionAcceptor;
 pub use serve::serve;
+pub use serve::serve_with_acceptor;
 pub use serve::serve_with_connection_limit;
+#[cfg(unix)]
+pub use unix::PeerCredentials;
+#[cfg(unix)]
+pub use unix::UnixConnectionAcceptor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XrpcRequest {
+    /// The NSID the request addressed. A fallback handler serves many NSIDs and learns which
+    /// one here; a registered handler already knows its own.
+    pub nsid: String,
     pub context: RequestContext,
     pub metadata: HttpMetadata,
     pub params: Value,

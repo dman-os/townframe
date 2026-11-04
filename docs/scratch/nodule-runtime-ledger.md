@@ -250,6 +250,18 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 ### Plan N (the node PR, branch `feat/big-node`)
 - **N1 (done).** `big_dispatch` and `big_dispatch_core` own the router, admission and providers. `Readiness` and `authority_owns` moved with them. One `ServiceProvider` adapter (via `Protocol::visit_unary`) registers authority, docs, drawers, blobs, plugs and nodules as `builtin:<service>`. Callers hold two capabilities (a dispatch handle plus the in-request `Authorization`); the dispatch caller's identity does not flow into services yet. Subscriptions are not routed through dispatch. Follow-up: the invoke/mint/`Echo` test helpers are duplicated in `big_dispatch/e2e.rs` and `big_nodule/e2e/dispatch.rs`.
 - **N1. `big_dispatch` crate.** Move the router, admission and provider registry out of `big_nodule`. Register docs, drawers, blobs, authority, plugs and nodule-management operations as built-in providers. `big_nodule` registers its Wasm providers into it. Tests: a built-in operation and a nodule operation are reached through the one router with the same admission.
+- **N2 (done).**
+  - `/xrpc/<nsid>` is a fallback in front of dispatch, on the existing XRPC server and its envelopes. Dispatch refusals map to 401/403/404/503.
+  - The caller presents `Authorization: Bearer <authority>.<signer>` (`BearerToken`, the existing minted dispatch handle).
+  - `Anonymous` per listener: a token-less request over UDS is the operator (`Authorization::identity(root)`); over TCP it gets 401.
+  - The UDS acceptor reports `PeerCredentials` (tokio `peer_cred`). The `big_node` `OwnerOnly` wrapper refuses another uid before any request is read.
+  - The socket directory is 0700, a 0755 parent is refused, a stale socket is replaced, a live one is refused, and stop removes the socket.
+  - `XrpcClient::unix`.
+  - Open questions:
+    1. Built-in services still require their capability in the request body, so a CLI needs the root `CapId` plus minted service caps. Dispatch admission does not pass the caller's identity into services.
+    2. Minting narrowing tokens over the wire (dispatch `mintCapability` is not served through the router), and client-side token storage.
+    3. Windows: no transport or token rule.
+  - Not done: GET/query operations (e.g. docs `getDocAvailability`) through the fallback; TLS on TCP.
 - **N2. Listeners.** Serve the node router over UDS (token handshake that yields a capability) and TCP (`service_utils_rs` already has TCP serving; add a UDS acceptor). A `Client` over XRPC/UDS drives a node end to end.
 - **N3. Resource bindings.** Node config moves from paths to bindings: a SQL handle with a scope key, a blob store, secrets. `big_repo` stops opening `StorageConfig::Disk` itself. Test: boot and stop 20 nodes in one process with nothing leaked (databases, files, tasks).
 - **N4. Peers and networking.**

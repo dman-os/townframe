@@ -139,7 +139,10 @@ struct ScriptedAcceptor {
 }
 
 impl ConnectionAcceptor for ScriptedAcceptor {
-    fn accept(&mut self) -> AcceptFuture<'_> {
+    type Stream = tokio::net::TcpStream;
+    type Peer = std::net::SocketAddr;
+
+    fn accept(&mut self) -> AcceptFuture<'_, Self::Stream, Self::Peer> {
         let call = self.calls.fetch_add(1, Ordering::AcqRel);
         if call == 0 {
             let listener = &mut self.listener;
@@ -1873,4 +1876,113 @@ async fn websocket_subscription_streams_hosted_events() {
     shutdown.send(()).expect("shutdown receiver");
     task.await.expect("server task join").expect("server task");
     stop.stop().await;
+}
+
+/// A fallback serves every NSID nothing is registered for, and learns which from the request;
+/// a registered operation still wins; and a query cannot be a fallback.
+#[tokio::test]
+async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() {
+    let mut router = XrpcRouter::new(1024);
+    router
+        .register(XrpcOperationHandler::typed(
+            PROCEDURE_OPERATION,
+            |_context, _metadata, _params: Value| async move { Ok(json!("registered")) },
+        ))
+        .unwrap();
+    assert_eq!(
+        router
+            .register_fallback(XrpcOperationHandler::new(QUERY_OPERATION, |_| async {
+                Ok::<_, XrpcHandlerError>(json!(null))
+            }))
+            .unwrap_err(),
+        XrpcRegistrationError::FallbackNotProcedure
+    );
+    let fallback = || {
+        XrpcOperationHandler::new(
+            XrpcOperation::procedure(""),
+            |request: XrpcRequest| async move {
+                Ok::<_, XrpcHandlerError>(json!({ "nsid": request.nsid, "input": request.params }))
+            },
+        )
+    };
+    router.register_fallback(fallback()).unwrap();
+    assert_eq!(
+        router.register_fallback(fallback()).unwrap_err(),
+        XrpcRegistrationError::DuplicateFallback
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (task, shutdown) = serve(listener, router.into_router()).await.unwrap();
+    let client = reqwest::Client::new();
+    let post = |nsid: &'static str| {
+        let client = client.clone();
+        async move {
+            client
+                .post(format!("http://{address}/xrpc/{nsid}"))
+                .json(&json!({ "n": 1 }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(post("org.example.test.write").await, json!("registered"));
+    assert_eq!(
+        post("org.example.anything.at.all").await,
+        json!({ "nsid": "org.example.anything.at.all", "input": { "n": 1 } })
+    );
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+/// The Unix transport end to end: the acceptor reports the kernel's credentials for the peer,
+/// every request of the connection can read them, and an `XrpcClient` reaches the server over
+/// the socket.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_unix_acceptor_reports_peer_credentials_to_the_handlers() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("server.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let mut router = XrpcRouter::new(1024);
+    router
+        .register(XrpcOperationHandler::new(
+            PROCEDURE_OPERATION,
+            |_request| async move { Ok::<_, XrpcHandlerError>(json!("ok")) },
+        ))
+        .unwrap();
+    let seen = Arc::new(Mutex::new(None));
+    let observed = Arc::clone(&seen);
+    let router = router.into_router().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let observed = Arc::clone(&observed);
+            async move {
+                *observed.lock().unwrap() = request.extensions().get::<PeerCredentials>().copied();
+                next.run(request).await
+            }
+        },
+    ));
+    let (task, shutdown) = serve_with_acceptor(UnixConnectionAcceptor::new(listener), router, 4)
+        .await
+        .unwrap();
+    let client = XrpcClient::unix(&path, 1024).unwrap();
+    let output: Value = client
+        .execute::<_, Value, Value>(
+            PROCEDURE_OPERATION,
+            RequestContext::root(),
+            &HttpMetadata::default(),
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output, json!("ok"));
+    // The socket file was created by this process, so its owner is the peer's uid.
+    let credentials = seen.lock().unwrap().expect("the handler saw the peer");
+    assert_eq!(credentials.uid, std::fs::metadata(&path).unwrap().uid());
+    assert_eq!(credentials.pid, Some(std::process::id() as i32));
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
 }

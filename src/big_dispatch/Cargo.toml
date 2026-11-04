@@ -18,6 +18,7 @@ service_utils_rs.workspace = true
 
 # encoding
 serde_json.workspace = true
+http.workspace = true
 irpc.workspace = true
 
 # errors and state

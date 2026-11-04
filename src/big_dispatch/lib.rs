@@ -10,6 +10,7 @@
 
 mod router;
 mod service;
+mod xrpc;
 
 pub use router::Caller;
 pub use router::Provider;
@@ -19,6 +20,8 @@ pub use router::ProviderKind;
 pub use router::ProviderState;
 pub use router::Router;
 pub use service::ServiceProvider;
+pub use xrpc::Anonymous;
+pub use xrpc::xrpc_router;
 
 use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;

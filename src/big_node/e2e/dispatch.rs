@@ -21,7 +21,7 @@ use service_utils_rs::ClientError;
 use service_utils_rs::Operation;
 
 /// The operator's identity narrowed to a dispatch handle that covers `scope` only.
-async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorization {
+pub(super) async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorization {
     let operator = Authorization::identity(node.authority.root);
     let capability = node
         .dispatch
@@ -42,7 +42,7 @@ async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorization {
     }
 }
 
-fn operations(nsids: &[&str]) -> DispatchScope {
+pub(super) fn operations(nsids: &[&str]) -> DispatchScope {
     DispatchScope {
         operations: nsids.iter().map(|nsid| (*nsid).to_owned()).collect(),
         ..Default::default()

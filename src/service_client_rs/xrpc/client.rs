@@ -137,7 +137,15 @@ pub struct XrpcClient {
     client: reqwest::Client,
     base_url: Url,
     max_response_bytes: usize,
+    /// Set when every connection, the subscription handshake's included, goes to this Unix
+    /// socket instead of the host in `base_url`.
+    #[cfg(unix)]
+    unix_socket: Option<std::path::PathBuf>,
 }
+
+/// A byte stream a subscription handshake runs over: TCP or a Unix socket.
+trait HandshakeIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> HandshakeIo for T {}
 
 impl XrpcClient {
     pub fn http_client(&self) -> &reqwest::Client {
@@ -145,6 +153,30 @@ impl XrpcClient {
     }
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+
+    /// A client for the node listening on the Unix socket at `path`. Requests are HTTP/1 over the
+    /// socket; the URL only supplies the `Host` header and path prefix, so it is fixed.
+    #[cfg(unix)]
+    pub fn unix(
+        path: impl Into<std::path::PathBuf>,
+        max_response_bytes: usize,
+    ) -> Result<Self, XrpcClientError<Value>> {
+        let path = path.into();
+        let client = reqwest::Client::builder()
+            .unix_socket(path.as_path())
+            .build()
+            .map_err(|error| XrpcClientError::Transport {
+                message: error.to_string(),
+                outcome_unknown: false,
+            })?;
+        let mut this = Self::with_client(
+            client,
+            Url::parse("http://localhost/").expect("a constant URL parses"),
+            max_response_bytes,
+        )?;
+        this.unix_socket = Some(path);
+        Ok(this)
     }
 
     pub fn new(base_url: Url, max_response_bytes: usize) -> Result<Self, XrpcClientError<Value>> {
@@ -177,6 +209,8 @@ impl XrpcClient {
             client,
             base_url,
             max_response_bytes,
+            #[cfg(unix)]
+            unix_socket: None,
         })
     }
 
@@ -293,12 +327,29 @@ impl XrpcClient {
                 outcome_unknown: false,
             });
         }
-        let mut stream = tokio::net::TcpStream::connect((host.as_str(), port))
-            .await
-            .map_err(|error| XrpcClientError::Transport {
-                message: error.to_string(),
-                outcome_unknown: false,
-            })?;
+        let connect_failed = |error: std::io::Error| XrpcClientError::Transport {
+            message: error.to_string(),
+            outcome_unknown: false,
+        };
+        #[cfg(unix)]
+        let unix_socket = self.unix_socket.as_deref();
+        #[cfg(not(unix))]
+        let unix_socket: Option<&std::path::Path> = None;
+        let mut stream: Box<dyn HandshakeIo> = match unix_socket {
+            #[cfg(unix)]
+            Some(path) => Box::new(
+                tokio::net::UnixStream::connect(path)
+                    .await
+                    .map_err(connect_failed)?,
+            ),
+            #[cfg(not(unix))]
+            Some(_) => unreachable!("a Unix socket client exists only on Unix"),
+            None => Box::new(
+                tokio::net::TcpStream::connect((host.as_str(), port))
+                    .await
+                    .map_err(connect_failed)?,
+            ),
+        };
         let key = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             uuid::Uuid::now_v7().as_bytes(),

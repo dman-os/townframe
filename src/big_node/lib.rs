@@ -1,6 +1,10 @@
 #![recursion_limit = "256"]
 
 mod blob_boot;
+mod listeners;
+
+use listeners::Listener;
+pub use listeners::Listeners;
 
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
@@ -62,6 +66,8 @@ pub struct Config<'a> {
     /// can be granted to invoke. A nodule's own operation grants are minted from it, so a grant
     /// outside it is reported on the nodule's record as not applied.
     pub nodule_operations: DispatchScope,
+    /// The attachments that serve the node's router. Empty is a complete node.
+    pub listeners: Listeners,
 }
 
 pub struct BigNode {
@@ -88,6 +94,8 @@ pub struct BigNode {
     /// The plug registry service and the grouped drawer it keeps its plugs in.
     pub plugs: Plugs,
     pub registry_drawer: DrawerId,
+    /// What the node listens on, as bound (a TCP port of `0` in the config is resolved here).
+    pub listeners: Listeners,
 }
 
 impl BigNode {
@@ -235,8 +243,11 @@ impl BigNode {
                 nodules,
                 plugs,
                 registry_drawer,
+                listeners: Listeners::default(),
             };
             stop.stages.push(node.register_built_ins());
+            let mut node = node;
+            node.listeners = attach_listeners(&node, config.listeners, &mut stop).await?;
             Ok(node)
         })
         .await;
@@ -365,6 +376,33 @@ async fn start_drawers(
     let (drawers, drawers_stop) = big_cabinet::boot_drawers(DrawerConfig { worker }).await?;
     stop.stages.push(Stage::Service(drawers_stop));
     Ok(drawers)
+}
+
+/// Starts the listeners the config asks for and returns what they bound. They come last in boot,
+/// so they stop first: nothing is served from a node that is coming down. Each is pushed as soon
+/// as it runs, so a later one failing to bind still stops the earlier ones.
+async fn attach_listeners(
+    node: &BigNode,
+    requested: Listeners,
+    stop: &mut StopToken,
+) -> Res<Listeners> {
+    let mut bound = Listeners::default();
+    if let Some(path) = requested.unix_socket {
+        let listener = Listener::unix(
+            &path,
+            node.dispatch.client.clone(),
+            Authorization::identity(node.authority.root),
+        )
+        .await?;
+        stop.stages.push(Stage::Listener(listener));
+        bound.unix_socket = Some(path);
+    }
+    if let Some(address) = requested.tcp {
+        let (listener, address) = Listener::tcp(address, node.dispatch.client.clone()).await?;
+        stop.stages.push(Stage::Listener(listener));
+        bound.tcp = Some(address);
+    }
+    Ok(bound)
 }
 
 /// Opens the subsystem actor at `path` under the node root, and its namespace.
@@ -522,6 +560,8 @@ enum Stage {
         worker: DrawerWorker,
         stop: service_utils_rs::StopToken,
     },
+    /// A listener serving the router; stopping closes it and removes its socket file.
+    Listener(Listener),
     /// The built-in providers registered in dispatch's router; stopping unbinds them.
     BuiltIns {
         router: Arc<big_dispatch::Router>,
@@ -539,6 +579,7 @@ impl Stage {
                 stop.stop().await;
                 drop(worker);
             }
+            Self::Listener(listener) => return listener.stop().await,
             Self::BuiltIns {
                 router,
                 provider_ids,

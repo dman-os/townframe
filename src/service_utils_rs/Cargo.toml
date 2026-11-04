@@ -47,6 +47,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 url.workspace = true
+tempfile.workspace = true
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
 reqwest.workspace = true

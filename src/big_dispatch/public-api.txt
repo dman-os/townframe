@@ -16,3 +16,5 @@ pub use big_dispatch::router :: ProviderKind
 pub use big_dispatch::router :: ProviderState
 pub use big_dispatch::router :: Router
 pub use big_dispatch::service :: ServiceProvider
+pub use big_dispatch::xrpc :: Anonymous
+pub use big_dispatch::xrpc :: xrpc_router

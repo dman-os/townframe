@@ -1554,6 +1554,7 @@ dependencies = [
  "big_cabinet_core",
  "big_dispatch_core",
  "futures",
+ "http",
  "irpc",
  "keyring-core",
  "secrets_rs",
@@ -1605,6 +1606,7 @@ dependencies = [
  "subduction_iroh",
  "tempfile",
  "tokio",
+ "tracing",
  "utils_rs",
 ]
 
@@ -14179,6 +14181,7 @@ dependencies = [
  "serde_urlencoded",
  "service_client_rs",
  "service_core_rs",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",

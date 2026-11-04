@@ -216,6 +216,7 @@ impl XrpcSubscriptionHandler {
 #[derive(Clone, Debug)]
 pub struct XrpcRouter {
     operations: Arc<BTreeMap<String, XrpcOperationHandler>>,
+    fallback: Option<XrpcOperationHandler>,
     subscriptions: Arc<BTreeMap<String, XrpcSubscriptionHandler>>,
     max_body_bytes: usize,
     admission: Arc<Semaphore>,
@@ -235,6 +236,10 @@ pub enum XrpcRegistrationError {
     DuplicateOperation(String),
     #[error("XRPC subscriptions are not supported by the unary HTTP adapter")]
     SubscriptionUnsupported,
+    #[error("the XRPC fallback handler must be a procedure")]
+    FallbackNotProcedure,
+    #[error("an XRPC fallback handler is already registered")]
+    DuplicateFallback,
 }
 
 impl XrpcRouter {
@@ -266,6 +271,7 @@ impl XrpcRouter {
         );
         Self {
             operations: Arc::new(BTreeMap::new()),
+            fallback: None,
             subscriptions: Arc::new(BTreeMap::new()),
             max_body_bytes,
             admission: Arc::new(Semaphore::new(max_concurrent_handlers)),
@@ -411,6 +417,25 @@ impl XrpcRouter {
         Ok(())
     }
 
+    /// Installs the handler that serves every NSID no operation is registered for, for a router
+    /// whose operations are not known when it is built (a reverse proxy in front of a routing
+    /// table that changes at runtime). It is a procedure: the request's `nsid` names the
+    /// operation, and its JSON body is the input. Registered operations take precedence.
+    pub fn register_fallback(
+        &mut self,
+        handler: XrpcOperationHandler,
+    ) -> Result<(), XrpcRegistrationError> {
+        let operation = handler.operation();
+        if operation.kind != XrpcKind::Procedure {
+            return Err(XrpcRegistrationError::FallbackNotProcedure);
+        }
+        if self.fallback.is_some() {
+            return Err(XrpcRegistrationError::DuplicateFallback);
+        }
+        self.fallback = Some(handler);
+        Ok(())
+    }
+
     /// Builds an Axum router.  The caller owns the listener and task, which
     /// keeps shutdown and a future Iroh listener outside this transport seam.
     pub fn into_router(self) -> Router {
@@ -483,7 +508,7 @@ async fn dispatch(
         )
         .await;
     }
-    let Some(handler) = router.operations.get(&nsid) else {
+    let Some(handler) = router.operations.get(&nsid).or(router.fallback.as_ref()) else {
         return error_response(
             StatusCode::NOT_FOUND,
             request_id,
@@ -566,6 +591,7 @@ async fn dispatch(
         }
     };
     let call = handler.call(XrpcRequest {
+        nsid,
         context: context.clone(),
         metadata: metadata.clone(),
         params,
@@ -603,7 +629,7 @@ async fn dispatch(
 async fn dispatch_subscription(
     subscription: XrpcSubscriptionHandler,
     admission: Arc<Semaphore>,
-    _nsid: String,
+    nsid: String,
     raw_query: Option<String>,
     parts: axum::http::request::Parts,
     request_id: Option<uuid::Uuid>,
@@ -680,6 +706,7 @@ async fn dispatch_subscription(
         .cloned()
         .unwrap_or(crate::TransportContext::Http);
     let (metadata_out, mut stream) = match (subscription.handler)(XrpcRequest {
+        nsid,
         context,
         metadata,
         params,
