@@ -61,9 +61,11 @@ test("a disabled counter stays disabled across a reload", async ({ page }) => {
   await page.getByText("Micro lifecycle controls").click();
   await page.getByRole("button", { name: "Enable dayframe.counter micro" }).click();
   await page.getByRole("button", { name: "Disable dayframe.counter micro" }).click();
+  // The toggle is inert until the datum reached IndexedDB; a reload before that would race
+  // the write, since a reload does not run the persister's shutdown drain.
   await expect(
     page.getByRole("button", { name: "Enable dayframe.counter micro" }),
-  ).toBeVisible();
+  ).toBeEnabled();
 
   await page.reload();
   await page.getByText("Micro lifecycle controls").click();

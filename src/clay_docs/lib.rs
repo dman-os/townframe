@@ -243,6 +243,10 @@ struct State {
     /// Set by [`DocumentService::durable`]: every change to `source` is queued here, in order,
     /// for the persist future to apply to the store.
     persist: Persistence,
+    /// How many source changes have been queued for persistence so far.
+    queued: u64,
+    /// How many of them the persist future has applied to the store; `None` when volatile.
+    applied: Option<watch::Receiver<u64>>,
     // Mock FacetSet lookup: selected document/tag routes, including removal tombstones.
     membership: BTreeMap<(String, String, String), BTreeSet<String>>,
     config_owners: BTreeMap<String, (String, String)>,
@@ -302,6 +306,8 @@ impl DocumentService {
                 capacity,
                 source: BTreeMap::new(),
                 persist: Persistence::Volatile,
+                queued: 0,
+                applied: None,
                 membership: BTreeMap::new(),
                 config_owners: BTreeMap::new(),
                 cache: BTreeMap::new(),
@@ -333,6 +339,7 @@ impl DocumentService {
     ) -> Result<(Self, impl Future<Output = ()> + use<St>), StoreError> {
         let service = Self::new(capacity);
         let (sender, mut queue) = mpsc::unbounded_channel::<(FacetRoute, Option<Value>)>();
+        let (applied_sender, applied) = watch::channel(0_u64);
         let stored = store.scan_prefix(b"").await?;
         {
             let mut state = service.inner.lock().unwrap();
@@ -346,8 +353,10 @@ impl DocumentService {
                 state.source.insert(route, value);
             }
             state.persist = Persistence::Open(sender);
+            state.applied = Some(applied);
         }
         let persist = async move {
+            let mut applied_count = 0_u64;
             while let Some(first) = queue.recv().await {
                 let mut batch = Vec::new();
                 let mut next = Some(first);
@@ -361,14 +370,35 @@ impl DocumentService {
                         None => BatchOp::Delete(key),
                     });
                     next = queue.try_recv().ok();
+                    applied_count += 1;
                 }
                 store
                     .apply(batch)
                     .await
                     .unwrap_or_else(|error| panic!("persisting the mock document source: {error}"));
+                applied_sender.send_replace(applied_count);
             }
         };
         Ok((service, persist))
+    }
+
+    /// Resolves once every source change made before this call has been applied to the store
+    /// (immediately for a volatile service). Orderly shutdown drains the queue by itself, but a
+    /// browser page reload never runs it, so a caller whose write must survive a reload awaits
+    /// this before it lets the user proceed. The future needs the persist future to be driven.
+    pub fn persisted(&self) -> impl Future<Output = ()> + use<> {
+        let (target, applied) = {
+            let state = self.inner.lock().unwrap();
+            (state.queued, state.applied.clone())
+        };
+        async move {
+            if let Some(mut applied) = applied {
+                applied
+                    .wait_for(|count| *count >= target)
+                    .await
+                    .expect("the persist future drains the queue before it ends");
+            }
+        }
     }
 
     /// Ends persistence for a [`Self::durable`] service: the persist future writes everything
@@ -1084,9 +1114,12 @@ impl State {
         };
         match &self.persist {
             Persistence::Volatile => {}
-            Persistence::Open(persist) => persist
-                .send((route, value))
-                .expect("the persist future outlives the document service"),
+            Persistence::Open(persist) => {
+                persist
+                    .send((route, value))
+                    .expect("the persist future outlives the document service");
+                self.queued += 1;
+            }
             Persistence::Closed => {
                 panic!("document source changed after the composition shut down")
             }

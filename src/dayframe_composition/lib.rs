@@ -46,6 +46,8 @@ use clay_mdk::view::PresentationSlot;
 use clay_store::OrderedStore;
 use clay_store::StoreError;
 use dioxus::prelude::*;
+use serde::Deserialize;
+use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -110,15 +112,25 @@ fn install_route(micro: &MicroId) -> FacetRoute {
     }
 }
 
-fn install_datum(enabled: bool, package_version: u32) -> serde_json::Value {
-    serde_json::json!({ "enabled": enabled, "package_version": package_version })
+/// One install facet's value. Unknown fields ride along in `extra` so a datum written by a
+/// newer build survives a rewrite by this one (as big_nodule's install datum does).
+#[derive(Serialize, Deserialize)]
+struct InstallDatum {
+    enabled: bool,
+    package_version: u32,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
-/// The datum's flag. Only this crate writes the document, so a malformed datum is a bug.
-fn datum_enabled(datum: &serde_json::Value) -> bool {
-    datum["enabled"]
-        .as_bool()
-        .expect("an install datum carries a boolean `enabled`")
+impl InstallDatum {
+    /// Only this crate writes the document, so a malformed datum is a bug.
+    fn decode(value: serde_json::Value) -> Self {
+        serde_json::from_value(value).expect("the install document holds only install datums")
+    }
+
+    fn encode(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("an install datum serializes")
+    }
 }
 
 /// Admission of the install datums, returning each unlocked micro's enablement at boot.
@@ -138,16 +150,21 @@ fn admit_installs(
         let version = micro.manifest.package_version;
         let enabled = match installs.get(&route) {
             Some(stored) => {
-                let enabled = datum_enabled(&stored);
-                if stored["package_version"] != version {
-                    installs.external_change(route, Some(install_datum(enabled, version)));
+                let mut datum = InstallDatum::decode(stored);
+                if datum.package_version != version {
+                    datum.package_version = version;
+                    installs.external_change(route, Some(datum.encode()));
                 }
-                enabled
+                datum.enabled
             }
             None => {
-                let enabled = micro.enabled_on_admission;
-                installs.external_change(route, Some(install_datum(enabled, version)));
-                enabled
+                let datum = InstallDatum {
+                    enabled: micro.enabled_on_admission,
+                    package_version: version,
+                    extra: BTreeMap::new(),
+                };
+                installs.external_change(route, Some(datum.encode()));
+                datum.enabled
             }
         };
         enabled_at_boot.insert(identity, enabled);
@@ -191,15 +208,21 @@ async fn reconcile_installs(
     micros: Vec<MicroId>,
     failure: watch::Sender<Option<String>>,
 ) {
+    // Micros by key id, so a facet is matched without building a route or a MicroId.
+    let micros: BTreeMap<&str, &MicroId> =
+        micros.iter().map(|micro| (micro.as_str(), micro)).collect();
     let mut snapshot = installs.current().expect("the install watch is live");
     loop {
-        for micro in &micros {
-            let Some(FacetValue::Present(datum)) = snapshot.facets.get(&install_route(micro))
+        for (route, value) in &snapshot.facets {
+            // The watch selects only the install tag; ids of micros no longer in the catalog
+            // are left alone.
+            let (FacetValue::Present(datum), Some(micro)) =
+                (value, micros.get(route.key_id.as_str()))
             else {
                 continue;
             };
             let disabled = supervisor.state(micro) == MicroState::Disabled;
-            if datum_enabled(datum) {
+            if InstallDatum::decode(datum.clone()).enabled {
                 if disabled {
                     supervisor.enable(micro);
                 }
@@ -499,22 +522,38 @@ impl CompositionRuntime {
         &self.micros
     }
 
-    /// Record the desired enablement of `micro` in its install datum, keeping the stored
-    /// package version. The supervisor follows through the reconciler's watch, not directly.
-    /// Written host-side like admission (the node is mocked). Locked micros have no datum.
-    pub fn set_enabled(&self, micro: &MicroId, enabled: bool) {
+    /// Record the desired enablement of `micro` in its install datum, keeping everything else
+    /// in it. The supervisor follows through the reconciler's watch, not directly. Written
+    /// host-side like admission (the node is mocked). Locked micros have no datum. Does not
+    /// wait for the store; see [`Self::set_enabled`].
+    pub fn request_enabled(&self, micro: &MicroId, enabled: bool) {
         let installs = self.documents.mock_documents();
         let route = install_route(micro);
-        let stored = installs
-            .get(&route)
-            .expect("an unlocked micro was admitted with an install datum");
-        installs.external_change(
-            route,
-            Some(install_datum(
-                enabled,
-                stored["package_version"].as_u64().unwrap() as u32,
-            )),
+        let mut datum = InstallDatum::decode(
+            installs
+                .get(&route)
+                .expect("an unlocked micro was admitted with an install datum"),
         );
+        datum.enabled = enabled;
+        installs.external_change(route, Some(datum.encode()));
+    }
+
+    /// [`Self::request_enabled`], then wait until the datum is in the store. The wait exists
+    /// for the browser: a page reload does not run the orderly-shutdown drain of the document
+    /// persister, so the shell must not let the user reload before the write landed. Needs
+    /// [`Self::serve`] to be running, since the persister runs inside it.
+    pub async fn set_enabled(&self, micro: &MicroId, enabled: bool) {
+        self.request_enabled(micro, enabled);
+        self.documents.persisted().await;
+    }
+
+    /// Whether the install datum asks for `micro` to run: the desired state, which the
+    /// supervisor's state follows. Locked micros have no datum and are always wanted.
+    pub fn is_enabled(&self, micro: &MicroId) -> bool {
+        self.documents
+            .mock_documents()
+            .get(&install_route(micro))
+            .is_none_or(|datum| InstallDatum::decode(datum).enabled)
     }
 
     /// The latest close error of a disable the reconciler applied; `None` until one fails.
@@ -557,6 +596,8 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
     });
     let _ = states();
     let mut failure = use_signal(|| None::<String>);
+    // Micros whose toggle is being written; the button is inert until the datum is stored.
+    let mut toggling = use_signal(BTreeSet::<MicroId>::new);
     let failures = shell.lifecycle_failures();
     use_future(move || {
         let mut failures = failures.clone();
@@ -626,11 +667,15 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                                 let state = shell.state(&micro);
                                 let toggle = micro.clone();
                                 let runtime = shell.clone();
-                                let label = if state == MicroState::Disabled {
-                                    format!("Enable {micro} micro")
-                                } else {
+                                // The label follows what the user asked for, not the supervisor's
+                                // state, which lags it while a close is in flight.
+                                let wanted = shell.is_enabled(&micro);
+                                let label = if wanted {
                                     format!("Disable {micro} micro")
+                                } else {
+                                    format!("Enable {micro} micro")
                                 };
+                                let busy = toggling.read().contains(&micro);
                                 let retry = matches!(state, MicroState::Faulted(_)).then(|| {
                                     (Rc::clone(&shell.supervisor), micro.clone())
                                 });
@@ -639,9 +684,15 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                                         key: "toggle-{micro}",
                                         class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                                         "aria-label": "{label}",
+                                        disabled: busy,
                                         onclick: move |_| {
-                                            let enable = runtime.state(&toggle) == MicroState::Disabled;
-                                            runtime.set_enabled(&toggle, enable);
+                                            let runtime = runtime.clone();
+                                            let micro = toggle.clone();
+                                            toggling.write().insert(micro.clone());
+                                            spawn(async move {
+                                                runtime.set_enabled(&micro, !wanted).await;
+                                                toggling.write().remove(&micro);
+                                            });
                                         },
                                         "{label}"
                                     }
