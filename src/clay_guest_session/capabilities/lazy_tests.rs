@@ -423,3 +423,106 @@ async fn an_endpoint_attachment_mints_a_lazy_reference_that_stores_back_as_the_e
     assert_eq!(response, Ok(b"ping".to_vec()));
     assert_eq!(Script::count(&world.script.inits), 1);
 }
+
+/// Two supervised incarnations whose sessions retain each other's `echo` through
+/// `retain_call`. Each session's activator was handed to its own incarnation, so the lease a
+/// retained binding holds is held by that incarnation, not by an outside root.
+struct Peers {
+    sessions: std::cell::RefCell<BTreeMap<String, CapabilitySession>>,
+    /// What each incarnation retains; its root drops them on close, as a guest's teardown does.
+    bindings: std::cell::RefCell<BTreeMap<String, Vec<CallBinding>>>,
+    closes: AtomicUsize,
+}
+
+struct Peer(&'static str, Rc<Peers>);
+struct PeerRoot(&'static str, Rc<Peers>, Vec<PublishedCapability>);
+
+impl Factory<CapabilityPublication> for Peer {
+    fn initialize(
+        &self,
+        host: Host,
+        instance: Instance,
+        _requirements: BTreeMap<String, CapabilityPublication>,
+        activator: Activator<CapabilityPublication>,
+    ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
+        let (name, peers) = (self.0, Rc::clone(&self.1));
+        Box::pin(async move {
+            let session = CapabilitySession::new(host, instance, CapabilityLimits::default());
+            session.attach_activator(activator);
+            let echo = session
+                .publish_call("echo", echo_contract(), Arc::new(Echo(Arc::default())))
+                .unwrap();
+            let publications = BTreeMap::from([("echo".to_owned(), echo.publication())]);
+            peers.sessions.borrow_mut().insert(name.to_owned(), session);
+            Ok(Initialized {
+                root: Box::new(PeerRoot(name, peers, vec![echo])),
+                publications,
+            })
+        })
+    }
+}
+
+impl Root for PeerRoot {
+    fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
+        Box::pin(async move {
+            self.1.bindings.borrow_mut().remove(self.0);
+            self.1.closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+}
+
+// ADR 030 validation 8: retained lazy bindings between two incarnations are edges of the
+// retention graph, so the pair is live while an outside lease reaches either and closes as a
+// group once none does, instead of keeping itself live.
+#[tokio::test]
+async fn incarnations_retaining_each_others_calls_close_once_no_outside_lease_reaches_them() {
+    let host = Host::new();
+    let peers = Rc::new(Peers {
+        sessions: Default::default(),
+        bindings: Default::default(),
+        closes: AtomicUsize::new(0),
+    });
+    let micro = |name: &'static str| ConfiguredMicro {
+        identity: MicroId::new(name),
+        eager: false,
+        enabled: true,
+        requirements: BTreeMap::new(),
+        unresolved_bindings: Vec::new(),
+        factory: Rc::new(Peer(name, Rc::clone(&peers))),
+    };
+    let supervisor = Supervisor::new(host, [micro("a"), micro("b")]);
+    let both = |state: MicroState| {
+        ["a", "b"]
+            .iter()
+            .all(|name| supervisor.state(&MicroId::new(*name)) == state)
+    };
+    tokio::select! {
+        never = supervisor.drive() => never,
+        () = async {
+            let from_a = supervisor.acquire(&MicroId::new("a"), "echo").await.unwrap();
+            let from_b = supervisor.acquire(&MicroId::new("b"), "echo").await.unwrap();
+            for (holder, target) in [("a", "b"), ("b", "a")] {
+                let session = peers.sessions.borrow()[holder].clone();
+                let reference = session
+                    .mint_lazy(&PublicationEndpoint {
+                        micro: MicroId::new(target),
+                        publication: "echo".to_owned(),
+                        contract: echo_contract(),
+                    })
+                    .unwrap();
+                let binding = reference.retain_call().await.unwrap();
+                peers.bindings.borrow_mut().entry(holder.to_owned()).or_default().push(binding);
+            }
+            // The lease on `a` reaches `b` through `a`'s retained binding.
+            drop(from_b);
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+            assert!(both(MicroState::Active));
+            drop(from_a);
+            supervisor.changes().wait_for(|_| both(MicroState::Idle)).await.unwrap();
+        } => {}
+    }
+    assert_eq!(Script::count(&peers.closes), 2);
+}
