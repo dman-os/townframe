@@ -250,9 +250,17 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs: P1 `d12adcd2` and P2 `e1bd3853` done. P3 (signatures and import) is next, on a fresh agent.
+- big_plugs: P1, P2, P3a done. P3b (importers) is next, on a fresh agent.
 ## Done
 
+- 2026-11-04: P3a signatures and accept rules.
+  - `Plug.signature {alg: ed25519, value: multibase}` over `SIGNING_DOMAIN || revision`. `revision()` excludes the signature.
+  - did:key-only verification; other DID methods fail closed.
+  - Downgrade rule: a new label must be above every first-seen or tombstoned label. Synced unverified versions are listed with `unverified` and refused by `GetPlugVersion`.
+  - Node publisher = did:key of the authority node key, plus a `GetPublisher` op. `PlugsScope.namespaces` narrows publishing to listed DIDs.
+  - Manager fix: `AuthorityService::sign_as_node(domain, payload)` enforces a NUL-terminated domain prefix, because the same key issues attribution certificates.
+  - Accepted: a synced older version is served (arrival order is not version order; downgrades are a runtime concern). Pre-P3 unsigned dev data is served from first-seen pins.
+  - Main's heavy drawer tests (`named_metadata_creation_replays_every_boundary_on_both_roots` 116 s, `deterministic_drawer_model_scenarios_match_reference` 97 s in isolation) time out at nextest's 120 s limit when run alongside other crates.
 - 2026-11-04: P2 plug registry, `e1bd3853`.
   - **Storage.** A grouped registry drawer (`CreateLayout::SingleGroup`) with `ciphertext`/`plaintext` inventories. Its id is persisted in `plugs_registry_drawer` (SQLite). `CREATE_DRAWER_OBJECT` is revoked after creation (manager fix).
   - **Datums.** Each plug has an identity datum `org.example.daybook.plug.identity/main {id}`. Versions are `org.example.daybook.plug/<semver>`, holding the `Plug` envelope. Artifacts are `org.example.daybook.blob/plug.artifact/<label>/<key>`.
