@@ -4266,6 +4266,7 @@ dependencies = [
  "clay_surface",
  "daybook_types",
  "dayframe_composition",
+ "dayframe_native",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
@@ -4299,11 +4300,31 @@ dependencies = [
  "anyrender_vello",
  "anyrender_vello_cpu 0.17.0",
  "anyrender_vello_hybrid 0.10.0",
+ "dayframe_native",
  "dioxus",
  "dioxus-native",
  "tokio",
- "ui",
  "winit",
+]
+
+[[package]]
+name = "dayframe_native"
+version = "0.1.0"
+dependencies = [
+ "clay_docs",
+ "clay_mdk",
+ "clay_store",
+ "dayframe_composition",
+ "dioxus",
+ "micro_counter_manifest",
+ "micro_sample",
+ "micro_settings",
+ "micro_settings_manifest",
+ "micro_toolbar",
+ "micro_toolbar_manifest",
+ "serde_json",
+ "sqlite_rs",
+ "ui",
 ]
 
 [[package]]
