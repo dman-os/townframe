@@ -156,6 +156,18 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - Stand-in loader: `clay_mdk::package` (`<name>.component.wasm` + `<name>.manifest.json`). Our importer treats it as a local source, and Clay deletes its loader afterwards.
 - Read first: ADR 025 §5–§7, §11, §12; ADR 024 §11–§15 (in `../townframe-p3N-4`).
 
+### D10. big_plugs is a registry; runtimes are its node_modules (operator, 2026-11-04)
+- **big_plugs is the catalog/registry and nothing more,** like npm: it versions what comes in and upholds semver. It does no enablement. Nodules and Clay micros are the "node_modules": each runtime owns its own enablement, downgrades, grants and readiness.
+- **The registry is a drawer.** A plug lives in a document with Blob datums for its artifacts. Removing a plug from the registry just drops it from that drawer.
+- **Retention is by reference, not leases.** Each enabling runtime has its own drawer (nodules: the config drawer, as in slice 2a) naming the plug documents and blobs it uses, so the plug stays pinned even after the registry drops it. No lease system.
+- **Downgrades** are a runtime concern and are allowed (review Q5).
+- **Historical NSID reservation / prefix backstops** (review Q6): not this PR. A later layer, possibly in a schema registry.
+- **Review Q7 withdrawn:** no hole. Per `docs/wiki/drawer.md`, whoever holds a drawer delegates at or below their level, and creators hold Admin.
+- **Schemas:** Cabinet's `SchemaRepo` stays a doc/drawer-service concern ("identifiers and shapes"). A schema registry keyed by NSID is a layer on top. Plugs, the schema registry, Clay and nodules are all downstream of plugs. Boundary agreed.
+- **NSID is the schema id everywhere, aligned with AT Protocol** (a breaking change gets a new NSID). Clay contract and schema ids become NSIDs.
+- **Strict dependency rule:** referencing another plug's prefix requires declaring that plug as a dependency. Access requests name the datum NSIDs they touch. Broad untyped access ("any datum in this drawer or doc") may come later, but must be explicit in the manifest so audits can detect it. The default is least access.
+- Pending: micros calling nodule operations (D9).
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
