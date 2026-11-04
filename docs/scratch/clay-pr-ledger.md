@@ -581,3 +581,8 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   (`big_plugs_core::MicroContribution {schema, description}`); `schema` = our manifest format id,
   `description` = `MicroManifest` JSON minus `id`/`package_version`. One micro per plug; micro id =
   installed-as `PlugId` (lands with P3b, peer will ping).
+- P3b landed on feat/nodules: `big_plugs::import::micro_pair(component_bytes, manifest_json)`
+  imports our sidecar pair (id → `<node did>/<id>`, package_version n → `n.0.0`, component →
+  artifact `component` in big_blobs, node-signed). Plug names may contain dots. Micro
+  contribution schema NSID = `org.example.clay.micro.manifest`; C6d drops `MicroManifest.schema`
+  (the NSID is the format identity; breaking change = new NSID).
