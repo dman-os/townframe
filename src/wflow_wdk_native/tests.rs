@@ -6,7 +6,6 @@ use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 use wflow_core::r#gen::metastore::WflowMeta;
 use wflow_core::r#gen::metastore::WflowServiceMeta;
-use wflow_core::partition::JobFailure;
 use wflow_core::partition::effects;
 use wflow_core::partition::job_events;
 use wflow_core::partition::state;
@@ -16,218 +15,6 @@ use wflow_wdk::route_wflows;
 
 use crate::interlude::*;
 use crate::*;
-
-/// Counts the closures a cleanup workflow ran: `a`/`b` are the forward
-/// effects, `undo_a` the defer registered after `a` committed.
-#[derive(Default)]
-struct CleanupRuns {
-    a: AtomicUsize,
-    b: AtomicUsize,
-    undo_a: AtomicUsize,
-}
-
-/// `fail_after_a` makes the workflow return a terminal error after
-/// registering its defer instead of running effect `b`.
-fn register_cleanup_wflow(driver: &NativeHostDriver, runs: &Arc<CleanupRuns>, fail_after_a: bool) {
-    let runs = Arc::clone(runs);
-    driver.register_typed("cleanup", move |cx, sleep_ms: u64| {
-        let runs = Arc::clone(&runs);
-        Box::pin(async move {
-            let a: i64 = cx
-                .named_effect("a", || {
-                    let runs = Arc::clone(&runs);
-                    async move {
-                        runs.a.fetch_add(1, Ordering::SeqCst);
-                        Ok(Json(1i64))
-                    }
-                })
-                .await?;
-            let undo_runs = Arc::clone(&runs);
-            cx.defer("undo-a", move || async move {
-                undo_runs.undo_a.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })?;
-            if fail_after_a {
-                return Err(JobErrorX::Terminal(ferr!("forward work failed")));
-            }
-            if sleep_ms > 0 {
-                cx.named_sleep("nap", Duration::from_millis(sleep_ms))
-                    .await?;
-            }
-            let b: i64 = cx
-                .named_effect("b", || {
-                    let runs = Arc::clone(&runs);
-                    async move {
-                        runs.b.fetch_add(1, Ordering::SeqCst);
-                        Ok(Json(a + 1))
-                    }
-                })
-                .await?;
-            Ok(b)
-        })
-    });
-}
-
-async fn expect_persist(session: &NativeSession, expected_meta: StepMeta) -> Arc<str> {
-    let trap = session.next_yield().await.expect("session yielded nothing");
-    let SessionYield::PersistStep {
-        value_json, meta, ..
-    } = trap
-    else {
-        panic!("expected PersistStep, got {trap:?}");
-    };
-    assert_eq!(meta, expected_meta);
-    value_json
-}
-
-async fn expect_terminal(session: &NativeSession) -> String {
-    let trap = session.next_yield().await.expect("session yielded nothing");
-    let SessionYield::Complete(Err(types::JobError::Terminal(error_json))) = trap else {
-        panic!("expected terminal Complete, got {trap:?}");
-    };
-    error_json
-}
-
-/// After the host interrupted the session, the cleanup it runs must consist of
-/// exactly the `undo-a` defer followed by the terminal outcome.
-async fn expect_cleanup_outcome(session: &NativeSession, runs: &CleanupRuns) -> String {
-    let defer_value = expect_persist(session, StepMeta::new(StepKind::Defer, Some("undo-a"))).await;
-    assert_eq!(defer_value.as_ref(), "null");
-    assert_eq!(runs.undo_a.load(Ordering::SeqCst), 1);
-    assert!(session.resume());
-    let error_json = expect_terminal(session).await;
-    assert_eq!(runs.b.load(Ordering::SeqCst), 0, "effect b must not run");
-    error_json
-}
-
-#[tokio::test]
-async fn interrupt_while_parked_on_persist_runs_defers_with_cancelled_outcome() {
-    let driver = NativeHostDriver::new();
-    let runs = Arc::new(CleanupRuns::default());
-    register_cleanup_wflow(&driver, &runs, false);
-    let session = driver
-        .spawn(
-            Arc::from("job-int-persist"),
-            "cleanup",
-            "0".into(),
-            vec![],
-            None,
-        )
-        .expect("spawn");
-
-    let a_value = expect_persist(&session, StepMeta::new(StepKind::Effect, Some("a"))).await;
-    assert_eq!(a_value.as_ref(), "1");
-    assert!(session.interrupt(CleanupCause::Cancelled {
-        reason: "operator".into(),
-    }));
-
-    let error_json = expect_cleanup_outcome(&session, &runs).await;
-    let failure: JobFailure = serde_json::from_str(&error_json).expect(ERROR_JSON);
-    assert_eq!(
-        failure,
-        JobFailure::Cancelled {
-            reason: "operator".into()
-        }
-    );
-    assert_eq!(runs.a.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn interrupt_while_parked_on_sleep_returns_interrupted_and_runs_defers() {
-    let driver = NativeHostDriver::new();
-    let runs = Arc::new(CleanupRuns::default());
-    register_cleanup_wflow(&driver, &runs, false);
-    let session = driver
-        .spawn(
-            Arc::from("job-int-sleep"),
-            "cleanup",
-            "60000".into(),
-            vec![],
-            None,
-        )
-        .expect("spawn");
-
-    let a_value = expect_persist(&session, StepMeta::new(StepKind::Effect, Some("a"))).await;
-    assert_eq!(a_value.as_ref(), "1");
-    assert!(session.resume());
-
-    let trap = session.next_yield().await.expect("session yielded nothing");
-    let SessionYield::WaitStep { step_id, meta, .. } = trap else {
-        panic!("expected WaitStep, got {trap:?}");
-    };
-    assert_eq!(step_id, 1);
-    assert_eq!(meta, StepMeta::new(StepKind::Sleep, Some("nap")));
-    assert!(session.interrupt(CleanupCause::Cancelled {
-        reason: "while napping".into(),
-    }));
-
-    let error_json = expect_cleanup_outcome(&session, &runs).await;
-    let failure: JobFailure = serde_json::from_str(&error_json).expect(ERROR_JSON);
-    assert_eq!(
-        failure,
-        JobFailure::Cancelled {
-            reason: "while napping".into()
-        }
-    );
-}
-
-#[tokio::test]
-async fn spawn_in_cleanup_replays_committed_steps_and_interrupts_the_next_forward_one() {
-    let driver = NativeHostDriver::new();
-    let runs = Arc::new(CleanupRuns::default());
-    register_cleanup_wflow(&driver, &runs, false);
-    let replay = vec![ReplayStep::durable(
-        &StepMeta::new(StepKind::Effect, Some("a")),
-        "1",
-    )];
-    let session = driver
-        .spawn(
-            Arc::from("job-int-replay"),
-            "cleanup",
-            "0".into(),
-            replay,
-            Some(CleanupCause::Failed {
-                error: "durable failure".into(),
-            }),
-        )
-        .expect("spawn");
-
-    let error_json = expect_cleanup_outcome(&session, &runs).await;
-    assert_eq!(error_json, "durable failure");
-    assert_eq!(runs.a.load(Ordering::SeqCst), 0, "replayed a must not run");
-}
-
-#[tokio::test]
-async fn begin_cleanup_round_trips_the_durable_cause() {
-    let driver = NativeHostDriver::new();
-    let runs = Arc::new(CleanupRuns::default());
-    register_cleanup_wflow(&driver, &runs, true);
-    let session = driver
-        .spawn(
-            Arc::from("job-begin-cleanup"),
-            "cleanup",
-            "0".into(),
-            vec![],
-            None,
-        )
-        .expect("spawn");
-
-    let a_value = expect_persist(&session, StepMeta::new(StepKind::Effect, Some("a"))).await;
-    assert_eq!(a_value.as_ref(), "1");
-    assert!(session.resume());
-
-    let trap = session.next_yield().await.expect("session yielded nothing");
-    let SessionYield::BeginCleanup { error_json } = trap else {
-        panic!("expected BeginCleanup, got {trap:?}");
-    };
-    assert!(error_json.contains("forward work failed"));
-    assert!(session.interrupt(CleanupCause::Failed {
-        error: error_json.to_string(),
-    }));
-
-    let outcome = expect_cleanup_outcome(&session, &runs).await;
-    assert_eq!(outcome, error_json.as_ref());
-}
 
 fn make_journal(key: &str, args_json: &str) -> state::JobState {
     state::JobState {
@@ -261,6 +48,45 @@ fn push_step_effect(journal: &mut state::JobState, effect: job_events::JobEffect
     }
     let state::JobStepState::Effect { attempts } = &mut journal.steps[idx];
     attempts.push(effect);
+}
+
+#[test]
+fn legacy_attempts_and_retry_policies_are_translated_at_the_adapter_boundary() {
+    let mut journal = make_journal("attempt-boundary", "null");
+    push_step_effect(
+        &mut journal,
+        job_events::JobEffectResult {
+            step_id: 0,
+            attempt_id: 0,
+            start_at: Timestamp::now(),
+            end_at: Timestamp::now(),
+            deets: job_events::JobEffectResultDeets::EffectErr(job_events::JobError::Transient {
+                error_json: Arc::from("retry"),
+                retry_policy: None,
+            }),
+        },
+    );
+
+    assert_eq!(legacy_attempts_from_job_state(&journal), vec![1]);
+    assert_eq!(replay_from_job_state(&journal), vec![ReplayStep::default()]);
+    assert_eq!(
+        retry_policy_to_legacy(types::RetryPolicy::Immediate),
+        wflow_core::partition::RetryPolicy::Immediate
+    );
+    assert_eq!(
+        retry_policy_to_legacy(types::RetryPolicy::Fixed { delay_ms: 25 }),
+        wflow_core::partition::RetryPolicy::Fixed { delay_ms: 25 }
+    );
+    assert_eq!(
+        retry_policy_to_legacy(types::RetryPolicy::CappedExponential {
+            base_ms: 100,
+            cap_ms: 1_000,
+        }),
+        wflow_core::partition::RetryPolicy::CappedExponential {
+            base_ms: 100,
+            cap_ms: 1_000,
+        }
+    );
 }
 
 #[tokio::test]

@@ -42,17 +42,12 @@ pub type NativeWflowRunner = Arc<
 use wflow_wdk::session::ReplayStep;
 use wflow_wdk::session::SessionYield;
 use wflow_wdk::session::WaitYield;
-use wflow_wdk::types::CleanupCause;
 
 #[derive(Debug, Clone)]
 enum SessionResume {
     Continue,
     /// Resumes a wait with the value the host resolved it to.
     Deliver(Arc<str>),
-    /// Resumes a parked boundary with the durable cause the job entered
-    /// cleanup under: a committed `PersistStep` continues, a wait or a
-    /// `BeginCleanup` returns the cause to the workflow.
-    Interrupt(CleanupCause),
 }
 
 #[derive(Debug, Clone)]
@@ -68,13 +63,11 @@ struct ActiveStepCtx {
 
 struct ActiveJobState {
     replay: Vec<ReplayStep>,
+    /// Attempt numbering belongs only to the legacy partition adapter. The
+    /// replacement protocol has one durable result per step and no attempt field.
+    legacy_attempts: Vec<u64>,
     cur_step: u64,
     active_step: Option<ActiveStepCtx>,
-    /// Set once the job entered cleanup; every forward boundary reached after
-    /// that returns it as [`BackendError::Interrupted`] unless a committed
-    /// replay value exists for the step, which replays as usual so the
-    /// workflow re-registers the defers it derived from it.
-    cleanup: Option<CleanupCause>,
 }
 
 struct ActiveJobShared {
@@ -102,10 +95,9 @@ fn wait_id_for(step_id: u64, attempt_id: u64) -> u64 {
     hi | lo
 }
 
-/// Converts the legacy partition journal into replay steps: a step whose last
-/// attempt succeeded replays its value, otherwise the next attempt id is the
-/// number of recorded attempts; durable waits pin the step kind.
-pub fn replay_from_job_state(journal: &state::JobState) -> Vec<ReplayStep> {
+/// Converts the legacy partition journal into replay steps. A step whose last
+/// attempt succeeded replays its value; durable waits pin the step kind.
+fn replay_from_job_state(journal: &state::JobState) -> Vec<ReplayStep> {
     let mut replay: Vec<ReplayStep> = journal
         .steps
         .iter()
@@ -115,10 +107,7 @@ pub fn replay_from_job_state(journal: &state::JobState) -> Vec<ReplayStep> {
                 Some(job_events::JobEffectResultDeets::Success { value_json }) => {
                     ReplayStep::completed(value_json.to_string())
                 }
-                Some(job_events::JobEffectResultDeets::EffectErr(_)) | None => ReplayStep {
-                    failed_attempts: attempts.len() as u64,
-                    ..default()
-                },
+                Some(job_events::JobEffectResultDeets::EffectErr(_)) | None => default(),
             }
         })
         .collect();
@@ -138,8 +127,27 @@ pub fn replay_from_job_state(journal: &state::JobState) -> Vec<ReplayStep> {
     replay
 }
 
-fn kind_compatible(replayed: StepKind, actual: StepKind) -> bool {
-    replayed == actual || matches!((replayed, actual), (StepKind::Effect, StepKind::Defer))
+fn legacy_attempts_from_job_state(journal: &state::JobState) -> Vec<u64> {
+    journal
+        .steps
+        .iter()
+        .map(|step| {
+            let state::JobStepState::Effect { attempts } = step;
+            attempts.len() as u64
+        })
+        .collect()
+}
+
+fn retry_policy_to_legacy(policy: types::RetryPolicy) -> wflow_core::partition::RetryPolicy {
+    match policy {
+        types::RetryPolicy::Immediate => wflow_core::partition::RetryPolicy::Immediate,
+        types::RetryPolicy::Fixed { delay_ms } => {
+            wflow_core::partition::RetryPolicy::Fixed { delay_ms }
+        }
+        types::RetryPolicy::CappedExponential { base_ms, cap_ms } => {
+            wflow_core::partition::RetryPolicy::CappedExponential { base_ms, cap_ms }
+        }
+    }
 }
 
 impl ActiveJobShared {
@@ -153,9 +161,7 @@ impl ActiveJobShared {
         // recorded. `kind` is always pinned when present; `name` is tri-state,
         // where `None` means the source journals no names and pins nothing.
         if let Some(step) = replay {
-            let kind_diverged = step
-                .kind
-                .is_some_and(|kind| !kind_compatible(kind, meta.kind));
+            let kind_diverged = step.kind.is_some_and(|kind| kind != meta.kind);
             let name_diverged = step
                 .name
                 .as_ref()
@@ -198,9 +204,7 @@ impl ActiveJobShared {
     }
 
     /// Parks the session on `trap` until the host resumes it. A hard stop
-    /// (the session was cancelled or its channels closed) is not cooperative
-    /// cleanup: the invocation is being torn down, so it surfaces as a
-    /// protocol error rather than an interruption that would run defers.
+    /// tears down the invocation and surfaces as a protocol error.
     async fn yield_and_wait_resume(
         &self,
         trap: SessionYield,
@@ -219,31 +223,6 @@ impl ActiveJobShared {
             cmd = self.resume_rx.recv() => cmd.ok(),
         };
         cmd.ok_or_else(|| BackendError::Protocol("session stopped".into()))
-    }
-
-    /// Abandons the uncommitted active step for cleanup: a wait the host
-    /// interrupted, or an effect whose closure failed terminally. It never
-    /// committed, so its step slot is the one the first cleanup step takes:
-    /// `cur_step` stays put and the boundary identity recorded for the slot is
-    /// dropped, matching what a cold replay in cleanup records there.
-    fn abandon_active_step(&self, cause: CleanupCause) {
-        let mut state = self.state.lock().expect(ERROR_MUTEX);
-        state.cleanup = Some(cause);
-        let Some(active) = state.active_step.take() else {
-            return;
-        };
-        let mut all_metas = self.job_step_metas.lock().expect(ERROR_MUTEX);
-        if let Some((latest_gen, metas)) = all_metas.get_mut(&self.job_id)
-            && *latest_gen == self.session_gen
-            && metas.len() == active.step_id as usize + 1
-        {
-            metas.truncate(active.step_id as usize);
-        }
-    }
-
-    fn interrupt_wait(&self, cause: CleanupCause) -> BackendError {
-        self.abandon_active_step(cause.clone());
-        BackendError::Interrupted(cause)
     }
 }
 
@@ -273,12 +252,6 @@ impl WflowBackend for NativeWflowBackend {
             }
             let step_id = state.cur_step;
             let replay = state.replay.get(step_id as usize);
-            if let Some(cause) = state.cleanup.as_ref()
-                && meta.kind != StepKind::Defer
-                && replay.is_none_or(|step| step.value_json.is_none())
-            {
-                return Err(BackendError::Interrupted(cause.clone()));
-            }
             self.shared
                 .validate_and_record_meta(replay, step_id, &meta)?;
 
@@ -294,8 +267,11 @@ impl WflowBackend for NativeWflowBackend {
                         value_json,
                     }));
                 }
-                Some(step) => step.failed_attempts,
-                None => 0,
+                Some(_) | None => state
+                    .legacy_attempts
+                    .get(step_id as usize)
+                    .copied()
+                    .unwrap_or(0),
             };
 
             let start_at = Timestamp::now();
@@ -327,7 +303,6 @@ impl WflowBackend for NativeWflowBackend {
                 state.cur_step = step_id + 1;
                 SessionYield::PersistStep {
                     step_id,
-                    attempt_id: active.attempt_id,
                     start_at: active.start_at,
                     end_at: Timestamp::now(),
                     value_json: Arc::from(value_json),
@@ -336,13 +311,6 @@ impl WflowBackend for NativeWflowBackend {
             };
             match self.shared.yield_and_wait_resume(trap).await? {
                 SessionResume::Continue => Ok(()),
-                // The host only interrupts a parked persist after its commit
-                // landed, so the step is durable and the workflow observes
-                // the cause at its next forward boundary.
-                SessionResume::Interrupt(cause) => {
-                    self.shared.state.lock().expect(ERROR_MUTEX).cleanup = Some(cause);
-                    Ok(())
-                }
                 SessionResume::Deliver(_) => Err(BackendError::Protocol(
                     "persisted step resumed with a delivered value".into(),
                 )),
@@ -370,7 +338,6 @@ impl WflowBackend for NativeWflowBackend {
                     .expect("ts overflow");
                 SessionYield::WaitStep {
                     step_id,
-                    attempt_id: active.attempt_id,
                     start_at: active.start_at,
                     deets: WaitYield::Timer {
                         wait_id: wait_id_for(step_id, active.attempt_id),
@@ -380,10 +347,7 @@ impl WflowBackend for NativeWflowBackend {
                 }
             };
             // A timer resolves to no value the workflow observes.
-            let resumed = self.shared.yield_and_wait_resume(trap).await?;
-            if let SessionResume::Interrupt(cause) = resumed {
-                return Err(self.shared.interrupt_wait(cause));
-            }
+            self.shared.yield_and_wait_resume(trap).await?;
             let mut state = self.shared.state.lock().expect(ERROR_MUTEX);
             state.active_step = None;
             state.cur_step = step_id + 1;
@@ -403,7 +367,6 @@ impl WflowBackend for NativeWflowBackend {
                 }
                 SessionYield::WaitStep {
                     step_id,
-                    attempt_id: active.attempt_id,
                     start_at: active.start_at,
                     deets: WaitYield::Message {
                         wait_id: wait_id_for(step_id, active.attempt_id),
@@ -421,10 +384,6 @@ impl WflowBackend for NativeWflowBackend {
                     .replay
                     .get(step_id as usize)
                     .and_then(|step| step.value_json.clone()),
-                SessionResume::Interrupt(cause) => {
-                    drop(state);
-                    return Err(self.shared.interrupt_wait(cause));
-                }
             };
             let Some(value_json) = delivered else {
                 return Err(BackendError::Protocol(
@@ -435,29 +394,6 @@ impl WflowBackend for NativeWflowBackend {
             state.active_step = None;
             state.cur_step = step_id + 1;
             Ok(out)
-        })
-    }
-
-    fn begin_cleanup<'a>(
-        &'a self,
-        error_json: &'a str,
-    ) -> LocalBoxFuture<'a, Result<CleanupCause, BackendError>> {
-        Box::pin(async move {
-            let trap = SessionYield::BeginCleanup {
-                error_json: Arc::from(error_json),
-            };
-            match self.shared.yield_and_wait_resume(trap).await? {
-                // The effect whose closure failed terminally (if any) is still
-                // the active step; it never persisted, so its slot is freed for
-                // the first defer instead of reporting a concurrent step.
-                SessionResume::Interrupt(cause) => {
-                    self.shared.abandon_active_step(cause.clone());
-                    Ok(cause)
-                }
-                SessionResume::Continue | SessionResume::Deliver(_) => Err(BackendError::Protocol(
-                    "cleanup began without a durable cause".into(),
-                )),
-            }
         })
     }
 }
@@ -592,23 +528,6 @@ impl NativeSession {
             .is_ok()
     }
 
-    /// Resumes the invocation parked on a `PersistStep`, `WaitStep` or
-    /// `BeginCleanup` yield with the durable cause the job entered cleanup
-    /// under. The host calls this only for a parked session, after the cause
-    /// is committed: a persisted step continues (its next forward boundary
-    /// returns the cause), a wait returns the cause right away, and a
-    /// `BeginCleanup` receives it as the cause its defers run under. A
-    /// session that is running between yields is not interrupted here; the
-    /// host waits for its next yield. `false` means the session was already
-    /// cancelled.
-    #[must_use]
-    pub fn interrupt(&self, cause: CleanupCause) -> bool {
-        self.shared.state.lock().expect(ERROR_MUTEX).cleanup = Some(cause.clone());
-        self.resume_tx
-            .try_send(SessionResume::Interrupt(cause))
-            .is_ok()
-    }
-
     pub fn cancel(&self) {
         self.shared.pause_cancel.cancel();
         self.resume_tx.close();
@@ -618,8 +537,21 @@ impl NativeSession {
         self.shared.finished.load(Ordering::Acquire)
     }
 
-    fn replace_replay(&self, replay: Vec<ReplayStep>) {
-        self.shared.state.lock().expect(ERROR_MUTEX).replay = replay;
+    fn replace_legacy_state(&self, journal: &state::JobState) {
+        let mut state = self.shared.state.lock().expect(ERROR_MUTEX);
+        state.replay = replay_from_job_state(journal);
+        state.legacy_attempts = legacy_attempts_from_job_state(journal);
+    }
+
+    fn legacy_attempt_id(&self, step_id: u64) -> u64 {
+        self.shared
+            .state
+            .lock()
+            .expect(ERROR_MUTEX)
+            .legacy_attempts
+            .get(step_id as usize)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -747,19 +679,25 @@ impl NativeHostDriver {
     }
 
     /// Starts `wflow_key` as job `job_id`, replaying `replay` before running
-    /// any step closure. `cleanup` is the durable cleanup the job is already
-    /// in, if any: the invocation then replays its committed forward steps
-    /// (re-registering their defers) and is interrupted at the first forward
-    /// boundary without a committed value. Step metadata recorded for this
-    /// job beyond the replayed prefix is discarded: it came from an
-    /// invocation whose later steps never became durable.
+    /// any step closure. Step metadata recorded for this job beyond the
+    /// replayed prefix is discarded because it never became durable.
     pub fn spawn(
         &self,
         job_id: Arc<str>,
         wflow_key: &str,
         args_json: String,
         replay: Vec<ReplayStep>,
-        cleanup: Option<CleanupCause>,
+    ) -> Result<NativeSession, SpawnError> {
+        self.spawn_with_legacy_attempts(job_id, wflow_key, args_json, replay, Vec::new())
+    }
+
+    fn spawn_with_legacy_attempts(
+        &self,
+        job_id: Arc<str>,
+        wflow_key: &str,
+        args_json: String,
+        replay: Vec<ReplayStep>,
+        legacy_attempts: Vec<u64>,
     ) -> Result<NativeSession, SpawnError> {
         let runner = self
             .workflows
@@ -789,9 +727,9 @@ impl NativeHostDriver {
             session_gen,
             state: Mutex::new(ActiveJobState {
                 replay,
+                legacy_attempts,
                 cur_step: 0,
                 active_step: None,
-                cleanup,
             }),
             yield_tx,
             resume_rx,
@@ -829,12 +767,12 @@ impl NativeHostDriver {
         journal: &state::JobState,
     ) -> Result<NativeSessionHandle, job_events::JobRunResult> {
         let wflow_key = journal.wflow.key.as_str();
-        match self.spawn(
+        match self.spawn_with_legacy_attempts(
             Arc::clone(job_id),
             wflow_key,
             journal.init_args_json.to_string(),
             replay_from_job_state(journal),
-            None,
+            legacy_attempts_from_job_state(journal),
         ) {
             Ok(session) => Ok(NativeSessionHandle {
                 session,
@@ -858,108 +796,86 @@ impl NativeHostDriver {
     }
 
     /// Awaits the next suspension the legacy partition worker records as a
-    /// run result. A `BeginCleanup` is acknowledged here non-durably: this
-    /// path has no authority to journal the cause, so the session is
-    /// interrupted with the terminal error as-is and the loop awaits the
-    /// defers' yields. Defers still run on a terminal error, but a crash
-    /// mid-cleanup re-runs forward work on the next invocation. The legacy
-    /// worker path is slated for obsolete-path review.
+    /// run result. Attempt numbers are reconstructed from that worker's
+    /// journal and never enter the replacement session protocol.
     async fn wait_for_session_yield(
         session: &NativeSession,
         cancel_token: &CancellationToken,
     ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
-        loop {
-            let trap = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
-                    debug!("cancel token lit for native workflow session");
-                    session.cancel();
-                    return Ok(job_events::JobRunResult::Aborted);
-                }
-                trap = session.next_yield() => trap,
-            };
-            let Some(trap) = trap else {
-                return Err(job_events::JobRunResult::WorkerErr(
-                    job_events::JobRunWorkerError::Other {
-                        msg: "native session loop closed without yielding".into(),
-                    },
-                ));
-            };
-            return match trap {
-                SessionYield::BeginCleanup { error_json } => {
-                    let cause = CleanupCause::Failed {
-                        error: error_json.to_string(),
-                    };
-                    if session.interrupt(cause) {
-                        continue;
-                    }
-                    Err(job_events::JobRunResult::WorkerErr(
-                        job_events::JobRunWorkerError::Other {
-                            msg: "native session stopped before its cleanup began".into(),
-                        },
-                    ))
-                }
-                SessionYield::Complete(Err(err)) => match err {
-                    types::JobError::Transient(err) => Err(job_events::JobError::Transient {
-                        error_json: err.error_json.into(),
-                        retry_policy: err.retry_policy,
-                    }
-                    .into()),
-                    types::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {
-                        error_json: err_json.into(),
-                    }
-                    .into()),
+        let trap = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                debug!("cancel token lit for native workflow session");
+                session.cancel();
+                return Ok(job_events::JobRunResult::Aborted);
+            }
+            trap = session.next_yield() => trap,
+        };
+        let Some(trap) = trap else {
+            return Err(job_events::JobRunResult::WorkerErr(
+                job_events::JobRunWorkerError::Other {
+                    msg: "native session loop closed without yielding".into(),
                 },
-                // The legacy run-result shape carries no step kind or name, so
-                // the boundary identity is dropped here; only the durable
-                // authority journal pins it. Replay against this log therefore
-                // leaves names unpinned (`ReplayStep::name == None`).
-                SessionYield::PersistStep {
+            ));
+        };
+        match trap {
+            SessionYield::Complete(Err(err)) => match err {
+                types::JobError::Transient(err) => Err(job_events::JobError::Transient {
+                    error_json: err.error_json.into(),
+                    retry_policy: err.retry_policy.map(retry_policy_to_legacy),
+                }
+                .into()),
+                types::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {
+                    error_json: err_json.into(),
+                }
+                .into()),
+            },
+            // The legacy run-result shape carries no step kind or name, so
+            // the boundary identity is dropped here. Attempt numbering is
+            // likewise reconstructed only for this legacy result.
+            SessionYield::PersistStep {
+                step_id,
+                value_json,
+                start_at,
+                end_at,
+                meta: _,
+            } => Ok(job_events::JobRunResult::StepEffect(
+                job_events::JobEffectResult {
                     step_id,
-                    value_json,
+                    attempt_id: session.legacy_attempt_id(step_id),
                     start_at,
                     end_at,
-                    attempt_id,
-                    meta: _,
-                } => Ok(job_events::JobRunResult::StepEffect(
-                    job_events::JobEffectResult {
-                        step_id,
-                        attempt_id,
-                        start_at,
-                        end_at,
-                        deets: job_events::JobEffectResultDeets::Success { value_json },
-                    },
-                )),
-                SessionYield::WaitStep {
+                    deets: job_events::JobEffectResultDeets::Success { value_json },
+                },
+            )),
+            SessionYield::WaitStep {
+                step_id,
+                start_at,
+                deets,
+                meta: _,
+            } => Ok(job_events::JobRunResult::StepWait(
+                job_events::JobWaitResult {
                     step_id,
-                    attempt_id,
+                    attempt_id: session.legacy_attempt_id(step_id),
                     start_at,
-                    deets,
-                    meta: _,
-                } => Ok(job_events::JobRunResult::StepWait(
-                    job_events::JobWaitResult {
-                        step_id,
-                        attempt_id,
-                        start_at,
-                        deets: match deets {
-                            WaitYield::Timer { wait_id, fire_at } => {
-                                job_events::JobWaitResultDeets::Timer { wait_id, fire_at }
-                            }
-                            WaitYield::Message { wait_id } => {
-                                job_events::JobWaitResultDeets::Message { wait_id }
-                            }
-                        },
+                    deets: match deets {
+                        WaitYield::Timer { wait_id, fire_at } => {
+                            job_events::JobWaitResultDeets::Timer { wait_id, fire_at }
+                        }
+                        WaitYield::Message { wait_id } => {
+                            job_events::JobWaitResultDeets::Message { wait_id }
+                        }
                     },
-                )),
-                SessionYield::Complete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
-                    value_json: value_json.into(),
-                }),
-                SessionYield::Panicked(msg) => Err(job_events::JobRunResult::WorkerErr(
-                    job_events::JobRunWorkerError::Other {
-                        msg: format!("native workflow task panicked: {msg}"),
-                    },
-                )),
-            };
+                },
+            )),
+            SessionYield::Complete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
+                value_json: value_json.into(),
+            }),
+            SessionYield::Panicked(msg) => Err(job_events::JobRunResult::WorkerErr(
+                job_events::JobRunWorkerError::Other {
+                    msg: format!("native workflow task panicked: {msg}"),
+                },
+            )),
         }
     }
 
@@ -983,9 +899,7 @@ impl NativeHostDriver {
                 && !existing.session.is_finished()
         });
         let resumed = warm.and_then(|existing| {
-            existing
-                .session
-                .replace_replay(replay_from_job_state(&journal));
+            existing.session.replace_legacy_state(&journal);
             existing.session.resume().then_some(existing)
         });
         let mut active_session = match resumed {
