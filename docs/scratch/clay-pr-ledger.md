@@ -569,3 +569,11 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   - Immediate feedback: a lazy action renders a pending state at once and queues the call until
     the incarnation is ready, so nothing feels dead while initializing.
   - Measure first: activation latency per engine (Wasmtime, browser) before choosing budgets.
+- big_plugs registry landed on feat/nodules (peer, 2026-11-04): `big_plugs_core::PlugId
+  {namespace, name}` (text `<did>/<name>`, d12adcd2); registry datums `org.example.daybook.plug.
+  identity/main`, `org.example.daybook.plug/<semver>` (envelope, immutable per label),
+  `org.example.daybook.blob/plug.artifact/<label>/<artifactKey>` (BLAKE3 Blob) (e1bd3853);
+  `PlugsProtocol` (`org.example.daybook.plugs.*`): listPlugs, getPlug, getPlugVersion,
+  watchPlugs (long-poll cursor), publish/remove, mintPlugsCapability. Pending there: typed
+  `micro` section key, publisher signatures (P3a), importers incl. our sidecar pair (P3b).
+  C6d uses `PlugId` for micro ids once the micro section key is confirmed.
