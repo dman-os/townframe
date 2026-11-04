@@ -46,8 +46,9 @@ pub async fn boot_repo() -> Res<(
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
     utils_rs::testing::setup_tracing_once();
+    let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
     let (repo, stop) = BigRepo::boot(
-        Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+        Arc::clone(&sqlite_runtime),
         Config {
             node_identity_seed: [7_u8; 32],
             storage: StorageConfig::Memory,
@@ -80,6 +81,11 @@ pub async fn boot_repo() -> Res<(
             async move {
                 stop.stop().await?;
                 big_sync_stop.stop().await?;
+                // Jobs cancelled by the stops finish on the sqlite workers and
+                // own a database handle (and the ephemeral directory) until
+                // they do; a test that returns right after stopping would race
+                // process exit.
+                sqlite_runtime.drain_workers().await;
                 eyre::Ok(())
             }
             .boxed()
@@ -235,7 +241,7 @@ async fn wait_for_document_access_notification(
 
 #[tokio::test]
 async fn causal_coverage_deduplicates_per_epoch_and_rotates_at_unchanged_frontier() -> Res<()> {
-    let (repo, _part_store, _stop_token) = boot_repo().await?;
+    let (repo, _part_store, stop) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "stable-frontier"))
         .expect("failed seeding doc");
@@ -276,6 +282,7 @@ async fn causal_coverage_deduplicates_per_epoch_and_rotates_at_unchanged_frontie
         rotated_count,
         "replayed attempts in one epoch must not mint duplicate checkpoints"
     );
+    stop().await?;
     Ok(())
 }
 
@@ -1670,7 +1677,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
 
 #[tokio::test]
 async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()> {
-    let (repo, _part_store, _stop_token) = boot_repo().await?;
+    let (repo, _part_store, stop) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
         .expect("failed seeding title");
@@ -1734,12 +1741,13 @@ async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()>
         .with_document_read(|doc| get_str_at_root(doc, "title"))
         .await;
     assert_eq!(title, "remote-after");
+    stop().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn with_document_handles_concurrent_writers() -> Res<()> {
-    let (repo, _part_store, _stop_token) = boot_repo().await?;
+    let (repo, _part_store, stop) = boot_repo().await?;
     let handle = repo
         .create_doc({
             let mut d = automerge::Automerge::new();
@@ -1809,6 +1817,7 @@ async fn with_document_handles_concurrent_writers() -> Res<()> {
         .with_document_read(|doc| get_int_at_root(doc, "count"))
         .await;
     assert_eq!(final_count, (writer_count * increments_per_writer) as i64);
+    stop().await?;
     Ok(())
 }
 
@@ -3782,6 +3791,9 @@ async fn stop_releases_the_database_despite_the_keyhive_reference_cycle() -> Res
     drop((handle, group));
     stop.stop().await?;
     drop(repo);
+    // Statements cancelled by the stop still finish on the sqlite workers and
+    // own a database handle until they do.
+    sqlite_runtime.drain_workers().await;
     assert_eq!(
         sqlite_runtime.live_database_count(),
         0,

@@ -703,3 +703,29 @@ async fn ephemeral_directory_is_removed_when_last_handle_drops() -> SqlResult<()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn drain_workers_waits_for_cancelled_jobs_on_every_worker() -> SqlResult<()> {
+    let runtime = SqliteRuntime::new(RuntimeConfig {
+        workers: 3,
+        ..Default::default()
+    });
+    let database = runtime.ephemeral(&[]).expect("test db");
+    let directory = database
+        .inner
+        .path
+        .parent()
+        .expect("database parent")
+        .to_owned();
+    let blockers = tests::block_workers(&runtime).await;
+    let mut pending = Box::pin(database.query("SELECT 1", ()));
+    assert_pending(pending.as_mut()).await;
+    drop(pending);
+    drop(database);
+    assert_eq!(runtime.live_database_count(), 1);
+    drop(blockers);
+    runtime.drain_workers().await;
+    assert_eq!(runtime.live_database_count(), 0);
+    assert!(!directory.exists());
+    Ok(())
+}
