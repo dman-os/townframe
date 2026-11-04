@@ -527,3 +527,12 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   - `WriterId` = micro id breaks the total tie-break once collections sync across nodes (equal
     `(lamport, writer)` with different values); should become (replica identity, micro id).
   - Install datum should record lineage `{publisher, plug doc ref, version}` beside `enabled`.
+- Identity approved by the operator (via peer): plug id = DID/name; every fork is a new id;
+  node-local substitution. Clay rule proposed: micro id = the plug id it is installed *as* (slot);
+  the install datum records `filled_by`. Dependencies are by NSID (OSGi Import-Package style,
+  resolved at enable time like a lockfile).
+- Alignment-step additions found by the dependency inventory:
+  - `ContributionDeclaration.collection` is a concrete collection id; it must name a binding in
+    `collection_requests` (ADR 024 §14 says contributions target a local binding).
+  - Drop `FacetAccess.owner_plug_id` (plug-id reference that breaks under substitution); the
+    request names the datum NSID and configuration picks the document.
