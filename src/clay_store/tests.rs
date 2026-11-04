@@ -7,10 +7,12 @@ use crate::BatchOp;
 use crate::MemoryStore;
 use crate::OrderedStore;
 use crate::SqliteStore;
+use crate::Subspace;
 use crate::prefix_successor;
 use sqlite_rs::Database;
 use sqlite_rs::RuntimeConfig;
 use sqlite_rs::SqliteRuntime;
+use std::sync::Arc;
 
 fn put(key: &[u8], value: &[u8]) -> BatchOp {
     BatchOp::Put(key.to_vec(), value.to_vec())
@@ -281,6 +283,51 @@ async fn fresh_sqlite() -> (SqliteStore, SqliteGuard) {
 
 contract_suite!(memory, fresh_memory);
 contract_suite!(sqlite, fresh_sqlite);
+
+async fn fresh_memory_subspace() -> (Subspace<MemoryStore>, ()) {
+    (Arc::new(MemoryStore::new()).subspace("ns"), ())
+}
+
+// The whole contract must hold inside a subspace too, including the empty-prefix cases.
+contract_suite!(memory_subspace, fresh_memory_subspace);
+
+mod subspace_specific {
+    use super::*;
+
+    #[tokio::test]
+    async fn sibling_subspaces_and_the_root_are_disjoint() {
+        let root = Arc::new(MemoryStore::new());
+        // "a" and "ab" would collide under a separator-free prefix scheme; the length prefix
+        // keeps one name from being a prefix of the other.
+        let a = Arc::clone(&root).subspace("a");
+        let ab = Arc::clone(&root).subspace("ab");
+        put_all(&a, &[b"k", b"b", b""]).await;
+        put_all(&ab, &[b"k", b"c"]).await;
+        put_all(&*root, &[b"k"]).await;
+
+        assert_eq!(
+            scanned_keys(&a, b"").await,
+            vec![b"".to_vec(), b"b".to_vec(), b"k".to_vec()]
+        );
+        assert_eq!(
+            scanned_keys(&ab, b"").await,
+            vec![b"c".to_vec(), b"k".to_vec()]
+        );
+        assert_eq!(a.get(b"c").await.unwrap(), None);
+        assert_eq!(root.get(b"c").await.unwrap(), None);
+
+        // Clearing one subspace leaves its sibling and the root untouched.
+        a.apply(vec![BatchOp::DeletePrefix(Vec::new())])
+            .await
+            .unwrap();
+        assert!(a.scan_prefix(b"").await.unwrap().is_empty());
+        assert_eq!(scanned_keys(&ab, b"").await.len(), 2);
+        assert_eq!(root.get(b"k").await.unwrap(), Some(b"k".to_vec()));
+        // Two views over the same name share data.
+        let again = Arc::clone(&root).subspace("ab");
+        assert_eq!(again.get(b"k").await.unwrap(), Some(b"k".to_vec()));
+    }
+}
 
 mod sqlite_specific {
     use super::*;

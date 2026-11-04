@@ -14,8 +14,12 @@
 //! Clay is single-threaded and the browser's IndexedDB futures are `!Send`, so
 //! the trait's futures carry no `Send` bound.
 
+use std::sync::Arc;
+
 mod memory;
 pub use memory::MemoryStore;
+mod subspace;
+pub use subspace::Subspace;
 
 #[cfg(not(target_arch = "wasm32"))]
 use sqlite_rs as sqlite_rs_alias;
@@ -78,6 +82,17 @@ pub trait OrderedStore {
     /// took effect or none did. Later ops observe earlier ones, so a
     /// `DeletePrefix` followed by a `Put` under that prefix keeps the put.
     async fn apply(&self, batch: Vec<BatchOp>) -> Result<(), StoreError>;
+
+    /// A view of this store whose keys live under `name`, disjoint from every other
+    /// subspace of the same store. Keys written through the view are not visible at the
+    /// store root under the same bytes, so a store shared by several users must hand each
+    /// one its own subspace.
+    fn subspace(self: Arc<Self>, name: &str) -> Subspace<Self>
+    where
+        Self: Sized,
+    {
+        Subspace::new(self, name)
+    }
 }
 
 /// The smallest key greater than every key that starts with `prefix`, or `None`
