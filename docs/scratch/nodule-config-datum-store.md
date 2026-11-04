@@ -1,9 +1,31 @@
 # Nodule configuration and datum-store API
 
-Status: Implemented
+Status: Implemented (config layer). Superseded in part by the runtime decisions below
 Owner: Townframe maintainers
-Updated: 2026-10-31
+Updated: 2026-11-04
 Scope: ADR 027 host-side nodule management, node config drawer, portable desired state, and a facet-store-inspired datum store; no big_blobs or big_tasks dependency
+
+> [!NOTE]
+> The config-datum and reconciler design here still stands. Since it was written the
+> operator has decided how nodules execute (dispatch, providers, ocap operation grants,
+> per-service readiness; ADR 027 §3-§8), recorded in the
+> [runtime ledger](nodule-runtime-ledger.md) (D1-D6). A design review of this layer is in
+> the [lifecycle review](nodule-lifecycle-review.md); its proposals are undecided.
+> Points below that are now inaccurate:
+>
+> - **Observation:** the datum store consumes `PollDatums` (cursored long poll), not
+>   `ObserveDatums`, which `origin/main` removed. See ADR 025.
+> - **Readiness:** `Readiness` is to become two-level (nodule, then per service/provider);
+>   `InvalidConfig` is now `Refused`, and `ExecutorUnavailable` ends once artifacts and
+>   the Wasm provider land.
+> - **Grants:** `NoduleGrants` is drawer-only today and gains an operations section
+>   (per-actor "may invoke NSID" caps) later; the management call is
+>   `setNoduleDrawerGrants`.
+> - **Deferred list:** blob materialization, the executor and dispatch are now in the
+>   `feat/nodules` PR scope (ADR 027 §8); wflow, processors, BigTasks and network
+>   exposure remain deferred.
+> - **Known review findings** (reconcile errors swallowed, upgrade wedge, per-reconcile
+>   re-admission) are tracked in the review and ledger.
 
 ## Agreed direction
 
@@ -37,7 +59,7 @@ mutations that flush through a domain, and reads at explicit document heads.
 Do not copy the old whole-facet replacement, shared asynchronous lock, or the
 mutation-before-flush failure behavior.
 
-[`ReadDatums`, `WriteDatums`, and `ObserveDatums`](../../src/big_cabinet_core/doc.rs)
+[`ReadDatums`, `WriteDatums`, and `ObserveDatums` (since replaced by `PollDatums`)](../../src/big_cabinet_core/doc.rs)
 already provide gated values, explicit heads, multi-datum writes, and membership
 observation. These are docs-domain operations; they do not depend on big_tasks.
 `CommandId` here is the existing docs-domain idempotency key, not an executor
@@ -258,8 +280,9 @@ Acceptance coverage should demonstrate:
 - Snapshot and receipt semantics survive forced notification/completion ordering;
   shutdown joins service tasks in reverse dependency order.
 
-Deferred: blob materialization/artifact availability, processors and executors,
-invocation/discovery/exposure enforcement, task dispatch, GUI, catalog hosting,
+Deferred at the time (blob materialization and the executor have since moved into the
+`feat/nodules` PR, see the note at the top): blob materialization/artifact availability,
+processors and executors, invocation/discovery/exposure enforcement, task dispatch, GUI, catalog hosting,
 relay sponsorship, the durable cursored management feed, and multi-provider pins.
 Catalog hosting and GUI are deferred for scope, not technically blocked by
 big_blobs/big_tasks. Existing install envelopes are enough for this PR.

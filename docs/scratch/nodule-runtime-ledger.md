@@ -99,6 +99,14 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 - Guest long-poll subscriptions are an exception; host-served revisioned stores are preferred. Single-instance services come later.
 
 ## In flight
+
+- ADR 027 and config scratch doc revision from D1–D6 (the merge subagent, reused). Review proposals go in a "pending operator review" subsection only.
+- Review fixes batch 1 (subagent):
+  - stop swallowing reconcile errors and silently exiting the actor;
+  - remove `Inventory`;
+  - `resolve_entry` filters to the nodule contribution;
+  - per-plug admit scope.
+  Next batches: the upgrade wedge plus reconcile perf, then admission narrowing (D1), then the dispatch work.
 - wash-runtime fork seam (subagent) in `../wasmCloud`, a jj clone of `dman-os/wasmCloud`:
   - bookmark `townframe-changes`, based on the pinned `1bcaeba`;
   - adds pub `Ingress::dispatch_request` with a test;

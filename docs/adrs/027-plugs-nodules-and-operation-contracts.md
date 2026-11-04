@@ -1,12 +1,19 @@
 # ADR 027: Plugs, nodules, and operation contracts
 
 **Status:** Accepted direction. The portable descriptions, the inert static catalog,
-and the standalone nodule inventory are implemented (`big_plugs_core`, `big_nodule_core`,
-and Cabinet's operation-Lexicon admission; see §8); distribution ingestion, actor/policy
-provisioning, and execution are not. This records the
-agreed responsibilities, authority model, versioning, and staged scope. Concrete
-wire/guest contracts still needing specification are listed in §10; they do not
-reopen the decisions below.
+the standalone nodule inventory and the datum-backed management service are implemented
+(`big_plugs_core`, `big_nodule_core`, `big_nodule`, and Cabinet's operation-Lexicon
+admission; see §8); dispatch, execution and artifact materialization are the staged work
+of the `feat/nodules` PR (§8), and nothing executes yet. This records the agreed
+responsibilities, authority model, versioning, and staged scope. Concrete wire/guest
+contracts still needing specification are listed in §10; they do not reopen the
+decisions below. The operator-approved runtime decisions D1-D6 of the
+[runtime ledger](../scratch/nodule-runtime-ledger.md) are folded in as normative text
+(2026-11-04). Items from the [lifecycle review](../scratch/nodule-lifecycle-review.md)
+that the operator has not decided are listed only under "Proposed, pending operator
+review" in §10.
+
+**Updated:** 2026-11-04
 
 **Related:** [Multiprocessing notes](../DEVDOC/log.md#2026-07-04--multiprocessing),
 [ADR 007: plug manifests](007-plug-manifests-as-drawer-docs.md),
@@ -65,9 +72,12 @@ Rather than treating a nodule and a micro as sibling component kinds, a plug has
 two consumer-specific facets:
 
 - The **nodule** is the plug's singular **node-facing facet**: everything in the
-  package that applies to BigNode (Lexicon schemas and operation contracts,
-  routines, commands, processors, revisioned stores, stateless views, initializers,
-  and private state). Its identity is 1:1 with the plug's identity.
+  package that applies to BigNode. The runtime understands three things in it:
+  **services** (Lexicon operation contracts and the providers implementing them),
+  **facilities** (the resources a nodule is granted: private state, revisioned stores,
+  artifacts, drawers, network) and **lifecycle** (install, enable, upgrade, retire,
+  initialize). Everything else it carries (commands, views, processors) is a
+  **binding**, described in §2. Its identity is 1:1 with the plug's identity.
 - The GUI facet contains zero or more **micros**, where each micro is an individual,
   specifically addressed frontend contribution (such as a gallery view, picker, or
   inspector) namespaced under the plug.
@@ -119,7 +129,7 @@ Keep these identities distinct:
 | Version label | Semver label on a package release for discovery and dependency constraints |
 | Manifest/contribution revision | Immutable content-addressed description selected for installation or dispatch |
 | Operation NSID | ATProto Lexicon contract identity, independent of its provider |
-| Contribution key within a nodule | A routine, command, processor, revisioned store, or view inside the nodule facet |
+| Contribution key within a nodule | A provider component, revisioned store, initializer or binding inside the nodule facet |
 | Micro key within a plug | An individual GUI contribution, namespaced under its package |
 | Node and actor identities | Network participation and cryptographic attribution |
 
@@ -152,27 +162,53 @@ but have different admission and runtime responsibilities.
 
 An operation NSID does not name a routine, package, node, or transport. Where we
 extend beyond vanilla ATProto XRPC is in how a nodule binds implementations,
-invocations, and cursored state to those NSIDs: commands, processors, views, and
-revisioned stores are nodule contribution kinds around Lexicon operations, not new
-XRPC operation kinds. A service-group abstraction above individual NSIDs is not
-required.
+invocations, and cursored state to those NSIDs. A service-group abstraction above
+individual NSIDs is not required.
+
+### What the runtime understands, and what it only carries
+
+The runtime models exactly three things: **services** (operation NSIDs of kind
+query | procedure | subscription, plus their providers), **facilities** (granted
+resources such as private state, revisioned stores, network, artifacts and drawers)
+and **lifecycle** (install, enable, upgrade, retire, and initialization). Admission
+validates only identity and authority, Lexicons, implemented operations with their
+handler artifact, facilities, and initializers.
+
+Everything else is a **binding**: consumer-owned metadata that names an operation NSID.
+Commands (invoked from GUI, CLI or agents), views (rendered by Clay) and processors
+(triage, deferred) are bindings. The runtime carries them as open, schema-tagged
+manifest sections and does not read or validate them, so a vocabulary member it does
+not know inside a binding never refuses a nodule. Unknown vocabulary inside an
+*executable* part (a provider or facility) makes that service unavailable with a
+reason; it does not refuse the nodule either. The consumer of a binding validates it.
+
+**Initialization** is the one binding the runtime owns, because it is lifecycle: "on
+revision R, invoke operation X with run mode M". Its prior art is
+[`rt/init.rs`](../../src/daybook_core/rt/init.rs). The redesign of its identity,
+modes and gating is under review (§10, proposals), but the shape above is settled.
+
+**Cross-nodule calls invoke operations, not commands.** A command is only a consumer's
+saved way to invoke an operation; the callee never sees one.
 
 ### Routine implementations and long-polling
 
 Retain **routine** for an executable implementation inside a nodule. Each routine
-identifies the operation NSID it implements, artifact/export references, its
-execution kind, private state requirements, and requested host facilities. These
-belong to the provider, not the Lexicon contract.
+identifies the operation NSID it implements, artifact/export references, private
+state requirements, and requested host facilities. These belong to the provider, not
+the Lexicon contract.
 
-The routine model has two execution kinds:
-
-- **Asynchronous call (`call`):** ordinary non-workflow request/response execution
-  in the Wasm host.
-- **Workflow (`workflow`):** durable `wflow`-backed execution.
+A nodule's synchronous provider is a **Wasm component serving XRPC** (§3 "Dispatch"):
+one handler component that answers `/xrpc/<nsid>` for every operation it implements.
+Durable execution is not a routine kind of the nodule runtime. It is a separate
+**wflow service** with start, status long-poll, message and cancel operations; a
+durable procedure returns a job reference, and by convention durable document
+mutations default to wflow, whose journal is the storage so components stay
+stateless. The wflow service and nodule support for it are deferred (§8).
 
 Wasm is an execution environment, whereas workflow is an execution semantic; a
-workflow runs in Wasm. The current manifest's workflow-only implementation enum
-is not the new model's limit.
+workflow runs in Wasm. The current manifest's `routines` list with a `call | workflow`
+execution kind is superseded by the handler-plus-`implements` shape in §3; reshaping
+the serialized manifest is a proposal under review (§10).
 
 **Long-polling over cursors is our primary primitive for live observation and
 subscriptions**, matching [`big_sync_core`](../../src/big_sync_core/revisioned_store.rs).
@@ -211,11 +247,11 @@ contract:
   and across nodes without forcing consumers to share SQLite files or invent ad-hoc
   event buses.
 
-### Commands, processors, and initialization
+### Bindings and initialization
 
-Commands describe explicit invocation, including calls across nodules. Processors
-describe reactive invocation and triggering policy. Their targets are **operation
-NSIDs, not private routine keys**. A nodule also declares which external operation
+Commands describe explicit invocation by a person, script or agent. Processors
+describe reactive invocation and triggering policy. Both are bindings (see above)
+whose targets are **operation NSIDs, not private routine keys**. A nodule also declares which external operation
 NSIDs its routines or commands **require** (`requires`), separate from the
 operations its routines **implement** (`implements`). The runtime resolves an
 eligible implementation; the consumer never depends on the provider's private
@@ -228,11 +264,12 @@ routine names or storage layout.
 | Photo browser | Declares `requires: [org.example.search.query]`; command `findPhotos` targets `org.example.search.query`, optionally presenting its result |
 
 A different provider can implement that operation without changing the command.
-Cross-nodule calls use the same command/operation invocation path, not a second
-routine messaging protocol. Commands are not automatically durable jobs.
+A nodule calling another nodule invokes the **operation** through dispatch (§3); a
+command is never the cross-nodule interface, and there is no second routine
+messaging protocol. Commands are not automatically durable jobs.
 Initialization likewise declares an operation to invoke and a run mode. The runtime
-owns its lifecycle intent, but execution and completion accounting require the later
-task/execution integration; registration is not proof that initialization ran.
+owns its lifecycle intent and, once providers can run, its execution through
+dispatch (§8); registration is not proof that initialization ran.
 
 ### Stateless presentation
 
@@ -279,14 +316,17 @@ NoduleDescription
   nodule identity (derived from package identity)
   config schema: optional Lexicon schema and defaults for mutable runtime settings
   lexicons: declared datum definitions and operation contracts (query | procedure | subscription)
+  -- understood by the runtime --
   requires: operation NSIDs and host facilities required by this nodule
-  routines: key, implemented operation NSID, execution kind (call | workflow), artifact/export, state needs
+  routines: key, implemented operation NSID, artifact/export, state needs
+            (the serialized reshape to one handler component + `implements` is proposed, §10)
   revisioned_stores: key, selector/entry schemas, frontier/retention mode, backing routine/source
-  commands: key, target operation NSID, optional stateless view key
-  views: key, typed input schema, portable view output, presenter routine key
   initialization: target operation NSID, run mode
-  processors: key, target operation NSID, trigger policy
   private_state: named SQLite/KV state declarations
+  -- bindings, carried opaquely --
+  commands: key, target operation NSID, optional stateless view key
+  views: key, typed input schema, portable view output, presenter operation
+  processors: key, target operation NSID, trigger policy
 
 NoduleConfiguration
   selected immutable nodule revision, desired enablement
@@ -300,11 +340,11 @@ MicroConfiguration
 ```
 
 The catalog owns `PackageEnvelope`, not either configuration. The runtime validates
-operation targets against admitted contracts, validates settings against `config
-schema`, and checks implementation compatibility; it does not require a routine of
-the same name in the consuming manifest. Processor and initialization descriptions
-are specified for future use even when their execution is unavailable in the first
-implementation.
+the understood sections: operation implementations against admitted contracts,
+settings against `config schema`, and implementation compatibility; it does not
+require a routine of the same name in the consuming manifest, and it does not
+interpret binding sections. Processor descriptions are specified for future use even
+though nothing executes them yet.
 
 ## 3. Service semantics and multiprocessing
 
@@ -333,6 +373,72 @@ the [sample service's](../../src/service_utils_rs/sample/protocol.rs) queries,
 procedure, revisioned reads, and cursored long-poll/subscription behavior as
 operation implementations.
 
+### Dispatch
+
+**Dispatch is the nodule runtime's XRPC reverse proxy.** Its contract lives in
+`big_nodule_core` (the service's home) and its host in `big_nodule`. For one call it
+(1) does ocap admission by checking the presented capability against live
+capabilities ([ADR 022](022-authority-actors-capabilities-and-grants.md)) and that its
+scope covers the NSID, (2) resolves NSID to provider and gates on that provider's
+readiness, and (3) forwards. It keeps no per-call state, writes nothing durable for a
+non-durable call and does no I/O on admission. It validates input and output against
+the Lexicon at the edges only.
+
+**Routing table.** Modelled on wash-runtime's `Router`/`DynamicRouter`: a synchronous
+snapshot lookup `Nsid -> ProviderEntry { kind, provider_id, operation_kind, readiness }`
+with a reverse index per provider, so `unbind(provider)` is idempotent and cheap. The
+nodule reconciler drives `register(provider_id, entries)` and `unbind`. Ambiguous or
+missing providers are errors, never installation-order fallbacks (§5).
+
+**Provider kinds.** `BuiltIn` is a native service reached through its typed
+`service_utils_rs` client, with no JSON on the path beyond dispatch's own edge. `Wasm`
+is a nodule component hosted by wash-runtime. `Posix`, the wflow service and `Remote`
+are later kinds. Dispatch knows the provider kind and operation kind because some
+capabilities are granted **by type**: those are checked **at bind time**, modelled on
+wash-runtime `BindingSchema`/`narrows`, so a call does not re-derive them.
+
+**Who calls dispatch.** NSID routing is dynamic, so its callers are guests, XRPC
+ingress, the operator or CLI invoking by NSID, and later tasks. In-process native
+callers of a built-in service keep using the typed client with their own capability and
+bypass dispatch; the JSON `Value` at dispatch is an edge that path would pay anyway.
+
+**Wire contract** (`big_nodule_core::dispatch`, in the style of `protocol.rs`, each
+operation carrying an `Authorization`): `dispatch.invoke { authorization, operation:
+Nsid, input: Value, context { deadline?, idempotency_key? } } -> { output: Value }` and
+`dispatch.mintCapability { authorization, scope: DispatchScope, rights }`, whose
+attenuation follows `mintNoduleCapability`. `DispatchError` distinguishes `Denied`,
+`UnknownOperation`, `NotReady { reason }` (retryable, reasons mirror per-service
+readiness), `InvalidInput`, `DeadlineExceeded` and `Provider { status, body }` (the
+provider's own XRPC error). This is the working contract; names may move during
+implementation.
+
+**Guest model.** A nodule is a wash workload with one HTTP-shaped XRPC handler
+component serving `POST /xrpc/<nsid>` (`GET` for queries). The semantics are our own,
+aligned with `service_utils_rs`; `wasi:http` p3 is the first transport, and we may swap
+it for our own WIT export of the same shape. Lifecycle follows wash's.
+
+**Authority and instances.** Authority is a header: the proxy checks it, and it becomes
+the authority of that dispatch. Each dispatch gets **one fresh instance** (no pooling
+across dispatches), and the store's host context is the request context, so a guest
+cannot leak authority between calls. Deadline and idempotency key travel as headers
+that the guest SDK forwards.
+
+**Nodule to nodule.** A guest makes an outgoing request to the reserved authority
+`dispatch.local`. Our `Router::route_local_egress` declines it, so it lands in our
+`OutgoingHandler`, which receives the workload id; the workload id maps to the nodule
+actor. Dispatch admission then runs as for any caller: the header names the capability
+and the host checks that the capability belongs to that actor. There is no other
+cross-nodule path.
+
+**wash-runtime seam.** wash-runtime has no public in-process entry (checked at the
+pinned `1bcaeba` and at upstream `3de4e69`). The fork `dman-os/wasmCloud` adds
+`Ingress::dispatch_request(workload_id, Request<WasiBody>) -> Response<WasiBody>` over
+its private `resolve_local_target` and `dispatch_local`. Until the operator pushes the
+fork, a local `[patch]` is used; follow `.agents/skills/fork-pinning-and-upstream-sync`.
+Keeping the provider behind a service boundary lets the Wasm host move out of process
+later. Guest long-poll subscriptions are the exception to stateless dispatch; host-served
+revisioned stores are preferred, and single-instance services come later.
+
 A workflow still has to fulfil the declared operation. A query or procedure returns
 its declared result; a procedure designed to submit durable work may explicitly
 return a task reference. A dispatch ID is not a substitute for a promised result.
@@ -353,16 +459,16 @@ there is any guest execution backend.
 
 It owns:
 
-- Admission and inventory of nodule contributions, revisioned stores, and implemented
-  operations.
+- Admission of services, facilities and lifecycle (not bindings, which it carries),
+  and inventory of revisioned stores and implemented operations.
 - Selected revisions, desired enablement, validated runtime configuration, and
   reconciliation.
 - Actor provisioning and acquisition of permitted resource capabilities.
-- Provider selection and routing metadata, plus discovery and invocation policy.
-- Whether operations, commands, or revisioned stores are exposed to local clients
-  or other nodes.
-- Initialization intent and, later, its execution through the task machinery.
-- Host isolation and the authorized WASI/resource environment for later execution.
+- **Dispatch** (§3): the routing table, provider selection, ocap admission and
+  forwarding, local to this node.
+- Whether operations or revisioned stores are exposed to local clients or other nodes.
+- Initialization, executed through dispatch once a provider is ready.
+- Host isolation and the authorized WASI/resource environment of its providers.
 
 ### Management lifecycle vocabulary
 
@@ -370,10 +476,12 @@ The management surface distinguishes these states and transitions:
 
 - **Known (catalogued):** `PackageEnvelope` is present in the plug service; referenced
   blobs are tracked as materialized, missing, or corrupt. No actor or grant exists.
-- **Admitted (installed):** The nodule runtime validates the `NoduleDescription`,
-  registers non-conflicting Lexicon schemas, provisions the nodule's durable local
-  actor, and initializes its `NoduleConfiguration` (disabled by default, with zero
-  drawer grants).
+- **Admitted (installed):** The nodule runtime validates the services, facilities and
+  lifecycle of the `NoduleDescription`, provisions the nodule's durable local actor,
+  and initializes its `NoduleConfiguration` (disabled by default, with zero drawer
+  grants). Registering the nodule's own datum Lexicons with `SchemaRepo` is **not
+  done today**: `SchemaRepo` has no live-registration API, so a nodule cannot yet
+  write its own datums. This is an open item (§10).
 - **Selected & configured:** Operator/installer binds a specific immutable
   `NoduleDescription` revision, validates runtime settings against `config schema`,
   assigns standing drawer grants and provider bindings, and configures discovery,
@@ -383,9 +491,9 @@ The management surface distinguishes these states and transitions:
   long-poll/subscription waits while preserving the durable actor, standing grants
   (unless explicitly revoked), admitted schemas, and private SQLite state.
 - **Upgraded:** Moves the selected revision to a newer immutable `NoduleDescription`
-  under the same nodule identity and durable actor. New invocations use the newly
-  selected revision; already admitted dispatches stay pinned to their original
-  revision and artifact digests.
+  under the same nodule identity and durable actor. A call resolves the current
+  enabled revision for its duration (§5); a workflow provider freezes its execution at
+  start.
 - **Uninstalled:** Retires configuration and revokes standing grants per operator
   policy without erasing admitted schemas required to decode historical documents or
   rewriting historical `dmeta` attribution.
@@ -421,9 +529,23 @@ control. No processors execute in this stage.
 | Nodule runtime composed by BigNode | Nodule admission, configuration, actors, authorized routing/exposure, and integration with resource/execution services | OCI packaging, GUI composition, or implementing a competing task scheduler |
 | BigCabinet | Documents, drawers, schema admission/codecs, and domain access policy | Discovering plugs or requiring their code to read documents |
 | Authority and actor services | Generic namespace capabilities, revocation, durable actor identities, protected signing | Global plug/drawer policy or treating actor creation as a grant |
-| BigTasks, planned | Dispatch, workflows, processors, task coordination, and execution lifecycle | Assuming every task concerns a document |
+| Dispatch (nodule runtime) | Local NSID routing, ocap admission, readiness gating, provider forwarding | Choosing which node runs work, durability, or a bespoke routine kind |
+| wflow, a service behind dispatch | Durable execution: start, status long-poll, message, cancel; freezes the revision at start | Being a nodule routine kind or the dispatcher |
+| BigTasks, planned | Allocating work **across nodes** (triage, processors, distributed coordination), then handing dispatch or wflow an already captured invocation | Local routing, admission, or assuming every task concerns a document |
 | BigBlobs, planned | Artifact/blob storage and transfer | Deciding which provider to activate |
 | Clay micro host | Micro configuration, execution, and frontend composition | Owning nodule grants or node-side dispatch |
+
+Tasks decide *which node*; dispatch decides *whether and how, locally*. Only
+triage/processors, which are distributed, wait on BigTasks.
+
+**Readiness is per service/provider, not per nodule.** A nodule has a coarse state
+(`Refused(reason)` or `Admitted(revision)`, `enabled`, observed versus applied heads,
+grant status), and each service has `Ready`, `Disabled` or `Unavailable(reason)`
+(artifacts pending or corrupt, host unavailable, initializing, init failed, or a
+required provider missing). Dispatch reads only ready/not-ready and the reason, and
+answers a not-ready service with a retryable `NotReady`. Artifacts are fetched and
+pinned through big_blobs, which provides the first real transitions beyond today's
+`ExecutorUnavailable`.
 
 BigTasks may store its own state in documents and BigSync without every task being
 a document processor. Cabinet-aware triggers use document services; generic tasks
@@ -437,7 +559,7 @@ contract, not duplicate definitions or a dependency back into the executor.
 Final crate names are not selected; `big_plugs` is a possible catalog name, not
 permission to move Daybook types wholesale.
 
-## 5. Schemas, versions, and dispatch pins
+## 5. Schemas, versions, and provider pinning
 
 A known schema does not require a running routine. Disabling execution does not
 remove admitted schemas or make existing documents unreadable. Discovering a schema
@@ -454,18 +576,20 @@ not the provider's semver. Carried schema bundles have immutable provenance refe
 for reproducible admission and validation, without making a package version the
 operation's semantic identity. Concrete compatibility validation remains §10 work.
 
-New invocations use the **currently enabled implementation revision**, resolved
-through runtime provider policy. Once a dispatch is admitted, it pins the selected
-nodule/manifest revision, routine, and executable artifact digests, together with
-resolved contract dependencies. A version label alone is not an immutable pin.
-Retries, restarts, and upgrades do not silently re-resolve existing work to the
-latest implementation. Explicitly changing the enabled revision affects new work;
-publication of a newer package does not itself change that selection.
+**Pinning belongs to providers, not to dispatch.** Dispatch is stateless, so a call
+resolves the **currently enabled implementation revision** for its duration through
+runtime provider policy. A provider that has durable work pins for itself: the wflow
+service freezes the selected nodule/manifest revision, handler and executable
+artifact digests at start, so retries, restarts and upgrades do not silently
+re-resolve a running workflow to newer code. A version label alone is not an immutable
+pin. Explicitly changing the enabled revision affects new calls; publication of a newer
+package does not itself change that selection. (This supersedes the earlier text that
+a dispatch pins on admission.)
 
 Multiple nodules can implement the same operation; version selection within one
 provider does not decide between providers. Ambiguous or unavailable providers must
 not fall back to installation order or an unselected revision. The exact binding
-policy remains to be specified, but immutable dispatch selection is settled.
+policy remains to be specified; provider-side pinning is settled.
 
 Separate catalog knowledge, schema admission, selected/desired enablement, policy,
 and local execution readiness. Missing selected bytes are pending, not authority to
@@ -503,6 +627,16 @@ No resource request searches the caller's or nodule's other grants after a prese
 access capability is refused. A selected access capability covers the operation's
 resources; signer identity cannot enlarge that scope. Invoking a service intentionally
 using its own grants requires its invocation policy, not merely finding its NSID.
+
+### Operation authority is ocap too
+
+Dispatch owns an **operations namespace** in the authority service. The operator
+delegates to the nodule service, which mints per-actor "may invoke NSID" capabilities
+(scoped by NSID or authority prefix) from config datums, exactly as it applies drawer
+grants. `NoduleGrants` gains an operations section for this later; the design must not
+hard-code drawer-only grants. Presenting such a capability in the dispatch authority
+header is the only way a guest or caller reaches an operation (§3), and discovery,
+invocation and exposure remain separate gates.
 
 The policy layer is not limited to today's datum-tag predicates or manifest ACLs.
 It must support concrete drawers chosen after installation. Installation may provision
@@ -699,7 +833,7 @@ the same nodule identity reopens the same actor across restarts, uninstall/reins
 ordinary upgrades while each boot's handle is fresh; the service asks for `USE` alone,
 the actor is created holding nothing, and the management record reports the actor's
 identity and public key but never its capability. Management calls (`admitNodule`,
-`configureNodule`, `setNoduleEnabled`, `setNoduleGrants`, `uninstallNodule`, `getNodule`,
+`configureNodule`, `setNoduleEnabled`, `setNoduleDrawerGrants`, `uninstallNodule`, `getNodule`,
 `listNodules`, `mintNoduleCapability` under `org.example.daybook.nodules.*`) are
 authorized by the operator's identity capability, or by a handle the service minted from
 it carrying a `NoduleScope` (`admit`, and the set of plugs whose enablement, settings,
@@ -708,12 +842,29 @@ covers, and any other actor's identity is refused rather than looked up in a gra
 Host-local SQLite retains only durable actor identity bindings and rebuildable
 service-owned grant provenance (`nodule_actors` and `nodule_applied_grants`), never a
 second copy of desired config. Foreign or invalid imported config is carried and reported
-per nodule (`Readiness::InvalidConfig`, `error`, and `observed_heads` versus
+per nodule (`Readiness::Refused`, `error`, and `observed_heads` versus
 `applied_heads`) rather than refusing the whole node's boot, while dynamic local drawer
 grants apply, downgrade, and revoke service-owned grants within the reconciler's
 delegated drawer authority without disturbing other grant sources or Keyhive participant
 membership. Discovery and invocation policy, and the cursored observation of management
-state (§7), remain ahead of this slice.
+state (§7), remain ahead of this slice. Today readiness stops at `ExecutorUnavailable`
+and nothing executes a nodule.
+
+### Staged scope of the `feat/nodules` PR
+
+This PR covers, in order: dispatch (contract in `big_nodule_core`, host and routing
+table in `big_nodule`); the `BuiltIn` and `Wasm` providers (a wash workload per nodule
+revision, an instance per dispatch, the authority header, and the `dispatch.local`
+egress); nodule artifacts fetched and pinned through big_blobs so readiness moves past
+`ExecutorUnavailable`; initialization as a lifecycle binding; admission narrowed to
+services, facilities and lifecycle; and an end-to-end test where an operator invokes a
+nodule operation and one nodule calls another's operation under capabilities, allowed
+and denied.
+
+**Deferred:** the wflow service and durable procedures (a separate PR after the wflow
+rework); POSIX providers; triage and processors; BigTasks; network and XRPC exposure;
+consumers of command and view bindings; single-instance services; generalising
+`NoduleGrants` to operation grants.
 
 ### First implementation stage: catalog and runtime management
 
@@ -735,7 +886,8 @@ The planned standalone work includes:
   `big_nodule` opens each nodule's actor under the `nodules` subsystem actor and
   reconciles service-owned drawer grants against desired config datums).
 - Discovery/invocation policy, network exposure controls by caller subject, and
-  provider/routing metadata without executing guest handlers.
+  provider/routing metadata. (Guest handlers now run in this PR's Wasm provider;
+  see "Staged scope" above.)
 
 Management operations can be served through the existing service framework.
 Registration of an operation is not an executable endpoint: without an executor,
@@ -745,18 +897,15 @@ mutation seam is documented here; an explicit Cabinet contract change is needed
 before it can be exercised by a guest, not a reason to silently reinterpret today's
 single-capability API.
 
-### Later PR: execution and tasks
+### Later PRs: durable execution and tasks
 
-Running **any nodule code** is deferred: asynchronous calls (including long-poll
-handlers and stateless presenters), command execution, workflow execution,
-subscriptions, and initialization. Initializers are not an exception that starts
-code in the management stage. Full dispatch/BigTasks, processors, distributed
-coordination, remote execution, and direct routine communication are not brought
-into scope by specifying their manifest model.
+Deferred beyond this PR: workflow execution (the wflow service), processors,
+BigTasks and distributed coordination, remote execution, and direct routine
+communication. Specifying their manifest model does not bring them into scope.
 
-The later executor integrates with the runtime's policy and immutable selection,
-rather than moving enablement back into the catalog. BigTasks can be staged without
-requiring distributed task coordination in its first implementation.
+Executors integrate with the runtime's policy and provider-side selection, rather than
+moving enablement back into the catalog. BigTasks can be staged without requiring
+distributed task coordination in its first implementation.
 
 ### Relationship to existing documents and data
 
@@ -833,9 +982,9 @@ a new package/runtime/authority architecture:
    future processor triggers without implementing their execution.
 2. **Provider policy.** Express explicit selection and any unambiguous automatic
    resolution for `requires`, distinguishing missing, denied, incompatible,
-   ambiguous, disabled, and unavailable providers. Dispatch pinning and selection
-   from enabled revisions are settled; versioning is not a policy for selecting
-   between different providers.
+   ambiguous, disabled, and unavailable providers. Provider-side pinning and
+   resolution of the enabled revision per call are settled; versioning is not a
+   policy for selecting between different providers.
 3. **Two-capability resource protocol.** Specify identity rights, access-only scope
    encoding, protected signing, atomic authorization/revocation boundaries, and
    the explicit replacement of Cabinet's bound-signer mutation DTOs. No identity
@@ -846,20 +995,56 @@ a new package/runtime/authority architecture:
    per-contribution toggle granularity, schema admission mode (live or restart-bound),
    and how disabling/upgrading cancels or drains in-flight work when the execution PR
    lands remain to be specified.
-5. **Guest execution contracts, later PR.** Typed XRPC/Wasm requests/results/errors,
-   cursored long-poll and `RevisionedStore` host bindings for `call` routines,
-   durable `workflow` continuation and cancellation, initialization completion, and
-   any optional guest streaming binding if later needed. Define capability parameters
-   by role, never as arbitrary strings inferred from routine payloads.
+5. **Guest and dispatch contracts.** The dispatch wire contract and `DispatchError`
+   (§3) are a working sketch to finalise during implementation; also the guest SDK
+   (header forwarding, `dispatch.local` client), cursored long-poll and
+   `RevisionedStore` host bindings, initialization run modes and completion, wflow
+   continuation and cancellation (later PR), and any optional guest streaming binding.
+   Define capability parameters by role, never as arbitrary strings inferred from
+   payloads.
 6. **State and presentation, later PR.** Private store naming/migrations/concurrency,
    artifact retention for pinned work, capability reacquisition during retry, and
    portable view/action/terminal rendering vocabulary. Micro-to-nodule integration
    uses services but its frontend dependency/readiness behavior is deferred.
+7. **Live datum-schema registration.** The nodule's own Lexicons are never registered
+   with `SchemaRepo`, which has no live-registration API, so nodules cannot write their
+   own datums. Whether this is in scope for the PR is an open operator question.
+   Dispatch keeps operation schemas per provider for edge validation and does not need
+   `SchemaRepo`.
+8. **Physical considerations.** No I/O on admission; validation at the edges only; no
+   durable write per non-durable call and no mirrors of terminal records; provider
+   behind a service boundary.
 
 Remote identity authentication/delegation, provider discovery across nodes, custom
 BigSync backends, generic cross-nodule SQL, distributed tasks, and confidential cloud
 execution are later work. Local routing/exposure controls must leave room for them
 without claiming a portable capability-token format or implementing them now.
+
+### Proposed, pending operator review
+
+These come from the [lifecycle review](../scratch/nodule-lifecycle-review.md) and are
+**not decided**. They are listed so they are not lost; nothing above depends on them.
+
+- **Catalog role (review §1).** Keep the inline envelope in `NoduleInstall`; reduce the
+  catalog to a distribution tool (import, version resolution, fetching and pinning
+  artifacts) and drop the in-memory `Catalog` unless a consumer appears.
+- **Dependency split (review §1).** Package dependencies (`Plug.dependencies`) are a
+  distribution concern resolved at import; runtime dependencies are operation NSIDs
+  (`requires`) resolved by dispatch, and a missing provider makes the dependent's
+  services `Unavailable(ProviderMissing)` instead of refusing installation.
+- **Manifest reshape (review §2).** Collapse `routines` into one XRPC handler component
+  plus `implements: [NSID]`; workflows become a section owned by the wflow service.
+- **Initialization redesign (review §4).** `Initializer{key, target, mode}` with
+  `PerNode` and `PerStart` modes, done-ness keyed by (nodule, key, version label),
+  idempotency-key-based shared inits instead of a synced `PerInstall`, readiness gating
+  (`Unavailable(Initializing)`) instead of queues, ordering by the operation graph,
+  `InitFailed` recorded without a hidden retry loop, settings via a facility.
+- **Downgrades (review §5).** Allow downgrade as explicit operator intent and gate on
+  contract safety (a dependent becomes `ProviderMissing`) instead of version order.
+- **Retired prefixes (review §6).** Restrict the NSID-prefix overlap check to installed
+  plugs so a retired actor's prefix stops blocking others.
+- **Drawer-grant authority (review §6).** `setNoduleDrawerGrants` carries the operator's
+  delegated capability for the drawer instead of pre-granting the nodules actor Admin.
 
 ## 11. Evidence required from implementations
 
@@ -902,8 +1087,12 @@ without claiming a portable capability-token format or implementing them now.
   current authority and never stores live bearer handles for replay.
 - Dmeta retains actor/node attribution without a new capability/delegation audit
   chain. Policy changes do not rewrite untouched documents.
-- Existing dispatches retain exact implementations across upgrade/retry; new work
-  uses the selected enabled revision. Missing pinned bytes never select newer code.
+- A call resolves the currently enabled revision; durable providers (wflow) retain
+  the exact implementation they froze at start across upgrade and retry. Missing pinned
+  bytes never select newer code.
+- A nodule calls another nodule's operation through `dispatch.local` under a held
+  capability, and the same call without one is denied; an operator invokes a nodule
+  operation by NSID; a not-ready provider yields a retryable `NotReady`.
 - Disabled code does not make admitted schemas or existing documents disappear;
   writes with unknown schemas remain refused by Cabinet.
 - Commands provide both scriptable typed output and portable GUI/CLI presentation
