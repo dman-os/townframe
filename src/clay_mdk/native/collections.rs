@@ -16,9 +16,9 @@ use clay_collection::ReadLimits;
 use clay_collection::Stamp;
 use clay_collection::Stamped;
 use clay_collection::WriteBasis;
-use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::CapabilityRef;
 use clay_guest_session::capabilities::CapabilitySession;
+use clay_guest_session::capabilities::RowAttachment;
 use clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG;
 use clay_guest_session::collections::CollectionReader;
 use clay_guest_session::collections::CollectionValue;
@@ -162,11 +162,11 @@ impl<K: DeserializeOwned, V: DeserializeOwned> CollectionWatch<K, V> {
                 continue;
             };
             let attachments = value
-                .capabilities
+                .attachments
                 .iter()
-                .map(|publication| {
+                .map(|attachment| {
                     self.capabilities
-                        .mint(publication)
+                        .mint_attachment(attachment)
                         .map_err(|_| AccessError::Revoked)
                 })
                 .collect::<Result<_, _>>()?;
@@ -227,7 +227,7 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Registrat
         &self,
         key: &K,
         value: &V,
-        attachments: Vec<CapabilityPublication>,
+        attachments: Vec<RowAttachment>,
     ) -> Result<Stamp, WriteFailure> {
         let key = encode(key);
         let basis = self.basis(&key);
@@ -236,7 +236,7 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Registrat
             basis,
             CollectionValue {
                 body: encode(value),
-                capabilities: attachments,
+                attachments,
             },
         )
     }

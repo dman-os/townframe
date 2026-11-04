@@ -115,6 +115,7 @@ impl Factory<Provision> for Fake {
         host: Host,
         instance: Instance,
         requirements: BTreeMap<String, Provision>,
+        _activator: Activator<Provision>,
     ) -> LocalFuture<'static, Result<Initialized<Provision>, String>> {
         let name = self.name.clone();
         let controls = self.controls.clone();

@@ -67,14 +67,17 @@ impl fmt::Display for MicroId {
 }
 
 /// Runs one incarnation's initialization. `requirements` maps each local requirement binding
-/// to the publication its provider serves. Everything the incarnation publishes before the
-/// returned future resolves stays staged until the supervisor commits it.
+/// to the publication its provider serves. `activator` is the supervisor's demand handle,
+/// which the incarnation keeps for the lazy references it mints from stored endpoints.
+/// Everything the incarnation publishes before the returned future resolves stays staged until
+/// the supervisor commits it.
 pub trait Factory<P> {
     fn initialize(
         &self,
         host: Host,
         instance: Instance,
         requirements: BTreeMap<String, P>,
+        activator: Activator<P>,
     ) -> LocalFuture<'static, Result<Initialized<P>, String>>;
 }
 
@@ -505,7 +508,7 @@ impl<P: Clone + 'static> Supervisor<P> {
                             NodeState::Initializing(instance.clone(), outcome),
                         );
                         factory
-                            .initialize(host, instance, resolved)
+                            .initialize(host, instance, resolved, self.activator())
                             .await
                             .map_err(StartError::Faulted)
                     }

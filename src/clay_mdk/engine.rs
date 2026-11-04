@@ -13,6 +13,7 @@ use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
 use clay_guest_session::collections::BytesProjection;
 use clay_guest_session::collections::RegistrationGrant;
+use clay_host::Activator;
 use clay_host::ComponentRef;
 use clay_host::Factory;
 use clay_host::Host;
@@ -120,6 +121,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
         host: Host,
         instance: Instance,
         requirements: BTreeMap<String, CapabilityPublication>,
+        activator: Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
         let resources = self.resources.clone();
         let manifest = self.manifest.clone();
@@ -164,6 +166,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                 registrations,
                 requirements,
                 publications: declared,
+                activator: Some(activator),
                 ..InitialContext::default()
             };
             let (runtime, driver) = E::initialize(host, instance.clone(), package, context).await?;

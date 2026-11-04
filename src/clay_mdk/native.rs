@@ -32,6 +32,8 @@ pub use clay_guest_session::capabilities::CapabilityPublication;
 pub use clay_guest_session::capabilities::CapabilityRef;
 pub use clay_guest_session::capabilities::ContractIdentity;
 pub use clay_guest_session::capabilities::PresentationComponent;
+pub use clay_guest_session::capabilities::PublicationEndpoint;
+pub use clay_guest_session::capabilities::RowAttachment;
 pub use clay_guest_session::collections::WriteFailure;
 pub use clay_host::AccessError;
 pub use clay_host::CollectionRegistry;
@@ -55,6 +57,7 @@ use clay_guest_session::capabilities::admit_publications;
 use clay_guest_session::collections::BytesRegistrations;
 use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
+use clay_host::Activator;
 use clay_host::Factory;
 use clay_host::Host;
 use clay_host::Initialized;
@@ -307,6 +310,7 @@ impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFac
         host: Host,
         instance: Instance,
         requirements: BTreeMap<String, CapabilityPublication>,
+        activator: Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
         let resources = self.resources.clone();
         let manifest = self.manifest.clone();
@@ -316,6 +320,7 @@ impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFac
         Box::pin(async move {
             let capabilities =
                 CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
+            capabilities.attach_activator(activator);
             let sessions =
                 CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
             let configs = grant_configs(&resources.documents, &host, &instance, &manifest)?;

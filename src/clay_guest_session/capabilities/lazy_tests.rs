@@ -53,6 +53,7 @@ impl Factory<CapabilityPublication> for Provider {
         host: Host,
         instance: Instance,
         _requirements: BTreeMap<String, CapabilityPublication>,
+        _activator: Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
         let script = Arc::clone(&self.0);
         Box::pin(async move {
@@ -133,11 +134,13 @@ impl World {
 
     /// A fresh recipient incarnation's bank session.
     fn recipient(&self, name: &str) -> CapabilitySession {
-        CapabilitySession::new(
+        let session = CapabilitySession::new(
             self.host.clone(),
             self.host.start(name),
             CapabilityLimits::default(),
-        )
+        );
+        session.attach_activator(self.supervisor.activator());
+        session
     }
 
     fn lazy(
@@ -147,11 +150,10 @@ impl World {
         contract: ContractIdentity,
     ) -> CapabilityRef {
         recipient
-            .mint_lazy(LazyEndpoint {
+            .mint_lazy(&PublicationEndpoint {
                 micro: provider(),
                 publication: publication.to_owned(),
                 contract,
-                activator: self.supervisor.activator(),
             })
             .unwrap()
     }
@@ -199,11 +201,10 @@ async fn reading_a_lazy_status_never_starts_the_provider() {
     assert_eq!(Script::count(&world.script.inits), 0);
 
     let unknown = recipient
-        .mint_lazy(LazyEndpoint {
+        .mint_lazy(&PublicationEndpoint {
             micro: MicroId::new("nobody"),
             publication: "echo".to_owned(),
             contract: echo_contract(),
-            activator: world.supervisor.activator(),
         })
         .unwrap();
     assert_eq!(unknown.status(), RefStatus::Unavailable);
@@ -384,4 +385,23 @@ async fn an_endpoint_naming_no_publication_is_unavailable() {
             world.settle(|| world.state() == MicroState::Idle).await;
         })
         .await;
+}
+
+#[tokio::test]
+async fn an_endpoint_attachment_mints_a_lazy_reference_that_stores_back_as_the_endpoint() {
+    let world = World::new();
+    let recipient = world.recipient("recipient");
+    let attachment = RowAttachment::Endpoint(PublicationEndpoint {
+        micro: provider(),
+        publication: "echo".to_owned(),
+        contract: echo_contract(),
+    });
+    let reference = recipient.mint_attachment(&attachment).unwrap();
+    assert_eq!(reference.attachment(), attachment);
+    // Decoding a row activates nothing; only using the reference does.
+    assert_eq!(reference.status(), RefStatus::Dormant);
+    assert_eq!(Script::count(&world.script.inits), 0);
+    let response = world.driven(reference.call(b"ping".to_vec())).await;
+    assert_eq!(response, Ok(b"ping".to_vec()));
+    assert_eq!(Script::count(&world.script.inits), 1);
 }

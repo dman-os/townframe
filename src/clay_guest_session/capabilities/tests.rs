@@ -21,10 +21,8 @@ async fn two_recipients_get_distinct_refs_and_redeem_independently() {
         CapabilitySession::new(host.clone(), host.start("b"), CapabilityLimits::default());
     let ref_a = consumer_a.mint(&publication).unwrap();
     let ref_b = consumer_b.mint(&publication).unwrap();
-    assert_eq!(
-        ref_a.publication().unwrap().id(),
-        ref_b.publication().unwrap().id()
-    );
+    assert_eq!(ref_a.attachment(), ref_b.attachment());
+    assert_eq!(ref_a.attachment(), RowAttachment::Bound(publication));
     assert_ne!(ref_a.recipient_scope(), ref_b.recipient_scope());
     let proxy_a = ref_a.redeem_presentation().await.unwrap();
     let proxy_b = ref_b.redeem_presentation().await.unwrap();

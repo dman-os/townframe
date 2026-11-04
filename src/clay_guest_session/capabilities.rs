@@ -25,6 +25,7 @@ use futures::future::BoxFuture;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
@@ -225,13 +226,24 @@ pub fn admit_publications(
     Ok(admitted)
 }
 
-/// A weak, name-only reference to a micro's publication (ADR 025 §6), as read from a durable
+/// A weak, name-only reference to a micro's publication (ADR 025 §6), as stored in a durable
 /// row. `contract` is what the row promises; it is checked before anything is activated.
-pub struct LazyEndpoint {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationEndpoint {
     pub micro: MicroId,
     pub publication: String,
     pub contract: ContractIdentity,
-    pub activator: Activator<CapabilityPublication>,
+}
+
+/// What one collection-value attachment slot holds. A bound attachment names a live
+/// publication and exists only in memory; an endpoint names where to find a publication and is
+/// the only form a durable row may store (ADR 025 §7: rows persist endpoints, never
+/// references). Reading either mints a recipient-local [`CapabilityRef`]: bound for the first,
+/// lazy for the second.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowAttachment {
+    Bound(CapabilityPublication),
+    Endpoint(PublicationEndpoint),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -383,6 +395,8 @@ struct SessionState {
     instance: Instance,
     limits: CapabilityLimits,
     counts: Mutex<Counts>,
+    /// Reaches the supervisor, for the lazy references this session mints.
+    activator: OnceLock<Activator<CapabilityPublication>>,
 }
 
 #[derive(Default)]
@@ -440,8 +454,18 @@ impl CapabilitySession {
                 instance,
                 limits,
                 counts: Mutex::new(Counts::default()),
+                activator: OnceLock::new(),
             }),
         }
+    }
+
+    /// Let this session mint lazy references, which activate their provider through
+    /// `activator`. Attached once, when the incarnation is set up.
+    pub fn attach_activator(&self, activator: Activator<CapabilityPublication>) {
+        self.state
+            .activator
+            .set(activator)
+            .unwrap_or_else(|_| panic!("a session's activator is attached once"));
     }
 
     pub fn publication_count(&self) -> usize {
@@ -559,8 +583,29 @@ impl CapabilitySession {
     }
 
     /// Mint a recipient-local reference that activates `endpoint`'s provider on use.
-    pub fn mint_lazy(&self, endpoint: LazyEndpoint) -> Result<CapabilityRef, CapabilityFailure> {
-        self.state.mint(Target::Lazy(endpoint))
+    pub fn mint_lazy(
+        &self,
+        endpoint: &PublicationEndpoint,
+    ) -> Result<CapabilityRef, CapabilityFailure> {
+        let activator = self
+            .state
+            .activator
+            .get()
+            .cloned()
+            .expect("a session that mints lazy references is built with an activator");
+        self.state.mint(Target::Lazy(endpoint.clone(), activator))
+    }
+
+    /// Mint the reference one stored attachment stands for: bound for a publication, lazy for
+    /// an endpoint.
+    pub fn mint_attachment(
+        &self,
+        attachment: &RowAttachment,
+    ) -> Result<CapabilityRef, CapabilityFailure> {
+        match attachment {
+            RowAttachment::Bound(publication) => self.mint(publication),
+            RowAttachment::Endpoint(endpoint) => self.mint_lazy(endpoint),
+        }
     }
 
     pub fn same_recipient(&self, reference: &CapabilityRef) -> bool {
@@ -570,7 +615,7 @@ impl CapabilitySession {
 
 enum Target {
     Bound(CapabilityPublication),
-    Lazy(LazyEndpoint),
+    Lazy(PublicationEndpoint, Activator<CapabilityPublication>),
 }
 
 /// Recipient-local, unforgeable reference. Guests hold this only as a
@@ -596,12 +641,12 @@ impl CapabilityRef {
         self.0.recipient.instance.scope_id().0
     }
 
-    /// The live publication this reference is bound to. A lazy reference has none: only a
-    /// bound reference can be attached to a collection value.
-    pub fn publication(&self) -> Option<CapabilityPublication> {
+    /// What attaching this reference to a collection value stores: the live publication for a
+    /// bound reference, the endpoint for a lazy one.
+    pub fn attachment(&self) -> RowAttachment {
         match &self.0.target {
-            Target::Bound(publication) => Some(publication.clone()),
-            Target::Lazy(_) => None,
+            Target::Bound(publication) => RowAttachment::Bound(publication.clone()),
+            Target::Lazy(endpoint, _) => RowAttachment::Endpoint(endpoint.clone()),
         }
     }
 
@@ -613,7 +658,7 @@ impl CapabilityRef {
         match &self.0.target {
             Target::Bound(publication) if publication.is_revoked() => RefStatus::Revoked,
             Target::Bound(_) => RefStatus::Live,
-            Target::Lazy(endpoint) => match endpoint.activator.status(&endpoint.micro) {
+            Target::Lazy(endpoint, activator) => match activator.status(&endpoint.micro) {
                 None | Some(MicroState::Blocked(_)) => RefStatus::Unavailable,
                 Some(MicroState::Active) => RefStatus::Live,
                 Some(MicroState::Idle | MicroState::Initializing | MicroState::Closing) => {
@@ -671,15 +716,14 @@ impl CapabilityRef {
                 Err(CapabilityFailure::ContractMismatch)
             }
             Target::Bound(publication) => Ok((publication.clone(), None)),
-            Target::Lazy(endpoint)
+            Target::Lazy(endpoint, _)
                 if (endpoint.contract == ContractIdentity::presentation_component())
                     != (kind == PublicationKind::Presentation) =>
             {
                 Err(CapabilityFailure::ContractMismatch)
             }
-            Target::Lazy(endpoint) => {
-                let lease = endpoint
-                    .activator
+            Target::Lazy(endpoint, activator) => {
+                let lease = activator
                     .acquire(&endpoint.micro, &endpoint.publication)
                     .await
                     .map_err(|_| CapabilityFailure::Unavailable)?;
