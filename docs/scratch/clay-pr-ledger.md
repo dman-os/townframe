@@ -586,3 +586,9 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   artifact `component` in big_blobs, node-signed). Plug names may contain dots. Micro
   contribution schema NSID = `org.example.clay.micro.manifest`; C6d drops `MicroManifest.schema`
   (the NSID is the format identity; breaking change = new NSID).
+
+## C7b review (2026-11-04)
+
+- Accepted: `RootRow.pinned` keeps a root (the toolbar) mounted when Settings is closed. Generic shell flag, no toolbar vocabulary in the shell.
+- Fixed in C7b-2: call contracts may be implemented outside the package's authority (ADR 028 §5); the toolbar owns `org.example.dayframe.toolbar.action`. Durable mock operations settle on local persistence. `Capability::retain_call` in the MDK; the completion test proves one incarnation across retained calls. The pushed `components` list on `presentation.mount` and `ComponentSlot` are removed (micros only pull presentations through capabilities).
+- Deferred: volatile per-incarnation button state (badge/enabled) needs manifest-declared volatile collections and a scope-owned writer path; icon vocabulary (string carried as `data-icon`, no glyphs); the press path does not consult `status()`, so a disabled provider's button reports its failure on press.
