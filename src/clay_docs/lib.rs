@@ -285,6 +285,11 @@ struct WatchRecord {
 struct PendingMutation {
     route: FacetRoute,
     mutation: FacetMutation,
+    /// Set for a mutation of a [`DocumentService::durable`] service: the source already holds
+    /// its value, queued as this source change, and the persist future completes the operation
+    /// once the store has applied that many changes. `None` while volatile, where only
+    /// [`MockDocuments::complete`]/[`MockDocuments::settle`] complete an operation.
+    stored_at: Option<u64>,
     updates: watch::Sender<OperationReceipt>,
 }
 
@@ -331,6 +336,10 @@ impl DocumentService {
     /// has queued up as one atomic batch, so the store never reflects a prefix of a pair of
     /// changes that happened under one lock hold. Only the source is persisted; cache, watches,
     /// pending operations, membership routes' bindings and config owners are rebuilt per boot.
+    /// There is no remote to accept or reject a write here, so a mutation's operation stays
+    /// pending exactly until its change has been applied to the store, and then completes
+    /// accepted: local persistence is acceptance. (A volatile service leaves operations to
+    /// [`MockDocuments::settle`]/[`MockDocuments::complete`].)
     /// A store failure while writing panics: the source is a stand-in for the node, and a
     /// silently dropped write would only surface later as lost documents. Failures to read the
     /// store at construction are returned.
@@ -356,6 +365,8 @@ impl DocumentService {
             state.persist = Persistence::Open(sender);
             state.applied = Some(applied);
         }
+        // Weak: the persist future must not keep the state (and so the queue's sender) alive.
+        let state = Arc::downgrade(&service.inner);
         let persist = async move {
             let mut applied_count = 0_u64;
             while let Some(first) = queue.recv().await {
@@ -377,6 +388,11 @@ impl DocumentService {
                     .apply(batch)
                     .await
                     .unwrap_or_else(|error| panic!("persisting the mock document source: {error}"));
+                // Complete the operations the batch made durable before waking `persisted()`
+                // waiters, so whoever it releases already sees them settled.
+                if let Some(state) = state.upgrade() {
+                    state.lock().unwrap().complete_stored(applied_count);
+                }
                 applied_sender.send_replace(applied_count);
             }
         };
@@ -578,6 +594,17 @@ impl DocumentAccess {
             FacetMutation::Write(value) | FacetMutation::Create(value) => Some(value.clone()),
             FacetMutation::Delete => None,
         };
+        // A durable service has no remote to accept or reject a write, so reaching the local
+        // store is acceptance: the change goes into the source (and the persist queue) now,
+        // the overlay stays until the persist future has applied it, and that same point
+        // completes the operation with `Ok` (see `complete_stored`). A volatile service leaves
+        // the operation pending for a test to settle.
+        let stored_at = if matches!(state.persist, Persistence::Volatile) {
+            None
+        } else {
+            state.write_source(route.clone(), value.clone());
+            Some(state.queued)
+        };
         assert!(
             state.ledger.get(OperationId(id)).is_none(),
             "duplicate operation"
@@ -603,6 +630,7 @@ impl DocumentAccess {
                     PendingMutation {
                         route,
                         mutation,
+                        stored_at,
                         updates
                     }
                 )
@@ -1253,21 +1281,33 @@ impl State {
         self.evict();
     }
 
+    /// Accepts every durable operation whose source change is among the first `applied` ones
+    /// the store has applied.
+    fn complete_stored(&mut self, applied: u64) {
+        let ids = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.stored_at.is_some_and(|at| at <= applied))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.complete(id, Ok(()));
+        }
+    }
+
     fn complete(&mut self, id: u64, outcome: Result<(), OperationError>) {
         let pending = self.pending.remove(&id).expect("operation is not pending");
         let op_id = OperationId(id);
         let status = match outcome {
             Ok(()) => {
                 let value = match pending.mutation {
-                    FacetMutation::Write(value) | FacetMutation::Create(value) => {
-                        self.write_source(pending.route.clone(), Some(value.clone()));
-                        Some(value)
-                    }
-                    FacetMutation::Delete => {
-                        self.write_source(pending.route.clone(), None);
-                        None
-                    }
+                    FacetMutation::Write(value) | FacetMutation::Create(value) => Some(value),
+                    FacetMutation::Delete => None,
                 };
+                // A durable operation's change was written to the source when it was made.
+                if pending.stored_at.is_none() {
+                    self.write_source(pending.route.clone(), value.clone());
+                }
                 let version = self.apply_base(&pending.route, value);
                 self.ledger.settle(op_id, WriteOutcome::Durable { version });
                 let retired = self
@@ -1277,6 +1317,10 @@ impl State {
                 OperationStatus::Accepted
             }
             Err(error) => {
+                assert!(
+                    pending.stored_at.is_none(),
+                    "a durable operation is already in the source: nothing remote can reject it"
+                );
                 assert!(
                     self.ledger.settle(op_id, WriteOutcome::Rejected).is_some(),
                     "operation overlay disappeared"

@@ -9,6 +9,7 @@ use clay_mdk::Error;
 use clay_mdk::Facet;
 use clay_mdk::FacetState;
 use clay_mdk::Operation;
+use clay_mdk::OperationStatus;
 use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
 use micro_counter_manifest::BADGE;
@@ -43,7 +44,8 @@ impl Counter {
         })
     }
 
-    /// Count one more: the facet write, or nothing more for an in-memory count. A facet still
+    /// Count one more: the facet write (returned as submitted; the caller decides whether to await
+    /// its settlement), or nothing more for an in-memory count. A facet still
     /// loading is [`Error::Unavailable`]: counting from a guessed zero would overwrite the stored
     /// count.
     fn increment(&self) -> Result<Option<Operation>, Error> {
@@ -82,10 +84,28 @@ async fn activate(context: Context) -> Result<(), Error> {
         }
     })?;
     // The toolbar's Increment button is a lazy reference to this call: pressing it starts this
-    // incarnation if none is live, and the call holds it until the write is submitted.
+    // incarnation if none is live, and the call holds it until the write is settled, so the
+    // in-flight call is what keeps the counter live while the write becomes durable and the
+    // provider cannot go idle with the increment still an unacknowledged overlay.
     context.publish_call(INCREMENT, move |(): ()| {
         let counter = counter.clone();
-        async move { counter.increment().map(drop) }
+        async move {
+            let Some(operation) = counter.increment()? else {
+                return Ok(());
+            };
+            // Revision 0 is the local application; the next receipt is the settlement.
+            let settled = operation
+                .next(0)
+                .await?
+                .expect("a pending operation delivers its settlement");
+            match settled.status {
+                OperationStatus::Accepted => Ok(()),
+                OperationStatus::RolledBack(failure) => Err(Error::Rejected(failure.to_string())),
+                OperationStatus::LocallyApplied => {
+                    unreachable!("a settlement receipt is not the local application")
+                }
+            }
+        }
     })?;
     Ok(())
 }

@@ -992,7 +992,7 @@ async fn the_durable_source_survives_a_rebuild_and_persisted_values_beat_seeds()
     node.seed(route("a", "replaced"), json!(1));
     node.external_change(route("a", "removed"), None);
     node.external_change(route("a", "replaced"), Some(json!("external")));
-    // An accepted mutation persists; a rejected one leaves the stored value alone.
+    // A mutation persists: the store is the only authority, so there is no rejection.
     let host = Host::new();
     let instance = host.start("writer");
     let access = grant(&service, &host, &instance, &["a"], None);
@@ -1002,19 +1002,8 @@ async fn the_durable_source_survives_a_rebuild_and_persisted_values_beat_seeds()
     let created = access
         .mutate(route("a", "created"), FacetMutation::Create(json!(3)))
         .unwrap();
-    let rejected = access
-        .mutate(route("a", "seeded"), FacetMutation::Write(json!(9)))
-        .unwrap();
-    node.complete(accepted.id(), Ok(()));
-    node.complete(created.id(), Ok(()));
-    node.complete(
-        rejected.id(),
-        Err(OperationError::Rejected {
-            message: "denied".into(),
-        }),
-    );
     host.close();
-    drop((access, accepted, created, rejected, node));
+    drop((access, accepted, created, node));
     flush(service, persist).await;
 
     let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
@@ -1107,6 +1096,39 @@ async fn a_source_write_after_closing_persistence_panics() {
     let (service, _persist) = DocumentService::durable(store, 32).await.unwrap();
     service.close_persistence();
     service.mock_documents().seed(route("a", "x"), json!(1));
+}
+
+#[tokio::test]
+async fn a_durable_operation_is_accepted_once_its_write_reaches_the_store() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    let host = Host::new();
+    let instance = host.start("writer");
+    let access = grant(&service, &host, &instance, &["a"], None);
+    let operation = access
+        .mutate(route("a", "x"), FacetMutation::Create(json!(1)))
+        .unwrap();
+    let persisted = service.persisted();
+    // Until the persist future runs the write is only an overlay.
+    assert_eq!(operation.current().status, OperationStatus::LocallyApplied);
+    let mut persist = Box::pin(persist);
+    let mut persisted = Box::pin(persisted);
+    let mut next = Box::pin(operation.next(0));
+    assert_pending(next.as_mut());
+    assert_pending(persist.as_mut());
+    // The batch that stores the write accepts the operation before it releases `persisted`.
+    persisted.as_mut().await;
+    assert_eq!(operation.current().status, OperationStatus::Accepted);
+    assert_eq!(
+        next.await.unwrap().unwrap().status,
+        OperationStatus::Accepted
+    );
+    assert_eq!(store.scan_prefix(b"").await.unwrap().len(), 1);
+    host.close();
+    drop((access, operation));
+    flush(service, persist).await;
 }
 
 #[tokio::test]
