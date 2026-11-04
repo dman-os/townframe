@@ -3372,7 +3372,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-assembler-x64-meta",
 ]
@@ -3380,7 +3380,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64-meta"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-srcgen",
 ]
@@ -3388,7 +3388,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bforest"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-entity 0.135.7",
  "wasmtime-internal-core 48.0.7",
@@ -3407,7 +3407,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bitset"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "serde",
  "serde_derive",
@@ -3428,7 +3428,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "bumpalo",
  "cranelift-assembler-x64",
@@ -3458,7 +3458,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-assembler-x64-meta",
  "cranelift-codegen-shared",
@@ -3470,12 +3470,12 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 
 [[package]]
 name = "cranelift-control"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "arbitrary",
 ]
@@ -3483,7 +3483,7 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-bitset 0.135.7",
  "serde",
@@ -3506,7 +3506,7 @@ dependencies = [
 [[package]]
 name = "cranelift-frontend"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-codegen",
  "hashbrown 0.17.1",
@@ -3518,12 +3518,12 @@ dependencies = [
 [[package]]
 name = "cranelift-isle"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 
 [[package]]
 name = "cranelift-native"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-codegen",
  "libc",
@@ -3533,7 +3533,7 @@ dependencies = [
 [[package]]
 name = "cranelift-srcgen"
 version = "0.135.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 
 [[package]]
 name = "crc32fast"
@@ -12487,7 +12487,7 @@ dependencies = [
 [[package]]
 name = "pulley-interpreter"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-bitset 0.135.7",
  "log",
@@ -12498,7 +12498,7 @@ dependencies = [
 [[package]]
 name = "pulley-macros"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -17534,7 +17534,7 @@ dependencies = [
 [[package]]
 name = "wasmtime"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "addr2line 0.26.1",
  "async-trait",
@@ -17586,7 +17586,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-environ"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "anyhow",
  "cpp_demangle",
@@ -17646,7 +17646,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-cache"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "base64 0.22.1",
  "directories-next",
@@ -17665,7 +17665,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-component-macro"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -17679,7 +17679,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-component-util"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 
 [[package]]
 name = "wasmtime-internal-component-util"
@@ -17690,7 +17690,7 @@ checksum = "2626398b21bf4b1547fdbadc68afd5cbe69c89ca2a1d6c45fd56fd3b28177b93"
 [[package]]
 name = "wasmtime-internal-core"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "anyhow",
  "hashbrown 0.17.1",
@@ -17712,7 +17712,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-cranelift"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-codegen",
  "cranelift-control",
@@ -17737,7 +17737,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-fiber"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cc",
  "libc",
@@ -17750,7 +17750,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-debug"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cc",
  "object 0.39.1",
@@ -17761,7 +17761,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "libc",
  "wasmtime-internal-core 48.0.7",
@@ -17771,7 +17771,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-unwinder"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "cranelift-codegen",
  "log",
@@ -17782,7 +17782,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-versioned-export-macros"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -17792,7 +17792,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-wit-bindgen"
 version = "48.0.7"
-source = "git+https://github.com/dman-os/wasmtime?rev=04bb391f3f416f9fceebf92bdaf0b1d095b05ca2#04bb391f3f416f9fceebf92bdaf0b1d095b05ca2"
+source = "git+https://github.com/dman-os/wasmtime?rev=783ad10c0847597039a76cf741ee565530e61070#783ad10c0847597039a76cf741ee565530e61070"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
