@@ -58,7 +58,7 @@
         cp -r ${witDeps}/. $out/
       '';
 
-      # Cargo.lock pins five git dependencies by raw revision. Some of those
+      # Cargo.lock pins git dependencies by raw revision. Some of those
       # revisions are orphaned commits (reachable by SHA, contained in no ref),
       # which builtins.fetchGit refuses even with allRefs, so Nix 2.34 cannot
       # vendor them the default way. outputHashes makes crane use pkgs.fetchgit
@@ -77,10 +77,10 @@
           "sha256-wCLRhV509AWZzI2IHlyChesSTSkV3exI57iuwqVdoHs=";
         "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" =
           "sha256-zogYtiZrpVSQF6D4t6bvDBshjvvODzImh9Cs3aQn9/I=";
-        "git+https://github.com/wasmCloud/wasmCloud?rev=1bcaebaeba509b8a59fd239e668abe6f02596794#1bcaebaeba509b8a59fd239e668abe6f02596794" =
-          "sha256-VReAAyM1idIWc2phRUWOn6biUu1pXdq1bCs3Xw/0IS0=";
       };
-      # wash-runtime's build.rs finds the wasmCloud repository root by walking
+      # wash-runtime comes from our fork (dman-os/wasmCloud, branch
+      # townframe-changes); its pinned commit is on a branch, so it needs no
+      # outputHashes entry. wash-runtime's build.rs finds the wasmCloud repository root by walking
       # up from its own crate directory to the first Cargo.lock, then compiles
       # the protobuf definitions in <root>/proto. crane's git vendoring keeps
       # only the individual crates, so both repo-root inputs are restored: first
@@ -91,7 +91,7 @@
         inherit outputHashes;
         overrideVendorGitCheckout =
           ps: drv:
-          if lib.any (p: lib.hasPrefix "git+https://github.com/wasmCloud/wasmCloud" p.source) ps then
+          if lib.any (p: lib.hasPrefix "git+https://github.com/dman-os/wasmCloud" p.source) ps then
             drv.overrideAttrs (_: {
               postInstall = ''
                 cp Cargo.lock $out/
