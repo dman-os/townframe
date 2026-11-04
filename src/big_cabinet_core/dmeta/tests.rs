@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(feature = "schemars")]
 use crate::datum::DatumMember;
 #[cfg(feature = "schemars")]
 use crate::datum::DatumShape;

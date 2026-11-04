@@ -104,8 +104,11 @@ enum Progress {
 
 impl BlobProjection {
     pub async fn new(sql: Database) -> Res<Self> {
-        sql.apply_migrations(sqlite::queries::MIGRATION_TABLE, sqlite::queries::MIGRATIONS)
-            .await?;
+        sql.apply_migrations(
+            sqlite::queries::MIGRATION_TABLE,
+            sqlite::queries::MIGRATIONS,
+        )
+        .await?;
         let frontier = SqliteKeyedFrontier::new(
             sql.clone(),
             "big-blobs-projection-v1",
@@ -278,8 +281,12 @@ impl BlobProjection {
                 route.doc_id.to_string(),
                 route.datum_key.to_string(),
                 i64::try_from(revision)?,
-                reference.as_ref().map(|value| value.blob_id.to_bytes32().to_vec()),
-                reference.as_ref().map(|value| value.length_octets.to_string()),
+                reference
+                    .as_ref()
+                    .map(|value| value.blob_id.to_bytes32().to_vec()),
+                reference
+                    .as_ref()
+                    .map(|value| value.length_octets.to_string()),
             )
             .await?;
             sqlite::queries::delete_parked(
@@ -591,7 +598,6 @@ fn plaintext_blob_id(blob: &Blob) -> Option<BlobId> {
             })
     })
 }
-
 
 #[cfg(test)]
 mod tests;

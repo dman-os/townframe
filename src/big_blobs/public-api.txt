@@ -37,8 +37,10 @@ pub impl big_blobs::projection::BlobProjection::async fn source_revision (& self
 pub impl big_blobs::projection::BlobProjection::fn rearm (& self)
 pub impl big_blobs::service::BlobService::async fn adopt_import (& self , imported : & ImportedBlob , document : & big_cabinet_core :: DocId ,) -> Res < () >
 pub impl big_blobs::service::BlobService::async fn announce (& self , blob_id : BlobId) -> Res < () >
+pub impl big_blobs::service::BlobService::async fn availability_revision (& self) -> Res < u64 >
 pub impl big_blobs::service::BlobService::async fn import_stream < S > (& self , stream : S) -> Res < ImportedBlob > where S : Stream < Item = std :: io :: Result < Bytes > > + Send + Sync + 'static ,
 pub impl big_blobs::service::BlobService::async fn open_availability (& self , after : u64 ,) -> Res < KeyedFrontierRevisionReader < '_ , BlobId , BlobInfo > >
+pub impl big_blobs::service::BlobService::async fn read_all (& self , blob_id : & BlobId , max_octets : u64) -> Res < Option < Vec < u8 > > >
 pub impl big_blobs::service::BlobService::async fn release_import (& self , imported : & ImportedBlob) -> Res < () >
 pub impl big_blobs::service::BlobService::async fn stat (& self , blob_id : & BlobId) -> Res < Option < BlobInfo > >
 pub impl big_blobs::service::BlobService::fn put_object () -> & 'static str

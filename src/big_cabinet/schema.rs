@@ -34,6 +34,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::RwLock;
 use thiserror::Error;
 
 static CORE: LazyLock<Universe> = LazyLock::new(|| {
@@ -204,28 +205,29 @@ impl SchemaHandle {
     }
 }
 
+/// The datum schemas this node knows. The boot set (the core datums and the groups the embedder
+/// registers) is fixed for the life of the repo; beyond it, a plug's Lexicons are registered
+/// under an owner and retired with it, live, as the plug is enabled and disabled. Readers hold a
+/// [`SchemaHandle`], so a retired schema stays usable to whoever already resolved it and only
+/// stops resolving for new readers.
 #[derive(Debug)]
 pub struct SchemaRepo {
-    known: BTreeMap<String, SchemaHandle>,
+    state: RwLock<KnownSchemas>,
 }
 
-impl SchemaRepo {
-    pub fn open<'a>(
-        groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
-    ) -> Result<Self, SchemaRepoError> {
-        Self {
-            known: core_schemas()
-                .map(|handle| (handle.datum_tag().to_owned(), handle))
-                .collect(),
-        }
-        .with_groups(groups)
-    }
+#[derive(Debug, Clone, Default)]
+struct KnownSchemas {
+    known: BTreeMap<String, SchemaHandle>,
+    /// The owner of each tag registered after boot; the boot set has none.
+    owners: BTreeMap<String, String>,
+}
 
-    pub fn with_groups<'a>(
-        &self,
+impl KnownSchemas {
+    fn admit_groups<'a>(
+        &mut self,
         groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
-    ) -> Result<Self, SchemaRepoError> {
-        let mut known = self.known.clone();
+    ) -> Result<(), SchemaRepoError> {
+        let known = &mut self.known;
         let empty = Universe::default();
         for group in groups {
             let mut tags = std::collections::BTreeSet::new();
@@ -286,18 +288,97 @@ impl SchemaRepo {
                 );
             }
         }
-        Ok(Self { known })
+        Ok(())
+    }
+}
+
+impl SchemaRepo {
+    pub fn open<'a>(
+        groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
+    ) -> Result<Self, SchemaRepoError> {
+        let mut state = KnownSchemas {
+            known: core_schemas()
+                .map(|handle| (handle.datum_tag().to_owned(), handle))
+                .collect(),
+            owners: BTreeMap::new(),
+        };
+        state.admit_groups(groups)?;
+        Ok(Self {
+            state: RwLock::new(state),
+        })
+    }
+
+    /// A new repo holding this one's schemas plus `groups`, which become boot-set members of the
+    /// new repo. The two repos are independent afterwards.
+    pub fn with_groups<'a>(
+        &self,
+        groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
+    ) -> Result<Self, SchemaRepoError> {
+        let mut state = self.read().clone();
+        state.owners.clear();
+        state.admit_groups(groups)?;
+        Ok(Self {
+            state: RwLock::new(state),
+        })
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, KnownSchemas> {
+        self.state.read().expect("schema repo lock is not poisoned")
+    }
+
+    /// Registers `group` as `owner`'s schemas, replacing whatever `owner` registered before. It
+    /// is all or nothing: on error the repo, including `owner`'s earlier schemas, is untouched.
+    /// A tag already known (a boot schema or another owner's) is refused, never shadowed. The
+    /// write lock is held while the group compiles, so callers register only when the owner's
+    /// schemas actually changed.
+    pub fn register(
+        &self,
+        owner: &str,
+        group: SchemaRegistrationGroup<'_>,
+    ) -> Result<(), SchemaRepoError> {
+        let mut state = self
+            .state
+            .write()
+            .expect("schema repo lock is not poisoned");
+        let mut next = state.clone();
+        next.retire(owner);
+        let tags: Vec<String> = group
+            .registrations
+            .iter()
+            .map(|registration| registration.datum_tag.clone())
+            .collect();
+        next.admit_groups([group])?;
+        next.owners
+            .extend(tags.into_iter().map(|tag| (tag, owner.to_owned())));
+        *state = next;
+        Ok(())
+    }
+
+    /// Removes every schema `owner` registered. Retiring an owner with none is a no-op.
+    pub fn retire(&self, owner: &str) {
+        self.state
+            .write()
+            .expect("schema repo lock is not poisoned")
+            .retire(owner);
+    }
+
+    /// Whether `datum_tag` belongs to the boot set: known to the node itself rather than
+    /// registered by a plug.
+    pub fn is_boot_schema(&self, datum_tag: &str) -> bool {
+        let state = self.read();
+        state.known.contains_key(datum_tag) && !state.owners.contains_key(datum_tag)
     }
 
     pub fn resolve_for_read(&self, datum_tag: &str) -> Option<SchemaHandle> {
-        self.known.get(datum_tag).cloned()
+        self.read().known.get(datum_tag).cloned()
     }
 
     /// The tags of the known datums whose schema declares at least one `reference` position: the
     /// selector a reference index consumes, derived once from the compiled schemas rather than
     /// re-derived per document.
     pub fn reference_tags(&self) -> Vec<String> {
-        self.known
+        self.read()
+            .known
             .values()
             .filter(|handle| handle.compiled().declares_references())
             .map(|handle| handle.datum_tag().to_owned())
@@ -309,6 +390,21 @@ impl SchemaRepo {
             .ok_or_else(|| SchemaRepoError::UnknownDatum {
                 tag: datum_tag.to_owned(),
             })
+    }
+}
+
+impl KnownSchemas {
+    fn retire(&mut self, owner: &str) {
+        let tags: Vec<String> = self
+            .owners
+            .iter()
+            .filter(|(_, tag_owner)| *tag_owner == owner)
+            .map(|(tag, _)| tag.clone())
+            .collect();
+        for tag in tags {
+            self.owners.remove(&tag);
+            self.known.remove(&tag);
+        }
     }
 }
 

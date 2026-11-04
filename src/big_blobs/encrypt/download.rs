@@ -207,7 +207,7 @@ impl FsDownloadLedger {
         buf.extend_from_slice(&facts.salt);
         buf.extend_from_slice(&facts.rs.to_be_bytes());
         buf.push(facts.idlen);
-buf.push(match padding {
+        buf.push(match padding {
             Padding::Padme => 1,
         });
         eyre::ensure!(buf.len() == LEDGER_META_LEN, "meta layout drifted");

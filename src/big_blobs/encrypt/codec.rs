@@ -189,7 +189,10 @@ pub(crate) fn encrypt_raw_ikm(
 ) -> Vec<u8> {
     let rc = cipher_from_ikm(ikm, salt);
     let payload_max = payload_size(rs) as usize;
-    let encoding = EncodingParams { record_size: rs, padding };
+    let encoding = EncodingParams {
+        record_size: rs,
+        padding,
+    };
     let target = ciphertext_len(plaintext.len() as u64, encoding) as usize;
     let record_count = encoded_record_count(target as u64, rs);
     let final_wire = target - HEADER_LEN - (record_count as usize - 1) * rs as usize;
@@ -210,12 +213,7 @@ pub(crate) fn encrypt_raw_ikm(
 
         pos += take;
         let last = idx + 1 == record_count as usize;
-        out.extend_from_slice(&rc.encrypt_record(
-            idx as u64,
-            last,
-            content,
-            capacity - take,
-        ));
+        out.extend_from_slice(&rc.encrypt_record(idx as u64, last, content, capacity - take));
     }
     debug_assert_eq!(out.len(), target);
     out
@@ -471,7 +469,12 @@ pub(crate) struct RecordEncryptor {
 }
 
 impl RecordEncryptor {
-    pub(crate) fn new(key: &MasterKey, p_hash: &Hash, p_len: u64, encoding: EncodingParams) -> Self {
+    pub(crate) fn new(
+        key: &MasterKey,
+        p_hash: &Hash,
+        p_len: u64,
+        encoding: EncodingParams,
+    ) -> Self {
         let salt = key.salt_for(p_hash, &encoding);
         let cipher = key.cipher_with_salt(&salt);
         let target = ciphertext_len(p_len, encoding);
@@ -515,21 +518,26 @@ impl RecordEncryptor {
         let mut pos = 0usize;
         for idx in 0..remaining {
             let last = idx + 1 == remaining;
-            let capacity = if last { self.target_final_payload } else { self.payload_max };
+            let capacity = if last {
+                self.target_final_payload
+            } else {
+                self.payload_max
+            };
             let take = capacity.min(plaintext_tail.len() - pos);
             let content = plaintext_tail[pos..pos + take].to_vec();
 
             pos += take;
-            out.push(self.cipher.encrypt_record(
-                self.seq,
-                last,
-                content,
-                capacity - take,
-            ));
+            out.push(
+                self.cipher
+                    .encrypt_record(self.seq, last, content, capacity - take),
+            );
             self.seq += 1;
         }
-        assert_eq!(pos, plaintext_tail.len(), "Padmé target cannot carry plaintext");
-
+        assert_eq!(
+            pos,
+            plaintext_tail.len(),
+            "Padmé target cannot carry plaintext"
+        );
 
         out
     }
@@ -575,7 +583,6 @@ pub(crate) fn representable_length(minimum: u64, rs: u64) -> u64 {
     let maximum = base + rs;
     padme_length(minimum).min(maximum)
 }
-
 
 /// Total encoded length, including the 26-byte RFC header, for a plaintext.
 pub(crate) fn ciphertext_len(p_len: u64, encoding: EncodingParams) -> u64 {

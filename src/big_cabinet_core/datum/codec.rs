@@ -368,7 +368,7 @@ impl Codec {
             },
             Codec::Datetime => value
                 .as_str()
-                .filter(|value| crate::datum::input::datetime(value))
+                .filter(|value| crate::datum::value::datetime(value))
                 .map(|_| ())
                 .ok_or_else(|| CodecError::NotAnInstant {
                     stated: found.to_owned(),
@@ -440,24 +440,8 @@ fn kind(value: &Value) -> &'static str {
     }
 }
 
-/// Base64, padded or not on the way in: both spell the same bytes, and a writer that leaves the
-/// padding off is unambiguous.
-pub(super) fn decode_base64(stated: &str) -> Option<Vec<u8>> {
-    data_encoding::BASE64
-        .decode(stated.as_bytes())
-        .or_else(|_| data_encoding::BASE64_NOPAD.decode(stated.as_bytes()))
-        .ok()
-}
-
-/// Read the one canonical bytes object. Plain base64 strings belong to explicit foreign adapters,
-/// never to the Cabinet canonical path.
-pub(super) fn bytes_value(value: &Value) -> Option<Vec<u8>> {
-    let object = value.as_object()?;
-    if object.len() != 1 {
-        return None;
-    }
-    object.get("$bytes")?.as_str().and_then(decode_base64)
-}
+pub(super) use super::value::bytes_value;
+pub(super) use super::value::decode_base64;
 
 /// The milliseconds of an RFC 3339 instant.
 ///

@@ -1,0 +1,22 @@
+version = 1
+role = "runtime"
+dependency_reason = "The Wasm executor hosts nodule handler components in one wash-runtime host: it loads their bytes from the in-process blob service, verifies them against the artifact digest in the nodule envelope, and answers the nodule service's executor seam and dispatch's provider contract."
+allowed_dependencies = [
+    "big_blobs",
+    "big_blobs_core",
+    "big_cabinet_core",
+    "big_nodule",
+    "big_nodule_core",
+    "big_plugs_core",
+    "big_sync_core",
+    "service_utils_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]

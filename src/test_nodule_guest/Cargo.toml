@@ -1,0 +1,16 @@
+[package]
+name = "test_nodule_guest"
+workspace = "../wasm_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[dependencies]
+serde_json.workspace = true
+wit-bindgen = { workspace = true, features = ["async-spawn", "futures-stream", "inter-task-wakeup"] }

@@ -13,7 +13,7 @@ crate-type = ["rlib"]
 
 [features]
 default = ["manifest"]
-schemars = ["dep:schemars", "dep:unicode-segmentation"]
+schemars = ["dep:schemars"]
 manifest = []
 
 [dependencies]
@@ -34,7 +34,7 @@ jsonschema = { version = "0.42.0", default-features = false }
 displaydoc.workspace = true
 url.workspace = true
 unicode-properties = { version = "=0.1.1", default-features = false, features = ["general-category"] }
-unicode-segmentation = { version = "=1.13.3", optional = true }
+unicode-segmentation = "=1.13.3"
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v7"] }

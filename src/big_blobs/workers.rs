@@ -155,7 +155,13 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
             queue.enqueue(&document.parse()?).await?;
         }
     }
-    config.sql.apply_migrations(sqlite::queries::MIGRATION_TABLE, sqlite::queries::MIGRATIONS).await?;
+    config
+        .sql
+        .apply_migrations(
+            sqlite::queries::MIGRATION_TABLE,
+            sqlite::queries::MIGRATIONS,
+        )
+        .await?;
     let metadata = MetadataCapabilities::new(
         Arc::clone(&config.metadata_capability),
         config.policy.clone(),
@@ -534,11 +540,8 @@ async fn poll_writer_documents(
     polled: &mut BTreeSet<DocId>,
     document: Option<&DocId>,
 ) -> Res<()> {
-    let rows = sqlite::queries::writer_documents(
-        &config.sql,
-        document.map(ToString::to_string),
-    )
-    .await?;
+    let rows =
+        sqlite::queries::writer_documents(&config.sql, document.map(ToString::to_string)).await?;
     for row in rows {
         let document = row.document;
         let inventory = row.inventory;
@@ -577,11 +580,9 @@ async fn enqueue_root_members(
     use big_cabinet_core::drawer::protocol::DrawersError;
     let sql = &config.sql;
 
-    let roots = sqlite::queries::root_drawers(sql, document.to_string())
-        .await?;
+    let roots = sqlite::queries::root_drawers(sql, document.to_string()).await?;
     let mut metadata = None;
     for drawer in roots {
-
         let descriptor = sqlite::queries::drawer_descriptor(sql, drawer.clone())
             .await?
             .into_iter()
@@ -623,9 +624,7 @@ async fn enqueue_root_members(
             }
             Err(error) => return Err(error.into()),
         }
-        let members = sqlite::queries::drawer_members(sql, drawer.clone())
-            .await?;
-
+        let members = sqlite::queries::drawer_members(sql, drawer.clone()).await?;
 
         for member in members {
             queue.enqueue(&member.parse()?).await?;
@@ -633,7 +632,6 @@ async fn enqueue_root_members(
     }
     Ok(metadata)
 }
-
 
 fn pin_id(key: &DatumKey) -> Res<BlobId> {
     Ok(std::str::from_utf8(key.slot_bytes())?.parse()?)

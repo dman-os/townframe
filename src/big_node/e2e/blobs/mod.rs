@@ -15,6 +15,8 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use service_utils_rs::ClientError;
 
+mod nodule_artifacts;
+
 pub(super) async fn drawer_cap(node: &BigNode, drawer: &DocId) -> CapId {
     node.drawers
         .client
@@ -130,7 +132,7 @@ pub(super) async fn all_datums(node: &BigNode, document: &DocId) -> DatumsRead {
         .unwrap()
 }
 
-async fn blob_cap(node: &BigNode, object: String, dependencies: Vec<CapId>) -> CapId {
+pub(super) async fn blob_cap(node: &BigNode, object: String, dependencies: Vec<CapId>) -> CapId {
     node.authority
         .client
         .call(

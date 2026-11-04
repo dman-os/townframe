@@ -1,5 +1,6 @@
 use super::*;
 use big_cabinet_core::datum::DatumDecl;
+use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::Stored;
 use big_cabinet_core::datum::TypeDecl;
 use serde_json::json;
@@ -315,4 +316,76 @@ fn unknown_reads_are_best_effort_but_unknown_writes_are_refused() {
         repo.require_for_write("org.example.unknown"),
         Err(SchemaRepoError::UnknownDatum { .. })
     ));
+}
+
+fn plug_group(tags: &[&str]) -> SchemaRegistrationGroup<'static> {
+    SchemaRegistrationGroup::new(
+        None,
+        tags.iter()
+            .map(|tag| registration(tag, json!({"type": "string"}))),
+        Vec::new(),
+    )
+}
+
+#[test]
+fn an_owners_schemas_register_replace_and_retire_live() {
+    let repo = SchemaRepo::open([]).unwrap();
+    repo.register(
+        "plug-a",
+        plug_group(&["org.example.a.one", "org.example.a.two"]),
+    )
+    .unwrap();
+    assert!(repo.resolve_for_read("org.example.a.one").is_some());
+    assert!(!repo.is_boot_schema("org.example.a.one"));
+    assert!(repo.is_boot_schema(Dmeta::ID));
+    // A handle outlives the retirement of its schema; only new readers stop resolving it.
+    let held = repo.resolve_for_read("org.example.a.one").unwrap();
+
+    // Registering again replaces the owner's set, so `two` goes and `three` arrives.
+    repo.register(
+        "plug-a",
+        plug_group(&["org.example.a.one", "org.example.a.three"]),
+    )
+    .unwrap();
+    assert!(repo.resolve_for_read("org.example.a.two").is_none());
+    assert!(repo.resolve_for_read("org.example.a.three").is_some());
+
+    repo.retire("plug-a");
+    assert!(repo.resolve_for_read("org.example.a.one").is_none());
+    assert_eq!(held.datum_tag(), "org.example.a.one");
+    assert!(
+        repo.resolve_for_read(Dmeta::ID).is_some(),
+        "retiring never touches the boot set"
+    );
+    repo.retire("plug-a");
+}
+
+#[test]
+fn a_registration_never_shadows_and_a_refusal_leaves_the_owner_untouched() {
+    let repo = SchemaRepo::open([]).unwrap();
+    repo.register("plug-a", plug_group(&["org.example.a.one"]))
+        .unwrap();
+    assert!(matches!(
+        repo.register("plug-b", plug_group(&["org.example.a.one"])),
+        Err(SchemaRepoError::DuplicateDatumTag(_))
+    ));
+    assert!(matches!(
+        repo.register("plug-b", plug_group(&[Dmeta::ID])),
+        Err(SchemaRepoError::DuplicateDatumTag(_))
+    ));
+    // A group that fails to compile does not retire what the owner already had.
+    let broken = SchemaRegistrationGroup::new(
+        None,
+        [SchemaRegistration::new(
+            "org.example.a.two",
+            json!({"lexicon": 2}),
+        )],
+        Vec::new(),
+    );
+    assert!(matches!(
+        repo.register("plug-a", broken),
+        Err(SchemaRepoError::Admission { .. })
+    ));
+    assert!(repo.resolve_for_read("org.example.a.one").is_some());
+    assert!(repo.resolve_for_read("org.example.a.two").is_none());
 }

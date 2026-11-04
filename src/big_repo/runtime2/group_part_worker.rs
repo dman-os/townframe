@@ -974,10 +974,7 @@ mod tests {
         let (evt_tx, _evt_rx) = async_channel::unbounded();
         let keyhive = BigKeyhiveHandle::new(
             [23; 32],
-            BigRepoKeyhiveListener {
-                evt_tx,
-                storage: BigRepoKeyhiveStorage::memory(),
-            },
+            BigRepoKeyhiveListener::new(evt_tx, BigRepoKeyhiveStorage::memory()),
         )
         .await
         .expect("boot keyhive handle");

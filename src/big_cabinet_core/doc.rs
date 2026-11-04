@@ -8,7 +8,7 @@ use crate::dmeta::DocId;
 use crate::drawer::DrawerAccess;
 use crate::query::DatumSelection;
 use crate::query::Predicate;
-use automerge::ChangeHash;
+pub use automerge::ChangeHash;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as Json;
@@ -137,6 +137,52 @@ pub struct DatumListing {
 pub struct WriteReceipt {
     pub doc_id: DocId,
     pub heads: Vec<ChangeHash>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatumPatch {
+    #[serde(default)]
+    pub set: BTreeMap<DatumKey, Json>,
+    #[serde(default)]
+    pub remove: BTreeSet<DatumKey>,
+}
+
+impl DatumPatch {
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty() && self.remove.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreSnapshot<S> {
+    pub heads: Vec<ChangeHash>,
+    pub value: S,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum StoreError {
+    #[error("document operation failed: {0}")]
+    Docs(#[from] DocsError),
+    #[error("document service transport failed: {0}")]
+    DocsUnavailable(String),
+    #[error("access to the store document was lost")]
+    AccessLost,
+    #[error("invalid store edit: {0}")]
+    InvalidEdit(String),
+}
+
+impl From<ContextError> for StoreError {
+    fn from(error: ContextError) -> Self {
+        Self::Docs(DocsError::Context(error))
+    }
+}
+
+pub trait DatumStore: Clone + Send + 'static {
+    fn owns(key: &DatumKey) -> bool;
+    fn hydrate(read: &DatumsRead) -> Self;
+    fn diff(before: &Self, after: &Self) -> Result<DatumPatch, StoreError>;
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]

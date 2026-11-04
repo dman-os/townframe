@@ -1576,6 +1576,10 @@ async fn forced_commit_failure_invalidates_entry() -> Res<()> {
     drop(tx);
     drop(guard);
     assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+    // The rollback of a dropped transaction still runs on a sqlite worker and
+    // owns a database handle; returning now would race process exit and leave
+    // the ephemeral directory behind.
+    store.sql.drain_workers().await;
     Ok(())
 }
 
@@ -1620,6 +1624,10 @@ async fn cancellation_cannot_leave_speculative_state() -> Res<()> {
     );
 
     assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
+    // The rollback of a dropped transaction still runs on a sqlite worker and
+    // owns a database handle; returning now would race process exit and leave
+    // the ephemeral directory behind.
+    store.sql.drain_workers().await;
     Ok(())
 }
 
@@ -2049,6 +2057,10 @@ async fn sqlite_big_repo_admission_log_fails_loud_on_unknown_hash() -> Res<()> {
         result.is_err(),
         "admitting an unarrived hash must fail loudly"
     );
+    // The rollback of a dropped transaction still runs on a sqlite worker and
+    // owns a database handle; returning now would race process exit and leave
+    // the ephemeral directory behind.
+    store.sql.drain_workers().await;
     Ok(())
 }
 

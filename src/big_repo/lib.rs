@@ -461,10 +461,11 @@ impl BigRepo {
         // and the keyhive sync-done observer send `Runtime2Evt` directly into
         // this channel; the runtime consumes it.
         let (evt_tx, evt_rx) = async_channel::unbounded::<crate::runtime2::Runtime2Evt>();
-        let listener = crate::keyhive_listener::BigRepoKeyhiveListener {
-            evt_tx: evt_tx.clone(),
-            storage: keyhive_storage.clone(),
-        };
+        let listener = crate::keyhive_listener::BigRepoKeyhiveListener::new(
+            evt_tx.clone(),
+            keyhive_storage.clone(),
+        );
+        let listener_storage = listener.storage_cell();
         let keyhive = if let Some(restored) = BigKeyhiveHandle::restore_from_storage_archive(
             node_identity_seed,
             &keyhive_storage,
@@ -548,6 +549,7 @@ impl BigRepo {
                 runtime_stop,
                 change_manager_stop: Some(change_manager_stop),
                 connection_tasks,
+                listener_storage,
             },
         ))
     }
@@ -1438,6 +1440,10 @@ pub struct BigRepoStopToken {
     runtime_stop: runtime2::Runtime2StopToken<future_form::Sendable, runtime2::TokioTaskRuntime>,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
     connection_tasks: Arc<utils_rs::AbortableJoinSet>,
+    /// Severed once the runtime has stopped; see
+    /// [`keyhive_listener::ListenerStorage`] for why the keyhive's listener
+    /// clones can outlive the repo.
+    listener_storage: keyhive_listener::ListenerStorage,
 }
 
 impl BigRepoStopToken {
@@ -1452,6 +1458,7 @@ impl BigRepoStopToken {
         if let Some(stop_token) = self.change_manager_stop.take() {
             stop_token.stop().await?;
         }
+        self.listener_storage.detach();
         Ok(())
     }
 }

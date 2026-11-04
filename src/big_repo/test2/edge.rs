@@ -1596,57 +1596,61 @@ async fn tier9_quiescence_probe_restarts_over_coverage_routed_behind_it() -> cra
     // routed behind the probe.
     let hold = node.repo.hold_hub_events().await?;
 
-    let wait = node.repo.wait_for_quiescence(Some(utils_rs::scale_timeout(
-        std::time::Duration::from_secs(30),
-    )));
-    futures::pin_mut!(wait);
-    assert!(
-        futures::poll!(wait.as_mut()).is_pending(),
-        "quiescence wait must park on its probe"
-    );
-    let barrier_before = node
-        .repo
-        .runtime
-        .quiescence_probe_barrier_for_test()
-        .await?;
-    assert!(
-        barrier_before.is_some(),
-        "a probe must be active with a live doc worker and held fence acks"
-    );
+    // The pinned futures borrow `node`; scope them so it can shut down.
+    {
+        let wait = node.repo.wait_for_quiescence(Some(utils_rs::scale_timeout(
+            std::time::Duration::from_secs(30),
+        )));
+        futures::pin_mut!(wait);
+        assert!(
+            futures::poll!(wait.as_mut()).is_pending(),
+            "quiescence wait must park on its probe"
+        );
+        let barrier_before = node
+            .repo
+            .runtime
+            .quiescence_probe_barrier_for_test()
+            .await?;
+        assert!(
+            barrier_before.is_some(),
+            "a probe must be active with a live doc worker and held fence acks"
+        );
 
-    // Route coverage work into the doc worker while the probe is pending. The
-    // probe barrier query below is FIFO after this command, so it observes the
-    // hub's reaction to the routing.
-    let coverage = node.repo.runtime.ensure_causal_coverage(doc_id.clone());
-    futures::pin_mut!(coverage);
-    assert!(
-        futures::poll!(coverage.as_mut()).is_pending(),
-        "coverage must park on the worker's reconcile"
-    );
-    let barrier_after = node
-        .repo
-        .runtime
-        .quiescence_probe_barrier_for_test()
-        .await?;
-    assert_ne!(
-        barrier_after, barrier_before,
-        "routing work to a doc worker must restart the pending probe, got barrier {barrier_after:?}"
-    );
+        // Route coverage work into the doc worker while the probe is pending. The
+        // probe barrier query below is FIFO after this command, so it observes the
+        // hub's reaction to the routing.
+        let coverage = node.repo.runtime.ensure_causal_coverage(doc_id.clone());
+        futures::pin_mut!(coverage);
+        assert!(
+            futures::poll!(coverage.as_mut()).is_pending(),
+            "coverage must park on the worker's reconcile"
+        );
+        let barrier_after = node
+            .repo
+            .runtime
+            .quiescence_probe_barrier_for_test()
+            .await?;
+        assert_ne!(
+            barrier_after, barrier_before,
+            "routing work to a doc worker must restart the pending probe, got barrier {barrier_after:?}"
+        );
 
-    // Release the probe. It may only resolve after the worker has run the
-    // coverage (its fence is enqueued behind it), so the reconcile's response
-    // is already available when the wait returns.
-    hold.resume().await?;
-    wait.as_mut().await?;
-    match futures::poll!(coverage.as_mut()) {
-        std::task::Poll::Ready(result) => {
-            result?;
+        // Release the probe. It may only resolve after the worker has run the
+        // coverage (its fence is enqueued behind it), so the reconcile's response
+        // is already available when the wait returns.
+        hold.resume().await?;
+        wait.as_mut().await?;
+        match futures::poll!(coverage.as_mut()) {
+            std::task::Poll::Ready(result) => {
+                result?;
+            }
+            std::task::Poll::Pending => {
+                panic!("quiescence returned before the coverage routed behind its fence ran")
+            }
         }
-        std::task::Poll::Pending => {
-            panic!("quiescence returned before the coverage routed behind its fence ran")
-        }
+        drop(hold);
     }
-    drop(hold);
+    node.shutdown().await;
     Ok(())
 }
 

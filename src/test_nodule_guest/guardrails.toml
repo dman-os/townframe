@@ -1,0 +1,7 @@
+version = 1
+role = "plugin"
+dependency_reason = "tiny p3 wasi:http test guest for the nodule runtime; depends on no internal crates"
+allowed_dependencies = []
+allow_external_api_types = false
+
+[builds.wasm32-wasip3]

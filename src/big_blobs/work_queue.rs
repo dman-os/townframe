@@ -15,7 +15,11 @@ pub(crate) struct WorkQueue {
 
 impl WorkQueue {
     pub async fn new(sql: Database) -> Res<Self> {
-        sql.apply_migrations(sqlite::queries::MIGRATION_TABLE, sqlite::queries::MIGRATIONS).await?;
+        sql.apply_migrations(
+            sqlite::queries::MIGRATION_TABLE,
+            sqlite::queries::MIGRATIONS,
+        )
+        .await?;
         Ok(Self {
             sql,
             changed: Arc::new(Notify::new()),
@@ -81,7 +85,13 @@ impl WorkQueue {
     }
 
     pub async fn finish(&self, doc: &DocId, generation: u64, waiting: bool) -> Res<()> {
-        sqlite::queries::finish(&self.sql, waiting, doc.to_string(), i64::try_from(generation)?).await?;
+        sqlite::queries::finish(
+            &self.sql,
+            waiting,
+            doc.to_string(),
+            i64::try_from(generation)?,
+        )
+        .await?;
         Ok(())
     }
 }
