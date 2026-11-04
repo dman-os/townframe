@@ -444,6 +444,33 @@ async fn a_lease_dropped_while_a_consumer_binds_does_not_close_the_provider() {
     assert_eq!(supervisor.state(&provider), MicroState::Idle);
 }
 
+/// The supervisor records a close when it begins (mirror and tick), not only when it ends, so
+/// an activator's status and change receiver see the provider leave `Active` while its guest
+/// close is still parked.
+#[tokio::test]
+async fn a_closing_micro_is_recorded_before_its_guest_close_returns() {
+    let controls = Controls::default();
+    let close_gate = controls.close_gate("solo");
+    let host = Host::new();
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
+    let (solo, activator) = (id("solo"), supervisor.activator());
+    driven(&supervisor, async {
+        drop(supervisor.acquire(&solo, PRESENTATION).await.unwrap());
+        let mut changes = activator.changes();
+        changes
+            .wait_for(|_| activator.status(&solo) == Some(MicroState::Closing))
+            .await
+            .unwrap();
+        close_gate.notify_one();
+        changes
+            .wait_for(|_| activator.status(&solo) == Some(MicroState::Idle))
+            .await
+            .unwrap();
+    })
+    .await;
+    assert_eq!(controls.log(), ["init solo", "close solo"]);
+}
+
 #[tokio::test]
 async fn acquiring_during_closing_waits_for_a_fresh_incarnation() {
     let controls = Controls::default();

@@ -748,7 +748,13 @@ impl<P: Clone + 'static> Supervisor<P> {
                     publications,
                     providers,
                     ..
-                } => (instance, root, publications, providers),
+                } => {
+                    // Record the transition like every other (mirror, then tick): a waiter on
+                    // `changes` sees the close begin, and an activator's status stops saying
+                    // the provider is live while its guest closes.
+                    self.refresh(&identity);
+                    (instance, root, publications, providers)
+                }
                 // Another close drives this incarnation; wait for its teardown.
                 NodeState::Closing(instance) => {
                     self.host.await_close(&instance).await;
