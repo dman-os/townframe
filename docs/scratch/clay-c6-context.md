@@ -456,3 +456,30 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   way an id leaves the arrangement besides re-registering it. (3) Arrangement is order-of-show only (toggle appends); reordering
   and removing unknown ids are not designed. (4) The slot's wording is "Section unavailable" for every presentation, including a
   panel. (5) Whether the layout package should be enabled on admission like the native built-ins.
+
+## C7d notes (2026-11-04): validation matrix and test hygiene
+
+- **Matrix.** `clay-pr-ledger.md` "Validation matrix": 21 items, evidence read from test bodies. Covered: ADR 030 #1-7, #9; ADR 031 #1-4, #6-8, #10.
+  Partial: ADR 030 #8 (dynamic half), #10; ADR 031 #5, #9, #11. ADR 030/031 Status prose and ADR 030's "Implementation status" were stale and
+  are corrected (still Proposed; acceptance is the operator's).
+- **Bug found and fixed (`761cb9ca`).** `Supervisor::close` moved a node to `Closing` without `refresh` (mirror + `changes` tick). Any
+  `changes` waiter on `Closing`, and `Activator::status` during a guest close, was wrong. Regression test hangs without the fix.
+- **Gaps filled.** ADR 031 #1 (composition known-empty), #2 (`context_collections_and_calls` over volatile and durable collections),
+  #7 (three-recipient concurrent call + redemption).
+- **Deferred (not built), needs a decision.** ADR 030 #8 dynamic half: `Lease` has no holder, so two incarnations retaining each other
+  never idle, and a lazy initialization cycle (A's initialize demands B whose initialize demands A) deadlocks on A's staged outcome rather
+  than failing with `Cycle`. ADR 031 #5: no Lexicon validation of keys/values (only limits, attachment indices, selector ceilings);
+  depends on the schema registry (big_plugs P7). ADR 030 #10 / 031 #11: no native `Incarnations`; the lifecycle fixture is wasm32-only.
+  ADR 031 #9 guest-side `status()` of a bound reference after closure through the WIT: no fixture call exposes it (adding one needs a
+  guest rebuild and a fixture change; the mapping is a one-line enum match per engine).
+- **Hygiene.** Spin-waits replaced by event waits: composition `settle` (supervisor `changes().wait_for`), clay_host supervisor tests
+  (`settle` over a change receiver; `Controls::logged` over a stored-permit `Notify`), `lazy_tests` (`entered_init`/`entered_call` permits,
+  `settle`), `lifecycle_conformance` (`idle`, `leased_provider_closes_when_idle`, `until`; guest call handlers via a new
+  `InFlightCalls` watch replacing `Arc<AtomicUsize>`, `Incarnations::calls_in_flight`), `clay_mdk` hooks test (`rendered`: mirror
+  `changed()` then `wait_for_work`), desktop composition test. Kept on purpose: bounded `yield_now` loops (4-32 iterations) that assert
+  something does NOT happen (nothing can be awaited for an absence): supervisor tests, `lazy_tests::stay_live`, conformance `stays_up`,
+  composition slot-churn loops; `registration_tests_durable::InterleavingStore::apply` and `native::tests` handler `yield_now` are
+  deliberate interleaving points, not waits; `sleeper_fixture` burns guest time on purpose. No `waitForTimeout`/`setTimeout` in the
+  Playwright specs.
+- **Env note.** Per-crate nextest runs need the `DAYFRAME_*_COMPONENT` variables `x/check-dayframe.ts` prints (without them three
+  `clay_mdk` blitz/store tests fail in 0.03 s); the full gate sets them itself.
