@@ -577,3 +577,7 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   watchPlugs (long-poll cursor), publish/remove, mintPlugsCapability. Pending there: typed
   `micro` section key, publisher signatures (P3a), importers incl. our sidecar pair (P3b).
   C6d uses `PlugId` for micro ids once the micro section key is confirmed.
+- Micro section confirmed: envelope contribution `org.example.daybook.plug.micro`
+  (`big_plugs_core::MicroContribution {schema, description}`); `schema` = our manifest format id,
+  `description` = `MicroManifest` JSON minus `id`/`package_version`. One micro per plug; micro id =
+  installed-as `PlugId` (lands with P3b, peer will ping).
