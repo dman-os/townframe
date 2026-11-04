@@ -84,3 +84,44 @@ test("a disabled counter stays disabled across a reload", async ({ page }) => {
   ).toBeVisible({ timeout: 60_000 });
   expect(failures).toEqual([]);
 });
+
+// The counter package contributes an Increment button to the toolbar through its manifest: a
+// durable row whose action is a lazy reference to the guest's `increment` call. With Settings
+// closed nothing holds the guest, yet the pinned toolbar still lists the button; pressing it
+// starts the guest on `wcmp` for the length of the call, and the new count shows once the
+// counter's section is mounted again.
+test("the toolbar button increments a stopped wcmp counter", async ({ page }) => {
+  const failures: string[] = [];
+  page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
+  page.on("console", (message) => {
+    if (message.type() === "error") failures.push(`console: ${message.text()}`);
+  });
+
+  await page.goto("/");
+  const increment = page
+    .getByRole("toolbar", { name: "Toolbar" })
+    .getByRole("button", { name: "Increment", exact: true });
+  await expect(increment).toBeVisible({ timeout: 60_000 });
+
+  await page.getByText("Micro lifecycle controls").click();
+  await page
+    .getByRole("button", { name: "Enable dayframe.counter micro" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Disable dayframe.counter micro" }),
+  ).toBeVisible();
+
+  // Close Settings: the counter's section unmounts, and the toolbar stays.
+  await page.getByRole("button", { name: "Close Settings" }).click();
+  await expect(
+    page.getByRole("button", { name: "Increment Wasm counter" }),
+  ).toBeHidden();
+  await expect(increment).toBeVisible();
+  await increment.click();
+
+  await page.getByRole("button", { name: "Open Settings" }).click();
+  await expect(
+    page.getByRole("button", { name: "Increment Wasm counter" }),
+  ).toHaveText("1", { timeout: 60_000 });
+  expect(failures).toEqual([]);
+});

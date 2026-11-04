@@ -331,3 +331,46 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   `clay_mdk` `wasm::tests::a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_disable_and_enable`: the
   `context` fixture's `slot` presentation shows the counter guest through the real renderer, clickable, then
   unavailable on disable and mounted again on enable. No new fixture crate; `x/check-dayframe.ts` unchanged.
+
+## C7b notes (2026-11-04): toolbar micro and completion validation
+
+- **Toolbar.** `micro_toolbar_manifest` (contract: `org.example.dayframe.toolbar.buttons`, rows `Button { label, icon,
+  action: Attachment }`, key = contributor's chosen id) and `micro_toolbar` (MDK-only, mirrors settings). The toolbar
+  reads the buttons collection (`use_rows`) and a press is `Capability::call::<(), ()>` on the row's attachment, which is
+  the lazy endpoint the counter's manifest declared. Clay learns nothing about toolbars. The press disables only that
+  button while its call is in flight; a failed call (disabled or faulted provider) shows in a `role="alert"` line.
+  `status()` is not read by the toolbar (a disabled provider's button stays enabled and shows the failure on press).
+- **Counter.** New call `increment` (contract `org.example.dayframe.counter.increment`, under the counter's authority:
+  `Sidecar::validate` requires a declared call contract to lie under it, so it is not a toolbar-owned `action@1` NSID) and
+  a `toolbar-button` contribution (key `increment`) through the optional write binding `toolbar`. `Counter::increment` is
+  shared by the call and the view's click. The call returns once the write is *submitted*, not settled: the mock document
+  source never completes an operation by itself (only `MockDocuments::settle/complete` do), so awaiting settlement hangs;
+  the overlay outlives the incarnation (the native test reads the count back from a later incarnation).
+- **Mounting (decision to confirm).** The toolbar registers a shell root like Settings, but `RootRow` gained
+  `pinned: bool` (serde default false) and `Application` shows pinned roots even while Settings is closed; the toggle
+  covers the unpinned roots. Before, the toggle gated every root. Alternative if "pinned" is unwanted vocabulary: a
+  second shell collection, or the toolbar rendered by the shell outside the roots loop.
+- **Icon.** `Button.icon` is carried as `data-icon` only; there is no icon vocabulary or glyph rendering yet.
+- **Volatile button state not done.** The composition declares only durable collections (`declare` uses
+  `durable_bytes_registrations`) and has no volatile collection declaration, scope-owned writer path or per-incarnation
+  scope for manifest-declared collections; badge/enabled state would need that first, so it was left out per the brief.
+- **Tests.** `dayframe_composition::tests::the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press_starts_it_once`
+  (native counter through `ACTIVATE`: the pinned root renders "Increment" through a `PresentationSlot`, the button row is read
+  and `status()` is `Dormant`, counter `Idle` with 0 activations; one call = 1 activation, idle after, the count is 1 from a
+  later incarnation). `dayframe_desktop::e2e::the_toolbar_button_increments_a_stopped_wasm_counter` (Wasmtime guest, real
+  Application: Settings closed, guest idle, button rendered, press, reopen shows 1). Playwright
+  `the toolbar button increments a stopped wcmp counter` does the same on wcmp. Desktop `desktop_runtime` and the web shell
+  link the toolbar (on demand, enabled on admission, not locked: it has an enable/disable toggle in the lifecycle panel).
+- **Completion validation.** Test-scoped pair in `dayframe_composition::tests` (`editor`, `provider`, test
+  `the_editor_calls_only_the_providers_whose_trigger_matches`): the editor declares a durable completion-source collection
+  and a `complete` call; two providers each contribute one row `{ trigger, provider: attachment }` to a lazy `complete`
+  call. The editor filters rows locally and calls only the matching provider (non-matching providers stay `Idle` with 0
+  activations, text matching nothing starts nobody). **`retain-call` is not reachable from `clay_mdk::Context`**:
+  `Capability` has `call`/`redeem_presentation`/`status` but nothing wrapping `CapabilityRef::retain_call` (which exists in
+  `clay_guest_session` and is covered by `lazy_tests::retained_proxies_keep_the_provider_live_until_dropped`). So the
+  "one incarnation across keystrokes while the editor holds a retain-call binding" half is not proven through the MDK;
+  the test instead pins the present behaviour (each call is its own incarnation, 2 activations for 2 calls). Adding
+  `Capability::retain_call` (a `CallBinding` wrapper for both backends and a WIT resource for guests) is the open item.
+- **Dead end seen.** An awaited operation in a guest call (`Operation::next` from inside a call handler) was tried
+  and hangs, but only because the mock source never settles; the guest runtime itself was not shown to mis-wake (the
+  `clay_rt_wasmtime` driver change tried while chasing it was reverted).
