@@ -70,6 +70,8 @@ use clay_collection::Nsid;
 mod context;
 pub use context::context_collections_and_calls;
 pub use context::context_follows_a_provider;
+pub use context::context_peers_demanding_each_other_fail_as_unavailable;
+pub use context::context_peers_retaining_each_other_close_together;
 pub use context::context_retains_a_call;
 pub use context::context_sees_a_closed_provider_revoked;
 
