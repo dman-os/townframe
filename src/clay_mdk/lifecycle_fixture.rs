@@ -208,9 +208,9 @@ async fn register(prefix: &[u8], bindings: Vec<collection_registration::Registra
     let value = |text: &str| {
         let mut body = Vec::new();
         ciborium::into_writer(text, &mut body).unwrap();
-        collections::EncodedValue {
+        collection_registration::WrittenValue {
             body,
-            capabilities: Vec::new(),
+            attachments: Vec::new(),
         }
     };
     let [x, y] = ["x", "y"].map(|name| [prefix, name.as_bytes()].concat());

@@ -381,14 +381,29 @@ interface collection-registration {
         compare-and-set(option<stamp>),
     }
 
+    variant row-attachment {
+        reference(capability-ref),
+        own-publication(string),
+    }
+
+    record written-value {
+        body: list<u8>,
+        attachments: list<row-attachment>,
+    }
+
     resource registration-writer {
-        put: async func(key: list<u8>, basis: write-basis, value: encoded-value)
+        put: async func(key: list<u8>, basis: write-basis, value: written-value)
             -> result<stamp, mutation-error>;
         delete: async func(key: list<u8>, basis: write-basis)
             -> result<stamp, mutation-error>;
     }
 }
 ```
+
+A written value's attachment is either a held `reference` or `own-publication(name)`, one of the
+writer's manifest-declared publications; the host stores its endpoint (ADR 025 §7) and answers a
+name the manifest does not declare with `invalid-attachment`. Reads still deliver `encoded-value`
+with minted `capability-ref`s.
 
 `registration-writer` writes into a host-assigned registration scope with the causal-map rules of
 ADR 017 §9; `mutation-error` adds `conflict(option<stamp>)` for a failed compare-and-set. There is no
@@ -427,7 +442,8 @@ interface capability-bank {
 The two publication kinds, Call and Presentation, are defined in ADR 025 §5. A
 `capability-ref` is bound or lazy (ADR 025 §6); every use is async because a lazy
 reference may activate its provider. Typed publication/redemption methods are finite and additive. Collection CBOR contains
-attachment-slot indices; `encoded-value.capabilities` carries recipient-local authority.
+attachment-slot indices; `encoded-value.capabilities` carries recipient-local authority on reads and
+`written-value.attachments` names what a write attaches.
 A retained typed proxy is owned by the consumer but becomes inert when its publication
 or provider closes.
 

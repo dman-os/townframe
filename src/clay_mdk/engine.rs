@@ -156,6 +156,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                 registrations,
                 requirements,
                 publications: declared,
+                micro: Some(micro),
                 activator: Some(activator),
                 ..InitialContext::default()
             };

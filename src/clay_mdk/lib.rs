@@ -549,7 +549,6 @@ pub use context::OperationReceipt;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::OperationStatus;
 #[cfg(any(feature = "in_process", feature = "guest"))]
-pub use context::Publication;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::RefStatus;
 #[cfg(any(feature = "in_process", feature = "guest"))]

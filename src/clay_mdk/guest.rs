@@ -25,7 +25,6 @@ use crate::MicroManifest;
 use crate::OperationError;
 use crate::OperationReceipt;
 use crate::OperationStatus;
-use crate::Publication;
 use crate::PublicationKind;
 use crate::RefStatus;
 use crate::RowAttachment;
@@ -72,25 +71,6 @@ mod dom;
 pub(crate) struct GuestValue {
     pub(crate) body: Vec<u8>,
     pub(crate) capabilities: Vec<Rc<capability_bank::CapabilityRef>>,
-}
-
-/// One publication this incarnation staged with the capability bank. The bank's resource moves
-/// to the host when initialization returns, so a reference to the publication can only be made
-/// while `activate` runs; a row written later cannot attach it.
-pub(crate) struct Staged {
-    published: RefCell<Option<capability_bank::PublishedCapability>>,
-}
-
-impl Staged {
-    /// A fresh reference to the publication, moved into one write.
-    pub(crate) fn reference(&self) -> Result<capability_bank::CapabilityRef, Error> {
-        Ok(self
-            .published
-            .borrow()
-            .as_ref()
-            .ok_or(Error::Revoked)?
-            .reference()?)
-    }
 }
 
 /// The change tick [`crate::hooks`] subscribes to, provided at each published component's root.
@@ -216,7 +196,9 @@ pub struct Runtime {
     /// The publication each mounted surface belongs to, by surface identity.
     surfaces: RefCell<BTreeMap<u64, String>>,
     calls: RefCell<BTreeMap<String, RawHandler>>,
-    staged: RefCell<Vec<(String, Rc<Staged>)>>,
+    /// The bank's resource of each publication staged, handed to the host when `initialize`
+    /// returns.
+    staged: RefCell<Vec<(String, capability_bank::PublishedCapability)>>,
     /// Set by the mirror's notifier and the feeds; [`Self::mutate`] pushes it into the views.
     dirty: Cell<bool>,
     tasks: Rc<Tasks>,
@@ -361,13 +343,7 @@ impl Runtime {
             .staged
             .take()
             .into_iter()
-            .map(|(name, staged)| micro_lifecycle::NamedPublication {
-                name,
-                capability: staged
-                    .published
-                    .take()
-                    .expect("a staged publication is handed to the host exactly once"),
-            })
+            .map(|(name, capability)| micro_lifecycle::NamedPublication { name, capability })
             .collect();
         Ok(micro_lifecycle::Initialized {
             root: micro_lifecycle::InstanceRoot::new(GuestRoot),
@@ -543,21 +519,11 @@ impl Runtime {
         }
     }
 
-    fn stage(&self, name: &str, published: capability_bank::PublishedCapability) -> Publication {
-        let staged = Rc::new(Staged {
-            published: RefCell::new(Some(published)),
-        });
-        self.staged
-            .borrow_mut()
-            .push((name.to_owned(), Rc::clone(&staged)));
-        Publication::guest(staged)
-    }
-
     pub(crate) fn publish_component(
         &self,
         name: &str,
         render: Rc<dyn Fn() -> Element>,
-    ) -> Result<Publication, Error> {
+    ) -> Result<(), Error> {
         let tick = Rc::default();
         let dom = GuestDom::new_with_props(
             root,
@@ -574,14 +540,11 @@ impl Runtime {
                 .is_none(),
             "presentation {name:?} published twice"
         );
-        Ok(self.stage(name, published))
+        self.staged.borrow_mut().push((name.to_owned(), published));
+        Ok(())
     }
 
-    pub(crate) fn publish_call(
-        &self,
-        name: &str,
-        handler: RawHandler,
-    ) -> Result<Publication, Error> {
+    pub(crate) fn publish_call(&self, name: &str, handler: RawHandler) -> Result<(), Error> {
         let contract = self
             .declared
             .calls
@@ -595,7 +558,8 @@ impl Runtime {
                 .is_none(),
             "call {name:?} published twice"
         );
-        Ok(self.stage(name, published))
+        self.staged.borrow_mut().push((name.to_owned(), published));
+        Ok(())
     }
 
     pub(crate) fn spawn(&self, future: Pin<Box<dyn Future<Output = ()>>>) {
@@ -619,8 +583,8 @@ pub(crate) fn snapshot<T: DeserializeOwned>(facet: &Facet<T>) -> Result<FacetSna
     }
 }
 
-/// Write one row through the host's registration writer; `attachments` are minted into fresh
-/// references moved with the value.
+/// Write one row through the host's registration writer; each attachment names one of this
+/// micro's own declared publications, which the host turns into its endpoint.
 pub(crate) async fn put(
     writer: &collection_registration::RegistrationWriter,
     key: Vec<u8>,
@@ -628,15 +592,17 @@ pub(crate) async fn put(
     body: Vec<u8>,
     attachments: Vec<RowAttachment>,
 ) -> Result<Stamp, Error> {
-    let capabilities = attachments
+    let attachments = attachments
         .into_iter()
-        .map(RowAttachment::into_guest)
-        .collect::<Result<_, _>>()?;
+        .map(|attachment| {
+            collection_registration::RowAttachment::OwnPublication(attachment.into_name())
+        })
+        .collect();
     Ok(writer
         .put(
             key,
             basis.into(),
-            collections::EncodedValue { body, capabilities },
+            collection_registration::WrittenValue { body, attachments },
         )
         .await?
         .into())

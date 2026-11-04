@@ -41,7 +41,6 @@ use crate::CollectionAccess;
 use crate::Config;
 use crate::Context;
 use crate::Error;
-use crate::Publication;
 use crate::context::Backend;
 use crate::context::RawHandler;
 use crate::context::Shared;
@@ -261,7 +260,7 @@ impl Activation {
     fn stage(
         &self,
         published: Result<PublishedCapability, CapabilityFailure>,
-    ) -> Result<Publication, Error> {
+    ) -> Result<(), Error> {
         let published = published?;
         let publication = published.publication();
         self.published
@@ -269,14 +268,14 @@ impl Activation {
             .as_mut()
             .expect("publications are staged only while activate runs")
             .push((publication.name().to_owned(), published));
-        Ok(Publication::in_process(publication))
+        Ok(())
     }
 
     pub(crate) fn publish_component(
         &self,
         name: &str,
         render: Rc<dyn Fn() -> Element>,
-    ) -> Result<Publication, Error> {
+    ) -> Result<(), Error> {
         let component = self.components.publish(&self.instance, move || render())?;
         self.stage(self.capabilities.publish_component(name, component))
     }
@@ -289,7 +288,7 @@ impl Activation {
         this: &Rc<Self>,
         name: &str,
         handler: RawHandler,
-    ) -> Result<Publication, Error> {
+    ) -> Result<(), Error> {
         let contract = this.declared_call(name);
         let (queue, mut inbox) = mpsc::unbounded_channel::<GuestCall>();
         let target = Arc::new(GuestCallTarget::new(name.to_owned(), queue));
@@ -477,6 +476,7 @@ impl Factory<CapabilityPublication> for NativeFactory {
             let capabilities =
                 CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
             capabilities.attach_activator(activator);
+            capabilities.attach_own(&micro, &declared);
             let sessions =
                 CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
             let configs = grant_configs(&resources.documents, &host, &instance, &manifest)?

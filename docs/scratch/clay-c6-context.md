@@ -207,10 +207,7 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   views, handlers and bindings, which also breaks the runtime -> view -> context -> runtime cycle. The new
   conformance scenario asserts `GuestResidue::NONE` after close.
 - **Deviations / limits.**
-  - A guest `Publication` can attach to rows only while `activate` runs: the bank's `published-capability`
-    moves to the host when `initialize` returns and `reference()` is the only way to mint an attachable ref.
-    Later writes attaching it fail with `Revoked`. Manifest-declared rows (as the counter's Settings row) are
-    unaffected.
+  - A guest `Publication` could attach to rows only while `activate` ran (fixed in C6e below).
   - Guest `Capability` has `status` and `call`; `redeem_presentation`/`PresentationSlot` stay in-process
     (guest slots need the `mount-component` GuestDom work in section 2.2). `Context::instance()` is in-process
     only.
@@ -225,3 +222,23 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   `lifecycle_conformance::context_collections_and_calls` runs it on Wasmtime and wcmp/Wasmi.
   `micro_counter` (view + badge presentations, `count` call) builds as the guest and links natively (unit test
   through `ACTIVATE`).
+
+## C6e notes (2026-11-04): rows attach own publications by name
+
+- **Change.** `registration-writer.put` takes `written-value { body, attachments: list<row-attachment> }`,
+  `row-attachment = reference(capability-ref) | own-publication(string)`; reads keep `encoded-value`. The host
+  resolves the name through `CapabilitySession::own_endpoint`, fed by `attach_own(micro, declared)` from
+  `InitialContext.micro` + `.publications` (engines) or the factory (in-process), so it needs no live handle and
+  works after `initialize`. An undeclared name is `invalid-attachment`.
+- **Author surface.** `clay_mdk::RowAttachment::own("detail")` replaces `RowAttachment::Bound(Publication)`;
+  `Publication` is gone (`publish_component`/`publish_call` return `()`). The guest `Staged` wrapper and
+  `reference()` use are gone from the MDK; `micro_sample` writes its row with `RowAttachment::own(DETAIL)`, so the
+  stored row holds an endpoint like a manifest row (it used to hold a live publication).
+- **Why not drop `Bound`/`published-capability.reference`.** Host `RowAttachment::Bound` and `reference` still
+  serve forwarding a held reference (a requirement's reference, a bound mint); only the own-publication use is
+  subsumed. Candidate for removal if nothing forwards references.
+- **Proof.** `clay_mdk` native test `a_row_written_after_activate_attaches_the_writers_own_declared_publication`
+  (call handler writes the row, reader redeems it, undeclared name rejected); the `context` fixture gains
+  `attach`/`detail`, and `context_collections_and_calls` asserts the stored endpoint and the rejection on
+  Wasmtime and wcmp/Wasmi. The engine scenario stops at the stored endpoint (a conformance engine has no
+  supervisor to redeem through); native redemption covers the activation path.

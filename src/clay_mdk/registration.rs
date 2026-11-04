@@ -59,7 +59,7 @@ impl<F: Fn(&Vec<u8>) -> WriteBasis> RegistrationWriter<F> {
     pub async fn put(
         &self,
         key: Vec<u8>,
-        value: collections::EncodedValue,
+        value: wire::WrittenValue,
     ) -> Result<collections::Stamp, wire::MutationError> {
         let basis = (self.replica_basis)(&key).into();
         self.put_with(key, basis, value).await
@@ -69,7 +69,7 @@ impl<F: Fn(&Vec<u8>) -> WriteBasis> RegistrationWriter<F> {
         &self,
         key: Vec<u8>,
         basis: wire::WriteBasis,
-        value: collections::EncodedValue,
+        value: wire::WrittenValue,
     ) -> Result<collections::Stamp, wire::MutationError> {
         self.writer.put(key, basis, value).await
     }

@@ -124,14 +124,14 @@ impl<T: 'static> registration_wit::HostRegistrationWriterWithStore<T> for HasSel
         writer: Resource<RegistrationWriter>,
         key: Vec<u8>,
         basis: registration_wit::WriteBasis,
-        value: wit::EncodedValue,
+        value: registration_wit::WrittenValue,
     ) -> wasmtime::Result<Result<wit::Stamp, registration_wit::MutationError>> {
         accessor.with(|mut access| {
             let state = access.get();
             let value = value_from_wire(state, value)?;
             let writer = state.table.get(&writer)?;
-            Ok(writer
-                .put_value(key, basis_from_wire(basis), value)
+            Ok(value
+                .and_then(|value| writer.put_value(key, basis_from_wire(basis), value))
                 .map(stamp_to_wire)
                 .map_err(write_failure))
         })
@@ -286,18 +286,37 @@ fn page_to_wire(
     })
 }
 
+/// The value a guest wrote, its reference attachments taken out of the resource table and its
+/// own-publication attachments turned into the endpoints of the micro's declared publications.
+/// A name the manifest does not declare is an invalid attachment, reported to the guest as the
+/// write's failure, after every reference of the value was released.
 fn value_from_wire(
     state: &mut WasmStoreState,
-    value: wit::EncodedValue,
-) -> wasmtime::Result<CollectionValue> {
-    let mut attachments = Vec::with_capacity(value.capabilities.len());
-    for reference in value.capabilities {
-        attachments.push(state.table.get(&reference)?.attachment());
-        state.table.delete(reference)?;
+    value: registration_wit::WrittenValue,
+) -> wasmtime::Result<Result<CollectionValue, WriteFailure>> {
+    let mut attachments = Vec::with_capacity(value.attachments.len());
+    let mut invalid = false;
+    for attachment in value.attachments {
+        match attachment {
+            registration_wit::RowAttachment::Reference(reference) => {
+                attachments.push(state.table.get(&reference)?.attachment());
+                state.table.delete(reference)?;
+            }
+            registration_wit::RowAttachment::OwnPublication(name) => {
+                match state.capabilities.own_endpoint(&name) {
+                    Some(endpoint) => attachments.push(endpoint),
+                    None => invalid = true,
+                }
+            }
+        }
     }
-    Ok(CollectionValue {
-        body: value.body,
-        attachments,
+    Ok(if invalid {
+        Err(WriteFailure::InvalidAttachment)
+    } else {
+        Ok(CollectionValue {
+            body: value.body,
+            attachments,
+        })
     })
 }
 

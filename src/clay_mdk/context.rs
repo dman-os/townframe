@@ -208,64 +208,36 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     bytes
 }
 
-/// One of this micro's own publications, staged by [`Context::publish_component`] or
-/// [`Context::publish_call`], which a row can attach (see [`Registration::put`]).
-#[derive(Clone)]
-pub struct Publication(PublicationInner);
-
-#[derive(Clone)]
-enum PublicationInner {
-    #[cfg(feature = "in_process")]
-    InProcess(clay_guest_session::capabilities::CapabilityPublication),
-    #[cfg(feature = "guest")]
-    Guest(Rc<crate::guest::Staged>),
-}
-
-impl Publication {
-    #[cfg(feature = "in_process")]
-    pub(crate) fn in_process(
-        publication: clay_guest_session::capabilities::CapabilityPublication,
-    ) -> Self {
-        Self(PublicationInner::InProcess(publication))
-    }
-
-    #[cfg(feature = "guest")]
-    pub(crate) fn guest(staged: Rc<crate::guest::Staged>) -> Self {
-        Self(PublicationInner::Guest(staged))
-    }
-}
-
 /// What one row of a registration attaches to its value (indexed by [`crate::Attachment`]):
-/// one of this micro's own publications.
-#[derive(Clone)]
-pub enum RowAttachment {
-    Bound(Publication),
-}
+/// one of this micro's own publications, named as the manifest declares it.
+///
+/// A durable row persists endpoints, never references (ADR 025 §7), so the host turns the name
+/// into the endpoint `(micro, publication, contract)` when the row is written. That needs no
+/// live publication, so a row may be written at any time: from `activate`, from a spawned task
+/// or from a call handler, and a reader that redeems it activates the micro as for any lazy
+/// endpoint. A name the manifest does not declare fails the write.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RowAttachment(String);
 
 impl RowAttachment {
-    #[cfg(feature = "in_process")]
-    pub(crate) fn into_in_process(self) -> clay_guest_session::capabilities::RowAttachment {
-        let Self::Bound(Publication(publication)) = self;
-        match publication {
-            PublicationInner::InProcess(publication) => {
-                clay_guest_session::capabilities::RowAttachment::Bound(publication)
-            }
-            #[cfg(feature = "guest")]
-            PublicationInner::Guest(_) => unreachable!("a publication belongs to its own backend"),
-        }
+    pub fn own(publication: impl Into<String>) -> Self {
+        Self(publication.into())
     }
 
-    /// A fresh reference to the attached publication, moved into one write.
     #[cfg(feature = "guest")]
-    pub(crate) fn into_guest(self) -> Result<crate::capability_bank::CapabilityRef, Error> {
-        let Self::Bound(Publication(publication)) = self;
-        match publication {
-            PublicationInner::Guest(staged) => staged.reference(),
-            #[cfg(feature = "in_process")]
-            PublicationInner::InProcess(_) => {
-                unreachable!("a publication belongs to its own backend")
-            }
-        }
+    pub(crate) fn into_name(self) -> String {
+        self.0
+    }
+
+    /// The endpoint the host stores for this attachment.
+    #[cfg(feature = "in_process")]
+    pub(crate) fn into_in_process(
+        self,
+        capabilities: &clay_guest_session::capabilities::CapabilitySession,
+    ) -> Result<clay_guest_session::capabilities::RowAttachment, Error> {
+        capabilities
+            .own_endpoint(&self.0)
+            .ok_or_else(|| clay_guest_session::collections::WriteFailure::InvalidAttachment.into())
     }
 }
 
@@ -537,7 +509,7 @@ impl Backend {
         &self,
         name: &str,
         render: Rc<dyn Fn() -> dioxus_core::Element>,
-    ) -> Result<Publication, Error> {
+    ) -> Result<(), Error> {
         match self {
             #[cfg(feature = "in_process")]
             Self::InProcess(activation) => activation.publish_component(name, render),
@@ -546,7 +518,7 @@ impl Backend {
         }
     }
 
-    fn publish_call(&self, name: &str, handler: RawHandler) -> Result<Publication, Error> {
+    fn publish_call(&self, name: &str, handler: RawHandler) -> Result<(), Error> {
         match self {
             #[cfg(feature = "in_process")]
             Self::InProcess(activation) => {
@@ -640,7 +612,7 @@ impl Context {
         &self,
         name: &str,
         render: impl Fn() -> dioxus_core::Element + 'static,
-    ) -> Result<Publication, Error> {
+    ) -> Result<(), Error> {
         self.0.backend.publish_component(name, Rc::new(render))
     }
 
@@ -654,7 +626,7 @@ impl Context {
         &self,
         name: &str,
         handler: Handler,
-    ) -> Result<Publication, Error>
+    ) -> Result<(), Error>
     where
         Req: DeserializeOwned + 'static,
         Resp: Serialize + 'static,

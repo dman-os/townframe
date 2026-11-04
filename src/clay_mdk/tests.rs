@@ -510,7 +510,7 @@ impl<T: 'static> collection_registration::HostRegistrationWriterWithStore<T> for
         _writer: Resource<collection_registration::RegistrationWriter>,
         _key: Vec<u8>,
         _basis: collection_registration::WriteBasis,
-        _value: collections::EncodedValue,
+        _value: collection_registration::WrittenValue,
     ) -> wasmtime::Result<Result<collections::Stamp, collection_registration::MutationError>> {
         wasmtime::bail!("test host grants no registration writers")
     }

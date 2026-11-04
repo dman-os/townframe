@@ -3,7 +3,8 @@
 //! `export_micro!`. It reads the collection bound to `feed`, registers one row of its own that
 //! records what it read (so a host can tell a guest collection read from a guest registration
 //! write), and serves a `rows` call that answers every row it can see once its own is among
-//! them. Engine conformance runs it as `lifecycle_conformance::context_collections_and_calls`.
+//! them. A second call, `attach`, writes a row after `activate` returned that attaches the
+//! declared presentation `detail` by name. Engine conformance runs it as `lifecycle_conformance::context_collections_and_calls`.
 use clay_mdk::BindingResolution;
 use clay_mdk::CollectionAccess;
 use clay_mdk::CollectionRequest;
@@ -17,6 +18,7 @@ use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
+use clay_mdk::RowAttachment;
 
 fn manifest() -> MicroManifest {
     MicroManifest {
@@ -24,11 +26,27 @@ fn manifest() -> MicroManifest {
         id: MicroId::new("dayframe.context-fixture"),
         package_version: 1,
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: "rows".into(),
-            kind: PublicationKind::Call,
-            contract: Some(ContractIdentity::new("dayframe.context", "rows", (1, 0, 0))),
-        }],
+        publications: vec![
+            PublicationDeclaration {
+                name: "rows".into(),
+                kind: PublicationKind::Call,
+                contract: Some(ContractIdentity::new("dayframe.context", "rows", (1, 0, 0))),
+            },
+            PublicationDeclaration {
+                name: "attach".into(),
+                kind: PublicationKind::Call,
+                contract: Some(ContractIdentity::new(
+                    "dayframe.context",
+                    "attach",
+                    (1, 0, 0),
+                )),
+            },
+            PublicationDeclaration {
+                name: "detail".into(),
+                kind: PublicationKind::Presentation,
+                contract: None,
+            },
+        ],
         requires: vec![],
         configuration_requests: vec![],
         collection_contracts: vec![],
@@ -58,6 +76,20 @@ async fn activate(context: Context) -> Result<(), Error> {
         .join(",");
     feed.put(&"guest".to_owned(), &seen, Vec::new()).await?;
     let collection = feed.collection().clone();
+    context.publish_component("detail", dioxus_core::VNode::empty)?;
+    // Runs long after `initialize` returned, when no handle to `detail` exists any more.
+    context.publish_call("attach", move |publication: String| {
+        let feed = feed.clone();
+        async move {
+            feed.put(
+                &"late".to_owned(),
+                &"late".to_owned(),
+                vec![RowAttachment::own(publication)],
+            )
+            .await?;
+            Ok(())
+        }
+    })?;
     context.publish_call("rows", move |(): ()| {
         let mut collection = collection.clone();
         async move {

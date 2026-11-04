@@ -397,6 +397,9 @@ struct SessionState {
     counts: Mutex<Counts>,
     /// Reaches the supervisor, for the lazy references this session mints.
     activator: OnceLock<Activator<CapabilityPublication>>,
+    /// The endpoints of the publications this incarnation's manifest declares, by name; see
+    /// [`CapabilitySession::own_endpoint`].
+    own: OnceLock<BTreeMap<String, PublicationEndpoint>>,
 }
 
 #[derive(Default)]
@@ -455,6 +458,7 @@ impl CapabilitySession {
                 limits,
                 counts: Mutex::new(Counts::default()),
                 activator: OnceLock::new(),
+                own: OnceLock::new(),
             }),
         }
     }
@@ -466,6 +470,39 @@ impl CapabilitySession {
             .activator
             .set(activator)
             .unwrap_or_else(|_| panic!("a session's activator is attached once"));
+    }
+
+    /// Record which publications this incarnation's micro declares, so a row it writes can
+    /// attach one by name (see [`Self::own_endpoint`]). Attached once, when the incarnation is
+    /// set up.
+    pub fn attach_own(&self, micro: &MicroId, declared: &BTreeMap<String, DeclaredPublication>) {
+        let endpoints = declared
+            .iter()
+            .map(|(name, declaration)| {
+                (
+                    name.clone(),
+                    PublicationEndpoint {
+                        micro: micro.clone(),
+                        publication: name.clone(),
+                        contract: declaration.contract.clone(),
+                    },
+                )
+            })
+            .collect();
+        self.state
+            .own
+            .set(endpoints)
+            .unwrap_or_else(|_| panic!("a session's own publications are attached once"));
+    }
+
+    /// The endpoint of the publication `name` that this incarnation's micro declares, which is
+    /// what a durable row stores to attach it (ADR 025 §7). It names the micro's publication
+    /// rather than this incarnation's, so it needs no live publication and stays valid when the
+    /// row is written after `initialize` returned. `None` when the manifest declares no such
+    /// publication, which a write reports as an invalid attachment.
+    pub fn own_endpoint(&self, name: &str) -> Option<RowAttachment> {
+        let own = self.state.own.get()?;
+        Some(RowAttachment::Endpoint(own.get(name)?.clone()))
     }
 
     pub fn publication_count(&self) -> usize {

@@ -92,7 +92,8 @@ interface collections {
 
 @since(version = 0.2.0)
 interface collection-registration {
-    use collections.{encoded-value, stamp};
+    use collections.{stamp};
+    use capability-bank.{capability-ref};
 
     /// What a writer claims to have seen when it writes a key.
     variant write-basis {
@@ -117,8 +118,26 @@ interface collection-registration {
         capability-limit,
     }
 
+    /// What one attachment slot of a written value holds. A durable row persists endpoints and
+    /// never references (ADR 025 §7), so a row names its own publications; the host turns the
+    /// name into the endpoint of the writer's own micro and manifest-declared contract.
+    variant row-attachment {
+        /// A held reference, forwarded as it is.
+        reference(capability-ref),
+        /// One of the writer's own manifest-declared publications, by name. Naming one the
+        /// manifest does not declare is `invalid-attachment`. The publication needs no live
+        /// incarnation or `initialize` handle, so a row may attach it at any time.
+        own-publication(string),
+    }
+
+    /// A value as written: the body names attachments by index into `attachments`.
+    record written-value {
+        body: list<u8>,
+        attachments: list<row-attachment>,
+    }
+
     resource registration-writer {
-        put: async func(key: list<u8>, basis: write-basis, value: encoded-value) -> result<stamp, mutation-error>;
+        put: async func(key: list<u8>, basis: write-basis, value: written-value) -> result<stamp, mutation-error>;
         delete: async func(key: list<u8>, basis: write-basis) -> result<stamp, mutation-error>;
     }
 
