@@ -350,8 +350,6 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
     use clay_docs::FacetSelection;
     use clay_docs::FacetValue;
     use clay_docs::WatchSelection;
-    use clay_store::OrderedStore as _;
-
     let store = Arc::new(clay_store::MemoryStore::new());
     let route = FacetRoute {
         document: "notes".into(),
@@ -376,14 +374,9 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
         .documents()
         .mock_documents()
         .external_change(route.clone(), Some(serde_json::json!("from boot one")));
-    let documents = Arc::new(Arc::clone(&store).subspace("documents"));
-    tokio::join!(first.serve(), async {
-        // The persister runs inside `serve`; wait until its write reached the store.
-        while documents.scan_prefix(b"").await.unwrap().is_empty() {
-            tokio::task::yield_now().await;
-        }
-        first.request_shutdown();
-    });
+    // Orderly shutdown drains the persister, so the write is in the store once `serve` returns.
+    first.request_shutdown();
+    first.serve().await;
 
     let second = boot().await;
     second

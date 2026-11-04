@@ -241,8 +241,8 @@ struct State {
     capacity: usize,
     source: BTreeMap<FacetRoute, Value>,
     /// Set by [`DocumentService::durable`]: every change to `source` is queued here, in order,
-    /// for the persist future to apply to the store. `None` for the volatile service.
-    persist: Option<mpsc::UnboundedSender<(FacetRoute, Option<Value>)>>,
+    /// for the persist future to apply to the store.
+    persist: Persistence,
     // Mock FacetSet lookup: selected document/tag routes, including removal tombstones.
     membership: BTreeMap<(String, String, String), BTreeSet<String>>,
     config_owners: BTreeMap<String, (String, String)>,
@@ -254,6 +254,15 @@ struct State {
     reads: Vec<FacetRoute>,
     hold_refresh: bool,
     requests: BTreeMap<FacetRoute, BTreeMap<u64, u64>>,
+}
+
+enum Persistence {
+    /// [`DocumentService::new`]: the source lives in memory only.
+    Volatile,
+    Open(mpsc::UnboundedSender<(FacetRoute, Option<Value>)>),
+    /// The sender is dropped, so the persist future ends once it has drained the queue. A source
+    /// write after this point would be silently lost, so it panics instead.
+    Closed,
 }
 
 struct CacheEntry {
@@ -292,7 +301,7 @@ impl DocumentService {
                 clock: 0,
                 capacity,
                 source: BTreeMap::new(),
-                persist: None,
+                persist: Persistence::Volatile,
                 membership: BTreeMap::new(),
                 config_owners: BTreeMap::new(),
                 cache: BTreeMap::new(),
@@ -336,7 +345,7 @@ impl DocumentService {
                 state.note_route(&route);
                 state.source.insert(route, value);
             }
-            state.persist = Some(sender);
+            state.persist = Persistence::Open(sender);
         }
         let persist = async move {
             while let Some(first) = queue.recv().await {
@@ -360,6 +369,17 @@ impl DocumentService {
             }
         };
         Ok((service, persist))
+    }
+
+    /// Ends persistence for a [`Self::durable`] service: the persist future writes everything
+    /// already queued and then completes. Every later source change panics, so call this only
+    /// once nothing can change documents anymore (after every micro has closed). A no-op on a
+    /// volatile service.
+    pub fn close_persistence(&self) {
+        let mut state = self.inner.lock().unwrap();
+        if matches!(state.persist, Persistence::Open(_)) {
+            state.persist = Persistence::Closed;
+        }
     }
 
     /// Uses the manifest's owner-config semantics. The composition root supplies already-approved
@@ -1052,10 +1072,14 @@ impl State {
             Some(value) => self.source.insert(route.clone(), value.clone()),
             None => self.source.remove(&route),
         };
-        if let Some(persist) = &self.persist {
-            persist
+        match &self.persist {
+            Persistence::Volatile => {}
+            Persistence::Open(persist) => persist
                 .send((route, value))
-                .expect("the persist future outlives the document service");
+                .expect("the persist future outlives the document service"),
+            Persistence::Closed => {
+                panic!("document source changed after the composition shut down")
+            }
         }
     }
 
