@@ -1,263 +1,98 @@
 use super::*;
-use clay_host::AccessError;
-use clay_mdk::native::output;
-use clay_mdk::wasm::WasmMicro;
-use clay_micro_core::micros::composition::ConfigurationError;
-use clay_micro_core::micros::composition::Enablement;
-use clay_micro_core::micros::composition::InstanceState;
-use micro_sample::SampleConfig;
-use micro_sample::SampleMicro;
-use micro_settings::SettingsMicro;
-use std::collections::BTreeSet;
+use clay_host::MicroId;
+use clay_host::MicroState;
+use clay_mdk::native::CollectionWatch;
+use clay_mdk::native::RowAttachment;
+use micro_settings_manifest::Section;
 
-// ── desktop package linkage: the package directory must register the Wasmtime
-//    counter beside the shell's native built-ins, or the id sets drift ──
-
+// The package directory must install the Wasmtime counter beside the shell's native
+// built-ins, and its manifest-declared section must be there before the guest ever runs.
 #[test]
-fn desktop_runtime_links_wasmtime_counter_with_shared_native_providers() {
+fn desktop_runtime_installs_the_counter_section_from_its_package_manifest() {
     let runtime = desktop_runtime();
-    let manifests = [
-        micro_settings_manifest::manifest(),
-        micro_sample::manifest(),
-        micro_counter_manifest::manifest(),
-    ];
-    let descriptors = runtime.application.provider_descriptors();
-    let registered: BTreeSet<&str> = descriptors
-        .iter()
-        .map(|descriptor| descriptor.id.as_str())
-        .collect();
-    let declared: BTreeSet<&str> = manifests
-        .iter()
-        .map(|manifest| manifest.id.as_str())
-        .collect();
-    assert_eq!(registered, declared);
     assert!(
-        runtime
-            .application
-            .provider_descriptors()
-            .iter()
-            .any(|descriptor| descriptor.id.as_str() == micro_counter_manifest::ID)
+        runtime.installation_errors.is_empty(),
+        "{:?}",
+        runtime.installation_errors
     );
-    runtime.application.host().close();
-}
-
-fn started() -> CompositionRuntime {
-    let mut runtime = desktop_runtime();
-    runtime.apply_now().unwrap();
-    runtime
-}
-
-fn set_now(runtime: &mut CompositionRuntime, instance: &str, enablement: Enablement) {
-    runtime.set_enablement(instance, enablement).unwrap();
-    runtime.apply_now().unwrap();
-}
-
-fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
-}
-
-// ── native edit receipts: an edit is optimistic (LocallyApplied, visible in the facet)
-//    until the mock node settles it Accepted or RolledBack ──────────────────────────────
-
-#[test]
-fn sample_edit_receipt_reports_locally_applied_then_accepted_or_rolled_back() {
-    let runtime = started();
-    let sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
-
-    let accepted = SampleConfig {
-        enabled: false,
-        greeting: "Accepted edit".into(),
-    };
-    let operation = sample.edit(accepted.clone()).unwrap();
-    let initial = operation.current();
-    assert_eq!(initial.status, clay_docs::OperationStatus::LocallyApplied);
+    let micros: Vec<&str> = runtime.micros().iter().map(MicroId::as_str).collect();
     assert_eq!(
-        sample.decode(&sample.watch().current().unwrap()),
-        Some(accepted.clone()),
-        "optimistic edit is visible before settlement"
+        micros,
+        [
+            micro_settings_manifest::ID,
+            micro_sample::ID,
+            micro_counter_manifest::ID
+        ]
     );
-    runtime.application.mock_documents().settle(true);
-    let receipt = block_on(operation.next(initial.revision))
+    let mut key = Vec::new();
+    ciborium::into_writer(micro_counter_manifest::ID, &mut key).unwrap();
+    let row = runtime
+        .collection(micro_settings_manifest::SECTIONS)
         .unwrap()
-        .expect("settled edit completes");
-    assert_eq!(receipt.status, clay_docs::OperationStatus::Accepted);
-    assert_eq!(
-        sample.decode(&sample.watch().current().unwrap()),
-        Some(accepted.clone())
-    );
-
-    let rejected = SampleConfig {
-        enabled: true,
-        greeting: "Rejected edit".into(),
-    };
-    let operation = sample.edit(rejected).unwrap();
-    let initial = operation.current();
-    assert_eq!(initial.status, clay_docs::OperationStatus::LocallyApplied);
-    runtime.application.mock_documents().settle(false);
-    let receipt = block_on(operation.next(initial.revision))
+        .get(&key)
         .unwrap()
-        .expect("rejected edit completes");
+        .value
+        .unwrap();
     assert!(matches!(
-        receipt.status,
-        clay_docs::OperationStatus::RolledBack(_)
+        row.attachments.as_slice(),
+        [RowAttachment::Endpoint(endpoint)]
+            if endpoint.micro.as_str() == micro_counter_manifest::ID
     ));
     assert_eq!(
-        sample.decode(&sample.watch().current().unwrap()),
-        Some(accepted),
-        "rolled-back edit restores the last accepted value"
+        runtime.state(&MicroId::new(micro_counter_manifest::ID)),
+        MicroState::Idle
     );
-    runtime.application.host().close();
+    runtime.host().close();
 }
 
-#[test]
-fn provider_registration_drives_native_and_wasm_settings_and_locked_boot_entries() {
-    let mut runtime = started();
-    assert_eq!(runtime.application.provider_descriptors().len(), 3);
-    assert_eq!(runtime.application.roots().snapshot().unwrap().len(), 1);
-    assert!(matches!(
-        runtime.set_enablement("settings", Enablement::Disabled),
-        Err(ConfigurationError::LockedInstance(name)) if name == "settings"
-    ));
-    let sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
-    let counter = runtime
-        .application
-        .output::<WasmMicro>("dayframe.counter")
-        .unwrap();
-    assert!(runtime.application.host().check(&counter.instance).is_ok());
-    let sections = output::<SettingsMicro, _>(&runtime.application, "settings")
-        .unwrap()
-        .sections
-        .snapshot()
-        .unwrap();
-    assert_eq!(sections.len(), 2);
-    let titles: Vec<_> = sections.values().map(|s| s.title.as_str()).collect();
-    assert!(titles.contains(&"Sample micro"));
-    assert!(titles.contains(&"Counter (Wasm)"));
-    assert_eq!(
-        sample.decode(&sample.watch().current().unwrap()).unwrap(),
-        SampleConfig {
-            enabled: true,
-            greeting: "Hello from a micro".into(),
-        }
-    );
-    runtime.application.host().close();
-}
-
-#[test]
-fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_restarts_wasm() {
-    let mut runtime = started();
-    let first_sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
-    let first_counter = runtime
-        .application
-        .output::<WasmMicro>("dayframe.counter")
-        .unwrap();
-    let changed = SampleConfig {
-        enabled: false,
-        greeting: "Edited".into(),
-    };
-    first_sample.edit(changed.clone()).unwrap();
-    runtime.application.mock_documents().settle(false);
-    assert_eq!(
-        first_sample.decode(&first_sample.watch().current().unwrap()),
-        Some(SampleConfig {
-            enabled: true,
-            greeting: "Hello from a micro".into(),
+// Redeeming the counter's section starts the Wasmtime guest, and releasing it lets the
+// supervisor close the guest again.
+#[tokio::test(flavor = "current_thread")]
+async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
+    let runtime = desktop_runtime();
+    let counter = MicroId::new(micro_counter_manifest::ID);
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let serving = runtime.serve();
+            tokio::pin!(serving);
+            let scenario = async {
+                let shell = runtime.host().start("test-observer");
+                let (sections, feed) = CollectionWatch::<String, Section>::observe(
+                    runtime.host(),
+                    &shell,
+                    runtime.supervisor().activator(),
+                    &runtime
+                        .collection(micro_settings_manifest::SECTIONS)
+                        .unwrap(),
+                )
+                .unwrap();
+                tokio::task::spawn_local(feed);
+                let mut changes = sections.revisions();
+                while sections.rows().unwrap().len() < 2 {
+                    changes.changed().await.unwrap();
+                }
+                let rows = sections.rows().unwrap();
+                let row = rows
+                    .iter()
+                    .find(|row| row.key == micro_counter_manifest::ID)
+                    .unwrap();
+                let detail = row.attachments[row.value.detail.index()]
+                    .redeem_presentation()
+                    .await
+                    .unwrap();
+                assert_eq!(runtime.state(&counter), MicroState::Active);
+                assert!(detail.component().is_ok());
+                drop(detail);
+                while runtime.state(&counter) != MicroState::Idle {
+                    tokio::task::yield_now().await;
+                }
+            };
+            tokio::select! {
+                () = &mut serving => panic!("the composition stopped before shutdown"),
+                () = scenario => {}
+            }
+            runtime.request_shutdown();
+            serving.await;
         })
-    );
-    first_sample.edit(changed.clone()).unwrap();
-    runtime.application.mock_documents().settle(true);
-    set_now(&mut runtime, "dayframe.sample", Enablement::Disabled);
-    set_now(&mut runtime, "dayframe.counter", Enablement::Disabled);
-    assert_eq!(runtime.states["dayframe.sample"], InstanceState::Disabled);
-    assert_eq!(runtime.states["dayframe.counter"], InstanceState::Disabled);
-    assert!(matches!(
-        output::<SampleMicro, _>(&runtime.application, "dayframe.sample"),
-        Err(AccessError::Revoked)
-    ));
-    assert!(matches!(
-        runtime.application.output::<WasmMicro>("dayframe.counter"),
-        Err(AccessError::Revoked)
-    ));
-    assert!(
-        output::<SettingsMicro, _>(&runtime.application, "settings")
-            .unwrap()
-            .sections
-            .snapshot()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        first_sample.watch().current().unwrap_err(),
-        AccessError::Revoked
-    );
-    set_now(&mut runtime, "dayframe.sample", Enablement::Enabled);
-    set_now(&mut runtime, "dayframe.counter", Enablement::Enabled);
-    let second_sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
-    let second_counter = runtime
-        .application
-        .output::<WasmMicro>("dayframe.counter")
-        .unwrap();
-    assert!(first_sample.instance != second_sample.instance);
-    assert!(first_counter.instance != second_counter.instance);
-    assert_eq!(
-        second_sample.decode(&second_sample.watch().current().unwrap()),
-        Some(changed)
-    );
-    assert_eq!(
-        output::<SettingsMicro, _>(&runtime.application, "settings")
-            .unwrap()
-            .sections
-            .snapshot()
-            .unwrap()
-            .len(),
-        2
-    );
-    runtime.application.host().close();
-}
-
-#[test]
-fn provider_withdrawal_closes_dependents_before_their_collection() {
-    let runtime = started();
-    let sample = output::<SampleMicro, _>(&runtime.application, "dayframe.sample").unwrap();
-    let counter = runtime
-        .application
-        .output::<WasmMicro>("dayframe.counter")
-        .unwrap();
-    let mut updates = sample.watch().subscribe().unwrap();
-    let settings_instance = output::<SettingsMicro, _>(&runtime.application, "settings")
-        .unwrap()
-        .instance;
-    let sample_mount = runtime
-        .application
-        .host()
-        .mount(&settings_instance, sample.detail().host())
-        .unwrap();
-    let counter_mount = runtime
-        .application
-        .host()
-        .mount(&settings_instance, counter.surface().host())
-        .unwrap();
-    runtime
-        .application
-        .host()
-        .close_instance(&settings_instance)
-        .unwrap();
-    assert_eq!(
-        runtime.application.host().check(&sample.instance),
-        Err(AccessError::Revoked)
-    );
-    assert_eq!(
-        runtime.application.host().check(&counter.instance),
-        Err(AccessError::Revoked)
-    );
-    assert!(!sample_mount.is_live());
-    assert!(!counter_mount.is_live());
-    assert!(runtime.application.roots().snapshot().unwrap().is_empty());
-    assert!(updates.borrow_and_update().revoked);
-    assert!(updates.borrow().facets.is_empty());
-    runtime.application.host().close();
+        .await;
 }

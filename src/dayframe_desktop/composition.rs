@@ -4,41 +4,46 @@
 pub use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
 
-use clay_micro_core::micros::MicroId;
-use clay_micro_core::micros::composition::ConfiguredMicro;
-use clay_micro_core::micros::composition::Enablement;
+use clay_mdk::native::factory;
+use clay_mdk::native::CollectionBindings;
 use dayframe_composition::InstalledMicro;
-use std::collections::BTreeMap;
+use micro_settings_manifest::SECTIONS;
 use std::path::PathBuf;
 
-fn locked_settings() -> BTreeMap<String, ConfiguredMicro> {
-    BTreeMap::from([(
-        "settings".into(),
-        ConfiguredMicro {
-            provider: MicroId::new(micro_settings_manifest::ID),
-            enablement: Enablement::Enabled,
-            eager: true,
-            bindings: BTreeMap::new(),
-        },
-    )])
-}
-
+/// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
+/// is unusable without it. Sample is eager so its section is written at boot. What each may
+/// read or write is this catalog's decision, not the micro's.
 fn native_micros() -> Vec<InstalledMicro> {
     vec![
-        InstalledMicro::new(micro_settings_manifest::manifest(), |application| {
-            clay_mdk::native::provider(
-                application,
-                micro_settings_manifest::manifest(),
-                micro_settings::activate,
-            )
-        }),
-        InstalledMicro::new(micro_sample::manifest(), |application| {
-            clay_mdk::native::provider(
-                application,
-                micro_sample::manifest(),
-                micro_sample::activate,
-            )
-        }),
+        InstalledMicro {
+            eager: true,
+            locked: true,
+            ..InstalledMicro::new(micro_settings_manifest::manifest(), |resources| {
+                factory(
+                    resources,
+                    micro_settings_manifest::manifest(),
+                    CollectionBindings {
+                        read: vec![SECTIONS.into()],
+                        write: vec![],
+                    },
+                    micro_settings::activate,
+                )
+            })
+        },
+        InstalledMicro {
+            eager: true,
+            ..InstalledMicro::new(micro_sample::manifest(), |resources| {
+                factory(
+                    resources,
+                    micro_sample::manifest(),
+                    CollectionBindings {
+                        read: vec![],
+                        write: vec![SECTIONS.into()],
+                    },
+                    micro_sample::activate,
+                )
+            })
+        },
     ]
 }
 
@@ -93,12 +98,16 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
             Ok(package) => {
                 let manifest = package.manifest().clone();
                 let bytes = package.bytes().to_vec();
-                installed.push(InstalledMicro::new(manifest.clone(), move |application| {
-                    let bytes = bytes.clone();
-                    clay_mdk::wasm::provider(application, manifest.clone(), move || {
-                        let bytes = bytes.clone();
-                        async move { clay_mdk::wasm::WasmPackage::from_bytes(bytes).await }
-                    })
+                installed.push(InstalledMicro::new(manifest.clone(), move |resources| {
+                    clay_mdk::wasm::factory(
+                        resources,
+                        manifest,
+                        CollectionBindings::default(),
+                        move || {
+                            let bytes = bytes.clone();
+                            async move { clay_mdk::wasm::WasmPackage::from_bytes(bytes).await }
+                        },
+                    )
                 }));
             }
             Err(error) => errors.push(error),
@@ -107,16 +116,18 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
     (installed, errors)
 }
 
+/// Assemble the desktop composition. The constructor is async because durable collections load
+/// before they report bootstrap; with the in-memory store it never parks, so blocking is safe.
 pub fn desktop_runtime() -> CompositionRuntime {
     let mut installed = native_micros();
     let (packages, errors) = package_micros();
     installed.extend(packages);
-    let mut runtime = CompositionRuntime::new(installed, locked_settings());
-    runtime.installation_errors = errors;
-    micro_sample::seed_mock_defaults(&runtime.application.documents());
+    let mut runtime = futures::executor::block_on(CompositionRuntime::new(installed));
+    runtime.installation_errors.extend(errors);
+    micro_sample::seed_mock_defaults(runtime.documents());
     // Demo seed for the counter package the check script installs: start its config at
     // zero so the guest renders its value instead of the absent-config notice.
-    runtime.application.mock_documents().seed(
+    runtime.documents().mock_documents().seed(
         clay_docs::FacetRoute {
             document: "counter-config".into(),
             branch: "main".into(),
@@ -127,9 +138,6 @@ pub fn desktop_runtime() -> CompositionRuntime {
     );
     runtime
 }
-
-#[cfg(test)]
-mod counter_tests;
 
 #[cfg(test)]
 mod tests;

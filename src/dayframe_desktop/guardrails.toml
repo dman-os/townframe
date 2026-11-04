@@ -6,7 +6,6 @@ allowed_dependencies = [
     "clay_docs",
     "clay_host",
     "clay_mdk",
-    "clay_micro_core",
     "clay_surface",
     "daybook_types",
     "dayframe_composition",
