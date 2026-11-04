@@ -177,7 +177,7 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - **Dependencies are referenced by plug id + semver range** (not by document id), so OCI and other non-document substrates stay possible. Resolving and fetching referenced plugs is a later layer above the catalog.
 - **The catalog holds manifests and blobs only.** Downstream consumers (nodules, Clay) refuse enablement until every dependency resolves in the catalog.
 - **Import sources:** author-published documents (primary), OCI, and Clay's local wasm + manifest pair.
-- Registry drawer locality: operator said "not local" (see the open question to the operator).
+- **The registry drawer is not node-local.** It is an ordinary drawer that can be shared and synced across nodes (unlike config, D8). Sharing it activates nothing: each node remains its own arbiter of which versions it accepts, and enablement stays in each node's own runtime drawers.
 
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
