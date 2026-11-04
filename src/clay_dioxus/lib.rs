@@ -169,6 +169,21 @@ impl NativeComponents {
     ) -> Result<ComponentRef, AccessError> {
         self.recover_withdrawn();
         let reference = self.host.publish_component(owner)?;
+        self.attach_surface(owner, reference, mount_surface);
+        Ok(reference)
+    }
+
+    /// Bind an engine-driven surface to a component reference the host already issued to
+    /// `owner`, such as the one a presentation publication minted when its incarnation
+    /// published it (ADR 025 §5). The reference was issued by this registry's host to `owner`;
+    /// a second factory for one reference is a programming error.
+    pub fn attach_surface(
+        &self,
+        owner: &Instance,
+        reference: ComponentRef,
+        mount_surface: impl Fn(Arc<Mount>, SurfaceWriter) -> Result<SurfaceSession, PresentationError>
+        + 'static,
+    ) {
         let factory = SurfaceFactory(Rc::new(mount_surface));
         let owner = owner.clone();
         assert!(
@@ -186,9 +201,9 @@ impl NativeComponents {
                         }
                     }),
                 )
-                .is_none()
+                .is_none(),
+            "a surface factory is already attached to this component reference"
         );
-        Ok(reference)
     }
     fn recover_withdrawn(&self) {
         let allowed = self.host.component_lifetimes().borrow().clone();
