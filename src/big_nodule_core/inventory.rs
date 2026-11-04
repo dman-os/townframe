@@ -36,7 +36,8 @@ pub enum ArtifactState {
 
 /// Whether an [`InstalledNodule`] can serve its handler, and if not the first reason in priority
 /// order: refused configuration, then disabled, then a required operation request no grant
-/// covers, then missing handler artifact bytes, then the
+/// covers, then a required operation request no provider satisfies, then missing handler
+/// artifact bytes, then the
 /// absence of a handler executor, then initialization. [`Self::Ready`] is the executor's word
 /// that the handler can be called now and the node's word that every initializer of this
 /// revision and start has succeeded.
@@ -49,6 +50,13 @@ pub enum Readiness {
     /// A required operation request has no covering grant. Not a fault: configuration (granting
     /// the operation) makes the nodule ready. An optional request never causes this.
     NeedsConfiguration,
+    /// A required operation request has no provider that satisfies it: none enabled, more than
+    /// one, a revision older than the request's `minRevision`, or a different plug than the one
+    /// the operator consented to. The record's `requests` say which and why. Not a fault: the
+    /// nodule is enabled and waits (as a Kubernetes pod waits on a missing dependency, a systemd
+    /// unit on `Requires=`), and becomes ready once a provider appears or the operator confirms.
+    /// An optional request never causes this.
+    ProviderMissing,
     ArtifactsUnavailable,
     ExecutorUnavailable,
     /// The handler is hosted but an initializer of this revision and start is still running or
@@ -106,6 +114,14 @@ impl InstalledNodule {
             config,
             configured,
         }
+    }
+
+    /// Each declared artifact's availability, by key.
+    pub fn artifact_states(&self) -> BTreeMap<String, ArtifactState> {
+        self.artifacts
+            .iter()
+            .map(|(key, (_, state))| (key.clone(), *state))
+            .collect()
     }
 
     /// Whether an operator has set `config` explicitly. Unconfigured settings are the selected

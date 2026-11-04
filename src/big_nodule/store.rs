@@ -5,8 +5,12 @@
 //! node's config drawer document; SQLite stores only the host's `(plug_id, actor_uuid)`
 //! identity binding, the `(plug_id, drawer_id) -> access` grants this service has applied, and the
 //! `plug_id -> (scope, capability)` dispatch capability minted from each nodule's operation grants,
-//! and the `(plug_id, init key) -> revision` a [`Once`](big_nodule_core::RunMode::Once)
-//! initializer last succeeded at on this node.
+//! the `(plug_id, init key) -> revision` a [`Once`](big_nodule_core::RunMode::Once)
+//! initializer last succeeded at on this node, and the `(plug_id, binding) -> provider` each
+//! operation request resolved to (the resolution lockfile). The lockfile is host-local, not a
+//! config datum: it records which providers *this* node has, which a node mirroring the config
+//! document must not inherit (config syncs for backup and activates nothing elsewhere), and the
+//! operator's consent to a provider is node-specific.
 
 use crate::sqlite;
 use big_cabinet_core::authority::CapId;
@@ -15,9 +19,11 @@ use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_nodule_core::dispatch::DispatchScope;
 use big_nodule_core::protocol::NodulesError;
+use big_nodule_core::providers::LockedProvider;
 use big_plugs_core::PlugId;
 use big_plugs_core::Revision;
 use sqlite_rs::Database;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActorRow {
@@ -38,15 +44,6 @@ pub(crate) struct AppliedOperationsRow {
     pub(crate) plug_id: PlugId,
     pub(crate) scope: DispatchScope,
     pub(crate) capability_id: CapId,
-}
-
-/// The revision a `Once` initializer last succeeded at. Done-ness is per revision (a new one
-/// runs it again), so one row per initializer is enough and a superseded revision's is replaced.
-#[derive(Debug, Clone)]
-pub(crate) struct InitDoneRow {
-    pub(crate) plug_id: PlugId,
-    pub(crate) init_key: String,
-    pub(crate) revision: Revision,
 }
 
 fn storage(error: impl std::fmt::Display) -> NodulesError {
@@ -251,30 +248,30 @@ pub(crate) async fn delete_applied_operations(
     transaction.commit().await.map_err(storage)
 }
 
-pub(crate) async fn init_done(database: &Database) -> Result<Vec<InitDoneRow>, NodulesError> {
+pub(crate) async fn init_done(
+    database: &Database,
+) -> Result<BTreeMap<PlugId, BTreeMap<String, Revision>>, NodulesError> {
     let transaction = database.begin_read().await.map_err(storage)?;
     let rows = sqlite::init_done(&transaction).await.map_err(storage)?;
-    rows.into_iter()
-        .map(|row| {
-            let plug_id: PlugId = row.plug_id.parse().map_err(|error| {
-                storage(format!(
-                    "init done plug_id `{}` is invalid: {error}",
-                    row.plug_id
-                ))
-            })?;
-            let revision: Revision = row.revision.parse().map_err(|error| {
-                storage(format!(
-                    "init done revision `{}` for `{}` is invalid: {error}",
-                    row.revision, row.plug_id
-                ))
-            })?;
-            Ok(InitDoneRow {
-                plug_id,
-                init_key: row.init_key,
-                revision,
-            })
-        })
-        .collect()
+    let mut done: BTreeMap<PlugId, BTreeMap<String, Revision>> = BTreeMap::new();
+    for row in rows {
+        let plug_id: PlugId = row.plug_id.parse().map_err(|error| {
+            storage(format!(
+                "init done plug_id `{}` is invalid: {error}",
+                row.plug_id
+            ))
+        })?;
+        let revision: Revision = row.revision.parse().map_err(|error| {
+            storage(format!(
+                "init done revision `{}` for `{}` is invalid: {error}",
+                row.revision, row.plug_id
+            ))
+        })?;
+        done.entry(plug_id)
+            .or_default()
+            .insert(row.init_key, revision);
+    }
+    Ok(done)
 }
 
 pub(crate) async fn upsert_init_done(
@@ -303,5 +300,84 @@ pub(crate) async fn delete_init_done(
     sqlite::delete_init_done(&transaction, plug_id.to_string())
         .await
         .map_err(storage)?;
+    transaction.commit().await.map_err(storage)
+}
+
+pub(crate) async fn resolution_locks(
+    database: &Database,
+) -> Result<BTreeMap<PlugId, BTreeMap<String, LockedProvider>>, NodulesError> {
+    let transaction = database.begin_read().await.map_err(storage)?;
+    let rows = sqlite::resolution_locks(&transaction)
+        .await
+        .map_err(storage)?;
+    let mut locks: BTreeMap<PlugId, BTreeMap<String, LockedProvider>> = BTreeMap::new();
+    for row in rows {
+        {
+            let plug_id: PlugId = row.plug_id.parse().map_err(|error| {
+                storage(format!(
+                    "resolution lock plug_id `{}` is invalid: {error}",
+                    row.plug_id
+                ))
+            })?;
+            let version = row
+                .provider_version
+                .map(|version| {
+                    version.parse().map_err(|error| {
+                        storage(format!(
+                            "resolution lock version `{version}` for `{}` is invalid: {error}",
+                            row.plug_id
+                        ))
+                    })
+                })
+                .transpose()?;
+            let lexicon_revision = row
+                .lexicon_revision
+                .map(|revision| {
+                    u32::try_from(revision).map_err(|error| {
+                        storage(format!(
+                            "resolution lock revision {revision} for `{}` is invalid: {error}",
+                            row.plug_id
+                        ))
+                    })
+                })
+                .transpose()?;
+            locks.entry(plug_id).or_default().insert(
+                row.binding,
+                LockedProvider {
+                    contract: row.contract,
+                    provider: row.provider,
+                    version,
+                    lexicon_revision,
+                },
+            );
+        }
+    }
+    Ok(locks)
+}
+
+/// Replaces every resolution lock of `plug_id` with `locks` (by binding) in one transaction;
+/// an empty map removes them.
+pub(crate) async fn replace_resolution_locks(
+    database: &Database,
+    plug_id: &PlugId,
+    locks: &BTreeMap<String, LockedProvider>,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::delete_resolution_locks(&transaction, plug_id.to_string())
+        .await
+        .map_err(storage)?;
+    for (binding, locked) in locks {
+        sqlite::upsert_resolution_lock(
+            &transaction,
+            plug_id.to_string(),
+            binding.clone(),
+            locked.contract.clone(),
+            locked.provider.clone(),
+            locked.version.as_ref().map(ToString::to_string),
+            locked.lexicon_revision.map(i64::from),
+        )
+        .await
+        .map_err(storage)?;
+    }
     transaction.commit().await.map_err(storage)
 }

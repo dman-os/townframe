@@ -45,6 +45,7 @@ pub mod config;
 pub mod dispatch;
 pub mod inventory;
 pub mod protocol;
+pub mod providers;
 
 pub const AUTHORITY: &str = "org.example.daybook";
 
@@ -315,6 +316,38 @@ impl Nodule {
         })
     }
 
+    /// The required operation requests whose `statuses` (by binding, see
+    /// [`providers::RequestStatus::evaluate`]) say no provider satisfies them: while any exists
+    /// the nodule is held at [`inventory::Readiness::ProviderMissing`]. An optional request
+    /// never appears.
+    pub fn missing_providers<'a>(
+        &'a self,
+        statuses: &'a BTreeMap<String, providers::RequestStatus>,
+    ) -> impl Iterator<Item = &'a Request> {
+        self.operation_requests().filter(|request| {
+            // An enabled nodule has a status for every operation request, which is the only
+            // case this is asked in.
+            request.necessity.is_required() && statuses[&request.binding].unresolved.is_some()
+        })
+    }
+
+    /// The `revision` the Lexicon file defining `nsid` declares, if this nodule carries that
+    /// file and it declares one. Admission checked every declared revision, so a malformed one
+    /// cannot reach here.
+    pub fn lexicon_revision(&self, nsid: &str) -> Option<u32> {
+        let file = self
+            .lexicons
+            .iter()
+            .find(|file| file.get("id").and_then(Value::as_str) == Some(nsid))?;
+        let revision = file.get("revision")?;
+        Some(
+            revision
+                .as_u64()
+                .and_then(|revision| u32::try_from(revision).ok())
+                .expect("admission checked the Lexicon revision"),
+        )
+    }
+
     /// The Lexicon files that declare datums rather than operations, for the datum compiler.
     pub fn datum_lexicons(&self) -> impl Iterator<Item = &IndexMap<String, Value>> {
         self.lexicons
@@ -405,6 +438,16 @@ impl Nodule {
                         "non-empty definitions are required",
                     )
                 })?;
+            if let Some(revision) = file.get("revision")
+                && !revision
+                    .as_u64()
+                    .is_some_and(|revision| (1..=u64::from(u32::MAX)).contains(&revision))
+            {
+                return Err(NoduleError::invalid(
+                    format!("{path}.revision"),
+                    "a Lexicon revision is an integer starting at 1",
+                ));
+            }
             let operation = operation_kind(file);
             let refs = match operation {
                 Some(kind) => operation::validate(kind, defs, &format!("{path}.defs"))?,

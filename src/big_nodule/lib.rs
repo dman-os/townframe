@@ -53,6 +53,7 @@ use big_nodule_core::config::config_universe;
 use big_nodule_core::dispatch::DispatchProtocol;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::ConfigureNodule;
+use big_nodule_core::protocol::ConfirmNoduleResolution;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::MintNoduleCapability;
@@ -290,6 +291,24 @@ impl NoduleService {
             .await
     }
 
+    async fn confirm_resolution(
+        &self,
+        context: &RequestContext,
+        params: ConfirmNoduleResolution,
+    ) -> Res<NoduleRecord> {
+        let caller = self.caller(context, params.authorization).await?;
+        self.require_manage(&caller, &params.plug_id)?;
+        let context = context.clone();
+        self.state
+            .ask(|reply| Command::ConfirmResolution {
+                context,
+                plug_id: params.plug_id,
+                binding: params.binding,
+                reply,
+            })
+            .await
+    }
+
     async fn set_drawer_grants(
         &self,
         context: &RequestContext,
@@ -385,6 +404,7 @@ handlers! {
     SetNoduleEnabled => set_enabled: NoduleRecord;
     SetNoduleDrawerGrants => set_drawer_grants: NoduleRecord;
     SetNoduleOperationGrants => set_operation_grants: NoduleRecord;
+    ConfirmNoduleResolution => confirm_resolution: NoduleRecord;
     UninstallNodule => uninstall: ();
     GetNodule => get: NoduleRecord;
     ListNodules => list: Vec<NoduleRecord>;
@@ -399,6 +419,7 @@ service_utils_rs::bind_service_protocol! {
             SetNoduleEnabled(SetNoduleEnabled),
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
             SetNoduleOperationGrants(SetNoduleOperationGrants),
+            ConfirmNoduleResolution(ConfirmNoduleResolution),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)

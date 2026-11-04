@@ -61,6 +61,10 @@ use big_nodule_core::protocol::NoduleOperationGrantStatus;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NoduleScope;
 use big_nodule_core::protocol::NodulesError;
+use big_nodule_core::providers::LockedProvider;
+use big_nodule_core::providers::ProviderIndex;
+use big_nodule_core::providers::RequestStatus;
+use big_nodule_core::providers::Unresolved;
 use big_plugs_core::Plug;
 use big_plugs_core::PlugId;
 use big_plugs_core::Revision;
@@ -128,6 +132,12 @@ pub(crate) enum Command {
         context: RequestContext,
         plug_id: PlugId,
         operations: DispatchScope,
+        reply: Reply<NoduleRecord>,
+    },
+    ConfirmResolution {
+        context: RequestContext,
+        plug_id: PlugId,
+        binding: String,
         reply: Reply<NoduleRecord>,
     },
     Uninstall {
@@ -274,6 +284,9 @@ pub(crate) struct State {
     /// The dispatch handle minted for each nodule from its operation grants, with the scope it
     /// was minted for.
     applied_operations: BTreeMap<PlugId, (DispatchScope, CapId)>,
+    /// The resolution lockfile: the provider each enabled nodule's operation request is pinned
+    /// to, by binding (see [`LockedProvider`]). Mirrors SQLite.
+    locks: BTreeMap<PlugId, BTreeMap<String, LockedProvider>>,
     applied_heads: BTreeMap<PlugId, Vec<ChangeHash>>,
     records: BTreeMap<PlugId, NoduleRecord>,
     observed_heads: Vec<ChangeHash>,
@@ -333,13 +346,9 @@ impl State {
             .map(|row| (row.plug_id, (row.scope, row.capability_id)))
             .collect();
 
-        let mut init_done: BTreeMap<PlugId, BTreeMap<String, Revision>> = BTreeMap::new();
-        for row in store::init_done(&stores.sql).await? {
-            init_done
-                .entry(row.plug_id)
-                .or_default()
-                .insert(row.init_key, row.revision);
-        }
+        let init_done = store::init_done(&stores.sql).await?;
+
+        let locks = store::resolution_locks(&stores.sql).await?;
 
         let mut watch = stores
             .datum_store
@@ -363,6 +372,7 @@ impl State {
             actors: BTreeMap::new(),
             applied_grants,
             applied_operations,
+            locks,
             applied_heads: BTreeMap::new(),
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
@@ -512,6 +522,12 @@ impl State {
                 )
                 .await
             }
+            Command::ConfirmResolution {
+                context,
+                plug_id,
+                binding,
+                reply,
+            } => answer(reply, self.confirm_resolution(&context, &plug_id, &binding)).await,
             Command::Uninstall {
                 context,
                 plug_id,
@@ -650,6 +666,76 @@ impl State {
             .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
     }
 
+    /// Re-pins `binding` of `plug_id` to the plug that provides its contract now, which the
+    /// operator has seen reported as [`Unresolved::ProviderChanged`] and accepts (ADR 028 §3).
+    /// Refused when the request is not held at that state, so a confirmation never takes effect
+    /// on anything but what was reported.
+    async fn confirm_resolution(
+        &mut self,
+        context: &RequestContext,
+        plug_id: &PlugId,
+        binding: &str,
+    ) -> Res<NoduleRecord> {
+        self.refresh_if_needed(context).await?;
+        let record = self
+            .records
+            .get(plug_id)
+            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))?;
+        let Some(RequestStatus {
+            contract,
+            unresolved: Some(Unresolved::ProviderChanged { .. }),
+            ..
+        }) = record.requests.get(binding)
+        else {
+            return Err(NodulesError::Rejected(format!(
+                "request `{binding}` of `{plug_id}` is not awaiting confirmation of a changed \
+                 provider"
+            )));
+        };
+        let snapshot = self
+            .stores
+            .datum_store
+            .snapshot()
+            .await
+            .map_err(crate::store_error)?;
+        // `refresh_if_needed` brought the records to this snapshot, so the recorded provider
+        // change is still what the offers say, and the one offer is the plug to pin.
+        let resolved = snapshot.value.resolve(&self.admission_cache);
+        let index = ProviderIndex::new(&resolved);
+        let offers = index.offers(contract, self.stores.dispatch.claimants(contract));
+        let [offer] = offers.as_slice() else {
+            unreachable!("a provider change is held only while exactly one provider offers it")
+        };
+        let mut locks = self.locks.get(plug_id).cloned().unwrap_or_default();
+        locks.insert(binding.to_owned(), offer.clone());
+        self.set_locks(plug_id, locks).await?;
+        drop(self.reconcile(context, snapshot, Trigger::Change).await?);
+        self.records
+            .get(plug_id)
+            .cloned()
+            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+    }
+
+    /// Records `locks` as the lockfile of `plug_id`, in SQLite first, when they differ from what
+    /// is recorded.
+    async fn set_locks(
+        &mut self,
+        plug_id: &PlugId,
+        locks: BTreeMap<String, LockedProvider>,
+    ) -> Res<()> {
+        let held = self.locks.get(plug_id);
+        if held.is_none_or(BTreeMap::is_empty) && locks.is_empty() || held == Some(&locks) {
+            return Ok(());
+        }
+        store::replace_resolution_locks(&self.stores.sql, plug_id, &locks).await?;
+        if locks.is_empty() {
+            self.locks.remove(plug_id);
+        } else {
+            self.locks.insert(plug_id.clone(), locks);
+        }
+        Ok(())
+    }
+
     async fn uninstall(&mut self, context: &RequestContext, plug_id: &PlugId) -> Res<()> {
         let target = plug_id.clone();
         let domain_error: Arc<Mutex<Option<NodulesError>>> = Arc::new(Mutex::new(None));
@@ -786,6 +872,26 @@ impl State {
             }
         }
 
+        // A plug that left the config (uninstall) has no resolution to unbind it from below.
+        // It goes first, so its registration cannot be offered as a provider to the others.
+        let removed: Vec<PlugId> = self
+            .records
+            .keys()
+            .filter(|plug_id| !resolved.contains_key(*plug_id))
+            .cloned()
+            .collect();
+        for plug_id in removed {
+            self.withdraw(&plug_id).await;
+            if self.init_done.remove(&plug_id).is_some() {
+                store::delete_init_done(&self.stores.sql, &plug_id).await?;
+            }
+            self.set_locks(&plug_id, BTreeMap::new()).await?;
+        }
+
+        // Providers are indexed from the snapshot, not read back from the routing table as the
+        // loop registers them, so a dependent that sorts before its provider resolves in the
+        // same pass.
+        let providers = ProviderIndex::new(&resolved);
         let mut new_records = BTreeMap::new();
         for (plug_id, resolution) in resolved {
             match resolution {
@@ -815,6 +921,7 @@ impl State {
                             artifacts: BTreeMap::new(),
                             drawers: BTreeMap::new(),
                             operations: None,
+                            requests: BTreeMap::new(),
                             init: None,
                             observed_heads: snapshot.heads.clone(),
                             applied_heads: self.applied_heads.get(&plug_id).cloned(),
@@ -832,6 +939,7 @@ impl State {
                             context,
                             &snapshot.heads,
                             trigger,
+                            &providers,
                             installed,
                             desired_grants,
                             desired_operations,
@@ -842,19 +950,6 @@ impl State {
             }
         }
 
-        // A plug that left the config (uninstall) has no resolution to unbind it from above.
-        let removed: Vec<PlugId> = self
-            .records
-            .keys()
-            .filter(|plug_id| !new_records.contains_key(*plug_id))
-            .cloned()
-            .collect();
-        for plug_id in removed {
-            self.withdraw(&plug_id).await;
-            if self.init_done.remove(&plug_id).is_some() {
-                store::delete_init_done(&self.stores.sql, &plug_id).await?;
-            }
-        }
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
@@ -900,6 +995,7 @@ impl State {
         actor: &Actor,
         capability: Option<CapId>,
         granted: &DispatchScope,
+        requests: &BTreeMap<String, RequestStatus>,
         trigger: Trigger,
     ) -> Readiness {
         let plug_id = installed.plug_id.clone();
@@ -934,6 +1030,25 @@ impl State {
                 ProviderState::NotReady(Readiness::NeedsConfiguration),
             );
             return Readiness::NeedsConfiguration;
+        }
+        // Likewise a required operation nobody (or more than one, or the wrong plug) provides:
+        // enabling is accepted and the nodule waits, as a pod waits on a missing dependency. No
+        // waiter needs waking when a provider turns up: resolution is recomputed for every
+        // nodule on each reconcile, and a provider can only appear through one (a config
+        // change, since every nodule's enablement lives in the config document).
+        if installed
+            .nodule
+            .missing_providers(requests)
+            .next()
+            .is_some()
+        {
+            self.retire(&plug_id).await;
+            self.stores.dispatch.register(
+                &provider_id,
+                installed.admitted.operations.clone(),
+                ProviderState::NotReady(Readiness::ProviderMissing),
+            );
+            return Readiness::ProviderMissing;
         }
         let Some((executor, artifact_key)) = hosting else {
             self.retire(&plug_id).await;
@@ -1297,6 +1412,49 @@ impl State {
         Ok(())
     }
 
+    /// Resolves the operation requests of `installed` to providers and keeps the lockfile in
+    /// step with the outcome.
+    ///
+    /// A disabled nodule has no resolution and no lockfile: enabling is the consent to the
+    /// providers found then, so it begins afresh each time. For an enabled one every operation
+    /// request gets a status, and a request that resolved is (re)pinned to the provider it
+    /// resolved to. A request that did not keeps its earlier pin, so the same plug coming back
+    /// resolves without asking, and a different one is reported as a change. A pin for a binding
+    /// the nodule no longer has, or for another contract than the binding now names, is dropped.
+    async fn resolve_requests(
+        &mut self,
+        installed: &InstalledNodule,
+        providers: &ProviderIndex,
+    ) -> Res<BTreeMap<String, RequestStatus>> {
+        let plug_id = &installed.plug_id;
+        if !installed.enabled {
+            self.set_locks(plug_id, BTreeMap::new()).await?;
+            return Ok(BTreeMap::new());
+        }
+        let mut statuses = BTreeMap::new();
+        for request in installed.nodule.operation_requests() {
+            let pinned = self
+                .locks
+                .get(plug_id)
+                .and_then(|locks| locks.get(&request.binding))
+                .filter(|pin| pin.contract == request.contract);
+            let offers = providers.offers(
+                &request.contract,
+                self.stores.dispatch.claimants(&request.contract),
+            );
+            statuses.insert(
+                request.binding.clone(),
+                RequestStatus::evaluate(request, &offers, pinned),
+            );
+        }
+        let locks = statuses
+            .iter()
+            .filter_map(|(binding, status)| Some((binding.clone(), status.locked.clone()?)))
+            .collect();
+        self.set_locks(plug_id, locks).await?;
+        Ok(statuses)
+    }
+
     async fn ensure_nodule_actor(
         &mut self,
         context: &RequestContext,
@@ -1322,11 +1480,16 @@ impl State {
         Ok(opened)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one nodule's slice of a reconcile: the pass's snapshot facts plus the nodule's resolved pieces"
+    )]
     async fn reconcile_admitted(
         &mut self,
         context: &RequestContext,
         heads: &[ChangeHash],
         trigger: Trigger,
+        providers: &ProviderIndex,
         mut installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
         desired_operations: DispatchScope,
@@ -1351,17 +1514,16 @@ impl State {
             .apply_operations(context, &plug_id, &actor, &effective_operations)
             .await?;
         // A grant that failed to mint covers nothing, so it cannot satisfy a request.
-        let granted_operations = if capability.is_some() {
-            effective_operations
-        } else {
-            DispatchScope::default()
-        };
+        let granted_operations =
+            capability.map_or_else(DispatchScope::default, |_| effective_operations);
+        let requests = self.resolve_requests(&installed, providers).await?;
         let readiness = self
             .serve(
                 &mut installed,
                 &actor,
                 capability,
                 &granted_operations,
+                &requests,
                 trigger,
             )
             .await;
@@ -1472,11 +1634,7 @@ impl State {
             enabled: installed.enabled,
             readiness,
             config: installed.config.clone(),
-            artifacts: installed
-                .artifacts
-                .iter()
-                .map(|(key, (_, state))| (key.clone(), *state))
-                .collect(),
+            artifacts: installed.artifact_states(),
             drawers: drawer_statuses,
             operations: (!desired_operations.is_empty()).then(|| NoduleOperationGrantStatus {
                 desired: bound_operations,
@@ -1484,6 +1642,7 @@ impl State {
                 granted: capability.is_some(),
                 error: operations_error,
             }),
+            requests,
             init: self.init_status(&plug_id),
             observed_heads: heads.to_vec(),
             applied_heads: self.applied_heads.get(&plug_id).cloned(),

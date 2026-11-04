@@ -50,7 +50,7 @@ use tokio::sync::Notify;
 use tokio::sync::watch;
 
 const ALPHA: &str = example_plug!("alpha");
-const PING: &str = "org.example.alpha.ping";
+pub(super) const PING: &str = "org.example.alpha.ping";
 const SETUP: &str = "org.example.alpha.setup";
 const WARM: &str = "org.example.alpha.warm";
 const REMOTE: &str = "org.example.remote.sync";
@@ -64,7 +64,7 @@ struct Call {
 
 /// Records every call and can hold or fail them: the provider behind a nodule's handler, or a
 /// native provider of a foreign operation.
-struct Probe {
+pub(super) struct Probe {
     calls: Mutex<Vec<Call>>,
     /// How many calls have been entered, for a test to wait on without polling.
     entered: watch::Sender<usize>,
@@ -74,7 +74,7 @@ struct Probe {
 }
 
 impl Probe {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::default(),
             entered: watch::channel(0).0,
@@ -169,7 +169,7 @@ fn query(nsid: &str) -> serde_json::Map<String, Value> {
 /// A package `<example did>/<name>` whose nodule `org.example.<name>` serves `serves` (all under its
 /// authority), requires `requires`, and declares `inits` as `(key, target, mode)` in order.
 /// Each `version` has a handler of its own, so each is a revision of its own.
-fn init_plug(
+pub(super) fn init_plug(
     name: &str,
     version: &str,
     serves: &[&str],
@@ -246,7 +246,7 @@ async fn alpha_node(mode: RunMode) -> (Node, Arc<Probe>) {
     (node, probe)
 }
 
-async fn node_hosting(probe: &Arc<Probe>) -> Node {
+pub(super) async fn node_hosting(probe: &Arc<Probe>) -> Node {
     super::node_with(Some(FakeExecutor::hosting(
         Arc::clone(probe) as Arc<dyn Provider>,
         true,
@@ -284,7 +284,7 @@ impl Node {
         .unwrap()
     }
 
-    async fn set_enabled_record(&self, plug_id: &str) -> NoduleRecord {
+    pub(super) async fn set_enabled_record(&self, plug_id: &str) -> NoduleRecord {
         self.call(SetNoduleEnabled {
             authorization: self.operator(),
             plug_id: id(plug_id),
@@ -302,7 +302,11 @@ impl Node {
         .unwrap()
     }
 
-    async fn grant_operations(&self, plug_id: &str, authorities: &[&str]) -> NoduleRecord {
+    pub(super) async fn grant_operations(
+        &self,
+        plug_id: &str,
+        authorities: &[&str],
+    ) -> NoduleRecord {
         self.call(SetNoduleOperationGrants {
             authorization: self.operator(),
             plug_id: id(plug_id),
@@ -675,7 +679,7 @@ async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_p
 
 /// `plug` with its nodule's requests replaced by `requests`, for tests of what a request does
 /// to the nodule (`init_plug` states its requests as optional).
-fn with_requests(mut plug: Plug, requests: Vec<Request>) -> Plug {
+pub(super) fn with_requests(mut plug: Plug, requests: Vec<Request>) -> Plug {
     let Some(Contribution::Nodule(nodule)) = plug.contributions.first_mut() else {
         panic!("init plugs carry a nodule");
     };
@@ -685,7 +689,7 @@ fn with_requests(mut plug: Plug, requests: Vec<Request>) -> Plug {
     plug
 }
 
-fn necessity(nsid: &str, necessity: Necessity) -> Request {
+pub(super) fn necessity(nsid: &str, necessity: Necessity) -> Request {
     let mut request = Request::new(nsid, nsid);
     request.necessity = necessity;
     request
@@ -783,6 +787,13 @@ async fn a_required_request_needs_configuration_until_granted_and_an_optional_on
     )
     .await
     .unwrap();
+
+    // A native provider of the requested operation, so only the grant is missing.
+    node.dispatch.router.register(
+        "remote",
+        [(REMOTE.to_owned(), Some(OperationKind::Query))],
+        ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
+    );
 
     // The required request has no grant: not ready, not a fault, and callers get the
     // retryable not-ready. The optional one has no readiness effect.

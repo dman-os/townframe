@@ -567,6 +567,30 @@ fn requests_are_validated_and_an_unknown_necessity_is_required() {
 }
 
 #[test]
+fn a_lexicon_revision_is_read_from_the_file_defining_the_contract_and_must_start_at_one() {
+    let mut nodule = photos();
+    assert_eq!(nodule.lexicon_revision("org.example.photos.list"), None);
+    nodule.lexicons[1].insert("revision".into(), json!(3));
+    nodule.admit(Some(PHOTOS)).unwrap();
+    assert_eq!(nodule.lexicon_revision("org.example.photos.list"), Some(3));
+    assert_eq!(nodule.lexicon_revision("org.example.photos.photo"), None);
+    assert_eq!(nodule.lexicon_revision("org.example.absent"), None);
+    for bad in [
+        json!(0),
+        json!("2"),
+        json!(1.5),
+        json!(u64::from(u32::MAX) + 1),
+    ] {
+        let mut nodule = photos();
+        nodule.lexicons[1].insert("revision".into(), bad);
+        refuse(
+            nodule,
+            "lexicons[1].revision`: a Lexicon revision is an integer",
+        );
+    }
+}
+
+#[test]
 fn grants_never_exceed_requests() {
     let nodule = Nodule {
         requires: vec![

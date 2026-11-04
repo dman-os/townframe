@@ -12,6 +12,7 @@ use crate::dispatch::DispatchScope;
 use crate::inventory::ArtifactState;
 use crate::inventory::InventoryError;
 use crate::inventory::Readiness;
+use crate::providers::RequestStatus;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Capability;
@@ -105,6 +106,18 @@ pub struct SetNoduleOperationGrants {
     pub authorization: Authorization,
     pub plug_id: PlugId,
     pub operations: DispatchScope,
+}
+
+/// Confirms that the nodule's request `binding` is to be served by the plug that now provides its
+/// contract, replacing the one the operator consented to earlier (ADR 028 §3). Refused unless the
+/// request is held at `ProviderChanged`, so a confirmation cannot be applied to a state the
+/// operator did not see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmNoduleResolution {
+    pub authorization: Authorization,
+    pub plug_id: PlugId,
+    pub binding: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +216,11 @@ pub struct NoduleRecord {
     /// Absent when the nodule has no operation grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operations: Option<NoduleOperationGrantStatus>,
+    /// Where each operation request stands, by binding, and the lockfile entry (provider plug
+    /// id, version and Lexicon revision) it is pinned to. Node-local and durable; empty while
+    /// the nodule is disabled or refused. Data and schema requests are not listed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requests: BTreeMap<String, RequestStatus>,
     /// Absent until an initializer of the current start has been invoked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init: Option<NoduleInitStatus>,
@@ -264,6 +282,7 @@ operations! {
     SetNoduleEnabled => NoduleRecord, procedure, "setNoduleEnabled";
     SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants";
     SetNoduleOperationGrants => NoduleRecord, procedure, "setNoduleOperationGrants";
+    ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution";
     UninstallNodule => (), procedure, "uninstallNodule";
     GetNodule => NoduleRecord, query, "getNodule";
     ListNodules => Vec<NoduleRecord>, query, "listNodules";
@@ -278,6 +297,7 @@ declare_service_protocol! {
             SetNoduleEnabled(SetNoduleEnabled),
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
             SetNoduleOperationGrants(SetNoduleOperationGrants),
+            ConfirmNoduleResolution(ConfirmNoduleResolution),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)

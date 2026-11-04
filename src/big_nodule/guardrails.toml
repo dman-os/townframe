@@ -27,3 +27,4 @@ features = []
 "src/big_nodule/sqlite/migrations/002_applied_operations.sql" = "e2ae6d0b46b07e812265ba344f11d8cd0a1dff9e9b113f795b64f74e5a0ff35b"
 "src/big_nodule/sqlite/migrations/003_init_done.sql" = "83f5b4769acfac69f4f82ca3048afd376f85baa7822aee33cbd94f48181cd042"
 "src/big_nodule/sqlite/migrations/004_actor_path_derived.sql" = "7b80c20c6eab5ffc6ce590fab0405f270922b62e5741c5aeff45ef09bc971b32"
+"src/big_nodule/sqlite/migrations/005_resolution_locks.sql" = "7c588d8cd7bf31c1a189b8b7c1ca67024b0ade301246ccb4469d02a8310c79e7"

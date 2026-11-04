@@ -168,6 +168,21 @@ impl Router {
         }
     }
 
+    /// The ids of every provider claiming `nsid`, in order: what a request for that contract
+    /// can be resolved to, ready or not.
+    pub fn claimants(&self, nsid: &str) -> Vec<String> {
+        self.snapshot()
+            .routes
+            .get(nsid)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| entry.provider_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The NSIDs `provider_id` currently claims, in order.
     pub fn operations_of(&self, provider_id: &str) -> Vec<String> {
         self.snapshot()
@@ -349,6 +364,19 @@ mod tests {
         router.register("p", ops(&["x.op"]), ready());
         router.unbind("q");
         assert_eq!(provider_of(&router, "x.op"), "p");
+    }
+
+    #[test]
+    fn claimants_lists_every_provider_of_an_nsid_ready_or_not() {
+        let router = Router::default();
+        assert!(router.claimants("x.op").is_empty());
+        router.register("q", ops(&["x.op"]), ready());
+        router.register(
+            "p",
+            ops(&["x.op"]),
+            ProviderState::NotReady(Readiness::Disabled),
+        );
+        assert_eq!(router.claimants("x.op"), ["p", "q"]);
     }
 
     #[test]
