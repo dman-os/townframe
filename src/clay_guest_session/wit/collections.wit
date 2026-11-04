@@ -96,7 +96,8 @@ interface collection-registration {
 
     /// What a writer claims to have seen when it writes a key.
     variant write-basis {
-        /// No claim: a concurrent creation that loses to anything the key already holds.
+        /// No claim: stamped as a fresh creation, so a later stamp the key already holds wins
+        /// and an equal one breaks by writer.
         concurrent,
         /// The writer saw this stamp; the write supersedes it and is always accepted.
         observed(stamp),
