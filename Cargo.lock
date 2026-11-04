@@ -2668,22 +2668,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clay_micro_core"
-version = "0.1.0"
-dependencies = [
- "clay_docs",
- "clay_host",
- "daybook_types",
- "futures",
- "insta",
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
 name = "clay_rt_wasmtime"
 version = "0.1.0"
 dependencies = [
@@ -4119,11 +4103,11 @@ dependencies = [
  "anyrender_vello_cpu 0.17.0",
  "anyrender_vello_hybrid 0.10.0",
  "blitz-dom",
+ "ciborium",
  "clay_dioxus",
  "clay_docs",
  "clay_host",
  "clay_mdk",
- "clay_micro_core",
  "clay_surface",
  "daybook_types",
  "dayframe_composition",
@@ -4132,6 +4116,7 @@ dependencies = [
  "dioxus-html",
  "dioxus-native",
  "dioxus-native-dom",
+ "futures",
  "micro_counter_manifest",
  "micro_sample",
  "micro_settings",
@@ -4181,7 +4166,6 @@ dependencies = [
  "clay_dioxus",
  "clay_docs",
  "clay_mdk",
- "clay_micro_core",
  "clay_rt_wcmp",
  "clay_rt_wcmp_web",
  "console_error_panic_hook",
