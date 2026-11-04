@@ -119,6 +119,20 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 - **Egress:** `allow_outgoing_request` admits only `dispatch.local`, and `NoEgress` becomes the dispatch egress. `POST http://dispatch.local/xrpc/<nsid>` with `authorization` naming a cap. The caller identity is the workload's nodule actor (from the workload id, which is unforgeable). Dispatch checks that the cap's holder is that actor, then admits and invokes as usual. Deadline and idempotency headers pass through. Dispatch errors map back to XRPC statuses (the inverse of the provider mapping).
 - No other egress, ever, in this PR.
 
+### D7. Init as a lifecycle binding (manager, 2026-11-04, by convention; operator delegated)
+Answers review question 4. Precedents: Kubernetes init containers and lifecycle hooks (the kubelet runs them directly; the pod is not Ready until they succeed; callers are not queued), and Helm install/upgrade hooks (re-run per release revision).
+- **Shape:** `Initializer{key, target, mode}`. `key` is a new required string, unique per nodule. `mode` keeps `Once` (once per node per revision) and `EveryStart` (each time the nodule starts: node boot, or enable).
+- **Done-ness:** host-local SQLite (big_nodule migration), keyed (plug, init key, revision). Per revision, like Helm. A new revision re-runs `Once` inits, so inits must be idempotent. No synced done-ness: running it again on a mirrored node is harmless by idempotency.
+- **Idempotency key:** `nodule/<plug>/<revision>/<key>` in the `InvocationContext`, so durable document mutations made by an init dedupe (D3).
+- **Who invokes:**
+  - A **local** target (an operation the nodule implements) is called by the runtime directly on the nodule's provider from the executor, not through dispatch. This is the host running its own lifecycle hook, like the kubelet. The `Caller` is the nodule service.
+  - A **foreign** target (a `requires` operation) goes through dispatch as an ordinary call by the nodule actor under its own operations cap (D2e), so it needs a grant like any other call.
+- **Gating:** `Readiness` gains `Initializing` and `InitFailed`. Dispatch registers the nodule `NotReady(Initializing)` until all its inits for the current revision and start have succeeded. Callers get the retryable NotReady (503); nothing queues.
+- **Ordering:** inits run in declaration order. A foreign target whose provider is not Ready leaves the nodule `Initializing` and is retried when that provider becomes ready (the next reconcile). A dependency cycle is reported as `InitFailed` on the record, not executed.
+- **Failure:** `InitFailed`, with the error and attempt count on the `NoduleRecord`. It is retried on the next reconcile trigger (boot, config change, enable). There is no hidden retry loop or backoff yet; CrashLoopBackOff-style backoff is a follow-up.
+- **Execution:** init calls run in tasks off the state actor (tied to its stop token), and results come back as actor messages. The actor never awaits a handler. A stale result (from a revision or start that has since been superseded) is dropped by checking an epoch.
+- **Settings** reach a nodule through a facility, not an init argument (review §4). Out of scope here.
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
@@ -147,7 +161,7 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- Next: init as a lifecycle binding (to-do 9).
+- Init (D7): fresh subagent, running.
 ## Done
 
 - 2026-11-04: Slice 2c (D2e) plus gRPC deadline fail-fast.
