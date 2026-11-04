@@ -1,8 +1,10 @@
 //! Engine-neutral Counter declarations. The manifest is portable MDK vocabulary (ADR 030
 //! §§11–15): identity, the presentations and call it publishes, the configuration it requests, and the
 //! Settings section row it declares into the `settings.sections` collection, whose attachment
-//! is a lazy endpoint to the counter's own presentation. The wasm guest reads only the
-//! constants; the composition root reads `manifest()`.
+//! is a lazy endpoint to the counter's own presentation, and the Increment button row it
+//! declares into the `toolbar.buttons` collection, whose attachment is a lazy endpoint to the
+//! counter's `increment` call. The wasm guest reads only the constants; the composition root
+//! reads `manifest()`.
 use clay_mdk::Access;
 use clay_mdk::AttachmentDeclaration;
 use clay_mdk::BindingResolution;
@@ -18,6 +20,7 @@ use clay_mdk::PublicationKind;
 use clay_mdk::Request;
 use clay_mdk::Sidecar;
 use micro_settings_manifest::SECTIONS;
+use micro_toolbar_manifest::BUTTONS;
 
 pub const ID: &str = "dayframe.counter";
 pub const PACKAGE_VERSION: u32 = 1;
@@ -36,6 +39,13 @@ pub const COUNT: &str = "count";
 pub const COUNT_CONTRACT: &str = "org.example.dayframe.counter.count";
 /// The local binding name under which the counter registers its Settings section.
 pub const SECTIONS_BINDING: &str = "sections";
+/// The call the toolbar's Increment button performs (CBOR `()` in, CBOR `()` out): count one more.
+pub const INCREMENT: &str = "increment";
+/// The contract NSID of the [`INCREMENT`] call. The counter owns it: a call a button attaches is
+/// declared under its provider's authority like any other call.
+pub const INCREMENT_CONTRACT: &str = "org.example.dayframe.counter.increment";
+/// The local binding name under which the counter contributes its toolbar button.
+pub const TOOLBAR_BINDING: &str = "toolbar";
 
 pub fn manifest() -> MicroManifest {
     MicroManifest {
@@ -56,6 +66,11 @@ pub fn manifest() -> MicroManifest {
                 kind: PublicationKind::Call,
                 contract: Some(Nsid::literal(COUNT_CONTRACT)),
             },
+            PublicationDeclaration {
+                name: INCREMENT.into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal(INCREMENT_CONTRACT)),
+            },
         ],
         requires: vec![],
         configuration_requests: vec![ConfigurationRequest {
@@ -70,27 +85,53 @@ pub fn manifest() -> MicroManifest {
             }],
         }],
         collection_contracts: vec![],
-        collection_requests: vec![Request {
-            binding: SECTIONS_BINDING.into(),
-            contract: Nsid::literal(SECTIONS),
-            access: Some(Access::Write),
-            necessity: Necessity::Optional,
-            resolution: BindingResolution::Configured,
-            min_revision: None,
-        }],
-        contributions: vec![ContributionDeclaration {
-            id: "settings-section".into(),
-            binding: SECTIONS_BINDING.into(),
-            key: ID.into(),
-            payload: serde_json::json!({
-                "title": "Counter (Wasm)",
-                "detail": { "$attachment": 0 },
-            }),
-            attachments: vec![AttachmentDeclaration {
-                index: 0,
-                publication: VIEW.into(),
-            }],
-        }],
+        collection_requests: vec![
+            Request {
+                binding: SECTIONS_BINDING.into(),
+                contract: Nsid::literal(SECTIONS),
+                access: Some(Access::Write),
+                necessity: Necessity::Optional,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
+            Request {
+                binding: TOOLBAR_BINDING.into(),
+                contract: Nsid::literal(BUTTONS),
+                access: Some(Access::Write),
+                necessity: Necessity::Optional,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
+        ],
+        contributions: vec![
+            ContributionDeclaration {
+                id: "settings-section".into(),
+                binding: SECTIONS_BINDING.into(),
+                key: ID.into(),
+                payload: serde_json::json!({
+                    "title": "Counter (Wasm)",
+                    "detail": { "$attachment": 0 },
+                }),
+                attachments: vec![AttachmentDeclaration {
+                    index: 0,
+                    publication: VIEW.into(),
+                }],
+            },
+            ContributionDeclaration {
+                id: "toolbar-button".into(),
+                binding: TOOLBAR_BINDING.into(),
+                key: INCREMENT.into(),
+                payload: serde_json::json!({
+                    "label": "Increment",
+                    "icon": "plus",
+                    "action": { "$attachment": 0 },
+                }),
+                attachments: vec![AttachmentDeclaration {
+                    index: 0,
+                    publication: INCREMENT.into(),
+                }],
+            },
+        ],
         extra: Default::default(),
     }
 }

@@ -1,9 +1,9 @@
 //! The counter, authored once against the MDK's [`Context`]: a configured facet it counts in (or
 //! an in-memory count when the composition granted none), two presentations of it (`view`, the
-//! one its Settings section mounts, and a compact `badge`) and a `count` call that answers the
-//! current value. [`clay_mdk::export_micro!`] exports it as the `micro-client` guest on
-//! wasm32-wasip3 and as the native `ACTIVATE` entry everywhere else; nothing here names a
-//! backend.
+//! one its Settings section mounts, and a compact `badge`), a `count` call that answers the
+//! current value and an `increment` call, which the toolbar's Increment button performs.
+//! [`clay_mdk::export_micro!`] exports it as the `micro-client` guest on wasm32-wasip3 and as
+//! the native `ACTIVATE` entry everywhere else; nothing here names a backend.
 use clay_mdk::Context;
 use clay_mdk::Error;
 use clay_mdk::Facet;
@@ -16,6 +16,7 @@ use micro_counter_manifest::CONFIG_KEY;
 use micro_counter_manifest::CONFIG_NAME;
 use micro_counter_manifest::CONFIG_TAG;
 use micro_counter_manifest::COUNT;
+use micro_counter_manifest::INCREMENT;
 use micro_counter_manifest::VIEW;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -41,6 +42,18 @@ impl Counter {
             FacetState::Present(count) => Some(count),
         })
     }
+
+    /// Count one more: the facet write, or nothing more for an in-memory count. A facet still
+    /// loading is [`Error::Unavailable`]: counting from a guessed zero would overwrite the stored
+    /// count.
+    fn increment(&self) -> Result<Option<Operation>, Error> {
+        let Some(facet) = &self.facet else {
+            self.standalone.set(self.standalone.get() + 1);
+            return Ok(None);
+        };
+        let current = self.value()?.ok_or(Error::Unavailable)?;
+        facet.write(current + 1).map(Some)
+    }
 }
 
 /// Bind the counter's configuration facet when the composition granted one and publish its two
@@ -61,9 +74,18 @@ async fn activate(context: Context) -> Result<(), Error> {
         let counter = counter.clone();
         move || badge(counter.clone())
     })?;
-    context.publish_call(COUNT, move |(): ()| {
+    context.publish_call(COUNT, {
         let counter = counter.clone();
-        async move { counter.value()?.ok_or(Error::Unavailable) }
+        move |(): ()| {
+            let counter = counter.clone();
+            async move { counter.value()?.ok_or(Error::Unavailable) }
+        }
+    })?;
+    // The toolbar's Increment button is a lazy reference to this call: pressing it starts this
+    // incarnation if none is live, and the call holds it until the write is submitted.
+    context.publish_call(INCREMENT, move |(): ()| {
+        let counter = counter.clone();
+        async move { counter.increment().map(drop) }
     })?;
     Ok(())
 }
@@ -90,27 +112,14 @@ fn view(counter: Counter) -> Element {
                 class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                 "aria-label": "Increment Wasm counter",
                 disabled: matches!(value, FacetState::Loading),
-                onclick: move |_| {
-                    let Some(facet) = &increment.facet else {
-                        increment.standalone.set(increment.standalone.get() + 1);
-                        rerender += 1;
-                        return;
-                    };
-                    let current = match increment.value() {
-                        Ok(Some(current)) => current,
-                        Ok(None) => return,
-                        Err(failure) => {
-                            error.set(Some(format!("Write failed: {failure}")));
-                            return;
-                        }
-                    };
-                    match facet.write(current + 1) {
-                        Ok(submitted) => {
-                            operation.set(Some(submitted));
-                            error.set(None);
-                        }
-                        Err(failure) => error.set(Some(format!("Write failed: {failure}"))),
+                onclick: move |_| match increment.increment() {
+                    // A standalone count has no document to notify the view of it changing.
+                    Ok(None) => rerender += 1,
+                    Ok(Some(submitted)) => {
+                        operation.set(Some(submitted));
+                        error.set(None);
                     }
+                    Err(failure) => error.set(Some(format!("Write failed: {failure}"))),
                 },
                 match &value {
                     FacetState::Loading => rsx! { "Loading counter" },
