@@ -169,6 +169,16 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - Pending: micros calling nodule operations (D9).
 - **Shared request vocabulary candidate:** Clay's collection request `{binding, contract, access, necessity: required|optional, resolution: configured|at-runtime}` (Clay `af37bbcc`, `clay_mdk/manifest.rs`). Nodules today have only `requires: [nsid]`, with no binding or necessity. Settle the shared names with the Clay agent before either side hardens them.
 
+### D11. Registry provenance, versions and dependencies (operator, 2026-11-04)
+- **Provenance is the document system.** There is no global plug authority. A plug's author publishes it as a document they sign (keyhive document identity), and the registry holds *the author's own document* in our drawer. A reference to a plug points at that specific author-signed document.
+- **Layout:** one document per plug, with versions as immutable entries in it, or one document per version; the operator doesn't mind. Manager pick: one document per plug, one version datum per version label. A version is pinned by (document id, Automerge heads), so a pin is immutable by construction.
+- **Immutability is expected:** a version label, once seen, never changes content.
+- **Each node is its own arbiter of a legal upgrade.** Seeing a new version or a valid signature does not make it the latest or a correct upgrade. The node checks upgrade legality locally on accept (immutability, version order, and later Lexicon compatibility). Any ecosystem-level policy is a layer above.
+- **Dependencies are referenced by plug id + semver range** (not by document id), so OCI and other non-document substrates stay possible. Resolving and fetching referenced plugs is a later layer above the catalog.
+- **The catalog holds manifests and blobs only.** Downstream consumers (nodules, Clay) refuse enablement until every dependency resolves in the catalog.
+- **Import sources:** author-published documents (primary), OCI, and Clay's local wasm + manifest pair.
+- Registry drawer locality: operator said "not local" (see the open question to the operator).
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
