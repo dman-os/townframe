@@ -42,6 +42,12 @@ interface capability-bank {
         retain-call: async func() -> result<call-binding, capability-error>;
         /// Strong while the component is held or mounted.
         redeem-presentation: async func() -> result<presentation-component, capability-error>;
+        /// Completes once `status` differs from `seen` (at once if it already does), so a holder
+        /// that saw a failure waits for the provider to change (a disabled micro enabled, an
+        /// unconfigured one configured) rather than redeeming in a loop. Driven by the
+        /// supervisor's status ticks; never activates anything. A reference to a live
+        /// publication has no restarts to follow and never completes.
+        status-changed: async func(seen: ref-status);
     }
 
     resource call-binding {
@@ -50,6 +56,11 @@ interface capability-bank {
 
     resource presentation-component {
         component: func() -> result<component-ref, capability-error>;
+        /// Completes once the provider incarnation this proxy was redeemed from has ended, after
+        /// which `component` reports `revoked`; so a slot knows to redeem again (which
+        /// demand-starts the next incarnation) without polling. Never completes for a proxy of
+        /// a live publication, which is never restarted.
+        revoked: async func();
     }
 
     resource published-capability {

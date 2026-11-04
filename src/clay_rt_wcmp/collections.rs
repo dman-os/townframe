@@ -403,16 +403,32 @@ impl cap_wit::HostPublishedCapability for WcmpStoreState {
     }
 }
 
+fn ref_status(status: RefStatus) -> cap_wit::RefStatus {
+    match status {
+        RefStatus::Live => cap_wit::RefStatus::Live,
+        RefStatus::Dormant => cap_wit::RefStatus::Dormant,
+        RefStatus::Disabled => cap_wit::RefStatus::Disabled,
+        RefStatus::Faulted => cap_wit::RefStatus::Faulted,
+        RefStatus::Unavailable => cap_wit::RefStatus::Unavailable,
+        RefStatus::Revoked => cap_wit::RefStatus::Revoked,
+    }
+}
+
+/// The status a guest says it last saw, as the host type `status_changed` compares against.
+fn seen_status(status: cap_wit::RefStatus) -> RefStatus {
+    match status {
+        cap_wit::RefStatus::Live => RefStatus::Live,
+        cap_wit::RefStatus::Dormant => RefStatus::Dormant,
+        cap_wit::RefStatus::Disabled => RefStatus::Disabled,
+        cap_wit::RefStatus::Faulted => RefStatus::Faulted,
+        cap_wit::RefStatus::Unavailable => RefStatus::Unavailable,
+        cap_wit::RefStatus::Revoked => RefStatus::Revoked,
+    }
+}
+
 impl cap_wit::HostCapabilityRef for WcmpStoreState {
     fn status(&mut self, reference: Resource<CapabilityRef>) -> wcmp::Result<cap_wit::RefStatus> {
-        Ok(match self.table.get(&reference)?.status() {
-            RefStatus::Live => cap_wit::RefStatus::Live,
-            RefStatus::Dormant => cap_wit::RefStatus::Dormant,
-            RefStatus::Disabled => cap_wit::RefStatus::Disabled,
-            RefStatus::Faulted => cap_wit::RefStatus::Faulted,
-            RefStatus::Unavailable => cap_wit::RefStatus::Unavailable,
-            RefStatus::Revoked => cap_wit::RefStatus::Revoked,
-        })
+        Ok(ref_status(self.table.get(&reference)?.status()))
     }
 
     fn drop(&mut self, reference: Resource<CapabilityRef>) -> wcmp::Result<()> {
@@ -484,6 +500,16 @@ impl<T: 'static> cap_wit::HostCapabilityRefWithStore<T> for HasSelf<WcmpStoreSta
             Err(failure) => Ok(Err(capability_error(failure))),
         }
     }
+
+    async fn status_changed(
+        accessor: &Accessor<T, Self>,
+        reference: Resource<CapabilityRef>,
+        seen: cap_wit::RefStatus,
+    ) -> wcmp::Result<()> {
+        let (reference, wake) = shared(accessor, &reference, CapabilityRef::share);
+        awaited(wake, reference.status_changed(seen_status(seen))).await;
+        Ok(())
+    }
 }
 
 impl cap_wit::HostCallBinding for WcmpStoreState {
@@ -503,6 +529,23 @@ impl<T: 'static> cap_wit::HostCallBindingWithStore<T> for HasSelf<WcmpStoreState
         Ok(awaited(wake, binding.call(request))
             .await
             .map_err(call_error))
+    }
+}
+
+impl<T: 'static> cap_wit::HostPresentationComponentWithStore<T> for HasSelf<WcmpStoreState> {
+    async fn revoked(
+        accessor: &Accessor<T, Self>,
+        proxy: Resource<PresentationComponent>,
+    ) -> wcmp::Result<()> {
+        let (revocation, wake) = accessor.with(|mut access| {
+            let state = access.get();
+            (
+                state.table.get(&proxy).unwrap().revocation(),
+                state.collection_wake.clone(),
+            )
+        });
+        awaited(wake, revocation.wait()).await;
+        Ok(())
     }
 }
 

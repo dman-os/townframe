@@ -347,6 +347,18 @@ fn ref_status(status: RefStatus) -> cap_wit::RefStatus {
     }
 }
 
+/// The status a guest says it last saw, as the host type `status_changed` compares against.
+fn seen_status(status: cap_wit::RefStatus) -> RefStatus {
+    match status {
+        cap_wit::RefStatus::Live => RefStatus::Live,
+        cap_wit::RefStatus::Dormant => RefStatus::Dormant,
+        cap_wit::RefStatus::Disabled => RefStatus::Disabled,
+        cap_wit::RefStatus::Faulted => RefStatus::Faulted,
+        cap_wit::RefStatus::Unavailable => RefStatus::Unavailable,
+        cap_wit::RefStatus::Revoked => RefStatus::Revoked,
+    }
+}
+
 impl cap_wit::Host for WasmStoreState {
     fn publish_presentation(
         &mut self,
@@ -469,6 +481,16 @@ impl<T: 'static> cap_wit::HostCapabilityRefWithStore<T> for HasSelf<WasmStoreSta
             Err(failure) => Ok(Err(capability_error(failure))),
         }
     }
+
+    async fn status_changed(
+        accessor: &Accessor<T, Self>,
+        reference: Resource<CapabilityRef>,
+        seen: cap_wit::RefStatus,
+    ) -> wasmtime::Result<()> {
+        let (reference, wake) = shared(accessor, &reference, CapabilityRef::share);
+        awaited(wake, reference.status_changed(seen_status(seen))).await;
+        Ok(())
+    }
 }
 
 impl cap_wit::HostCallBinding for WasmStoreState {
@@ -488,6 +510,23 @@ impl<T: 'static> cap_wit::HostCallBindingWithStore<T> for HasSelf<WasmStoreState
         Ok(awaited(wake, binding.call(request))
             .await
             .map_err(call_error))
+    }
+}
+
+impl<T: 'static> cap_wit::HostPresentationComponentWithStore<T> for HasSelf<WasmStoreState> {
+    async fn revoked(
+        accessor: &Accessor<T, Self>,
+        proxy: Resource<PresentationComponent>,
+    ) -> wasmtime::Result<()> {
+        let (revocation, wake) = accessor.with(|mut access| {
+            let state = access.get();
+            (
+                state.table.get(&proxy).unwrap().revocation(),
+                state.collection_wake.clone(),
+            )
+        });
+        awaited(wake, revocation.wait()).await;
+        Ok(())
     }
 }
 

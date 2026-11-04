@@ -702,6 +702,26 @@ impl CapabilityRef {
         }
     }
 
+    /// Completes once [`Self::status`] differs from `seen`, at once if it already does. The
+    /// receiver is taken before the status is read, so a change that lands in between still
+    /// wakes the wait: it is level-triggered on the status, not on the ticks. A bound reference
+    /// has no restarts to follow, so waiting on it never completes; neither does waiting once the
+    /// supervisor that sends the ticks is gone (the incarnation is being torn down and drops
+    /// this future).
+    pub async fn status_changed(&self, seen: RefStatus) {
+        let mut changes = self.status_changes();
+        while self.status() == seen {
+            match changes.as_mut() {
+                Some(changes) => {
+                    if changes.changed().await.is_err() {
+                        std::future::pending().await
+                    }
+                }
+                None => std::future::pending().await,
+            }
+        }
+    }
+
     /// One call. A lazy reference holds its lease only until the response arrives.
     pub async fn call(&self, request: Vec<u8>) -> Result<Vec<u8>, CallError> {
         let (publication, _lease) = self.resolve(PublicationKind::Call).await?;
@@ -730,6 +750,7 @@ impl CapabilityRef {
         Ok(PresentationComponent {
             publication,
             recipient: Arc::clone(&self.0.recipient),
+            changes: self.status_changes(),
             _lease: lease,
         })
     }
@@ -830,10 +851,17 @@ impl Drop for BindingState {
 pub struct PresentationComponent {
     publication: CapabilityPublication,
     recipient: Arc<SessionState>,
+    /// The provider's status ticks (lazy references), which is when its incarnation ends.
+    changes: Option<tokio::sync::watch::Receiver<u64>>,
     _lease: Option<Lease<CapabilityPublication>>,
 }
 
 impl PresentationComponent {
+    /// The incarnation that redeemed this proxy, on whose behalf its component is mounted.
+    pub fn owner(&self) -> &Instance {
+        &self.recipient.instance
+    }
+
     pub fn component(&self) -> Result<ComponentRef, CapabilityFailure> {
         self.recipient.check()?;
         match self.publication.inner.live(&self.recipient.instance)? {
@@ -843,6 +871,39 @@ impl PresentationComponent {
     }
     pub fn is_revoked(&self) -> bool {
         self.publication.is_revoked()
+    }
+
+    /// An owned wait for [`Self::is_revoked`], so a host import can await it while the store
+    /// (and the guest's own handle to this proxy) move on.
+    pub fn revocation(&self) -> Revocation {
+        Revocation {
+            publication: self.publication.clone(),
+            changes: self.changes.clone(),
+        }
+    }
+}
+
+/// Waits for a presentation proxy's provider incarnation to end. The supervisor records the end
+/// as a status tick right after revoking the publication, so a lazy proxy is woken by the tick
+/// and then re-checks revocation (level-triggered: a restart that races the wait cannot hide
+/// the end). A proxy of a live publication has no tick source, so it never completes.
+pub struct Revocation {
+    publication: CapabilityPublication,
+    changes: Option<tokio::sync::watch::Receiver<u64>>,
+}
+
+impl Revocation {
+    pub async fn wait(mut self) {
+        while !self.publication.is_revoked() {
+            match self.changes.as_mut() {
+                Some(changes) => {
+                    if changes.changed().await.is_err() {
+                        std::future::pending().await
+                    }
+                }
+                None => std::future::pending().await,
+            }
+        }
     }
 }
 
