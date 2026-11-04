@@ -1,11 +1,13 @@
 use super::*;
 use clay_collection::Stamped;
-use clay_host::StartError;
-use clay_mdk::Error;
+use clay_dioxus::NativeComponents;
 use clay_guest_session::capabilities::RowAttachment;
+use clay_host::StartError;
 use clay_mdk::host::factory;
-use micro_settings_manifest::SECTIONS;
+use clay_mdk::Capability;
+use clay_mdk::Error;
 use micro_settings_manifest::Section;
+use micro_settings_manifest::SECTIONS;
 use std::future::Future;
 
 const COUNTER: &str = micro_counter_manifest::ID;
@@ -41,17 +43,14 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
     let sample = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
-        ..InstalledMicro::new(
-            micro_sample::manifest(),
-            |resources, bindings| {
-                factory(
-                    resources,
-                    micro_sample::manifest(),
-                    bindings,
-                    micro_sample::activate,
-                )
-            },
-        )
+        ..InstalledMicro::new(micro_sample::manifest(), |resources, bindings| {
+            factory(
+                resources,
+                micro_sample::manifest(),
+                bindings,
+                micro_sample::activate,
+            )
+        })
     };
     vec![settings, sample, counter]
 }
@@ -60,27 +59,28 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
 fn stub_counter() -> InstalledMicro {
     InstalledMicro {
         enabled_on_admission: true,
-        ..InstalledMicro::new(
-            micro_counter_manifest::manifest(),
-            |resources, bindings| {
-                factory(
-                    resources,
-                    micro_counter_manifest::manifest(),
-                    bindings,
-                    |context| async move {
-                        context.publish_component(micro_counter_manifest::VIEW, || {
-                            rsx! { p { "stub counter" } }
-                        })?;
-                        Ok(())
-                    },
-                )
-            },
-        )
+        ..InstalledMicro::new(micro_counter_manifest::manifest(), |resources, bindings| {
+            factory(
+                resources,
+                micro_counter_manifest::manifest(),
+                bindings,
+                |context| async move {
+                    context.publish_component(micro_counter_manifest::VIEW, || {
+                        rsx! { p { "stub counter" } }
+                    })?;
+                    Ok(())
+                },
+            )
+        })
     }
 }
 
 /// A counter whose guest cannot be produced (fetch, compile, missing artifact).
-struct Unfetchable;
+#[derive(Default)]
+struct Unfetchable {
+    /// How many times the supervisor tried to start it.
+    attempts: Rc<std::cell::Cell<usize>>,
+}
 
 impl Factory<CapabilityPublication> for Unfetchable {
     fn initialize(
@@ -90,16 +90,21 @@ impl Factory<CapabilityPublication> for Unfetchable {
         _requirements: BTreeMap<String, CapabilityPublication>,
         _activator: clay_host::Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<clay_host::Initialized<CapabilityPublication>, String>> {
+        self.attempts.set(self.attempts.get() + 1);
         Box::pin(async { Err("the package could not be fetched".to_owned()) })
     }
 }
 
-fn unfetchable_counter() -> InstalledMicro {
+fn unfetchable_counter(attempts: Rc<std::cell::Cell<usize>>) -> InstalledMicro {
     InstalledMicro {
         enabled_on_admission: true,
         ..InstalledMicro::new(
             micro_counter_manifest::manifest(),
-            |_resources, _bindings| Rc::new(Unfetchable),
+            move |_resources, _bindings| {
+                Rc::new(Unfetchable {
+                    attempts: Rc::clone(&attempts),
+                })
+            },
         )
     }
 }
@@ -170,13 +175,11 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         [RowAttachment::Endpoint(endpoint)] if endpoint.micro == id(COUNTER) && endpoint.publication == "view"
     ));
     // The sample writes its row at runtime, so nothing exists for it yet.
-    assert!(
-        runtime
-            .collection(SECTIONS)
-            .unwrap()
-            .get(&cbor_key(micro_sample::ID))
-            .is_none()
-    );
+    assert!(runtime
+        .collection(SECTIONS)
+        .unwrap()
+        .get(&cbor_key(micro_sample::ID))
+        .is_none());
     runtime.host.close();
 }
 
@@ -254,7 +257,7 @@ async fn a_disabled_micro_keeps_its_row_but_cannot_be_redeemed_until_enabled() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn an_unfetchable_guest_faults_alone_until_retried() {
-    let runtime = memory_runtime(unfetchable_counter()).await;
+    let runtime = memory_runtime(unfetchable_counter(Rc::default())).await;
     served(&runtime, async {
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
@@ -296,7 +299,7 @@ async fn a_manifest_contributing_to_an_undeclared_collection_is_an_installation_
     let mut manifest = micro_counter_manifest::manifest();
     manifest.contributions[0].collection = "nobody.declared.this".into();
     let counter = InstalledMicro::new(manifest, |_resources, _bindings| {
-        Rc::new(Unfetchable)
+        Rc::new(Unfetchable::default())
     });
     let runtime = memory_runtime(counter).await;
     assert_eq!(runtime.installation_errors.len(), 1);
@@ -329,10 +332,9 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
             manifest.contributions[0].payload["title"] = title.into();
             let runtime = CompositionRuntime::new(
                 Arc::new(store),
-                catalog(InstalledMicro::new(
-                    manifest,
-                    |_resources, _bindings| Rc::new(Unfetchable),
-                )),
+                catalog(InstalledMicro::new(manifest, |_resources, _bindings| {
+                    Rc::new(Unfetchable::default())
+                })),
             )
             .await
             .unwrap();
@@ -377,7 +379,7 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
             Arc::clone(&store),
             catalog(InstalledMicro::new(
                 micro_counter_manifest::manifest(),
-                |_, _| Rc::new(Unfetchable),
+                |_, _| Rc::new(Unfetchable::default()),
             )),
         )
         .await
@@ -442,7 +444,7 @@ fn install_datum_of(runtime: &CompositionRuntime, micro: &str) -> Option<serde_j
 async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
     let package = InstalledMicro::new(
         micro_counter_manifest::manifest(),
-        |_resources, _bindings| Rc::new(Unfetchable),
+        |_resources, _bindings| Rc::new(Unfetchable::default()),
     );
     let runtime = memory_runtime(package).await;
     let version = micro_counter_manifest::manifest().package_version;
@@ -467,7 +469,7 @@ async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
 async fn the_install_datum_drives_the_supervisor() {
     let runtime = memory_runtime(InstalledMicro::new(
         micro_counter_manifest::manifest(),
-        |_resources, _bindings| Rc::new(Unfetchable),
+        |_resources, _bindings| Rc::new(Unfetchable::default()),
     ))
     .await;
     served(&runtime, async {
@@ -739,4 +741,137 @@ async fn the_binding_datum_survives_a_reboot() {
     })
     .await;
     assert!(seen.borrow().is_empty(), "the micro was started");
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct SlotApp {
+    components: NativeComponents,
+    owner: Instance,
+    reference: Capability,
+}
+
+fn slot_app(props: SlotApp) -> Element {
+    use_context_provider(|| props.components.clone());
+    rsx! { PresentationSlot { owner: props.owner, reference: props.reference } }
+}
+
+/// A slot over the counter's section detail, rendered into a surface tree the way a shell
+/// mounts it.
+async fn counter_slot(runtime: &CompositionRuntime) -> (VirtualDom, clay_surface::SurfaceTree) {
+    let (sections, feed) = section_refs(runtime);
+    tokio::task::spawn_local(feed);
+    let mut changes = sections.clone();
+    while sections.rows().unwrap().is_empty() {
+        changes.changed().await.unwrap();
+    }
+    let rows = sections.rows().unwrap();
+    let counter = rows.iter().find(|row| row.key == COUNTER).unwrap();
+    let mut dom = VirtualDom::new_with_props(
+        slot_app,
+        SlotApp {
+            components: runtime.components.clone(),
+            owner: runtime.shell.clone(),
+            reference: counter.attachments[counter.value.detail.index()].clone(),
+        },
+    );
+    let mut tree = clay_surface::SurfaceTree::new();
+    dom.rebuild(&mut tree);
+    (dom, tree)
+}
+
+/// Run the slot's tasks until its rendering contains `text`; each wake is a task or signal of
+/// the slot, so a slot that never gets there hangs until the test runner's timeout.
+async fn slot_shows(dom: &mut VirtualDom, tree: &mut clay_surface::SurfaceTree, text: &str) {
+    loop {
+        dom.render_immediate(tree);
+        if tree.text_content().contains(text) {
+            return;
+        }
+        dom.wait_for_work().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_slot_opened_on_a_disabled_micro_mounts_once_it_is_enabled() {
+    let runtime = memory_runtime(stub_counter()).await;
+    served(&runtime, async {
+        runtime.set_enabled(&id(COUNTER), false).await;
+        reaches(&runtime, &id(COUNTER), MicroState::Disabled).await;
+        let (mut dom, mut tree) = counter_slot(&runtime).await;
+        slot_shows(&mut dom, &mut tree, "Section unavailable").await;
+        // The same slot, not a remounted one, picks the micro up.
+        runtime.set_enabled(&id(COUNTER), true).await;
+        slot_shows(&mut dom, &mut tree, "stub counter").await;
+        assert_eq!(runtime.state(&id(COUNTER)), MicroState::Active);
+        drop(dom);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_mounted_slot_follows_its_micro_through_disable_enable_and_reconfigure() {
+    let runtime = memory_runtime(stub_counter()).await;
+    served(&runtime, async {
+        let counter = id(COUNTER);
+        let (mut dom, mut tree) = counter_slot(&runtime).await;
+        slot_shows(&mut dom, &mut tree, "stub counter").await;
+        runtime.set_enabled(&counter, false).await;
+        slot_shows(&mut dom, &mut tree, "Section unavailable").await;
+        assert_eq!(runtime.state(&counter), MicroState::Disabled);
+        runtime.set_enabled(&counter, true).await;
+        slot_shows(&mut dom, &mut tree, "stub counter").await;
+        // A reconfiguration closes the incarnation; the slot re-redeems the next one, which
+        // demand starts again without anyone remounting the slot.
+        let first = runtime.supervisor.instance(&counter).unwrap();
+        runtime
+            .supervisor
+            .reconfigure(&counter, vec![])
+            .await
+            .unwrap();
+        loop {
+            dom.render_immediate(&mut tree);
+            match runtime.supervisor.instance(&counter) {
+                Some(next) if next.scope_id() != first.scope_id() => break,
+                _ => dom.wait_for_work().await,
+            }
+        }
+        slot_shows(&mut dom, &mut tree, "stub counter").await;
+        drop(dom);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_slot_does_not_redeem_a_faulted_micro_again_until_it_is_retried() {
+    let attempts = Rc::<std::cell::Cell<usize>>::default();
+    let runtime = memory_runtime(unfetchable_counter(Rc::clone(&attempts))).await;
+    served(&runtime, async {
+        let counter = id(COUNTER);
+        let (mut dom, mut tree) = counter_slot(&runtime).await;
+        slot_shows(&mut dom, &mut tree, "Section unavailable").await;
+        assert_eq!(attempts.get(), 1);
+        // Further status ticks of other micros and renders do not redeem it again.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            dom.render_immediate(&mut tree);
+        }
+        assert_eq!(attempts.get(), 1);
+        runtime.supervisor.retry(&counter);
+        while attempts.get() < 2 {
+            dom.wait_for_work().await;
+        }
+        reaches(
+            &runtime,
+            &counter,
+            MicroState::Faulted("the package could not be fetched".into()),
+        )
+        .await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            dom.render_immediate(&mut tree);
+        }
+        assert_eq!(attempts.get(), 2);
+        drop(dom);
+    })
+    .await;
 }

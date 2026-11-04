@@ -126,6 +126,18 @@ impl Capability {
         }
     }
 
+    /// Ticks whenever the provider's status may have changed; re-read [`Self::status`] on each
+    /// tick. `None` where the status can only end once (a reference to a live publication).
+    /// In-process only, like [`Self::redeem_presentation`].
+    #[cfg(feature = "in_process")]
+    pub fn status_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        match &self.0 {
+            CapabilityInner::InProcess(reference) => reference.status_changes(),
+            #[cfg(feature = "guest")]
+            CapabilityInner::Guest(_) => unreachable!("guest references are not redeemable yet"),
+        }
+    }
+
     /// One call of the provider's call publication, CBOR-encoded both ways. The provider is
     /// held strongly for the duration of the call only.
     pub async fn call<Req: Serialize, Resp: DeserializeOwned>(

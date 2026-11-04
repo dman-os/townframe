@@ -195,6 +195,9 @@ struct Idle {
 pub struct Activator<P> {
     requests: mpsc::UnboundedSender<Request<P>>,
     mirror: Arc<Mutex<BTreeMap<MicroId, MicroState>>>,
+    /// The supervisor's change counter, so [`Self::changes`] can wake whoever acts on a
+    /// status without polling the mirror.
+    changes: Arc<watch::Sender<u64>>,
 }
 
 /// The request queue while a driver owns it. Dropping the driver puts it back, so a later
@@ -234,7 +237,7 @@ pub struct Supervisor<P> {
     /// Every node's state as last [`Self::set`], for [`Activator::status`].
     mirror: Arc<Mutex<BTreeMap<MicroId, MicroState>>>,
     /// Ticks on every recorded state change, for shells that render [`Self::state`].
-    changes: watch::Sender<u64>,
+    changes: Arc<watch::Sender<u64>>,
 }
 
 struct Inner<P> {
@@ -314,7 +317,7 @@ impl<P: Clone + 'static> Supervisor<P> {
             requests,
             served: RefCell::new(Some(served)),
             mirror: Arc::new(Mutex::new(mirror)),
-            changes: watch::channel(0).0,
+            changes: Arc::new(watch::channel(0).0),
         }
     }
 
@@ -327,6 +330,7 @@ impl<P: Clone + 'static> Supervisor<P> {
         Activator {
             requests: self.requests.clone(),
             mirror: Arc::clone(&self.mirror),
+            changes: Arc::clone(&self.changes),
         }
     }
 
@@ -893,6 +897,7 @@ impl<P> Clone for Activator<P> {
         Self {
             requests: self.requests.clone(),
             mirror: Arc::clone(&self.mirror),
+            changes: Arc::clone(&self.changes),
         }
     }
 }
@@ -923,6 +928,13 @@ impl<P> Activator<P> {
     /// supervision shows as `Active` until the supervisor next observes it.
     pub fn status(&self, micro: &MicroId) -> Option<MicroState> {
         self.mirror.lock().unwrap().get(micro).cloned()
+    }
+
+    /// [`Supervisor::changes`]: ticks whenever any micro's recorded state changes, after the
+    /// mirror [`Self::status`] reads was updated. A waiter re-reads the status it cares about
+    /// on each tick; a tick does not say which micro moved.
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 }
 

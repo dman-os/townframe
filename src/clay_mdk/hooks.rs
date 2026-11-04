@@ -44,30 +44,82 @@ pub struct PresentationSlotProps {
     pub reference: Capability,
 }
 
+/// What a slot shows: the presentation it redeemed, or why there is none right now.
+#[cfg(feature = "view")]
+enum SlotState {
+    Loading,
+    Unavailable(crate::Error),
+    Mounted(clay_host::ComponentRef),
+}
+
 /// Mount the presentation a row attaches. The redemption is asynchronous (a lazy reference
 /// activates its provider) and the redeemed proxy is held for exactly as long as this
-/// component lives, so unmounting it releases the provider (ADR 025 §9). A reference that
-/// cannot be redeemed renders its failure instead of a mount.
+/// component lives, so unmounting it releases the provider (ADR 025 §9).
+///
+/// The slot follows its provider rather than redeeming once. A redemption that fails renders
+/// its failure, and the next redemption waits for the reference's status to move off the
+/// status the failure left it in (a disabled micro enabled, an unconfigured one configured, a
+/// faulted one `retry`'d), so a provider that keeps failing is never redeemed in a loop. A
+/// mounted presentation whose incarnation ends renders as loading and is redeemed again, which
+/// demand-starts the provider's next incarnation. Both waits are woken by the supervisor's
+/// status ticks; nothing polls.
 #[cfg(feature = "view")]
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn PresentationSlot(props: PresentationSlotProps) -> Element {
+    let mut state = use_signal(|| SlotState::Loading);
     // Reactive over the prop: a row that keeps its key but attaches another target redeems
-    // anew, and dropping the old redemption releases the previous provider.
+    // anew, and dropping the old future drops its redemption, releasing the previous provider.
     let reference = props.reference.clone();
-    let redeemed = use_resource(use_reactive!(|(reference,)| {
+    use_future(use_reactive!(|(reference,)| {
         let reference = reference.clone();
-        async move { reference.redeem_presentation().await }
-    }));
-    let redeemed = redeemed.read();
-    match &*redeemed {
-        None => rsx! { p { role: "status", "Loading section…" } },
-        Some(Err(failure)) => rsx! { p { role: "alert", "Section unavailable: {failure:?}" } },
-        Some(Ok(component)) => match component.component() {
-            Ok(reference) => {
-                rsx! { ComponentMount { owner: props.owner, reference } }
+        async move {
+            state.set(SlotState::Loading);
+            // `None` for a reference to a live publication, which has no restart to follow.
+            let mut changes = reference.status_changes();
+            loop {
+                let failure = match reference.redeem_presentation().await {
+                    Ok(proxy) => match proxy.component() {
+                        Ok(component) => {
+                            state.set(SlotState::Mounted(component));
+                            // The proxy is revoked when its incarnation closes, which the
+                            // supervisor records as a status change right after.
+                            while !proxy.is_revoked() {
+                                let Some(changes) = changes.as_mut() else {
+                                    return std::future::pending().await;
+                                };
+                                if changes.changed().await.is_err() {
+                                    return;
+                                }
+                            }
+                            state.set(SlotState::Loading);
+                            continue;
+                        }
+                        Err(failure) => crate::Error::from(failure),
+                    },
+                    Err(failure) => failure,
+                };
+                // Redeeming again before the status moves would only fail the same way.
+                let failed_at = reference.status();
+                state.set(SlotState::Unavailable(failure));
+                while reference.status() == failed_at {
+                    let Some(changes) = changes.as_mut() else {
+                        return std::future::pending().await;
+                    };
+                    if changes.changed().await.is_err() {
+                        return;
+                    }
+                }
             }
-            Err(failure) => rsx! { p { role: "alert", "Section unavailable: {failure:?}" } },
-        },
+        }
+    }));
+    match &*state.read() {
+        SlotState::Loading => rsx! { p { role: "status", "Loading section…" } },
+        SlotState::Unavailable(failure) => {
+            rsx! { p { role: "alert", "Section unavailable: {failure:?}" } }
+        }
+        SlotState::Mounted(reference) => {
+            rsx! { ComponentMount { owner: props.owner, reference: *reference } }
+        }
     }
 }
 
