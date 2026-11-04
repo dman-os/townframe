@@ -19,6 +19,9 @@ publications:
   - name: count
     kind: call
     contract: org.example.dayframe.counter.count
+  - name: increment
+    kind: call
+    contract: org.example.dayframe.counter.increment
 requires: []
 configuration_requests:
   - binding: counter
@@ -35,6 +38,10 @@ collection_requests:
     contract: org.example.dayframe.settings.sections
     access: write
     necessity: optional
+  - binding: toolbar
+    contract: org.example.dayframe.toolbar.buttons
+    access: write
+    necessity: optional
 contributions:
   - id: settings-section
     binding: sections
@@ -46,3 +53,14 @@ contributions:
     attachments:
       - index: 0
         publication: view
+  - id: toolbar-button
+    binding: toolbar
+    key: increment
+    payload:
+      action:
+        $attachment: 0
+      icon: plus
+      label: Increment
+    attachments:
+      - index: 0
+        publication: increment

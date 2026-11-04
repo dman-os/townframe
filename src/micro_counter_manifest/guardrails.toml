@@ -4,6 +4,7 @@ dependency_reason = "dayframe microkernel layering: engine-neutral contracts at 
 allowed_dependencies = [
     "clay_mdk",
     "micro_settings_manifest",
+    "micro_toolbar_manifest",
 ]
 allow_external_api_types = false
 
