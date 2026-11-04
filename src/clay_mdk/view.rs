@@ -5,12 +5,14 @@
 //! Dioxus reactivity. Micro views reach both through this module and so never name a renderer
 //! crate (ADR 015 §3 dependency direction).
 use crate::ComponentRef;
+use crate::native::CapabilityRef;
 use crate::native::CollectionWatch;
 use crate::native::Instance;
 use crate::native::Row;
 use clay_dioxus::ComponentMount;
 use dioxus::prelude::*;
 use serde::de::DeserializeOwned;
+use std::rc::Rc;
 
 /// The view-side counterpart of [`crate::native::Context::publish_component`]: mounts a published
 /// component into the host tree, resolving the renderer registry from Dioxus context. Backend-owned
@@ -26,6 +28,54 @@ pub struct ComponentSlotProps {
 pub fn ComponentSlot(props: ComponentSlotProps) -> Element {
     let reference = props.reference.host();
     rsx! { ComponentMount { owner: props.owner, reference } }
+}
+
+/// A row's attachment reference as a component prop. Two props are equal when the reference
+/// stores back as the same attachment, so a re-rendered row that still names the same target
+/// does not remount its slot.
+#[derive(Clone)]
+pub struct AttachedRef(Rc<CapabilityRef>);
+
+impl AttachedRef {
+    pub fn new(reference: CapabilityRef) -> Self {
+        Self(Rc::new(reference))
+    }
+}
+
+impl PartialEq for AttachedRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.attachment() == other.0.attachment()
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+pub struct PresentationSlotProps {
+    pub owner: Instance,
+    pub reference: AttachedRef,
+}
+
+/// Mount the presentation a row attaches. The redemption is asynchronous (a lazy reference
+/// activates its provider) and the redeemed proxy is held for exactly as long as this
+/// component lives, so unmounting it releases the provider (ADR 025 §9). A reference that
+/// cannot be redeemed renders its failure instead of a mount.
+#[expect(non_snake_case, reason = "Dioxus component naming")]
+pub fn PresentationSlot(props: PresentationSlotProps) -> Element {
+    let reference = props.reference.0.share();
+    let redeemed = use_resource(move || {
+        let reference = reference.share();
+        async move { reference.redeem_presentation().await }
+    });
+    let redeemed = redeemed.read();
+    match &*redeemed {
+        None => rsx! { p { role: "status", "Loading section…" } },
+        Some(Err(failure)) => rsx! { p { role: "alert", "Section unavailable: {failure:?}" } },
+        Some(Ok(component)) => match component.component() {
+            Ok(reference) => {
+                rsx! { ComponentMount { owner: props.owner, reference } }
+            }
+            Err(failure) => rsx! { p { role: "alert", "Section unavailable: {failure:?}" } },
+        },
+    }
 }
 
 /// Bind a collection mirror to Dioxus reactivity: the returned rows are the mirror's live rows
