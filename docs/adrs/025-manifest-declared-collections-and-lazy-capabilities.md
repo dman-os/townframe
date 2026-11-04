@@ -30,7 +30,6 @@ CollectionDefinition {
     write_context_schema?,
     offered_capabilities,
     backing,
-    writer_policy,
 }
 ```
 
@@ -76,36 +75,47 @@ Selectors and queries remain distinct:
 
 The host validates admitted writes and selectors structurally without understanding application semantics such as toolbar grouping or completion ranking. Contract-specific active admission callbacks are deferred until a concrete use case cannot be expressed by schema validation, declarative limits, and enablement policy.
 
-### 4. Registration scopes own rows; writer handles only convey mutation authority
+### 4. Registration scopes own contributions; writer handles only convey mutation authority
 
-Physical registration identity is:
+A registration collection is the causal map of ADR 017 §9. Each scope holds at most one stamped
+candidate per key, a value or a tombstone, and readers see the highest stamp. A writer is a revocable
+capability to write into one scope; dropping or closing it releases that access and does not choose
+retention.
 
-```text
-(registration_scope, local_key)
-```
-
-A contributor cannot address another scope's rows. A writer is a revocable capability to mutate one scope with compare-and-set operations. Dropping or closing a writer releases that access handle; it does not choose row retention.
-
-The scope owner determines cleanup:
+Retention is the writer's scope, never the collection's or a consumer's choice:
 
 ```text
 IncarnationScope
-    incarnation closes -> remove all scope rows atomically
+    incarnation closes -> retract the scope's candidates atomically
 
 InstallationScope
-    process/guest stops -> rows remain
-    owning plug is uninstalled -> remove all scope rows atomically
+    process/guest stops -> candidates remain (durable)
+    owning plug is uninstalled -> retract the scope's candidates atomically
+
+PermanentScope
+    never retracted by lifecycle; requires an explicit manifest grant
 ```
 
-Both writers expose the same operations:
+Retraction includes tombstones and recomputes only the touched keys, so whatever a scope hid
+resurfaces. Durability is a separate axis: installation and permanent candidates persist with their
+stamps and writer identity, so winners recompute identically after a restart.
+
+Every writer exposes the same operations:
 
 ```text
-put(local_key, based_on?, value)
-remove(local_key, based_on?)
-clear()
+put(key, basis, value) -> stamp
+delete(key, basis) -> stamp
 ```
 
-A runtime durable writer is stronger authority because its effects survive that incarnation. Ordinary runtime micros receive incarnation-scoped writers. Manifest-declared durable contributions are applied by Clay's package/enablement machinery; a runtime receives a durable writer only through an explicit grant.
+A durable writer is stronger authority because its effects survive the incarnation. Ordinary
+runtime micros receive incarnation-scoped writers; a runtime receives an installation or permanent
+writer only through an explicit grant. Durable writes are applied to the store before they are
+published, and concurrent durable writes to one key take turns.
+
+Package installation writes manifest-declared rows into one installation scope and a micro's
+runtime durable writes go into another, both keyed by the plug. Reinstalling replaces the manifest
+scope wholesale (an unchanged row keeps its stamp, a changed one advances it) without touching
+runtime rows; uninstalling retracts both.
 
 This supersedes ADR 017's earlier rule that dropping the `registration-writer` resource itself retracts rows.
 

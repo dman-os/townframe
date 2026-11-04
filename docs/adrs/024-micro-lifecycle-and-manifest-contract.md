@@ -375,27 +375,26 @@ Writer interfaces are separate capabilities rather than methods on `collection-r
 
 ```wit
 interface collection-registration {
-    resource registration-writer {
-        put: async func(local-key: list<u8>, based-on: option<list<u8>>, value: encoded-value)
-            -> result<mutation-accepted, mutation-error>;
-        remove: async func(local-key: list<u8>, based-on: option<list<u8>>)
-            -> result<mutation-accepted, mutation-error>;
-        clear: async func() -> result<_, mutation-error>;
+    variant write-basis {
+        concurrent,
+        observed(stamp),
+        compare-and-set(option<stamp>),
     }
-}
 
-interface collection-causal-write {
-    resource causal-writer {
-        mutate: async func(
-            key: list<u8>,
-            observed-context: list<u8>,
-            mutation: list<u8>,
-        ) -> result<mutation-accepted, mutation-error>;
+    resource registration-writer {
+        put: async func(key: list<u8>, basis: write-basis, value: encoded-value)
+            -> result<stamp, mutation-error>;
+        delete: async func(key: list<u8>, basis: write-basis)
+            -> result<stamp, mutation-error>;
     }
 }
 ```
 
-`registration-writer` mutates a host-assigned registration scope. Dropping the handle releases mutation authority only. The host removes incarnation-scope rows when the instance closes and installation-scope rows when the owning plug is uninstalled, as specified by ADR 025.
+`registration-writer` writes into a host-assigned registration scope with the causal-map rules of
+ADR 017 §9; `mutation-error` adds `conflict(option<stamp>)` for a failed compare-and-set and
+`forbidden` for a key outside the binding's prefix grant. Dropping the handle releases mutation
+authority only. The host retracts incarnation-scope contributions when the instance closes and
+installation-scope contributions when the owning plug is uninstalled, as specified by ADR 025.
 Documents retain their domain command interface and heads-based settlement rather than
 being forced through either generic writer.
 
@@ -436,7 +435,7 @@ Phase one has no guest installer world and no separate activation-registry proto
 ```text
 begin installation scope(plug revision)
     validate target collection contract and schemas
-    put(scope, local_key, value + logical endpoints)
+    put(scope, key, value + logical endpoints)
 commit atomically
 
 uninstall plug
@@ -514,11 +513,13 @@ CollectionContract {
     key_schema,
     value_schema,
     write_context_schema?,
-    offered_capabilities: Read | Register | CausalWrite | DomainCommands,
+    offered_capabilities: Read | Register | DomainCommands,
     backing: Volatile | Durable | Materialized,
-    writer_policy: IncarnationScope | InstallationScope | DomainSpecific,
 }
 ```
+
+A contract has no writer policy: retention belongs to the writer's scope (ADR 025 §4), and write
+authority is a key-prefix grant on each registration binding, which configuration narrows.
 
 These are requested/declared shapes, not grants. Configuration chooses concrete
 documents, suppliers, and allowed access. Collection query IRs remain contract-specific
@@ -531,7 +532,7 @@ ContributionDeclaration {
     id,
     target_binding,       // local RequiredContract.binding
     collection_contract,
-    local_key,
+    key,
     value,                // schema-compatible CBOR
     endpoints: [LazyEndpointDeclaration],
 }

@@ -264,60 +264,55 @@ mutation semantics.
 
 ## Writer layers above the waist
 
-### 9. Owner-scoped registrations
+### 9. Registrations are a causal map with scope-owned contributions
 
-Independently keyed contributions use a host-assigned registration scope. A guest addresses only local keys:
-
-```text
-registration-writer.put(local_key, based_on?, value)
-registration-writer.remove(local_key, based_on?)
-registration-writer.clear()
-```
-
-Physical identity is `(registration_scope, local_key)`, so one contributor cannot overwrite or delete another contributor's row. `based_on` is optional compare-and-set protection for the caller's own row. The host serializes accepted mutations and returns acceptance separately from when the resulting projection page reaches the caller.
-
-The registration scope, not a particular writer-table handle, owns row lifetime. Closing a writer releases mutation authority. Closing an incarnation removes all rows in its incarnation scopes atomically; uninstalling a plug removes all rows in its durable installation scopes atomically. Durable rows survive process and guest inactivity. ADR 025 specifies these ownership classes and supersedes the earlier writer-drop rule.
-
-A host materializer combines all inputs into a consumer-facing projection using an explicitly selected policy such as union, grouping, actor priority, host-ordered LWW, rejection of collisions, or provider-defined logic. The framework has no silent default for concurrent writes to the same logical scalar.
-
-### 10. Causal contributions to one logical row
-
-Owner scoping alone is insufficient when contributor A observes combined row `foo`
-and asks to change `foo.bar`. The mutation must carry the causal context A actually
-observed; host tracking of the last page sent to A would be racy.
+A registration collection is a map from logical key to value with one fixed merge rule. A guest
+writes through a host-minted writer:
 
 ```text
-causal-writer.mutate(
-    key,
-    observed_context,
-    source_defined_mutation,
-)
+registration-writer.put(key, basis, value) -> stamp
+registration-writer.delete(key, basis) -> stamp
+
+basis = concurrent | observed(stamp) | compare-and-set(option<stamp>)
+stamp = (lamport, writer)
 ```
 
-The writer identity is implied by the capability, and the host maintains its actor
-sequence. The collection contract interprets the opaque context and mutation. A
-reusable implementation may use actor dots plus a version vector:
+Every write belongs to the writer's registration scope, and each live scope holds at most one
+candidate per key: a value or a tombstone. A write's lamport is one more than the larger of the
+stamp it observed and the scope's own previous lamport on that key; `concurrent` observes nothing.
+Readers see the candidate with the highest stamp. Equal lamports break by writer identity, which is
+the micro identity and so stable across restarts. Writes are always accepted. `compare-and-set` is
+opt-in: it fails unless the current winner, tombstones included, has exactly the expected stamp, and
+`none` matches an absent or tombstoned key.
 
-```text
-Dot     = (actor, sequence)
-Context = version vector / observed frontier
-```
+Rows reach readers stamped, with an optional value. A winning tombstone is a row with no value and
+the delete's stamp, so snapshots and pages replicate deletes like any other row and a reader can
+name the delete it observed. A `remove` change appears only when a key has no candidates left. The
+MDK writer defaults the basis to the stamp its replica holds for the key, tombstone included: an
+ordinary write supersedes everything its writer has seen, while writes it never saw are resolved by
+stamp order.
 
-The context distinguishes causally later operations from concurrent ones; it does not
-decide their meaning. The collection must name a merge policy such as multi-value,
-deterministic host-ordered LWW, actor priority, reject-concurrent, or a domain
-reducer.
+The registration scope, not the writer handle, owns retention. Closing a writer releases mutation
+authority only. When a scope ends (an incarnation closes, a plug is uninstalled) its candidates,
+tombstones included, are retracted and only the keys it touched recompute their winner, so a
+contribution it hid resurfaces. A delete made by a scope that later ends is therefore undone; a
+delete meant to outlive its writer is written from a permanent scope. ADR 025 §4 specifies the
+scope classes.
 
-Contributor state remains in separately retractable actor branches. The materializer
-combines active branches into current logical rows. Dropping one writer removes that
-branch and recomputes the projection, allowing a previously hidden contribution to
-become visible. Operations therefore record contributor intent or field changes, not
-a whole combined value that would accidentally take ownership of other actors'
-fields.
+Write authority is a grant of key prefixes carried by the binding; a write outside it fails with
+`forbidden`. Guests have no `clear` and no per-key withdrawal of their contribution.
 
-This machinery is CRDT-like and primarily operation-based, with materialized branch
-state for efficient reads. Safe operation compaction is collection-specific. Simple
-registration collections pay none of this cost.
+A collection has no merge policy, materializer, or business hook. Union, priority, and grouping are
+expressed by consumers or by separate collections (§11). The single-process host orders every
+write, so the stamps need no vector clocks. Stamps are per key; a collection-wide frontier, like
+big_sync's keyed frontiers, is a likely later unification.
+
+### 10. Field-level merges are layers above the map
+
+Values are written whole. Structure that needs independent merges goes into keys, so contributors
+updating different fields write different keys. Operation-based writers with version-vector
+contexts and domain reducers are not a waist writer kind: a collection that needs them is built
+above the map by an owner that adopts contributions (§11).
 
 ### 11. Canonical adoption composes collections
 
@@ -442,7 +437,8 @@ programming/invariant failures and must not be silently recovered.
 - Zero-style IVM/client-view records and unioning overlapping selectors;
 - cross-projection body sharing and exact-version hydration;
 - durable cursor retention across host restarts;
-- a generic library of causal materializers beyond the first concrete workload;
+- tombstone collection for permanent scopes, whose tombstones accumulate, and a collection-wide
+  frontier in place of per-key stamps;
 - query planning beyond collection-specific typed IRs; and
 - backing adapters, durable registration scopes, and manifest admission are specified by ADR 025 and remain implementation work rather than changes to this read waist.
 
@@ -453,8 +449,9 @@ This ADR becomes Accepted only after the same protocol validates:
 1. one ordinary host collection with bootstrap, empty progress, long polling, resume,
    and clear-on-reset;
 2. one owner-scoped contribution collection whose rows survive writer-handle closure and disappear atomically when its incarnation scope closes;
-3. one causal shared-row contribution with observed context and deterministic
-   concurrent resolution;
+3. one shared key written by two micros with observed stamps and deterministic concurrent
+   resolution, where a re-creation after an observed delete wins and retracting a scope
+   resurfaces what it hid;
 4. one node-backed datum projection with host-owned optimism and heads-based
    settlement;
 5. one capability-bearing toolbar or surface-mount row using ADR 023;
