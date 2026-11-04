@@ -456,3 +456,12 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 - Tests: composition admission / datum-drives-supervisor / reboot-stays-disabled, clay_host
   eager-disabled, desktop tests enable the counter via the datum, web `counter.spec.ts` enables
   first and adds the reload check (not run here).
+
+## C5 done (2026-11-04)
+
+- Persisted enablement is complete: Playwright passes 2/2, including the reload check (a disabled
+  counter is still disabled after `page.reload()`).
+- `CompositionRuntime::set_enabled` writes the datum at call time and returns the `persisted()`
+  acknowledgement future; pre-serve callers drop it.
+- Open issue: a `PresentationSlot` that redeemed a disabled micro stays "unavailable" after the
+  micro is enabled; nothing re-redeems on availability changes.

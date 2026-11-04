@@ -58,7 +58,8 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
     let counter = MicroId::new(micro_counter_manifest::ID);
     // Packages are admitted disabled; enable through the install datum, which the reconciler
     // applies once the composition serves.
-    runtime.request_enabled(&counter, true);
+    // Before serving, nothing drives the persister, so the acknowledgement is dropped.
+    drop(runtime.set_enabled(&counter, true));
     tokio::task::LocalSet::new()
         .run_until(async {
             let serving = runtime.serve();
