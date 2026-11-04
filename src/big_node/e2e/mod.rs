@@ -30,6 +30,7 @@ use std::collections::BTreeSet;
 
 mod blob_discovery;
 mod blobs;
+mod nodule_wasm;
 
 const NOTE: &str = "org.example.note";
 

@@ -46,9 +46,12 @@ pub struct Caller {
 /// JSON dispatch exchanges with its caller: the edge a dynamic by-NSID call pays anyway.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Runs `operation`. One provider serves all of a nodule's operations, so the NSID arrives
+    /// per call (a Wasm provider builds `/xrpc/<operation>` from it).
     async fn call(
         &self,
         caller: &Caller,
+        operation: &str,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError>;
@@ -251,6 +254,7 @@ mod tests {
         async fn call(
             &self,
             _: &Caller,
+            _: &str,
             _: &InvocationContext,
             input: Value,
         ) -> Result<Value, ProviderError> {

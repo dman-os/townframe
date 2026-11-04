@@ -158,7 +158,9 @@ impl DispatchService {
         .into_iter()
         .flatten()
         .min();
-        let call = kind.provider().call(&caller, &params.context, params.input);
+        let call = kind
+            .provider()
+            .call(&caller, &params.operation, &params.context, params.input);
         let result = match budget {
             Some(budget) => tokio::time::timeout(budget, call)
                 .await

@@ -297,6 +297,28 @@ impl BlobService {
         )
     }
 
+    /// The whole of a complete local blob, or `None` while it is not (or not readable) here.
+    /// In-process only, for hosts that need the bytes themselves: the `ReadBlob` wire operation
+    /// is range-capped. A blob longer than `max_octets` is an error rather than a truncation, so
+    /// a caller never holds a partial blob and the allocation is bounded by the caller's cap.
+    pub async fn read_all(&self, blob_id: &BlobId, max_octets: u64) -> Res<Option<Vec<u8>>> {
+        let Some(info) = self.stat(blob_id).await? else {
+            return Ok(None);
+        };
+        utils_rs::prelude::eyre::ensure!(
+            info.length_octets <= max_octets,
+            "blob {blob_id} is {} octets, over the {max_octets} octet cap",
+            info.length_octets
+        );
+        let mut bytes = Vec::with_capacity(info.length_octets as usize);
+        self.store
+            .blobs()
+            .reader(Hash::from(blob_id.to_bytes32()))
+            .read_to_end(&mut bytes)
+            .await?;
+        Ok(Some(bytes))
+    }
+
     pub async fn announce(&self, blob_id: BlobId) -> Res<()> {
         let info = self
             .stat(&blob_id)
@@ -308,6 +330,12 @@ impl BlobService {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// The availability feed's current revision: a reader opened `after` it sees only blobs
+    /// announced from now on.
+    pub async fn availability_revision(&self) -> Res<u64> {
+        Ok(self.availability.latest_revision().await?)
     }
 
     pub async fn open_availability(

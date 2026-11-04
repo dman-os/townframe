@@ -54,6 +54,7 @@ impl Provider for Echo {
     async fn call(
         &self,
         caller: &Caller,
+        _operation: &str,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError> {

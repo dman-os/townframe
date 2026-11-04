@@ -1555,6 +1555,7 @@ dependencies = [
  "big_cabinet_core",
  "big_nodule",
  "big_nodule_core",
+ "big_nodule_wasm",
  "big_plugs_core",
  "big_repo",
  "big_sync",
@@ -1615,6 +1616,31 @@ dependencies = [
  "service_core_rs",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "big_nodule_wasm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "big_blobs",
+ "big_blobs_core",
+ "big_nodule",
+ "big_nodule_core",
+ "big_plugs_core",
+ "big_sync_core",
+ "blake3",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "serde",
+ "serde_json",
+ "service_utils_rs",
+ "tokio",
+ "tracing",
+ "utils_rs",
+ "wash-runtime",
+ "wasmtime-wasi-http",
 ]
 
 [[package]]
@@ -17106,7 +17132,7 @@ dependencies = [
 [[package]]
 name = "wash-runtime"
 version = "2.11.0"
-source = "git+https://github.com/wasmCloud/wasmCloud?rev=1bcaebaeba509b8a59fd239e668abe6f02596794#1bcaebaeba509b8a59fd239e668abe6f02596794"
+source = "git+file:///run/media/asdf/p3N/repos/wasmCloud?rev=e7648c6e939c50ba1be8d9c138ef6da3305a672e#e7648c6e939c50ba1be8d9c138ef6da3305a672e"
 dependencies = [
  "anyhow",
  "arc-swap",

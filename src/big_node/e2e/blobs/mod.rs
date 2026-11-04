@@ -132,7 +132,7 @@ pub(super) async fn all_datums(node: &BigNode, document: &DocId) -> DatumsRead {
         .unwrap()
 }
 
-async fn blob_cap(node: &BigNode, object: String, dependencies: Vec<CapId>) -> CapId {
+pub(super) async fn blob_cap(node: &BigNode, object: String, dependencies: Vec<CapId>) -> CapId {
     node.authority
         .client
         .call(

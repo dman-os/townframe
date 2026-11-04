@@ -139,9 +139,16 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
-- Next: slice 2b (Wasm host in `big_nodule_wasm`), with the 2a follow-ups below.
+- Next: slice 2c (`dispatch.local` egress plus operation grants), with the small 2a follow-ups below.
 ## Done
 
+- 2026-11-04: Slice 2b.
+  - New `big_nodule_wasm` crate: one wash `Host`; the ingress router (`Sealed`) refuses all incoming routes and egress is denied (`NoEgress`) until 2c. Workload id `nodule/<plug>/<revision>`, `pool_size: 0` (ephemeral instance per request). Handler bytes come from `BlobService::read_all` (64 MiB cap), with a BLAKE3 digest `assert`.
+  - Late bytes: `ensure` registers a waiter before its `stat`, and a task follows `open_availability` from the head read at boot (`BlobService::availability_revision`), so nothing polls and boot does not replay the announcement history (manager fix on review).
+  - XRPC mapping: `POST http://nodule.local/xrpc/<nsid>`, `authorization: Capability <id>`, `idempotency-key`, `x-request-deadline-unix-ms`. 2xx JSON is the output, 400 is `InvalidInput`, other statuses are `Failed{status, body}`, transport errors are 502. Response cap 4 MiB.
+  - `Provider::call` takes the operation NSID. Shutdown order: nodules, then wasm, then dispatch.
+  - wash-runtime comes from a `file://` git `[patch]` to `../wasmCloud` @ `e7648c6e` (a path patch loses `--cap-lints allow` and trips `recursion_depth_exceeding_limit`). **CI cannot resolve it until the operator pushes `townframe-changes` and the rev is repinned.**
+  - Dropped: the e2e assertion that an already-elapsed deadline gives `DeadlineExceeded` (a fast provider wins the first poll). The gated-provider dispatch e2e still covers deadlines.
 - 2026-11-04: Slice 2a.
   - Handler artifacts are referenced by `Blob` datums in the config doc, keyed `org.example.daybook.blob/nodule.artifact/<plug>/<artifactKey>`. They're owned by `NoduleConfig` only under that slot prefix and written atomically with the install datum. Retention counts only top-level `Blob`/`CipherBlob` datums.
   - Blob workers also poll `config_id`, with Write, because they write cipherBlob/jwk representations into the doc.
@@ -251,6 +258,13 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
   - `lifecycle::sensitive_root_creation_replays_every_boundary_without_replacing_groups_or_docs`
 
   They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
+
+### Slice 2b follow-ups
+- [design, operator] Zero-budget deadline: reject up front in dispatch (breaks the "provider entered once" contract) or keep the race? Manager leans keep.
+- [design] A failed workload start is retried on every reconcile; cache a negative result per (plug, revision, handler)? Manager leans retry for now (rare, and the reconcile perf work bounds it).
+- [limits] Handlers run with wash default resource limits; no memory/CPU caps yet.
+- [test] The late-bytes e2e polls `GetNodule` every 20ms because there is no reconciled signal to subscribe to.
+- [main] `big_blobs` and `big_node/e2e/blob_discovery/mod.rs` are not rustfmt-clean on main (from #77); fixed in its own commit.
 
 ### Slice 2a follow-ups
 - **[design, operator] The config drawer isn't blob-portable yet.** It's a parentless self-doc drawer, and ADR 026 gives such drawers no inventories, so no inventory pin is published and a mirror can't discover or fetch artifact bytes. Retention is local only. This undercuts D2d's "portable" rationale until big_blobs supports pins or inventories for self-doc drawers (or the config drawer gets a parent).

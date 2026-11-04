@@ -23,6 +23,8 @@ use big_nodule::Nodules;
 use big_nodule::NodulesConfig;
 use big_nodule::dispatch::Dispatch;
 use big_nodule::dispatch::DispatchConfig;
+use big_nodule::executor::NoduleExecutor;
+use big_nodule_wasm::WasmExecutor;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::SharedBigRepo;
@@ -65,6 +67,7 @@ pub struct BigNode {
     pub docs: DocsRepo,
     pub drawers: Drawers,
     pub dispatch: Dispatch,
+    pub wasm: Arc<WasmExecutor>,
     pub nodules: Nodules,
 }
 
@@ -179,6 +182,11 @@ impl BigNode {
                 operator: authority.service.operator_uuid(),
             });
             stop.stages.push(Stage::Service(dispatch_stop));
+            // The Wasm executor is called by the nodule service, so it boots before it and
+            // stops after it. It reads handler bytes from the blob service, which stops later
+            // still.
+            let (wasm, wasm_stop) = big_nodule_wasm::boot(Arc::clone(&blobs.service)).await?;
+            stop.stages.push(Stage::Service(wasm_stop));
             let (nodules, nodules_stop) = boot_nodules(
                 &authority,
                 &docs,
@@ -187,6 +195,7 @@ impl BigNode {
                 &nodules_actor,
                 nodules_namespace,
                 Arc::clone(&dispatch.router),
+                Arc::clone(&wasm) as Arc<dyn NoduleExecutor>,
                 config.sql,
             )
             .await?;
@@ -209,6 +218,7 @@ impl BigNode {
                 docs,
                 drawers,
                 dispatch,
+                wasm,
                 nodules,
             })
         }
@@ -237,6 +247,7 @@ async fn boot_nodules(
     nodules_actor: &Actor,
     namespace: Namespace,
     dispatch: Arc<big_nodule::dispatch::Router>,
+    executor: Arc<dyn NoduleExecutor>,
     sql: Database,
 ) -> Res<(Nodules, service_utils_rs::StopToken)> {
     let config_drawer = drawers.local().config_id.clone();
@@ -251,7 +262,7 @@ async fn boot_nodules(
         namespace,
         operator: authority.service.operator_uuid(),
         dispatch,
-        executor: None,
+        executor: Some(executor),
         sql,
     })
     .await?)
