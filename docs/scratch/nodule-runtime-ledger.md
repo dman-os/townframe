@@ -145,6 +145,7 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
+- Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
 - Slice 2c (fresh subagent, running). Design D2e below.
 ## Done
@@ -267,7 +268,7 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
   They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
 
 ### Slice 2b follow-ups
-- Decided (manager, operator delegated): keep the deadline race; no up-front zero-budget rejection.
+- Decided (operator, 2026-11-04): follow gRPC. A call whose deadline has already elapsed fails fast with the deadline error, checked first in `invoke`, and the provider is never entered. This supersedes the slice 1 "provider entered once" test contract. Folded into slice 2c.
 - Decided (manager): keep retrying a failed workload start on each reconcile; revisit with the reconcile perf work.
 - [limits] Handlers run with wash default resource limits; no memory/CPU caps yet.
 - [test] The late-bytes e2e polls `GetNodule` every 20ms because there is no reconciled signal to subscribe to.
