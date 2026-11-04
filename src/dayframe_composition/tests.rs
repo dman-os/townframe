@@ -1088,14 +1088,20 @@ fn toolbar_catalog(activations: Rc<std::cell::Cell<usize>>) -> Vec<InstalledMicr
     catalog
 }
 
-/// The counter's current count as its `count` call answers it, asked by a fresh recipient.
-async fn counted(runtime: &CompositionRuntime) -> u64 {
+/// One call of `micro`'s call publication `name`, made by a fresh recipient that holds the
+/// provider only for the length of the call.
+async fn call_publication<Req: Serialize, Resp: serde::de::DeserializeOwned>(
+    runtime: &CompositionRuntime,
+    micro: &str,
+    name: &str,
+    request: &Req,
+) -> Resp {
     let lease = runtime
         .supervisor
-        .acquire(&supervised(COUNTER), micro_counter_manifest::COUNT)
+        .acquire(&supervised(micro), name)
         .await
         .unwrap();
-    let recipient = runtime.host.start("count-asker");
+    let recipient = runtime.host.start("caller");
     let reference = clay_guest_session::capabilities::CapabilitySession::new(
         runtime.host.clone(),
         recipient.clone(),
@@ -1103,9 +1109,9 @@ async fn counted(runtime: &CompositionRuntime) -> u64 {
     )
     .mint(&lease)
     .unwrap();
-    let mut request = Vec::new();
-    ciborium::into_writer(&(), &mut request).unwrap();
-    let response = reference.call(request).await.unwrap();
+    let mut bytes = Vec::new();
+    ciborium::into_writer(request, &mut bytes).unwrap();
+    let response = reference.call(bytes).await.unwrap();
     drop((reference, lease));
     runtime.host.close_instance(&recipient).unwrap();
     ciborium::from_reader(response.as_slice()).unwrap()
@@ -1191,13 +1197,221 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
         // Nothing holds the counter once the call returned, so idle shutdown follows, and the
         // increment outlives the incarnation that made it.
         settle(|| runtime.state(&id(COUNTER)) == MicroState::Idle).await;
-        assert_eq!(counted(&runtime).await, 1);
+        assert_eq!(
+            call_publication::<(), u64>(&runtime, COUNTER, micro_counter_manifest::COUNT, &())
+                .await,
+            1
+        );
         assert_eq!(
             activations.get(),
             2,
             "the count read is the second activation"
         );
         drop(dom);
+    })
+    .await;
+}
+
+// ── completion providers (ADR 031 §13), as a validation of the contribution pattern ──────────
+
+const SOURCES: &str = "org.example.test.editor.sources";
+
+/// One completion-source row: when the typed text starts with `trigger`, the provider the
+/// `provider` attachment names is asked for candidates.
+#[derive(Serialize, Deserialize)]
+struct Source {
+    trigger: String,
+    provider: clay_mdk::Attachment,
+}
+
+fn editor_sidecar() -> clay_mdk::Sidecar {
+    let mut sidecar = probe_sidecar(
+        "tests.editor",
+        &[SOURCES],
+        vec![clay_mdk::Request {
+            binding: "sources".into(),
+            contract: Nsid::literal(SOURCES),
+            access: Some(clay_mdk::Access::Read),
+            necessity: clay_mdk::Necessity::Required,
+            resolution: clay_mdk::BindingResolution::Configured,
+            min_revision: None,
+        }],
+    );
+    sidecar.manifest.publications = vec![clay_mdk::PublicationDeclaration {
+        name: "complete".into(),
+        kind: clay_mdk::PublicationKind::Call,
+        contract: Some(Nsid::literal("org.example.test.editor.complete")),
+    }];
+    sidecar
+}
+
+/// The editor: it reads the completion-source rows, filters them locally on the typed text and
+/// calls only the providers whose trigger matches, collecting their candidates.
+fn editor() -> InstalledMicro {
+    let sidecar = editor_sidecar();
+    let manifest = sidecar.manifest.clone();
+    InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(id(&sidecar.id), sidecar, |id, resources, bindings| {
+            factory(resources, id, manifest, bindings, |context| async move {
+                let sources = context
+                    .collection::<String, Source>("sources")
+                    .expect("configuration binds the sources collection");
+                context.publish_call("complete", move |typed: String| {
+                    let sources = sources.clone();
+                    async move {
+                        sources.bootstrapped().await;
+                        let mut candidates = Vec::<String>::new();
+                        for row in sources.rows()?.iter() {
+                            if typed.starts_with(&row.value.trigger) {
+                                let provider = &row.attachments[row.value.provider.index()];
+                                candidates
+                                    .extend(provider.call::<String, Vec<String>>(&typed).await?);
+                            }
+                        }
+                        Ok(candidates)
+                    }
+                })?;
+                Ok(())
+            })
+        })
+    }
+}
+
+/// What a provider records: how many incarnations started and how many calls it served.
+#[derive(Clone, Default)]
+struct Served {
+    activations: Rc<std::cell::Cell<usize>>,
+    calls: Rc<std::cell::Cell<usize>>,
+}
+
+/// A provider named `name` triggered by `trigger`: it contributes one completion-source row, a
+/// lazy reference to its `complete` call, and answers `name:<typed>`.
+fn provider(name: &'static str, trigger: &'static str) -> (InstalledMicro, Served) {
+    let micro = format!("tests.{name}");
+    let authority = format!("org.example.test.{name}");
+    let mut sidecar = clay_mdk::Sidecar::new(
+        micro.clone(),
+        1,
+        clay_mdk::MicroManifest {
+            entrypoints: clay_mdk::Entrypoints::micro_client(),
+            publications: vec![clay_mdk::PublicationDeclaration {
+                name: "complete".into(),
+                kind: clay_mdk::PublicationKind::Call,
+                contract: Some(Nsid::literal(&format!("{authority}.complete"))),
+            }],
+            requires: vec![],
+            configuration_requests: vec![],
+            collection_contracts: vec![],
+            collection_requests: vec![clay_mdk::Request {
+                binding: "sources".into(),
+                contract: Nsid::literal(SOURCES),
+                access: Some(clay_mdk::Access::Write),
+                necessity: clay_mdk::Necessity::Optional,
+                resolution: clay_mdk::BindingResolution::Configured,
+                min_revision: None,
+            }],
+            contributions: vec![clay_mdk::ContributionDeclaration {
+                id: "source".into(),
+                binding: "sources".into(),
+                key: name.into(),
+                payload: serde_json::json!({
+                    "trigger": trigger,
+                    "provider": { "$attachment": 0 },
+                }),
+                attachments: vec![clay_mdk::AttachmentDeclaration {
+                    index: 0,
+                    publication: "complete".into(),
+                }],
+            }],
+            extra: BTreeMap::new(),
+        },
+    );
+    sidecar.authority = Some(authority);
+    let manifest = sidecar.manifest.clone();
+    let served = Served::default();
+    let record = served.clone();
+    let installed = InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(id(&micro), sidecar, move |id, resources, bindings| {
+            factory(resources, id, manifest, bindings, move |context| {
+                record.activations.set(record.activations.get() + 1);
+                let record = record.clone();
+                async move {
+                    context.publish_call("complete", move |typed: String| {
+                        record.calls.set(record.calls.get() + 1);
+                        async move { Ok(vec![format!("{name}:{typed}")]) }
+                    })?;
+                    Ok(())
+                }
+            })
+        })
+    };
+    (installed, served)
+}
+
+// The editor provides a durable completion-source collection and two providers each contribute
+// one row with a lazy reference to their call. Completing a text filters the rows locally and
+// calls only the matching provider, which is started by the call and not before; a text that
+// matches nothing starts nobody.
+#[tokio::test(flavor = "current_thread")]
+async fn the_editor_calls_only_the_providers_whose_trigger_matches() {
+    let (alpha, alpha_served) = provider("alpha", "a.");
+    let (beta, beta_served) = provider("beta", "b.");
+    let mut micros = catalog(stub_counter());
+    micros.extend([editor(), alpha, beta]);
+    let runtime = CompositionRuntime::new(Arc::new(clay_store::MemoryStore::new()), micros)
+        .await
+        .unwrap();
+    assert!(
+        runtime.installation_errors.is_empty(),
+        "{:?}",
+        runtime.installation_errors
+    );
+    served(&runtime, async {
+        for provider in ["tests.alpha", "tests.beta"] {
+            assert_eq!(runtime.state(&id(provider)), MicroState::Idle);
+        }
+        let runtime = &runtime;
+        async fn complete(runtime: &CompositionRuntime, typed: &str) -> Vec<String> {
+            call_publication(runtime, "tests.editor", "complete", &typed.to_owned()).await
+        }
+
+        assert_eq!(complete(runtime, "a.x").await, ["alpha:a.x"]);
+        assert_eq!(
+            (alpha_served.activations.get(), alpha_served.calls.get()),
+            (1, 1)
+        );
+        assert_eq!(
+            (beta_served.activations.get(), beta_served.calls.get()),
+            (0, 0)
+        );
+        assert_eq!(runtime.state(&id("tests.beta")), MicroState::Idle);
+
+        assert_eq!(complete(runtime, "b.y").await, ["beta:b.y"]);
+        assert_eq!(
+            (beta_served.activations.get(), beta_served.calls.get()),
+            (1, 1)
+        );
+        assert_eq!(alpha_served.calls.get(), 1);
+
+        assert!(complete(runtime, "zzz").await.is_empty());
+        assert_eq!(
+            (
+                alpha_served.activations.get(),
+                beta_served.activations.get()
+            ),
+            (1, 1)
+        );
+
+        // Nothing retains a provider between calls (`Context` has no `retain-call` yet), so the
+        // call's own hold ends with it and the next call starts a new incarnation.
+        settle(|| runtime.state(&id("tests.alpha")) == MicroState::Idle).await;
+        assert_eq!(complete(runtime, "a.again").await, ["alpha:a.again"]);
+        assert_eq!(
+            (alpha_served.activations.get(), alpha_served.calls.get()),
+            (2, 2)
+        );
     })
     .await;
 }
