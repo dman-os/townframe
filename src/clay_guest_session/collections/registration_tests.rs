@@ -81,6 +81,72 @@ fn key_value_and_row_limits_refuse_before_the_collection_changes() {
     );
 }
 
+#[tokio::test]
+async fn admitted_rows_fit_an_atomic_withdrawal_page() {
+    let limits = CollectionLimits {
+        key_bytes: 64,
+        value_bytes: 16,
+        page_bytes: 1024,
+        rows_per_writer: usize::MAX,
+        ..CollectionLimits::default()
+    };
+    let (session, host, instance) = session(limits);
+    let registrations = registrations();
+    let writer = session
+        .grant_writer(full_grant(&registrations, "w"))
+        .unwrap();
+    let capacity =
+        (limits.page_bytes - limits.cursor_bytes) / (limits.key_bytes + writer.stamp_bytes);
+    for index in 0..capacity {
+        writer
+            .put(vec![index as u8; 64], WriteBasis::Concurrent, vec![1])
+            .unwrap();
+    }
+    assert_eq!(
+        writer.put(vec![capacity as u8; 64], WriteBasis::Concurrent, vec![1]),
+        Err(WriteFailure::RowLimit)
+    );
+    // The reader lives on another incarnation: its own instance is about to close.
+    let observer = CollectionSession::new(
+        host.clone(),
+        host.start("observer"),
+        CollectionLimits::default(),
+    );
+    let reader = observer.grant(registrations.projection()).unwrap();
+    let lease = reader.acquire(Vec::new(), None).unwrap();
+    let read_limits = ReadLimits {
+        max_transactions: Some(1),
+        max_changes: Some(1),
+    };
+    let mut committed = None;
+    loop {
+        let page = lease
+            .read(committed, read_limits, std::future::pending())
+            .await
+            .unwrap();
+        committed = Some(page.through);
+        if page.bootstrap_complete {
+            break;
+        }
+    }
+    // Closing the incarnation, not dropping the writer handle, withdraws the scope's rows.
+    host.close_instance(&instance).unwrap();
+    drop(writer);
+    let withdrawn = lease
+        .read(committed, read_limits, std::future::pending())
+        .await
+        .unwrap();
+    assert_eq!(withdrawn.transactions.len(), 1);
+    assert_eq!(withdrawn.transactions[0].changes.len(), capacity);
+    assert!(
+        withdrawn.transactions[0]
+            .changes
+            .iter()
+            .all(|change| matches!(change, Change::Remove { .. }))
+    );
+    assert!(page_bytes(&withdrawn) <= limits.page_bytes);
+}
+
 #[test]
 fn a_put_must_fit_the_projection_page_even_when_the_value_limit_is_larger() {
     let (session, _, _) = session(CollectionLimits {
