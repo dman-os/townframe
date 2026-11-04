@@ -51,6 +51,7 @@ use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -523,10 +524,14 @@ impl CompositionRuntime {
     }
 
     /// Record the desired enablement of `micro` in its install datum, keeping everything else
-    /// in it. The supervisor follows through the reconciler's watch, not directly. Written
-    /// host-side like admission (the node is mocked). Locked micros have no datum. Does not
-    /// wait for the store; see [`Self::set_enabled`].
-    pub fn request_enabled(&self, micro: &MicroId, enabled: bool) {
+    /// in it. The write happens when this is called; the returned future resolves once the
+    /// datum is in the store, and may be dropped by callers that do not need that. The wait
+    /// exists for the browser: a page reload does not run the orderly-shutdown drain of the
+    /// document persister, so the shell must not let the user reload before the write landed.
+    /// It only resolves while [`Self::serve`] runs, since the persister runs inside it. The
+    /// supervisor follows through the reconciler's watch, not directly. Written host-side like
+    /// admission (the node is mocked). Locked micros have no datum.
+    pub fn set_enabled(&self, micro: &MicroId, enabled: bool) -> impl Future<Output = ()> + use<> {
         let installs = self.documents.mock_documents();
         let route = install_route(micro);
         let mut datum = InstallDatum::decode(
@@ -536,15 +541,7 @@ impl CompositionRuntime {
         );
         datum.enabled = enabled;
         installs.external_change(route, Some(datum.encode()));
-    }
-
-    /// [`Self::request_enabled`], then wait until the datum is in the store. The wait exists
-    /// for the browser: a page reload does not run the orderly-shutdown drain of the document
-    /// persister, so the shell must not let the user reload before the write landed. Needs
-    /// [`Self::serve`] to be running, since the persister runs inside it.
-    pub async fn set_enabled(&self, micro: &MicroId, enabled: bool) {
-        self.request_enabled(micro, enabled);
-        self.documents.persisted().await;
+        self.documents.persisted()
     }
 
     /// Whether the install datum asks for `micro` to run: the desired state, which the
