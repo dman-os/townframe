@@ -156,6 +156,12 @@ fn MountedSlot(mount: Mount) -> Element {
 #[cfg(feature = "guest")]
 #[component]
 fn GuestMount(mount: Mount) -> Element {
+    // With only the guest backend compiled, `MountInner` has one variant and the pattern cannot
+    // fail; with both backends it can, if an in-process mount reached a guest slot.
+    #[cfg_attr(
+        not(feature = "in_process"),
+        expect(irrefutable_let_patterns, reason = "single-backend build")
+    )]
     let MountInner::Guest(component) = mount.0 else {
         unreachable!("guest slots mount guest components");
     };
