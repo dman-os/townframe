@@ -562,3 +562,46 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   fails `Faulted`, both micros `Faulted` with an "unavailable" message and no instance, log `initialize a, initialize b`. All on native,
   Wasmtime and Wasmi.
 - **Also:** the dead-code warning in `lazy_tests::PeerRoot` (C7e) is now an `expect` with a reason.
+
+## C7g notes (2026-11-04): the portable lifecycle scenarios run natively, with no close hook
+
+- **Ruling followed.** A micro never closes itself and author code gets no close callback (operator, 2026-11-04). The WIT
+  `instance-root.close()` stays as the host to guest mechanism; the MDK answers it by dropping what the incarnation owns. ADR 030 §6
+  gained the sentence saying so. Nothing was added to `Context` (no `on_close`, no raw call API, no stop token); C7f's plan items (1)
+  and (2) are dropped, and (3) became grants.
+- **What closing does, at the sites.** Native (`NativeRoot::close`): abort and join the incarnation's tasks (which owns every call
+  handler loop, feed, view task and any value a task holds), then drop the publication leases; the supervisor calls it while the
+  incarnation's providers and leases are still held and revokes afterwards. Guest (`Runtime::close`): stop and join tasks (each drops its
+  future), then drop views, handlers and bindings. Both are commented with that mechanism. A value whose `Drop` uses a dependency is
+  therefore held by a task or handler, not by something the registry outlives the close with.
+- **The consumer scenario without a close hook.** The `context` micro keeps its redeemed `presentation` proxy in `Held`, owned by a task
+  it spawns; `Held::drop` calls the proxy's synchronous `component()` and crashes if the provider was already withdrawn (a drop cannot
+  return an error, so a violation is a panic: a close error on a guest, a task panic raised at the join natively). `provider_consumer_graph`
+  passes only if that drop ran with the provider live; flipping the assertion makes it fail on native and on Wasmtime (done once by hand,
+  not kept as a test). `GuestResidue::NONE` after the close shows the proxy was dropped once. The effect is synchronous on purpose: a
+  `Drop` cannot await a host call, and the only async host-visible effects (rows, calls) would need the close to wait for them.
+- **Roles from grants.** The micro gained optional requirements `presentation`, `service`, `peer`; a `relay` call (`relay:` plus the
+  `peer`'s answer); `feed` rows `reject` (fail `activate` after publishing everything) and `name` (prefix of the row the incarnation
+  writes). `ContextWorld::granted` (conformance side) is the one `InitialContext` builder; `ContextWorld::declared` the one declared set,
+  used by every harness and by the raw fixture's sidecar. Calls are typed CBOR text (the wire is what the raw fixture also speaks, so
+  `Gate`/`Gated` serve both).
+- **Native additions.** `Granted` carries `calls: InFlightCalls` (counted per call handler from the moment the call is queued; the
+  supervisor factory never reads it) and `Granted::activate` takes the declarations to admit against separately from the ones the
+  micro publishes under (the factory passes the same map; `undeclared_publications_*` makes them differ, which is what a guest's
+  sidecar disagreeing with its component is). `calls_in_flight` moved from `GuestIncarnations` into `Incarnations`; `GuestIncarnations`
+  now has only `mount`, for `sync_exports_*`.
+- **Raw fixture.** `lifecycle_fixture.rs` is a provider only (presentation `detail`, `echo`, `relay`, trap on the request `trap`), with
+  the micro's wire and contracts; the consumer, failing and registration roles, the CBOR role arguments and the root that redeemed a proxy
+  are gone. Its sidecar and the package test follow. `x/check-dayframe.ts` and the CI export needed no change (same two example names).
+- **Not carried over (listed in the ledger gap detail):** the explicit `WriteBasis` sequence of `registration_scope_ownership` (the
+  `Registration` writer derives bases from its mirror; covered at the writer's layer), the mount inside `lazy_references_*`, "the consumer
+  publishes nothing", exact refusal wording.
+- **Harness.** `lifecycle_conformance.rs` split into `calls.rs` (call concurrency, the engine-only trio) and `registrations.rs`
+  beside `context.rs`, which also keeps the shared `seeder`/`cbor_text`. Two function-length limits (`activate`, the ownership
+  scenario) were met by extracting `publish_follow`, `publish_retention`, `assert_owns_one_row`, `versions_of`.
+- **Design questions for the owner.** (1) A `Drop` that must report failure can only panic; if micros need an observable
+  cleanup result (a row written as the incarnation closes), that needs a design (a host-side effect on drop, not a hook). (2) Unchecked: native
+  component renderers (`publish_component` closures) are handed to the component registry, so they may drop with the instance after
+  `Root::close` rather than inside it as a guest's presentations do; values whose `Drop` needs a live dependency are held by tasks or
+  handlers here (documented at `NativeRoot::close`), and a view-held one needs checking before anyone relies on it. (3) Whether to keep a mutation check of the
+  `Held` drop order as a test.
