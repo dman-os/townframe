@@ -374,3 +374,38 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
 - **Dead end seen.** An awaited operation in a guest call (`Operation::next` from inside a call handler) was tried
   and hangs, but only because the mock source never settles; the guest runtime itself was not shown to mis-wake (the
   `clay_rt_wasmtime` driver change tried while chasing it was reverted).
+
+## C7b-2 notes (2026-11-04): follow-ups from the C7b review
+
+- **Implementing is not owning.** `Sidecar::validate` no longer holds a published call's contract to the authority: only
+  the collection contracts a package *declares* (and their schemas, unless requested) must lie under it. Implementing a
+  contract grants no access, so it needs no request. The toolbar now owns `org.example.dayframe.toolbar.action`
+  (`micro_toolbar_manifest::ACTION_CONTRACT`, empty request and response); the counter's `increment` publication
+  implements it (`INCREMENT_CONTRACT` is gone). The toolbar manifest declares nothing for the contract: a call contract is
+  only an NSID a provider and a caller agree on, there is no call-contract declaration kind in the manifest. Test
+  `a_package_declares_only_nsids_under_its_authority` covers both directions, and the composition test that used a foreign
+  call contract as its authority violation now declares a foreign collection contract.
+- **Durable mock operations settle on persistence.** In `DocumentService::durable` a mutation writes the source (and the persist
+  queue) when it is made, keeps its overlay, and the persist future accepts it (`State::complete_stored`) once the store
+  has applied that change, before it wakes `persisted()` waiters. The persist future holds the state weakly so it does not
+  keep the queue open. A durable operation cannot be rejected (`complete(.., Err)` on one asserts) and a mutation after
+  `close_persistence` panics like every other source write. Volatile services keep manual `settle`/`complete`. The old durable
+  test that rejected an operation was dropped for that reason; `a_durable_operation_is_accepted_once_its_write_reaches_the_store`
+  pins the new behaviour. The counter's `increment` call awaits `Operation::next(0)` and maps a rollback to
+  `Error::Rejected`; the native and wasm toolbar tests and the Playwright toolbar test still hold.
+- **`Capability::retain_call`.** Returns `clay_mdk::CallBinding` (`call` over the retained binding, drop releases it) for
+  both backends; the guest wraps the generated `capability_bank::CallBinding` (already generated, no WIT change). The completion test
+  now has the editor `focus` (retain the matching providers' calls while the editor itself is held live by a lease, since the
+  bindings live in its incarnation), complete three times (one provider activation), and `blur` (provider goes idle, the next
+  completion activates again). Guest proof: the `context` fixture's `hold`/`release` calls and
+  `lifecycle_conformance::context_retains_a_call` (Wasmtime and wcmp/Wasmi): two calls through the binding are one provider
+  incarnation, the provider is still `Active` after `hold` returned, and `release` makes it `Idle` (awaited on
+  `Supervisor::changes`). The `context_*` scenarios moved to `lifecycle_conformance/context.rs` with a `ContextRig` for the
+  shared boot, to stay inside the module-item budget.
+- **Pushed component list removed.** `presentation.mount` takes `(publication, placement)`; both engines, the guest runtime, the
+  `export_micro!` macro, the fixtures and `ComponentSlot`/`ComponentSlotProps` are gone. `grant_components` stays only as a
+  `test-utils` helper (the presentation-import tests still need component handles in a table). The `slots` fixture and
+  `wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdrawal` went with it: the only pushed-component consumer,
+  superseded by the C7a guest-slot test (a guest mounts another guest's presentation through a capability). Not covered any
+  more: a mount refusing a component grant from another host (there are no grants). ADRs 029-031 never described pushing; the
+  stale `ComponentSlot` mention in ADR 015's crate map and the `slots` fixture in ADR 018's migration list were updated.
