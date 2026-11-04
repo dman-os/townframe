@@ -679,3 +679,15 @@ Gap detail.
   `a_closing_micro_is_recorded_before_its_guest_close_returns` (hangs without the fix).
 - **Test hygiene (`bf3e034d`).** Polling waits replaced by event waits (see "C7d notes" in `clay-c6-context.md` for the
   list of loops deliberately kept).
+
+## PR #79 CI state (2026-11-04, before a harness restart)
+
+- PR: https://github.com/dman-os/townframe/pull/79 (opened as the `dman-os` gh account: `GH_TOKEN=$(gh auth token --user dman-os)`; push with `GIT_ASKPASS=/home/asdf/dman-creds`).
+- First CI run failures and fixes (committed, NOT yet pushed or verified locally):
+  - check-matrix: `clay_mdk` guest-only build, irrefutable `let MountInner::Guest` in `hooks.rs` → `7f472994`.
+  - counter guest linked `in_process` via `micro_{settings,toolbar}_manifest` → in_process moved to their dev-deps, `293069ba`.
+  - `x/check-dayframe.ts` ran `cargo tree --offline` before fetching the new wcmp rev / jiff-tzdb → `cargo fetch` first, `153402ee`.
+  - Nix CLI package: crane vendoring of the wasmtime fork failed on `crates/c-api/artifact` missing README → fork commit `783ad10` on `dman-os/wasmtime` branch `drive-until-stalled-48` (pushed), rev bumped in `f3756c5f`.
+  - Lint job died without logs (cache throttling); rerun.
+- To do after restart: run `cargo x guardrails check-matrix --package <p> --target <t>` for clay_mdk, micro_* manifests, micro_counter, micro_layout on native / wasm32-unknown-unknown / wasm32-wasip3; then the full check; push; watch CI.
+- Dev-script agent (D1, `x/dayframe.ts`) may still have uncommitted work; check `git status`.
