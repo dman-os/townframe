@@ -250,9 +250,13 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs: P1–P4b done. P5 (enable-time resolution and lockfile) is next, on a fresh agent.
+- big_plugs: P1–P5 done. P6 (substitution) is running on the P5 agent; then P7 (schema registry).
 ## Done
 
+- 2026-11-04: P5 resolution and lockfile.
+  - The lockfile is SQLite `nodule_resolution_lock` (node-local per D8; the consent is this node's) and appears on `NoduleRecord.requests`.
+  - Resolution comes from the config snapshot plus router-native providers (a provider is a string; native ones have no version or revision). Built-in providers register at boot by contract, so router registration does not trigger reconciles.
+  - Disabling drops locks, and re-enabling re-resolves (enabling is consent). `ConfirmNoduleResolution` re-pins only at `ProviderChanged`. Data requests wait for P7.
 - 2026-11-04: P4b `Plug.authority`. An optional NSID authority prefix on the envelope (absent = holds nothing, so only vendor and request). Held = declared under the authority. Foreign Lexicons, refs, stores and init targets must be requested or implemented. Equal or nested enabled authorities conflict (trie). `Nodule::admit(authority)`. Verified 425/425 including big_cabinet_core.
 - 2026-11-04: P4 shared request shape, `6431c8aa`.
   - `big_plugs_core::request::Request{binding, contract, access, necessity, resolution, minRevision}`. An unknown necessity counts as required. `access: None` means an operation call.
