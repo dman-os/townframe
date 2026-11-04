@@ -178,7 +178,7 @@ const gzip = new Deno.Command("gzip", {
 }).outputSync().stdout;
 console.log(
   `bundle-size dayframe_web host=${hostBytes} gzip=${gzip.length} guest=${
-    (await Deno.stat(counter)).size
+    (await Deno.stat(`${packageDirectory}/counter.component.wasm`)).size
   }`,
 );
 
