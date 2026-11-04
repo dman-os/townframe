@@ -1,4 +1,5 @@
 use super::*;
+use clay_guest_session::capabilities::RowAttachment;
 use clay_surface::SurfaceTree;
 use wasmtime::component::Resource;
 
@@ -614,7 +615,7 @@ async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independe
         row_version: Version::new(1, 1),
         value: stamped(CollectionValue {
             body: vec![0xd9, 0xa7, 0xf8, 0],
-            capabilities: vec![lease.publication()],
+            attachments: vec![RowAttachment::Bound(lease.publication())],
         }),
         evidence: RowEvidence::Authoritative,
         write_context: None,
@@ -633,10 +634,7 @@ async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independe
             .unwrap();
         assert!(state.capabilities.same_recipient(reference));
         assert_eq!(state.capabilities.reference_count(), 1);
-        (
-            reference.publication().unwrap().id(),
-            reference.recipient_scope(),
-        )
+        (reference.attachment(), reference.recipient_scope())
     };
     let (publication_b, scope_b) = {
         let state = store_b.data_mut();
@@ -646,13 +644,10 @@ async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independe
             .unwrap();
         assert!(state.capabilities.same_recipient(reference));
         assert_eq!(state.capabilities.reference_count(), 1);
-        (
-            reference.publication().unwrap().id(),
-            reference.recipient_scope(),
-        )
+        (reference.attachment(), reference.recipient_scope())
     };
     assert_eq!(publication_a, publication_b);
-    assert_eq!(publication_a, lease.publication().id());
+    assert_eq!(publication_a, RowAttachment::Bound(lease.publication()));
     assert_ne!(scope_a, scope_b);
 
     let proxy_a = redeem(&mut store_a, reference_a).await.unwrap();
@@ -739,7 +734,7 @@ async fn retained_presentation_proxy_survives_row_removal_but_turns_inert_when_l
         row_version: Version::new(1, 1),
         value: stamped(CollectionValue {
             body: vec![0xd9, 0xa7, 0xf8, 0],
-            capabilities: vec![lease.publication()],
+            attachments: vec![RowAttachment::Bound(lease.publication())],
         }),
         evidence: RowEvidence::Authoritative,
         write_context: None,
@@ -821,7 +816,7 @@ async fn registration_writer_surfaces_invalid_attachment_for_fabricated_capabili
     let lease = cap_wit::Host::publish_presentation(&mut state, "view".into())
         .unwrap()
         .unwrap();
-    let publication_id = state.table.get(&lease).unwrap().publication().id();
+    let publication = state.table.get(&lease).unwrap().publication();
     let lease_rep = lease.rep();
     let reference = HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease_rep))
         .unwrap()
@@ -878,8 +873,8 @@ async fn registration_writer_surfaces_invalid_attachment_for_fabricated_capabili
         .value
         .unwrap();
     assert_eq!(stored.body, [0xd9, 0xa7, 0xf8, 0]);
-    assert_eq!(stored.capabilities.len(), 1);
-    assert_eq!(stored.capabilities[0].id(), publication_id);
+    assert_eq!(stored.attachments.len(), 1);
+    assert_eq!(stored.attachments[0], RowAttachment::Bound(publication));
 
     let state = store.data_mut();
     HostPublishedCapability::drop(state, Resource::new_own(lease_rep)).unwrap();
@@ -1617,7 +1612,7 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
             .unwrap()
             .value
             .unwrap();
-        assert_eq!(stored.capabilities.len(), 1);
+        assert_eq!(stored.attachments.len(), 1);
 
         command(7);
         let text = writer.wait_for(|text| text.contains("cap-redeem=")).await;

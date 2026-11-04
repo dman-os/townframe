@@ -1,6 +1,10 @@
+use crate::capabilities::ContractIdentity;
+use crate::capabilities::PublicationEndpoint;
+use crate::capabilities::RowAttachment;
 use clay_collection::AcquireError;
 use clay_collection::Change;
 use clay_collection::Cursor;
+use clay_collection::DurableCodec;
 use clay_collection::MutationError;
 use clay_collection::Page;
 use clay_collection::Projection;
@@ -30,28 +34,115 @@ use tokio::sync::watch;
 pub type Bytes = Vec<u8>;
 
 /// One stored collection value: portable CBOR body plus host-retained
-/// capability attachments (ADR 023 §6). The body names attachments by
-/// index under [`CAPABILITY_ATTACHMENT_TAG`]; the body alone conveys no
-/// authority.
+/// attachments (ADR 023 §6): live publications, or endpoints that name a micro's publication
+/// (ADR 025 §7). The body names attachments by index under [`CAPABILITY_ATTACHMENT_TAG`]; the
+/// body alone conveys no authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionValue {
     pub body: Bytes,
-    pub capabilities: Vec<crate::capabilities::CapabilityPublication>,
+    pub attachments: Vec<RowAttachment>,
 }
 
 impl CollectionValue {
     pub fn plain(body: Bytes) -> Self {
         Self {
             body,
-            capabilities: Vec::new(),
+            attachments: Vec::new(),
         }
     }
     pub fn byte_len(&self) -> usize {
-        self.body.len().saturating_add(
-            self.capabilities
-                .len()
-                .saturating_mul(CAPABILITY_PAGE_BYTES),
+        self.body
+            .len()
+            .saturating_add(self.attachments.len().saturating_mul(CAPABILITY_PAGE_BYTES))
+    }
+}
+
+/// The durable form of a [`CollectionValue`]: CBOR `[body, [[micro, publication, namespace,
+/// name, major, minor, patch], ...]]`. A durable row persists endpoints and never references
+/// (ADR 025 §7), so encoding a bound attachment is a programming error; a row that does not
+/// decode is corrupt storage. Both crash.
+pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
+    use ciborium::Value;
+    fn encode_value(value: &CollectionValue) -> Vec<u8> {
+        let attachments = value
+            .attachments
+            .iter()
+            .map(|attachment| {
+                let RowAttachment::Endpoint(endpoint) = attachment else {
+                    panic!("a durable row can only attach endpoints, never live publications");
+                };
+                let (major, minor, patch) = endpoint.contract.version;
+                Value::Array(vec![
+                    Value::Text(endpoint.micro.as_str().to_owned()),
+                    Value::Text(endpoint.publication.clone()),
+                    Value::Text(endpoint.contract.namespace.clone()),
+                    Value::Text(endpoint.contract.name.clone()),
+                    Value::Integer(major.into()),
+                    Value::Integer(minor.into()),
+                    Value::Integer(patch.into()),
+                ])
+            })
+            .collect();
+        let mut out = Vec::new();
+        ciborium::into_writer(
+            &Value::Array(vec![
+                Value::Bytes(value.body.clone()),
+                Value::Array(attachments),
+            ]),
+            &mut out,
         )
+        .expect("CBOR encoding of an in-memory value");
+        out
+    }
+    fn decode_value(bytes: &[u8]) -> CollectionValue {
+        fn text(value: Value) -> String {
+            value.into_text().expect("stored endpoint field is text")
+        }
+        fn number(value: Value) -> u32 {
+            let number = value
+                .into_integer()
+                .expect("stored contract version is an integer");
+            u32::try_from(number).expect("stored contract version fits u32")
+        }
+        let Value::Array(parts) =
+            ciborium::from_reader(bytes).expect("stored collection value is CBOR")
+        else {
+            panic!("stored collection value is not an array");
+        };
+        let [body, attachments] = <[Value; 2]>::try_from(parts)
+            .unwrap_or_else(|_| panic!("stored collection value has the wrong arity"));
+        let attachments = attachments
+            .into_array()
+            .expect("stored attachments are an array")
+            .into_iter()
+            .map(|attachment| {
+                let fields = attachment
+                    .into_array()
+                    .expect("stored attachment is an array");
+                let [micro, publication, namespace, name, major, minor, patch] =
+                    <[Value; 7]>::try_from(fields)
+                        .unwrap_or_else(|_| panic!("stored endpoint has the wrong arity"));
+                RowAttachment::Endpoint(PublicationEndpoint {
+                    micro: MicroId::new(text(micro)),
+                    publication: text(publication),
+                    contract: ContractIdentity::new(
+                        text(namespace),
+                        text(name),
+                        (number(major), number(minor), number(patch)),
+                    ),
+                })
+            })
+            .collect();
+        CollectionValue {
+            body: body.into_bytes().expect("stored body is bytes"),
+            attachments,
+        }
+    }
+    DurableCodec {
+        encode_key: Bytes::clone,
+        decode_key: <[u8]>::to_vec,
+        encode_value,
+        decode_value,
     }
 }
 
@@ -230,6 +321,25 @@ pub fn bytes_registrations(
     runtime_epoch: [u64; 2],
 ) -> BytesRegistrations {
     RegistrationCollection::with_source(BytesSource, replay_capacity, runtime_epoch)
+}
+
+/// A registration collection backed by `store`: installation scopes persist there and are
+/// rebuilt on construction (ADR 025 §2), with [`durable_codec`] as the row encoding.
+pub async fn durable_bytes_registrations<St: clay_store::OrderedStore + Send + Sync + 'static>(
+    store: Arc<St>,
+    collection_id: Bytes,
+    replay_capacity: NonZeroUsize,
+    runtime_epoch: [u64; 2],
+) -> Result<BytesRegistrations, clay_store::StoreError> {
+    RegistrationCollection::with_durable_source(
+        store,
+        collection_id,
+        durable_codec(),
+        BytesSource,
+        replay_capacity,
+        runtime_epoch,
+    )
+    .await
 }
 
 /// What a micro's registration binding is allowed to write into one collection: the
@@ -546,14 +656,14 @@ impl RegistrationWriter {
         value: CollectionValue,
     ) -> Result<Stamp, WriteFailure> {
         let limits = self.admit(&key)?;
-        if value.capabilities.len() > limits.capabilities_per_value {
+        if value.attachments.len() > limits.capabilities_per_value {
             return Err(WriteFailure::CapabilityLimit);
         }
         // The attachment list is authoritative; the body may only name indices into it.
         if let Some(indices) = attachment_indices(&value.body)
             && indices
                 .iter()
-                .any(|index| *index >= value.capabilities.len())
+                .any(|index| *index >= value.attachments.len())
         {
             return Err(WriteFailure::InvalidAttachment);
         }

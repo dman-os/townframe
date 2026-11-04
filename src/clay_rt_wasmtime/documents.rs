@@ -87,7 +87,11 @@ pub(super) async fn initialize(
         registrations,
         requirements,
         publications: declared,
+        activator,
     } = context;
+    if let Some(activator) = activator {
+        active.store.data().capabilities.attach_activator(activator);
+    }
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {
         let access = active.store.data().documents.grant(document.access())?;

@@ -55,7 +55,7 @@ fn fabricated_indices_and_copied_cbor_convey_no_authority() {
         WriteBasis::Concurrent,
         CollectionValue {
             body: tagged_body(0),
-            capabilities: Vec::new(),
+            attachments: Vec::new(),
         },
     );
     assert_eq!(copied, Err(WriteFailure::InvalidAttachment));
@@ -67,7 +67,7 @@ fn fabricated_indices_and_copied_cbor_convey_no_authority() {
             WriteBasis::Concurrent,
             CollectionValue {
                 body: tagged_body(0),
-                capabilities: vec![lease.publication()],
+                attachments: vec![RowAttachment::Bound(lease.publication())],
             },
         )
         .unwrap();
@@ -75,7 +75,7 @@ fn fabricated_indices_and_copied_cbor_convey_no_authority() {
     // Attachment-count limit.
     let many = CollectionValue {
         body: vec![0x80],
-        capabilities: vec![lease.publication(); 33],
+        attachments: vec![RowAttachment::Bound(lease.publication()); 33],
     };
     assert_eq!(
         writer.put_value(vec![2], WriteBasis::Concurrent, many),
@@ -112,7 +112,7 @@ async fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
             WriteBasis::Concurrent,
             CollectionValue {
                 body: tagged_body(0),
-                capabilities: vec![lease.publication()],
+                attachments: vec![RowAttachment::Bound(lease.publication())],
             },
         )
         .unwrap();
@@ -124,12 +124,9 @@ async fn row_replace_and_remove_release_mirror_refs_but_not_retained_proxies() {
         .value
         .unwrap();
     // Two recipients mint distinct local refs to the one publication.
-    let mirror_ref = consumer.mint(&stored.capabilities[0]).unwrap();
-    let other_ref = other.mint(&stored.capabilities[0]).unwrap();
-    assert_eq!(
-        mirror_ref.publication().unwrap().id(),
-        other_ref.publication().unwrap().id()
-    );
+    let mirror_ref = consumer.mint_attachment(&stored.attachments[0]).unwrap();
+    let other_ref = other.mint_attachment(&stored.attachments[0]).unwrap();
+    assert_eq!(mirror_ref.attachment(), other_ref.attachment());
     assert_ne!(mirror_ref.recipient_scope(), other_ref.recipient_scope());
     let proxy = mirror_ref.redeem_presentation().await.unwrap();
 

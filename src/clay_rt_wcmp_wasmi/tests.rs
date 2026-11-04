@@ -2,6 +2,7 @@ use super::WcmpPackage;
 use super::WcmpRuntime;
 use clay_collection::WriteBasis;
 use clay_guest_session::Limits as DocumentLimits;
+use clay_guest_session::capabilities::RowAttachment;
 use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_rt_wcmp::InitialContext;
@@ -654,7 +655,7 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
             .unwrap()
             .value
             .unwrap();
-        assert_eq!(stored.capabilities.len(), 1);
+        assert_eq!(stored.attachments.len(), 1);
 
         command(7);
         let text = writer.wait_for(|text| text.contains("cap-redeem=")).await;
@@ -1272,7 +1273,7 @@ async fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers
             WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 0],
-                capabilities: vec![lease.publication()],
+                attachments: vec![RowAttachment::Bound(lease.publication())],
             },
         )
         .unwrap();
@@ -1284,8 +1285,11 @@ async fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers
         .value
         .unwrap();
     assert_eq!(stored.body, vec![0xd9, 0xa7, 0xf8, 0]);
-    assert_eq!(stored.capabilities.len(), 1);
-    assert_eq!(stored.capabilities[0], lease.publication());
+    assert_eq!(stored.attachments.len(), 1);
+    assert_eq!(
+        stored.attachments[0],
+        RowAttachment::Bound(lease.publication())
+    );
 
     let (mut reader_a, _reader_a_incoming) = WcmpStoreState::detached(
         host.clone(),
@@ -1299,29 +1303,23 @@ async fn capability_row_mints_distinct_recipient_local_refs_for_two_wcmp_readers
         DocumentLimits::default(),
     )
     .unwrap();
-    let minted_a = reader_a.capabilities.mint(&stored.capabilities[0]).unwrap();
+    let minted_a = reader_a
+        .capabilities
+        .mint_attachment(&stored.attachments[0])
+        .unwrap();
     let ref_a = reader_a.table.push(minted_a).unwrap();
-    let minted_b = reader_b.capabilities.mint(&stored.capabilities[0]).unwrap();
+    let minted_b = reader_b
+        .capabilities
+        .mint_attachment(&stored.attachments[0])
+        .unwrap();
     let ref_b = reader_b.table.push(minted_b).unwrap();
     assert_eq!(
-        reader_a
-            .table
-            .get(&ref_a)
-            .unwrap()
-            .publication()
-            .unwrap()
-            .id(),
-        lease.publication().id()
+        reader_a.table.get(&ref_a).unwrap().attachment(),
+        RowAttachment::Bound(lease.publication())
     );
     assert_eq!(
-        reader_b
-            .table
-            .get(&ref_b)
-            .unwrap()
-            .publication()
-            .unwrap()
-            .id(),
-        lease.publication().id()
+        reader_b.table.get(&ref_b).unwrap().attachment(),
+        RowAttachment::Bound(lease.publication())
     );
     assert_ne!(
         reader_a.table.get(&ref_a).unwrap().recipient_scope(),
@@ -1443,7 +1441,7 @@ async fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_leas
             WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 0],
-                capabilities: vec![lease.publication()],
+                attachments: vec![RowAttachment::Bound(lease.publication())],
             },
         )
         .unwrap();
@@ -1461,7 +1459,10 @@ async fn retained_presentation_proxy_survives_row_removal_but_goes_inert_on_leas
         DocumentLimits::default(),
     )
     .unwrap();
-    let minted = reader.capabilities.mint(&stored.capabilities[0]).unwrap();
+    let minted = reader
+        .capabilities
+        .mint_attachment(&stored.attachments[0])
+        .unwrap();
     let reference = reader.table.push(minted).unwrap();
     let redeemed = reader
         .table
@@ -1586,7 +1587,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
             WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 0],
-                capabilities: Vec::new(),
+                attachments: Vec::new(),
             },
         ),
         Err(WriteFailure::InvalidAttachment)
@@ -1597,7 +1598,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
             WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 1],
-                capabilities: vec![lease.publication()],
+                attachments: vec![RowAttachment::Bound(lease.publication())],
             },
         ),
         Err(WriteFailure::InvalidAttachment)
@@ -1617,7 +1618,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
             WriteBasis::Concurrent,
             CollectionValue {
                 body: vec![0xd9, 0xa7, 0xf8, 0],
-                capabilities: vec![lease.publication()],
+                attachments: vec![RowAttachment::Bound(lease.publication())],
             },
         )
         .unwrap();
@@ -1629,10 +1630,16 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
         .value
         .unwrap();
     assert_eq!(stored.body, vec![0xd9, 0xa7, 0xf8, 0]);
-    assert_eq!(stored.capabilities.len(), 1);
-    assert_eq!(stored.capabilities[0].id(), lease.publication().id());
+    assert_eq!(stored.attachments.len(), 1);
     assert_eq!(
-        stored.capabilities[0].contract(),
+        stored.attachments[0],
+        RowAttachment::Bound(lease.publication())
+    );
+    let RowAttachment::Bound(attached) = &stored.attachments[0] else {
+        panic!("the row attaches the live publication");
+    };
+    assert_eq!(
+        attached.contract(),
         &clay_guest_session::capabilities::ContractIdentity::presentation_component()
     );
     writer

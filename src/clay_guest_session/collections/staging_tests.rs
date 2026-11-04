@@ -70,7 +70,7 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
             WriteBasis::Concurrent,
             CollectionValue {
                 body: tagged_body(),
-                capabilities: vec![published.publication()],
+                attachments: vec![RowAttachment::Bound(published.publication())],
             },
         )
         .unwrap();
@@ -121,7 +121,7 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
                 if value
                     .value
                     .as_ref()
-                    .is_some_and(|value| !value.capabilities.is_empty()) =>
+                    .is_some_and(|value| !value.attachments.is_empty()) =>
             {
                 value.value.as_ref()
             }
@@ -130,7 +130,7 @@ async fn staged_rows_and_capabilities_become_visible_together_on_commit() {
         .unwrap();
     // The capability the row carries is redeemable as soon as the row is readable.
     consumer
-        .mint(&row.capabilities[0])
+        .mint_attachment(&row.attachments[0])
         .unwrap()
         .redeem_presentation()
         .await
@@ -178,7 +178,7 @@ async fn failed_initialization_exposes_no_rows_or_capabilities() {
                     WriteBasis::Concurrent,
                     CollectionValue {
                         body: tagged_body(),
-                        capabilities: vec![published.publication()],
+                        attachments: vec![RowAttachment::Bound(published.publication())],
                     },
                 )
                 .unwrap();

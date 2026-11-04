@@ -29,6 +29,7 @@ use crate::collections::RegistrationGrant;
 use crate::collections::bytes_registrations;
 use clay_collection::Change;
 use clay_collection::ReadLimits;
+use clay_host::Activator;
 use clay_host::ConfiguredMicro;
 use clay_host::Factory;
 use clay_host::Host;
@@ -59,7 +60,7 @@ use crate::capabilities::CapabilityRef;
 use crate::capabilities::CapabilitySession;
 use crate::capabilities::ContractIdentity;
 use crate::capabilities::DeclaredPublication;
-use crate::capabilities::LazyEndpoint;
+use crate::capabilities::PublicationEndpoint;
 use crate::capabilities::PublicationKind;
 use crate::capabilities::PublishedCapability;
 use crate::capabilities::RefStatus;
@@ -569,7 +570,7 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
                         .value
                         .as_ref()
                         .expect("the fixture leaves no tombstone winner");
-                    assert!(value.capabilities.is_empty());
+                    assert!(value.attachments.is_empty());
                     assert_eq!(entry.stamp.writer.as_bytes(), name.as_bytes());
                     ciborium::from_reader::<String, _>(value.body.as_slice()).unwrap()
                 })
@@ -1226,13 +1227,18 @@ impl<E: Incarnations> Harness<E> {
         publication: &str,
         contract: ContractIdentity,
     ) -> CapabilityRef {
-        self.shared
-            .observer
-            .mint_lazy(LazyEndpoint {
+        // The observer's instance, with this scenario's supervisor behind its lazy references.
+        let session = CapabilitySession::new(
+            self.host.clone(),
+            self.shared.observer_instance.clone(),
+            CapabilityLimits::default(),
+        );
+        session.attach_activator(supervisor.activator());
+        session
+            .mint_lazy(&PublicationEndpoint {
                 micro: MicroId::new(micro),
                 publication: publication.to_owned(),
                 contract,
-                activator: supervisor.activator(),
             })
             .unwrap()
     }
@@ -1298,6 +1304,7 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
         host: Host,
         instance: Instance,
         requirements: BTreeMap<String, CapabilityPublication>,
+        activator: Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
         let engine = Rc::clone(&self.engine);
         let shared = Rc::clone(&self.shared);
@@ -1317,6 +1324,7 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
                 arguments,
                 requirements,
                 publications: declared_publications(),
+                activator: Some(activator),
                 ..InitialContext::default()
             };
             let (runtime, driver) = engine

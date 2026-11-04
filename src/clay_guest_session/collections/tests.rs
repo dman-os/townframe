@@ -365,3 +365,68 @@ async fn timeout_completes_a_caught_up_read_with_an_empty_page() {
     assert_eq!(page.through, initial.through);
     assert!(page.bootstrap_complete);
 }
+
+fn endpoint_row() -> CollectionValue {
+    CollectionValue {
+        body: vec![0x80],
+        attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
+            micro: MicroId::new("counter"),
+            publication: "settings-view".to_owned(),
+            contract: ContractIdentity::new(
+                "townframe:dayframe",
+                "presentation-component",
+                (0, 4, 0),
+            ),
+        })],
+    }
+}
+
+#[tokio::test]
+async fn durable_rows_persist_endpoints_and_reload_them() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let open = || {
+        durable_bytes_registrations(
+            Arc::clone(&store),
+            b"settings.sections".to_vec(),
+            NonZeroUsize::new(8).unwrap(),
+            [1, 2],
+        )
+    };
+    let first = open().await.unwrap();
+    first
+        .install(
+            b"counter/manifest",
+            clay_collection::Retention::Installation,
+            WriterId::new("counter"),
+            std::collections::BTreeMap::from([(b"counter".to_vec(), Some(endpoint_row()))]),
+        )
+        .await
+        .unwrap()
+        .dispatch();
+    assert_eq!(
+        first.get(&b"counter".to_vec()).unwrap().value,
+        Some(endpoint_row())
+    );
+    drop(first);
+    let reloaded = open().await.unwrap();
+    assert_eq!(
+        reloaded.get(&b"counter".to_vec()).unwrap().value,
+        Some(endpoint_row())
+    );
+}
+
+#[test]
+#[should_panic(expected = "only attach endpoints")]
+fn the_durable_codec_refuses_a_live_publication() {
+    use crate::capabilities::CapabilityLimits;
+    use crate::capabilities::CapabilitySession;
+    let host = Host::new();
+    let provider =
+        CapabilitySession::new(host.clone(), host.start("p"), CapabilityLimits::default());
+    let lease = provider.publish_presentation("view").unwrap();
+    let value = CollectionValue {
+        body: vec![0x80],
+        attachments: vec![RowAttachment::Bound(lease.publication())],
+    };
+    (durable_codec().encode_value)(&value);
+}

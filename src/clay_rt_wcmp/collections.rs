@@ -259,14 +259,15 @@ fn change_to_wire(
             let value = match value {
                 None => None,
                 Some(value) => {
-                    let mut capabilities = Vec::with_capacity(value.capabilities.len());
-                    for publication in &value.capabilities {
+                    let mut capabilities = Vec::with_capacity(value.attachments.len());
+                    for attachment in &value.attachments {
                         let reference =
-                            state.capabilities.mint(publication).map_err(|failure| {
-                                wcmp::Error::Internal {
+                            state
+                                .capabilities
+                                .mint_attachment(attachment)
+                                .map_err(|failure| wcmp::Error::Internal {
                                     message: format!("{failure:?}"),
-                                }
-                            })?;
+                                })?;
                         match state.table.push(reference) {
                             Ok(resource) => capabilities.push(resource),
                             Err(error) => {
@@ -312,17 +313,14 @@ fn value_from_wire(
     state: &mut WcmpStoreState,
     value: wit::EncodedValue,
 ) -> wcmp::Result<CollectionValue> {
-    let mut capabilities = Vec::with_capacity(value.capabilities.len());
+    let mut attachments = Vec::with_capacity(value.capabilities.len());
     for reference in value.capabilities {
-        let publication = state.table.get(&reference)?.publication().expect(
-            "lazy references are not guest-mintable yet (C3b), so every attached reference is bound",
-        );
-        capabilities.push(publication);
+        attachments.push(state.table.get(&reference)?.attachment());
         state.table.delete(reference)?;
     }
     Ok(CollectionValue {
         body: value.body,
-        capabilities,
+        attachments,
     })
 }
 

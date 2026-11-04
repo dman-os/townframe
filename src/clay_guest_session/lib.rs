@@ -53,6 +53,10 @@ pub struct InitialContext {
     /// The publications the package's manifest declares, by name. What `initialize` returns is
     /// admitted against this (see [`capabilities::admit_publications`]).
     pub publications: BTreeMap<String, capabilities::DeclaredPublication>,
+    /// The supervisor's demand handle, behind the lazy references this incarnation mints from
+    /// stored endpoints (see [`capabilities::CapabilitySession::mint_lazy`]). `None` where no
+    /// supervisor runs (engine tests); minting a lazy reference then crashes.
+    pub activator: Option<clay_host::Activator<capabilities::CapabilityPublication>>,
 }
 
 /// A guest's own refusal to initialize, as opposed to a trap.
