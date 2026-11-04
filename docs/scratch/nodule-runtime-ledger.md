@@ -167,6 +167,7 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - **NSID is the schema id everywhere, aligned with AT Protocol** (a breaking change gets a new NSID). Clay contract and schema ids become NSIDs.
 - **Strict dependency rule:** referencing another plug's prefix requires declaring that plug as a dependency. Access requests name the datum NSIDs they touch. Broad untyped access ("any datum in this drawer or doc") may come later, but must be explicit in the manifest so audits can detect it. The default is least access.
 - Pending: micros calling nodule operations (D9).
+- **Shared request vocabulary candidate:** Clay's collection request `{binding, contract, access, necessity: required|optional, resolution: configured|at-runtime}` (Clay `af37bbcc`, `clay_mdk/manifest.rs`). Nodules today have only `requires: [nsid]`, with no binding or necessity. Settle the shared names with the Clay agent before either side hardens them.
 
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
