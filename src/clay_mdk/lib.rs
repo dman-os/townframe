@@ -359,14 +359,18 @@ macro_rules! __export_native_entry {
     ($activate:path) => {};
 }
 
-/// The guest half of [`export_micro!`].
+/// The guest half of [`export_micro!`]. Only a wasi target exports the component world: a native
+/// build of the same crate links through `ACTIVATE` instead (and a native `cdylib` has no
+/// component exports to link).
 #[doc(hidden)]
 #[macro_export]
 #[cfg(feature = "guest")]
 macro_rules! __export_guest_world {
     ($activate:path, $manifest:path) => {
+        #[cfg(target_os = "wasi")]
         struct ClayMdkExportedMicro;
 
+        #[cfg(target_os = "wasi")]
         impl $crate::micro_lifecycle::Guest for ClayMdkExportedMicro {
             type InstanceRoot = $crate::guest::GuestRoot;
 
@@ -387,6 +391,7 @@ macro_rules! __export_guest_world {
             }
         }
 
+        #[cfg(target_os = "wasi")]
         impl $crate::document_events::Guest for ClayMdkExportedMicro {
             fn changed(snapshot: $crate::documents::DocumentSnapshot) {
                 $crate::guest::Runtime::changed(snapshot);
@@ -401,6 +406,7 @@ macro_rules! __export_guest_world {
             }
         }
 
+        #[cfg(target_os = "wasi")]
         impl $crate::presentation_events::Guest for ClayMdkExportedMicro {
             fn mount(
                 publication: ::std::string::String,
@@ -425,6 +431,7 @@ macro_rules! __export_guest_world {
             }
         }
 
+        #[cfg(target_os = "wasi")]
         $crate::bindings::export!(ClayMdkExportedMicro with_types_in $crate::bindings);
     };
 }
