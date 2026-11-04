@@ -14,8 +14,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-clay_micro_core = { workspace = true }
 clay_dioxus = { workspace = true }
+ciborium.workspace = true
+clay_guest_session = { workspace = true }
+clay_host = { workspace = true }
 insta.workspace = true
-micro_settings = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

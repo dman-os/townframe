@@ -30,6 +30,8 @@ contributions:
     collection: settings.sections
     key: dayframe.counter
     payload:
+      detail:
+        $attachment: 0
       title: Counter (Wasm)
     attachments:
       - index: 0

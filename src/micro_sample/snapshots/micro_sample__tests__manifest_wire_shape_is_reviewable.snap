@@ -9,18 +9,11 @@ entrypoints:
   initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
   presentation: "townframe:dayframe/presentation-events@0.4.0"
   installer: ~
-provides:
-  - id: controller
-    contract:
-      id: sample.controller
-      version: 1
-    retention: strong
-requires:
-  - binding: settings
-    contract:
-      id: settings.sections
-      version: 1
-    necessity: required
+publications:
+  - name: detail
+    kind: presentation
+    contract: ~
+requires: []
 configuration_requests:
   - binding: sample
     facets:
@@ -32,13 +25,4 @@ configuration_requests:
         create: false
         delete: false
 collection_contracts: []
-contributions:
-  - id: settings-section
-    target_binding: settings
-    extension_contract:
-      id: settings.sections
-      version: 1
-    payload:
-      title: Sample micro
-    capability_slots: []
-activation_defaults: []
+contributions: []
