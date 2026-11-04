@@ -503,3 +503,20 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   exposed as the same call capability); whether the envelope's id/version replace the manifest's
   `id`/`package_version`. Schema gaps for later: lookup by schema id (not datum tag) and a repo
   that grows on plug import.
+
+## big_plugs rulings relayed by the peer (2026-11-04; operator rulings via ../townframe-p3N-2 session)
+
+- big_plugs = registry/catalog only (npm-like: versioned imports, semver, no enablement). Clay and
+  nodules each own enablement, bindings, grants, downgrades, readiness in their own datums.
+- The registry is a drawer; a plug is a document with Blob datums. Retention by reference: Clay's
+  desired-state drawer will name the plug doc and blobs it enabled (once on the real node).
+- NSIDs everywhere (AT Protocol): schema id is the NSID; breaking change = new NSID, no version
+  inside. Plan: `ContractIdentity {namespace, name, version}` and bare schema strings → NSID.
+- Envelope is authoritative for id, version, artifacts: drop `MicroManifest.id`/`package_version`
+  when aligning; digests are BLAKE3 (big_blobs), not SHA-256.
+- Strict dependencies: referencing another plug's NSID prefix requires declaring that plug as a
+  dependency; access requests name the datum NSIDs they touch.
+- Schema registry keyed by NSID on top of Cabinet's SchemaRepo, fed by plugs, grows at runtime.
+- Pending: micros requiring nodule operations by NSID.
+- Clay plan: alignment step after the envelope/section type names arrive (NSID rename, drop id/
+  package_version, BLAKE3); not started.
