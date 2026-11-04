@@ -6,9 +6,16 @@
 //! supervisor decides when an incarnation exists. A configured micro is started because it is
 //! an eager root, because a micro that requires it is being started, or because something
 //! [`Supervisor::acquire`]s one of its publications. Each resolved requirement becomes a
-//! [`Binding`] owned by the consumer incarnation and each acquisition a [`Lease`]; the provider
-//! stays live exactly while some binding or lease retains it, and a provider whose last
-//! retention drops is closed unless it is itself an eager root.
+//! [`Binding`] owned by the consumer incarnation and each acquisition a [`Lease`]. Every lease
+//! has a holder: an external root (a shell, a test, anything holding the supervisor's own
+//! [`Supervisor::activator`]) or the incarnation whose [`Factory::initialize`] was handed the
+//! activator the lease was acquired through. Bindings and incarnation-held leases are the
+//! edges `holder -> provider` of a retention graph; a provider stays live exactly while it is
+//! reachable in that graph from a root (an eager micro, an external lease, or an incarnation
+//! that is still starting or closing). Reference counting alone would let a disconnected
+//! cycle of incarnations that retain each other live forever, so when an edge drops the
+//! supervisor searches backwards from the provider for a root, and a provider with none closes
+//! together with the rest of its strongly connected group (ADR 030 §§2, 5).
 //!
 //! Closing is ordered: dependents close before their providers, `Root::close` runs while the
 //! closing incarnation's own bindings still hold its providers live, its publications are then
@@ -30,8 +37,6 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
@@ -128,6 +133,8 @@ pub enum StartError {
     Disabled(MicroId),
     #[error("{0} needs configuration of {1:?}")]
     Unconfigured(MicroId, Vec<String>),
+    /// Either a configured requirement cycle, or a demand that would wait on an activation which
+    /// is itself (transitively) waiting on the demander's own staged outcome.
     #[error("requirement cycle through {0}")]
     Cycle(MicroId),
     #[error("requirement {binding} unavailable: {cause}")]
@@ -167,21 +174,41 @@ pub enum MicroState {
     Faulted(String),
 }
 
-/// An external strong edge to one publication of one incarnation (ADR 030 §2, ADR 031 §9).
-/// While any lease on an incarnation lives, it is retained. Dropping the last one makes a
-/// non-eager incarnation without bindings eligible for idle close, which
-/// [`Supervisor::drive`] performs. The lease dereferences to the publication it was acquired
-/// for; after its incarnation closes, the publication is revoked and the lease is inert.
+/// A strong edge `holder -> provider` to one publication of one incarnation (ADR 030 §2,
+/// ADR 031 §9). The holder is recorded when the lease is acquired: an external root for a lease
+/// taken through [`Supervisor::acquire`] or [`Supervisor::activator`], the acquiring incarnation
+/// for one taken through the activator its factory was handed. While the holder is reachable
+/// from a root the provider is retained; dropping the edge makes the provider a candidate for
+/// an idle close, which [`Supervisor::drive`] decides by reachability. The lease dereferences
+/// to the publication it was acquired for; after its incarnation closes, the publication is
+/// revoked and the lease is inert.
 pub struct Lease<P> {
     publication: P,
     micro: MicroId,
+    holder: Holder,
     /// The leases on the incarnation this one was acquired from.
-    retention: Arc<AtomicUsize>,
+    retention: Arc<Leases>,
     idle: Arc<Idle>,
 }
 
-/// Micros whose last lease dropped. `Lease::drop` is synchronous and cannot close anything,
-/// so it enqueues here and wakes `Supervisor::drive`.
+/// Who holds a lease. An incarnation is named by its scope id, which is never reused, so a
+/// lease that outlives its holder cannot be mistaken for one of the replacement's.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Holder {
+    /// A root outside the supervisor's graph: a shell mount, a test, an in-flight call from one.
+    External,
+    Incarnation(u64),
+}
+
+/// The live leases on one incarnation, counted per holder. `Lease::drop` is synchronous and
+/// may run on any thread, hence the mutex.
+#[derive(Default)]
+struct Leases(Mutex<BTreeMap<Holder, usize>>);
+
+/// Micros one of whose holders dropped its last lease on them. `Lease::drop` is synchronous and
+/// cannot close anything, so it enqueues here and wakes `Supervisor::drive`, which decides by
+/// reachability. A drop is the only event that can make a retained micro unreachable besides a
+/// close (which re-checks its configured providers itself), so nothing recomputes on reads.
 #[derive(Default)]
 struct Idle {
     queue: Mutex<VecDeque<MicroId>>,
@@ -193,6 +220,8 @@ struct Idle {
 /// `acquire` makes progress only while a driver runs. The supervisor outlives every
 /// incarnation (shutdown closes them first), so a closed channel here is an invariant break.
 pub struct Activator<P> {
+    /// Who holds the leases acquired through this handle.
+    holder: Holder,
     requests: mpsc::UnboundedSender<Request<P>>,
     mirror: Arc<Mutex<BTreeMap<MicroId, MicroState>>>,
     /// The supervisor's change counter, so [`Self::changes`] can wake whoever acts on a
@@ -222,6 +251,7 @@ impl<P> Drop for ServedRequests<'_, P> {
 }
 
 struct Request<P> {
+    holder: Holder,
     micro: MicroId,
     publication: String,
     reply: oneshot::Sender<Result<Lease<P>, StartError>>,
@@ -242,6 +272,34 @@ pub struct Supervisor<P> {
 
 struct Inner<P> {
     nodes: BTreeMap<MicroId, Node<P>>,
+    /// Pending activations blocked on another micro's activation: `waiter -> targets`, one
+    /// entry per outstanding wait (see [`Waiting`]). A demand that would close a loop in this
+    /// graph would wait on its own staged outcome forever, so it fails with
+    /// [`StartError::Cycle`] instead.
+    waits: BTreeMap<MicroId, Vec<MicroId>>,
+}
+
+/// One outstanding wait recorded in [`Inner::waits`], removed when dropped, so a cancelled
+/// activation cannot leave a stale edge behind.
+struct Waiting<'a, P> {
+    inner: &'a RefCell<Inner<P>>,
+    waiter: MicroId,
+    target: MicroId,
+}
+
+impl<P> Drop for Waiting<'_, P> {
+    fn drop(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        let targets = inner.waits.get_mut(&self.waiter).unwrap();
+        let at = targets
+            .iter()
+            .position(|target| *target == self.target)
+            .unwrap();
+        targets.swap_remove(at);
+        if targets.is_empty() {
+            inner.waits.remove(&self.waiter);
+        }
+    }
 }
 
 struct Node<P> {
@@ -262,7 +320,7 @@ enum NodeState<P> {
         root: Box<dyn Root>,
         publications: BTreeMap<String, P>,
         providers: Vec<MicroId>,
-        leases: Arc<AtomicUsize>,
+        leases: Arc<Leases>,
     },
     Closing(Instance),
     Faulted(String),
@@ -312,7 +370,10 @@ impl<P: Clone + 'static> Supervisor<P> {
         let (requests, served) = mpsc::unbounded_channel();
         Self {
             host,
-            inner: RefCell::new(Inner { nodes }),
+            inner: RefCell::new(Inner {
+                nodes,
+                waits: BTreeMap::new(),
+            }),
             idle: Arc::default(),
             requests,
             served: RefCell::new(Some(served)),
@@ -326,8 +387,14 @@ impl<P: Clone + 'static> Supervisor<P> {
         self.changes.subscribe()
     }
 
+    /// A handle for an external root: leases acquired through it are held by that root.
     pub fn activator(&self) -> Activator<P> {
+        self.activator_for(Holder::External)
+    }
+
+    fn activator_for(&self, holder: Holder) -> Activator<P> {
         Activator {
+            holder,
             requests: self.requests.clone(),
             mirror: Arc::clone(&self.mirror),
             changes: Arc::clone(&self.changes),
@@ -368,8 +435,25 @@ impl<P: Clone + 'static> Supervisor<P> {
         micro: &MicroId,
         publication: &str,
     ) -> Result<Lease<P>, StartError> {
-        self.start(micro).await?;
-        let leased = self.lease(micro, publication);
+        self.acquire_as(Holder::External, micro, publication).await
+    }
+
+    /// [`Self::acquire`] on behalf of `holder`. A holder that is itself still initializing is
+    /// blocked on this demand, which is recorded as a wait so a demand cycle is found.
+    async fn acquire_as(
+        &self,
+        holder: Holder,
+        micro: &MicroId,
+        publication: &str,
+    ) -> Result<Lease<P>, StartError> {
+        let waiter = match holder {
+            Holder::External => None,
+            Holder::Incarnation(id) => self.initializing_micro(id),
+        };
+        let _waiting = waiter.as_ref().map(|waiter| self.waiting(waiter, micro));
+        self.start_visiting(micro.clone(), BTreeSet::new(), waiter.clone())
+            .await?;
+        let leased = self.lease(holder, micro, publication);
         if leased.is_err() {
             // The demand may have been what started it, and no lease exists whose drop would
             // queue the idle check.
@@ -380,8 +464,8 @@ impl<P: Clone + 'static> Supervisor<P> {
     }
 
     /// Serve the supervisor's deferred work for its whole life: [`Activator`] requests, and
-    /// idle closes whenever a micro's last [`Lease`] drops while nothing else retains it and it
-    /// is not an eager root. There is no grace period. Work runs concurrently, so one slow
+    /// idle closes whenever a [`Lease`] edge drops and its provider is no longer reachable from
+    /// a root, along with the unreachable cycle it belongs to. There is no grace period. Work runs concurrently, so one slow
     /// activation does not delay an idle close. A failed close is recorded as the micro's
     /// `Faulted` state, which is where it is observed, so one micro's failure does not stop
     /// the others. The host spawns this on its local executor and drops it at shutdown.
@@ -400,10 +484,10 @@ impl<P: Clone + 'static> Supervisor<P> {
         loop {
             tokio::select! {
                 request = served.receiver.as_mut().unwrap().recv() => {
-                    let Request { micro, publication, reply } =
+                    let Request { holder, micro, publication, reply } =
                         request.expect("the supervisor holds a sender");
                     work.push(Box::pin(async move {
-                        let leased = self.acquire(&micro, &publication).await;
+                        let leased = self.acquire_as(holder, &micro, &publication).await;
                         // The requester may have been cancelled meanwhile; dropping the lease
                         // then enqueues the micro for an idle check like any other release.
                         drop(reply.send(leased));
@@ -421,23 +505,76 @@ impl<P: Clone + 'static> Supervisor<P> {
     }
 
     async fn close_if_idle(&self, micro: MicroId) {
-        let idle = self.inner.borrow().nodes[&micro].is_idle(&self.host);
-        if idle && let Err(CloseError(_)) = self.close(micro).await {
-            // `close` already recorded each failure as `Faulted` on the micro it concerns,
-            // which is where it is observed; nothing is lost by carrying on.
+        // `close` already recorded each failure as `Faulted` on the micro it concerns, which is
+        // where it is observed; nothing is lost by carrying on.
+        drop(self.close_unreachable(&micro).await);
+    }
+
+    /// The micro of the incarnation `id` while that incarnation is initializing.
+    fn initializing_micro(&self, id: u64) -> Option<MicroId> {
+        self.inner
+            .borrow()
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                matches!(&node.state, NodeState::Initializing(instance, _) if instance.scope_id().0 == id)
+            })
+            .map(|(micro, _)| micro.clone())
+    }
+
+    /// Record that `waiter`'s activation is blocked on `target`'s until the guard drops.
+    fn waiting(&self, waiter: &MicroId, target: &MicroId) -> Waiting<'_, P> {
+        self.inner
+            .borrow_mut()
+            .waits
+            .entry(waiter.clone())
+            .or_default()
+            .push(target.clone());
+        Waiting {
+            inner: &self.inner,
+            waiter: waiter.clone(),
+            target: target.clone(),
         }
+    }
+
+    /// Whether `waiter` waiting on `target`'s activation would wait on itself: `target` is
+    /// `waiter`, or is pending and (transitively, through pending activations only) waits on
+    /// it. An activation that already finished waits on nothing, whatever a detached task of
+    /// it still has outstanding.
+    fn would_wait_on_itself(&self, waiter: &MicroId, target: &MicroId) -> bool {
+        let inner = self.inner.borrow();
+        let mut frontier = vec![target];
+        let mut seen = BTreeSet::new();
+        while let Some(micro) = frontier.pop() {
+            if micro == waiter {
+                return true;
+            }
+            if seen.insert(micro)
+                && matches!(
+                    inner.nodes[micro].state,
+                    NodeState::Starting(_) | NodeState::Initializing(..)
+                )
+            {
+                frontier.extend(inner.waits.get(micro).into_iter().flatten());
+            }
+        }
+        false
     }
 
     /// Bring `identity` live, starting the providers its requirements resolve to first.
     /// A faulted micro is not retried by demand; see [`Self::retry`].
     async fn start(&self, identity: &MicroId) -> Result<(), StartError> {
-        self.start_visiting(identity.clone(), BTreeSet::new()).await
+        self.start_visiting(identity.clone(), BTreeSet::new(), None)
+            .await
     }
 
+    /// `waiter` is the pending activation, if any, whose progress is blocked on this one:
+    /// the consumer starting its provider, or the initializing incarnation that demanded it.
     fn start_visiting(
         &self,
         identity: MicroId,
         mut visiting: BTreeSet<MicroId>,
+        waiter: Option<MicroId>,
     ) -> LocalFuture<'_, Result<(), StartError>> {
         Box::pin(async move {
             if visiting.contains(&identity) {
@@ -447,7 +584,17 @@ impl<P: Clone + 'static> Supervisor<P> {
                 match self.next(&identity)? {
                     Next::Done => return Ok(()),
                     Next::Start => break,
-                    Next::AwaitOutcome(outcome) => outcome.notified().await,
+                    Next::AwaitOutcome(outcome) => {
+                        // Waiting on a pending activation that is itself waiting on ours
+                        // would never resolve. The wait edges are recorded before any await,
+                        // so of two demands racing into each other the second sees the first.
+                        if let Some(waiter) = &waiter
+                            && self.would_wait_on_itself(waiter, &identity)
+                        {
+                            return Err(StartError::Cycle(identity));
+                        }
+                        outcome.notified().await;
+                    }
                     Next::AwaitClosed(instance) => self.host.await_close(&instance).await,
                 }
             }
@@ -461,10 +608,16 @@ impl<P: Clone + 'static> Supervisor<P> {
             self.set(&identity, NodeState::Starting(Rc::default()));
             let mut providers = Vec::new();
             for (binding, requirement) in &requirements {
-                if let Err(cause) = self
-                    .start_visiting(requirement.provider.clone(), visiting.clone())
-                    .await
-                {
+                let waiting = self.waiting(&identity, &requirement.provider);
+                let started = self
+                    .start_visiting(
+                        requirement.provider.clone(),
+                        visiting.clone(),
+                        Some(identity.clone()),
+                    )
+                    .await;
+                drop(waiting);
+                if let Err(cause) = started {
                     if matches!(cause, StartError::Cycle(_)) {
                         self.set(&identity, NodeState::Idle);
                         self.release(providers).await;
@@ -527,6 +680,8 @@ impl<P: Clone + 'static> Supervisor<P> {
                 .initialize(identity.as_str(), |instance| {
                     let host = host.clone();
                     let identity = identity.clone();
+                    // Leases the incarnation takes through this handle are held by it.
+                    let activator = self.activator_for(Holder::Incarnation(instance.scope_id().0));
                     async move {
                         // Bindings are the consumer's first owned effects, so its teardown
                         // releases them last: its providers outlive every other cleanup.
@@ -544,7 +699,7 @@ impl<P: Clone + 'static> Supervisor<P> {
                             NodeState::Initializing(instance.clone(), outcome),
                         );
                         factory
-                            .initialize(host, instance, resolved, self.activator())
+                            .initialize(host, instance, resolved, activator)
                             .await
                             .map_err(StartError::Faulted)
                     }
@@ -664,7 +819,12 @@ impl<P: Clone + 'static> Supervisor<P> {
     /// A lease on `publication` of the live incarnation of `micro`. `start` returns `Ok` only
     /// in the poll that observed or established `Active`, with no `.await` after it, so no
     /// other task can have closed the incarnation by the time this runs.
-    fn lease(&self, micro: &MicroId, publication: &str) -> Result<Lease<P>, StartError> {
+    fn lease(
+        &self,
+        holder: Holder,
+        micro: &MicroId,
+        publication: &str,
+    ) -> Result<Lease<P>, StartError> {
         let inner = self.inner.borrow();
         let NodeState::Active {
             publications,
@@ -681,10 +841,11 @@ impl<P: Clone + 'static> Supervisor<P> {
                 publication: publication.to_owned(),
             })?
             .clone();
-        leases.fetch_add(1, Ordering::AcqRel);
+        *leases.0.lock().unwrap().entry(holder).or_default() += 1;
         Ok(Lease {
             publication,
             micro: micro.clone(),
+            holder,
             retention: Arc::clone(leases),
             idle: Arc::clone(&self.idle),
         })
@@ -808,17 +969,114 @@ impl<P: Clone + 'static> Supervisor<P> {
         })
     }
 
-    /// Close each of `providers` that is live, not an eager root, and no longer retained by a
-    /// binding or a lease. Close failures are also recorded as each provider's fault.
+    /// Close each of `providers` that is live and no longer reachable from a root, with the
+    /// unreachable cycle it belongs to. Close failures are also recorded as each provider's
+    /// fault.
     async fn release(&self, providers: Vec<MicroId>) -> CloseError {
         let mut failures = CloseError::default();
         for provider in providers {
-            let unneeded = self.inner.borrow().nodes[&provider].is_idle(&self.host);
-            if unneeded && let Err(error) = self.close(provider).await {
+            failures.0.extend(self.close_unreachable(&provider).await.0);
+        }
+        failures
+    }
+
+    /// Close `micro` if nothing reachable from a root retains it, together with every micro in
+    /// its strongly connected group (ADR 030 §5): members that only retain each other. They
+    /// begin closing together, so each member's guest close runs once with its peers possibly
+    /// already revoked, and each close's own teardown drops its leases, which queue the next
+    /// reachability check (step 6: recomputed after each close).
+    async fn close_unreachable(&self, micro: &MicroId) -> CloseError {
+        let group = self.unreachable_group(micro);
+        let mut failures = CloseError::default();
+        for closed in
+            futures::future::join_all(group.into_iter().map(|member| self.close(member))).await
+        {
+            if let Err(error) = closed {
                 failures.0.extend(error.0);
             }
         }
         failures
+    }
+
+    /// Empty while `start` is retained from a root; otherwise `start` and the micros that are
+    /// both reachable from it and retain it, which are exactly its strongly connected group.
+    ///
+    /// The search runs backwards from `start` over the retainers of each micro (the holders of
+    /// its leases and the micros that configure a strong requirement on it) and stops at the
+    /// first root: an eager micro, an external lease, or an incarnation that is still
+    /// initializing or already closing (or no longer supervised), whose leases are therefore
+    /// not going away on their own. Its cost is the size of `start`'s ancestry, and it runs
+    /// only when an edge was dropped, never on a read. Every micro it visits without finding a
+    /// root is unreachable, and the group is the part of them `start` reaches forward.
+    fn unreachable_group(&self, start: &MicroId) -> Vec<MicroId> {
+        let inner = self.inner.borrow();
+        let mut retainers: BTreeMap<&MicroId, Vec<&MicroId>> = BTreeMap::new();
+        let mut frontier = vec![start];
+        while let Some(micro) = frontier.pop() {
+            if retainers.contains_key(micro) {
+                continue;
+            }
+            let node = &inner.nodes[micro];
+            // Only `start` can be something other than active: retainers are pushed below
+            // only when they are.
+            let NodeState::Active { leases, .. } = &node.state else {
+                return Vec::new();
+            };
+            if node.config.eager {
+                return Vec::new();
+            }
+            let mut found = Vec::new();
+            for holder in leases.0.lock().unwrap().keys() {
+                let Holder::Incarnation(id) = holder else {
+                    return Vec::new();
+                };
+                match inner
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.live().is_some_and(|live| live.scope_id().0 == *id))
+                {
+                    Some((holder, node)) if matches!(node.state, NodeState::Active { .. }) => {
+                        found.push(holder);
+                    }
+                    _ => return Vec::new(),
+                }
+            }
+            for (consumer, node) in &inner.nodes {
+                if !node
+                    .config
+                    .requirements
+                    .values()
+                    .any(|requirement| requirement.provider == *micro)
+                {
+                    continue;
+                }
+                match node.state {
+                    NodeState::Active { .. } => found.push(consumer),
+                    // Starting, initializing and closing consumers hold their bindings.
+                    NodeState::Starting(_)
+                    | NodeState::Initializing(..)
+                    | NodeState::Closing(_) => {
+                        return Vec::new();
+                    }
+                    _ => {}
+                }
+            }
+            frontier.extend(found.iter().copied());
+            retainers.insert(micro, found);
+        }
+        let mut group = BTreeSet::new();
+        let mut frontier = vec![start];
+        while let Some(micro) = frontier.pop() {
+            if group.insert(micro) {
+                frontier.extend(
+                    retainers
+                        .iter()
+                        .filter(|(_, held)| held.contains(&micro))
+                        .map(|(retained, _)| *retained),
+                );
+            }
+        }
+        group.into_iter().cloned().collect()
     }
 
     /// Re-record `identity`'s state in the mirror and tick the change counter.
@@ -868,20 +1126,6 @@ impl<P> Node<P> {
             _ => None,
         }
     }
-
-    /// Active, not an eager root, and retained by neither a consumer binding nor a lease.
-    fn is_idle(&self, host: &Host) -> bool {
-        match &self.state {
-            NodeState::Active {
-                instance, leases, ..
-            } => {
-                !self.config.eager
-                    && leases.load(Ordering::Acquire) == 0
-                    && !host.is_bound(instance)
-            }
-            _ => false,
-        }
-    }
 }
 
 impl<P> NodeState<P> {
@@ -901,6 +1145,7 @@ impl<P> NodeState<P> {
 impl<P> Clone for Activator<P> {
     fn clone(&self) -> Self {
         Self {
+            holder: self.holder,
             requests: self.requests.clone(),
             mirror: Arc::clone(&self.mirror),
             changes: Arc::clone(&self.changes),
@@ -917,6 +1162,7 @@ impl<P> Activator<P> {
     ) -> Result<Lease<P>, StartError> {
         let (reply, response) = oneshot::channel();
         let request = Request {
+            holder: self.holder,
             micro: micro.clone(),
             publication: publication.to_owned(),
             reply,
@@ -954,7 +1200,14 @@ impl<P> Deref for Lease<P> {
 
 impl<P> Drop for Lease<P> {
     fn drop(&mut self) {
-        if self.retention.fetch_sub(1, Ordering::AcqRel) == 1 {
+        let mut holders = self.retention.0.lock().unwrap();
+        let count = holders.get_mut(&self.holder).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            // This holder's edge is gone; whether the provider is still reachable some other
+            // way is the driver's question.
+            holders.remove(&self.holder);
+            drop(holders);
             self.idle
                 .queue
                 .lock()
