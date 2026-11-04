@@ -15,28 +15,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::rc::Rc;
 
-#[cfg(feature = "view")]
-use crate::ComponentRef;
-#[cfg(feature = "view")]
-use crate::Instance;
 #[cfg(feature = "in_process")]
 use clay_dioxus::ComponentMount;
-
-/// The view-side counterpart of [`crate::Context::publish_component`]: mounts a published
-/// component into the host tree, resolving the renderer registry from Dioxus context.
-#[cfg(feature = "view")]
-#[derive(Props, Clone, PartialEq)]
-pub struct ComponentSlotProps {
-    pub owner: Instance,
-    pub reference: ComponentRef,
-}
-
-#[cfg(feature = "view")]
-#[expect(non_snake_case, reason = "Dioxus component naming")]
-pub fn ComponentSlot(props: ComponentSlotProps) -> Element {
-    let reference = props.reference.host();
-    rsx! { ComponentMount { owner: props.owner, reference } }
-}
 
 #[derive(Props, Clone, PartialEq)]
 pub struct PresentationSlotProps {

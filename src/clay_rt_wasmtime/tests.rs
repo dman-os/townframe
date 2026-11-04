@@ -1132,7 +1132,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     host.close_instance(&owner).unwrap();
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     assert_eq!(
-        runtime.mount("view", writer.clone(), &[]).err(),
+        runtime.mount("view", writer.clone()).err(),
         Some(PresentationError::Revoked)
     );
     assert!(writer.is_live());
@@ -1177,7 +1177,7 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
             .unwrap();
     let writer = Arc::new(LiveSink(AtomicBool::new(false)));
     let session = runtime
-        .mount("view", Arc::clone(&writer) as _, &[])
+        .mount("view", Arc::clone(&writer) as _)
         .expect("mount must complete before dispatch blocks");
     assert!(writer.is_live());
 
@@ -1293,7 +1293,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     .await
     .unwrap();
     let writer = Arc::new(RecordingSink::new());
-    let surface = runtime.mount("view", writer.clone(), &[]).unwrap();
+    let surface = runtime.mount("view", writer.clone()).unwrap();
     assert_eq!(
         writer.tree(SurfaceTree::text_content),
         "3Pending counter writes: 0Refresh counter"
@@ -1386,7 +1386,7 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     .unwrap();
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
-        let session = runtime.mount("view", writer.clone(), &[]).unwrap();
+        let session = runtime.mount("view", writer.clone()).unwrap();
         let text = writer
             .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
             .await;
@@ -1502,7 +1502,7 @@ async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount("view", Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("view", Arc::<RecordingSink>::clone(&writer))
             .unwrap();
         writer.wait_for(|text| text.contains("status=live")).await;
         let command = |element: u32| {
@@ -1605,7 +1605,7 @@ async fn collection_probe_capability_publication_redemption_and_closure_cross_th
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount("view", Arc::<RecordingSink>::clone(&writer), &[])
+            .mount("view", Arc::<RecordingSink>::clone(&writer))
             .unwrap();
         writer.wait_for(|text| text.contains("status=live")).await;
         let command = |element: u32| {

@@ -226,7 +226,7 @@ src/
                      on clay_micro_core. ResourceTable and generated ABI types remain here.
   clay_mdk/          the Micro Development Kit (§5). Features: `in_process` (authoring over
                      clay_host/clay_docs/clay_micro_core, renderer-agnostic), `view` (its Dioxus
-                     half: ComponentSlot, use_collection), `wasmtime` (engine-backed providers
+                     half: PresentationSlot, use_rows), `wasmtime` (engine-backed providers
                      for composition roots), `wit` (guest bindings and the guest Context), and
                      `dioxus` (the guest VirtualDom adapter, GuestDom, export_micro!).
   micro_<name>_manifest/  a micro family's contract crate: id, provisions, requirements, facet

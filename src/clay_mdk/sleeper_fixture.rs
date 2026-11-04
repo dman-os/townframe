@@ -46,7 +46,6 @@ impl presentation_events::Guest for Sleeper {
     fn mount(
         _publication: String,
         placement: &presentation::MountPoint,
-        _components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {
         let surface = placement.open()?;
         let mut edits = WireMutations::default();

@@ -128,6 +128,23 @@ impl WcmpStoreState {
         Self::new(host, instance, limits, mpsc::unbounded_channel().0)
     }
 
+    /// Push component handles the way a capability redemption does (and under its limit), for
+    /// tests that drive the presentation imports with handles of their own.
+    pub fn grant_components(
+        &mut self,
+        components: &[ComponentRef],
+    ) -> Result<Vec<Resource<WcmpComponentRef>>, PresentationError> {
+        self.presentation.admit_components(components.len())?;
+        Ok(components
+            .iter()
+            .map(|&reference| {
+                self.table
+                    .push(WcmpComponentRef(reference))
+                    .expect("bounded component resource table")
+            })
+            .collect())
+    }
+
     /// How many call handlers are in the store.
     pub fn calls_in_flight(&self) -> usize {
         self.calls_in_flight.load(Ordering::Acquire)
@@ -163,21 +180,6 @@ impl WcmpStoreState {
             },
             incoming,
         ))
-    }
-
-    pub fn grant_components(
-        &mut self,
-        components: &[ComponentRef],
-    ) -> Result<Vec<Resource<WcmpComponentRef>>, PresentationError> {
-        self.presentation.admit_components(components.len())?;
-        Ok(components
-            .iter()
-            .map(|&reference| {
-                self.table
-                    .push(WcmpComponentRef(reference))
-                    .expect("bounded component resource table")
-            })
-            .collect())
     }
 }
 
@@ -701,19 +703,8 @@ impl WcmpRuntime {
         &self,
         publication: &str,
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
-        components: &[ComponentRef],
     ) -> Result<SurfaceSession, PresentationError> {
-        for &reference in components {
-            self.host
-                .check_component(reference)
-                .map_err(|error| match error {
-                    clay_host::AccessError::Revoked => PresentationError::Revoked,
-                    clay_host::AccessError::Denied => PresentationError::InvalidBatch(
-                        "component grant belongs to another host".into(),
-                    ),
-                })?;
-        }
-        let surface = self.mount_guest_surface(publication, &writer, components)?;
+        let surface = self.mount_guest_surface(publication, &writer)?;
         let dispatch = self.clone();
         let dispatch_writer = Arc::clone(&writer);
         let unmount = self.clone();
@@ -727,7 +718,6 @@ impl WcmpRuntime {
         &self,
         publication: &str,
         writer: &Arc<dyn SurfaceSink<ComponentRef>>,
-        components: &[ComponentRef],
     ) -> Result<u32, PresentationError> {
         let mut guard = self.incarnation.borrow_mut();
         if self.host.check(&self.instance).is_err() {
@@ -736,7 +726,6 @@ impl WcmpRuntime {
         let Some(active) = guard.as_mut() else {
             return Err(PresentationError::Revoked);
         };
-        let components = active.store.data_mut().grant_components(components)?;
         let placement = active
             .store
             .data_mut()
@@ -755,7 +744,6 @@ impl WcmpRuntime {
                     &mut active.store,
                     publication,
                     Resource::new_borrow(placement_rep),
-                    components,
                 ),
             &active.waker,
         ) {

@@ -176,9 +176,7 @@ impl presentation_events::Guest for CollectionProbe {
     fn mount(
         _publication: String,
         placement: &presentation::MountPoint,
-        components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {
-        assert!(components.is_empty());
         let surface = placement.open()?;
         let retained = surface.retain()?;
         let identity = surface.identity();

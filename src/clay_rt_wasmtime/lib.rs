@@ -304,18 +304,9 @@ impl WasmStoreState {
     ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
         Self::new(host, instance, limits, mpsc::unbounded_channel().0)
     }
-}
 
-impl WasiView for WasmStoreState {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
-    }
-}
-
-impl WasmStoreState {
+    /// Push component handles the way a capability redemption does (and under its limit), for
+    /// tests that drive the presentation imports with handles of their own.
     fn grant_components(
         &mut self,
         components: &[ComponentRef],
@@ -331,7 +322,18 @@ impl WasmStoreState {
             })
             .collect())
     }
+}
 
+impl WasiView for WasmStoreState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
+}
+
+impl WasmStoreState {
     fn new(
         host: Host,
         instance: Instance,
@@ -626,8 +628,8 @@ fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
 
 impl WasmPackage {
     /// Load a component artifact prepared by `x/check-dayframe.ts`, named by the environment
-    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `slots` →
-    /// `DAYFRAME_SLOTS_COMPONENT`). Test and fixture code only: compositions that ship a package
+    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
+    /// `DAYFRAME_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
     /// embed or fetch it themselves.
     pub async fn from_env(name: &str) -> Result<Self, String> {
         let variable = format!(
@@ -948,24 +950,12 @@ impl WasmRuntime {
         &self,
         publication: &str,
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
-        components: &[ComponentRef],
     ) -> Result<SurfaceSession, PresentationError> {
-        for &reference in components {
-            self.host
-                .check_component(reference)
-                .map_err(|error| match error {
-                    clay_host::AccessError::Revoked => PresentationError::Revoked,
-                    clay_host::AccessError::Denied => PresentationError::InvalidBatch(
-                        "component grant belongs to another host".into(),
-                    ),
-                })?;
-        }
         let instance_for_surface = self.instance.clone();
         let incarnation_for_surface = self.incarnation.clone();
         let surface_rep = self.mount_guest_surface(
             publication,
             &writer,
-            components,
             &instance_for_surface,
             &incarnation_for_surface,
         )?;
@@ -1080,7 +1070,6 @@ impl WasmRuntime {
         &self,
         publication: &str,
         writer: &Arc<dyn SurfaceSink<ComponentRef>>,
-        components: &[ComponentRef],
         instance: &Instance,
         incarnation: &Arc<Mutex<Option<WasmIncarnation>>>,
     ) -> Result<u32, PresentationError> {
@@ -1092,7 +1081,6 @@ impl WasmRuntime {
         let Some(active) = guard.as_mut() else {
             return Err(PresentationError::Revoked);
         };
-        let components = active.store.data_mut().grant_components(components)?;
         let placement = active
             .store
             .data_mut()
@@ -1109,7 +1097,6 @@ impl WasmRuntime {
                     &mut active.store,
                     publication,
                     Resource::new_borrow(placement_rep),
-                    &components,
                 ),
             &active.waker,
         ) {
