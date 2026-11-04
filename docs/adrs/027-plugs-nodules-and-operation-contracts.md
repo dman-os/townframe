@@ -9,9 +9,11 @@ responsibilities, authority model, versioning, and staged scope. Concrete wire/g
 contracts still needing specification are listed in §10; they do not reopen the
 decisions below. The operator-approved runtime decisions D1-D6 of the
 [runtime ledger](../scratch/nodule-runtime-ledger.md) are folded in as normative text
-(2026-11-04). Items from the [lifecycle review](../scratch/nodule-lifecycle-review.md)
-that the operator has not decided are listed only under "Proposed, pending operator
-review" in §10.
+(2026-11-04). The [lifecycle review](../scratch/nodule-lifecycle-review.md) questions are resolved in §10.
+
+**Amended by:** [ADR 028](028-plug-identity-naming-and-dependencies.md) on plug identity,
+naming, dependencies, forks and substitution. Where this ADR describes package dependencies or
+the catalog role, ADR 028 is authoritative.
 
 **Updated:** 2026-11-04
 
@@ -1020,31 +1022,35 @@ BigSync backends, generic cross-nodule SQL, distributed tasks, and confidential 
 execution are later work. Local routing/exposure controls must leave room for them
 without claiming a portable capability-token format or implementing them now.
 
-### Proposed, pending operator review
+### Lifecycle review questions: resolved (2026-11-04)
 
-These come from the [lifecycle review](../scratch/nodule-lifecycle-review.md) and are
-**not decided**. They are listed so they are not lost; nothing above depends on them.
+The questions from the [lifecycle review](../scratch/nodule-lifecycle-review.md) were settled with
+the operator; [ADR 028](028-plug-identity-naming-and-dependencies.md) records the plug-level
+decisions in full.
 
-- **Catalog role (review §1).** Keep the inline envelope in `NoduleInstall`; reduce the
-  catalog to a distribution tool (import, version resolution, fetching and pinning
-  artifacts) and drop the in-memory `Catalog` unless a consumer appears.
-- **Dependency split (review §1).** Package dependencies (`Plug.dependencies`) are a
-  distribution concern resolved at import; runtime dependencies are operation NSIDs
-  (`requires`) resolved by dispatch, and a missing provider makes the dependent's
-  services `Unavailable(ProviderMissing)` instead of refusing installation.
-- **Manifest reshape (review §2).** Collapse `routines` into one XRPC handler component
-  plus `implements: [NSID]`; workflows become a section owned by the wflow service.
-- **Initialization redesign (review §4).** `Initializer{key, target, mode}` with
-  `PerNode` and `PerStart` modes, done-ness keyed by (nodule, key, version label),
-  idempotency-key-based shared inits instead of a synced `PerInstall`, readiness gating
-  (`Unavailable(Initializing)`) instead of queues, ordering by the operation graph,
-  `InitFailed` recorded without a hidden retry loop, settings via a facility.
-- **Downgrades (review §5).** Allow downgrade as explicit operator intent and gate on
-  contract safety (a dependent becomes `ProviderMissing`) instead of version order.
-- **Retired prefixes (review §6).** Restrict the NSID-prefix overlap check to installed
-  plugs so a retired actor's prefix stops blocking others.
-- **Drawer-grant authority (review §6).** `setNoduleDrawerGrants` carries the operator's
-  delegated capability for the drawer instead of pre-granting the nodules actor Admin.
+- **Catalog role (review §1).** big_plugs is a registry, like npm, and does no enablement. The
+  registry is a drawer whose plug documents hold immutable versions and their `Blob` datums. Each
+  runtime keeps the manifest it enabled (the inline envelope in `NoduleInstall`) and references
+  the artifacts from its own drawer, so a plug the registry drops stays usable wherever it is
+  enabled (ADR 028 §1).
+- **Dependency split (review §1).** Manifests depend on the NSIDs they use, not on plugs, in the
+  shared request shape with `necessity` and `minRevision`. Plug-to-plug dependencies are a
+  delivery hint for a future fetch layer, and enablement is refused until every required NSID
+  resolves (ADR 028 §4).
+- **Manifest reshape (review §2).** Done: one XRPC handler plus `implements`, with bindings
+  carried opaquely (§2 above).
+- **Initialization redesign (review §4).** Done, with run modes `Once` (per node per revision)
+  and `EveryStart`. Done-ness is host-local and keyed by (plug, init key, revision), so there is
+  no synced `PerInstall`. Readiness is gated by `Initializing`/`InitFailed` instead of queues.
+  Local targets are called directly on the provider, and foreign targets go through dispatch
+  under the nodule's operation grant. Waiters are woken on any readiness transition.
+- **Downgrades (review §5).** Allowed as an explicit runtime action. They are a runtime concern,
+  not a catalog one. Automatic acceptance only ever moves forward (ADR 028 §3).
+- **Retired prefixes (review §6).** Not addressed in this PR. Reserving historical NSIDs or
+  freeing retired prefixes is a later layer.
+- **Drawer-grant authority (review §6).** Withdrawn. Keyhive already lets whoever holds a drawer
+  delegate at or below their own level, and creators hold Admin (see the
+  [drawer wiki](../wiki/drawer.md)).
 
 ## 11. Evidence required from implementations
 

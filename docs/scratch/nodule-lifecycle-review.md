@@ -100,6 +100,8 @@ The old design was strong on ids and done-ness, but its gating and retry model w
 
 ## Questions for the operator
 
+**Resolved 2026-11-04.** See [ADR 027](../adrs/027-plugs-nodules-and-operation-contracts.md) §10 and [ADR 028](../adrs/028-plug-identity-naming-and-dependencies.md).
+
 1. Keep the inline envelope and reduce the catalog to a distribution tool (§1)?
 2. Package dependencies go to the catalog and runtime dependencies are operation NSIDs (§1)?
 3. Manifest reshape: one XRPC handler component plus `implements`, with routines collapsed (§2)?

@@ -179,7 +179,7 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - **Import sources:** author-published documents (primary), OCI, and Clay's local wasm + manifest pair.
 - **The registry drawer is not node-local.** It is an ordinary drawer that can be shared and synced across nodes (unlike config, D8). Sharing it activates nothing: each node remains its own arbiter of which versions it accepts, and enablement stays in each node's own runtime drawers.
 
-### D12. Malleable plugs: identity, naming, forks, substitution (DRAFT rev 2, pending operator; manager + Clay agent, 2026-11-04)
+### D12. Malleable plugs: identity, naming, forks, substitution (ACCEPTED 2026-11-04 as ADR 028; manager + Clay agent)
 Goal (operator): malleable, not an app store. Anyone may modify any plug or publish new ones at the drop of a hat, but nobody can masquerade as an official upgrade. There is no global authority, and identity, resolution and verification must not be mixed: a name may indicate verification but never dictate it.
 - **Plug id = `<namespace>/<name>`, both required.** The name is human-readable. The namespace is a **DID** (any method: `did:key` for raw public keys, keyhive keys included; `did:plc`, `did:web`), so we are not tied to keyhive. Identity is independent of delivery (documents, branches, OCI).
 - **Readable namespaces are aliases, resolution-side only (AT Protocol DID vs handle; Zooko's triangle/petnames):** a DNS handle is verified bidirectionally (the DID doc lists the handle, DNS lists the DID) and is display/indication only. Node-local petnames are allowed. An alias never appears in durable state; only the DID-based id does.
@@ -188,13 +188,13 @@ Goal (operator): malleable, not an app store. Anyone may modify any plug or publ
 - **Ids never lie, so every fork is a new id:** `did:me/photos` with `basedOn: did:up/photos@v`. A fork may be a branch document per `docs/wiki/docs.md` §Branches (a separate doc with `org.example.daybook.branch` datums pinning parent and `refHeads`); there are no Automerge-internal branches.
 - **Drop-in replacement = explicit node-local substitution (Cargo `[patch]`):** "references to `did:up/photos` are satisfied by `did:me/photos`". The fork's code is *installed as* the upstream id: slot state, durable rows, endpoints and enablement stay keyed by upstream, and the install datum records `filledBy: did:me/photos@v (basedOn …)`. Removing the substitution reverts the slot to upstream with nothing orphaned. Only a substitution may hold upstream's NSID prefix; two holders without one are refused at enablement.
 - **Coexistence (hard fork):** a fork enabled standalone is its own slot under its own id, must rename the NSIDs it changes, and needs explicit rebinding.
-- **Grants never widen silently:** a substitution is a different publisher, so the granted request *set* is re-consented. Widened requests (new bindings, read→write, contract change) come up unresolved. This applies to nodules and micros alike.
+- **Grants never widen silently:** a substitution or upgrade re-checks the granted request *set*. Enablement is the user's choice and survives both. A widened required request leaves the plug enabled but not startable until configured; a widened optional request stays unbound until granted (ADR 028 §3).
 - **Schemas/NSIDs (AT Protocol implement-vs-own):** NSIDs stay reverse-DNS names. A fork may implement upstream NSIDs unchanged, but changing a schema means a new NSID. Prefix "authority" is the enabled plug holding it on this node; DNS verification of a prefix may later indicate, never gate.
 - **Clay mapping:** a micro id is the plug id it is installed as (`MicroManifest.id` removed; `<plug id>#<micro>` only if a plug ever carries more than one micro). Endpoints embed DID-based ids. Contracts stay NSIDs, separate from plug ids.
 - **Dev loop:** a local build publishes under the node's own `did:key` namespace and is used in place of upstream via substitution.
 - Clay-side: `WriterId` → (replica, micro id).
 
-### D13. Dependencies by what you use (operator-approved direction, 2026-11-04; details in progress)
+### D13. Dependencies by what you use (ACCEPTED 2026-11-04 as ADR 028 §4–§5)
 - **Depend on NSIDs, not plugs (OSGi `Import-Package` over `Require-Bundle`; Debian `Provides:`).** Manifest requests name operation, datum, collection and contract NSIDs. Any enabled provider satisfies them (upstream, substituting fork, reimplementation).
 - **Compatibility lives in the NSID (AT Protocol):** a breaking change means a new NSID; within an NSID, only compatible growth. A feature dependency is `{nsid, minRevision}`, using the Lexicon `revision` integer.
 - **Plugs vendor the Lexicons they depend on,** not just the names (Protobuf/gRPC consumers carry .proto copies). This makes an incompatible view of an NSID detectable at catalog/registry time. AT Protocol Lexicon resolution (`_lexicon` DNS → DID → published Lexicon) becomes the arbiter later; we bootstrap on AT Protocol.
@@ -389,6 +389,8 @@ Goal (operator): malleable, not an app store. Anyone may modify any plug or publ
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
 
 ## Open questions for the operator
+
+- Lifecycle review questions 1–7: resolved 2026-11-04. See ADR 027 §10 and ADR 028.
 
 - The seven questions at the end of `docs/scratch/nodule-lifecycle-review.md` (catalog role, dependency split, manifest reshape, init redesign, downgrades, retired prefixes, carried drawer-grant authority).
 - Live `SchemaRepo` registration of the nodule's own datum Lexicons. Nodules can't write their own datums without it. Is it in scope for this PR?
