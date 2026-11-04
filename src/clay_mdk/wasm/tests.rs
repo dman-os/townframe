@@ -10,8 +10,6 @@ use clay_collection::ReplicaId;
 use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
 use clay_docs::DocumentService;
-use clay_guest_session::InitialContext;
-use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::presentation_component;
 use clay_host::AccessError;
 use clay_host::CollectionRegistry;
@@ -35,35 +33,6 @@ async fn counter_package() -> WasmPackage {
 
 /// The counter's manifest, publishing its presentation as `view`, optionally requesting its
 /// configuration document with the given `(read, write)` access.
-/// A context whose manifest declares the presentation publication `view`.
-fn declaring_view() -> InitialContext {
-    let presentation = || DeclaredPublication {
-        kind: clay_guest_session::capabilities::PublicationKind::Presentation,
-        contract: presentation_component(),
-    };
-    InitialContext {
-        publications: BTreeMap::from([
-            ("view".to_owned(), presentation()),
-            ("badge".to_owned(), presentation()),
-            (
-                "count".to_owned(),
-                DeclaredPublication {
-                    kind: clay_guest_session::capabilities::PublicationKind::Call,
-                    contract: Nsid::literal("org.example.dayframe.counter.count"),
-                },
-            ),
-            (
-                "increment".to_owned(),
-                DeclaredPublication {
-                    kind: clay_guest_session::capabilities::PublicationKind::Call,
-                    contract: Nsid::literal("org.example.dayframe.toolbar.action"),
-                },
-            ),
-        ]),
-        ..InitialContext::default()
-    }
-}
-
 fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
