@@ -13,6 +13,7 @@ allowed_dependencies = [
     "micro_sample",
     "micro_settings",
     "micro_settings_manifest",
+    "sqlite_rs",
 ]
 allow_external_api_types = false
 
