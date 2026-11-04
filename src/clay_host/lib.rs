@@ -5,9 +5,15 @@
 //! engine crates and document data lives in `clay_docs`; neither is this crate's concern
 //! (ADR 015 §3, §6).
 
+mod collections;
 mod instance;
 mod supervisor;
 
+pub use collections::CollectionContract;
+pub use collections::CollectionRegistry;
+pub use collections::DeclareError;
+pub use collections::Grant;
+pub use collections::GrantError;
 pub use instance::AccessError;
 pub use instance::Binding;
 pub use instance::CloseReason;

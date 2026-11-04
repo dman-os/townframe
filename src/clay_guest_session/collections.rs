@@ -245,6 +245,17 @@ pub struct RegistrationGrant {
     pub prefixes: Vec<Bytes>,
 }
 
+impl From<clay_host::Grant<BytesRegistrations>> for RegistrationGrant {
+    /// A grant the declared-collection registry issued, in the session's terms.
+    fn from(grant: clay_host::Grant<BytesRegistrations>) -> Self {
+        Self {
+            registrations: grant.collection,
+            micro: grant.micro,
+            prefixes: grant.prefixes,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectionLimits {
     pub readers: usize,
