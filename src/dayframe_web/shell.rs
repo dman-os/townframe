@@ -16,7 +16,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 /// One entry of `packages/index.json`: where the component lives, the SHA-256 the shell
-/// must verify after fetching, and the manifest read statically at build time.
+/// must verify after fetching, and the manifest from the package's sidecar JSON.
+/// STAND-IN until `big_plugs` delivers manifests.
 #[derive(Clone, Deserialize)]
 struct PackageIndexEntry {
     location: String,
@@ -45,24 +46,18 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Fetch and compile one indexed package on the browser's `WebAssembly` engine through
-/// the shared `clay_rt_wcmp` seam. The fetched bytes must hash to the indexed digest and
-/// declare the indexed manifest; a mismatch is this micro's activation failure, reported
-/// in its status row while the rest of the shell keeps running.
+/// the shared `clay_rt_wcmp` seam. The fetched bytes must hash to the indexed digest; a
+/// mismatch is this micro's activation failure, reported in its status row while the rest
+/// of the shell keeps running.
 async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpPackage, String> {
     let bytes = fetch_bytes(&entry.location).await?;
-    let package = clay_mdk::package::Package::from_bytes(bytes)?;
+    let package = clay_mdk::package::Package::new(entry.manifest, bytes)?;
     if package.digest() != entry.digest {
         return Err(format!(
-            "package at {} declares digest {} but the index pins {}",
+            "package at {} hashes to {} but the index pins {}",
             entry.location,
             package.digest(),
             entry.digest
-        ));
-    }
-    if package.manifest() != &entry.manifest {
-        return Err(format!(
-            "package at {} declares a manifest that differs from the index",
-            entry.location
         ));
     }
     clay_rt_wcmp_web::load(package.bytes()).await

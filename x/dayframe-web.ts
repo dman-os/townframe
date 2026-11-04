@@ -1,10 +1,10 @@
 #!/usr/bin/env -S deno run --allow-all
 
 // Build and serve the `dayframe_web` shell (ADR 018 migration steps 6–7): the shared
-// composition plus every package in `packages/index.json`. Each entry's manifest is read
-// statically from the component's `dayframe.manifest` custom section (never by running
-// the guest) and pinned with the SHA-256 of the exact bytes; the shell fetches a package
-// only when an instance activates and verifies the digest before `wcmp` compiles it.
+// composition plus every package in `packages/index.json`. Each entry's manifest is the
+// sidecar `<name>.manifest.json` beside the component (STAND-IN until `big_plugs` delivers
+// manifests) and is pinned with the SHA-256 of the component bytes; the shell fetches a
+// package only when an instance activates and verifies the digest before `wcmp` compiles it.
 //
 //   deno run --allow-all x/dayframe-web.ts            build, then serve on HOST:PORT
 //   deno run --allow-all x/dayframe-web.ts --build    build only
@@ -34,62 +34,15 @@ const isolated = ["--config", 'resolver.feature-unification="selected"'];
 const prepared = await $`deno run --allow-all ${
   root.join("x/check-dayframe.ts")
 } --prepare-only`.lines();
-const counter = prepared
-  .map((line) => line.match(/^DAYFRAME_COUNTER_COMPONENT=(.+)$/)?.[1])
+const packageDirectory = prepared
+  .map((line) => line.match(/^DAYFRAME_PACKAGE_DIR=(.+)$/)?.[1])
   .find((path) => path !== undefined);
-if (!counter) {
+if (!packageDirectory) {
   throw new Error(
-    `check-dayframe.ts printed no DAYFRAME_COUNTER_COMPONENT:\n${
+    `check-dayframe.ts printed no DAYFRAME_PACKAGE_DIR:\n${
       prepared.join("\n")
     }`,
   );
-}
-
-function readUleb(buf: Uint8Array, offset: number): [number, number] {
-  let value = 0;
-  let shift = 0;
-  let at = offset;
-  for (;;) {
-    const byte = buf[at++];
-    value |= (byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) return [value, at];
-    shift += 7;
-  }
-}
-
-// Statically read the `dayframe.manifest` custom section, descending into nested
-// modules/components (a component embeds its core module as a section payload).
-function extractManifest(buf: Uint8Array): Uint8Array {
-  const name = new TextEncoder().encode("dayframe.manifest");
-  let offset = 8; // magic + version
-  while (offset < buf.length) {
-    const id = buf[offset++];
-    const [size, payloadStart] = readUleb(buf, offset);
-    const payload = buf.subarray(payloadStart, payloadStart + size);
-    if (id === 0) {
-      const [nameLen, nameStart] = readUleb(payload, 0);
-      if (
-        nameLen === name.length &&
-        payload.subarray(nameStart, nameStart + nameLen).every((b, i) =>
-          b === name[i]
-        )
-      ) {
-        return payload.subarray(nameStart + nameLen);
-      }
-    }
-    if (
-      payload.length > 8 && payload[0] === 0x00 && payload[1] === 0x61 &&
-      payload[2] === 0x73 && payload[3] === 0x6d
-    ) {
-      try {
-        return extractManifest(payload);
-      } catch {
-        // Not the nested module carrying the manifest; keep scanning siblings.
-      }
-    }
-    offset = payloadStart + size;
-  }
-  throw new Error("no dayframe.manifest custom section found");
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -122,9 +75,11 @@ await $`wasm-bindgen --target web --no-typescript --out-dir ${site} --out-name d
 }`;
 await Deno.mkdir(site.join("packages").toString(), { recursive: true });
 {
-  const counterBytes = await Deno.readFile(counter);
+  const counterBytes = await Deno.readFile(
+    `${packageDirectory}/counter.component.wasm`,
+  );
   const manifest = JSON.parse(
-    new TextDecoder().decode(extractManifest(counterBytes)),
+    await Deno.readTextFile(`${packageDirectory}/counter.manifest.json`),
   );
   const index = [{
     location: "packages/counter.component.wasm",

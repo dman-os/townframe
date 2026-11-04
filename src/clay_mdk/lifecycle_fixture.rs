@@ -17,7 +17,7 @@
 //!   redeems the proxy again: it fails unless the provider is still live while the consumer
 //!   closes, which is the close-order guarantee under test.
 //!
-//! The package embeds `lifecycle_fixture.manifest.json` as its `dayframe.manifest` section.
+//! Its manifest is the checked-in sidecar `lifecycle_fixture.manifest.json`.
 
 use clay_mdk::bindings;
 use clay_mdk::capability_bank;
@@ -36,12 +36,6 @@ use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
 use std::cell::RefCell;
 use std::rc::Rc;
-
-const MANIFEST: &[u8] = include_bytes!("lifecycle_fixture.manifest.json");
-
-#[used]
-#[unsafe(link_section = "dayframe.manifest")]
-static DAYFRAME_MANIFEST: [u8; MANIFEST.len()] = *include_bytes!("lifecycle_fixture.manifest.json");
 
 const PRESENTATION: &str = "presentation";
 const ECHO: &str = "echo";
