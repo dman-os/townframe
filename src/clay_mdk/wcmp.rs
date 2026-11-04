@@ -9,7 +9,6 @@ use crate::engine::Started;
 use crate::manifest::MicroManifest;
 use crate::native::CollectionBindings;
 use crate::native::Resources;
-use clay_dioxus::NativeComponents;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_host::ComponentRef;
@@ -72,7 +71,6 @@ impl Engine for Wcmp {
 /// micro crates never build factories themselves.
 pub fn factory<Fut>(
     resources: Resources,
-    components: NativeComponents,
     manifest: MicroManifest,
     bindings: CollectionBindings,
     package: impl Fn() -> Fut + 'static,
@@ -81,5 +79,5 @@ where
     Fut: Future<Output = Result<WcmpPackage, String>> + 'static,
 {
     let package: PackageSource<Wcmp> = Rc::new(move || Box::pin(package()));
-    crate::engine::factory::<Wcmp>(resources, components, manifest, bindings, package)
+    crate::engine::factory::<Wcmp>(resources, manifest, bindings, package)
 }

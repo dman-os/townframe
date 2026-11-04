@@ -18,36 +18,12 @@ use clay_host::MicroState;
 use clay_host::Requirement;
 use clay_host::StartError;
 use clay_host::Supervisor;
+use dioxus_core::Element;
 use dioxus_core::VNode;
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 
 const ROWS: &str = "test.rows";
-
-/// Publishes through the host so revocation stays authoritative, but renders nothing.
-#[derive(Clone)]
-struct StubRegistry {
-    host: Host,
-}
-
-impl RendererRegistry for StubRegistry {
-    type Render = Element;
-
-    fn for_host(host: &Host) -> Self {
-        Self { host: host.clone() }
-    }
-
-    fn publish<F>(
-        &self,
-        owner: &Instance,
-        _render: F,
-    ) -> Result<clay_host::ComponentRef, AccessError>
-    where
-        F: Fn() -> Self::Render + 'static,
-    {
-        self.host.publish_component(owner)
-    }
-}
 
 fn blank() -> Element {
     VNode::empty()
@@ -73,7 +49,7 @@ impl Rig {
     fn new() -> Self {
         let host = Host::new();
         let resources = Resources::new(
-            StubRegistry::for_host(&host),
+            NativeComponents::new(&host),
             DocumentService::new(16),
             CollectionRegistry::default(),
         );

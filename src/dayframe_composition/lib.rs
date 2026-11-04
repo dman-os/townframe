@@ -89,22 +89,14 @@ pub struct InstalledMicro {
 
 /// See [`InstalledMicro::factory`].
 pub type FactoryBuilder = Box<
-    dyn FnOnce(
-        Resources,
-        NativeComponents,
-        CollectionBindings,
-    ) -> Rc<dyn Factory<CapabilityPublication>>,
+    dyn FnOnce(Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>,
 >;
 
 impl InstalledMicro {
     /// An on-demand, unlocked micro with no requirements, admitted disabled.
     pub fn new(
         manifest: clay_mdk::MicroManifest,
-        factory: impl FnOnce(
-            Resources,
-            NativeComponents,
-            CollectionBindings,
-        ) -> Rc<dyn Factory<CapabilityPublication>>
+        factory: impl FnOnce(Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>
         + 'static,
     ) -> Self {
         Self {
@@ -485,7 +477,7 @@ impl CompositionRuntime {
                 eager: micro.eager,
                 requirements: micro.requirements,
                 unresolved_bindings: resolution.unresolved.clone(),
-                factory: (micro.factory)(resources.clone(), components.clone(), bindings.clone()),
+                factory: (micro.factory)(resources.clone(), bindings.clone()),
             });
             managed.push(ManagedMicro {
                 id: identity,
