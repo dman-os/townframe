@@ -13,7 +13,13 @@
 //! `unavailable` for each failed redemption, after which it waits for the reference's status to
 //! change). Conformance runs it as `lifecycle_conformance::context_follows_a_provider`, the
 //! `clay_mdk` wasm tests mount `slot`.
+//!
+//! Its calls `hold` and `release` retain a row's call and drop that binding
+//! (`lifecycle_conformance::context_retains_a_call`).
 use clay_mdk::Access;
+use clay_mdk::CallBinding;
+use clay_mdk::Capability;
+use clay_mdk::Collection;
 use clay_mdk::BindingResolution;
 use clay_mdk::Context;
 use clay_mdk::Entrypoints;
@@ -28,6 +34,8 @@ use clay_mdk::RowAttachment;
 use clay_mdk::hooks::PresentationSlot;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// The `feed` row whose attachment `slot` shows and `follow` waits for.
 const VIEW: &str = "view";
@@ -50,6 +58,16 @@ fn manifest() -> MicroManifest {
                 name: "follow".into(),
                 kind: PublicationKind::Call,
                 contract: Some(Nsid::literal("org.example.clay.test.context.follow")),
+            },
+            PublicationDeclaration {
+                name: "hold".into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal("org.example.clay.test.context.hold")),
+            },
+            PublicationDeclaration {
+                name: "release".into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal("org.example.clay.test.context.release")),
             },
             PublicationDeclaration {
                 name: "detail".into(),
@@ -75,6 +93,19 @@ fn manifest() -> MicroManifest {
         }],
         contributions: vec![],
         extra: Default::default(),
+    }
+}
+
+/// The first attachment of the row `key`, once it exists.
+async fn attachment_of(
+    collection: &mut Collection<String, String>,
+    key: &str,
+) -> Result<Capability, Error> {
+    loop {
+        if let Some(row) = collection.rows()?.iter().find(|row| row.key == key) {
+            return Ok(row.attachments[0].clone());
+        }
+        collection.changed().await?;
     }
 }
 
@@ -110,12 +141,7 @@ async fn activate(context: Context) -> Result<(), Error> {
             let feed = feed.clone();
             let mut collection = feed.collection().clone();
             async move {
-                let reference = loop {
-                    if let Some(row) = collection.rows()?.iter().find(|row| row.key == key) {
-                        break row.attachments[0].clone();
-                    }
-                    collection.changed().await?;
-                };
+                let reference = attachment_of(&mut collection, &key).await?;
                 let mut steps = Vec::new();
                 // Each step is also a row, so a host waiting on the collection learns the call
                 // got there.
@@ -149,6 +175,34 @@ async fn activate(context: Context) -> Result<(), Error> {
                 }
             }
         }
+    })?;
+    // `hold` retains the call the row `key` attaches and calls it twice (an echo), keeping the
+    // binding until `release`, so a host can see the provider live past the call that took it
+    // and then idle once the binding is dropped.
+    let held = Rc::new(RefCell::new(None::<CallBinding>));
+    context.publish_call("hold", {
+        let collection = collection.clone();
+        let held = Rc::clone(&held);
+        move |key: String| {
+            let mut collection = collection.clone();
+            let held = Rc::clone(&held);
+            async move {
+                let binding = attachment_of(&mut collection, &key)
+                    .await?
+                    .retain_call()
+                    .await?;
+                let mut replies = Vec::new();
+                for text in ["one", "two"] {
+                    replies.push(binding.call::<String, String>(&text.to_owned()).await?);
+                }
+                *held.borrow_mut() = Some(binding);
+                Ok(replies)
+            }
+        }
+    })?;
+    context.publish_call("release", move |(): ()| {
+        held.borrow_mut().take();
+        async { Ok(()) }
     })?;
     // Runs long after `initialize` returned, when no handle to `detail` exists any more.
     context.publish_call("attach", move |publication: String| {

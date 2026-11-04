@@ -528,6 +528,8 @@ mod context;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod rows;
 #[cfg(any(feature = "in_process", feature = "guest"))]
+pub use context::CallBinding;
+#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Capability;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Config;
