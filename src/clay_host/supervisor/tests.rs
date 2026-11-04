@@ -853,3 +853,19 @@ async fn dropping_a_driver_with_queued_requests_fails_them_instead_of_hanging() 
     assert!(supervisor.served.borrow().is_some());
     acquire.await.unwrap();
 }
+
+#[tokio::test]
+async fn recorded_state_changes_tick_the_change_receiver() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
+    let solo = id("solo");
+    let mut changes = supervisor.changes();
+    changes.mark_unchanged();
+    supervisor.disable(&solo).await.unwrap();
+    assert!(changes.has_changed().unwrap());
+    changes.mark_unchanged();
+    supervisor.enable(&solo);
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(supervisor.state(&solo), MicroState::Idle);
+}

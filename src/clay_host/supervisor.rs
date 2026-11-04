@@ -37,6 +37,7 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::instance::AccessError;
 use crate::instance::Host;
@@ -219,6 +220,8 @@ pub struct Supervisor<P> {
     served: RefCell<Option<mpsc::UnboundedReceiver<Request<P>>>>,
     /// Every node's state as last [`Self::set`], for [`Activator::status`].
     mirror: Arc<Mutex<BTreeMap<MicroId, MicroState>>>,
+    /// Ticks on every recorded state change, for shells that render [`Self::state`].
+    changes: watch::Sender<u64>,
 }
 
 struct Inner<P> {
@@ -294,7 +297,13 @@ impl<P: Clone + 'static> Supervisor<P> {
             requests,
             served: RefCell::new(Some(served)),
             mirror: Arc::new(Mutex::new(mirror)),
+            changes: watch::channel(0).0,
         }
+    }
+
+    /// A receiver that ticks whenever any micro's recorded state changes.
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     pub fn activator(&self) -> Activator<P> {
@@ -755,6 +764,7 @@ impl<P: Clone + 'static> Supervisor<P> {
             .lock()
             .unwrap()
             .insert(identity.clone(), state.micro_state());
+        self.changes.send_modify(|ticks| *ticks += 1);
         let previous = std::mem::replace(
             &mut self
                 .inner
