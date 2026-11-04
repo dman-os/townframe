@@ -172,6 +172,7 @@ impl BigNode {
             let plugs = boot_plugs(
                 &authority,
                 &docs,
+                &drawers,
                 &registry_drawer,
                 &plugs_actor,
                 plugs_namespace,
@@ -250,6 +251,7 @@ impl BigNode {
 async fn boot_plugs(
     authority: &Authority,
     docs: &DocsRepo,
+    drawers: &Drawers,
     registry_drawer: &DrawerId,
     actor: &Actor,
     namespace: Namespace,
@@ -260,6 +262,7 @@ async fn boot_plugs(
     let (plugs, plugs_stop) = big_plugs::boot(PlugsConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
+        drawers: drawers.client.clone(),
         registry_drawer: registry_drawer.clone(),
         actor: actor.clone(),
         namespace,

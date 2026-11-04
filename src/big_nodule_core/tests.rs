@@ -1180,7 +1180,6 @@ mod config_tests {
         plug.contributions.insert(
             0,
             Contribution::Micro(big_plugs_core::MicroContribution {
-                key: "button".into(),
                 schema: "org.example.micro.button".into(),
                 description: micro_description,
                 extra: Default::default(),

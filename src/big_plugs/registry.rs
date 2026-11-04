@@ -26,7 +26,11 @@ use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumTag;
+use big_cabinet_core::authority::AuthorityProtocol;
+use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::RetractCapability;
+use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
@@ -36,13 +40,19 @@ use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumsRead;
+use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsProtocol;
+use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::protocol::AddDoc;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::DrawersProtocol;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 use big_plugs_core::Plug;
@@ -427,11 +437,23 @@ enum Command {
     },
 }
 
+/// What importing an existing document needs: the drawers service, and the registry actor whose
+/// identity enters the document in the registry drawer and reads it first. The actor is Admin on
+/// the registry drawer, but it reaches only the documents the operator has made reachable to it,
+/// which is what bounds an import: a publish handle cannot pull in a document the registry
+/// itself could not read.
+pub(crate) struct DocImport {
+    pub(crate) authority: Client<AuthorityProtocol>,
+    pub(crate) drawers: Client<DrawersProtocol>,
+    pub(crate) actor: CapId,
+}
+
 /// The registry: a handle to the task that owns the derived [`State`], plus the means to write
 /// the drawer. `gate` serializes publishes and removals so two of them never both decide a plug
 /// has no document yet.
 pub(crate) struct Registry {
     commands: mpsc::Sender<Command>,
+    import: DocImport,
     gate: Semaphore,
     docs: Client<DocsProtocol>,
     capability: CapId,
@@ -448,6 +470,7 @@ impl Registry {
         docs: Client<DocsProtocol>,
         capability: CapId,
         drawer: DrawerId,
+        import: DocImport,
         blobs: Arc<BlobService>,
         sql: Database,
     ) -> Result<Self, PlugsError> {
@@ -505,6 +528,7 @@ impl Registry {
             .expect("a fresh stop token accepts tasks");
         Ok(Self {
             commands,
+            import,
             gate: Semaphore::new(1),
             docs,
             capability,
@@ -723,6 +747,129 @@ impl Registry {
             record: self.version(&id, &version).await?,
             unchanged: false,
         })
+    }
+
+    /// Retracts a handle this registry minted for one call; a handle is its own `via`.
+    async fn retract(&self, capability: CapId) -> Result<(), PlugsError> {
+        self.import
+            .authority
+            .call(
+                RequestContext::root(),
+                RetractCapability {
+                    via: capability,
+                    capability,
+                },
+            )
+            .await
+            .map_err(|error| PlugsError::AuthorityUnavailable(error.to_string()))
+    }
+
+    /// Enters an existing document in the registry drawer, after checking that it is a plug
+    /// document and that `permitted` accepts its plug id. The version contents are not looked at:
+    /// the follower folds the document like any other that arrives in the drawer, which is where
+    /// each version's signature is verified. Returns once the registry serves the document.
+    pub(crate) async fn import_document(
+        &self,
+        doc: &DocId,
+        source_drawer: &DrawerId,
+        permitted: impl Fn(&PlugId) -> Result<(), PlugsError>,
+    ) -> Result<PlugRecord, PlugsError> {
+        let _gate = self
+            .gate
+            .acquire()
+            .await
+            .expect("the registry's gate is never closed");
+        let read_capability = self
+            .docs
+            .call(
+                RequestContext::root(),
+                MintDocCapability {
+                    authorization: Authorization::identity(self.import.actor),
+                    scope: DocScope {
+                        read: [doc.clone()].into(),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .map_err(docs_error)?
+            .capability_id;
+        let read = read_doc(&self.docs, read_capability, doc).await;
+        self.retract(read_capability).await?;
+        let read = read?;
+        let Some(DatumRead::Accepted { value, .. }) = read.datums.get(&identity_key()) else {
+            return Err(PlugsError::Rejected(format!(
+                "document {doc} has no readable plug identity datum"
+            )));
+        };
+        let id = serde_json::from_value::<PlugIdentity>(value.clone())
+            .map_err(|error| {
+                PlugsError::Rejected(format!("the plug identity does not decode: {error}"))
+            })?
+            .id;
+        permitted(&id)?;
+        // The handle covers the registry drawer and the document's own drawer, which is what
+        // lets the drawers service see the registry actor reach the document at the level it
+        // confers. It lives for this one call.
+        let entry = self
+            .import
+            .drawers
+            .call(
+                RequestContext::root(),
+                MintDrawerCapability {
+                    authorization: Authorization::identity(self.import.actor),
+                    scope: DrawerScope {
+                        drawers: BTreeMap::from([
+                            (self.drawer.clone(), DrawerAccess::Write),
+                            (source_drawer.clone(), DrawerAccess::Write),
+                        ]),
+                        create: false,
+                    },
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .map_err(|error| PlugsError::Storage(error.to_string()))?
+            .capability_id;
+        let entered = self
+            .import
+            .drawers
+            .call(
+                RequestContext::root(),
+                AddDoc {
+                    capability: entry,
+                    // Entering a document is idempotent, so a fresh command per call costs
+                    // nothing and never replays a stale ledger answer.
+                    command: CommandId::try_from(format!("plug registry import {}", Uuid7::new()))
+                        .expect("an import command is within bounds"),
+                    drawer_id: self.drawer.clone(),
+                    doc_id: doc.clone(),
+                    access: DrawerAccess::Write,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                service_utils_rs::ClientError::Operation(
+                    big_cabinet_core::drawer::protocol::DrawersError::Denied,
+                ) => PlugsError::Denied,
+                other => PlugsError::Storage(other.to_string()),
+            });
+        // Retracted whether or not the entry succeeded.
+        self.retract(entry).await?;
+        entered?;
+        let waited = (id.clone(), doc.clone());
+        self.settled(move |state| {
+            state
+                .claims
+                .get(&waited.0)
+                .is_some_and(|docs| docs.contains(&waited.1))
+        })
+        .await;
+        Ok(self
+            .record(&id)
+            .await
+            .expect("a plug whose document was just folded in has a record"))
     }
 
     /// Drops one version from every document claiming the plug, and forgets what the node first

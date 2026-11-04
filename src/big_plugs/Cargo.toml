@@ -21,6 +21,8 @@ service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 
 # encoding
+bytes.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

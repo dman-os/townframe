@@ -14,6 +14,7 @@ use big_plugs_core::example_plug;
 use big_plugs_core::protocol::GetPlug;
 use big_plugs_core::protocol::GetPlugVersion;
 use big_plugs_core::protocol::GetPublisher;
+use big_plugs_core::protocol::ImportPlugDocument;
 use big_plugs_core::protocol::ListPlugs;
 use big_plugs_core::protocol::MintPlugsCapability;
 use big_plugs_core::protocol::PlugChanges;
@@ -25,6 +26,7 @@ use big_plugs_core::protocol::PublishedPlugVersion;
 use big_plugs_core::protocol::RemovePlug;
 use big_plugs_core::protocol::RemovePlugVersion;
 use big_plugs_core::protocol::WatchPlugs;
+use big_plugs_core::registry::identity_key;
 use big_plugs_core::registry::version_key;
 use big_plugs_core::signature::SignatureError;
 use big_plugs_core::test_support::plug_id;
@@ -1068,4 +1070,321 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
         Err(PlugsError::Denied)
     );
     shutdown(node, stop).await;
+}
+
+const CLAY_MANIFEST: &str = r#"{
+    "schema": 1,
+    "id": "counter",
+    "package_version": 2,
+    "entrypoints": {
+        "initialize": "townframe:dayframe/micro-lifecycle@0.4.0",
+        "presentation": "townframe:dayframe/presentation-events@0.4.0",
+        "installer": null
+    },
+    "publications": []
+}"#;
+
+/// The smallest thing with a WebAssembly header; the importer does not instantiate it.
+const COMPONENT: &[u8] = b"\0asm\x0d\0\x01\0 counter";
+
+async fn micro_pair(
+    node: &BigNode,
+    component: &[u8],
+    manifest: &str,
+) -> Result<PublishedPlugVersion, big_plugs::import::ImportError> {
+    big_plugs::import::micro_pair(
+        &node.plugs.client,
+        &node.blobs.service,
+        operator(node),
+        component.to_vec(),
+        manifest.as_bytes(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() {
+    use big_plugs::import::ImportError;
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let published = micro_pair(&node, COMPONENT, CLAY_MANIFEST).await.unwrap();
+    let envelope = &published.record.envelope;
+    assert_eq!(
+        envelope.id.to_string(),
+        format!("{}/counter", node.plugs.publisher)
+    );
+    assert_eq!(envelope.version.to_string(), "2.0.0");
+    envelope.verify_signature().unwrap();
+    let artifact = envelope.artifact("component").unwrap();
+    assert_eq!(artifact.digest, Digest::of(COMPONENT));
+    assert_eq!(artifact.size, Some(COMPONENT.len() as u64));
+    assert_eq!(artifact.media_type.as_deref(), Some("application/wasm"));
+    let micro = envelope.micro().unwrap();
+    assert_eq!(micro.schema, big_plugs::import::CLAY_MICRO_MANIFEST_SCHEMA);
+    // The description is the manifest minus the members the envelope states itself.
+    assert!(!micro.description.contains_key("id"));
+    assert!(!micro.description.contains_key("package_version"));
+    assert_eq!(micro.description["schema"], json!(1));
+    assert_eq!(
+        micro.description["entrypoints"]["initialize"],
+        "townframe:dayframe/micro-lifecycle@0.4.0"
+    );
+    // The bytes are in the blob store, as the registry requires of every artifact.
+    assert!(
+        node.blobs
+            .service
+            .stat(&big_blobs_core::BlobId::new(artifact.digest.0))
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Publishing it again is idempotent, and an older package version is a downgrade.
+    assert!(
+        micro_pair(&node, COMPONENT, CLAY_MANIFEST)
+            .await
+            .unwrap()
+            .unchanged
+    );
+    let older = CLAY_MANIFEST.replace("\"package_version\": 2", "\"package_version\": 1");
+    assert!(matches!(
+        micro_pair(&node, COMPONENT, &older).await,
+        Err(ImportError::Registry(PlugsError::Downgrade { .. }))
+    ));
+
+    // Bad input is refused before anything is published.
+    assert!(matches!(
+        micro_pair(&node, b"not wasm", CLAY_MANIFEST).await,
+        Err(ImportError::Component(_))
+    ));
+    assert!(matches!(
+        micro_pair(&node, COMPONENT, "[]").await,
+        Err(ImportError::Manifest(_))
+    ));
+    // Clay's real ids are dotted, and a dotted id is its own plug name.
+    let dotted = CLAY_MANIFEST.replace("\"counter\"", "\"dayframe.counter\"");
+    let published = micro_pair(&node, COMPONENT, &dotted).await.unwrap();
+    assert_eq!(
+        published.record.id.to_string(),
+        format!("{}/dayframe.counter", node.plugs.publisher)
+    );
+    let invalid = CLAY_MANIFEST.replace("\"counter\"", "\"Counter\"");
+    assert!(matches!(
+        micro_pair(&node, COMPONENT, &invalid).await,
+        Err(ImportError::Manifest(reason)) if reason.contains("plug name")
+    ));
+    assert_eq!(list(&node).await.len(), 2);
+    shutdown(node, stop).await;
+}
+
+/// A document an author made outside the registry drawer, in the node's local drawer, holding
+/// the plug identity and the given versions as they would be written by the author's tooling.
+async fn author_document(node: &BigNode, command: &str, id: &str, versions: &[Plug]) -> DocId {
+    let placement = format!("drawer {}", node.drawers.local().present_id);
+    let create = capability(
+        node,
+        DocScope {
+            create: BTreeSet::from([placement.clone()]),
+            ..DocScope::default()
+        },
+    )
+    .await;
+    let mut datums = BTreeMap::from([(identity_key(), json!({ "id": id }))]);
+    for version in versions {
+        datums.insert(
+            version_key(&version.version),
+            serde_json::to_value(version).unwrap(),
+        );
+    }
+    node.docs
+        .client
+        .call(
+            RequestContext::root(),
+            CreateDoc {
+                capability: create,
+                command: CommandId::try_from(command.to_owned()).unwrap(),
+                placement,
+                datums,
+            },
+        )
+        .await
+        .unwrap()
+        .doc_id
+}
+
+/// Lets the registry's own actor reach documents in the node's local drawer, which is what an
+/// import of a document made there requires.
+async fn make_reachable_to_the_registry(node: &BigNode) {
+    use big_cabinet_core::drawer::DrawerAccess;
+    use big_cabinet_core::drawer::protocol::DrawerScope;
+    use big_cabinet_core::drawer::protocol::GrantDrawer;
+    use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+    let drawer = node.drawers.local().present_id;
+    let cap = node
+        .drawers
+        .client
+        .call(
+            RequestContext::root(),
+            MintDrawerCapability {
+                authorization: Authorization::identity(node.drawers_actor.capability),
+                scope: DrawerScope {
+                    drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
+                    create: false,
+                },
+                rights: Rights::USE | Rights::DELEGATE,
+            },
+        )
+        .await
+        .unwrap();
+    node.drawers
+        .client
+        .call(
+            RequestContext::root(),
+            GrantDrawer {
+                capability: cap.capability_id,
+                drawer_id: drawer,
+                subject_id: node.plugs_actor.actor_id,
+                access: DrawerAccess::Write,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+async fn import_document(
+    node: &BigNode,
+    authorization: Authorization,
+    doc_id: &DocId,
+) -> Result<big_plugs_core::protocol::PlugRecord, PlugsError> {
+    let source_drawer = node.drawers.local().present_id;
+    node.plugs
+        .client
+        .call(
+            RequestContext::root(),
+            ImportPlugDocument {
+                authorization,
+                doc_id: doc_id.clone(),
+                source_drawer,
+            },
+        )
+        .await
+        .map_err(operation)
+}
+
+#[tokio::test]
+async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_folded_in() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let operator = operator(&node);
+    make_reachable_to_the_registry(&node).await;
+    let info = put(&node, b"authored handler").await;
+
+    // Authored and signed by the namespace owner outside the registry.
+    let genuine = photos("1.0.0", &info);
+    let doc = author_document(
+        &node,
+        "author photos",
+        PHOTOS,
+        std::slice::from_ref(&genuine),
+    )
+    .await;
+    let record = import_document(&node, operator, &doc).await.unwrap();
+    assert_eq!(record.id, plug_id("photos"));
+    assert_eq!(record.doc_id, doc);
+    assert_eq!(record.versions.len(), 1);
+    assert_eq!(record.versions[0].unverified, None);
+    assert_eq!(listed_ids(&node).await, [plug_id("photos")]);
+    assert_eq!(
+        get_version(&node, PHOTOS, "1.0.0").await.unwrap().envelope,
+        genuine
+    );
+    // Importing it again is a no-op.
+    assert_eq!(
+        import_document(&node, operator, &doc).await.unwrap(),
+        record
+    );
+
+    // A tampered document: signed by another key, and one version edited after signing.
+    let other = "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z/other";
+    let forged = sign_with_seed(unsigned(other, "1.0.0", &info), &[9; 32]);
+    let mut edited = sign_as_example(unsigned(other, "1.1.0", &info));
+    edited.title = Some("edited after signing".into());
+    let tampered = author_document(&node, "author other", other, &[forged, edited]).await;
+    let record = import_document(&node, operator, &tampered).await.unwrap();
+    assert_eq!(record.versions.len(), 2);
+    for summary in &record.versions {
+        assert!(summary.unverified.is_some(), "{summary:?}");
+    }
+    assert!(matches!(
+        get_version(&node, other, "1.0.0").await,
+        Err(PlugsError::Unverified { .. })
+    ));
+
+    // A document that is not a plug document is refused, and a handle's namespace scope applies
+    // to the id the document names.
+    let no_identity = {
+        let doc = author_document(&node, "author anonymous", PHOTOS, &[]).await;
+        // Drop the identity: a plain document in the same drawer.
+        node.docs
+            .client
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability: capability(
+                        &node,
+                        DocScope {
+                            write: BTreeSet::from([doc.clone()]),
+                            ..DocScope::default()
+                        },
+                    )
+                    .await,
+                    command: None,
+                    doc_id: doc.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::new(),
+                    remove: BTreeSet::from([identity_key()]),
+                },
+            )
+            .await
+            .unwrap();
+        doc
+    };
+    assert!(matches!(
+        import_document(&node, operator, &no_identity).await,
+        Err(PlugsError::Rejected(_))
+    ));
+    let scoped = mint(
+        &node,
+        PlugsScope {
+            publish: true,
+            namespaces: Some(BTreeSet::from(["did:key:z6MkOther".to_owned()])),
+        },
+    )
+    .await;
+    let outside = author_document(&node, "author scoped", PHOTOS, &[genuine]).await;
+    assert!(matches!(
+        import_document(&node, scoped, &outside).await,
+        Err(PlugsError::NamespaceNotPermitted { .. })
+    ));
+    let reader = mint(
+        &node,
+        PlugsScope {
+            publish: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        import_document(&node, reader, &outside).await,
+        Err(PlugsError::Denied)
+    );
+    shutdown(node, stop).await;
+}
+
+async fn listed_ids(node: &BigNode) -> Vec<big_plugs_core::PlugId> {
+    list(node)
+        .await
+        .into_iter()
+        .map(|record| record.id)
+        .collect()
 }

@@ -17,6 +17,7 @@ use sqlite_rs as sqlite_rs_alias;
 mod sqlite {
     include!("sqlite/gen.rs");
 }
+pub mod import;
 mod registry;
 mod store;
 
@@ -51,10 +52,12 @@ use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::CreateMetaDoc;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_plugs_core::protocol::GetPlug;
 use big_plugs_core::protocol::GetPlugVersion;
 use big_plugs_core::protocol::GetPublisher;
+use big_plugs_core::protocol::ImportPlugDocument;
 use big_plugs_core::protocol::ListPlugs;
 use big_plugs_core::protocol::MintPlugsCapability;
 use big_plugs_core::protocol::PlugChanges;
@@ -270,6 +273,7 @@ pub struct PlugsConfig {
     pub namespace: Namespace,
     pub operator: Uuid7,
     pub blobs: Arc<BlobService>,
+    pub drawers: Client<DrawersProtocol>,
     pub node_key: NodeKey,
     pub sql: Database,
 }
@@ -396,6 +400,21 @@ impl PlugService {
         self.registry.remove_plug(&params.id).await
     }
 
+    async fn import_document(
+        &self,
+        context: &RequestContext,
+        params: ImportPlugDocument,
+    ) -> Res<PlugRecord> {
+        let caller = self.caller(context, params.authorization).await?;
+        // The document's namespace is known only after it is read, so the scope is checked
+        // against it by the registry once it has.
+        self.registry
+            .import_document(&params.doc_id, &params.source_drawer, |id| {
+                self.require_publish(&caller, &id.namespace)
+            })
+            .await
+    }
+
     async fn get_publisher(&self, context: &RequestContext, params: GetPublisher) -> Res<String> {
         self.read_caller(context, params.authorization).await?;
         Ok(self.publisher.clone())
@@ -472,6 +491,7 @@ handlers! {
     PublishPlugVersion => publish: PublishedPlugVersion;
     RemovePlugVersion => remove_version: ();
     RemovePlug => remove_plug: ();
+    ImportPlugDocument => import_document: PlugRecord;
     GetPublisher => get_publisher: String;
     ListPlugs => list: Vec<PlugRecord>;
     GetPlug => get: PlugRecord;
@@ -486,6 +506,7 @@ service_utils_rs::bind_service_protocol! {
             PublishPlugVersion(PublishPlugVersion),
             RemovePlugVersion(RemovePlugVersion),
             RemovePlug(RemovePlug),
+            ImportPlugDocument(ImportPlugDocument),
             GetPublisher(GetPublisher),
             ListPlugs(ListPlugs),
             GetPlug(GetPlug),
@@ -537,6 +558,11 @@ pub async fn boot(config: PlugsConfig) -> Res<(Plugs, StopToken)> {
             config.docs,
             capability,
             config.registry_drawer,
+            registry::DocImport {
+                authority: config.authority.clone(),
+                drawers: config.drawers,
+                actor: config.actor.capability,
+            },
             config.blobs,
             config.sql,
         )

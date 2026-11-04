@@ -18,6 +18,7 @@ use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::drawer::protocol::DrawerId;
 use serde::Deserialize;
 use serde::Serialize;
 use service_core_rs::ContextError;
@@ -88,6 +89,23 @@ pub struct PublishPlugVersion {
 #[serde(rename_all = "camelCase")]
 pub struct GetPublisher {
     pub authorization: Authorization,
+}
+
+/// Adds an existing document, one an author wrote and signed elsewhere, to the registry drawer.
+/// `source_drawer` is a drawer the document is in: entering a document confers access the caller
+/// must itself hold on it, so the registry's handle is scoped to the registry drawer and the
+/// drawer the document comes from, and no wider.
+/// The document must carry a plug identity datum. Nothing is checked here beyond that: each
+/// version in it is verified as it is folded in, exactly as for a document that synced into the
+/// drawer, so an unsigned or badly signed version is listed as unverified and never served, and
+/// no downgrade rule applies (arrival order is not version order). The registry's own actor must
+/// itself reach the document, so importing is limited to documents the operator made reachable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPlugDocument {
+    pub authorization: Authorization,
+    pub doc_id: DocId,
+    pub source_drawer: DrawerId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +324,7 @@ service_operation!(MintPlugsCapability => Capability, PlugsError, procedure("org
 service_operation!(PublishPlugVersion => PublishedPlugVersion, PlugsError, procedure("org.example.daybook.plugs.publishPlugVersion"));
 service_operation!(RemovePlugVersion => (), PlugsError, procedure("org.example.daybook.plugs.removePlugVersion"));
 service_operation!(RemovePlug => (), PlugsError, procedure("org.example.daybook.plugs.removePlug"));
+service_operation!(ImportPlugDocument => PlugRecord, PlugsError, procedure("org.example.daybook.plugs.importPlugDocument"));
 service_operation!(GetPublisher => String, PlugsError, query("org.example.daybook.plugs.getPublisher"));
 service_operation!(ListPlugs => Vec<PlugRecord>, PlugsError, query("org.example.daybook.plugs.listPlugs"));
 service_operation!(GetPlug => PlugRecord, PlugsError, query("org.example.daybook.plugs.getPlug"));
@@ -319,6 +338,7 @@ declare_service_protocol! {
             PublishPlugVersion(PublishPlugVersion),
             RemovePlugVersion(RemovePlugVersion),
             RemovePlug(RemovePlug),
+            ImportPlugDocument(ImportPlugDocument),
             GetPublisher(GetPublisher),
             ListPlugs(ListPlugs),
             GetPlug(GetPlug),

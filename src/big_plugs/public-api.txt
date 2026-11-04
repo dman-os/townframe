@@ -6,10 +6,15 @@
 pub big_plugs::async fn boot (config : PlugsConfig) -> Res < (Plugs , StopToken) >
 pub big_plugs::async fn ensure_registry_drawer (config : RegistryDrawerConfig < '_ >) -> Res < DrawerId >
 pub big_plugs::fn schema_group () -> SchemaRegistrationGroup < 'static >
+pub big_plugs::import::async fn micro_pair (plugs : & Client < PlugsProtocol > , blobs : & BlobService , authorization : Authorization , component : Vec < u8 > , manifest_json : & [u8] ,) -> Result < PublishedPlugVersion , ImportError >
+pub const big_plugs::import::CLAY_MICRO_MANIFEST_SCHEMA: & str
+pub const big_plugs::import::MICRO_COMPONENT_ARTIFACT: & str
+pub enum big_plugs::import::ImportError { # [error ("the manifest is not importable: {0}")] Manifest (String), # [error ("the component is not importable: {0}")] Component (String), # [error ("importing the component into the blob store failed: {0}")] Blob (String), # [error ("the registry refused the version: {0}")] Registry (# [from] PlugsError), # [error ("the registry could not be reached: {0}")] Transport (String) }
+pub mod big_plugs::import
 pub struct big_plugs::NodeKey  { public_key: [u8 ; 32], sign: NodeSigner }
 pub struct big_plugs::PlugService  {  }
 pub struct big_plugs::Plugs  { host: Arc < Host < PlugsHandler > >, client: Client < PlugsProtocol >, publisher: String }
-pub struct big_plugs::PlugsConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, registry_drawer: DrawerId, actor: Actor, namespace: Namespace, operator: Uuid7, blobs: Arc < BlobService >, node_key: NodeKey, sql: Database }
+pub struct big_plugs::PlugsConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, registry_drawer: DrawerId, actor: Actor, namespace: Namespace, operator: Uuid7, blobs: Arc < BlobService >, drawers: Client < DrawersProtocol >, node_key: NodeKey, sql: Database }
 pub struct big_plugs::RegistryDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a Actor, access: & 'a DrawerAccess, sql: Database }
 pub type big_plugs::NodeSigner = Arc < dyn Fn (& [u8]) -> [u8 ; 64] + Send + Sync >
 pub type big_plugs::PlugsHandler = Arc < PlugService >

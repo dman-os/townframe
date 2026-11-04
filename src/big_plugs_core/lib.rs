@@ -125,7 +125,7 @@ impl Plug {
             }
         }
         let mut nodules = 0;
-        let mut micros = BTreeSet::new();
+        let mut micros = 0;
         for (index, contribution) in self.contributions.iter().enumerate() {
             let path = format!("contributions[{index}]");
             match contribution {
@@ -141,13 +141,12 @@ impl Plug {
                     check_schema(&path, &nodule.schema)?;
                 }
                 Contribution::Micro(micro) => {
-                    if micro.key.is_empty() {
-                        return Err(PlugError::invalid(path, "a micro key is not empty"));
-                    }
-                    if !micros.insert(micro.key.as_str()) {
+                    micros += 1;
+                    if micros > 1 {
                         return Err(PlugError::invalid(
                             path,
-                            format!("micro key `{}` is declared twice", micro.key),
+                            "a plug has one micro; its micro id is the plug id it is installed as, \
+                             so a second micro is a second plug",
                         ));
                     }
                     check_schema(&path, &micro.schema)?;
@@ -167,10 +166,10 @@ impl Plug {
             })
     }
 
-    pub fn micros(&self) -> impl Iterator<Item = &MicroContribution> {
+    pub fn micro(&self) -> Option<&MicroContribution> {
         self.contributions
             .iter()
-            .filter_map(|contribution| match contribution {
+            .find_map(|contribution| match contribution {
                 Contribution::Micro(micro) => Some(micro),
                 _ => None,
             })
@@ -249,13 +248,15 @@ pub struct NoduleContribution {
     pub extra: Extra,
 }
 
-/// `org.example.daybook.plug.micro`: one GUI contribution, keyed inside the package.
+/// `org.example.daybook.plug.micro`: the package's one GUI contribution. It has no key of its own:
+/// the micro's identity is the plug id it is installed as. `schema` is the id of the description
+/// the payload conforms to, and `description` is Clay's manifest minus the members the envelope
+/// already states (`id`, `package_version`).
 #[macros::datum(authority = Plug::ID, name = "micro")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MicroContribution {
-    pub key: String,
     pub schema: String,
     pub description: IndexMap<String, serde_json::Value>,
     #[serde(flatten)]
@@ -371,13 +372,18 @@ fn is_did(did: &str) -> bool {
     true
 }
 
+/// A plug name: lowercase letters, digits, `-`, `_` and `.`, starting with a letter. Dots are
+/// allowed as npm allows them (Clay micro ids read `dayframe.counter`), but never last or doubled,
+/// so a name is never a `.`/`..` key-slot segment and `a..b` cannot alias anything.
 fn is_segment(segment: &str) -> bool {
     let bytes = segment.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 64
         && bytes[0].is_ascii_lowercase()
+        && bytes.last() != Some(&b'.')
+        && !segment.contains("..")
         && bytes.iter().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
         })
 }
 

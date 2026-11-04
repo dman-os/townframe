@@ -1654,6 +1654,8 @@ dependencies = [
  "big_cabinet",
  "big_cabinet_core",
  "big_plugs_core",
+ "bytes",
+ "futures",
  "serde",
  "serde_json",
  "service_utils_rs",

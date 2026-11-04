@@ -30,7 +30,6 @@ fn plug() -> Plug {
         }));
     plug.contributions
         .push(Contribution::Micro(MicroContribution {
-            key: "gallery".into(),
             schema: "org.example.clay.micro".into(),
             description: [("entry".to_owned(), json!("gallery.js"))]
                 .into_iter()
@@ -55,7 +54,7 @@ fn the_envelope_spells_ids_versions_and_digests_as_text() {
     assert_eq!(value["contributions"][1]["$type"], MicroContribution::ID);
     assert_eq!(serde_json::from_value::<Plug>(value).unwrap(), plug);
     assert_eq!(plug.nodule().unwrap().schema, "org.example.daybook.nodule");
-    assert_eq!(plug.micros().count(), 1);
+    assert_eq!(plug.micro().unwrap().schema, "org.example.clay.micro");
     assert_eq!(
         plug.artifact("routines").unwrap().media_type.as_deref(),
         Some("application/wasm")
@@ -78,9 +77,15 @@ fn a_plug_id_is_a_did_and_a_lowercase_name() {
         "did:key:z6Mk/Photos",
         "did:key:z6Mk/a/b",
         "/photos",
+        "did:key:z6Mk/.photos",
+        "did:key:z6Mk/photos.",
+        "did:key:z6Mk/a..b",
     ] {
         assert!(bad.parse::<PlugId>().is_err(), "{bad}");
     }
+    // Dotted names are legal, as Clay micro ids are (`dayframe.counter`).
+    let dotted: PlugId = example_plug!("dayframe.counter").parse().unwrap();
+    assert_eq!(dotted.name, "dayframe.counter");
 }
 
 #[test]
@@ -206,12 +211,12 @@ fn validation_owns_distribution_not_contribution_content() {
     let error = two_nodules.validate().unwrap_err().to_string();
     assert!(error.contains("one node-facing nodule"), "{error}");
 
-    let mut duplicate_micro = plug();
-    duplicate_micro
+    let mut two_micros = plug();
+    two_micros
         .contributions
-        .push(duplicate_micro.contributions[1].clone());
-    let error = duplicate_micro.validate().unwrap_err().to_string();
-    assert!(error.contains("micro key `gallery`"), "{error}");
+        .push(two_micros.contributions[1].clone());
+    let error = two_micros.validate().unwrap_err().to_string();
+    assert!(error.contains("has one micro"), "{error}");
 
     let mut duplicate_artifact = plug();
     duplicate_artifact
