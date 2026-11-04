@@ -408,3 +408,16 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   also remain by design (wire vocabulary vs host type).
 - Unrun: Playwright `src/dayframe_web/e2e/counter.spec.ts` (updated, never executed) — C4c.
 - Nit seen: `SettingsMicro::edit` maps "preferences still loading" to `AccessError::Denied`.
+
+## C4c part 1 (2026-11-04)
+
+- 527a27fe: `CompositionRuntime::new(store, installed) -> Result<_, StoreError>`; desktop opens
+  SQLite at `DAYFRAME_STORE_PATH` or `$XDG_DATA_HOME/dayframe/store.sqlite`, web opens IndexedDB
+  `"dayframe"`; boot failures render an alert. Test: three boots over one SQLite file prove load +
+  no-op reinstall.
+- `IndexedDbStore` is `unsafe impl Send + Sync` under `cfg(not(target_feature = "atomics"))`
+  (no threads on that target). Alternative was relaxing `clay_host` hook bounds (`Cleanup`,
+  `OutwardHook` are `Send`); not taken.
+- Verified: check-dayframe 455/455; dayframe_web Playwright passed on b4ad0d34 (before 527a27fe).
+- Part 2 (reload e2e in Playwright) moves to C5: needs persisted enablement to have a visible
+  durable fact.
