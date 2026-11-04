@@ -1,5 +1,5 @@
 //! The causal map: owner-scoped contribution to one logical keyspace (ADR 017 §9,
-//! ADR 025 §4, and the 2026-11-04 collection model in the Clay ledger).
+//! ADR 031 §4, and the 2026-11-04 collection model in the Clay ledger).
 //!
 //! A [`RegistrationCollection`] projects one value per logical key `K`. Every live
 //! writer scope holds at most one candidate per key, a value or a tombstone, stamped
@@ -22,7 +22,7 @@
 //! - permanent scopes are installation scopes that have no uninstall path.
 //!
 //! A scope minted with [`RegistrationCollection::create_staged_scope`] belongs to an
-//! initializing incarnation (ADR 024 §5). Its candidates receive stamps but are
+//! initializing incarnation (ADR 030 §5). Its candidates receive stamps but are
 //! invisible to readers and to other scopes until
 //! [`RegistrationCollection::commit_scopes`] publishes the named scopes together.
 //! Closing a staged scope discards its candidates unseen.

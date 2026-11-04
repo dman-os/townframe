@@ -1,4 +1,4 @@
-# ADR 023: Cross-guest capability bank
+# ADR 029: Cross-guest capability bank
 
 **Status:** Accepted. Implemented end-to-end (host bank, collection attachments,
 typed presentation redemption) across the Wasmtime and WCMP engines, with the

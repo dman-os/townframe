@@ -1,7 +1,7 @@
 //! Guest incarnations on any engine: one supervisor [`Factory`] generic over the engine
 //! adapter. [`crate::wasm`] and [`crate::wcmp`] only say how their runtime initializes, mounts
 //! and closes; granting the context, binding presentations to the renderer, and the
-//! incarnation's close order are the same for both (ADR 024 §§5–6).
+//! incarnation's close order are the same for both (ADR 030 §§5–6).
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;

@@ -232,7 +232,7 @@ impl Shell {
 }
 
 // Opening the counter's Settings section is what starts its Wasm guest: the section is a
-// manifest-declared row whose presentation is a lazy endpoint (ADR 025 §7).
+// manifest-declared row whose presentation is a lazy endpoint (ADR 031 §7).
 #[tokio::test(flavor = "current_thread")]
 async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_guest() {
     let Shell {

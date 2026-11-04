@@ -520,7 +520,7 @@ async fn a_disabled_micro_stays_disabled_across_a_reboot() {
     second.host.close();
 }
 
-// ── collection binding resolution (ADR 025 §11) ──────────────────────────────────────────────
+// ── collection binding resolution (ADR 031 §11) ──────────────────────────────────────────────
 
 const ROWS: &str = "tests.rows";
 const MISSING: &str = "tests.missing";

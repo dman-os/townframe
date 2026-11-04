@@ -38,7 +38,7 @@ pub struct Limits {
     pub pending_deliveries: usize,
 }
 
-/// Everything one guest incarnation's `micro-lifecycle.initialize` receives (ADR 024 §5), in
+/// Everything one guest incarnation's `micro-lifecycle.initialize` receives (ADR 030 §5), in
 /// host terms. Engines grant each entry into the guest's resource table under its local
 /// binding name; `requirements` are the provisions the incarnation's resolved providers
 /// published, minted into recipient-local capability references for this incarnation.

@@ -1,4 +1,4 @@
-//! A manifest's declared contributions as installable rows (ADR 025 §3, §4, §7). Installation
+//! A manifest's declared contributions as installable rows (ADR 031 §3, §4, §7). Installation
 //! writes them into the package's manifest installation scope of each target collection, so
 //! they are visible while the package is stopped; the package's runtime writes use another
 //! scope key, so reinstalling the manifest never drops them.
@@ -32,7 +32,7 @@ pub type DeclaredRows = BTreeMap<String, BTreeMap<Vec<u8>, Option<CollectionValu
 /// the row body as JSON; the one-member object `{"$attachment": n}` stands for the reserved
 /// attachment tag over index `n` (JSON has no tags). Each declared attachment becomes the
 /// endpoint of one of the package's own publications, so the stored row never retains the
-/// provider (ADR 025 §7).
+/// provider (ADR 031 §7).
 pub fn declared_rows(manifest: &MicroManifest) -> Result<DeclaredRows, String> {
     manifest.validate()?;
     let micro = MicroId::new(manifest.id.as_str());

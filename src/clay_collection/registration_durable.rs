@@ -1,4 +1,4 @@
-//! Durable installation and permanent scopes over an [`OrderedStore`] (ADR 025 §§2
+//! Durable installation and permanent scopes over an [`OrderedStore`] (ADR 031 §§2
 //! and 4).
 //!
 //! A durable [`RegistrationCollection`] holds two kinds of scope. Incarnation scopes

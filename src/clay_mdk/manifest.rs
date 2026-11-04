@@ -1,4 +1,4 @@
-//! Package declarations (ADR 024 §§11–15): what a micro package *could* do, inspectable
+//! Package declarations (ADR 030 §§11–15): what a micro package *could* do, inspectable
 //! without instantiating it. Neutral vocabulary: this module compiles without any backend
 //! feature so manifest and contract crates stay portable. Everything here is plain JSON wire
 //! data — a manifest read from a component's `dayframe.manifest` section and one built by a
@@ -72,7 +72,7 @@ impl InterfaceRef {
 }
 
 /// The component exports a host drives. `installer` is reserved: phase one never executes it
-/// (ADR 024 §10), it only round-trips.
+/// (ADR 030 §10), it only round-trips.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entrypoints {
     pub initialize: InterfaceRef,
@@ -134,7 +134,7 @@ macro_rules! open_vocabulary {
 }
 
 open_vocabulary! {
-    /// The two behaviors a micro can publish (ADR 025 §5): a request/response operation, or a
+    /// The two behaviors a micro can publish (ADR 031 §5): a request/response operation, or a
     /// mountable component. The set grows additively.
     PublicationKind {
         Call => "call",
@@ -162,7 +162,7 @@ open_vocabulary! {
 open_vocabulary! {
     /// Who decides what a [`CollectionRequest`] binds to.
     BindingResolution {
-        /// Configuration, with the host's defaults when it says nothing (ADR 025 §11).
+        /// Configuration, with the host's defaults when it says nothing (ADR 031 §11).
         Configured => "configured",
         /// Chosen by the user while the micro runs (a powerbox-style grant). Declared only:
         /// no host issues these yet, and the host never defaults them.
@@ -171,7 +171,7 @@ open_vocabulary! {
 }
 
 open_vocabulary! {
-    /// One capability a collection contract offers its consumers (ADR 024 §8).
+    /// One capability a collection contract offers its consumers (ADR 030 §8).
     CollectionCapability {
         Read => "read",
         Register => "register",
@@ -180,7 +180,7 @@ open_vocabulary! {
     }
 }
 
-/// A named publication this package can serve once initialized (ADR 025 §5, §8). `initialize`
+/// A named publication this package can serve once initialized (ADR 031 §5, §8). `initialize`
 /// returns publications by `name`, and what it returns is admitted against this declaration.
 /// A `Call` names the contract of its request and response Lexicons; a `Presentation` has the
 /// one presentation-component contract, so it declares none.
@@ -201,7 +201,7 @@ pub struct RequiredContract {
     pub necessity: Necessity,
 }
 
-/// A collection this package asks to use under a local binding name (ADR 025 §11). It names
+/// A collection this package asks to use under a local binding name (ADR 031 §11). It names
 /// the collection *contract* it can work with, never a concrete collection: configuration
 /// resolves the binding to one, and a micro's code only ever names the binding. Declaring it
 /// grants no authority; `contract` is a [`CollectionContract::id`].
@@ -252,7 +252,7 @@ pub struct CollectionContract {
 
 /// A lazy endpoint attached to a contribution row: the value's attachment `index` refers to
 /// one of this package's own declared publications, which installation turns into a
-/// `LazyEndpoint` (ADR 025 §7). The row stores the endpoint as data; it never retains the
+/// `LazyEndpoint` (ADR 031 §7). The row stores the endpoint as data; it never retains the
 /// provider.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AttachmentDeclaration {
@@ -260,7 +260,7 @@ pub struct AttachmentDeclaration {
     pub publication: String,
 }
 
-/// A row this package declares into a collection (ADR 025 §3, §7). Installation admits it and
+/// A row this package declares into a collection (ADR 031 §3, §7). Installation admits it and
 /// writes it into the package's manifest installation scope, so it is visible while the
 /// package is inactive. `collection` names the collection contract, `key` the row's key and
 /// `payload` the static row body, which the collection's own contract interprets.
@@ -276,7 +276,7 @@ pub struct ContributionDeclaration {
 /// A package's full static declaration: what it can provide, require, request, serve,
 /// contribute, and how it would like to be activated by default. It describes possibilities
 /// only — configured instance identity, enablement, concrete suppliers, granted documents,
-/// target acceptance, and live rows are configuration or runtime facts (ADR 024 §15).
+/// target acceptance, and live rows are configuration or runtime facts (ADR 030 §15).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MicroManifest {
     pub schema: u32,

@@ -2,12 +2,12 @@
 //! depend on the MDK, never on a renderer crate or the host kernel directly (ADR 015 §3
 //! dependency direction). Every operation still runs through the same host sessions a guest's
 //! engine drives, so a native micro and a guest are interchangeable to every other micro
-//! (ADR 025 §5).
+//! (ADR 031 §5).
 //!
 //! A native micro is one [`factory`]: a manifest plus an async `activate` function. The
 //! supervisor runs it as an incarnation like any guest: `activate` stages publications through
 //! the [`Context`], and what it staged is admitted against the manifest's declared publications
-//! and handed back by name (ADR 025 §8).
+//! and handed back by name (ADR 031 §8).
 //!
 //! Incarnation-owned work (the collection mirrors, [`Context::spawn`]) runs as local tasks, so
 //! a supervisor driving native micros runs inside a `tokio::task::LocalSet`.
@@ -107,7 +107,7 @@ impl Resources {
     }
 }
 
-/// One local collection binding resolved to a declared collection (ADR 025 §11).
+/// One local collection binding resolved to a declared collection (ADR 031 §11).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundCollection {
     /// The declared collection's id.
@@ -134,7 +134,7 @@ impl BoundCollection {
 
 /// What configuration resolved each of one micro's collection requests to, by the micro's
 /// local binding name; a binding absent from the map is unbound. Configuration decides these,
-/// not the micro (ADR 025 §11). It is a shared handle: the composition replaces the resolution
+/// not the micro (ADR 031 §11). It is a shared handle: the composition replaces the resolution
 /// when the micro's binding datum changes, and the factory snapshots it at each `initialize`,
 /// so an incarnation sees exactly the resolution current when it started and never changes
 /// under it (there is no hot rebinding).

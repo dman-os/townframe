@@ -34,8 +34,8 @@ use tokio::sync::watch;
 pub type Bytes = Vec<u8>;
 
 /// One stored collection value: portable CBOR body plus host-retained
-/// attachments (ADR 023 §6): live publications, or endpoints that name a micro's publication
-/// (ADR 025 §7). The body names attachments by index under [`CAPABILITY_ATTACHMENT_TAG`]; the
+/// attachments (ADR 029 §6): live publications, or endpoints that name a micro's publication
+/// (ADR 031 §7). The body names attachments by index under [`CAPABILITY_ATTACHMENT_TAG`]; the
 /// body alone conveys no authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionValue {
@@ -59,7 +59,7 @@ impl CollectionValue {
 
 /// The durable form of a [`CollectionValue`]: CBOR `[body, [[micro, publication, namespace,
 /// name, major, minor, patch], ...]]`. A durable row persists endpoints and never references
-/// (ADR 025 §7), so encoding a bound attachment is a programming error; a row that does not
+/// (ADR 031 §7), so encoding a bound attachment is a programming error; a row that does not
 /// decode is corrupt storage. Both crash.
 pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
     use ciborium::Value;
@@ -324,7 +324,7 @@ pub fn bytes_registrations(
 }
 
 /// A registration collection backed by `store`: installation scopes persist there and are
-/// rebuilt on construction (ADR 025 §2), with [`durable_codec`] as the row encoding.
+/// rebuilt on construction (ADR 031 §2), with [`durable_codec`] as the row encoding.
 pub async fn durable_bytes_registrations<St: clay_store::OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
     collection_id: Bytes,
@@ -383,7 +383,7 @@ struct State {
     limits: CollectionLimits,
     readers: Mutex<usize>,
     writers: Mutex<usize>,
-    /// One scope per writer grant (ADR 025 §4). The incarnation owns them: a scope lives until
+    /// One scope per writer grant (ADR 031 §4). The incarnation owns them: a scope lives until
     /// the incarnation closes or fails initialization, however long its writer handle lives.
     /// Scopes start staged, so their rows are in the authoritative replica but not the
     /// projection until initialization commits.
@@ -535,7 +535,7 @@ impl CollectionSession {
         } = grant;
         let permit = self.state.admit(Budget::Writers)?;
         let writer_id = WriterId::new(micro.as_str());
-        // Every grant mints a staged scope (ADR 024 §5): rows written while the incarnation is
+        // Every grant mints a staged scope (ADR 030 §5): rows written while the incarnation is
         // still initializing must not reach readers unless initialization commits.
         let scope = registrations.create_staged_scope(writer_id.clone());
         let writer = scope.writer().expect("a freshly minted scope is open");
@@ -557,7 +557,7 @@ impl CollectionSession {
             .on_outward(&self.state.instance, move |lifecycle| match lifecycle {
                 Lifecycle::Active => outward.commit(),
                 // Closing withdraws outward visibility of new publications only. The scopes keep
-                // their rows while `instance-root.close()` runs (ADR 024 §6) and are closed by
+                // their rows while `instance-root.close()` runs (ADR 030 §6) and are closed by
                 // the teardown effect above, after that cleanup.
                 Lifecycle::Closing => {}
                 other => unreachable!("outward hooks are never told {other:?}"),

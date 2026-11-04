@@ -66,7 +66,7 @@ interface presentation-events {
         stop-propagation: bool,
     }
 
-    /// Mount the presentation the incarnation published as `publication` (ADR 025 §5).
+    /// Mount the presentation the incarnation published as `publication` (ADR 031 §5).
     mount: func(publication: string, placement: borrow<mount-point>, components: list<component-ref>) -> result<surface, presentation-error>;
 
     unmount: func(surface: borrow<surface>);

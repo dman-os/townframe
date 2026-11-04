@@ -119,7 +119,7 @@ interface collection-registration {
     }
 
     /// What one attachment slot of a written value holds. A durable row persists endpoints and
-    /// never references (ADR 025 §7), so a row names its own publications; the host turns the
+    /// never references (ADR 031 §7), so a row names its own publications; the host turns the
     /// name into the endpoint of the writer's own micro and manifest-declared contract.
     variant row-attachment {
         /// A held reference, forwarded as it is.

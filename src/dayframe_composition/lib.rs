@@ -8,7 +8,7 @@
 //! supervisor starts the micro eagerly, which provider satisfies each of its requirements, and
 //! which declared collections it may read or write. The root declares the collections the
 //! manifests name and installs every manifest-declared row into the declaring micro's
-//! manifest installation scope (ADR 025 §4), so rows are visible while their micro is stopped.
+//! manifest installation scope (ADR 031 §4), so rows are visible while their micro is stopped.
 //! There is no supervisor reconfiguration yet: enablement and startup are fixed by the catalog
 //! except for the enable/disable/retry controls of the lifecycle panel.
 mod bindings;
@@ -523,7 +523,7 @@ impl CompositionRuntime {
     /// supervisor's activations and idle closes, and mirror `shell.roots`. Micros and their
     /// drivers spawn local tasks, so everything runs inside one `LocalSet`, which is why the
     /// shell spawns this future itself rather than driving the supervisor from its UI tasks.
-    /// On shutdown the micros close first, then the host (ADR 024 §6). Runs once.
+    /// On shutdown the micros close first, then the host (ADR 030 §6). Runs once.
     pub async fn serve(&self) {
         let feed = self
             .feed

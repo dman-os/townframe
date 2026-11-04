@@ -1,4 +1,4 @@
-//! Engine conformance for the ADR 024 activation boundary, run against the prepared
+//! Engine conformance for the ADR 030 activation boundary, run against the prepared
 //! `lifecycle` fixture component (`src/clay_mdk/lifecycle_fixture.rs`).
 //!
 //! Each engine crate implements [`Incarnations`] over its runtime and runs these scenarios from
@@ -264,7 +264,7 @@ pub async fn provider_consumer_graph<E: Incarnations>(engine: E) {
     harness.finish(supervisor).await;
 }
 
-/// ADR 025 §§6 and 9 against a lazy reference to the fixture's provider: `status` reports
+/// ADR 031 §§6 and 9 against a lazy reference to the fixture's provider: `status` reports
 /// `Dormant` without starting anything; a `call` activates the provider, answers, and lets it
 /// idle-close once the call's lease drops; a `retain-call` binding keeps it up until dropped;
 /// a redeemed presentation can be mounted, keeps it up while held, and lets it close when
@@ -357,7 +357,7 @@ pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine
 }
 
 /// A guest that returns a publication its manifest does not declare, or declares as another
-/// kind or under another contract, fails its initialization (ADR 025 §8).
+/// kind or under another contract, fails its initialization (ADR 031 §8).
 pub async fn undeclared_publications_fail_initialization<E: Incarnations>(engine: E) {
     let engine = Rc::new(engine);
     let declared = declared_publications();
@@ -1522,7 +1522,7 @@ impl<E: Incarnations> Factory<CapabilityPublication> for Fixture<E> {
             assert_eq!(host.lifecycle(&instance), Lifecycle::Initializing);
             let publications = E::publications(&runtime);
             for (name, publication) in &publications {
-                // Staged until the supervisor commits this initialization (ADR 024 §5).
+                // Staged until the supervisor commits this initialization (ADR 030 §5).
                 let staged = shared.observer.mint(publication).unwrap();
                 let outcome = match publication.kind() {
                     PublicationKind::Presentation => staged.redeem_presentation().await.err(),

@@ -1,5 +1,5 @@
 //! Typed access to declared registration collections for in-process micros (ADR 017 §9,
-//! ADR 025 §4). Rows are the same CBOR bytes a guest reads and writes: a native micro and a
+//! ADR 031 §4). Rows are the same CBOR bytes a guest reads and writes: a native micro and a
 //! guest see one collection through the same host sessions, so a native reader consumes rows a
 //! guest wrote (attachments included) and the reverse.
 //!

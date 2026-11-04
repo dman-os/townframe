@@ -110,7 +110,7 @@ pub enum RowEvidence {
 ///
 /// `write_context` is opaque, source-defined mutation context carried with the row.
 /// It is separate from capability attachments carried by encoded values
-/// (ADRs 017, 023, and 024).
+/// (ADRs 017, 029, and 030).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change<K, V> {
     Upsert {

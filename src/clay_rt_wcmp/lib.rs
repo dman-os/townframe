@@ -503,7 +503,7 @@ impl WcmpIncarnation {
         Ok(())
     }
 
-    /// The guest half of an orderly close (ADR 024 §6): run `instance-root.close` while the
+    /// The guest half of an orderly close (ADR 030 §6): run `instance-root.close` while the
     /// incarnation's host authority and dependencies are still live, then drop the root (its
     /// guest destructor releases whatever the root held) and only then revoke the publications.
     /// The store itself stays up so a caller can audit what the guest still holds.
@@ -686,7 +686,7 @@ impl WcmpRuntime {
         (*self.publications).clone()
     }
 
-    /// Close the incarnation's guest half (ADR 024 §6 step 2). The incarnation stops taking
+    /// Close the incarnation's guest half (ADR 030 §6 step 2). The incarnation stops taking
     /// presentation and document calls, its `instance-root.close` runs to completion, the
     /// root and the publication leases are released, and the store is dropped. The caller has
     /// already withdrawn outward visibility and tears the host incarnation down afterwards.

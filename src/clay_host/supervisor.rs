@@ -1,4 +1,4 @@
-//! Activation supervisor (ADR 024 §§1–6, ADR 025 §§8–9): configured singleton micros, strong
+//! Activation supervisor (ADR 030 §§1–6, ADR 031 §§8–9): configured singleton micros, strong
 //! requirement bindings, external leases, staged initialization, and ordered closing.
 //!
 //! The supervisor is engine-neutral. An engine (or a test) supplies a [`Factory`] that runs one
@@ -47,7 +47,7 @@ use crate::instance::Lifecycle;
 pub type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// The configured name of a singleton micro: its package, its configured instance, and the
-/// at-most-one live incarnation (ADR 025 §5).
+/// at-most-one live incarnation (ADR 031 §5).
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MicroId(String);
 
@@ -82,7 +82,7 @@ pub trait Factory<P> {
     ) -> LocalFuture<'static, Result<Initialized<P>, String>>;
 }
 
-/// What a successful initialization hands the supervisor (ADR 025 §8): the incarnation's
+/// What a successful initialization hands the supervisor (ADR 031 §8): the incarnation's
 /// lifecycle proof and the publications it serves, by the names its manifest declares. They
 /// become reachable together, only once `initialize` has returned.
 pub struct Initialized<P> {
@@ -108,12 +108,12 @@ pub struct ConfiguredMicro<P> {
     /// Required collection bindings that configuration left unresolved. While any remain the
     /// micro is not startable and shows as [`MicroState::Unconfigured`]: that is a
     /// configuration state, not a fault, so neither an eager reconcile nor demand starts it
-    /// (ADR 025 §11). [`Supervisor::reconfigure`] changes it later.
+    /// (ADR 031 §11). [`Supervisor::reconfigure`] changes it later.
     pub unresolved_bindings: Vec<String>,
     pub factory: Rc<dyn Factory<P>>,
 }
 
-/// A strong requirement: the configured `provider`'s named `publication` (ADR 025 §5).
+/// A strong requirement: the configured `provider`'s named `publication` (ADR 031 §5).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Requirement {
     pub provider: MicroId,
@@ -167,7 +167,7 @@ pub enum MicroState {
     Faulted(String),
 }
 
-/// An external strong edge to one publication of one incarnation (ADR 024 §2, ADR 025 §9).
+/// An external strong edge to one publication of one incarnation (ADR 030 §2, ADR 031 §9).
 /// While any lease on an incarnation lives, it is retained. Dropping the last one makes a
 /// non-eager incarnation without bindings eligible for idle close, which
 /// [`Supervisor::drive`] performs. The lease dereferences to the publication it was acquired
@@ -786,7 +786,7 @@ impl<P: Clone + 'static> Supervisor<P> {
             };
             // Revoke the publications while the incarnation's registration scopes still exist,
             // so nothing is reachable through a publication whose backing scope is gone
-            // (ADR 017 §6, ADR 025 §9). Teardown removes those scopes next.
+            // (ADR 017 §6, ADR 031 §9). Teardown removes those scopes next.
             drop(publications);
             self.host.close_instance(&instance).unwrap();
             let state = match closed {

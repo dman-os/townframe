@@ -1,10 +1,10 @@
-# ADR 024: Micro lifecycle, lazy activation, and manifest contract
+# ADR 030: Micro lifecycle, lazy activation, and manifest contract
 
 **Status:** Proposed. The lifecycle core is partially implemented; the WIT and revised
 manifest shape are not.
 
 **Amends:** ADR 014's binding-derived lifecycle and ADR 015 §§7–10. **Builds on:**
-ADR 017's projection leases and ADR 023's cross-guest capability bank.
+ADR 017's projection leases and ADR 029's cross-guest capability bank.
 
 ## Context
 
@@ -135,7 +135,7 @@ Demand =
 
 Reading a durable row or holding its lazy attachment does not activate the provider. Redeeming, invoking, or mounting it starts or joins one activation attempt. A target that intentionally wants eager contributors may retain their endpoints explicitly; helpers may retain visible, selected, or selector-matching entries without changing collection semantics.
 
-Package declarations and Clay configuration determine which entrypoint and named publication may satisfy an endpoint. Guests never send trusted provider identities in an invocation. Unknown application extension vocabulary remains data interpreted by target micros, not a host lifecycle enum. ADR 025 specifies manifest-declared collection and endpoint ownership.
+Package declarations and Clay configuration determine which entrypoint and named publication may satisfy an endpoint. Guests never send trusted provider identities in an invocation. Unknown application extension vocabulary remains data interpreted by target micros, not a host lifecycle enum. ADR 031 specifies manifest-declared collection and endpoint ownership.
 
 ### 5. Initialization stages outward visibility
 
@@ -152,7 +152,7 @@ Outward effects remain staged until initialization succeeds:
 - guest-served collection sources.
 
 
-A demanded lazy endpoint names a declared publication. `initialize` returns the publications it serves by name (ADR 025 §8); callers await the activation result rather than polling an ephemeral collection. A demand whose publication is not returned fails as `Unavailable`. Concurrent demand joins the same pending incarnation.
+A demanded lazy endpoint names a declared publication. `initialize` returns the publications it serves by name (ADR 031 §8); callers await the activation result rather than polling an ephemeral collection. A demand whose publication is not returned fails as `Unavailable`. Concurrent demand joins the same pending incarnation.
 On successful return, the host atomically exposes staged publications. On error,
 trap, cancellation, or dropped initialization, the pending incarnation scope is
 dropped and all acquired/staged resources unwind through RAII. This is transactional
@@ -179,7 +179,7 @@ This naturally closes dependents before providers. Mandatory configured dependen
 cycles are rejected. A dynamically formed unreachable strongly connected component
 closes as a group; members must tolerate peers becoming revoked during cleanup.
 
-Weak ADR 023 proxies remain owned and safely droppable after provider closure, but
+Weak ADR 029 proxies remain owned and safely droppable after provider closure, but
 become inert. Surface recovery may show a missing/error presentation or a frozen
 render; the weak handle does not keep the provider alive.
 
@@ -401,7 +401,7 @@ interface collection-registration {
 ```
 
 A written value's attachment is either a held `reference` or `own-publication(name)`, one of the
-writer's manifest-declared publications; the host stores its endpoint (ADR 025 §7) and answers a
+writer's manifest-declared publications; the host stores its endpoint (ADR 031 §7) and answers a
 name the manifest does not declare with `invalid-attachment`. Reads still deliver `encoded-value`
 with minted `capability-ref`s.
 
@@ -412,7 +412,7 @@ so a micro can supersede another's row; authority will be scoped by the collecti
 once it exists (guest and host run the same query engine), and the grant will be the query.
 Dropping the handle releases mutation authority only. The host retracts incarnation-scope
 contributions when the instance closes and installation-scope contributions when the owning plug is
-uninstalled, as specified by ADR 025.
+uninstalled, as specified by ADR 031.
 Documents retain their domain command interface and heads-based settlement rather than
 being forced through either generic writer.
 
@@ -439,8 +439,8 @@ interface capability-bank {
 }
 ```
 
-The two publication kinds, Call and Presentation, are defined in ADR 025 §5. A
-`capability-ref` is bound or lazy (ADR 025 §6); every use is async because a lazy
+The two publication kinds, Call and Presentation, are defined in ADR 031 §5. A
+`capability-ref` is bound or lazy (ADR 031 §6); every use is async because a lazy
 reference may activate its provider. Typed publication/redemption methods are finite and additive. Collection CBOR contains
 attachment-slot indices; `encoded-value.capabilities` carries recipient-local authority on reads and
 `written-value.attachments` names what a write attaches.
@@ -546,13 +546,13 @@ CollectionRequest {
 }
 ```
 
-A contract has no writer policy: retention belongs to the writer's scope (ADR 025 §4), and write
+A contract has no writer policy: retention belongs to the writer's scope (ADR 031 §4), and write
 authority is not key-scoped yet: any micro bound to a collection with Register may write any key,
 so a micro can supersede another's row. Authority will be scoped by the collection query language
 once it exists (guest and host run the same query engine), and the grant will be the query.
 
 These are requested/declared shapes, not grants. Configuration chooses concrete
-documents, suppliers, and the concrete collection each collection request binds to (ADR 025 §11
+documents, suppliers, and the concrete collection each collection request binds to (ADR 031 §11
 specifies resolution, defaults, and the unconfigured lifecycle state). Collection query IRs
 remain contract-specific CBOR interpreted by host and guest libraries.
 
@@ -578,7 +578,7 @@ LazyEndpointDeclaration {
 The target binding identifies where configuration routes the declaration; it does not hard-code a configured target instance into the package. Installation resolves the binding, validates registration authority and the target collection's schemas, then writes the row under the plug revision's installation scope. The row remains visible while the contributor is inactive and disappears when that scope is removed on uninstall.
 
 A lazy endpoint declaration contains no live authority. Projection mints an authorized lazy attachment for each recipient. Redemption activates or joins the contributor, and successful initialization fulfills the named publication slot. Static contributions therefore need neither `TargetLive` activation triggers nor a second ephemeral collection.
-ADR 025 specifies registration-scope ownership, collection availability, schema admission, and the toolbar/completion/layout examples.
+ADR 031 specifies registration-scope ownership, collection availability, schema admission, and the toolbar/completion/layout examples.
 
 ### 15. What does not belong in the manifest
 
@@ -618,7 +618,7 @@ Not built:
 - the revised context-centered MDK surface; and
 - installer/enablement reconciliation.
 
-Built checkpoints include the leased collection WIT, owner-scoped registration writers with writer-owned cleanup (now to be revised to scope ownership), and ADR 023 capability attachments/redemption. Those checkpoints do not yet implement ADR 025's durable or lazy lifecycle.
+Built checkpoints include the leased collection WIT, owner-scoped registration writers with writer-owned cleanup (now to be revised to scope ownership), and ADR 029 capability attachments/redemption. Those checkpoints do not yet implement ADR 031's durable or lazy lifecycle.
 
 ## Consequences
 
@@ -637,6 +637,10 @@ Built checkpoints include the leased collection WIT, owner-scoped registration w
 - installer upgrade/downgrade/uninstall migrations;
 - activation carriers beyond explicit roots, lazy capability redemption/invocation, and presentation mounting;
 - idle grace, freezing, and preinitialized pools;
+- a lazy-activation responsiveness policy: intent prewarm (hover/focus/visibility of a lazy endpoint
+  takes a short warm lease), a keep-warm TTL bounded by an LRU/memory budget across incarnations,
+  and immediate pending feedback with queued calls while an incarnation initializes. Activation
+  latency per engine (Wasmtime, browser) is to be measured before any budget is chosen;
 - dynamic mandatory dependency cycles;
 - guest-served collection sources; and
 - automatic lifecycle edges for every mount/invocation until concrete contracts choose

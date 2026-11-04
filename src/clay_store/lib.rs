@@ -1,4 +1,4 @@
-//! Ordered key-value storage under durable Clay collections (ADR 025 §2).
+//! Ordered key-value storage under durable Clay collections (ADR 031 §2).
 //!
 //! The store knows bytes and nothing else: no collections, rows, or schemas.
 //! Callers encode `(collection, scope, local_key)` into a key so that a whole

@@ -1,7 +1,7 @@
 //! Privileged composition host. Micros receive bound handles, not this constructor surface.
 //!
 //! This crate is the authority kernel: lifecycle, tokens, component references, mount records,
-//! and the engine-neutral activation supervisor (ADR 024). Component (wasm) hosting lives in the
+//! and the engine-neutral activation supervisor (ADR 030). Component (wasm) hosting lives in the
 //! engine crates and document data lives in `clay_docs`; neither is this crate's concern
 //! (ADR 015 §3, §6).
 

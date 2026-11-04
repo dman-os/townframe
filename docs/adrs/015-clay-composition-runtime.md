@@ -276,7 +276,7 @@ Requirements:
 
 Contribution collections share the ADR 017 read waist but retain distinct writer semantics. Settings sections, toolbar entries, and root mounts may be owner-scoped registrations or causally combined contributor branches. Disposal removes the owner's branch; a collection-defined materializer recomputes the consumer projection. Durable document commands never inherit that ownership behavior.
 They live in **clay_host** (they are host bookkeeping, `transcript:225-226`), parameterized by
-portable contract values and ADR 023 capability attachments, with writer and projection leases; the host stamps owner identity on every contribution. Configuration is not a third
+portable contract values and ADR 029 capability attachments, with writer and projection leases; the host stamps owner identity on every contribution. Configuration is not a third
 store: micro configuration lives in document facets reusing plug-manifest declarations (settled
 rule, `dayframe-micros.md:46-47`); *composition* configuration is a `ConfigurationSource` trait
 with static/mock/facet backends and nothing below the trait mentions facets (D2).
@@ -326,7 +326,7 @@ The MDK authoring surface stays synchronous against the guest's local partial re
   once-only operation; `Drop` does not promise completed asynchronous cleanup. A lease that
   outlives its owner is inert, never a stale-cleanup hazard: cleanup compares runtime
   incarnation identities so stale cleanup cannot withdraw a replacement (ADR 014:456-458).
-- **Contribution collections** are host-materialized projections over owner-scoped registrations or causal contributor branches (ADR 017). Writer capabilities imply host-stamped owner identity; no guest supplies a trusted scope. Closing a writer removes its branch and recomputes the combined projection. Root windows, toolbar entries, and Settings sections use this layer. Values that carry actions or surface mounts attach ADR 023 capability references rather than serializing engine handles.
+- **Contribution collections** are host-materialized projections over owner-scoped registrations or causal contributor branches (ADR 017). Writer capabilities imply host-stamped owner identity; no guest supplies a trusted scope. Closing a writer removes its branch and recomputes the combined projection. Root windows, toolbar entries, and Settings sections use this layer. Values that carry actions or surface mounts attach ADR 029 capability references rather than serializing engine handles.
 - **Lifecycle recovery** drops the `Condvar`/`ThreadId` gate (R7): dependent-close ordering is
   synchronous on the calling thread (the close cascade already is); the gate only served
   multi-threaded close callers, which the wasm32 shape forbids anyway.
@@ -374,7 +374,7 @@ The MDK authoring surface stays synchronous against the guest's local partial re
 
 ### 9. Micro manifests
 
-ADRs 024/025 replace the current flat `MicroManifest` target. The plug envelope carries opaque Clay micro descriptions, schema references, entrypoints, provided and required contracts, configuration requests, collection definitions, and durable contribution declarations. It describes possibilities and requested authority, never concrete suppliers, grants, local enablement, live resources, or runtime faults.
+ADRs 030/031 replace the current flat `MicroManifest` target. The plug envelope carries opaque Clay micro descriptions, schema references, entrypoints, provided and required contracts, configuration requests, collection definitions, and durable contribution declarations. It describes possibilities and requested authority, never concrete suppliers, grants, local enablement, live resources, or runtime faults.
 
 The immutable, content-addressed OCI plug envelope is the inspection boundary; a Wasm component does not need to embed a second normative manifest. Clay admits each micro contribution without instantiating its artifact, resolves collection and requirement bindings through runtime-owned desired state, and applies static contributions as installation-owned durable collection scopes. Runtime initialization fulfills named live publication slots rather than re-declaring installed metadata.
 
@@ -432,7 +432,7 @@ obtain `NativeComponents` through Dioxus context instead of threading props
 | Bootstrap complete | Evidence that all matching state at the lease's opening boundary was represented. |
 | Cursor | Opaque host projection position committed only after a guest applies a page. |
 | Pending prediction | Host-owned domain mutation intent included in the visible projection until authoritative settlement. |
-| Capability reference | Recipient-local ADR 023 resource redeemed into a typed proxy. |
+| Capability reference | Recipient-local ADR 029 resource redeemed into a typed proxy. |
 | Operation | A submitted domain command with source-defined settlement evidence. |
 | Engine | The component runtime (wasmtime today); instantiates and bounds guests. |
 | MDK | The micro authoring API; ergonomic surface over the wire or in-process backends. |
@@ -501,7 +501,7 @@ API sketches above:
 - Node → Clay → guest uses leased partial replication. A collection-specific selector drives host acquisition and guest-local querying; consumers read their partial replicas, never an implicit synchronous remote value. Not-yet-loaded, known-empty, present, stale, pending, and revoked evidence remain distinguishable in typed APIs.
 - A projection lease captures one immutable selector, bootstraps inline transactional rows, and then long-polls. `bootstrap_complete` marks its opening boundary. Overlapping leases use independent result sets initially; a later IVM/CVR may safely share membership and bodies. An expired cursor clears and reloads that projection.
 - Transient registration, causal contribution, and durable document commands share the read waist but not write semantics. Host-owned document predictions settle by returned/observed heads; closing a guest replica does not cancel a submitted durable write.
-- Capability-bearing values use ADR 023 attachments and recipient-local resource references, never serialized invocation authority.
+- Capability-bearing values use ADR 029 attachments and recipient-local resource references, never serialized invocation authority.
 - A boundary is evaluated through actual Settings/Sample consumption and native/WIT parity
   tests. Compiling host code for wasm32 alone proves neither guest portability nor browser
   support. Each increment must state which consumers and engines it actually exercised.

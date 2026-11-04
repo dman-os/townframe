@@ -1,4 +1,4 @@
-//! The declared-collection registry (ADR 025 §1, §11): a collection exists independently of any
+//! The declared-collection registry (ADR 031 §1, §11): a collection exists independently of any
 //! micro incarnation, is named by its contract id, and authority over it is issued as grants.
 //!
 //! Knowing a collection id conveys no authority; a [`Grant`] does. The registry is engine- and
