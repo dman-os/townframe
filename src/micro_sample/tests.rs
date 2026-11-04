@@ -19,7 +19,7 @@ use std::num::NonZeroUsize;
 // publication, or ACL drift is a reviewable diff.
 #[test]
 fn manifest_wire_shape_is_reviewable() {
-    insta::assert_yaml_snapshot!(manifest());
+    insta::assert_yaml_snapshot!(sidecar());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -37,9 +37,9 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
                 .collections
                 .declare(
                     CollectionContract {
-                        id: SECTIONS.into(),
-                        key_schema: micro_settings_manifest::SECTION_KEY_SCHEMA.into(),
-                        value_schema: micro_settings_manifest::SECTION_VALUE_SCHEMA.into(),
+                        id: Nsid::literal(SECTIONS),
+                        key_schema: Nsid::literal(micro_settings_manifest::SECTION_KEY_SCHEMA),
+                        value_schema: Nsid::literal(micro_settings_manifest::SECTION_VALUE_SCHEMA),
                     },
                     sections.clone(),
                 )
@@ -58,10 +58,11 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
                 unresolved_bindings: Vec::new(),
                 factory: factory(
                     resources,
+                    clay_mdk::MicroId::new(ID),
                     manifest(),
                     CollectionBindings::new([(
                         SECTIONS_BINDING.to_owned(),
-                        BoundCollection::write(SECTIONS),
+                        BoundCollection::write(Nsid::literal(SECTIONS)),
                     )]),
                     activate,
                 ),

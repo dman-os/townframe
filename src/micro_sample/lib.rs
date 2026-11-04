@@ -4,22 +4,22 @@
 mod tests;
 mod view;
 
+use clay_mdk::Access;
 use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
-use clay_mdk::CollectionAccess;
-use clay_mdk::CollectionRequest;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::Context;
 use clay_mdk::Entrypoints;
 use clay_mdk::Error;
 use clay_mdk::FacetAccess;
-use clay_mdk::MANIFEST_SCHEMA;
-use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
+use clay_mdk::Nsid;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
+use clay_mdk::Request;
 use clay_mdk::RowAttachment;
+use clay_mdk::Sidecar;
 use clay_mdk::host::DocumentService;
 use dioxus::prelude::*;
 use micro_settings_manifest::SECTIONS;
@@ -28,8 +28,11 @@ use serde::Deserialize;
 use serde::Serialize;
 
 pub const ID: &str = "dayframe.sample";
+pub const PACKAGE_VERSION: u32 = 1;
+/// The NSID prefix the sample holds. It declares no NSID, only requests the sections contract.
+pub const AUTHORITY: &str = "org.example.dayframe.sample";
 pub const CONFIG_NAME: &str = "sample";
-pub const CONFIG_TAG: &str = "org.dayframe.sample.config";
+pub const CONFIG_TAG: &str = "org.example.dayframe.sample.config";
 pub const CONFIG_KEY: &str = "main";
 /// The one publication: the presentation Settings mounts for this micro's section.
 pub const DETAIL: &str = "detail";
@@ -47,9 +50,6 @@ pub struct SampleConfig {
 /// at runtime, so it exists only while the micro runs.
 pub fn manifest() -> MicroManifest {
     MicroManifest {
-        schema: MANIFEST_SCHEMA,
-        id: MicroId::new(ID),
-        package_version: 1,
         entrypoints: Entrypoints::micro_client(),
         publications: vec![PublicationDeclaration {
             name: DETAIL.into(),
@@ -60,24 +60,31 @@ pub fn manifest() -> MicroManifest {
         configuration_requests: vec![ConfigurationRequest {
             binding: CONFIG_NAME.into(),
             facets: vec![FacetAccess {
-                tag: CONFIG_TAG.into(),
+                tag: Nsid::literal(CONFIG_TAG),
                 key_id: Some(CONFIG_KEY.into()),
                 read: true,
                 write: true,
-                ..Default::default()
+                create: false,
+                delete: false,
             }],
         }],
         collection_contracts: vec![],
-        collection_requests: vec![CollectionRequest {
+        collection_requests: vec![Request {
             binding: SECTIONS_BINDING.into(),
-            contract: SECTIONS.into(),
-            access: CollectionAccess::Write,
+            contract: Nsid::literal(SECTIONS),
+            access: Some(Access::Write),
             necessity: Necessity::Required,
             resolution: BindingResolution::Configured,
+            min_revision: None,
         }],
         contributions: vec![],
         extra: Default::default(),
     }
+}
+
+/// The Sample package as its sidecar carries it: identity, authority and manifest.
+pub fn sidecar() -> Sidecar {
+    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
 }
 
 /// Activation receives already-bound dependencies through the context; it cannot mint grants or

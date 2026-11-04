@@ -5,41 +5,32 @@
 //! write), and serves a `rows` call that answers every row it can see once its own is among
 //! them. A second call, `attach`, writes a row after `activate` returned that attaches the
 //! declared presentation `detail` by name. Engine conformance runs it as `lifecycle_conformance::context_collections_and_calls`.
+use clay_mdk::Access;
 use clay_mdk::BindingResolution;
-use clay_mdk::CollectionAccess;
-use clay_mdk::CollectionRequest;
 use clay_mdk::Context;
-use clay_mdk::ContractIdentity;
 use clay_mdk::Entrypoints;
 use clay_mdk::Error;
-use clay_mdk::MANIFEST_SCHEMA;
-use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
+use clay_mdk::Nsid;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
+use clay_mdk::Request;
 use clay_mdk::RowAttachment;
 
 fn manifest() -> MicroManifest {
     MicroManifest {
-        schema: MANIFEST_SCHEMA,
-        id: MicroId::new("dayframe.context-fixture"),
-        package_version: 1,
         entrypoints: Entrypoints::micro_client(),
         publications: vec![
             PublicationDeclaration {
                 name: "rows".into(),
                 kind: PublicationKind::Call,
-                contract: Some(ContractIdentity::new("dayframe.context", "rows", (1, 0, 0))),
+                contract: Some(Nsid::literal("org.example.clay.test.context.rows")),
             },
             PublicationDeclaration {
                 name: "attach".into(),
                 kind: PublicationKind::Call,
-                contract: Some(ContractIdentity::new(
-                    "dayframe.context",
-                    "attach",
-                    (1, 0, 0),
-                )),
+                contract: Some(Nsid::literal("org.example.clay.test.context.attach")),
             },
             PublicationDeclaration {
                 name: "detail".into(),
@@ -50,12 +41,13 @@ fn manifest() -> MicroManifest {
         requires: vec![],
         configuration_requests: vec![],
         collection_contracts: vec![],
-        collection_requests: vec![CollectionRequest {
+        collection_requests: vec![Request {
             binding: "feed".into(),
-            contract: "dayframe.context.feed".into(),
-            access: CollectionAccess::Write,
+            contract: Nsid::literal("org.example.clay.test.context.feed"),
+            access: Some(Access::Write),
             necessity: Necessity::Required,
             resolution: BindingResolution::Configured,
+            min_revision: None,
         }],
         contributions: vec![],
         extra: Default::default(),

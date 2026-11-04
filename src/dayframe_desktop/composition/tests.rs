@@ -1,8 +1,8 @@
 use super::*;
+use clay_guest_session::capabilities::RowAttachment;
 use clay_host::MicroId;
 use clay_host::MicroState;
 use clay_mdk::Collection;
-use clay_guest_session::capabilities::RowAttachment;
 use micro_settings_manifest::Section;
 
 // The package directory must install the Wasmtime counter beside the shell's native
@@ -29,7 +29,7 @@ async fn desktop_runtime_installs_the_counter_section_from_its_package_manifest(
     let mut key = Vec::new();
     ciborium::into_writer(micro_counter_manifest::ID, &mut key).unwrap();
     let row = runtime
-        .collection(micro_settings_manifest::SECTIONS)
+        .collection(&clay_mdk::Nsid::literal(micro_settings_manifest::SECTIONS))
         .unwrap()
         .get(&key)
         .unwrap()
@@ -71,7 +71,7 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
                     &shell,
                     runtime.supervisor().activator(),
                     &runtime
-                        .collection(micro_settings_manifest::SECTIONS)
+                        .collection(&clay_mdk::Nsid::literal(micro_settings_manifest::SECTIONS))
                         .unwrap(),
                 )
                 .unwrap();

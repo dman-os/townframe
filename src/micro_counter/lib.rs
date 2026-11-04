@@ -200,7 +200,13 @@ mod tests {
                     enabled: true,
                     requirements: BTreeMap::new(),
                     unresolved_bindings: Vec::new(),
-                    factory: factory(resources, manifest, CollectionBindings::default(), ACTIVATE),
+                    factory: factory(
+                        resources,
+                        clay_mdk::MicroId::new(micro_counter_manifest::ID),
+                        manifest,
+                        CollectionBindings::default(),
+                        ACTIVATE,
+                    ),
                 };
                 let supervisor = Supervisor::new(host.clone(), [counter]);
                 let id = MicroId::new(micro_counter_manifest::ID);

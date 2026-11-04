@@ -70,6 +70,7 @@ type PackageFuture<E> = LocalFuture<'static, Result<<E as Engine>::Package, Stri
 
 struct GuestFactory<E: Engine> {
     resources: Resources,
+    micro: MicroId,
     manifest: MicroManifest,
     declared: BTreeMap<String, DeclaredPublication>,
     bindings: CollectionBindings,
@@ -78,6 +79,7 @@ struct GuestFactory<E: Engine> {
 
 pub(crate) fn factory<E: Engine>(
     resources: Resources,
+    micro: crate::MicroId,
     manifest: MicroManifest,
     bindings: CollectionBindings,
     package: PackageSource<E>,
@@ -85,6 +87,7 @@ pub(crate) fn factory<E: Engine>(
     let declared = declared_publications(&manifest);
     Rc::new(GuestFactory::<E> {
         resources,
+        micro: MicroId::new(micro.as_str()),
         manifest,
         declared,
         bindings,
@@ -121,13 +124,13 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
         activator: Activator<CapabilityPublication>,
     ) -> LocalFuture<'static, Result<Initialized<CapabilityPublication>, String>> {
         let resources = self.resources.clone();
+        let micro = self.micro.clone();
         let manifest = self.manifest.clone();
         let declared = self.declared.clone();
         let bindings = self.bindings.snapshot();
         let package = Rc::clone(&self.package);
         Box::pin(async move {
             let package = package().await?;
-            let micro = MicroId::new(manifest.id.as_str());
             // Guests see their collections by the manifest's binding names, never by id.
             let collections = bindings
                 .iter()

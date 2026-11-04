@@ -14,13 +14,13 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 /// One entry of `packages/index.json`: where the component lives, the SHA-256 the shell
-/// must verify after fetching, and the manifest from the package's sidecar JSON.
+/// must verify after fetching, and the package's sidecar JSON (identity, authority, manifest).
 /// STAND-IN until `big_plugs` delivers manifests.
 #[derive(Clone, Deserialize)]
 struct PackageIndexEntry {
     location: String,
     digest: String,
-    manifest: clay_mdk::MicroManifest,
+    sidecar: clay_mdk::Sidecar,
 }
 
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
@@ -49,7 +49,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// of the shell keeps running.
 async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpPackage, String> {
     let bytes = fetch_bytes(&entry.location).await?;
-    let package = clay_mdk::package::Package::new(entry.manifest, bytes)?;
+    let package = clay_mdk::package::Package::new(entry.sidecar, bytes)?;
     if package.digest() != entry.digest {
         return Err(format!(
             "package at {} hashes to {} but the index pins {}",
@@ -70,32 +70,28 @@ fn native_micros() -> Vec<InstalledMicro> {
         InstalledMicro {
             eager: true,
             locked: true,
-            ..InstalledMicro::new(
-                micro_settings_manifest::manifest(),
-                |resources, bindings| {
-                    factory(
-                        resources,
-                        micro_settings_manifest::manifest(),
-                        bindings,
-                        micro_settings::activate,
-                    )
-                },
-            )
+            ..InstalledMicro::new(micro_settings_manifest::sidecar(), |resources, bindings| {
+                factory(
+                    resources,
+                    clay_mdk::MicroId::new(micro_settings_manifest::ID),
+                    micro_settings_manifest::manifest(),
+                    bindings,
+                    micro_settings::activate,
+                )
+            })
         },
         InstalledMicro {
             eager: true,
             enabled_on_admission: true,
-            ..InstalledMicro::new(
-                micro_sample::manifest(),
-                |resources, bindings| {
-                    factory(
-                        resources,
-                        micro_sample::manifest(),
-                        bindings,
-                        micro_sample::activate,
-                    )
-                },
-            )
+            ..InstalledMicro::new(micro_sample::sidecar(), |resources, bindings| {
+                factory(
+                    resources,
+                    clay_mdk::MicroId::new(micro_sample::ID),
+                    micro_sample::manifest(),
+                    bindings,
+                    micro_sample::activate,
+                )
+            })
         },
     ]
 }
@@ -114,12 +110,14 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
         Ok(bytes) => match serde_json::from_slice::<Vec<PackageIndexEntry>>(&bytes) {
             Ok(entries) => {
                 for entry in entries {
-                    let manifest = entry.manifest.clone();
+                    let sidecar = entry.sidecar.clone();
                     installed.push(InstalledMicro::new(
-                        manifest.clone(),
+                        sidecar.clone(),
                         move |resources, bindings| {
-                            clay_mdk::host::wcmp_factory(resources,
-                                manifest,
+                            clay_mdk::host::wcmp_factory(
+                                resources,
+                                sidecar.id,
+                                sidecar.manifest,
                                 bindings,
                                 move || indexed_package(entry.clone()),
                             )

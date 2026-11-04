@@ -99,12 +99,13 @@ fn mouse_data_json() -> String {
 /// The counter publishes the presentations `view` and `badge` and the call `count`, which its
 /// manifest has to declare.
 fn counter_context() -> InitialContext {
-    use clay_guest_session::capabilities::ContractIdentity;
+    use clay_collection::Nsid;
     use clay_guest_session::capabilities::DeclaredPublication;
     use clay_guest_session::capabilities::PublicationKind;
+    use clay_guest_session::capabilities::presentation_component;
     let presentation = || DeclaredPublication {
         kind: PublicationKind::Presentation,
-        contract: ContractIdentity::presentation_component(),
+        contract: presentation_component(),
     };
     InitialContext {
         publications: std::collections::BTreeMap::from([
@@ -114,7 +115,7 @@ fn counter_context() -> InitialContext {
                 "count".to_owned(),
                 DeclaredPublication {
                     kind: PublicationKind::Call,
-                    contract: ContractIdentity::new("dayframe.counter", "count", (1, 0, 0)),
+                    contract: Nsid::literal("org.example.dayframe.counter.count"),
                 },
             ),
         ]),
@@ -278,7 +279,7 @@ async fn document_driver_delivers_neutral_updates() {
     let route = FacetRoute {
         document: "counter-config".into(),
         branch: "main".into(),
-        tag: "org.dayframe.counter.config".into(),
+        tag: "org.example.dayframe.counter.config".into(),
         key_id: "count".into(),
     };
     node.seed(route.clone(), serde_json::json!(3));
@@ -1644,7 +1645,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
     };
     assert_eq!(
         attached.contract(),
-        &clay_guest_session::capabilities::ContractIdentity::presentation_component()
+        &clay_guest_session::capabilities::presentation_component()
     );
     writer
         .delete(vec![1], WriteBasis::Observed(version))

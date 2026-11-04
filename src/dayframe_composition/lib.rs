@@ -37,6 +37,7 @@ use clay_host::MicroState;
 use clay_host::Requirement;
 use clay_host::Supervisor;
 use clay_mdk::Collection;
+use clay_mdk::Nsid;
 use clay_mdk::hooks::PresentationSlot;
 use clay_mdk::hooks::use_rows;
 use clay_mdk::host::CapabilityPublication;
@@ -63,13 +64,14 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::sync::watch;
 
-/// One installed micro in the launcher-supplied catalog: its self-describing manifest, its
+/// One installed micro in the launcher-supplied catalog: its self-describing sidecar (package
+/// identity, authority and manifest), its
 /// static configuration, and the factory that turns the root's resources into its supervisor
 /// factory. Packaging (a component file a desktop scan read, an index entry a web shell
 /// fetched, a native built-in the launcher links) stays in the launcher; this crate sees only
 /// the catalog.
 pub struct InstalledMicro {
-    pub manifest: clay_mdk::MicroManifest,
+    pub sidecar: clay_mdk::Sidecar,
     /// Started at boot rather than on first use.
     pub eager: bool,
     /// Whether admission (the first boot that sees this micro) records it enabled. Launchers
@@ -88,19 +90,18 @@ pub struct InstalledMicro {
 }
 
 /// See [`InstalledMicro::factory`].
-pub type FactoryBuilder = Box<
-    dyn FnOnce(Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>,
->;
+pub type FactoryBuilder =
+    Box<dyn FnOnce(Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>>;
 
 impl InstalledMicro {
     /// An on-demand, unlocked micro with no requirements, admitted disabled.
     pub fn new(
-        manifest: clay_mdk::MicroManifest,
+        sidecar: clay_mdk::Sidecar,
         factory: impl FnOnce(Resources, CollectionBindings) -> Rc<dyn Factory<CapabilityPublication>>
         + 'static,
     ) -> Self {
         Self {
-            manifest,
+            sidecar,
             eager: false,
             enabled_on_admission: false,
             locked: false,
@@ -158,9 +159,9 @@ fn admit_installs(
     let installs = documents.mock_documents();
     let mut enabled_at_boot = BTreeMap::new();
     for micro in installed.iter().filter(|micro| !micro.locked) {
-        let identity = MicroId::new(micro.manifest.id.as_str());
+        let identity = MicroId::new(micro.sidecar.id.as_str());
         let route = install_route(&identity);
-        let version = micro.manifest.package_version;
+        let version = micro.sidecar.package_version;
         let enabled = match installs.get(&route) {
             Some(stored) => {
                 let mut datum = InstallDatum::decode(stored);
@@ -342,7 +343,7 @@ async fn declare<St: OrderedStore + Send + Sync + 'static>(
 ) -> Result<Result<BytesRegistrations, clay_host::DeclareError>, StoreError> {
     let registrations = durable_bytes_registrations(
         Arc::clone(store),
-        contract.id.clone().into_bytes(),
+        contract.id.as_str().as_bytes().to_vec(),
         NonZeroUsize::new(256).unwrap(),
         [0, 0],
     )
@@ -350,6 +351,45 @@ async fn declare<St: OrderedStore + Send + Sync + 'static>(
     Ok(collections
         .declare(contract, registrations.clone())
         .map(|()| registrations))
+}
+
+/// Install every manifest-declared row into the manifest installation scope of the collection
+/// its contribution's binding resolved to. A binding configuration left unbound has nowhere to
+/// put its rows: that is a configuration decision, not a defect, so those rows are skipped.
+async fn install_declared_rows(
+    collections: &CollectionRegistry<BytesRegistrations>,
+    installed: &[InstalledMicro],
+    resolutions: &[Resolution],
+    errors: &mut Vec<String>,
+) -> Result<(), StoreError> {
+    for (micro, resolution) in installed.iter().zip(resolutions) {
+        let id = MicroId::new(micro.sidecar.id.as_str());
+        let rows = match declared_rows(&micro.sidecar) {
+            Ok(rows) => rows,
+            Err(error) => {
+                errors.push(format!("{id}: {error}"));
+                continue;
+            }
+        };
+        for (binding, rows) in rows {
+            let Some(bound) = resolution.bound.get(&binding) else {
+                continue;
+            };
+            let target = collections
+                .collection(&bound.id)
+                .expect("a resolved binding names a declared collection");
+            target
+                .install(
+                    &manifest_scope(&id),
+                    clay_collection::Retention::Installation,
+                    clay_collection::WriterId::new(id.as_str()),
+                    rows,
+                )
+                .await?
+                .dispatch();
+        }
+    }
+    Ok(())
 }
 
 impl CompositionRuntime {
@@ -378,29 +418,43 @@ impl CompositionRuntime {
         let store = Arc::new(store.subspace("collections"));
         let collections = CollectionRegistry::default();
         let mut errors = Vec::new();
+        // Admission gate: a package whose sidecar is incoherent or declares an NSID outside its
+        // authority (ADR 028 §5) is refused whole, before anything it names is declared.
+        let installed: Vec<InstalledMicro> = installed
+            .into_iter()
+            .filter(|micro| match micro.sidecar.validate() {
+                Ok(()) => true,
+                Err(error) => {
+                    errors.push(format!("{}: {error}", micro.sidecar.id.as_str()));
+                    false
+                }
+            })
+            .collect();
         // A declared collection's id is its contract's id today (see `DeclaredCollections`).
         let mut declared_collections = DeclaredCollections::default();
 
+        let shell_roots = Nsid::literal(SHELL_ROOTS);
         let roots_collection = declare(
             &collections,
             &store,
             CollectionContract {
-                id: SHELL_ROOTS.into(),
-                key_schema: "dayframe.shell.root-key".into(),
-                value_schema: "dayframe.shell.root".into(),
+                id: shell_roots.clone(),
+                key_schema: Nsid::literal("org.example.clay.shell.rootKey"),
+                value_schema: Nsid::literal("org.example.clay.shell.root"),
             },
         )
         .await?
         .expect("the root declares shell.roots first");
+        declared_collections.declare(&shell_roots, &shell_roots);
         for micro in &installed {
-            for request in &micro.manifest.configuration_requests {
+            for request in &micro.sidecar.manifest.configuration_requests {
                 documents.mock_documents().bind_config(
                     request.binding.clone(),
                     format!("{}-config", request.binding),
                     "main".into(),
                 );
             }
-            for contract in &micro.manifest.collection_contracts {
+            for contract in &micro.sidecar.manifest.collection_contracts {
                 let declared = declare(
                     &collections,
                     &store,
@@ -413,37 +467,30 @@ impl CompositionRuntime {
                 .await?;
                 match declared {
                     Ok(_) => declared_collections.declare(&contract.id, &contract.id),
-                    Err(error) => errors.push(format!("{}: {error}", micro.manifest.id.as_str())),
+                    Err(error) => errors.push(format!("{}: {error}", micro.sidecar.id.as_str())),
                 }
             }
         }
-        for micro in &installed {
-            let id = MicroId::new(micro.manifest.id.as_str());
-            let rows = match declared_rows(&micro.manifest) {
-                Ok(rows) => rows,
-                Err(error) => {
-                    errors.push(format!("{id}: {error}"));
-                    continue;
-                }
-            };
-            for (collection, rows) in rows {
-                let Some(target) = collections.collection(&collection) else {
-                    errors.push(format!(
-                        "{id} contributes to undeclared collection {collection}"
-                    ));
-                    continue;
-                };
-                target
-                    .install(
-                        &manifest_scope(&id),
-                        clay_collection::Retention::Installation,
-                        clay_collection::WriterId::new(id.as_str()),
-                        rows,
-                    )
-                    .await?
-                    .dispatch();
-            }
-        }
+        // Collection bindings resolve from the stored datum (or, with none, the manifest's
+        // defaults) once every collection is declared; the factory reads the shared handle at
+        // each initialize, and a contribution lands in whichever collection its binding resolved
+        // to.
+        let resolutions: Vec<Resolution> = installed
+            .iter()
+            .map(|micro| {
+                let identity = MicroId::new(micro.sidecar.id.as_str());
+                bindings::resolve(
+                    &micro.sidecar.manifest,
+                    documents
+                        .mock_documents()
+                        .get(&bindings::bindings_route(&identity))
+                        .map(BindingsDatum::decode)
+                        .as_ref(),
+                    &declared_collections,
+                )
+            })
+            .collect();
+        install_declared_rows(&collections, &installed, &resolutions, &mut errors).await?;
 
         let enabled_at_boot = admit_installs(&documents, &installed);
 
@@ -452,23 +499,12 @@ impl CompositionRuntime {
         let mut managed = Vec::new();
         let mut locked = BTreeSet::new();
         let mut configured = Vec::new();
-        for micro in installed {
-            let identity = MicroId::new(micro.manifest.id.as_str());
+        for (micro, resolution) in installed.into_iter().zip(resolutions) {
+            let identity = MicroId::new(micro.sidecar.id.as_str());
             micros.push(identity.clone());
             if micro.locked {
                 locked.insert(identity.clone());
             }
-            // Collection bindings resolve from the stored datum (or, with none, the manifest's
-            // defaults); the factory reads the shared handle at each initialize.
-            let resolution = bindings::resolve(
-                &micro.manifest,
-                documents
-                    .mock_documents()
-                    .get(&bindings::bindings_route(&identity))
-                    .map(BindingsDatum::decode)
-                    .as_ref(),
-                &declared_collections,
-            );
             let bindings = CollectionBindings::new(resolution.bound.clone());
             configured.push(ConfiguredMicro {
                 // Locked micros have no datum and are always enabled.
@@ -481,7 +517,7 @@ impl CompositionRuntime {
             });
             managed.push(ManagedMicro {
                 id: identity,
-                manifest: micro.manifest,
+                manifest: micro.sidecar.manifest,
                 bindings,
                 applied: resolution,
             });
@@ -596,7 +632,7 @@ impl CompositionRuntime {
     }
 
     /// A declared collection, for inspection and tests.
-    pub fn collection(&self, id: &str) -> Option<BytesRegistrations> {
+    pub fn collection(&self, id: &Nsid) -> Option<BytesRegistrations> {
         self.collections.collection(id)
     }
 
@@ -635,12 +671,12 @@ impl CompositionRuntime {
         &self,
         micro: &MicroId,
         binding: &str,
-        collection: Option<&str>,
+        collection: Option<&Nsid>,
     ) -> impl Future<Output = ()> + use<> {
         self.edit_bindings(micro, |datum| {
             datum
                 .bindings
-                .insert(binding.to_owned(), collection.map(str::to_owned));
+                .insert(binding.to_owned(), collection.cloned());
         });
         self.documents.persisted()
     }

@@ -7,40 +7,47 @@
 //! exist while it is stopped declares the row in its manifest, which stores an endpoint to its
 //! own presentation; a micro that only contributes while running writes the row at runtime with
 //! a bound reference. Settings treats both alike.
+use clay_mdk::Access;
 use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
-use clay_mdk::CollectionAccess;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionContract;
-use clay_mdk::CollectionRequest;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::ContributionDeclaration;
 use clay_mdk::Entrypoints;
 use clay_mdk::FacetAccess;
-use clay_mdk::MANIFEST_SCHEMA;
-use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
+use clay_mdk::Nsid;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
+use clay_mdk::Request;
+use clay_mdk::Sidecar;
 use clay_mdk::host::SHELL_ROOTS;
 use serde::Deserialize;
 use serde::Serialize;
 
 pub const ID: &str = "dayframe.settings";
+pub const PACKAGE_VERSION: u32 = 1;
+/// The NSID prefix Settings holds: every NSID it declares (its collection contract and
+/// schemas) lies under it, everything else it names is a request.
+pub const AUTHORITY: &str = "org.example.dayframe.settings";
 pub const CONFIG_NAME: &str = "settings";
-pub const CONFIG_TAG: &str = "org.dayframe.settings.config";
+pub const CONFIG_TAG: &str = "org.example.dayframe.settings.config";
 pub const CONFIG_KEY: &str = "main";
 /// The Settings presentation, which the shell mounts as a root.
 pub const VIEW: &str = "view";
-/// The id of the declared collection Settings reads its sections from.
-pub const SECTIONS: &str = "settings.sections";
+/// The contract NSID, and so the declared collection's id, of the sections collection.
+pub const SECTIONS: &str = "org.example.dayframe.settings.sections";
 /// The local binding name under which Settings reads its sections collection.
 pub const SECTIONS_BINDING: &str = "sections";
-/// Schema ids of [`SECTIONS`] keys (the contributing micro's id, text) and values
-/// ([`Section`]).
-pub const SECTION_KEY_SCHEMA: &str = "dayframe.settings.section-key";
-pub const SECTION_VALUE_SCHEMA: &str = "dayframe.settings.section";
+/// The local binding name under which Settings registers its root into `shell.roots`.
+pub const ROOTS_BINDING: &str = "roots";
+/// Schema NSIDs of [`SECTIONS`] keys (the contributing micro's id, text) and values
+/// ([`Section`]), and of its selector (the whole collection).
+pub const SECTION_KEY_SCHEMA: &str = "org.example.dayframe.settings.sectionKey";
+pub const SECTION_VALUE_SCHEMA: &str = "org.example.dayframe.settings.section";
+pub const SECTION_SELECTOR_SCHEMA: &str = "org.example.dayframe.settings.sectionSelector";
 
 /// One Settings section: its title, and the presentation published for its detail, as an
 /// attachment of the row.
@@ -54,9 +61,6 @@ pub struct Section {
 /// view, and registers that view as a shell root.
 pub fn manifest() -> MicroManifest {
     MicroManifest {
-        schema: MANIFEST_SCHEMA,
-        id: MicroId::new(ID),
-        package_version: 1,
         entrypoints: Entrypoints::micro_client(),
         publications: vec![PublicationDeclaration {
             name: VIEW.into(),
@@ -67,33 +71,46 @@ pub fn manifest() -> MicroManifest {
         configuration_requests: vec![ConfigurationRequest {
             binding: CONFIG_NAME.into(),
             facets: vec![FacetAccess {
-                tag: CONFIG_TAG.into(),
+                tag: Nsid::literal(CONFIG_TAG),
                 key_id: Some(CONFIG_KEY.into()),
                 read: true,
                 write: true,
-                ..Default::default()
+                create: false,
+                delete: false,
             }],
         }],
         collection_contracts: vec![CollectionContract {
-            id: SECTIONS.into(),
-            selector_schema: "dayframe.collection.whole".into(),
-            key_schema: SECTION_KEY_SCHEMA.into(),
-            value_schema: SECTION_VALUE_SCHEMA.into(),
+            id: Nsid::literal(SECTIONS),
+            selector_schema: Nsid::literal(SECTION_SELECTOR_SCHEMA),
+            key_schema: Nsid::literal(SECTION_KEY_SCHEMA),
+            value_schema: Nsid::literal(SECTION_VALUE_SCHEMA),
             write_context_schema: None,
             offered: vec![CollectionCapability::Read, CollectionCapability::Register],
         }],
         // Settings reads sections through a binding configuration resolves; with one declared
-        // `settings.sections` collection the default binds it.
-        collection_requests: vec![CollectionRequest {
-            binding: SECTIONS_BINDING.into(),
-            contract: SECTIONS.into(),
-            access: CollectionAccess::Read,
-            necessity: Necessity::Required,
-            resolution: BindingResolution::Configured,
-        }],
+        // sections collection the default binds it. It also registers its root row into the
+        // runtime-defined `shell.roots` collection, which the runtime satisfies.
+        collection_requests: vec![
+            Request {
+                binding: SECTIONS_BINDING.into(),
+                contract: Nsid::literal(SECTIONS),
+                access: Some(Access::Read),
+                necessity: Necessity::Required,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
+            Request {
+                binding: ROOTS_BINDING.into(),
+                contract: Nsid::literal(SHELL_ROOTS),
+                access: Some(Access::Write),
+                necessity: Necessity::Required,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
+        ],
         contributions: vec![ContributionDeclaration {
             id: "root".into(),
-            collection: SHELL_ROOTS.into(),
+            binding: ROOTS_BINDING.into(),
             key: ID.into(),
             payload: serde_json::json!({
                 "title": "Settings",
@@ -108,6 +125,11 @@ pub fn manifest() -> MicroManifest {
     }
 }
 
+/// The Settings package as its sidecar carries it: identity, authority and manifest.
+pub fn sidecar() -> Sidecar {
+    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,7 +139,7 @@ mod tests {
     // is a reviewable diff.
     #[test]
     fn manifest_wire_shape_is_reviewable() {
-        insta::assert_yaml_snapshot!(manifest());
+        insta::assert_yaml_snapshot!(sidecar());
     }
 
     #[test]
@@ -137,8 +159,8 @@ mod tests {
 
     #[test]
     fn the_manifest_declares_a_settings_root_row() {
-        manifest().validate().unwrap();
-        let rows = declared_rows(&manifest()).unwrap();
-        assert_eq!(rows.keys().collect::<Vec<_>>(), [SHELL_ROOTS]);
+        sidecar().validate().unwrap();
+        let rows = declared_rows(&sidecar()).unwrap();
+        assert_eq!(rows.keys().collect::<Vec<_>>(), [ROOTS_BINDING]);
     }
 }

@@ -249,7 +249,8 @@ struct State {
     applied: Option<watch::Receiver<u64>>,
     // Mock FacetSet lookup: selected document/tag routes, including removal tombstones.
     membership: BTreeMap<(String, String, String), BTreeSet<String>>,
-    config_owners: BTreeMap<String, (String, String)>,
+    /// Which `(document, branch)` configuration picked for each config binding name.
+    config_documents: BTreeMap<String, (String, String)>,
     cache: BTreeMap<FacetRoute, CacheEntry>,
     replica: Replica<FacetRoute, Value>,
     ledger: Ledger<FacetRoute, Value>,
@@ -309,7 +310,7 @@ impl DocumentService {
                 queued: 0,
                 applied: None,
                 membership: BTreeMap::new(),
-                config_owners: BTreeMap::new(),
+                config_documents: BTreeMap::new(),
                 cache: BTreeMap::new(),
                 replica: Replica::new(1),
                 ledger: Ledger::new(),
@@ -412,47 +413,42 @@ impl DocumentService {
         }
     }
 
-    /// Uses the manifest's owner-config semantics. The composition root supplies already-approved
-    /// ACLs; dependency/tag validation remains the loader's responsibility, not a second ACL model.
+    /// Grants the configuration document that configuration picked for `binding`, with the
+    /// manifest's facet ACL. A manifest request names facets by tag and never the plug or
+    /// document that holds them (ADR 028 §4), so no ACL entry may carry an owner: the one
+    /// document is whatever `binding` was bound to. The composition root supplies
+    /// already-approved ACLs; tag validation remains the loader's responsibility, not a second
+    /// ACL model.
     pub fn grant_config(
         &self,
         host: &Host,
         instance: &Instance,
-        invoking_plug: &str,
+        binding: &str,
         acl: Vec<RoutineFacetAccess>,
-    ) -> Result<BTreeMap<String, DocumentRef>, AccessError> {
+    ) -> Result<DocumentRef, AccessError> {
         host.check(instance)?;
-        let mut owners: BTreeMap<String, Vec<RoutineFacetAccess>> = BTreeMap::new();
-        for access in acl {
-            let owner = access
-                .owner_plug_id
-                .as_deref()
-                .unwrap_or(invoking_plug)
-                .to_owned();
-            owners.entry(owner).or_default().push(access);
-        }
-        let mut result = BTreeMap::new();
-        for (owner, facets) in owners {
-            let (document, branch) = self
-                .inner
-                .lock()
-                .unwrap()
-                .config_owners
-                .get(&owner)
-                .cloned()
-                .expect("approved config owner has no document binding");
-            let access = self.grant_documents(
-                host,
-                instance,
-                vec![DocumentGrant {
-                    document: document.clone(),
-                    branch: branch.clone(),
-                    facets,
-                }],
-            )?;
-            result.insert(owner, access.document(document, branch)?);
-        }
-        Ok(result)
+        assert!(
+            acl.iter().all(|access| access.owner_plug_id.is_none()),
+            "a config ACL names no owner plug: configuration picks the document"
+        );
+        let (document, branch) = self
+            .inner
+            .lock()
+            .unwrap()
+            .config_documents
+            .get(binding)
+            .cloned()
+            .expect("approved config binding has no document");
+        let access = self.grant_documents(
+            host,
+            instance,
+            vec![DocumentGrant {
+                document: document.clone(),
+                branch: branch.clone(),
+                facets: acl,
+            }],
+        )?;
+        access.document(document, branch)
     }
 
     pub fn mock_documents(&self) -> MockDocuments {
@@ -875,16 +871,16 @@ impl Operation {
 }
 
 impl MockDocuments {
-    pub fn bind_config(&self, owner: String, document: String, branch: String) {
+    pub fn bind_config(&self, binding: String, document: String, branch: String) {
         assert!(
             self.service
                 .inner
                 .lock()
                 .unwrap()
-                .config_owners
-                .insert(owner, (document, branch))
+                .config_documents
+                .insert(binding, (document, branch))
                 .is_none(),
-            "config owner already bound"
+            "config binding already bound"
         );
     }
     /// The source's current value, for the host-side writer that must decide before writing.

@@ -1,4 +1,3 @@
-use crate::capabilities::ContractIdentity;
 use crate::capabilities::PublicationEndpoint;
 use crate::capabilities::RowAttachment;
 use clay_collection::AcquireError;
@@ -6,6 +5,7 @@ use clay_collection::Change;
 use clay_collection::Cursor;
 use clay_collection::DurableCodec;
 use clay_collection::MutationError;
+use clay_collection::Nsid;
 use clay_collection::Page;
 use clay_collection::Projection;
 use clay_collection::ProjectionLease;
@@ -57,8 +57,8 @@ impl CollectionValue {
     }
 }
 
-/// The durable form of a [`CollectionValue`]: CBOR `[body, [[micro, publication, namespace,
-/// name, major, minor, patch], ...]]`. A durable row persists endpoints and never references
+/// The durable form of a [`CollectionValue`]: CBOR `[body, [[micro, publication, contract],
+/// ...]]`, the contract as its NSID text. A durable row persists endpoints and never references
 /// (ADR 031 §7), so encoding a bound attachment is a programming error; a row that does not
 /// decode is corrupt storage. Both crash.
 pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
@@ -71,15 +71,10 @@ pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
                 let RowAttachment::Endpoint(endpoint) = attachment else {
                     panic!("a durable row can only attach endpoints, never live publications");
                 };
-                let (major, minor, patch) = endpoint.contract.version;
                 Value::Array(vec![
                     Value::Text(endpoint.micro.as_str().to_owned()),
                     Value::Text(endpoint.publication.clone()),
-                    Value::Text(endpoint.contract.namespace.clone()),
-                    Value::Text(endpoint.contract.name.clone()),
-                    Value::Integer(major.into()),
-                    Value::Integer(minor.into()),
-                    Value::Integer(patch.into()),
+                    Value::Text(endpoint.contract.to_string()),
                 ])
             })
             .collect();
@@ -98,12 +93,6 @@ pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
         fn text(value: Value) -> String {
             value.into_text().expect("stored endpoint field is text")
         }
-        fn number(value: Value) -> u32 {
-            let number = value
-                .into_integer()
-                .expect("stored contract version is an integer");
-            u32::try_from(number).expect("stored contract version fits u32")
-        }
         let Value::Array(parts) =
             ciborium::from_reader(bytes).expect("stored collection value is CBOR")
         else {
@@ -119,17 +108,13 @@ pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
                 let fields = attachment
                     .into_array()
                     .expect("stored attachment is an array");
-                let [micro, publication, namespace, name, major, minor, patch] =
-                    <[Value; 7]>::try_from(fields)
-                        .unwrap_or_else(|_| panic!("stored endpoint has the wrong arity"));
+                let [micro, publication, contract] = <[Value; 3]>::try_from(fields)
+                    .unwrap_or_else(|_| panic!("stored endpoint has the wrong arity"));
                 RowAttachment::Endpoint(PublicationEndpoint {
                     micro: MicroId::new(text(micro)),
                     publication: text(publication),
-                    contract: ContractIdentity::new(
-                        text(namespace),
-                        text(name),
-                        (number(major), number(minor), number(patch)),
-                    ),
+                    contract: Nsid::parse(&text(contract))
+                        .expect("a stored endpoint's contract is an NSID"),
                 })
             })
             .collect();

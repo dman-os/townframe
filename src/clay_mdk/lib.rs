@@ -444,25 +444,25 @@ macro_rules! __export_guest_world {
 }
 
 mod manifest;
+pub use manifest::Access;
 pub use manifest::AttachmentDeclaration;
 pub use manifest::BindingResolution;
-pub use manifest::CollectionAccess;
 pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
-pub use manifest::CollectionRequest;
 pub use manifest::ConfigurationRequest;
-pub use manifest::ContractIdentity;
 pub use manifest::ContributionDeclaration;
 pub use manifest::Entrypoints;
 pub use manifest::FacetAccess;
 pub use manifest::InterfaceRef;
-pub use manifest::MANIFEST_SCHEMA;
+pub use manifest::MANIFEST_NSID;
 pub use manifest::MicroId;
 pub use manifest::MicroManifest;
 pub use manifest::Necessity;
+pub use manifest::Nsid;
 pub use manifest::PublicationDeclaration;
 pub use manifest::PublicationKind;
-pub use manifest::RequiredContract;
+pub use manifest::Request;
+pub use manifest::Sidecar;
 
 mod component;
 pub use component::ComponentRef;

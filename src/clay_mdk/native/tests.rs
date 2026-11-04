@@ -1,16 +1,15 @@
 use super::*;
+use crate::Access;
 use crate::BindingResolution;
-use crate::CollectionRequest;
 use crate::Entrypoints;
-use crate::MANIFEST_SCHEMA;
-use crate::MicroId as ManifestId;
 use crate::Necessity;
 use crate::PublicationDeclaration;
 use crate::PublicationKind;
 use crate::Registration;
-use crate::RequiredContract;
-use clay_guest_session::capabilities::ContractIdentity as Admitted;
+use crate::Request;
+use crate::Sidecar;
 use clay_guest_session::capabilities::PublicationEndpoint;
+use clay_guest_session::capabilities::presentation_component;
 use clay_guest_session::collections::bytes_registrations;
 use clay_host::CollectionContract;
 use clay_host::ConfiguredMicro;
@@ -23,7 +22,12 @@ use dioxus_core::VNode;
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 
-const ROWS: &str = "test.rows";
+const ROWS: &str = "org.example.clay.test.rows";
+const INCREMENT: &str = "org.example.clay.test.calls.increment";
+
+fn rows() -> Nsid {
+    Nsid::literal(ROWS)
+}
 
 fn blank() -> Element {
     VNode::empty()
@@ -33,8 +37,8 @@ fn blank() -> Element {
 #[derive(Default)]
 struct Spec {
     publications: Vec<PublicationDeclaration>,
-    requests: Vec<CollectionRequest>,
-    requires: Vec<RequiredContract>,
+    requests: Vec<Request>,
+    requires: Vec<Request>,
     bindings: CollectionBindings,
     eager: bool,
     requirements: BTreeMap<String, Requirement>,
@@ -57,9 +61,9 @@ impl Rig {
             .collections
             .declare(
                 CollectionContract {
-                    id: ROWS.into(),
-                    key_schema: "text".into(),
-                    value_schema: "text".into(),
+                    id: rows(),
+                    key_schema: Nsid::literal("org.example.clay.test.rowKey"),
+                    value_schema: Nsid::literal("org.example.clay.test.rowValue"),
                 },
                 bytes_registrations(NonZeroUsize::new(64).unwrap(), [0, 0]),
             )
@@ -74,9 +78,6 @@ impl Rig {
         activate: impl Fn(Context) -> Fut + 'static,
     ) -> ConfiguredMicro<CapabilityPublication> {
         let manifest = MicroManifest {
-            schema: MANIFEST_SCHEMA,
-            id: ManifestId::new(id),
-            package_version: 1,
             entrypoints: Entrypoints::micro_client(),
             publications: spec.publications,
             requires: spec.requires,
@@ -93,7 +94,13 @@ impl Rig {
             enabled: true,
             requirements: spec.requirements,
             unresolved_bindings: Vec::new(),
-            factory: factory(self.resources.clone(), manifest, spec.bindings, activate),
+            factory: factory(
+                self.resources.clone(),
+                crate::MicroId::new(id),
+                manifest,
+                spec.bindings,
+                activate,
+            ),
         }
     }
 }
@@ -110,30 +117,31 @@ fn call(name: &str) -> PublicationDeclaration {
     PublicationDeclaration {
         name: name.into(),
         kind: PublicationKind::Call,
-        contract: Some(ContractIdentity::new("test.calls", "increment", (1, 0, 0))),
+        contract: Some(Nsid::literal(INCREMENT)),
     }
 }
 
 /// The binding name the test micros use for the `ROWS` collection.
 const ROWS_BINDING: &str = "rows";
 
-fn rows_request(access: CollectionAccess, necessity: Necessity) -> CollectionRequest {
-    CollectionRequest {
+fn rows_request(access: Access, necessity: Necessity) -> Request {
+    Request {
         binding: ROWS_BINDING.into(),
-        contract: ROWS.into(),
-        access,
+        contract: rows(),
+        access: Some(access),
         necessity,
         resolution: BindingResolution::Configured,
+        min_revision: None,
     }
 }
 
 fn writes_rows() -> Spec {
     Spec {
         eager: true,
-        requests: vec![rows_request(CollectionAccess::Write, Necessity::Required)],
+        requests: vec![rows_request(Access::Write, Necessity::Required)],
         bindings: CollectionBindings::new([(
             ROWS_BINDING.to_owned(),
-            BoundCollection::write(ROWS),
+            BoundCollection::write(rows()),
         )]),
         ..Spec::default()
     }
@@ -141,8 +149,11 @@ fn writes_rows() -> Spec {
 
 fn reads_rows() -> Spec {
     Spec {
-        requests: vec![rows_request(CollectionAccess::Read, Necessity::Required)],
-        bindings: CollectionBindings::new([(ROWS_BINDING.to_owned(), BoundCollection::read(ROWS))]),
+        requests: vec![rows_request(Access::Read, Necessity::Required)],
+        bindings: CollectionBindings::new([(
+            ROWS_BINDING.to_owned(),
+            BoundCollection::read(rows()),
+        )]),
         ..Spec::default()
     }
 }
@@ -343,7 +354,7 @@ async fn optional_requests_configuration_left_unbound_are_none() {
             "native.unbound",
             Spec {
                 eager: true,
-                requests: vec![rows_request(CollectionAccess::Write, Necessity::Optional)],
+                requests: vec![rows_request(Access::Write, Necessity::Optional)],
                 ..Spec::default()
             },
             {
@@ -376,7 +387,7 @@ async fn each_incarnation_sees_the_binding_resolution_current_when_it_started() 
     in_local_set(async {
         let rig = Rig::new();
         let spec = Spec {
-            requests: vec![rows_request(CollectionAccess::Read, Necessity::Optional)],
+            requests: vec![rows_request(Access::Read, Necessity::Optional)],
             ..reads_rows()
         };
         let bindings = spec.bindings.clone();
@@ -461,11 +472,14 @@ async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
     .await;
 }
 
-fn required(binding: &str, necessity: Necessity) -> RequiredContract {
-    RequiredContract {
+fn required(binding: &str, necessity: Necessity) -> Request {
+    Request {
         binding: binding.into(),
-        contract: ContractIdentity::new("test.calls", "increment", (1, 0, 0)),
+        contract: Nsid::literal(INCREMENT),
+        access: None,
         necessity,
+        resolution: BindingResolution::Configured,
+        min_revision: None,
     }
 }
 
@@ -637,20 +651,13 @@ async fn a_row_written_after_activate_attaches_the_writers_own_declared_publicat
 #[test]
 fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
     let manifest = MicroManifest {
-        schema: MANIFEST_SCHEMA,
-        id: ManifestId::new("native.contracts"),
-        package_version: 1,
         entrypoints: Entrypoints::micro_client(),
         publications: vec![
             presentation("view"),
             PublicationDeclaration {
                 name: "echo".into(),
                 kind: PublicationKind::Call,
-                contract: Some(ContractIdentity::new(
-                    "dayframe.lifecycle",
-                    "echo",
-                    (2, 0, 0),
-                )),
+                contract: Some(Nsid::literal("org.example.clay.test.lifecycle.echoV2")),
             },
             PublicationDeclaration {
                 name: "future".into(),
@@ -669,12 +676,9 @@ fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
     assert_eq!(declared.len(), 2, "an unknown kind is not served");
     assert_eq!(
         declared["echo"].contract,
-        Admitted::new("dayframe.lifecycle", "echo", (2, 0, 0))
+        Nsid::literal("org.example.clay.test.lifecycle.echoV2")
     );
-    assert_eq!(
-        declared["view"].contract,
-        Admitted::presentation_component()
-    );
+    assert_eq!(declared["view"].contract, presentation_component());
 }
 
 #[test]
@@ -682,32 +686,40 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
     use crate::AttachmentDeclaration;
     use crate::ContributionDeclaration;
 
-    let mut manifest = MicroManifest {
-        schema: MANIFEST_SCHEMA,
-        id: ManifestId::new("native.declares"),
-        package_version: 1,
-        entrypoints: Entrypoints::micro_client(),
-        publications: vec![presentation("view")],
-        requires: vec![],
-        configuration_requests: vec![],
-        collection_contracts: vec![],
-        collection_requests: vec![],
-        contributions: vec![ContributionDeclaration {
-            id: "root".into(),
-            collection: SHELL_ROOTS.into(),
-            key: "native.declares".into(),
-            payload: serde_json::json!({"title": "Declared", "content": {"$attachment": 0}}),
-            attachments: vec![AttachmentDeclaration {
-                index: 0,
-                publication: "view".into(),
+    let mut sidecar = Sidecar::new(
+        "native.declares",
+        1,
+        MicroManifest {
+            entrypoints: Entrypoints::micro_client(),
+            publications: vec![presentation("view")],
+            requires: vec![],
+            configuration_requests: vec![],
+            collection_contracts: vec![],
+            collection_requests: vec![Request {
+                binding: "roots".into(),
+                contract: Nsid::literal(SHELL_ROOTS),
+                access: Some(Access::Write),
+                necessity: Necessity::Required,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
             }],
-        }],
-        extra: BTreeMap::new(),
-    };
-    let rows = declared_rows(&manifest).unwrap();
+            contributions: vec![ContributionDeclaration {
+                id: "root".into(),
+                binding: "roots".into(),
+                key: "native.declares".into(),
+                payload: serde_json::json!({"title": "Declared", "content": {"$attachment": 0}}),
+                attachments: vec![AttachmentDeclaration {
+                    index: 0,
+                    publication: "view".into(),
+                }],
+            }],
+            extra: BTreeMap::new(),
+        },
+    );
+    let rows = declared_rows(&sidecar).unwrap();
     let mut key = Vec::new();
     ciborium::into_writer("native.declares", &mut key).unwrap();
-    let value = rows[SHELL_ROOTS][&key].clone().unwrap();
+    let value = rows["roots"][&key].clone().unwrap();
     let row: RootRow = ciborium::from_reader(value.body.as_slice()).unwrap();
     assert_eq!(
         row,
@@ -722,7 +734,7 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
             PublicationEndpoint {
                 micro: clay_host::MicroId::new("native.declares"),
                 publication: "view".into(),
-                contract: Admitted::presentation_component(),
+                contract: presentation_component(),
             }
         )]
     );
@@ -732,6 +744,6 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
     );
 
     // An attachment index that the contribution does not declare is refused.
-    manifest.contributions[0].attachments[0].index = 3;
-    assert!(declared_rows(&manifest).unwrap_err().contains("index 3"));
+    sidecar.manifest.contributions[0].attachments[0].index = 3;
+    assert!(declared_rows(&sidecar).unwrap_err().contains("index 3"));
 }

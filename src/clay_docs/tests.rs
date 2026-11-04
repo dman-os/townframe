@@ -112,7 +112,7 @@ fn multiple_document_mirrors_filter_warm_cache_and_follow_membership() {
 }
 
 #[test]
-fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
+fn config_binding_resolution_and_manifest_rights_are_not_conflated() {
     let host = Host::new();
     let service = DocumentService::new(32);
     let node = service.mock_documents();
@@ -120,7 +120,7 @@ fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
     node.bind_config("beta".into(), "b".into(), "main".into());
     node.seed(route("a", "main"), json!(1));
     let instance = host.start("alpha");
-    let configs = service
+    let alpha = service
         .grant_config(
             &host,
             &instance,
@@ -138,23 +138,29 @@ fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
                     write: true,
                     ..Default::default()
                 },
-                RoutineFacetAccess {
-                    owner_plug_id: Some("beta".into()),
-                    tag: "org.example.config".into(),
-                    key_id: Some("new".into()),
-                    create: true,
-                    ..Default::default()
-                },
             ],
         )
         .unwrap();
-    let facet = configs["alpha"]
+    let beta = service
+        .grant_config(
+            &host,
+            &instance,
+            "beta",
+            vec![RoutineFacetAccess {
+                tag: "org.example.config".into(),
+                key_id: Some("new".into()),
+                create: true,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    let facet = alpha
         .facet::<Value>("org.example.config".into(), "main".into())
         .unwrap();
     assert_eq!(facet.value(&facet.watch.current().unwrap()), Some(json!(1)));
     facet.write(json!(2)).unwrap();
     assert_eq!(
-        configs["alpha"]
+        alpha
             .mutate(
                 "org.example.config".into(),
                 "main".into(),
@@ -164,7 +170,7 @@ fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
         AccessError::Denied
     );
     assert_eq!(
-        configs["alpha"]
+        alpha
             .mutate(
                 "org.example.config".into(),
                 "other".into(),
@@ -174,29 +180,49 @@ fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
         AccessError::Denied
     );
     assert!(matches!(
-        configs["beta"].facet::<Value>("org.example.config".into(), "new".into()),
+        beta.facet::<Value>("org.example.config".into(), "new".into()),
         Err(AccessError::Denied)
     ));
-    configs["beta"]
-        .mutate(
+    beta.mutate(
+        "org.example.config".into(),
+        "new".into(),
+        FacetMutation::Create(json!(4)),
+    )
+    .unwrap();
+    assert_eq!(
+        beta.mutate(
             "org.example.config".into(),
             "new".into(),
-            FacetMutation::Create(json!(4)),
+            FacetMutation::Write(json!(5))
         )
-        .unwrap();
-    assert_eq!(
-        configs["beta"]
-            .mutate(
-                "org.example.config".into(),
-                "new".into(),
-                FacetMutation::Write(json!(5))
-            )
-            .unwrap_err(),
+        .unwrap_err(),
         AccessError::Denied
     );
     node.settle(/*accept*/ true);
     assert_eq!(node.reads(), vec![route("a", "main"), route("b", "new")]);
     host.close();
+}
+
+#[test]
+#[should_panic(expected = "a config ACL names no owner plug")]
+fn a_config_acl_naming_an_owner_plug_is_a_programming_error() {
+    let host = Host::new();
+    let service = DocumentService::new(32);
+    service
+        .mock_documents()
+        .bind_config("alpha".into(), "a".into(), "main".into());
+    let instance = host.start("alpha");
+    let _ = service.grant_config(
+        &host,
+        &instance,
+        "alpha",
+        vec![RoutineFacetAccess {
+            owner_plug_id: Some("beta".into()),
+            tag: "org.example.config".into(),
+            read: true,
+            ..Default::default()
+        }],
+    );
 }
 
 #[test]

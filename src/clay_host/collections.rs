@@ -10,27 +10,29 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use clay_collection::Nsid;
+
 use crate::supervisor::MicroId;
 
-/// What a collection was declared as: its id, and the schema ids its keys and values follow.
+/// What a collection was declared as: its id, and the schema NSIDs its keys and values follow.
 /// The registry only names the schemas; the collection's own contract interprets them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionContract {
-    pub id: String,
-    pub key_schema: String,
-    pub value_schema: String,
+    pub id: Nsid,
+    pub key_schema: Nsid,
+    pub value_schema: Nsid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DeclareError {
     #[error("collection {0} is already declared")]
-    AlreadyDeclared(String),
+    AlreadyDeclared(Nsid),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum GrantError {
     #[error("collection {0} is not declared")]
-    Undeclared(String),
+    Undeclared(Nsid),
 }
 
 /// Write authority over one declared collection for one singleton micro: the collection and
@@ -50,7 +52,7 @@ struct Declared<C> {
 
 /// Shared handle to the declared collections of one host. Cloning shares the registry.
 pub struct CollectionRegistry<C> {
-    declared: Arc<Mutex<BTreeMap<String, Declared<C>>>>,
+    declared: Arc<Mutex<BTreeMap<Nsid, Declared<C>>>>,
 }
 
 impl<C> Clone for CollectionRegistry<C> {
@@ -87,24 +89,24 @@ impl<C: Clone> CollectionRegistry<C> {
         Ok(())
     }
 
-    pub fn contract(&self, id: &str) -> Option<CollectionContract> {
+    pub fn contract(&self, id: &Nsid) -> Option<CollectionContract> {
         let declared = self.declared.lock().unwrap();
         Some(declared.get(id)?.contract.clone())
     }
 
     /// The collection itself, for read-side wiring done by the host (projections, readers).
     /// Writing needs a [`Grant`].
-    pub fn collection(&self, id: &str) -> Option<C> {
+    pub fn collection(&self, id: &Nsid) -> Option<C> {
         let declared = self.declared.lock().unwrap();
         Some(declared.get(id)?.collection.clone())
     }
 
     /// Issue `micro` write authority over every key of collection `id`. Narrower authority
     /// waits for the collection query language: the grant will carry the query.
-    pub fn grant(&self, id: &str, micro: &MicroId) -> Result<Grant<C>, GrantError> {
+    pub fn grant(&self, id: &Nsid, micro: &MicroId) -> Result<Grant<C>, GrantError> {
         let collection = self
             .collection(id)
-            .ok_or_else(|| GrantError::Undeclared(id.to_owned()))?;
+            .ok_or_else(|| GrantError::Undeclared(id.clone()))?;
         Ok(Grant {
             collection,
             micro: micro.clone(),

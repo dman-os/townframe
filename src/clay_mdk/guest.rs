@@ -15,8 +15,8 @@
 //! resyncs do.
 pub use dom::GuestDom;
 
+use crate::Access;
 use crate::Capability;
-use crate::CollectionAccess;
 use crate::Config;
 use crate::Context;
 use crate::Error;
@@ -178,8 +178,8 @@ impl Tasks {
 
 /// What the manifest declares that guest code needs to check its own calls against.
 struct Declared {
-    collections: BTreeMap<String, CollectionAccess>,
-    calls: BTreeMap<String, capability_bank::Contract>,
+    collections: BTreeMap<String, Access>,
+    calls: BTreeMap<String, clay_collection::Nsid>,
 }
 
 /// One incarnation's guest-side state: the mirror every granted binding routes through, the
@@ -256,23 +256,23 @@ impl Runtime {
                 collections: manifest
                     .collection_requests
                     .iter()
-                    .map(|request| (request.binding.clone(), request.access.clone()))
+                    .map(|request| {
+                        (
+                            request.binding.clone(),
+                            request
+                                .access
+                                .clone()
+                                .expect("a collection request declares its access"),
+                        )
+                    })
                     .collect(),
                 calls: manifest
                     .publications
                     .iter()
                     .filter_map(|publication| {
                         let contract = publication.contract.as_ref()?;
-                        (publication.kind == PublicationKind::Call).then(|| {
-                            (
-                                publication.name.clone(),
-                                capability_bank::Contract {
-                                    namespace: contract.namespace.clone(),
-                                    name: contract.name.clone(),
-                                    version: contract.version,
-                                },
-                            )
-                        })
+                        (publication.kind == PublicationKind::Call)
+                            .then(|| (publication.name.clone(), contract.clone()))
                     })
                     .collect(),
             },
@@ -513,7 +513,7 @@ impl Runtime {
         binding: &str,
     ) -> Option<Rc<collection_registration::RegistrationWriter>> {
         match self.declared.collections.get(binding) {
-            Some(CollectionAccess::Write) => self.writers.borrow().get(binding).cloned(),
+            Some(Access::Write) => self.writers.borrow().get(binding).cloned(),
             Some(_) => panic!("collection request {binding:?} is read-only"),
             None => panic!("the manifest declares no collection request {binding:?}"),
         }
@@ -550,7 +550,7 @@ impl Runtime {
             .calls
             .get(name)
             .unwrap_or_else(|| panic!("the manifest declares no call publication {name:?}"));
-        let published = capability_bank::publish_call(name, contract)?;
+        let published = capability_bank::publish_call(name, contract.as_str())?;
         assert!(
             self.calls
                 .borrow_mut()

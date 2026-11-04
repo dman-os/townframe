@@ -929,10 +929,12 @@ fn closing_a_binding_cycle_is_an_invariant_failure() {
 #[test]
 fn declared_collections_outlive_grants_and_issue_full_prefix_authority() {
     let registry = CollectionRegistry::<Arc<Mutex<Vec<u8>>>>::default();
+    let sections = clay_collection::Nsid::literal("org.example.test.sections");
+    let missing = clay_collection::Nsid::literal("org.example.test.missing");
     let contract = CollectionContract {
-        id: "settings.sections".into(),
-        key_schema: "text".into(),
-        value_schema: "settings-section".into(),
+        id: sections.clone(),
+        key_schema: clay_collection::Nsid::literal("org.example.test.sectionKey"),
+        value_schema: clay_collection::Nsid::literal("org.example.test.section"),
     };
     let collection = Arc::new(Mutex::new(vec![1]));
     registry
@@ -940,19 +942,19 @@ fn declared_collections_outlive_grants_and_issue_full_prefix_authority() {
         .unwrap();
     assert_eq!(
         registry.declare(contract.clone(), Arc::default()),
-        Err(DeclareError::AlreadyDeclared("settings.sections".into()))
+        Err(DeclareError::AlreadyDeclared(sections.clone()))
     );
-    assert_eq!(registry.contract("settings.sections"), Some(contract));
+    assert_eq!(registry.contract(&sections), Some(contract));
     let micro = MicroId::new("dayframe.counter");
-    let grant = registry.grant("settings.sections", &micro).unwrap();
+    let grant = registry.grant(&sections, &micro).unwrap();
     assert_eq!(grant.micro, micro);
     assert!(Arc::ptr_eq(&grant.collection, &collection));
     // The registry is shared and independent of any grant holder.
     drop(grant);
-    assert!(registry.clone().collection("settings.sections").is_some());
-    assert!(registry.collection("missing").is_none());
+    assert!(registry.clone().collection(&sections).is_some());
+    assert!(registry.collection(&missing).is_none());
     assert_eq!(
-        registry.grant("missing", &micro).err(),
-        Some(GrantError::Undeclared("missing".into()))
+        registry.grant(&missing, &micro).err(),
+        Some(GrantError::Undeclared(missing.clone()))
     );
 }

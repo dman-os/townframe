@@ -1,7 +1,7 @@
 {
-  "schema": 1,
   "id": "dayframe.lifecycle-fixture",
   "package_version": 1,
+  "authority": "org.example.clay.test.lifecycle",
   "entrypoints": {
     "initialize": "townframe:dayframe/micro-lifecycle@0.4.0",
     "presentation": "townframe:dayframe/presentation-events@0.4.0",
@@ -16,91 +16,54 @@
     {
       "name": "echo",
       "kind": "call",
-      "contract": {
-        "namespace": "dayframe.lifecycle",
-        "name": "echo",
-        "version": [
-          1,
-          0,
-          0
-        ]
-      }
+      "contract": "org.example.clay.test.lifecycle.echo"
     },
     {
       "name": "relay",
       "kind": "call",
-      "contract": {
-        "namespace": "dayframe.lifecycle",
-        "name": "relay",
-        "version": [
-          1,
-          0,
-          0
-        ]
-      }
+      "contract": "org.example.clay.test.lifecycle.relay"
     }
   ],
   "requires": [
     {
       "binding": "presentation",
-      "contract": {
-        "namespace": "dayframe.lifecycle",
-        "name": "presentation",
-        "version": [
-          1,
-          0,
-          0
-        ]
-      },
-      "necessity": "required"
+      "contract": "org.example.clay.test.lifecycle.presentation",
+      "necessity": "required",
+      "resolution": "configured"
     },
     {
       "binding": "service",
-      "contract": {
-        "namespace": "dayframe.lifecycle",
-        "name": "echo",
-        "version": [
-          1,
-          0,
-          0
-        ]
-      },
-      "necessity": "optional"
+      "contract": "org.example.clay.test.lifecycle.echo",
+      "necessity": "optional",
+      "resolution": "configured"
     },
     {
       "binding": "peer",
-      "contract": {
-        "namespace": "dayframe.lifecycle",
-        "name": "echo",
-        "version": [
-          1,
-          0,
-          0
-        ]
-      },
-      "necessity": "optional"
+      "contract": "org.example.clay.test.lifecycle.echo",
+      "necessity": "optional",
+      "resolution": "configured"
     },
     {
       "binding": "host",
-      "contract": {
-        "namespace": "dayframe.lifecycle",
-        "name": "host",
-        "version": [
-          1,
-          0,
-          0
-        ]
-      },
-      "necessity": "optional"
+      "contract": "org.example.clay.test.lifecycle.host",
+      "necessity": "optional",
+      "resolution": "configured"
     }
   ],
   "configuration_requests": [],
   "collection_contracts": [],
-  "collection_requests": [],
+  "collection_requests": [
+    {
+      "binding": "host-rows",
+      "contract": "org.example.clay.test.lifecycle.hostRows",
+      "access": "write",
+      "necessity": "required",
+      "resolution": "configured"
+    }
+  ],
   "contributions": [
     {
       "id": "serve-host",
-      "collection": "dayframe.lifecycle.host",
       "key": "serve-host",
       "payload": {
         "title": "Lifecycle fixture"
@@ -110,7 +73,8 @@
           "index": 0,
           "publication": "presentation"
         }
-      ]
+      ],
+      "binding": "host-rows"
     }
   ]
 }

@@ -8,10 +8,11 @@
 //! binding unbound; if it was required the micro is not startable until configuration changes.
 use clay_docs::FacetRoute;
 use clay_host::MicroId;
+use clay_mdk::Access;
 use clay_mdk::BindingResolution;
-use clay_mdk::CollectionAccess;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
+use clay_mdk::Nsid;
 use clay_mdk::host::BoundCollection;
 use serde::Deserialize;
 use serde::Serialize;
@@ -30,13 +31,13 @@ pub(crate) fn bindings_route(micro: &MicroId) -> FacetRoute {
     }
 }
 
-/// One micro's explicit binding configuration: binding name -> the declared collection id it is
+/// One micro's explicit binding configuration: binding name -> the declared collection id (NSID) it is
 /// bound to, or `null` to leave it deliberately unbound. A binding with no entry is up to the
 /// manifest's defaults. Unknown fields ride along so a datum written by a newer build survives
 /// a rewrite by this one.
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct BindingsDatum {
-    pub bindings: BTreeMap<String, Option<String>>,
+    pub bindings: BTreeMap<String, Option<Nsid>>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -55,24 +56,24 @@ impl BindingsDatum {
 /// The declared collections by the contract they implement. A contract may later have several
 /// declared instances; today a declared collection's id is its contract's id.
 #[derive(Default)]
-pub(crate) struct DeclaredCollections(BTreeMap<String, BTreeSet<String>>);
+pub(crate) struct DeclaredCollections(BTreeMap<Nsid, BTreeSet<Nsid>>);
 
 impl DeclaredCollections {
-    pub fn declare(&mut self, contract: &str, collection: &str) {
+    pub fn declare(&mut self, contract: &Nsid, collection: &Nsid) {
         self.0
-            .entry(contract.to_owned())
+            .entry(contract.clone())
             .or_default()
-            .insert(collection.to_owned());
+            .insert(collection.clone());
     }
 
-    fn implements(&self, contract: &str, collection: &str) -> bool {
+    fn implements(&self, contract: &Nsid, collection: &Nsid) -> bool {
         self.0
             .get(contract)
             .is_some_and(|collections| collections.contains(collection))
     }
 
     /// The one collection implementing `contract`, when there is exactly one.
-    fn sole(&self, contract: &str) -> Option<&str> {
+    fn sole(&self, contract: &Nsid) -> Option<&Nsid> {
         let mut collections = self.0.get(contract)?.iter();
         match (collections.next(), collections.next()) {
             (Some(only), None) => Some(only),
@@ -100,9 +101,7 @@ pub(crate) fn resolve(
         let target = match configured {
             // Configuration is final: an entry that names a collection the contract does not
             // allow leaves the binding unbound rather than falling back to the default.
-            Some(Some(id)) => declared
-                .implements(&request.contract, id)
-                .then_some(id.as_str()),
+            Some(Some(id)) => declared.implements(&request.contract, id).then_some(id),
             Some(None) => None,
             // A `Configured` request defaults; an `AtRuntime` one (or a resolution this build
             // does not know) is only ever bound by an explicit grant in the datum.
@@ -112,10 +111,10 @@ pub(crate) fn resolve(
             None => None,
         };
         // Access this build does not know cannot be granted.
-        let bound = target.and_then(|id| match request.access {
-            CollectionAccess::Read => Some(BoundCollection::read(id)),
-            CollectionAccess::Write => Some(BoundCollection::write(id)),
-            CollectionAccess::Other(_) => None,
+        let bound = target.and_then(|id| match &request.access {
+            Some(Access::Read) => Some(BoundCollection::read(id.clone())),
+            Some(Access::Write) => Some(BoundCollection::write(id.clone())),
+            Some(Access::Other(_)) | None => None,
         });
         match bound {
             Some(bound) => {
@@ -135,29 +134,22 @@ pub(crate) fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clay_mdk::CollectionRequest;
     use clay_mdk::Entrypoints;
-    use clay_mdk::MANIFEST_SCHEMA;
+    use clay_mdk::Request;
 
-    fn request(
-        binding: &str,
-        necessity: Necessity,
-        resolution: BindingResolution,
-    ) -> CollectionRequest {
-        CollectionRequest {
+    fn request(binding: &str, necessity: Necessity, resolution: BindingResolution) -> Request {
+        Request {
             binding: binding.into(),
-            contract: "tallies".into(),
-            access: CollectionAccess::Write,
+            contract: nsid("tallies"),
+            access: Some(Access::Write),
             necessity,
             resolution,
+            min_revision: None,
         }
     }
 
-    fn manifest(requests: Vec<CollectionRequest>) -> MicroManifest {
+    fn manifest(requests: Vec<Request>) -> MicroManifest {
         MicroManifest {
-            schema: MANIFEST_SCHEMA,
-            id: clay_mdk::MicroId::new("test.micro"),
-            package_version: 1,
             entrypoints: Entrypoints::micro_client(),
             publications: vec![],
             requires: vec![],
@@ -169,10 +161,14 @@ mod tests {
         }
     }
 
+    fn nsid(name: &str) -> Nsid {
+        Nsid::literal(&format!("org.example.test.{name}"))
+    }
+
     fn declared(collections: &[&str]) -> DeclaredCollections {
         let mut declared = DeclaredCollections::default();
         for collection in collections {
-            declared.declare("tallies", collection);
+            declared.declare(&nsid("tallies"), &nsid(collection));
         }
         declared
     }
@@ -181,7 +177,7 @@ mod tests {
         BindingsDatum {
             bindings: entries
                 .iter()
-                .map(|(binding, id)| ((*binding).to_owned(), id.map(str::to_owned)))
+                .map(|(binding, id)| ((*binding).to_owned(), id.map(nsid)))
                 .collect(),
             extra: BTreeMap::new(),
         }
@@ -197,7 +193,7 @@ mod tests {
         let resolution = resolve(&manifest, None, &declared(&["a"]));
         assert_eq!(
             resolution.bound,
-            BTreeMap::from([("book".to_owned(), BoundCollection::write("a"))])
+            BTreeMap::from([("book".to_owned(), BoundCollection::write(nsid("a")))])
         );
         assert!(resolution.unresolved.is_empty());
     }
@@ -228,7 +224,7 @@ mod tests {
             Some(&datum(&[("book", Some("b"))])),
             &declared(&["a", "b"]),
         );
-        assert_eq!(resolution.bound["book"], BoundCollection::write("b"));
+        assert_eq!(resolution.bound["book"], BoundCollection::write(nsid("b")));
         // Configuration is final: a collection the contract does not allow is not replaced by
         // the default, and an explicit null leaves the binding unbound.
         for entry in [Some("elsewhere"), None] {
@@ -276,7 +272,7 @@ mod tests {
             Some(&datum(&[("later", Some("a"))])),
             &declared(&["a"]),
         );
-        assert_eq!(resolution.bound["later"], BoundCollection::write("a"));
+        assert_eq!(resolution.bound["later"], BoundCollection::write(nsid("a")));
         assert!(resolution.unresolved.is_empty());
     }
 }

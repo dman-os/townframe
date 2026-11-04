@@ -609,7 +609,7 @@ impl capability_bank::Host for TestHost {
     fn publish_call(
         &mut self,
         _name: String,
-        _contract: capability_bank::Contract,
+        _contract: String,
     ) -> wasmtime::Result<
         Result<Resource<capability_bank::PublishedCapability>, capability_bank::CapabilityError>,
     > {
