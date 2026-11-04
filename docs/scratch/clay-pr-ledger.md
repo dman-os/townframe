@@ -489,6 +489,11 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   multi-presentation, publish_call, require) → C6c guest parity (counter: second presentation + a
   call; a guest registration write) → C7.
 
+- C6 done (2026-11-04): C6a/C6b/C6c landed. One `clay_mdk::Context` over in-process and guest backends,
+  `export_micro!(activate, manifest)` dual entry, counter with a second presentation and a `count` call,
+  guest collection read + registration write proven on Wasmtime and wcmp/Wasmi. Notes: docs/scratch/clay-c6-context.md
+  ("C6c notes").
+
 ## big_plugs coordination (2026-11-04, peer session on ../townframe-p3N-2)
 
 - Operator direction relayed by the peer: a plug is the one package format for every kind
