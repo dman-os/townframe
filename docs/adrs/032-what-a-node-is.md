@@ -1,6 +1,6 @@
 # ADR 032: What a node is, and how its services compose
 
-**Status:** Proposed. Drafted from the operator design session of 2026-11-04 (decisions D14–D20 of the
+**Status:** Accepted (operator, 2026-11-04). Drafted from the operator design session of 2026-11-04 (decisions D14–D21 of the
 [runtime ledger](../scratch/nodule-runtime-ledger.md)).
 
 **Updated:** 2026-11-04
@@ -94,7 +94,35 @@ The Unix socket follows the standard local-daemon pattern (PostgreSQL `peer` aut
 - **Narrowing.** Tokens are for narrowing, not for admission: a CLI or sandboxed app given a scoped capability presents its token, in the way X11's MIT-MAGIC-COOKIE or D-Bus's cookie mechanism carry an explicit credential.
 - **Windows** has `AF_UNIX` but no peer credentials, so there the token is required.
 
-### 6. The standard service set
+### 6. Networking and peers belong to the node
+
+Networking defines who the node is to others, so `big_node` owns it. It is the successor of the old `IrohSyncRepo` (`daybook_core/sync.rs`).
+
+**One node key.** The node's identity key is both its keyhive identity and its Iroh endpoint key, so "who is this connection" and "what may it have" are answered by the same identity.
+
+**The peers service.** A `big_node` service owns the Iroh endpoint. It:
+- accepts connections and identifies the peer;
+- registers the peer with the repo, sync and blob RPC services;
+- decides which partitions to sync with that peer, and calls `set_peer` on the document and blob sync workers;
+- dials, reconnects with backoff, and reports sync progress.
+
+**Policy is a hook the embedder supplies.** `big_node` orchestrates but does not own the policy for who to dial, whether to accept a peer, or which partitions to sync with it. Those decisions differ by node kind, so they come from the composition through a peer policy in `big_node`'s config. A user node dials its known devices and mirrors per its drawer policy. A relay accepts sponsored peers, mirrors by sponsorship and enforces quotas. Changing what kind of node this is requires no change to `big_node` itself.
+
+**The default policy uses ADR 019's split:**
+- `big_repo` projects keyhive access into sync partitions: what a peer may have.
+- The cabinet answers which drawer partitions are worth syncing with a given peer: this node's mirroring policy intersected with that access.
+
+That per-peer cabinet query is assigned by ADR 019 but not yet implemented. A relay's policy replaces the mirroring half with sponsorship, and the access half still bounds it.
+
+**Configuration.** Node configuration is `big_node`'s:
+- the identity;
+- the attachments (Unix socket path, TCP address, Iroh settings);
+- the resource bindings handed to services;
+- the peer policy.
+
+Each service keeps its own configuration section within it.
+
+### 7. The standard service set
 
 Every node runs:
 - authority;
@@ -107,7 +135,7 @@ Every node runs:
 
 This is the set both relay and user nodes need. "The node works" means this set works across nodes.
 
-### 7. Nothing assumes one node per process, machine, directory or database
+### 8. Nothing assumes one node per process, machine, directory or database
 
 We intend to host nodes for people: many tenants in one process, booted and stopped on demand and scaled to zero, as a PDS host serves thousands of accounts. Individual services may also be disaggregated into another address space, such as a Wasm instance or another process. Therefore:
 - **A node is a value.** It is booted into `(BigNode, StopToken)` and stopped in reverse construction order. Booting and stopping many nodes in one process, repeatedly, is supported and tested, including that stop releases everything (no leaked databases, files or tasks).
@@ -117,7 +145,7 @@ We intend to host nodes for people: many tenants in one process, booted and stop
 - **Each service acts as its own actor.** Services already hold actors in the node's authority (`documents`, `drawers`, `blobs`, `plugs`, `nodules`, `dispatch`). A disaggregated service presents that actor's capability when it calls the others, like any client.
 - **Scaling to zero needs durable truth.** Anything that must survive a stop and reboot is in the node's storage, never only in memory. Rebooting from storage is the normal path, not a recovery path.
 
-### 8. `big_node` is the system test arena
+### 9. `big_node` is the system test arena
 
 The node's integration tests live in `big_node`'s `e2e` module. They test the standard services the way a high-level user would:
 - **Harness:** boot N nodes in one process, link them in a topology, and drive them only through clients.
@@ -139,7 +167,7 @@ The `big_repo` topology and log-nickname helpers are reused rather than rewritte
 - Dispatch's crate boundary changes, and `big_nodule` depends on `big_dispatch` instead of owning it. ADR 027's dispatch sections stay valid, with the owner changed.
 - Every built-in operation becomes reachable over the network once a listener is attached, so each one's capability check is now a network-facing security boundary. The existing in-request `Authorization` checks are what make this safe, and the router does not bypass them.
 - Node configuration moves from paths to resource bindings, which changes the config of `big_repo` and `big_node`.
-- Networking moves from a test helper into a `big_node` attachment.
+- Networking moves from test helpers into `big_node`: the Iroh endpoint attachment and the peers service, with an embedder-supplied peer policy (§6). Today no production code calls `set_peer`; only test helpers do, with empty partition sets.
 - The old repo's lock-file model is gone. Other processes reach the node through a client; they don't open its storage.
 
 ## Deferred

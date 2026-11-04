@@ -240,13 +240,24 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - Services are handed storage bindings and never open paths.
   - Services call each other only through clients, each as its own actor.
   - Durable truth only, so a node can scale to zero.
+- **D21.** Networking and peers belong to `big_node`, as the successor of `IrohSyncRepo`:
+  - One node key serves as both the keyhive identity and the Iroh endpoint key.
+  - A peers service accepts and identifies peers, registers them with the RPC services, calls `set_peer` on the doc and blob workers, and dials and reconnects.
+  - Who to dial, whom to accept and which partitions to sync are an embedder-supplied peer policy, because relays mirror by sponsorship.
+  - The default policy is the ADR 019 cabinet query (mirroring policy ∩ the keyhive-access partitions from `big_repo`). That query is not implemented yet.
 - **D20.** `big_node` e2e is the system test arena: harness, ladder, scale, seeded stress and nodules across nodes, driven through clients like a high-level user. The progress repo is out of scope.
 
 ### Plan N (the node PR, branch `feat/big-node`)
 - **N1. `big_dispatch` crate.** Move the router, admission and provider registry out of `big_nodule`. Register docs, drawers, blobs, authority, plugs and nodule-management operations as built-in providers. `big_nodule` registers its Wasm providers into it. Tests: a built-in operation and a nodule operation are reached through the one router with the same admission.
 - **N2. Listeners.** Serve the node router over UDS (token handshake that yields a capability) and TCP (`service_utils_rs` already has TCP serving; add a UDS acceptor). A `Client` over XRPC/UDS drives a node end to end.
 - **N3. Resource bindings.** Node config moves from paths to bindings: a SQL handle with a scope key, a blob store, secrets. `big_repo` stops opening `StorageConfig::Disk` itself. Test: boot and stop 20 nodes in one process with nothing leaked (databases, files, tasks).
-- **N4. Network attachment.** Move the test-only `big_node/e2e/blob_discovery/network.rs` (Iroh endpoint, peer links, blob serving) into `big_node` as an attachment.
+- **N4. Peers and networking.**
+  - Use one node key for keyhive and Iroh.
+  - Move the Iroh endpoint attachment (from the test-only `big_node/e2e/blob_discovery/network.rs` and `big_cabinet/peer_net.rs`) into `big_node`.
+  - Add a peers service successor to `IrohSyncRepo`: accept, identify, register, `set_peer`, dial, reconnect with backoff.
+  - Add the embedder peer-policy hook to the config.
+  - Implement the cabinet per-peer partition query (ADR 019) as the default policy.
+  - Port test helpers onto it.
 - **N5. Harness and ladder suite.** An N-node harness that reuses `big_repo` test2's topology and nickname helpers. Port the scenarios of `daybook_core/sync/tests/ladder.rs` onto it.
 - **N6. Scale, stress and cross-node nodules.** 10k-document replication, a seeded randomized stress test (`long_test` names), and a plug published on node A then installed and invoked on node B.
 
