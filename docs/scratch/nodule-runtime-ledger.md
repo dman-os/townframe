@@ -133,6 +133,18 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - **Execution:** init calls run in tasks off the state actor (tied to its stop token), and results come back as actor messages. The actor never awaits a handler. A stale result (from a revision or start that has since been superseded) is dropped by checking an epoch.
 - **Settings** reach a nodule through a facility, not an init argument (review §4). Out of scope here.
 
+### D8. Operator direction on plugs, config and security (2026-11-04)
+- **Config is node-local.** A node's nodule/plug configuration is its own. It syncs elsewhere for durable backup, but syncing it does not install or activate anything on another node. Multi-node convergence ("these nodes should run the same plugs") is a separate layer on top. The config-drawer blob-portability concern is therefore moot. D7 init (no `PerInstall`) is approved for the same reason.
+- **A plug is the one package format** for every plugin kind: nodules (services), Clay micros, schemas (Lexicons), and future kinds, under one namespace. Kinds reference each other: a micro referencing a nodule service, everything sharing schemas.
+- **Package dependencies live at the plugs layer** (review Q2). A plug that uses another plug's schemas or services references that plug explicitly. Nodules and micros do not carry their own dependency graph.
+- **One auditable story across all plugin kinds: manifest → configuration → capability.**
+  - The manifest *requests* (operations, collections, drawers and schemas it needs).
+  - Configuration is the operator's *grant*.
+  - Capabilities are *minted from grants*.
+  - It must be answerable statically whether plug X can ever reach a given resource (for example a sensitive drawer), including transitively through the services it may call. This is schema-bound and capability-oriented throughout. Clay's C6 "declared → configured → granted" is the same story.
+- **Open:** where to cut big_plugs from the schema service. `SchemaRepo` (`big_cabinet/schema.rs`) knows only identifiers and shapes, is fixed at open, and has no live registration. Plugs bring schemas.
+- Next big work: finish big_plugs (delivery: import into big_blobs, plug store, dependencies, schemas), coordinated with the Clay agent (`../townframe-p3N-4`, session `townframe-p3n-4-9c`).
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
@@ -305,7 +317,7 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - [main] `big_blobs` and `big_node/e2e/blob_discovery/mod.rs` are not rustfmt-clean on main (from #77); fixed in its own commit.
 
 ### Slice 2a follow-ups
-- **[design, operator] The config drawer isn't blob-portable yet.** It's a parentless self-doc drawer, and ADR 026 gives such drawers no inventories, so no inventory pin is published and a mirror can't discover or fetch artifact bytes. Retention is local only. This undercuts D2d's "portable" rationale until big_blobs supports pins or inventories for self-doc drawers (or the config drawer gets a parent).
+- Moot per D8: config is node-local; syncing it is backup, not activation.
 - [2b] Handler bytes must already be in the local blob store before the workers can encrypt and retain them. The install path (operator `PutBlob`/import, or OCI import) must put them there.
 - [blobs] Removing a `Blob` datum leaves its worker-written cipherBlob/jwk datums in the doc. Retention is released, but the datums linger. That's big_blobs worker cleanup.
 - Done (2026-11-04): the watch reconcile is skipped at already-applied heads. Trade-off: a failed grant apply at unchanged heads is retried only by `refresh_if_needed` and the dead-cap check, not by the watch. Its test uses 200 `yield_now`s to settle, which can only false-pass, never flake; there is no "watch event handled" signal to wait on.
