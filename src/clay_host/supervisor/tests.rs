@@ -49,6 +49,13 @@ struct Script {
     withhold: BTreeSet<String>,
     gates: BTreeMap<String, Rc<Notify>>,
     close_gates: BTreeMap<String, Rc<Notify>>,
+    /// Micros an incarnation of the named micro demands, in order, from its `initialize`.
+    demands: BTreeMap<String, Vec<String>>,
+    /// The activator each micro's latest incarnation was handed.
+    activators: BTreeMap<String, Activator<Provision>>,
+    /// The leases each micro's latest incarnation holds; its root drops them when it closes,
+    /// as a guest's teardown drops what it retained.
+    held: BTreeMap<String, Rc<RefCell<Vec<Lease<Provision>>>>>,
 }
 
 struct Fake {
@@ -62,6 +69,7 @@ struct FakeRoot {
     host: Host,
     instance: Instance,
     requirements: BTreeMap<String, Provision>,
+    held: Rc<RefCell<Vec<Lease<Provision>>>>,
 }
 
 impl Controls {
@@ -102,6 +110,28 @@ impl Controls {
         gate
     }
 
+    /// Have `holder`'s live incarnation demand `target`'s publication and keep the lease. The
+    /// supervisor's driver must be running.
+    async fn retain(&self, holder: &str, target: &str) {
+        let (activator, held) = {
+            let script = self.0.borrow();
+            (
+                script.activators[holder].clone(),
+                Rc::clone(&script.held[holder]),
+            )
+        };
+        let lease = activator.acquire(&id(target), PRESENTATION).await.unwrap();
+        held.borrow_mut().push(lease);
+    }
+
+    /// Have each incarnation of `micro` demand `targets` while it initializes.
+    fn demands(&self, micro: &str, targets: &[&str]) {
+        self.0.borrow_mut().demands.insert(
+            micro.to_owned(),
+            targets.iter().map(|target| (*target).to_owned()).collect(),
+        );
+    }
+
     fn drops(&self) -> Vec<String> {
         self.0.borrow().drops.clone()
     }
@@ -131,7 +161,7 @@ impl Factory<Provision> for Fake {
         host: Host,
         instance: Instance,
         requirements: BTreeMap<String, Provision>,
-        _activator: Activator<Provision>,
+        activator: Activator<Provision>,
     ) -> LocalFuture<'static, Result<Initialized<Provision>, String>> {
         let name = self.name.clone();
         let controls = self.controls.clone();
@@ -141,6 +171,23 @@ impl Factory<Provision> for Fake {
                 assert_eq!(host.lifecycle(&provision.owner), Lifecycle::Active);
             }
             controls.record(format!("init {name}"));
+            let held = Rc::<RefCell<Vec<Lease<Provision>>>>::default();
+            let demands = {
+                let mut script = controls.0.borrow_mut();
+                script.held.insert(name.clone(), Rc::clone(&held));
+                script.activators.insert(name.clone(), activator.clone());
+                script.demands.get(&name).cloned().unwrap_or_default()
+            };
+            for target in demands {
+                let outcome = match activator.acquire(&id(&target), PRESENTATION).await {
+                    Ok(lease) => {
+                        held.borrow_mut().push(lease);
+                        "ok".to_owned()
+                    }
+                    Err(error) => error.to_string(),
+                };
+                controls.record(format!("{name} demanded {target}: {outcome}"));
+            }
             let gate = controls.0.borrow().gates.get(&name).cloned();
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -169,6 +216,7 @@ impl Factory<Provision> for Fake {
                 host,
                 instance,
                 requirements,
+                held,
             });
             Ok(Initialized { root, publications })
         })
@@ -201,7 +249,17 @@ impl Root for FakeRoot {
                 );
                 self.host.check(&provision.owner).unwrap();
             }
+            // What a closing incarnation finds of the peers it retains through leases.
+            for lease in self.held.borrow().iter() {
+                let peer = &lease.owner;
+                let lifecycle = self.host.lifecycle(peer);
+                self.controls
+                    .record(format!("{} saw {} {lifecycle:?}", self.name, peer.name));
+            }
             self.controls.record(format!("close {}", self.name));
+            // The script keeps a handle on the leases for `Controls::retain`, so the root's own
+            // drop would not release them: do what the guest's teardown does.
+            self.held.borrow_mut().clear();
             if self.controls.0.borrow().fail_close.contains(&self.name) {
                 return Err(format!("{} close failed", self.name));
             }
@@ -420,7 +478,12 @@ async fn a_lease_keeps_a_provider_a_binding_would_release() {
         host.clone(),
         [
             controls.micro("provider"),
-            requires(controls.micro("consumer"), "presentation", "provider"),
+            // Eager, so the consumer is a root: a non-eager micro nothing leases is not retained.
+            eager(requires(
+                controls.micro("consumer"),
+                "presentation",
+                "provider",
+            )),
         ],
     );
     let (provider, consumer) = (id("provider"), id("consumer"));
@@ -448,7 +511,12 @@ async fn a_lease_dropped_while_a_consumer_binds_does_not_close_the_provider() {
         host.clone(),
         [
             controls.micro("provider"),
-            requires(controls.micro("consumer"), "presentation", "provider"),
+            // Eager, so the consumer is a root: a non-eager micro nothing leases is not retained.
+            eager(requires(
+                controls.micro("consumer"),
+                "presentation",
+                "provider",
+            )),
         ],
     );
     let (provider, consumer) = (id("provider"), id("consumer"));
@@ -620,8 +688,17 @@ async fn a_shared_provider_stays_live_while_any_consumer_binds_it() {
         host.clone(),
         [
             controls.micro("provider"),
-            requires(controls.micro("first"), "presentation", "provider"),
-            requires(controls.micro("second"), "presentation", "provider"),
+            // Eager, so each consumer is a root: a non-eager micro nothing leases is not retained.
+            eager(requires(
+                controls.micro("first"),
+                "presentation",
+                "provider",
+            )),
+            eager(requires(
+                controls.micro("second"),
+                "presentation",
+                "provider",
+            )),
         ],
     );
     supervisor.start(&id("first")).await.unwrap();
@@ -1008,4 +1085,209 @@ async fn recorded_state_changes_tick_the_change_receiver() {
     supervisor.enable(&solo);
     assert!(changes.has_changed().unwrap());
     assert_eq!(supervisor.state(&solo), MicroState::Idle);
+}
+
+/// Wait until every micro in `names` is `Idle`.
+async fn all_idle(supervisor: &Supervisor<Provision>, names: &[&str]) {
+    settle(supervisor.changes(), || {
+        names
+            .iter()
+            .all(|name| supervisor.state(&id(name)) == MicroState::Idle)
+    })
+    .await;
+}
+
+fn assert_no_pending(supervisor: &Supervisor<Provision>, names: &[&str]) {
+    for name in names {
+        assert!(
+            !matches!(
+                supervisor.state(&id(name)),
+                MicroState::Initializing | MicroState::Closing
+            ),
+            "{name} is stuck"
+        );
+    }
+    assert!(supervisor.inner.borrow().waits.is_empty());
+}
+
+#[tokio::test]
+async fn incarnations_retaining_each_other_close_together_once_no_root_reaches_them() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("a"), controls.micro("b")]);
+    let (a, b) = (id("a"), id("b"));
+    driven(&supervisor, async {
+        let from_a = supervisor.acquire(&a, PRESENTATION).await.unwrap();
+        let from_b = supervisor.acquire(&b, PRESENTATION).await.unwrap();
+        controls.retain("a", "b").await;
+        controls.retain("b", "a").await;
+
+        // An external lease on either one reaches both through the cycle.
+        drop(from_b);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(supervisor.state(&a), MicroState::Active);
+        assert_eq!(supervisor.state(&b), MicroState::Active);
+        let again = supervisor.acquire(&b, PRESENTATION).await.unwrap();
+        drop(from_a);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(supervisor.state(&a), MicroState::Active);
+        assert_eq!(supervisor.state(&b), MicroState::Active);
+
+        // The last external lease drops: nothing reaches the pair, so it closes as a group.
+        drop(again);
+        all_idle(&supervisor, &["a", "b"]).await;
+    })
+    .await;
+    assert_eq!(controls.count("close a"), 1);
+    assert_eq!(controls.count("close b"), 1);
+    assert_no_pending(&supervisor, &["a", "b"]);
+    assert_quiescent(&host);
+}
+
+#[tokio::test]
+async fn a_three_member_cycle_closes_as_a_group_and_a_member_may_find_its_peer_revoked() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("a"),
+            controls.micro("b"),
+            controls.micro("c"),
+        ],
+    );
+    let (a, b, c) = (id("a"), id("b"), id("c"));
+    let hold_a = controls.close_gate("a");
+    driven(&supervisor, async {
+        let from_a = supervisor.acquire(&a, PRESENTATION).await.unwrap();
+        let from_b = supervisor.acquire(&b, PRESENTATION).await.unwrap();
+        let from_c = supervisor.acquire(&c, PRESENTATION).await.unwrap();
+        controls.retain("a", "b").await;
+        controls.retain("b", "c").await;
+        controls.retain("c", "a").await;
+        let closing = supervisor.changes();
+        drop((from_a, from_b, from_c));
+        // Every member begins closing while `a`'s guest close is parked...
+        settle(closing, || {
+            [&a, &b, &c]
+                .iter()
+                .all(|member| supervisor.state(member) != MicroState::Active)
+        })
+        .await;
+        // ...so `b` and `c` finish first and `a`'s close finds its peer already gone.
+        settle(supervisor.changes(), || {
+            supervisor.state(&b) == MicroState::Idle && supervisor.state(&c) == MicroState::Idle
+        })
+        .await;
+        assert_eq!(supervisor.state(&a), MicroState::Closing);
+        hold_a.notify_one();
+        all_idle(&supervisor, &["a", "b", "c"]).await;
+    })
+    .await;
+    for member in ["a", "b", "c"] {
+        assert_eq!(controls.count(&format!("close {member}")), 1, "{member}");
+    }
+    assert!(
+        controls.log().contains(&"a saw b Closed".to_owned()),
+        "{:?}",
+        controls.log()
+    );
+    assert_no_pending(&supervisor, &["a", "b", "c"]);
+    assert_quiescent(&host);
+}
+
+#[tokio::test]
+async fn an_activation_cycle_fails_the_closing_demand_and_leaves_nothing_pending() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("a"), controls.micro("b")]);
+    let (a, b) = (id("a"), id("b"));
+    controls.demands("a", &["b"]);
+    controls.demands("b", &["a"]);
+    driven(&supervisor, async {
+        // `a`'s initialize demands `b`, whose initialize demands `a` back: that demand would
+        // wait on `a`'s own staged outcome, so it fails, and `b` carries on without it.
+        drop(supervisor.acquire(&a, PRESENTATION).await.unwrap());
+        assert_eq!(
+            controls.log()[..4],
+            [
+                "init a",
+                "init b",
+                "b demanded a: requirement cycle through a",
+                "a demanded b: ok"
+            ]
+        );
+        assert_eq!(supervisor.state(&b), MicroState::Active);
+        assert_no_pending(&supervisor, &["a", "b"]);
+        // Nothing reaches `a` any more, and its close lets go of `b`.
+        all_idle(&supervisor, &["a", "b"]).await;
+
+        // Without the cycle, `b` starts and is demanded like any micro.
+        controls.demands("a", &[]);
+        controls.demands("b", &[]);
+        drop(supervisor.acquire(&b, PRESENTATION).await.unwrap());
+        all_idle(&supervisor, &["a", "b"]).await;
+    })
+    .await;
+    assert_eq!(controls.count("init b"), 2);
+    assert_no_pending(&supervisor, &["a", "b"]);
+    assert_quiescent(&host);
+}
+
+#[tokio::test]
+async fn demanding_itself_while_initializing_fails_with_a_cycle() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
+    controls.demands("solo", &["solo"]);
+    driven(&supervisor, async {
+        drop(supervisor.acquire(&id("solo"), PRESENTATION).await.unwrap());
+        all_idle(&supervisor, &["solo"]).await;
+    })
+    .await;
+    assert_eq!(
+        controls.log()[1],
+        "solo demanded solo: requirement cycle through solo"
+    );
+    assert_no_pending(&supervisor, &["solo"]);
+    assert_quiescent(&host);
+}
+
+#[tokio::test]
+async fn a_provider_demanding_its_starting_consumer_fails_the_demand() {
+    let controls = Controls::default();
+    let host = Host::new();
+    // `consumer` is blocked on its configured provider, whose initialize demands `consumer`.
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("provider"),
+            requires(controls.micro("consumer"), "presentation", "provider"),
+        ],
+    );
+    controls.demands("provider", &["consumer"]);
+    driven(&supervisor, async {
+        drop(
+            supervisor
+                .acquire(&id("consumer"), PRESENTATION)
+                .await
+                .unwrap(),
+        );
+        all_idle(&supervisor, &["consumer", "provider"]).await;
+    })
+    .await;
+    assert_eq!(
+        controls.log()[..3],
+        [
+            "init provider",
+            "provider demanded consumer: requirement cycle through consumer",
+            "init consumer"
+        ]
+    );
+    assert_no_pending(&supervisor, &["consumer", "provider"]);
+    assert_quiescent(&host);
 }
