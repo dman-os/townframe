@@ -4082,6 +4082,7 @@ dependencies = [
  "clay_host",
  "clay_mdk",
  "clay_store",
+ "clay_surface",
  "daybook_types",
  "dioxus",
  "dioxus-core",

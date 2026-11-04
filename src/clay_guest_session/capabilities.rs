@@ -673,6 +673,16 @@ impl CapabilityRef {
         }
     }
 
+    /// Ticks whenever the provider's recorded state may have changed, so a holder can re-read
+    /// [`Self::status`] without polling. `None` for a bound reference: its status moves only
+    /// once, to `Revoked`, when the publication or the recipient closes.
+    pub fn status_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        match &self.0.target {
+            Target::Bound(_) => None,
+            Target::Lazy(_, activator) => Some(activator.changes()),
+        }
+    }
+
     /// One call. A lazy reference holds its lease only until the response arrives.
     pub async fn call(&self, request: Vec<u8>) -> Result<Vec<u8>, CallError> {
         let (publication, _lease) = self.resolve(PublicationKind::Call).await?;

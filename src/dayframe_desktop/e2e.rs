@@ -377,21 +377,10 @@ async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
         MicroState::Active
     );
 
+    // The section stayed open while its micro was disabled, and its slot re-redeems when the
+    // supervisor records the micro enabled: a fresh incarnation mounts without reopening.
     ui.click("button[aria-label=\"Enable dayframe.counter micro\"]");
-    ui.wait_until("reenabled counter can be disabled again", |ui| {
-        ui.find("button[aria-label=\"Disable dayframe.counter micro\"]")
-            .is_some()
-    })
-    .await;
-    assert_eq!(runtime.state(&counter), MicroState::Idle);
-    // Reopening the section starts a fresh incarnation.
-    ui.click(SAMPLE);
-    ui.wait_until("switched to the sample section", |ui| {
-        ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
-    })
-    .await;
-    ui.click(COUNTER);
-    ui.wait_until("new counter incarnation mounted", |ui| {
+    ui.wait_until("reenabled counter section recovered", |ui| {
         ui.find(COUNTER_VALUE).is_some()
     })
     .await;

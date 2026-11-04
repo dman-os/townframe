@@ -28,19 +28,9 @@ test("the composed wcmp counter mounts and dispatches clicks in the browser", as
   await expect(
     page.getByRole("button", { name: "Disable dayframe.counter micro" }),
   ).toBeVisible();
-  // The label follows the install datum at once; the supervisor follows it through the
-  // document watch a moment later. Opening the section before that redeems a disabled micro.
-  await expect(
-    page
-      .getByRole("status")
-      .filter({ hasText: "dayframe.counter runtime: Idle" }),
-  ).toBeVisible();
-  // Settings opened the counter's section at boot, while the micro was disabled, so it shows
-  // "unavailable"; a slot does not re-redeem when its micro is enabled, so reopen it.
-  await page
-    .getByRole("button", { name: "Open Sample micro settings" })
-    .click();
-  await openCounter.click();
+  // Settings already shows the counter's section from boot, "unavailable" while the micro is
+  // disabled. Nothing is reopened: the section's slot re-redeems by itself once the supervisor
+  // records the enabled micro, so this waits only on the mounted counter below.
 
   const counter = page.getByRole("button", { name: "Increment Wasm counter" });
   await expect(counter).toBeVisible({ timeout: 60_000 });
@@ -51,7 +41,7 @@ test("the composed wcmp counter mounts and dispatches clicks in the browser", as
   }
 
   // Disabling the micro withdraws its mounted section; its manifest row stays listed, and
-  // re-enabling it lets a fresh open start a new incarnation. The lifecycle panel is still
+  // re-enabling it remounts the still-open section on a new incarnation. The lifecycle panel is still
   // open from enabling the counter above.
   await page
     .getByRole("button", { name: "Disable dayframe.counter micro" })
@@ -60,15 +50,6 @@ test("the composed wcmp counter mounts and dispatches clicks in the browser", as
   await page
     .getByRole("button", { name: "Enable dayframe.counter micro" })
     .click();
-  await expect(
-    page
-      .getByRole("status")
-      .filter({ hasText: "dayframe.counter runtime: Idle" }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Open Sample micro settings" })
-    .click();
-  await openCounter.click();
   await expect(counter).toBeVisible({ timeout: 60_000 });
   expect(failures).toEqual([]);
 });
