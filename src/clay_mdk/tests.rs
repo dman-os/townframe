@@ -504,36 +504,22 @@ impl collection_registration::HostRegistrationWriter for TestHost {
 }
 
 impl<T: 'static> collection_registration::HostRegistrationWriterWithStore<T> for HasSelf<TestHost> {
-    async fn clear(
-        _accessor: &Accessor<T, Self>,
-        _writer: Resource<collection_registration::RegistrationWriter>,
-    ) -> wasmtime::Result<Result<(), collection_registration::MutationError>> {
-        wasmtime::bail!("test host grants no registration writers")
-    }
-
     async fn put(
         _accessor: &Accessor<T, Self>,
         _writer: Resource<collection_registration::RegistrationWriter>,
-        _local_key: Vec<u8>,
-        _based_on: Option<collections::Version>,
+        _key: Vec<u8>,
+        _basis: collection_registration::WriteBasis,
         _value: collections::EncodedValue,
-    ) -> wasmtime::Result<
-        Result<collection_registration::MutationAccepted, collection_registration::MutationError>,
-    > {
+    ) -> wasmtime::Result<Result<collections::Stamp, collection_registration::MutationError>> {
         wasmtime::bail!("test host grants no registration writers")
     }
 
-    async fn remove(
+    async fn delete(
         _accessor: &Accessor<T, Self>,
         _writer: Resource<collection_registration::RegistrationWriter>,
-        _local_key: Vec<u8>,
-        _based_on: Option<collections::Version>,
-    ) -> wasmtime::Result<
-        Result<
-            Option<collection_registration::MutationAccepted>,
-            collection_registration::MutationError,
-        >,
-    > {
+        _key: Vec<u8>,
+        _basis: collection_registration::WriteBasis,
+    ) -> wasmtime::Result<Result<collections::Stamp, collection_registration::MutationError>> {
         wasmtime::bail!("test host grants no registration writers")
     }
 }
