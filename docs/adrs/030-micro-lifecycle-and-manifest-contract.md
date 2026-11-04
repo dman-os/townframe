@@ -467,15 +467,10 @@ Ordinary micro guests never receive this administration authority. A future inst
 ### 11. The manifest describes possibilities, not live state
 
 The current manifest conflates contract binding names, static contribution payloads,
-and activation routing. Replace it with an open, versioned vocabulary conceptually
-shaped as:
+and activation routing. Replace it with an open vocabulary conceptually shaped as:
 
 ```text
 MicroManifest {
-    schema: ManifestSchema,
-    id: MicroId,
-    package_version: Version,
-
     entrypoints: Entrypoints {
         initialize: InterfaceRef,
         presentation?: InterfaceRef,
@@ -483,16 +478,31 @@ MicroManifest {
     },
 
     provides: [ProvidedContract],
-    requires: [RequiredContract],
+    requires: [Request],
     configuration_requests: [ConfigurationRequest],
     collection_contracts: [CollectionContract],
-    collection_requests: [CollectionRequest],
+    collection_requests: [Request],
     contributions: [ContributionDeclaration],
 }
 ```
 
 All named members have stable ids. Unknown members are carried so newer manifests can
 round-trip through older tooling.
+
+The manifest names neither the package nor its version nor its format version (ADR 028). The
+plug envelope owns the package's identity, version and `authority` (the reverse-DNS NSID prefix it
+holds), and the manifest is filed in the envelope's micro contribution under the schema NSID
+`org.example.clay.micro.manifest`, which is the format identity: a breaking change to the
+manifest is a new NSID. The standalone stand-in form is the `<name>.manifest.json` sidecar, flat
+JSON of the manifest's members plus `id`, `package_version` and `authority` (`Sidecar` in
+`clay_mdk`); the loader splits it into the package identity and the manifest, and
+`big_plugs`' micro importer reads the same JSON. **Authority.** A package may *declare* only
+NSIDs under its authority: its collection contracts, the schemas they name, and the contract of each
+call it publishes. Every other NSID it touches is a request, and admission refuses a package that
+declares outside its authority. NSIDs the runtime itself defines (`org.example.clay.*`: the
+presentation-component contract, `org.example.clay.shell.roots`) are requested by micros and
+satisfied by the runtime, never declared by one. Dayframe's micros use `org.example.dayframe.<micro>`
+as authority and prefix.
 
 ### 12. Contract declarations
 
@@ -503,16 +513,24 @@ ProvidedContract {
     lifecycle: provided-resource contract metadata,
 }
 
-RequiredContract {
+Request {                        // the one request shape of ADR 028 §4, also used by collection requests
     binding,
-    contract: ContractRef,
-    necessity: Required | Optional,
+    contract: Nsid,
+    access?,                     // absent for a requirement: the grant is "may call" / "may mount"
+    necessity: required | optional,
+    resolution: configured | atRuntime,
+    minRevision?,
 }
 ```
 
 `binding` is the local stable name used by configured requirement bindings and
 `initial-context.require(binding)`. A requirement does not grant authority and a
-provider declaration is not a live provision.
+provider declaration is not a live provision. A contract is an NSID (AT Protocol syntax,
+`clay_collection::Nsid`, validated at deserialization); compatibility lives in the NSID, so there is
+no version inside it. The wire shape mirrors `big_plugs_core::request::Request`
+(camelCase, open strings), which replaces Clay's copy once that crate is reachable. A call
+publication's contract is the NSID of its request and response Lexicons, and the WIT
+`publish-call` takes it as a string.
 
 Resource contract metadata declares `Weak` or `Strong` retention where obtaining the
 resource targets another micro. Callers cannot override it. Ordinary provided services
@@ -528,23 +546,28 @@ ConfigurationRequest {
 }
 
 CollectionContract {
-    id,
-    selector_schema,
-    key_schema,
-    value_schema,
-    write_context_schema?,
+    id: Nsid,
+    selector_schema: Nsid,
+    key_schema: Nsid,
+    value_schema: Nsid,
+    write_context_schema?: Nsid,
     offered_capabilities: Read | Register | DomainCommands,
     backing: Volatile | Durable | Materialized,
 }
 
-CollectionRequest {
+Request {                        // as `requires`, with `access` present
     binding,                     // unique local name; the only name guest code uses
-    contract,                    // CollectionContract id
-    access: Read | Write,        // write implies read
-    necessity: Required | Optional,
-    resolution: Configured | AtRuntime,
+    contract: Nsid,              // CollectionContract id
+    access: read | write,        // open vocabulary; write implies read
+    necessity: required | optional,
+    resolution: configured | atRuntime,
+    minRevision?,
 }
 ```
+
+A configuration request names a facet by datum NSID (`tag`) and never by owning plug: configuration
+picks the document, so a plug substituted for another keeps working. (Clay's old `owner_plug_id` is
+gone; the node-side routine ACL keeps its own.)
 
 A contract has no writer policy: retention belongs to the writer's scope (ADR 031 §4), and write
 authority is not key-scoped yet: any micro bound to a collection with Register may write any key,
@@ -561,8 +584,7 @@ remain contract-specific CBOR interpreted by host and guest libraries.
 ```text
 ContributionDeclaration {
     id,
-    target_binding,       // local RequiredContract.binding
-    collection_contract,
+    binding,              // a `collection_requests` binding with write access
     key,
     value,                // schema-compatible CBOR
     endpoints: [LazyEndpointDeclaration],
@@ -575,7 +597,7 @@ LazyEndpointDeclaration {
 }
 ```
 
-The target binding identifies where configuration routes the declaration; it does not hard-code a configured target instance into the package. Installation resolves the binding, validates registration authority and the target collection's schemas, then writes the row under the plug revision's installation scope. The row remains visible while the contributor is inactive and disappears when that scope is removed on uninstall.
+The binding names one of the manifest's own collection requests, which must request `write` (validation refuses a contribution naming an unknown or read-only binding). It identifies where configuration routes the declaration; it does not hard-code a configured target instance or a concrete collection id into the package. Installation resolves the binding through the micro's resolved collection bindings (a binding configuration left unbound has nowhere to put its rows, so they are skipped), validates registration authority and the target collection's schemas, then writes the row under the plug revision's installation scope. The row remains visible while the contributor is inactive and disappears when that scope is removed on uninstall.
 
 A lazy endpoint declaration contains no live authority. Projection mints an authorized lazy attachment for each recipient. Redemption activates or joins the contributor, and successful initialization fulfills the named publication slot. Static contributions therefore need neither `TargetLive` activation triggers nor a second ephemeral collection.
 ADR 031 specifies registration-scope ownership, collection availability, schema admission, and the toolbar/completion/layout examples.

@@ -242,3 +242,22 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   `attach`/`detail`, and `context_collections_and_calls` asserts the stored endpoint and the rejection on
   Wasmtime and wcmp/Wasmi. The engine scenario stops at the stored endpoint (a conformance engine has no
   supervisor to redeem through); native redemption covers the activation path.
+
+## C6d-1 notes (2026-11-04): manifest vocabulary aligned to ADR 028
+
+- **NSID.** `clay_collection::Nsid` (re-exported by `clay_mdk`) replaces `ContractIdentity` everywhere: manifest, capability
+  bank (`presentation_component()` is `org.example.clay.presentationComponent`), WIT `publish-call(name, contract: string)`
+  (kept in package 0.4.0, like earlier unreleased WIT edits), durable endpoint rows (`[micro, publication, contract]`),
+  collection ids and schemas. Runtime-defined: `org.example.clay.*` (`shell.roots`, `shell.rootKey`, `shell.root`);
+  dayframe micros: authority and prefix `org.example.dayframe.<micro>` (`settings.sections`, `counter.count`,
+  facet tags `*.config`); tests and fixtures: `org.example.clay.test.*` / `org.example.test.*`.
+- **Request.** One `Request` (camelCase wire, `access` absent for `requires`, present for `collection_requests`,
+  `minRevision`), mirroring `big_plugs_core::request::Request`; swap to theirs after the merge.
+- **Sidecar.** `Sidecar { id, package_version, authority?, manifest }` is the flat on-disk form; factories take the
+  `MicroId` separately, `InstalledMicro::new(sidecar, ..)`, manifest crates expose `manifest()` (guests) and `sidecar()`.
+  `Sidecar::validate` = `MicroManifest::validate` + the authority rule; the composition drops a refused package whole.
+- **Contributions** name a write collection request by `binding`; `declared_rows(&Sidecar)` groups rows by binding and the
+  composition installs them into the collection the micro's resolution bound (an unbound binding skips its rows).
+- **Not done (C6d-2):** micro id = installed-as PlugId, writer = (replica, micro id), BLAKE3, grant re-check.
+- **Persisted-data breaks (pre-release, not migrated):** durable collections are keyed by the NSID text now, endpoint
+  rows have a new CBOR shape, and a stored binding datum must hold NSIDs.
