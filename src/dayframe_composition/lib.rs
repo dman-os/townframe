@@ -16,16 +16,16 @@ mod bindings;
 use bindings::BindingsDatum;
 use bindings::DeclaredCollections;
 use bindings::Resolution;
-use clay_dioxus::use_component_recovery;
 use clay_dioxus::NativeComponents;
+use clay_dioxus::use_component_recovery;
 use clay_docs::DocumentGrant;
 use clay_docs::DocumentWatch;
 use clay_docs::FacetRoute;
 use clay_docs::FacetSelection;
 use clay_docs::FacetValue;
 use clay_docs::WatchSelection;
-use clay_guest_session::collections::durable_bytes_registrations;
 use clay_guest_session::collections::BytesRegistrations;
+use clay_guest_session::collections::durable_bytes_registrations;
 use clay_host::CollectionContract;
 use clay_host::ConfiguredMicro;
 use clay_host::Factory;
@@ -36,19 +36,18 @@ use clay_host::MicroId;
 use clay_host::MicroState;
 use clay_host::Requirement;
 use clay_host::Supervisor;
-use clay_mdk::native::declared_rows;
-use clay_mdk::native::manifest_scope;
-use clay_mdk::native::CapabilityPublication;
-use clay_mdk::native::CollectionBindings;
-use clay_mdk::native::CollectionRegistry;
-use clay_mdk::native::CollectionWatch;
-use clay_mdk::native::DocumentService;
-use clay_mdk::native::Resources;
-use clay_mdk::native::RootRow;
-use clay_mdk::native::SHELL_ROOTS;
-use clay_mdk::view::use_rows;
-use clay_mdk::view::AttachedRef;
-use clay_mdk::view::PresentationSlot;
+use clay_mdk::Collection;
+use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::hooks::use_rows;
+use clay_mdk::host::CapabilityPublication;
+use clay_mdk::host::CollectionBindings;
+use clay_mdk::host::CollectionRegistry;
+use clay_mdk::host::DocumentService;
+use clay_mdk::host::Resources;
+use clay_mdk::host::RootRow;
+use clay_mdk::host::SHELL_ROOTS;
+use clay_mdk::host::declared_rows;
+use clay_mdk::host::manifest_scope;
 use clay_store::OrderedStore;
 use clay_store::StoreError;
 use dioxus::prelude::*;
@@ -61,8 +60,8 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
-use tokio::sync::watch;
 use tokio::sync::Notify;
+use tokio::sync::watch;
 
 /// One installed micro in the launcher-supplied catalog: its self-describing manifest, its
 /// static configuration, and the factory that turns the root's resources into its supervisor
@@ -91,7 +90,8 @@ pub struct InstalledMicro {
 /// See [`InstalledMicro::factory`].
 pub type FactoryBuilder = Box<
     dyn FnOnce(
-        Resources<NativeComponents>,
+        Resources,
+        NativeComponents,
         CollectionBindings,
     ) -> Rc<dyn Factory<CapabilityPublication>>,
 >;
@@ -101,10 +101,11 @@ impl InstalledMicro {
     pub fn new(
         manifest: clay_mdk::MicroManifest,
         factory: impl FnOnce(
-                Resources<NativeComponents>,
-                CollectionBindings,
-            ) -> Rc<dyn Factory<CapabilityPublication>>
-            + 'static,
+            Resources,
+            NativeComponents,
+            CollectionBindings,
+        ) -> Rc<dyn Factory<CapabilityPublication>>
+        + 'static,
     ) -> Self {
         Self {
             manifest,
@@ -322,7 +323,7 @@ pub struct CompositionRuntime {
     locked: BTreeSet<MicroId>,
     /// The shell's own instance: it mounts roots and owns the references minted from rows.
     shell: Instance,
-    roots: CollectionWatch<String, RootRow>,
+    roots: Collection<String, RootRow>,
     /// Applies changes of the install document to the supervisor; taken by the one
     /// [`Self::serve`].
     reconcile_installs: Rc<RefCell<Option<LocalFuture<'static, ()>>>>,
@@ -454,11 +455,7 @@ impl CompositionRuntime {
 
         let enabled_at_boot = admit_installs(&documents, &installed);
 
-        let resources = Resources {
-            registry: components.clone(),
-            documents: documents.clone(),
-            collections: collections.clone(),
-        };
+        let resources = Resources::new(components.clone(), documents.clone(), collections.clone());
         let mut micros = Vec::new();
         let mut managed = Vec::new();
         let mut locked = BTreeSet::new();
@@ -488,7 +485,7 @@ impl CompositionRuntime {
                 eager: micro.eager,
                 requirements: micro.requirements,
                 unresolved_bindings: resolution.unresolved.clone(),
-                factory: (micro.factory)(resources.clone(), bindings.clone()),
+                factory: (micro.factory)(resources.clone(), components.clone(), bindings.clone()),
             });
             managed.push(ManagedMicro {
                 id: identity,
@@ -500,7 +497,7 @@ impl CompositionRuntime {
         let supervisor = Rc::new(Supervisor::new(host.clone(), configured));
         let shell = host.start("shell");
         let (roots, feed) =
-            CollectionWatch::observe(&host, &shell, supervisor.activator(), &roots_collection)
+            Collection::observe(&host, &shell, supervisor.activator(), &roots_collection)
                 .expect("the shell instance is live");
         let installs = watch_installs(&documents, &host, &shell);
         let (lifecycle_failure, _) = watch::channel(None);
@@ -755,7 +752,7 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                 }
             }
             if settings_open() {
-                for row in roots {
+                for row in roots.iter() {
                     div { key: "{row.key}", "aria-label": "{row.value.title}",
                         // The root's presentation is a row attachment: a lazy endpoint the
                         // shell redeems, which starts the micro that publishes it. Guest-written
@@ -763,9 +760,7 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                         // through the wire-level slot primitive of ADR 015 §10.
                         PresentationSlot {
                             owner: shell.shell.clone(),
-                            reference: AttachedRef::new(
-                                row.attachments[row.value.content.index()].share(),
-                            ),
+                            reference: row.attachments[row.value.content.index()].clone(),
                         }
                     }
                 }

@@ -13,9 +13,9 @@
 //! mirror's one notifier bumps a Dioxus signal inside the guest runtime, so any component that
 //! called [`use_document_changes`] (directly or via [`use_facet`]) re-renders and reads the
 //! current snapshot. Reads never cross the boundary; only events and explicit resyncs do.
+pub use crate::FacetState;
 pub use crate::mirror::ConfigDocument;
 pub use crate::mirror::Facet;
-pub use crate::mirror::FacetState;
 pub use crate::mirror::MirrorOperation;
 pub use crate::mirror::MirrorSnapshot;
 pub use crate::mirror::MirrorStatus;

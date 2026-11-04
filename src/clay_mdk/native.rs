@@ -1,46 +1,24 @@
-//! The in-process backend: one authoring API over the host's session machinery. Native micros
-//! depend on this module, never on a renderer crate or the host kernel directly (ADR 015 §3
-//! dependency direction). The MDK adds ergonomics, never authority: every operation below
-//! still runs through the same host sessions a guest's engine drives, so a native micro and a
-//! guest are interchangeable to every other micro (ADR 025 §5).
+//! The in-process backend: the host-session machinery behind [`crate::Context`]. Native micros
+//! depend on the MDK, never on a renderer crate or the host kernel directly (ADR 015 §3
+//! dependency direction). Every operation still runs through the same host sessions a guest's
+//! engine drives, so a native micro and a guest are interchangeable to every other micro
+//! (ADR 025 §5).
 //!
-//! A native micro is one [`factory`]: a manifest plus an `activate` function. The supervisor
-//! runs it as an incarnation like any guest: `activate` stages publications through the
-//! [`Context`], and what it staged is admitted against the manifest's declared publications
-//! and handed back by name (ADR 025 §8). Nothing here names a renderer: a [`Context`] is
-//! generic over the host's [`RendererRegistry`].
+//! A native micro is one [`factory`]: a manifest plus an async `activate` function. The
+//! supervisor runs it as an incarnation like any guest: `activate` stages publications through
+//! the [`Context`], and what it staged is admitted against the manifest's declared publications
+//! and handed back by name (ADR 025 §8).
 //!
-//! Incarnation-owned work (the collection mirrors, [`Context::own_future`]) runs as local
-//! tasks, so a supervisor driving native micros runs inside a `tokio::task::LocalSet`.
+//! Incarnation-owned work (the collection mirrors, [`Context::spawn`]) runs as local tasks, so
+//! a supervisor driving native micros runs inside a `tokio::task::LocalSet`.
 
 mod collections;
 mod declared;
 
-pub use clay_docs::DocumentRef;
 pub use clay_docs::DocumentService;
-pub use clay_docs::DocumentSnapshot;
-pub use clay_docs::DocumentWatch;
-pub use clay_docs::Facet;
-pub use clay_docs::FacetRoute;
-pub use clay_docs::FacetValue;
-pub use clay_docs::Freshness;
-pub use clay_docs::Operation;
-pub use clay_docs::OperationReceipt;
-pub use clay_guest_session::capabilities::CallError;
-pub use clay_guest_session::capabilities::CallTarget;
-pub use clay_guest_session::capabilities::CapabilityFailure;
-pub use clay_guest_session::capabilities::CapabilityPublication;
-pub use clay_guest_session::capabilities::CapabilityRef;
-pub use clay_guest_session::capabilities::PresentationComponent;
-pub use clay_guest_session::capabilities::PublicationEndpoint;
-pub use clay_guest_session::capabilities::RowAttachment;
-pub use clay_guest_session::collections::WriteFailure;
-pub use clay_host::AccessError;
 pub use clay_host::CollectionRegistry;
-pub use clay_host::Instance;
-pub use clay_host::RendererRegistry;
 pub use collections::Attachment;
-pub use collections::CollectionWatch;
+pub use collections::Collection;
 pub use collections::Registration;
 pub use collections::Row;
 pub use declared::DeclaredRows;
@@ -48,6 +26,18 @@ pub use declared::declared_rows;
 pub use declared::manifest_scope;
 pub use declared::runtime_scope;
 
+use clay_docs::DocumentRef;
+use clay_guest_session::capabilities::CapabilityFailure;
+use clay_guest_session::capabilities::CapabilityPublication;
+use clay_host::AccessError;
+use clay_host::Instance;
+use clay_host::RendererRegistry;
+
+use crate::Capability;
+use crate::CollectionAccess;
+use crate::Config;
+use crate::Context;
+use crate::Error;
 use crate::manifest::ContractIdentity;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
@@ -60,7 +50,9 @@ use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::capabilities::admit_publications;
 use clay_guest_session::collections::BytesRegistrations;
 use clay_guest_session::collections::CollectionLimits;
+use clay_guest_session::collections::CollectionReader;
 use clay_guest_session::collections::CollectionSession;
+use clay_guest_session::collections::RegistrationWriter;
 use clay_host::Activator;
 use clay_host::Factory;
 use clay_host::Host;
@@ -68,22 +60,42 @@ use clay_host::Initialized;
 use clay_host::LocalFuture;
 use clay_host::MicroId;
 use clay_host::Root;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use dioxus_core::Element;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::rc::Rc;
 use tokio::task::JoinHandle;
 
-/// What a composition root hands every native micro it links: the renderer registry its
-/// components publish into, the document service its configuration is granted from, and the
-/// declared collections it may bind.
+/// What a composition root hands every native micro it links: the publisher its components
+/// render through, the document service its configuration is granted from, and the declared
+/// collections it may bind. The renderer registry is erased at construction: the authoring
+/// surface is Dioxus `Element` on every backend, so a registry only has to accept `Element`
+/// render factories.
 #[derive(Clone)]
-pub struct Resources<R: RendererRegistry> {
-    pub registry: R,
+pub struct Resources {
+    publisher: Publisher,
     pub documents: DocumentService,
     pub collections: CollectionRegistry<BytesRegistrations>,
+}
+
+/// Publish one render factory as a component owned by an instance, through whichever
+/// [`RendererRegistry`] the composition installed.
+pub(crate) type Publisher =
+    Rc<dyn Fn(&Instance, Rc<dyn Fn() -> Element>) -> Result<clay_host::ComponentRef, AccessError>>;
+
+impl Resources {
+    pub fn new<R: RendererRegistry<Render = Element> + 'static>(
+        registry: R,
+        documents: DocumentService,
+        collections: CollectionRegistry<BytesRegistrations>,
+    ) -> Self {
+        Self {
+            publisher: Rc::new(move |owner, render| registry.publish(owner, move || render())),
+            documents,
+            collections,
+        }
+    }
 }
 
 /// One local collection binding resolved to a declared collection (ADR 025 §11).
@@ -151,9 +163,13 @@ pub struct RootRow {
 /// Local tasks an incarnation owns. Dropping them aborts them, so a failed initialization
 /// leaves no work behind; an orderly close aborts and joins them.
 #[derive(Default)]
-struct Tasks(Vec<JoinHandle<()>>);
+pub(crate) struct Tasks(Vec<JoinHandle<()>>);
 
 impl Tasks {
+    pub(crate) fn push(&mut self, task: JoinHandle<()>) {
+        self.0.push(task);
+    }
+
     async fn close(mut self) {
         for task in &self.0 {
             task.abort();
@@ -177,162 +193,84 @@ impl Drop for Tasks {
     }
 }
 
-/// The value surface one native activation may use: granted configuration documents, resolved
-/// requirements, declared collections, component and call publication, and owned-task
-/// registration. It never hands out the host or the registry (ADR 015 §7); [`factory`]
-/// constructs it.
-pub struct Context<R: RendererRegistry> {
-    instance: Instance,
-    micro: MicroId,
-    registry: R,
-    configs: BTreeMap<String, DocumentRef>,
-    requirements: BTreeMap<String, CapabilityRef>,
-    resources: Resources<R>,
-    bindings: BTreeMap<String, BoundCollection>,
-    capabilities: CapabilitySession,
-    sessions: CollectionSession,
-    published: RefCell<Vec<(String, PublishedCapability)>>,
-    tasks: RefCell<Tasks>,
+/// One resolved collection request: the reader (and, for a write request, the writer) was
+/// granted before `activate` ran, so the accessors cannot fail.
+pub(crate) struct CollectionSlot {
+    pub(crate) reader: CollectionReader,
+    pub(crate) writer: Option<Rc<RegistrationWriter>>,
 }
 
-impl<R: RendererRegistry> Context<R> {
-    /// This activation's incarnation identity. Plain data; operations validate it host-side.
-    pub fn instance(&self) -> Instance {
-        self.instance.clone()
+/// The in-process backend's state behind one [`Context`]: everything `activate` may use, granted
+/// before it runs. Built by [`factory`].
+pub(crate) struct Activation {
+    pub(crate) instance: Instance,
+    pub(crate) publisher: Publisher,
+    pub(crate) configs: BTreeMap<String, Config>,
+    /// Every requirement the manifest declares; an optional one nothing resolved holds `None`.
+    pub(crate) requirements: BTreeMap<String, Option<Capability>>,
+    /// Every collection request the manifest declares; one configuration left unbound is `None`.
+    pub(crate) collections: BTreeMap<String, Option<CollectionSlot>>,
+    pub(crate) declared: BTreeMap<String, DeclaredPublication>,
+    pub(crate) capabilities: CapabilitySession,
+    /// Staged by `activate`; `None` once admission took them, after which publishing is a
+    /// programming error.
+    pub(crate) published: RefCell<Option<Vec<(String, PublishedCapability)>>>,
+    pub(crate) tasks: Rc<RefCell<Tasks>>,
+}
+
+impl Activation {
+    pub(crate) fn collection_slot(&self, binding: &str) -> Option<&CollectionSlot> {
+        self.collections
+            .get(binding)
+            .unwrap_or_else(|| panic!("the manifest declares no collection request {binding:?}"))
+            .as_ref()
     }
 
-    /// A configuration document granted from the manifest's declared ACL. `None` means the
-    /// manifest declared no such binding; grants are validated before activation runs.
-    pub fn config(&self, name: &str) -> Option<&DocumentRef> {
-        self.configs.get(name)
-    }
-
-    /// The reference that satisfies requirement `binding`, or `None` when configuration bound
-    /// nothing to it. Holding it keeps the provider incarnation live.
-    pub fn require(&self, binding: &str) -> Option<&CapabilityRef> {
-        self.requirements.get(binding)
-    }
-
-    /// Stage a presentation publication named `name` whose component renders `render`. The
-    /// name must be one the manifest declares as a presentation; admission checks that once
-    /// `activate` returns, and nothing is reachable by other micros before then.
-    ///
-    /// Returns the staged publication, which a row can attach (see [`Registration::put`]).
-    pub fn publish_component(
+    pub(crate) fn declared_call(
         &self,
         name: &str,
-        render: impl Fn() -> R::Render + 'static,
-    ) -> Result<CapabilityPublication, AccessError> {
-        let component = self.registry.publish(&self.instance, render)?;
-        self.stage(self.capabilities.publish_component(name, component))
+    ) -> clay_guest_session::capabilities::ContractIdentity {
+        match self.declared.get(name) {
+            Some(DeclaredPublication {
+                kind: clay_guest_session::capabilities::PublicationKind::Call,
+                contract,
+            }) => contract.clone(),
+            _ => panic!("the manifest declares no call publication {name:?}"),
+        }
     }
 
-    /// Stage a call publication named `name` served by `target` under `contract`.
-    pub fn publish_call(
-        &self,
-        name: &str,
-        contract: ContractIdentity,
-        target: std::sync::Arc<dyn CallTarget>,
-    ) -> Result<(), AccessError> {
-        self.stage(
-            self.capabilities
-                .publish_call(name, contract.admitted(), target),
-        )?;
-        Ok(())
-    }
-
-    fn stage(
+    pub(crate) fn stage(
         &self,
         published: Result<PublishedCapability, CapabilityFailure>,
-    ) -> Result<CapabilityPublication, AccessError> {
-        let published = published.map_err(|failure| match failure {
-            CapabilityFailure::Revoked => AccessError::Revoked,
-            CapabilityFailure::ContractMismatch
-            | CapabilityFailure::LimitExceeded
-            | CapabilityFailure::Unavailable => AccessError::Denied,
-        })?;
+    ) -> Result<CapabilityPublication, Error> {
+        let published = published?;
         let publication = published.publication();
         self.published
             .borrow_mut()
+            .as_mut()
+            .expect("publications are staged only while activate runs")
             .push((publication.name().to_owned(), published));
         Ok(publication)
     }
-
-    /// Mirror the collection bound to `binding`, which the manifest declares as a collection
-    /// request. `Denied` when configuration left the binding unbound (an optional request
-    /// nothing resolved). The feed task is incarnation-owned.
-    pub fn collection<K: DeserializeOwned + 'static, V: DeserializeOwned + 'static>(
-        &self,
-        binding: &str,
-    ) -> Result<CollectionWatch<K, V>, AccessError> {
-        let bound = self.bindings.get(binding).ok_or(AccessError::Denied)?;
-        let projection = self
-            .resources
-            .collections
-            .collection(&bound.id)
-            .ok_or(AccessError::Denied)?
-            .projection();
-        let reader = self.sessions.grant(projection)?;
-        let (watch, feed) = CollectionWatch::start(reader, self.capabilities.clone());
-        self.own_future(feed)?;
-        Ok(watch)
-    }
-
-    /// Write authority over the collection bound to `binding`, together with its mirror. The
-    /// binding must be a write request; `Denied` when it is unbound or read-only. The writer's
-    /// rows belong to this incarnation and are retracted when it closes.
-    pub fn registration<
-        K: Serialize + DeserializeOwned + 'static,
-        V: Serialize + DeserializeOwned + 'static,
-    >(
-        &self,
-        binding: &str,
-    ) -> Result<Registration<K, V>, AccessError> {
-        let bound = self
-            .bindings
-            .get(binding)
-            .filter(|bound| bound.write)
-            .ok_or(AccessError::Denied)?;
-        let grant = self
-            .resources
-            .collections
-            .grant(&bound.id, &self.micro)
-            .map_err(|_| AccessError::Denied)?;
-        let writer = self.sessions.grant_writer(grant)?;
-        Ok(Registration::new(writer, self.collection(binding)?))
-    }
-
-    /// Register incarnation-owned local work. It is dropped when this instance closes; a
-    /// panic in it is raised at the incarnation's close.
-    pub fn own_future(
-        &self,
-        future: impl Future<Output = ()> + 'static,
-    ) -> Result<(), AccessError> {
-        self.tasks
-            .borrow_mut()
-            .0
-            .push(tokio::task::spawn_local(future));
-        Ok(())
-    }
 }
 
-type Activate<R> = Rc<dyn Fn(&Context<R>) -> Result<(), AccessError>>;
+type Activate = Rc<dyn Fn(Context) -> LocalFuture<'static, Result<(), Error>>>;
 
-struct NativeFactory<R: RendererRegistry> {
-    resources: Resources<R>,
+struct NativeFactory {
+    resources: Resources,
     manifest: MicroManifest,
     declared: BTreeMap<String, DeclaredPublication>,
     bindings: CollectionBindings,
-    activate: Activate<R>,
+    activate: Activate,
 }
 
-/// Turn a native micro (manifest + activate function) into a supervisor factory. The
+/// Turn a native micro (manifest + `activate` function) into a supervisor factory. The
 /// composition root calls this; micro crates never build factories themselves.
-pub fn factory<R: RendererRegistry + 'static>(
-    resources: Resources<R>,
+pub fn factory<Fut: Future<Output = Result<(), Error>> + 'static>(
+    resources: Resources,
     manifest: MicroManifest,
     bindings: CollectionBindings,
-    activate: impl Fn(&Context<R>) -> Result<(), AccessError> + 'static,
+    activate: impl Fn(Context) -> Fut + 'static,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
     let declared = declared_publications(&manifest);
     Rc::new(NativeFactory {
@@ -340,20 +278,22 @@ pub fn factory<R: RendererRegistry + 'static>(
         manifest,
         declared,
         bindings,
-        activate: Rc::new(activate),
+        activate: Rc::new(move |context| Box::pin(activate(context))),
     })
 }
 
 /// Owns an incarnation's publication leases and tasks until the supervisor closes it.
 struct NativeRoot {
     leases: BTreeMap<String, PublishedCapability>,
-    tasks: Tasks,
+    tasks: Rc<RefCell<Tasks>>,
 }
 
 impl Root for NativeRoot {
     fn close(self: Box<Self>) -> LocalFuture<'static, Result<(), String>> {
         Box::pin(async move {
             let Self { leases, tasks } = *self;
+            // Taken out of the shared cell: the tasks themselves may still hold the context.
+            let tasks = std::mem::take(&mut *tasks.borrow_mut());
             tasks.close().await;
             // The leases drop with the root; the supervisor revokes the publications it
             // handed out before it tears the incarnation down.
@@ -363,7 +303,7 @@ impl Root for NativeRoot {
     }
 }
 
-impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFactory<R> {
+impl Factory<CapabilityPublication> for NativeFactory {
     fn initialize(
         &self,
         host: Host,
@@ -377,39 +317,94 @@ impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFac
         let bindings = self.bindings.snapshot();
         let activate = Rc::clone(&self.activate);
         Box::pin(async move {
+            let micro = MicroId::new(manifest.id.as_str());
             let capabilities =
                 CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
             capabilities.attach_activator(activator);
             let sessions =
                 CollectionSession::new(host.clone(), instance.clone(), CollectionLimits::default());
-            let configs = grant_configs(&resources.documents, &host, &instance, &manifest)?;
-            let requirements = requirements
+            let configs = grant_configs(&resources.documents, &host, &instance, &manifest)?
+                .into_iter()
+                .map(|(binding, document)| (binding, Config::new(document)))
+                .collect();
+            let requirements = manifest
+                .requires
                 .iter()
-                .map(|(binding, publication)| {
-                    capabilities
-                        .mint(publication)
-                        .map(|reference| (binding.clone(), reference))
-                        .map_err(|failure| format!("requirement {binding}: {failure:?}"))
+                .map(|required| {
+                    let resolved = requirements
+                        .get(&required.binding)
+                        .map(|publication| {
+                            capabilities
+                                .mint(publication)
+                                .map(Capability::new)
+                                .map_err(|failure| {
+                                    format!("requirement {}: {failure:?}", required.binding)
+                                })
+                        })
+                        .transpose()?;
+                    Ok((required.binding.clone(), resolved))
                 })
-                .collect::<Result<_, _>>()?;
-            let context = Context {
+                .collect::<Result<_, String>>()?;
+            // Grant every resolved collection request up front so the accessors cannot fail
+            // mid-activation. A bound collection that is not declared is a configuration
+            // fault, reported as a failed initialization like the guest engine's.
+            let collections = manifest
+                .collection_requests
+                .iter()
+                .map(|request| {
+                    let slot = bindings
+                        .get(&request.binding)
+                        .map(|bound| {
+                            let reader = resources
+                                .collections
+                                .collection(&bound.id)
+                                .ok_or_else(|| format!("collection {} is not declared", bound.id))
+                                .and_then(|collection| {
+                                    sessions
+                                        .grant(collection.projection())
+                                        .map_err(|error| error.to_string())
+                                })?;
+                            let writer = (bound.write && request.access == CollectionAccess::Write)
+                                .then(|| {
+                                    resources
+                                        .collections
+                                        .grant(&bound.id, &micro)
+                                        .map_err(|error| error.to_string())
+                                        .and_then(|grant| {
+                                            sessions
+                                                .grant_writer(grant)
+                                                .map_err(|error| error.to_string())
+                                        })
+                                        .map(Rc::new)
+                                })
+                                .transpose()?;
+                            Ok::<_, String>(CollectionSlot { reader, writer })
+                        })
+                        .transpose()?;
+                    Ok((request.binding.clone(), slot))
+                })
+                .collect::<Result<_, String>>()?;
+            let context = Context(Rc::new(Activation {
                 instance,
-                micro: MicroId::new(manifest.id.as_str()),
-                registry: resources.registry.clone(),
+                publisher: Rc::clone(&resources.publisher),
                 configs,
                 requirements,
-                resources,
-                bindings,
+                collections,
+                declared: declared.clone(),
                 capabilities,
-                sessions,
-                published: RefCell::default(),
-                tasks: RefCell::default(),
-            };
-            activate(&context).map_err(|error| format!("activation refused: {error}"))?;
-            let Context {
-                published, tasks, ..
-            } = context;
-            let leases = admit_publications(&declared, published.into_inner())?;
+                published: RefCell::new(Some(Vec::new())),
+                tasks: Rc::default(),
+            }));
+            activate(context.clone())
+                .await
+                .map_err(|error| format!("activation refused: {error}"))?;
+            let published = context
+                .0
+                .published
+                .borrow_mut()
+                .take()
+                .expect("admission is the only taker of staged publications");
+            let leases = admit_publications(&declared, published)?;
             let publications = leases
                 .iter()
                 .map(|(name, lease)| (name.clone(), lease.publication()))
@@ -417,7 +412,7 @@ impl<R: RendererRegistry + 'static> Factory<CapabilityPublication> for NativeFac
             Ok(Initialized {
                 root: Box::new(NativeRoot {
                     leases,
-                    tasks: tasks.into_inner(),
+                    tasks: Rc::clone(&context.0.tasks),
                 }),
                 publications,
             })

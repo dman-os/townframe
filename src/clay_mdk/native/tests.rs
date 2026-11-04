@@ -1,9 +1,16 @@
 use super::*;
+use crate::BindingResolution;
+use crate::CollectionRequest;
 use crate::Entrypoints;
 use crate::MANIFEST_SCHEMA;
 use crate::MicroId as ManifestId;
+use crate::Necessity;
 use crate::PublicationDeclaration;
+use crate::PublicationKind;
+use crate::RequiredContract;
+use crate::RowAttachment;
 use clay_guest_session::capabilities::ContractIdentity as Admitted;
+use clay_guest_session::capabilities::PublicationEndpoint;
 use clay_guest_session::collections::bytes_registrations;
 use clay_host::CollectionContract;
 use clay_host::ConfiguredMicro;
@@ -11,6 +18,7 @@ use clay_host::MicroState;
 use clay_host::Requirement;
 use clay_host::StartError;
 use clay_host::Supervisor;
+use dioxus_core::VNode;
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 
@@ -23,7 +31,7 @@ struct StubRegistry {
 }
 
 impl RendererRegistry for StubRegistry {
-    type Render = ();
+    type Render = Element;
 
     fn for_host(host: &Host) -> Self {
         Self { host: host.clone() }
@@ -41,19 +49,34 @@ impl RendererRegistry for StubRegistry {
     }
 }
 
+fn blank() -> Element {
+    VNode::empty()
+}
+
+/// One test micro's manifest-side declaration; `Rig::micro` pairs it with an `activate`.
+#[derive(Default)]
+struct Spec {
+    publications: Vec<PublicationDeclaration>,
+    requests: Vec<CollectionRequest>,
+    requires: Vec<RequiredContract>,
+    bindings: CollectionBindings,
+    eager: bool,
+    requirements: BTreeMap<String, Requirement>,
+}
+
 struct Rig {
     host: Host,
-    resources: Resources<StubRegistry>,
+    resources: Resources,
 }
 
 impl Rig {
     fn new() -> Self {
         let host = Host::new();
-        let resources = Resources {
-            registry: StubRegistry::for_host(&host),
-            documents: DocumentService::new(16),
-            collections: CollectionRegistry::default(),
-        };
+        let resources = Resources::new(
+            StubRegistry::for_host(&host),
+            DocumentService::new(16),
+            CollectionRegistry::default(),
+        );
         resources
             .collections
             .declare(
@@ -68,36 +91,33 @@ impl Rig {
         Self { host, resources }
     }
 
-    fn micro(
+    fn micro<Fut: Future<Output = Result<(), Error>> + 'static>(
         &self,
         id: &str,
-        publications: Vec<PublicationDeclaration>,
-        bindings: CollectionBindings,
-        eager: bool,
-        requirements: BTreeMap<String, Requirement>,
-        activate: impl Fn(&Context<StubRegistry>) -> Result<(), AccessError> + 'static,
+        spec: Spec,
+        activate: impl Fn(Context) -> Fut + 'static,
     ) -> ConfiguredMicro<CapabilityPublication> {
         let manifest = MicroManifest {
             schema: MANIFEST_SCHEMA,
             id: ManifestId::new(id),
             package_version: 1,
             entrypoints: Entrypoints::micro_client(),
-            publications,
-            requires: vec![],
+            publications: spec.publications,
+            requires: spec.requires,
             configuration_requests: vec![],
             collection_contracts: vec![],
-            collection_requests: vec![],
+            collection_requests: spec.requests,
             contributions: vec![],
             extra: BTreeMap::new(),
         };
         manifest.validate().unwrap();
         ConfiguredMicro {
             identity: clay_host::MicroId::new(id),
-            eager,
+            eager: spec.eager,
             enabled: true,
-            requirements,
+            requirements: spec.requirements,
             unresolved_bindings: Vec::new(),
-            factory: factory(self.resources.clone(), manifest, bindings, activate),
+            factory: factory(self.resources.clone(), manifest, spec.bindings, activate),
         }
     }
 }
@@ -110,49 +130,91 @@ fn presentation(name: &str) -> PublicationDeclaration {
     }
 }
 
+fn call(name: &str) -> PublicationDeclaration {
+    PublicationDeclaration {
+        name: name.into(),
+        kind: PublicationKind::Call,
+        contract: Some(ContractIdentity::new("test.calls", "increment", (1, 0, 0))),
+    }
+}
+
 /// The binding name the test micros use for the `ROWS` collection.
 const ROWS_BINDING: &str = "rows";
 
-fn writes_rows() -> CollectionBindings {
-    CollectionBindings::new([(ROWS_BINDING.to_owned(), BoundCollection::write(ROWS))])
+fn rows_request(access: CollectionAccess, necessity: Necessity) -> CollectionRequest {
+    CollectionRequest {
+        binding: ROWS_BINDING.into(),
+        contract: ROWS.into(),
+        access,
+        necessity,
+        resolution: BindingResolution::Configured,
+    }
 }
 
-fn reads_rows() -> CollectionBindings {
-    CollectionBindings::new([(ROWS_BINDING.to_owned(), BoundCollection::read(ROWS))])
+fn writes_rows() -> Spec {
+    Spec {
+        eager: true,
+        requests: vec![rows_request(CollectionAccess::Write, Necessity::Required)],
+        bindings: CollectionBindings::new([(
+            ROWS_BINDING.to_owned(),
+            BoundCollection::write(ROWS),
+        )]),
+        ..Spec::default()
+    }
+}
+
+fn reads_rows() -> Spec {
+    Spec {
+        requests: vec![rows_request(CollectionAccess::Read, Necessity::Required)],
+        bindings: CollectionBindings::new([(ROWS_BINDING.to_owned(), BoundCollection::read(ROWS))]),
+        ..Spec::default()
+    }
 }
 
 async fn in_local_set<T>(future: impl Future<Output = T>) -> T {
     tokio::task::LocalSet::new().run_until(future).await
 }
 
+fn titles(collection: &Collection<String, String>) -> Vec<(String, String)> {
+    collection
+        .rows()
+        .unwrap()
+        .iter()
+        .map(|row| (row.key.clone(), row.value.clone()))
+        .collect()
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn a_declared_presentation_is_published_by_name_and_leased() {
+async fn declared_presentations_are_published_by_name_and_leased() {
     in_local_set(async {
         let rig = Rig::new();
         let micro = rig.micro(
             "native.shelf",
-            vec![presentation("view")],
-            CollectionBindings::default(),
-            false,
-            BTreeMap::new(),
-            |context| {
-                context.publish_component("view", || ())?;
+            Spec {
+                publications: vec![presentation("view"), presentation("detail")],
+                ..Spec::default()
+            },
+            |context| async move {
+                context.publish_component("view", blank)?;
+                context.publish_component("detail", blank)?;
                 Ok(())
             },
         );
         let supervisor = Supervisor::new(rig.host.clone(), [micro]);
         let id = clay_host::MicroId::new("native.shelf");
-        let lease = supervisor.acquire(&id, "view").await.unwrap();
-        assert_eq!(lease.name(), "view");
+        let view = supervisor.acquire(&id, "view").await.unwrap();
+        let detail = supervisor.acquire(&id, "detail").await.unwrap();
+        assert_eq!(view.name(), "view");
+        assert_eq!(detail.name(), "detail");
         assert_eq!(
-            lease.kind(),
+            view.kind(),
             clay_guest_session::capabilities::PublicationKind::Presentation
         );
         assert!(matches!(
             supervisor.acquire(&id, "other").await.err(),
             Some(StartError::Unpublished { .. })
         ));
-        drop(lease);
+        drop((view, detail));
         supervisor.shutdown().await.unwrap();
         rig.host.close();
     })
@@ -166,18 +228,21 @@ async fn publishing_an_undeclared_name_fails_initialization() {
         let ran = Rc::new(Cell::new(false));
         let micro = rig.micro(
             "native.rogue",
-            vec![presentation("view")],
-            reads_rows(),
-            false,
-            BTreeMap::new(),
+            Spec {
+                publications: vec![presentation("view")],
+                ..reads_rows()
+            },
             {
                 let ran = Rc::clone(&ran);
                 move |context| {
-                    // A mirror task is registered before the rejected publication.
-                    context.collection::<String, String>(ROWS_BINDING)?;
-                    context.publish_component("undeclared", || ())?;
-                    ran.set(true);
-                    Ok(())
+                    let ran = Rc::clone(&ran);
+                    async move {
+                        // A mirror task is registered before the rejected publication.
+                        context.collection::<String, String>(ROWS_BINDING).unwrap();
+                        context.publish_component("undeclared", blank)?;
+                        ran.set(true);
+                        Ok(())
+                    }
                 }
             },
         );
@@ -199,56 +264,45 @@ async fn publishing_an_undeclared_name_fails_initialization() {
 async fn registration_rows_reach_a_reader_and_are_retracted_when_the_writer_closes() {
     in_local_set(async {
         let rig = Rig::new();
-        let watched = Rc::new(RefCell::new(None::<CollectionWatch<String, String>>));
+        let watched = Rc::new(RefCell::new(None::<Collection<String, String>>));
         let reader = rig.micro(
             "native.reader",
-            vec![],
-            reads_rows(),
-            true,
-            BTreeMap::new(),
+            Spec {
+                eager: true,
+                ..reads_rows()
+            },
             {
                 let watched = Rc::clone(&watched);
                 move |context| {
-                    *watched.borrow_mut() = Some(context.collection(ROWS_BINDING)?);
-                    Ok(())
+                    let watched = Rc::clone(&watched);
+                    async move {
+                        *watched.borrow_mut() = context.collection(ROWS_BINDING);
+                        Ok(())
+                    }
                 }
             },
         );
-        let writer = rig.micro(
-            "native.writer",
-            vec![],
-            writes_rows(),
-            true,
-            BTreeMap::new(),
-            |context| {
-                let registration = context.registration::<String, String>(ROWS_BINDING)?;
-                registration
-                    .put(&"counter".to_owned(), &"Counter".to_owned(), vec![])
-                    .unwrap();
-                Ok(())
-            },
-        );
+        let writer = rig.micro("native.writer", writes_rows(), |context| async move {
+            let registration = context
+                .registration::<String, String>(ROWS_BINDING)
+                .unwrap();
+            registration
+                .put(&"counter".to_owned(), &"Counter".to_owned(), vec![])
+                .await?;
+            Ok(())
+        });
         let supervisor = Supervisor::new(rig.host.clone(), [reader, writer]);
         assert!(supervisor.reconcile().await.is_empty());
-        let watch = watched.borrow().clone().unwrap();
-        let mut revisions = watch.revisions();
-        let titles = |watch: &CollectionWatch<String, String>| {
-            watch
-                .rows()
-                .unwrap()
-                .into_iter()
-                .map(|row| (row.key, row.value))
-                .collect::<Vec<_>>()
-        };
+        let mut watch = watched.borrow().clone().unwrap();
         while titles(&watch) != [("counter".to_owned(), "Counter".to_owned())] {
-            revisions.changed().await.unwrap();
+            watch.changed().await.unwrap();
         }
         supervisor
             .disable(&clay_host::MicroId::new("native.writer"))
             .await
             .unwrap();
         while !titles(&watch).is_empty() {
-            revisions.changed().await.unwrap();
+            watch.changed().await.unwrap();
         }
         supervisor.shutdown().await.unwrap();
         rig.host.close();
@@ -257,36 +311,84 @@ async fn registration_rows_reach_a_reader_and_are_retracted_when_the_writer_clos
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn bindings_the_manifest_resolved_nothing_for_are_denied() {
+async fn rows_are_decoded_once_per_revision_and_rewritten_over_what_the_mirror_saw() {
     in_local_set(async {
         let rig = Rig::new();
-        let denied = Rc::new(Cell::new(0));
+        let written = Rc::new(RefCell::new(None::<Registration<String, String>>));
+        let writer = rig.micro("native.writer", writes_rows(), {
+            let written = Rc::clone(&written);
+            move |context| {
+                let written = Rc::clone(&written);
+                async move {
+                    *written.borrow_mut() = context.registration(ROWS_BINDING);
+                    Ok(())
+                }
+            }
+        });
+        let supervisor = Supervisor::new(rig.host.clone(), [writer]);
+        assert!(supervisor.reconcile().await.is_empty());
+        let registration = written.borrow().clone().unwrap();
+        let mut watch = registration.collection().clone();
+        let key = "k".to_owned();
+        registration
+            .put(&key, &"one".to_owned(), vec![])
+            .await
+            .unwrap();
+        while titles(&watch) != [(key.clone(), "one".to_owned())] {
+            watch.changed().await.unwrap();
+        }
+        let first = watch.rows().unwrap();
+        assert!(Rc::ptr_eq(&first, &watch.rows().unwrap()));
+        // The default basis is the mirror's stamp for the key, so this supersedes "one".
+        registration
+            .put(&key, &"two".to_owned(), vec![])
+            .await
+            .unwrap();
+        while titles(&watch) != [(key.clone(), "two".to_owned())] {
+            watch.changed().await.unwrap();
+        }
+        assert!(!Rc::ptr_eq(&first, &watch.rows().unwrap()));
+        registration.delete(&key).await.unwrap();
+        while !titles(&watch).is_empty() {
+            watch.changed().await.unwrap();
+        }
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn optional_requests_configuration_left_unbound_are_none() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let unbound = Rc::new(Cell::new(false));
         let micro = rig.micro(
             "native.unbound",
-            vec![],
-            reads_rows(),
-            true,
-            BTreeMap::new(),
+            Spec {
+                eager: true,
+                requests: vec![rows_request(CollectionAccess::Write, Necessity::Optional)],
+                ..Spec::default()
+            },
             {
-                let denied = Rc::clone(&denied);
+                let unbound = Rc::clone(&unbound);
                 move |context| {
-                    // Read-only binding: no write authority; an unbound binding: no read.
-                    denied.set(
-                        usize::from(matches!(
-                            context.registration::<String, String>(ROWS_BINDING).err(),
-                            Some(AccessError::Denied)
-                        )) + usize::from(matches!(
-                            context.collection::<String, String>("other").err(),
-                            Some(AccessError::Denied)
-                        )),
-                    );
-                    Ok(())
+                    let unbound = Rc::clone(&unbound);
+                    async move {
+                        unbound.set(
+                            context.collection::<String, String>(ROWS_BINDING).is_none()
+                                && context
+                                    .registration::<String, String>(ROWS_BINDING)
+                                    .is_none(),
+                        );
+                        Ok(())
+                    }
                 }
             },
         );
         let supervisor = Supervisor::new(rig.host.clone(), [micro]);
         assert!(supervisor.reconcile().await.is_empty());
-        assert_eq!(denied.get(), 2);
+        assert!(unbound.get());
         supervisor.shutdown().await.unwrap();
         rig.host.close();
     })
@@ -297,23 +399,23 @@ async fn bindings_the_manifest_resolved_nothing_for_are_denied() {
 async fn each_incarnation_sees_the_binding_resolution_current_when_it_started() {
     in_local_set(async {
         let rig = Rig::new();
-        let bindings = reads_rows();
+        let spec = Spec {
+            requests: vec![rows_request(CollectionAccess::Read, Necessity::Optional)],
+            ..reads_rows()
+        };
+        let bindings = spec.bindings.clone();
         let seen = Rc::new(RefCell::new(Vec::new()));
-        let micro = rig.micro(
-            "native.rebound",
-            vec![],
-            bindings.clone(),
-            false,
-            BTreeMap::new(),
-            {
+        let micro = rig.micro("native.rebound", spec, {
+            let seen = Rc::clone(&seen);
+            move |context| {
                 let seen = Rc::clone(&seen);
-                move |context| {
+                async move {
                     seen.borrow_mut()
-                        .push(context.collection::<String, String>(ROWS_BINDING).is_ok());
+                        .push(context.collection::<String, String>(ROWS_BINDING).is_some());
                     Ok(())
                 }
-            },
-        );
+            }
+        });
         let supervisor = Supervisor::new(rig.host.clone(), [micro]);
         let id = clay_host::MicroId::new("native.rebound");
         supervisor.reconfigure(&id, vec![]).await.unwrap();
@@ -337,34 +439,40 @@ async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
         let rig = Rig::new();
         let provider = rig.micro(
             "native.provider",
-            vec![presentation("view")],
-            CollectionBindings::default(),
-            false,
-            BTreeMap::new(),
-            |context| {
-                context.publish_component("view", || ())?;
+            Spec {
+                publications: vec![presentation("view")],
+                ..Spec::default()
+            },
+            |context| async move {
+                context.publish_component("view", blank)?;
                 Ok(())
             },
         );
         let status = Rc::new(RefCell::new(None));
         let consumer = rig.micro(
             "native.consumer",
-            vec![],
-            CollectionBindings::default(),
-            true,
-            BTreeMap::from([(
-                "host".to_owned(),
-                Requirement {
-                    provider: clay_host::MicroId::new("native.provider"),
-                    publication: "view".into(),
-                },
-            )]),
+            Spec {
+                eager: true,
+                requires: vec![
+                    required("host", Necessity::Required),
+                    required("absent", Necessity::Optional),
+                ],
+                requirements: BTreeMap::from([(
+                    "host".to_owned(),
+                    provides("native.provider", "view"),
+                )]),
+                ..Spec::default()
+            },
             {
                 let status = Rc::clone(&status);
                 move |context| {
-                    *status.borrow_mut() = Some(context.require("host").map(CapabilityRef::status));
-                    assert!(context.require("absent").is_none());
-                    Ok(())
+                    let status = Rc::clone(&status);
+                    async move {
+                        *status.borrow_mut() =
+                            Some(context.require("host").map(Capability::status));
+                        assert!(context.require("absent").is_none());
+                        Ok(())
+                    }
                 }
             },
         );
@@ -374,6 +482,85 @@ async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
             *status.borrow(),
             Some(Some(clay_guest_session::capabilities::RefStatus::Live))
         );
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
+fn required(binding: &str, necessity: Necessity) -> RequiredContract {
+    RequiredContract {
+        binding: binding.into(),
+        contract: ContractIdentity::new("test.calls", "increment", (1, 0, 0)),
+        necessity,
+    }
+}
+
+fn provides(provider: &str, publication: &str) -> Requirement {
+    Requirement {
+        provider: clay_host::MicroId::new(provider),
+        publication: publication.into(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_published_call_serves_typed_requests_and_reports_handler_rejections() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let provider = rig.micro(
+            "native.provider",
+            Spec {
+                publications: vec![call("increment")],
+                ..Spec::default()
+            },
+            |context| async move {
+                context.publish_call("increment", |value: u32| async move {
+                    // The await point proves handlers run as tasks, not inline in the queue.
+                    tokio::task::yield_now().await;
+                    if value == 0 {
+                        return Err(Error::Rejected("zero".into()));
+                    }
+                    Ok(value + 1)
+                })?;
+                Ok(())
+            },
+        );
+        let capability = Rc::new(RefCell::new(None::<Capability>));
+        let consumer = rig.micro(
+            "native.consumer",
+            Spec {
+                eager: true,
+                requires: vec![required("increment", Necessity::Required)],
+                requirements: BTreeMap::from([(
+                    "increment".to_owned(),
+                    provides("native.provider", "increment"),
+                )]),
+                ..Spec::default()
+            },
+            {
+                let capability = Rc::clone(&capability);
+                move |context| {
+                    let capability = Rc::clone(&capability);
+                    async move {
+                        *capability.borrow_mut() = context.require("increment").cloned();
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [provider, consumer]);
+        assert!(supervisor.reconcile().await.is_empty());
+        let increment = capability.borrow().clone().unwrap();
+        assert_eq!(increment.call::<u32, u32>(&41).await, Ok(42));
+        assert_eq!(
+            increment.call::<u32, u32>(&0).await,
+            Err(Error::Rejected("rejected: zero".into()))
+        );
+        // A request the handler cannot decode is the provider's rejection, not a crash.
+        assert!(matches!(
+            increment.call::<String, u32>(&"nope".to_owned()).await,
+            Err(Error::Rejected(message)) if message.contains("does not decode")
+        ));
         supervisor.shutdown().await.unwrap();
         rig.host.close();
     })

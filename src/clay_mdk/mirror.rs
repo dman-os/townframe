@@ -15,12 +15,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::rc::Weak;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FacetState<T = String> {
-    Loading,
-    Absent,
-    Present(T),
-}
+use crate::FacetState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MirrorStatus {

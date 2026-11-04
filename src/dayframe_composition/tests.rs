@@ -1,11 +1,11 @@
 use super::*;
 use clay_collection::Stamped;
 use clay_host::StartError;
-use clay_mdk::native::factory;
-use clay_mdk::native::CapabilityFailure;
-use clay_mdk::native::RowAttachment;
-use micro_settings_manifest::Section;
+use clay_mdk::Error;
+use clay_mdk::RowAttachment;
+use clay_mdk::host::factory;
 use micro_settings_manifest::SECTIONS;
+use micro_settings_manifest::Section;
 use std::future::Future;
 
 const COUNTER: &str = micro_counter_manifest::ID;
@@ -28,7 +28,7 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
         locked: true,
         ..InstalledMicro::new(
             micro_settings_manifest::manifest(),
-            |resources, bindings| {
+            |resources, _components, bindings| {
                 factory(
                     resources,
                     micro_settings_manifest::manifest(),
@@ -41,14 +41,17 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
     let sample = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
-        ..InstalledMicro::new(micro_sample::manifest(), |resources, bindings| {
-            factory(
-                resources,
-                micro_sample::manifest(),
-                bindings,
-                micro_sample::activate,
-            )
-        })
+        ..InstalledMicro::new(
+            micro_sample::manifest(),
+            |resources, _components, bindings| {
+                factory(
+                    resources,
+                    micro_sample::manifest(),
+                    bindings,
+                    micro_sample::activate,
+                )
+            },
+        )
     };
     vec![settings, sample, counter]
 }
@@ -57,19 +60,22 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
 fn stub_counter() -> InstalledMicro {
     InstalledMicro {
         enabled_on_admission: true,
-        ..InstalledMicro::new(micro_counter_manifest::manifest(), |resources, bindings| {
-            factory(
-                resources,
-                micro_counter_manifest::manifest(),
-                bindings,
-                |context| {
-                    context.publish_component(micro_counter_manifest::VIEW, || {
-                        rsx! { p { "stub counter" } }
-                    })?;
-                    Ok(())
-                },
-            )
-        })
+        ..InstalledMicro::new(
+            micro_counter_manifest::manifest(),
+            |resources, _components, bindings| {
+                factory(
+                    resources,
+                    micro_counter_manifest::manifest(),
+                    bindings,
+                    |context| async move {
+                        context.publish_component(micro_counter_manifest::VIEW, || {
+                            rsx! { p { "stub counter" } }
+                        })?;
+                        Ok(())
+                    },
+                )
+            },
+        )
     }
 }
 
@@ -93,7 +99,7 @@ fn unfetchable_counter() -> InstalledMicro {
         enabled_on_admission: true,
         ..InstalledMicro::new(
             micro_counter_manifest::manifest(),
-            |_resources, _bindings| Rc::new(Unfetchable),
+            |_resources, _components, _bindings| Rc::new(Unfetchable),
         )
     }
 }
@@ -132,10 +138,10 @@ async fn served<T>(runtime: &CompositionRuntime, scenario: impl Future<Output = 
 fn section_refs(
     runtime: &CompositionRuntime,
 ) -> (
-    CollectionWatch<String, Section>,
+    Collection<String, Section>,
     impl Future<Output = ()> + 'static,
 ) {
-    CollectionWatch::observe(
+    Collection::observe(
         &runtime.host,
         &runtime.shell,
         runtime.supervisor.activator(),
@@ -164,11 +170,13 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         [RowAttachment::Endpoint(endpoint)] if endpoint.micro == id(COUNTER) && endpoint.publication == "view"
     ));
     // The sample writes its row at runtime, so nothing exists for it yet.
-    assert!(runtime
-        .collection(SECTIONS)
-        .unwrap()
-        .get(&cbor_key(micro_sample::ID))
-        .is_none());
+    assert!(
+        runtime
+            .collection(SECTIONS)
+            .unwrap()
+            .get(&cbor_key(micro_sample::ID))
+            .is_none()
+    );
     runtime.host.close();
 }
 
@@ -182,7 +190,7 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
         })
         .await;
         // The shell mounts the root through its manifest-declared endpoint.
-        let mut roots = runtime.roots.revisions();
+        let mut roots = runtime.roots.clone();
         while runtime.roots.rows().unwrap().is_empty() {
             roots.changed().await.unwrap();
         }
@@ -197,7 +205,7 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
 
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
-        let mut changes = sections.revisions();
+        let mut changes = sections.clone();
         while sections.rows().unwrap().len() < 2 {
             changes.changed().await.unwrap();
         }
@@ -224,7 +232,7 @@ async fn a_disabled_micro_keeps_its_row_but_cannot_be_redeemed_until_enabled() {
     served(&runtime, async {
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
-        let mut changes = sections.revisions();
+        let mut changes = sections.clone();
         while sections.rows().unwrap().is_empty() {
             changes.changed().await.unwrap();
         }
@@ -235,7 +243,7 @@ async fn a_disabled_micro_keeps_its_row_but_cannot_be_redeemed_until_enabled() {
         let reference = &counter.attachments[0];
         assert_eq!(
             reference.redeem_presentation().await.err(),
-            Some(CapabilityFailure::Unavailable)
+            Some(Error::Unavailable)
         );
         supervisor.enable(&id(COUNTER));
         assert!(reference.redeem_presentation().await.is_ok());
@@ -250,7 +258,7 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
     served(&runtime, async {
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
-        let mut changes = sections.revisions();
+        let mut changes = sections.clone();
         while sections.rows().unwrap().len() < 2 {
             changes.changed().await.unwrap();
         }
@@ -258,7 +266,7 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
         let counter = rows.iter().find(|row| row.key == COUNTER).unwrap();
         assert_eq!(
             counter.attachments[0].redeem_presentation().await.err(),
-            Some(CapabilityFailure::Unavailable)
+            Some(Error::Unavailable)
         );
         assert!(matches!(
             runtime.state(&id(COUNTER)),
@@ -287,7 +295,9 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
 async fn a_manifest_contributing_to_an_undeclared_collection_is_an_installation_error() {
     let mut manifest = micro_counter_manifest::manifest();
     manifest.contributions[0].collection = "nobody.declared.this".into();
-    let counter = InstalledMicro::new(manifest, |_resources, _bindings| Rc::new(Unfetchable));
+    let counter = InstalledMicro::new(manifest, |_resources, _components, _bindings| {
+        Rc::new(Unfetchable)
+    });
     let runtime = memory_runtime(counter).await;
     assert_eq!(runtime.installation_errors.len(), 1);
     assert!(runtime.installation_errors[0].contains("nobody.declared.this"));
@@ -319,9 +329,10 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
             manifest.contributions[0].payload["title"] = title.into();
             let runtime = CompositionRuntime::new(
                 Arc::new(store),
-                catalog(InstalledMicro::new(manifest, |_resources, _bindings| {
-                    Rc::new(Unfetchable)
-                })),
+                catalog(InstalledMicro::new(
+                    manifest,
+                    |_resources, _components, _bindings| Rc::new(Unfetchable),
+                )),
             )
             .await
             .unwrap();
@@ -366,7 +377,7 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
             Arc::clone(&store),
             catalog(InstalledMicro::new(
                 micro_counter_manifest::manifest(),
-                |_, _| Rc::new(Unfetchable),
+                |_, _, _| Rc::new(Unfetchable),
             )),
         )
         .await
@@ -431,7 +442,7 @@ fn install_datum_of(runtime: &CompositionRuntime, micro: &str) -> Option<serde_j
 async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
     let package = InstalledMicro::new(
         micro_counter_manifest::manifest(),
-        |_resources, _bindings| Rc::new(Unfetchable),
+        |_resources, _components, _bindings| Rc::new(Unfetchable),
     );
     let runtime = memory_runtime(package).await;
     let version = micro_counter_manifest::manifest().package_version;
@@ -456,7 +467,7 @@ async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
 async fn the_install_datum_drives_the_supervisor() {
     let runtime = memory_runtime(InstalledMicro::new(
         micro_counter_manifest::manifest(),
-        |_resources, _bindings| Rc::new(Unfetchable),
+        |_resources, _components, _bindings| Rc::new(Unfetchable),
     ))
     .await;
     served(&runtime, async {
@@ -548,12 +559,12 @@ fn probe_manifest(
 fn rows_owner() -> InstalledMicro {
     InstalledMicro::new(
         probe_manifest("tests.owner", &[ROWS], vec![]),
-        |resources, bindings| {
+        |resources, _components, bindings| {
             factory(
                 resources,
                 probe_manifest("tests.owner", &[ROWS], vec![]),
                 bindings,
-                |_| Ok(()),
+                |_| async { Ok(()) },
             )
         },
     )
@@ -580,11 +591,11 @@ fn probe(
     let micro = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
-        ..InstalledMicro::new(manifest.clone(), move |resources, bindings| {
+        ..InstalledMicro::new(manifest.clone(), move |resources, _components, bindings| {
             factory(resources, manifest, bindings, move |context| {
-                let bound = context.collection::<String, String>(BOOK).is_ok();
+                let bound = context.collection::<String, String>(BOOK).is_some();
                 activations.send_modify(|seen| seen.push(bound));
-                Ok(())
+                async { Ok(()) }
             })
         })
     };

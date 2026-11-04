@@ -6,12 +6,11 @@ use clay_host::ConfiguredMicro;
 use clay_host::Host;
 use clay_host::MicroState;
 use clay_host::Supervisor;
-use clay_mdk::native::BoundCollection;
-use clay_mdk::native::CollectionBindings;
-use clay_mdk::native::CollectionRegistry;
-use clay_mdk::native::RendererRegistry;
-use clay_mdk::native::Resources;
-use clay_mdk::native::factory;
+use clay_mdk::host::BoundCollection;
+use clay_mdk::host::CollectionBindings;
+use clay_mdk::host::CollectionRegistry;
+use clay_mdk::host::Resources;
+use clay_mdk::host::factory;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
@@ -27,11 +26,11 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let host = Host::new();
-            let resources = Resources {
-                registry: NativeComponents::for_host(&host),
-                documents: DocumentService::new(16),
-                collections: CollectionRegistry::default(),
-            };
+            let resources = Resources::new(
+                NativeComponents::new(&host),
+                DocumentService::new(16),
+                CollectionRegistry::default(),
+            );
             let sections = bytes_registrations(NonZeroUsize::new(64).unwrap(), [0, 0]);
             resources
                 .collections

@@ -7,6 +7,7 @@
 //! exist while it is stopped declares the row in its manifest, which stores an endpoint to its
 //! own presentation; a micro that only contributes while running writes the row at runtime with
 //! a bound reference. Settings treats both alike.
+use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
 use clay_mdk::CollectionAccess;
 use clay_mdk::CollectionCapability;
@@ -22,8 +23,7 @@ use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
-use clay_mdk::native::Attachment;
-use clay_mdk::native::SHELL_ROOTS;
+use clay_mdk::host::SHELL_ROOTS;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -111,7 +111,7 @@ pub fn manifest() -> MicroManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clay_mdk::native::declared_rows;
+    use clay_mdk::host::declared_rows;
 
     // The manifest is wire data (ADR 024 §11); the snapshot follows the current shape so drift
     // is a reviewable diff.

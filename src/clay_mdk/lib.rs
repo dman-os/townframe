@@ -2,14 +2,16 @@
 //! `manifest` and `ComponentRef` are neutral vocabulary every backend compiles against;
 //! `bindings` carries the WIT-generated surface; `mirror` is the typed document-mirror
 //! authoring surface over it (typed decoding, availability/freshness evidence, named config
-//! bindings); `native` (feature `in_process`) is the in-process backend (authoring context, collections, provider
-//! assembly), renderer-agnostic; `view` is its Dioxus half (the slot component and collection
-//! hook a host-linked view needs); `wasm` assembles Wasmtime-backed providers for a composition
-//! root, and `wcmp` (feature `wcmp`) is the browser-engine twin of the same provider shape
-//! (ADR 018); `guest` (feature `dioxus`) is the guest backend — the same `activate(&Context)` shape
-//! over the WIT imports, plus the Dioxus VirtualDom adapter and the `export_micro!` entry
-//! point that adapts it to `micro-lifecycle.initialize` (ADR 024). The MDK adds ergonomics, never authority: capabilities are still the host-issued
-//! resources.
+//! bindings). With feature `in_process`, [`Context`] is the one authoring surface a micro's
+//! `activate` receives (config, collections, requirements, component and call publication,
+//! owned tasks), backed by the in-process host sessions; `hooks` (feature `view`) binds its
+//! handles to Dioxus reactivity; `host` is the composition-root vocabulary (factories,
+//! resources, bindings) that micros never touch, including the Wasmtime (`wasm`) and browser
+//! (`wcmp`, ADR 018) guest-engine factories. `guest` (feature `dioxus`) is the guest backend,
+//! still on its own `activate(&guest::Context)` shape over the WIT imports until it joins
+//! [`Context`], plus the Dioxus VirtualDom adapter and the `export_micro!` entry point that
+//! adapts it to `micro-lifecycle.initialize` (ADR 024). The MDK adds ergonomics, never
+//! authority: capabilities are still the host-issued resources.
 #![cfg_attr(
     all(target_os = "wasi", target_env = "p3"),
     feature(asm_experimental_arch)
@@ -388,8 +390,6 @@ pub mod registration;
 #[cfg(feature = "wit")]
 pub use mirror::ConfigDocument;
 #[cfg(feature = "wit")]
-pub use mirror::FacetState;
-#[cfg(feature = "wit")]
 pub use mirror::MirrorSnapshot;
 #[cfg(feature = "wit")]
 pub use mirror::MirrorWatch;
@@ -398,19 +398,69 @@ pub use mirror::MirrorWatch;
 pub mod package;
 
 #[cfg(feature = "in_process")]
-pub mod native;
+mod native;
+
+#[cfg(feature = "in_process")]
+mod context;
+#[cfg(feature = "in_process")]
+pub use context::Attachment;
+#[cfg(feature = "in_process")]
+pub use context::Capability;
+#[cfg(feature = "in_process")]
+pub use context::Collection;
+#[cfg(feature = "in_process")]
+pub use context::Config;
+#[cfg(feature = "in_process")]
+pub use context::Context;
+#[cfg(feature = "in_process")]
+pub use context::Error;
+#[cfg(feature = "in_process")]
+pub use context::Facet;
+#[cfg(feature = "in_process")]
+pub use context::FacetSnapshot;
+#[cfg(feature = "in_process")]
+pub use context::Instance;
+#[cfg(feature = "in_process")]
+pub use context::Operation;
+#[cfg(feature = "in_process")]
+pub use context::OperationReceipt;
+#[cfg(feature = "in_process")]
+pub use context::Publication;
+#[cfg(feature = "in_process")]
+pub use context::RefStatus;
+#[cfg(feature = "in_process")]
+pub use context::Registration;
+#[cfg(feature = "in_process")]
+pub use context::Row;
+#[cfg(feature = "in_process")]
+pub use context::RowAttachment;
+#[cfg(feature = "in_process")]
+pub use context::Stamp;
+
+/// A configuration facet's availability (ADR 015 §4): distinct `Loading` (not hydrated yet) and
+/// `Absent` (known absent after hydration) so an uncached facet is never mistaken for a missing
+/// one. Shared by every backend's facet reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FacetState<T = String> {
+    Loading,
+    Absent,
+    Present(T),
+}
+
+#[cfg(feature = "in_process")]
+pub mod host;
 
 #[cfg(feature = "view")]
-pub mod view;
+pub mod hooks;
 
 #[cfg(any(feature = "wasmtime", feature = "wcmp"))]
 mod engine;
 
 #[cfg(feature = "wasmtime")]
-pub mod wasm;
+mod wasm;
 
 #[cfg(feature = "wcmp")]
-pub mod wcmp;
+mod wcmp;
 
 #[cfg(feature = "dioxus")]
 pub mod guest;

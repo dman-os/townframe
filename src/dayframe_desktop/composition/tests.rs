@@ -1,8 +1,8 @@
 use super::*;
 use clay_host::MicroId;
 use clay_host::MicroState;
-use clay_mdk::native::CollectionWatch;
-use clay_mdk::native::RowAttachment;
+use clay_mdk::Collection;
+use clay_mdk::RowAttachment;
 use micro_settings_manifest::Section;
 
 // The package directory must install the Wasmtime counter beside the shell's native
@@ -66,7 +66,7 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
             tokio::pin!(serving);
             let scenario = async {
                 let shell = runtime.host().start("test-observer");
-                let (sections, feed) = CollectionWatch::<String, Section>::observe(
+                let (sections, feed) = Collection::<String, Section>::observe(
                     runtime.host(),
                     &shell,
                     runtime.supervisor().activator(),
@@ -76,7 +76,7 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
                 )
                 .unwrap();
                 tokio::task::spawn_local(feed);
-                let mut changes = sections.revisions();
+                let mut changes = sections.clone();
                 while sections.rows().unwrap().len() < 2 {
                     changes.changed().await.unwrap();
                 }

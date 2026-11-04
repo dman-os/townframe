@@ -71,7 +71,8 @@ impl Engine for Wcmp {
 /// retains as `Faulted` until retried, never a shell panic. The composition root calls this;
 /// micro crates never build factories themselves.
 pub fn factory<Fut>(
-    resources: Resources<NativeComponents>,
+    resources: Resources,
+    components: NativeComponents,
     manifest: MicroManifest,
     bindings: CollectionBindings,
     package: impl Fn() -> Fut + 'static,
@@ -80,5 +81,5 @@ where
     Fut: Future<Output = Result<WcmpPackage, String>> + 'static,
 {
     let package: PackageSource<Wcmp> = Rc::new(move || Box::pin(package()));
-    crate::engine::factory::<Wcmp>(resources, manifest, bindings, package)
+    crate::engine::factory::<Wcmp>(resources, components, manifest, bindings, package)
 }

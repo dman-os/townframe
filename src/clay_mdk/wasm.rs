@@ -92,7 +92,8 @@ impl Engine for Wasmtime {
 /// retains as `Faulted` until retried, never a shell panic. The composition root calls this;
 /// micro crates never build factories themselves.
 pub fn factory<Fut>(
-    resources: Resources<NativeComponents>,
+    resources: Resources,
+    components: NativeComponents,
     manifest: MicroManifest,
     bindings: CollectionBindings,
     package: impl Fn() -> Fut + 'static,
@@ -101,7 +102,7 @@ where
     Fut: Future<Output = Result<WasmPackage, String>> + 'static,
 {
     let package: PackageSource<Wasmtime> = Rc::new(move || Box::pin(package()));
-    crate::engine::factory::<Wasmtime>(resources, manifest, bindings, package)
+    crate::engine::factory::<Wasmtime>(resources, components, manifest, bindings, package)
 }
 
 #[cfg(test)]

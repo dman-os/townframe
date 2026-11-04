@@ -4,7 +4,7 @@
 pub use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
 
-use clay_mdk::native::factory;
+use clay_mdk::host::factory;
 use clay_store::OrderedStore;
 use dayframe_composition::InstalledMicro;
 use std::path::Path;
@@ -22,7 +22,7 @@ fn native_micros() -> Vec<InstalledMicro> {
             locked: true,
             ..InstalledMicro::new(
                 micro_settings_manifest::manifest(),
-                |resources, bindings| {
+                |resources, _components, bindings| {
                     factory(
                         resources,
                         micro_settings_manifest::manifest(),
@@ -35,14 +35,17 @@ fn native_micros() -> Vec<InstalledMicro> {
         InstalledMicro {
             eager: true,
             enabled_on_admission: true,
-            ..InstalledMicro::new(micro_sample::manifest(), |resources, bindings| {
-                factory(
-                    resources,
-                    micro_sample::manifest(),
-                    bindings,
-                    micro_sample::activate,
-                )
-            })
+            ..InstalledMicro::new(
+                micro_sample::manifest(),
+                |resources, _components, bindings| {
+                    factory(
+                        resources,
+                        micro_sample::manifest(),
+                        bindings,
+                        micro_sample::activate,
+                    )
+                },
+            )
         },
     ]
 }
@@ -145,11 +148,17 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
                 let bytes = package.bytes().to_vec();
                 installed.push(InstalledMicro::new(
                     manifest.clone(),
-                    move |resources, bindings| {
-                        clay_mdk::wasm::factory(resources, manifest, bindings, move || {
-                            let bytes = bytes.clone();
-                            async move { clay_mdk::wasm::WasmPackage::from_bytes(bytes).await }
-                        })
+                    move |resources, components, bindings| {
+                        clay_mdk::host::wasm_factory(
+                            resources,
+                            components,
+                            manifest,
+                            bindings,
+                            move || {
+                                let bytes = bytes.clone();
+                                async move { clay_mdk::host::WasmPackage::from_bytes(bytes).await }
+                            },
+                        )
                     },
                 ));
             }

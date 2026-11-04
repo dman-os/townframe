@@ -3,7 +3,7 @@
 //! each component's statically-read manifest. A package's bytes are fetched only when an
 //! instance activates, and their digest is verified against the index before the browser
 //! engine (`wcmp`) ever sees them.
-use clay_mdk::native::factory;
+use clay_mdk::host::factory;
 use dayframe_composition::CompositionRuntime;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
@@ -72,7 +72,7 @@ fn native_micros() -> Vec<InstalledMicro> {
             locked: true,
             ..InstalledMicro::new(
                 micro_settings_manifest::manifest(),
-                |resources, bindings| {
+                |resources, _components, bindings| {
                     factory(
                         resources,
                         micro_settings_manifest::manifest(),
@@ -85,14 +85,17 @@ fn native_micros() -> Vec<InstalledMicro> {
         InstalledMicro {
             eager: true,
             enabled_on_admission: true,
-            ..InstalledMicro::new(micro_sample::manifest(), |resources, bindings| {
-                factory(
-                    resources,
-                    micro_sample::manifest(),
-                    bindings,
-                    micro_sample::activate,
-                )
-            })
+            ..InstalledMicro::new(
+                micro_sample::manifest(),
+                |resources, _components, bindings| {
+                    factory(
+                        resources,
+                        micro_sample::manifest(),
+                        bindings,
+                        micro_sample::activate,
+                    )
+                },
+            )
         },
     ]
 }
@@ -114,10 +117,14 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                     let manifest = entry.manifest.clone();
                     installed.push(InstalledMicro::new(
                         manifest.clone(),
-                        move |resources, bindings| {
-                            clay_mdk::wcmp::factory(resources, manifest, bindings, move || {
-                                indexed_package(entry.clone())
-                            })
+                        move |resources, components, bindings| {
+                            clay_mdk::host::wcmp_factory(
+                                resources,
+                                components,
+                                manifest,
+                                bindings,
+                                move || indexed_package(entry.clone()),
+                            )
                         },
                     ));
                 }

@@ -1,10 +1,13 @@
 //! Settings presentation: the sections collection's rows, ordered and filtered by the viewer's
 //! preferences, with the selected section's presentation mounted from its row attachment.
 use crate::SettingsMicro;
-use clay_mdk::native::Row;
-use clay_mdk::view::AttachedRef;
-use clay_mdk::view::PresentationSlot;
-use clay_mdk::view::use_rows;
+use clay_mdk::Error;
+use clay_mdk::Operation;
+use clay_mdk::OperationReceipt;
+use clay_mdk::Row;
+use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::hooks::use_facet;
+use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
 use micro_settings_manifest::Section;
 
@@ -15,45 +18,30 @@ pub struct SettingsViewProps {
 
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn SettingsView(props: SettingsViewProps) -> Element {
-    let watch = props.micro.config.watch.clone();
-    let mut snapshot = use_signal(|| watch.current().unwrap());
-    use_future(move || {
-        let mut changes = watch.subscribe().unwrap();
-        async move {
-            loop {
-                snapshot.set(changes.borrow_and_update().clone());
-                if changes.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    let preferences = props.micro.preferences(&snapshot());
-    let mut receipt = use_signal(|| None::<clay_mdk::native::OperationReceipt>);
+    let preferences = props.micro.preferences(&use_facet(&props.micro.config));
+    let mut receipt = use_signal(|| None::<OperationReceipt>);
     let mut error = use_signal(|| None::<String>);
-    let mut track =
-        move |result: Result<clay_mdk::native::Operation, clay_mdk::native::AccessError>| {
-            match result {
-                Ok(operation) => {
-                    error.set(None);
-                    let initial = operation.current();
-                    receipt.set(Some(initial.clone()));
-                    spawn(async move {
-                        if let Some(completed) = operation.next(initial.revision).await.unwrap()
-                            && receipt
-                                .peek()
-                                .as_ref()
-                                .is_some_and(|current| current.id == completed.id)
-                        {
-                            receipt.set(Some(completed));
-                        }
-                    });
+    let mut track = move |result: Result<Operation, Error>| match result {
+        Ok(operation) => {
+            error.set(None);
+            let initial = operation.current();
+            receipt.set(Some(initial.clone()));
+            spawn(async move {
+                if let Some(completed) = operation.next(initial.revision).await.unwrap()
+                    && receipt
+                        .peek()
+                        .as_ref()
+                        .is_some_and(|current| current.id == completed.id)
+                {
+                    receipt.set(Some(completed));
                 }
-                Err(problem) => error.set(Some(problem.to_string())),
-            }
-        };
+            });
+        }
+        Err(problem) => error.set(Some(problem.to_string())),
+    };
 
-    let mut available: Vec<Row<String, Section>> = use_rows(&props.micro.sections);
+    let rows = use_rows(&props.micro.sections);
+    let mut available: Vec<&Row<String, Section>> = rows.iter().collect();
     if let Some(config) = &preferences {
         available.sort_by(|left, right| {
             (config.rank(&left.key), &left.key).cmp(&(config.rank(&right.key), &right.key))
@@ -61,6 +49,7 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
     }
     let shown: Vec<&Row<String, Section>> = available
         .iter()
+        .copied()
         .filter(|row| {
             preferences
                 .as_ref()
@@ -137,9 +126,7 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
                             h3 { class: "mb-4 text-lg font-semibold", "{row.value.title}" }
                             PresentationSlot {
                                 owner: props.micro.instance.clone(),
-                                reference: AttachedRef::new(
-                                    row.attachments[row.value.detail.index()].share(),
-                                ),
+                                reference: row.attachments[row.value.detail.index()].clone(),
                             }
                         }
                     } else { p { "Select a section." } }
