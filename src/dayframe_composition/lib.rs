@@ -784,11 +784,16 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
                         key: "status-{micro}",
                         role: "status",
                         {
-                            let state = shell.state(micro);
+                            let state = match shell.state(micro) {
+                                MicroState::Unconfigured(missing) => {
+                                    format!("needs configuration ({})", missing.join(", "))
+                                }
+                                state => format!("{state:?}"),
+                            };
                             if shell.is_locked(micro) {
-                                format!("{micro} runtime (locked): {state:?}")
+                                format!("{micro} runtime (locked): {state}")
                             } else {
-                                format!("{micro} runtime: {state:?}")
+                                format!("{micro} runtime: {state}")
                             }
                         }
                     }

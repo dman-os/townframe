@@ -121,7 +121,9 @@ pub(crate) fn resolve(
             Some(bound) => {
                 resolution.bound.insert(request.binding.clone(), bound);
             }
-            None if request.necessity == Necessity::Required => {
+            // Only a known `Optional` may stay unbound. An unknown necessity likely comes from
+            // a newer manifest format, and blocking the start is the conservative reading.
+            None if request.necessity != Necessity::Optional => {
                 resolution.unresolved.push(request.binding.clone());
             }
             None => {}
@@ -238,6 +240,17 @@ mod tests {
             assert!(resolution.bound.is_empty());
             assert_eq!(resolution.unresolved, ["book"]);
         }
+    }
+
+    #[test]
+    fn an_unknown_necessity_blocks_like_a_required_one() {
+        let manifest = manifest(vec![request(
+            "book",
+            Necessity::Other("eventually".into()),
+            BindingResolution::Configured,
+        )]);
+        let resolution = resolve(&manifest, None, &declared(&[]));
+        assert_eq!(resolution.unresolved, ["book"]);
     }
 
     #[test]
