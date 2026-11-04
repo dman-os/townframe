@@ -28,7 +28,12 @@ pub struct Request {
     /// operation call, where the grant is "may call".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<String>,
+    /// Omitted means `required`, the safe reading (as an unknown member is).
+    #[serde(default, skip_serializing_if = "Necessity::is_default")]
     pub necessity: Necessity,
+    /// Omitted means `configured`, the common case. Defaults are skipped on the wire, so the
+    /// canonical (signed) form of a manifest stays minimal and deterministic.
+    #[serde(default, skip_serializing_if = "Resolution::is_default")]
     pub resolution: Resolution,
     /// The least Lexicon `revision` of `contract` that serves the plug. Carried and checked for
     /// shape here; enforcing it is the resolution step's.
@@ -60,7 +65,29 @@ pub enum Resolution {
     Unknown(String),
 }
 
+impl Default for Necessity {
+    fn default() -> Self {
+        Self::Required
+    }
+}
+
+impl Default for Resolution {
+    fn default() -> Self {
+        Self::Configured
+    }
+}
+
+impl Resolution {
+    fn is_default(&self) -> bool {
+        *self == Self::Configured
+    }
+}
+
 impl Necessity {
+    fn is_default(&self) -> bool {
+        *self == Self::Required
+    }
+
     /// An unknown member is required: a build that does not understand a relaxation must not
     /// assume the plug can run without the grant.
     pub fn is_required(&self) -> bool {
@@ -134,6 +161,22 @@ impl Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_necessity_and_resolution_default_and_are_not_written() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "binding": "search",
+            "contract": "org.example.search.query",
+        }))
+        .unwrap();
+        assert_eq!(request.necessity, Necessity::Required);
+        assert_eq!(request.resolution, Resolution::Configured);
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "binding": "search", "contract": "org.example.search.query" })
+        );
+    }
 
     #[test]
     fn wire_form_is_camel_case_and_unknown_members_are_carried() {

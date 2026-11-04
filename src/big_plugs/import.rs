@@ -94,6 +94,12 @@ pub async fn micro_pair(
         .and_then(|value| value.as_u64())
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| ImportError::Manifest("`package_version` is not a u32".into()))?;
+    // The envelope owns the NSID authority, as it owns identity (ADR 028 §5).
+    let authority = match manifest.remove("authority") {
+        None => None,
+        Some(serde_json::Value::String(authority)) => Some(authority),
+        Some(_) => return Err(ImportError::Manifest("`authority` is not a string".into())),
+    };
     if !component.starts_with(b"\0asm") {
         return Err(ImportError::Component("not a WebAssembly binary".into()));
     }
@@ -104,8 +110,8 @@ pub async fn micro_pair(
         .map_err(registry_error)?;
     let plug_id = PlugId::new(&publisher, &id).map_err(|error| {
         ImportError::Manifest(format!(
-            "`id` is not a plug name (a lowercase letter, then lowercase letters, digits, `-` \
-             or `_`, at most 64): {error}"
+            "`id` is not a plug name (a lowercase letter, then lowercase letters, digits, `-`, \
+             `_` or single inner `.`, at most 64): {error}"
         ))
     })?;
     let version = format!("{package_version}.0.0")
@@ -118,6 +124,7 @@ pub async fn micro_pair(
         .await
         .map_err(|error| ImportError::Blob(error.to_string()))?;
     let mut envelope = Plug::new(plug_id, version);
+    envelope.authority = authority;
     envelope.artifacts.push(Artifact {
         key: MICRO_COMPONENT_ARTIFACT.into(),
         digest: Digest(imported.info.blob_id.to_bytes32()),

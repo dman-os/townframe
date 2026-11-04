@@ -1076,6 +1076,7 @@ const CLAY_MANIFEST: &str = r#"{
     "schema": 1,
     "id": "counter",
     "package_version": 2,
+    "authority": "org.example.counter",
     "entrypoints": {
         "initialize": "townframe:dayframe/micro-lifecycle@0.4.0",
         "presentation": "townframe:dayframe/presentation-events@0.4.0",
@@ -1124,6 +1125,8 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
     // The description is the manifest minus the members the envelope states itself.
     assert!(!micro.description.contains_key("id"));
     assert!(!micro.description.contains_key("package_version"));
+    assert!(!micro.description.contains_key("authority"));
+    assert_eq!(envelope.authority.as_deref(), Some("org.example.counter"));
     assert_eq!(micro.description["schema"], json!(1));
     assert_eq!(
         micro.description["entrypoints"]["initialize"],

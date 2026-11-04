@@ -3,6 +3,8 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":["schemars"]}
 # exposed_external_crates: [semver, serde_json]
 
+impl Default for big_plugs_core::request::Necessity
+impl Default for big_plugs_core::request::Resolution
 impl FromStr for big_plugs_core::PlugId
 impl FromStr for big_plugs_core::Version
 impl FromStr for big_plugs_core::VersionReq
