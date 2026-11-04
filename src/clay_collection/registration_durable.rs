@@ -182,7 +182,7 @@ pub(super) fn decode_row<K, V>(
     };
     let stamp = Stamp {
         lamport: u64::from_be_bytes(*lamport),
-        writer: WriterId::new(writer),
+        writer: WriterId::from_encoded(writer),
     };
     (retention, Candidate { stamp, slot })
 }

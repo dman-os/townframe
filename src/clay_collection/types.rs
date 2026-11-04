@@ -41,14 +41,49 @@ impl RegistrationScopeId {
     }
 }
 
-/// A stable, ordered writer identity (for example a micro id), supplied when a scope is
-/// created. It is the tie-break between concurrent writes with equal lamports, so it
-/// must survive restarts for durable scopes.
+/// Identity of one replica of a collection store: one node's (or browser profile's) copy,
+/// generated once when its store is first opened and persisted in that store, so it is stable
+/// across boots. Fixed width, which is what lets [`WriterId`] order by replica first.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ReplicaId([u8; ReplicaId::LEN]);
+
+impl ReplicaId {
+    pub const LEN: usize = 16;
+
+    pub const fn from_bytes(bytes: [u8; Self::LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; Self::LEN] {
+        &self.0
+    }
+}
+
+/// A stable, totally ordered writer identity: the replica the write happened on plus the micro
+/// that wrote it (a micro id), supplied when a scope is created. It is the tie-break between
+/// concurrent writes with equal lamports. The micro id alone would tie across nodes once
+/// collections sync (two nodes' installations of the same micro would stamp different values
+/// with equal `(lamport, writer)`), and the replica alone would conflate micros on one node.
+///
+/// The encoding is explicit because it is persisted in every durable row and echoed through the
+/// guest's stamps: the replica's [`ReplicaId::LEN`] bytes, then the micro id's UTF-8 bytes. The
+/// replica is fixed width, so bytewise order is (replica, micro), which is the order stamps
+/// use.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WriterId(std::sync::Arc<[u8]>);
 
 impl WriterId {
-    pub fn new(bytes: impl AsRef<[u8]>) -> Self {
+    pub fn new(replica: &ReplicaId, micro: &str) -> Self {
+        Self(
+            [replica.as_bytes().as_slice(), micro.as_bytes()]
+                .concat()
+                .into(),
+        )
+    }
+
+    /// An identity already encoded: read back from the durable store, or echoed by a guest as
+    /// part of a stamp it observed. It is only ever compared, so its shape is not re-checked.
+    pub fn from_encoded(bytes: impl AsRef<[u8]>) -> Self {
         Self(bytes.as_ref().into())
     }
 
@@ -206,4 +241,50 @@ pub enum WriteOutcome {
     /// Transport failed and the authority may or may not have taken the write. Treated as
     /// a rejection for visibility; the row's next authoritative change decides.
     Unknown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stamp(lamport: u64, replica: u8, micro: &str) -> Stamp {
+        Stamp {
+            lamport,
+            writer: WriterId::new(&ReplicaId::from_bytes([replica; ReplicaId::LEN]), micro),
+        }
+    }
+
+    /// Stamps order by lamport, then replica, then micro id, so two replicas writing different
+    /// values at the same lamport never tie, whatever their micros are called, and one replica's
+    /// micros are ordered among themselves.
+    #[test]
+    fn stamps_order_by_lamport_then_replica_then_micro() {
+        let ordered = [
+            stamp(1, 9, "z"),
+            stamp(2, 1, "a"),
+            stamp(2, 1, "b"),
+            // A longer micro id that extends a shorter one sorts after it.
+            stamp(2, 1, "b2"),
+            stamp(2, 2, "a"),
+            stamp(3, 0, "a"),
+        ];
+        for pair in ordered.windows(2) {
+            assert!(pair[0] < pair[1], "{pair:?}");
+        }
+        // The same micro on two replicas is two writers; the same (replica, micro) is one.
+        assert_ne!(stamp(2, 1, "a"), stamp(2, 2, "a"));
+        assert_eq!(stamp(2, 1, "a"), stamp(2, 1, "a"));
+    }
+
+    /// The durable and wire form is the replica's fixed-width bytes followed by the micro id's.
+    #[test]
+    fn writer_encoding_is_replica_bytes_then_micro_bytes() {
+        let replica = ReplicaId::from_bytes([7; ReplicaId::LEN]);
+        let writer = WriterId::new(&replica, "did:example:x/app");
+        assert_eq!(
+            writer.as_bytes(),
+            [&[7; ReplicaId::LEN][..], b"did:example:x/app"].concat()
+        );
+        assert_eq!(WriterId::from_encoded(writer.as_bytes()), writer);
+    }
 }

@@ -18,7 +18,6 @@ use clay_collection::Source;
 use clay_collection::Stamp;
 use clay_collection::Stamped;
 use clay_collection::WriteBasis;
-use clay_collection::WriterId;
 use clay_host::AccessError;
 use clay_host::Host;
 use clay_host::Instance;
@@ -516,10 +515,10 @@ impl CollectionSession {
     ) -> Result<RegistrationWriter, AccessError> {
         let clay_host::Grant {
             collection: registrations,
-            micro,
+            writer: writer_id,
+            ..
         } = grant;
         let permit = self.state.admit(Budget::Writers)?;
-        let writer_id = WriterId::new(micro.as_str());
         // Every grant mints a staged scope (ADR 030 §5): rows written while the incarnation is
         // still initializing must not reach readers unless initialization commits.
         let scope = registrations.create_staged_scope(writer_id.clone());
@@ -857,6 +856,10 @@ fn full_grant(
     clay_host::Grant {
         collection: registrations.clone(),
         micro: MicroId::new(micro),
+        writer: clay_collection::WriterId::new(
+            &clay_collection::ReplicaId::from_bytes([7; clay_collection::ReplicaId::LEN]),
+            micro,
+        ),
     }
 }
 

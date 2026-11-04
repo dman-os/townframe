@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use clay_collection::Nsid;
+use clay_collection::ReplicaId;
+use clay_collection::WriterId;
 
 use crate::supervisor::MicroId;
 
@@ -35,14 +37,15 @@ pub enum GrantError {
     Undeclared(Nsid),
 }
 
-/// Write authority over one declared collection for one singleton micro: the collection and
-/// the micro whose stable identity stamps its writes. There is no key-level authorization yet:
+/// Write authority over one declared collection for one singleton micro: the collection, the
+/// micro, and the writer identity (this host's replica plus the micro) that stamps its writes. There is no key-level authorization yet:
 /// a grant covers every key, so one micro can supersede another's row. Authority will be scoped
 /// by the collection query language once it exists, and the grant will be the query.
 #[derive(Clone)]
 pub struct Grant<C> {
     pub collection: C,
     pub micro: MicroId,
+    pub writer: WriterId,
 }
 
 struct Declared<C> {
@@ -50,28 +53,36 @@ struct Declared<C> {
     collection: C,
 }
 
-/// Shared handle to the declared collections of one host. Cloning shares the registry.
+/// Shared handle to the declared collections of one host. Cloning shares the registry. A host
+/// is one replica: the registry carries its [`ReplicaId`], which every writer identity it
+/// issues includes.
 pub struct CollectionRegistry<C> {
+    replica: ReplicaId,
     declared: Arc<Mutex<BTreeMap<Nsid, Declared<C>>>>,
 }
 
 impl<C> Clone for CollectionRegistry<C> {
     fn clone(&self) -> Self {
         Self {
+            replica: self.replica,
             declared: Arc::clone(&self.declared),
         }
     }
 }
 
-impl<C> Default for CollectionRegistry<C> {
-    fn default() -> Self {
+impl<C: Clone> CollectionRegistry<C> {
+    pub fn new(replica: ReplicaId) -> Self {
         Self {
+            replica,
             declared: Arc::default(),
         }
     }
-}
 
-impl<C: Clone> CollectionRegistry<C> {
+    /// The writer identity `micro`'s writes carry on this replica (see [`WriterId`]).
+    pub fn writer(&self, micro: &MicroId) -> WriterId {
+        WriterId::new(&self.replica, micro.as_str())
+    }
+
     /// Declare `collection` under `contract.id`. The id is unique: two manifests naming one
     /// collection is a conflict the admitting layer reports, not a merge.
     pub fn declare(&self, contract: CollectionContract, collection: C) -> Result<(), DeclareError> {
@@ -110,6 +121,7 @@ impl<C: Clone> CollectionRegistry<C> {
         Ok(Grant {
             collection,
             micro: micro.clone(),
+            writer: self.writer(micro),
         })
     }
 }

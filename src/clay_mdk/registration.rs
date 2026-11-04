@@ -24,7 +24,7 @@ impl From<collections::Stamp> for Stamp {
     fn from(stamp: collections::Stamp) -> Self {
         Self {
             lamport: stamp.lamport,
-            writer: WriterId::new(stamp.writer),
+            writer: WriterId::from_encoded(stamp.writer),
         }
     }
 }

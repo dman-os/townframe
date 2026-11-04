@@ -7,6 +7,7 @@ use super::*;
 use crate::projection::ProjectionLease;
 use crate::types::Cursor;
 use crate::types::ReadLimits;
+use crate::types::ReplicaId;
 
 type Collection = RegistrationCollection<u32, &'static str>;
 
@@ -21,8 +22,9 @@ pub(super) fn ready<T>(future: impl Future<Output = T>) -> T {
     value
 }
 
+/// A writer on the one replica every semantics test runs on.
 pub(super) fn writer_id(name: &str) -> WriterId {
-    WriterId::new(name)
+    WriterId::new(&ReplicaId::from_bytes([0; ReplicaId::LEN]), name)
 }
 
 pub(super) type Changes<K, V> = Vec<Change<K, Stamped<Option<V>>>>;

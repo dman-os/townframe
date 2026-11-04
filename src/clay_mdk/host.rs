@@ -25,6 +25,7 @@ pub use crate::wasm::factory as wasm_factory;
 pub use crate::wcmp::WcmpPackage;
 #[cfg(feature = "wcmp")]
 pub use crate::wcmp::factory as wcmp_factory;
+pub use clay_collection::ReplicaId;
 pub use clay_docs::FacetRoute;
 pub use clay_guest_session::capabilities::CapabilityPublication;
 pub use clay_guest_session::capabilities::PresentationComponent;

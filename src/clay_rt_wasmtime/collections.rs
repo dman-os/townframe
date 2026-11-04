@@ -182,7 +182,7 @@ fn basis_from_wire(basis: registration_wit::WriteBasis) -> WriteBasis {
 fn stamp_from_wire(stamp: wit::Stamp) -> Stamp {
     Stamp {
         lamport: stamp.lamport,
-        writer: WriterId::new(stamp.writer),
+        writer: WriterId::from_encoded(stamp.writer),
     }
 }
 

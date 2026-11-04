@@ -58,6 +58,12 @@ async fn rows_hook_rerenders_on_each_change_and_hides_tombstones() {
                 .grant_writer(clay_host::Grant {
                     collection: registrations.clone(),
                     micro: MicroId::new("writer"),
+                    writer: clay_collection::WriterId::new(
+                        &clay_collection::ReplicaId::from_bytes(
+                            [1; clay_collection::ReplicaId::LEN],
+                        ),
+                        "writer",
+                    ),
                 })
                 .unwrap();
             let reader = sessions.grant(registrations.projection()).unwrap();
