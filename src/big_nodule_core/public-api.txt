@@ -91,7 +91,7 @@ pub struct big_nodule_core::protocol::ListNodules  { authorization: Authorizatio
 pub struct big_nodule_core::protocol::MintNoduleCapability  { authorization: Authorization, scope: NoduleScope, rights: Rights }
 pub struct big_nodule_core::protocol::NoduleActor  { actor_id: Uuid7, url: String, public_key: MultibaseKey }
 pub struct big_nodule_core::protocol::NoduleGrantStatus  { desired: DrawerAccess, granted: bool, error: Option < String > }
-pub struct big_nodule_core::protocol::NoduleInitStatus  { attempts: u32, error: Option < String > }
+pub struct big_nodule_core::protocol::NoduleInitStatus  { attempts: u32, error: Option < String >, waiting_on: Option < String > }
 pub struct big_nodule_core::protocol::NoduleOperationGrantStatus  { desired: DispatchScope, granted: bool, error: Option < String > }
 pub struct big_nodule_core::protocol::NoduleRecord  { plug_id: PlugId, version: Option < Version >, revision: Option < Revision >, nodule_id: Option < String >, actor: Option < NoduleActor >, enabled: bool, readiness: Readiness, config: Option < IndexMap < String , Value > >, artifacts: BTreeMap < String , ArtifactState >, drawers: BTreeMap < DrawerId , NoduleGrantStatus >, operations: Option < NoduleOperationGrantStatus >, init: Option < NoduleInitStatus >, observed_heads: Vec < ChangeHash >, applied_heads: Option < Vec < ChangeHash > >, error: Option < String > }
 pub struct big_nodule_core::protocol::NoduleScope  { admit: bool, plugs: BTreeSet < PlugId > }

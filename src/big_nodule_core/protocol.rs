@@ -168,6 +168,11 @@ pub struct NoduleInitStatus {
     /// succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The foreign operation the current initializer is waiting for a ready provider of: not
+    /// installed, not enabled, or still initializing itself. Present while it waits, even
+    /// before any attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<String>,
 }
 
 /// One installed nodule as the management surface reports it.

@@ -28,6 +28,7 @@ use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::StoreError;
@@ -181,6 +182,9 @@ struct InitRun {
     /// The provider id whose not-ready operation the next initializer is waiting on, if it is
     /// waiting on a nodule: what dependency cycles are found along.
     blocked_on: Option<String>,
+    /// The foreign operation the next initializer is waiting for a ready provider of. The
+    /// nodule that starts providing it wakes this run (see [`State::wake_waiters`]).
+    waiting_on: Option<String>,
 }
 
 /// How one initializer invocation reaches its target.
@@ -1026,7 +1030,7 @@ impl State {
             operations: installed.admitted.operations.clone(),
             reensure: self.reensure.handle(plug_id.clone()),
         };
-        self.hosted.insert(plug_id, installed.revision);
+        self.hosted.insert(plug_id.clone(), installed.revision);
         let state = match executor.ensure(&spec).await {
             // The runtime calls a local initializer on the provider directly, so the provider is
             // used here even while dispatch still answers not ready.
@@ -1065,7 +1069,33 @@ impl State {
             installed.admitted.operations.clone(),
             state.clone(),
         );
+        // The one place a hosted nodule's registration turns ready, whichever way it got
+        // there (its inits finished, its bytes arrived, it was enabled or installed late).
+        // Comparing with the previous reconcile's record makes it a transition, so a steady
+        // ready nodule never wakes anyone and a woken waiter cannot wake itself in a loop.
+        let was_ready = self
+            .records
+            .get(&plug_id)
+            .is_some_and(|record| record.readiness.is_ready());
+        if state.readiness().is_ready() && !was_ready {
+            self.wake_waiters(&installed.admitted.operations);
+        }
         state.readiness()
+    }
+
+    /// Asks for a reconcile of every run waiting for one of `operations`, which a nodule has
+    /// just started providing. Systemd and Kubernetes likewise re-evaluate dependents on a
+    /// readiness transition rather than wait for an unrelated event.
+    fn wake_waiters(&self, operations: &BTreeMap<String, Option<OperationKind>>) {
+        for (plug_id, run) in &self.inits {
+            if run
+                .waiting_on
+                .as_ref()
+                .is_some_and(|nsid| operations.contains_key(nsid))
+            {
+                self.reensure.handle(plug_id.clone()).request();
+            }
+        }
     }
 
     /// Moves the nodule's initializers along and returns `None` when every one has succeeded in
@@ -1116,6 +1146,7 @@ impl State {
                     error: None,
                     failed: false,
                     blocked_on: None,
+                    waiting_on: None,
                 },
             );
         }
@@ -1153,6 +1184,7 @@ impl State {
                 let run = self.inits.get_mut(plug_id).expect("run present");
                 run.failed = false;
                 run.blocked_on = provider_id;
+                run.waiting_on = Some(init.target.clone());
                 if self.in_dependency_cycle(plug_id) {
                     let run = self.inits.get_mut(plug_id).expect("run present");
                     run.failed = true;
@@ -1179,6 +1211,7 @@ impl State {
         run.attempts += 1;
         run.failed = false;
         run.blocked_on = None;
+        run.waiting_on = None;
         run.running = Some(init.key.clone());
         let context = InvocationContext {
             deadline_unix_ms: None,
@@ -1234,10 +1267,11 @@ impl State {
     fn init_status(&self, plug_id: &PlugId) -> Option<NoduleInitStatus> {
         self.inits
             .get(plug_id)
-            .filter(|run| run.attempts > 0 || run.error.is_some())
+            .filter(|run| run.attempts > 0 || run.error.is_some() || run.waiting_on.is_some())
             .map(|run| NoduleInitStatus {
                 attempts: run.attempts,
                 error: run.error.clone(),
+                waiting_on: run.waiting_on.clone(),
             })
     }
 
@@ -1311,20 +1345,6 @@ impl State {
             self.reconcile(&RequestContext::root(), snapshot, Trigger::InitResult)
                 .await?,
         );
-        // Nodules waiting on this one's operations can go now that it is registered ready: ask
-        // for a reconcile for each rather than depend on where they sort among the plugs.
-        let provider_id = finished.plug_id.to_string();
-        let ready = self
-            .records
-            .get(&finished.plug_id)
-            .is_some_and(|record| record.readiness.is_ready());
-        if ready {
-            for (plug_id, run) in &self.inits {
-                if run.blocked_on.as_deref() == Some(provider_id.as_str()) {
-                    self.reensure.handle(plug_id.clone()).request();
-                }
-            }
-        }
         Ok(())
     }
 

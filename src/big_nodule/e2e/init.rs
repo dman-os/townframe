@@ -323,7 +323,8 @@ async fn calls_are_not_ready_while_an_initializer_runs_and_served_once_it_succee
         record.init,
         Some(NoduleInitStatus {
             attempts: 1,
-            error: None
+            error: None,
+            waiting_on: None,
         })
     );
     assert_eq!(
@@ -475,7 +476,14 @@ async fn a_foreign_initializer_goes_through_dispatch_under_the_nodules_operation
     // Nobody provides the operation yet: the nodule waits, which is not an attempt.
     let record = node.set_enabled_record(ALPHA).await;
     assert_eq!(record.readiness, Readiness::Initializing);
-    assert_eq!(record.init, None);
+    assert_eq!(
+        record.init,
+        Some(NoduleInitStatus {
+            attempts: 0,
+            error: None,
+            waiting_on: Some(REMOTE.to_owned()),
+        })
+    );
     let nodule_actor = record.actor.unwrap().actor_id;
     let revision = record.revision.unwrap();
 
@@ -613,5 +621,41 @@ async fn initializers_that_wait_on_each_other_are_reported_as_a_dependency_cycle
     }
     // Waiting is not invoking.
     assert!(probe.calls().is_empty());
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_path() {
+    let probe = Probe::new();
+    let node = node_hosting(&probe).await;
+    let operator = node.operator();
+    let beta_ping = "org.example.beta.ping";
+    node.admit(
+        operator,
+        init_plug(
+            "alpha",
+            "1.0.0",
+            &[PING],
+            &[beta_ping],
+            &[("needs-beta", beta_ping, RunMode::Once)],
+        ),
+    )
+    .await
+    .unwrap();
+    // Beta is installed after alpha but stays disabled, so nobody provides its operation.
+    node.admit(operator, init_plug("beta", "1.0.0", &[beta_ping], &[], &[]))
+        .await
+        .unwrap();
+    node.grant_operations(ALPHA, &["org.example.beta"]).await;
+    let record = node.set_enabled_record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::Initializing);
+    assert_eq!(record.init.unwrap().waiting_on.as_deref(), Some(beta_ping));
+
+    // Enabling beta is the only change: its transition to ready wakes alpha, whose
+    // initializer then runs through dispatch (alpha sorts before beta, so a plain reconcile
+    // would have looked at beta too early).
+    node.set_enabled("@example/beta", true).await;
+    node.until(ALPHA, Readiness::Ready).await;
+    assert_eq!(probe.operations(), [beta_ping]);
     node.shutdown().await;
 }
