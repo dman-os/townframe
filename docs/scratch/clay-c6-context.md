@@ -510,3 +510,55 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   `retain_call`. Fake factory gained `demands`, `retain`, held leases (cleared in root close). Note the Script holds a handle on held
   leases, so the root must clear them explicitly.
 - **Not built.** Guest-level conformance scenario (see ledger gap detail): needs a supervised two-guest rig and a fixture rebuild.
+
+## C7f notes (2026-11-04): guest bound reference, native conformance run, guest retained cycles
+
+- **Guest-held bound reference (ADR 031 #9).** The `context` micro gained `probe(key)`: it reads the status of the row's first
+  attachment, then makes a call and a `retain_call` through it and answers all three as text. `context_sees_a_closed_provider_revoked`
+  attaches a `RowAttachment::Bound` publication of a host-side provider (taken from a lease), probes (`Live`, both calls succeed), drops the
+  lease so the provider idle-closes, and probes again (`Revoked`, both fail `Revoked`, provider still `Idle`, one activation). Wasmtime, Wasmi
+  and native. `ContextRig` lost its row arguments: `boot` starts the guest, `seed`/`seed_endpoint` write rows with a stored host writer.
+- **Native conformance run: design.** The scenarios are generic over `Incarnations`, whose methods were `initialize` (from the guest-session
+  `InitialContext`), `publications`, `mount`, `inspect`, `calls_in_flight`, `close`. Two ways to get a native run: (a) a native fixture
+  with equivalent behaviour, which is a third copy of the fixture logic, or (b) run the fixture source itself in-process. The `context`
+  micro is already written against `clay_mdk::Context`, which has an in-process backend, so (b): `clay_mdk/context_micro.rs` is one file,
+  `#[path]`-included by the `context` example (guest, `export_micro!`) and by `clay_mdk`'s tests (`context_micro` module, with
+  `extern crate self as clay_mdk` so the file names the crate the same way in both). The wasm slot test's hand-copied manifest is now
+  `context_micro::manifest()`, which also fixed a drift hazard (adding `probe` had silently broken it; found by running clay_mdk's tests,
+  which the first commit of C7f had skipped).
+- **Native engine.** `native::Granted` is what an incarnation is granted before `activate`; `Granted::activate` builds the `Activation` and
+  `Context`, runs `activate`, and admits the staged publications. The supervisor's `factory` now ends in it (behaviour unchanged), and
+  `resolve_requirements` is shared too. `InProcess` (`native/conformance_tests.rs`) maps the scenario's `InitialContext` (activator, micro
+  id, collection projections, registration grants, requirements, configs) to a `Granted`, uses the manifest for declared publications (the
+  guest engines are told the same through `context.publications`), keeps the capability and collection sessions to count what survives
+  `Root::close` (must be `GuestResidue::NONE`; it is, so the in-process close leaves no handle behind), and has no driver (native tasks are
+  the incarnation's own local tasks, joined by the root).
+- **Trait split.** `mount` and `calls_in_flight` moved to `GuestIncarnations: Incarnations`; the 15 scenarios over the raw `lifecycle`
+  fixture (and `Harness`, `Fixture`) require it, the `context_*` scenarios require only `Incarnations`. So the type system states which
+  scenarios an in-process micro can run. Wasmtime and Wasmi implement both.
+- **Native scenarios that run:** all 6 `context_*` (collections and calls over a volatile and a durable collection; follows a provider;
+  retains a call; sees a closed provider revoked; the two peer scenarios). **That do not (the 15 `lifecycle` ones), and why:**
+  `provider_consumer_graph`, `lazy_references_activate_retain_and_release`, `leased_provider_closes_when_idle`,
+  `failing_provider_publishes_nothing`, `registration_scope_ownership`, `failed_registration_initialization_publishes_nothing`,
+  `undeclared_publications_fail_initialization` and the call-concurrency ones that drive `relay` (`overlapping_*`, `many_*`,
+  `calls_reenter_*`, `disable_*`/`shutdown_with_calls_in_flight_*`) depend on the raw fixture: role by CBOR `arguments`, calls over raw bytes
+  (`echo:` + request), a consumer root whose `close` redeems a proxy, registration bindings as raw `WriteBasis` writers, host-gated peers.
+  `guest_trap_fails_outstanding_calls`, `sync_exports_interleave_with_suspended_calls` and `dropped_call_finishes_in_the_guest_without_leaks`
+  are guest-engine properties (a trap, sync WIT exports, a guest store's residue) with no in-process analogue.
+- **Plan for the other 12 (not built; larger than C7f).** (1) `Context::publish_raw_call(name, handler: Fn(Vec<u8>) -> Future<Result<Vec<u8>,Error>>)`
+  on both backends (the native one is `RawHandler` already; the guest one is the `call` export dispatch). (2) A close hook on `Context`
+  (`Context::on_close(async fn)`, run before the incarnation's handles drop; native: `NativeRoot::close`, guest: `InstanceRoot.close`).
+  (3) Role by closure or manifest-declared configuration instead of CBOR arguments (the native engine can pass the role as a captured value).
+  (4) Port `lifecycle_fixture.rs` roles to one `lifecycle_micro.rs` over `Context`, include it in the `lifecycle` example and in `clay_mdk`'s
+  tests the same way as the `context` micro, and give `Harness` a native `Incarnations`. (5) `registration_scope_ownership` needs the typed
+  `Registration` writer's `WriteBasis` surface, or stays guest-only. Estimated two to three days with the surface changes; it changes the
+  authoring API, so it needs the owner's go-ahead.
+- **Peer rig (ADR 030 #8 guest level).** `PeerRig` in `lifecycle_conformance/context.rs`: two supervised `context` micros `a` and `b`, each
+  with its own `feed` holding one row (`peer` or `init`) that attaches the other's `echo` as a lazy reference; a `Peer<E>` factory hands each
+  incarnation its own activator (so the leases it takes are incarnation-held) and a root that closes the engine incarnation, asserts
+  `GuestResidue::NONE`, and joins the driver. The micro gained `echo` and the `init` row (a call `activate` makes and waits for).
+  `context_peers_retaining_each_other_close_together`: `hold` on each through an external lease; dropping either lease keeps both up
+  (32 yields, log unchanged), dropping the other closes both once. `context_peers_demanding_each_other_fail_as_unavailable`: acquiring `a`
+  fails `Faulted`, both micros `Faulted` with an "unavailable" message and no instance, log `initialize a, initialize b`. All on native,
+  Wasmtime and Wasmi.
+- **Also:** the dead-code warning in `lazy_tests::PeerRoot` (C7e) is now an `expect` with a reason.
