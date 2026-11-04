@@ -791,12 +791,7 @@ impl NoduleConfig {
                 .filter_map(|(dot, _)| authorities.get_key_value(&id[..dot]));
             let same_or_descendants = authorities
                 .range::<str, _>((Bound::Included(id), Bound::Unbounded))
-                .take_while(|(other, _)| {
-                    other.as_str() == id
-                        || other
-                            .strip_prefix(id)
-                            .is_some_and(|rest| rest.starts_with('.'))
-                });
+                .take_while(|(other, _)| Nodule::authority_owns(id, other));
             let conflict = ancestors
                 .chain(same_or_descendants)
                 .flat_map(|(other_id, holders)| {

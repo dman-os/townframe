@@ -140,6 +140,13 @@ pub struct AuthorityService {
     ledger: tokio::sync::mpsc::Sender<cap::Command>,
     /// Bumped by the ledger after every retraction, so observers know to re-check.
     changes: tokio::sync::watch::Sender<u64>,
+    /// Registry rows already read, by actor. Rows are insert-only: nothing updates or deletes
+    /// one (no rotation or retirement exists; a retired actor's capability dies in the ledger,
+    /// which every lookup consults first). So a cached row can never be stale, and absence is
+    /// never cached, so an actor another instance just registered is still found by a read.
+    /// Resolution therefore costs no SQLite read once an actor has been seen. Unbounded, like
+    /// the registry itself, which holds one row per actor path.
+    actor_rows: std::sync::Mutex<std::collections::HashMap<Uuid7, Arc<ActorRow>>>,
 }
 
 impl AuthorityService {
@@ -251,6 +258,7 @@ impl AuthorityService {
                 actors_namespace,
                 ledger,
                 changes,
+                actor_rows: Default::default(),
             }),
             stop,
         ))
@@ -336,6 +344,22 @@ impl AuthorityService {
         Ok(store::actor(transaction, uuid)
             .await?
             .expect("an actor capability references a registered actor"))
+    }
+
+    /// The registry row of a registered actor, from memory when it was seen before and from one
+    /// read snapshot otherwise.
+    async fn cached_actor_row(&self, uuid: Uuid7) -> Result<Arc<ActorRow>, AuthorityError> {
+        if let Some(row) = self.actor_rows.lock().expect("actor row cache").get(&uuid) {
+            return Ok(Arc::clone(row));
+        }
+        let transaction = self.read().await?;
+        let row = Arc::new(Self::actor_row(&transaction, uuid).await?);
+        drop(transaction);
+        self.actor_rows
+            .lock()
+            .expect("actor row cache")
+            .insert(uuid, Arc::clone(&row));
+        Ok(row)
     }
 }
 

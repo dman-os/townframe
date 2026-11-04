@@ -5,6 +5,7 @@
 use super::Node;
 use super::id;
 use super::lexicon;
+use crate::dispatch::Caller;
 use crate::dispatch::Provider;
 use crate::dispatch::ProviderError;
 use crate::dispatch::ProviderKind;
@@ -39,7 +40,7 @@ use tokio::sync::Notify;
 
 const ECHO: &str = "org.example.echo.ping";
 
-/// Echoes its input and idempotency key; `{"invalid": ..}` and `{"fail": ..}` inputs make it
+/// Echoes its input, idempotency key and the caller dispatch verified; `{"invalid": ..}` and `{"fail": ..}` inputs make it
 /// refuse the way a provider does; `{"wait": true}` blocks on `release` after signalling
 /// `started`, so a test decides when (and whether) the call finishes.
 #[derive(Default)]
@@ -52,6 +53,7 @@ struct Echo {
 impl Provider for Echo {
     async fn call(
         &self,
+        caller: &Caller,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError> {
@@ -68,7 +70,15 @@ impl Provider for Echo {
             self.started.notify_one();
             self.release.notified().await;
         }
-        Ok(json!({ "echo": input, "idempotencyKey": context.idempotency_key }))
+        Ok(json!({
+            "echo": input,
+            "idempotencyKey": context.idempotency_key,
+            "caller": {
+                "authorization": caller.authorization,
+                "actor": caller.actor,
+                "scope": caller.scope,
+            },
+        }))
     }
 }
 
@@ -223,7 +233,15 @@ async fn the_operator_invokes_a_built_in_provider_and_its_refusals_pass_through(
     assert_eq!(
         node.invoke_with(operator, ECHO, json!({ "n": 1 }), context)
             .await,
-        Ok(json!({ "echo": { "n": 1 }, "idempotencyKey": "key-1" }))
+        Ok(json!({
+            "echo": { "n": 1 },
+            "idempotencyKey": "key-1",
+            "caller": {
+                "authorization": operator,
+                "actor": node.authority.service.operator_uuid(),
+                "scope": null,
+            },
+        }))
     );
     assert_eq!(
         node.invoke(operator, ECHO, json!({ "invalid": "n" })).await,

@@ -8,6 +8,7 @@
 //! [`DispatchScope`]. Nothing here serves a provider; routing, readiness and the providers
 //! themselves are the host's.
 
+use crate::Nodule;
 use crate::inventory::Readiness;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
@@ -34,26 +35,25 @@ pub struct DispatchScope {
     pub authorities: BTreeSet<String>,
 }
 
-/// Whether `nsid` is `authority` itself or lives under `authority.`.
-fn under(authority: &str, nsid: &str) -> bool {
-    nsid.strip_prefix(authority)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-}
-
 impl DispatchScope {
     /// Whether a holder of this scope may invoke `nsid`.
     pub fn permits(&self, nsid: &str) -> bool {
-        self.operations.contains(nsid) || self.authorities.iter().any(|a| under(a, nsid))
+        self.operations.contains(nsid)
+            || self
+                .authorities
+                .iter()
+                .any(|a| Nodule::authority_owns(a, nsid))
     }
 
     /// Whether everything `other` permits is also permitted here: the attenuation check a mint
     /// applies, so a handle can only hand out a narrower scope than it holds.
     pub fn covers(&self, other: &Self) -> bool {
         other.operations.iter().all(|nsid| self.permits(nsid))
-            && other
-                .authorities
-                .iter()
-                .all(|authority| self.authorities.iter().any(|a| under(a, authority)))
+            && other.authorities.iter().all(|authority| {
+                self.authorities
+                    .iter()
+                    .any(|a| Nodule::authority_owns(a, authority))
+            })
     }
 }
 

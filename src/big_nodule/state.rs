@@ -31,6 +31,7 @@ use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_nodule_core::Nodule;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
@@ -351,8 +352,8 @@ impl State {
         for (other_plug, (other_nodule_id, _)) in &self.persisted_actors {
             if other_plug != &plug.id
                 && let Some(incoming_id) = &incoming_nodule_id
-                && (owns_nsid(other_nodule_id, incoming_id)
-                    || owns_nsid(incoming_id, other_nodule_id))
+                && (Nodule::authority_owns(other_nodule_id, incoming_id)
+                    || Nodule::authority_owns(incoming_id, other_nodule_id))
             {
                 return Err(InventoryError::AuthorityConflict {
                     id: plug.id,
@@ -871,13 +872,6 @@ impl State {
             None => Ok(()),
         }
     }
-}
-
-fn owns_nsid(authority: &str, nsid: &str) -> bool {
-    nsid == authority
-        || nsid
-            .strip_prefix(authority)
-            .is_some_and(|rest| rest.starts_with('.'))
 }
 
 impl Stores {

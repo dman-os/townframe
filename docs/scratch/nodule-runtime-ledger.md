@@ -91,6 +91,28 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 - `Denied` is decided before lookup, so callers can't probe which operations exist. Authority prefixes match whole NSID segments.
 - `InvocationContext.deadline_unix_ms` keeps the wall-clock form used by `RequestContext`.
 
+### D2d. Slice 2 (Wasm provider) design (manager, 2026-11-04). The operator should review the retention choice.
+- **Artifact retention via `Blob` datums in the node config document**, the existing drawer-native retention model (ADR 026). No new big_blobs pin API.
+  - Portable: a mirror's config doc carries the references, so blob discovery can fetch the bytes.
+  - The blob workers must also watch the config drawer (today only `present`/`originated`).
+  - `big_plugs_core::Digest` and `BlobId` are the same BLAKE3 32-byte, `z`+base58btc format; no mapping is needed.
+  - Known big_blobs gap, not ours: an `import_stream` staging claim isn't persistable, so a crash between import and adopt leaks an `upload:` claim.
+- **The Wasm host lives in a new crate, `big_nodule_wasm`** (`role = "runtime"`), wired by big_node.
+  - This keeps wasmtime/iroh out of `big_nodule` and keeps the provider behind a boundary that could move out of process (D6).
+  - The host loads handler bytes from big_blobs (in-process `BlobService` store reader; `ReadBlob` is capped at 1 MiB) and reports readiness: artifacts missing vs ready.
+  - `big_nodule` gets an **executor seam**. The reconciler asks the executor to ensure or retire a nodule revision's workload and registers whatever provider state it returns.
+- **Workloads:** one wash workload per nodule revision. `pool_size` 0 means the `Ephemeral` policy, a fresh store per request, which matches the one-instance-per-dispatch rule. `host_interfaces = [wasi:http/handler@0.3.0]`. A custom `Router` plus `OutgoingHandler` handle `dispatch.local`.
+- **Header contract (guest ↔ host):**
+  - `authorization: Capability <cap-id>`;
+  - `idempotency-key: <key>` (the IETF Idempotency-Key draft);
+  - `x-request-deadline-unix-ms: <ms>`.
+  The guest SDK forwards the deadline and idempotency headers on nested calls.
+- **Test guest:** `src/test_nodule_guest` in the `src/wasm_utils_rs` workspace. It is a p3 `wasi:http/handler@0.3.0` component built with plain `cargo build --target wasm32-wasip3` and wit-bindgen (btress_sysadmin's async-export config), and consumed like `test_wflows` (a path under `$CARGO_TARGET_DIR/wasm32-wasip3/release/`, plus a CI build line).
+- **Sub-slices:**
+  - 2a: config-doc artifact `Blob` datums, blob workers on the config drawer, and the executor seam with a fake executor in tests.
+  - 2b: `big_nodule_wasm`, the fork `[patch]`, the test guest and the e2e.
+  - 2c: `dispatch.local` egress.
+
 ### D3. Durability via the wflow service (deferred)
 - Durable work goes through a wflow **service** with start / status long-poll / message / cancel operations; it is not a bespoke routine kind.
 - A durable procedure returns a job reference.
@@ -117,8 +139,20 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 ## In flight
 
-- Next: dispatch slice 2, the Wasm provider (see To do).
+- Next, after the follow-ups agent: slice 2a (D2d).
 ## Done
+
+- 2026-11-04: Dispatch follow-ups.
+  - Authority actor-row cache in `AuthorityService`. Rows are insert-only (the manager verified there are no UPDATE/DELETE queries and no writers outside `authority/`), so no invalidation is needed. Liveness stays in the in-memory ledger, absence is never cached, and there's no TTL.
+  - `Provider::call` receives the verified `Caller { authorization, actor, scope }`.
+  - The NSID-prefix check is unified as `Nodule::authority_owns`.
+  - Manager verified 79/79 targeted tests (authority, nodule crates, big_node minus blob_discovery), plus clippy, fmt, lint and api.
+  - Open: should providers also see the handle's minting (originating) actor?
+
+- 2026-11-04: Test guest `test_nodule_guest` (`d808dc42`).
+  - A p3 `wasi:http/handler@0.3.0` component (1.4 MB release) with routes `org.example.test.echo` and `.relay` (outgoing to `dispatch.local`).
+  - Imports `wasi:http/client@0.3.0` plus wasi cli/clocks plumbing, which the host must link.
+  - Path: `$CARGO_TARGET_DIR/wasm32-wasip3/release/test_nodule_guest.wasm`. Built in CI after `test_wflows`. `wit/deps` is fetched by `x/wit-fetch.ts` from the crate's `wkg.lock`.
 
 - 2026-11-04: Dispatch slice 1.
   - `big_nodule_core::dispatch` contract; `big_nodule::dispatch` service, with a `RwLock<Arc<Table>>` router and a reverse index.
@@ -199,6 +233,14 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 - [slice 2] `Provider::call` currently gets only `InvocationContext`. The Wasm provider needs the **caller identity/authority** (for the authority header). Pass the verified caller into providers. Dropping the future on deadline is the cancellation path.
 - [cleanup] `owns_nsid` (`big_nodule/state.rs`) and `under` (`big_nodule/dispatch.rs`) duplicate the NSID-prefix check. Unify in `big_nodule_core`.
 - [perf, minor] `Router::register` rebuilds the whole table per provider. Reconcile registers per nodule, so it's O(n²) per pass. Fine at today's scale; batch registration if it grows.
+
+- [test-time] Four heavy `big_cabinet` drawer e2e tests from main hit the 120s nextest kill under load, and one even alone:
+  - `model::deterministic_drawer_model_scenarios_match_reference`
+  - `lifecycle::named_metadata_creation_replays_every_boundary_on_both_roots`
+  - `delegation::three_group_root_invitations_bound_transitive_links_and_revoke_both_roots`
+  - `lifecycle::sensitive_root_creation_replays_every_boundary_without_replacing_groups_or_docs`
+
+  They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
 
 ## Deferred
 

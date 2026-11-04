@@ -26,6 +26,7 @@ pub enum big_nodule_core::inventory::InventoryError { # [error (transparent)] Pl
 pub enum big_nodule_core::inventory::Readiness { Refused, Disabled, ArtifactsUnavailable, ExecutorUnavailable }
 pub enum big_nodule_core::protocol::NodulesError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("nodule state failed: {0}")] Storage (String), # [error ("the package was refused: {0}")] Rejected (String), # [error ("nodule for plug `{0}` is not installed")] UnknownPlug (PlugId), # [error ("nodule for plug `{0}` declares no config schema")] NoConfigSchema (PlugId) }
 pub impl big_nodule_core::Nodule::fn admit (& self) -> Result < Admitted >
+pub impl big_nodule_core::Nodule::fn authority_owns (authority : & str , nsid : & str) -> bool
 pub impl big_nodule_core::Nodule::fn datum_lexicons (& self) -> impl Iterator < Item = & IndexMap < String , Value > >
 pub impl big_nodule_core::Nodule::fn new (id : impl Into < String >) -> Self
 pub impl big_nodule_core::Nodule::fn owns (& self , nsid : & str) -> bool

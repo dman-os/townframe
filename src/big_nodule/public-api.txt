@@ -15,6 +15,7 @@ pub struct big_nodule::dispatch::DispatchConfig  { authority: Client < Authority
 pub struct big_nodule::dispatch::DispatchService  {  }
 pub type big_nodule::NodulesHandler = Arc < NoduleService >
 pub type big_nodule::dispatch::DispatchHandler = Arc < DispatchService >
+pub use big_nodule::dispatch::router :: Caller
 pub use big_nodule::dispatch::router :: Provider
 pub use big_nodule::dispatch::router :: ProviderEntry
 pub use big_nodule::dispatch::router :: ProviderError

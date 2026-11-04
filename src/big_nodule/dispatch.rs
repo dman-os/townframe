@@ -9,6 +9,7 @@
 
 mod router;
 
+pub use router::Caller;
 pub use router::Provider;
 pub use router::ProviderEntry;
 pub use router::ProviderError;
@@ -124,14 +125,20 @@ impl DispatchService {
     }
 
     async fn invoke(&self, context: &RequestContext, params: Invoke) -> Res<InvokeOutput> {
-        let caller = self.caller(context, params.authorization).await?;
+        let verified = self.caller(context, params.authorization).await?;
+        let scope = self.scope_of(&verified)?;
         // Denied is settled before the lookup so an unauthorized caller cannot probe which
         // operations exist.
-        if let Some(scope) = self.scope_of(&caller)?
+        if let Some(scope) = scope
             && !scope.permits(&params.operation)
         {
             return Err(DispatchError::Denied);
         }
+        let caller = Caller {
+            authorization: params.authorization,
+            actor: verified.signer.actor_id,
+            scope: scope.cloned(),
+        };
         let entry = self.router.resolve(&params.operation)?;
         let kind = match &entry.state {
             ProviderState::Ready(kind) => kind,
@@ -152,7 +159,7 @@ impl DispatchService {
         .flatten()
         .min();
         let ProviderKind::BuiltIn(provider) = kind;
-        let call = provider.call(&params.context, params.input);
+        let call = provider.call(&caller, &params.context, params.input);
         let result = match budget {
             Some(budget) => tokio::time::timeout(budget, call)
                 .await

@@ -243,12 +243,17 @@ impl Nodule {
         }
     }
 
+    /// Whether `nsid` is `authority` itself or lives under `authority.`: the one NSID-prefix
+    /// rule for authorities, whole segments only (`org.example.photos` owns
+    /// `org.example.photos.list`, not `org.example.photosynthesis`).
+    pub fn authority_owns(authority: &str, nsid: &str) -> bool {
+        nsid.strip_prefix(authority)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+
     /// Whether `nsid` is under this nodule's authority: declared here or nowhere.
     pub fn owns(&self, nsid: &str) -> bool {
-        nsid == self.id
-            || nsid
-                .strip_prefix(self.id.as_str())
-                .is_some_and(|rest| rest.starts_with('.'))
+        Self::authority_owns(&self.id, nsid)
     }
 
     /// The Lexicon files that declare datums rather than operations, for the datum compiler.

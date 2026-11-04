@@ -5,9 +5,7 @@ use super::*;
 impl AuthorityService {
     async fn sign(&self, request: SignDatumClaim) -> Result<SignedDatumClaim, AuthorityError> {
         let uuid = self.resolve(request.actor).await?.actor(Rights::USE)?;
-        let transaction = self.read().await?;
-        let row = Self::actor_row(&transaction, uuid).await?;
-        drop(transaction);
+        let row = self.cached_actor_row(uuid).await?;
         signer::sign_claim(&self.wrapping, &row, request.claim)
     }
 }

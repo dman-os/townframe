@@ -7,8 +7,7 @@ impl AuthorityService {
         let uuid = self.resolve(request.capability).await?.actor(Rights::USE)?;
         // Registry rows are never deleted and a binding is only published after its row
         // commits, so the row is there for any actor the ledger recognized.
-        let transaction = self.read().await?;
-        let row = Self::actor_row(&transaction, uuid).await?;
+        let row = self.cached_actor_row(uuid).await?;
         actor::public_actor(&self.node_public_key(), &row, request.capability)
     }
 }

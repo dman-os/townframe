@@ -8,8 +8,11 @@
 //! small (one row per implemented operation) and registrations only follow config changes.
 
 use async_trait::async_trait;
+use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_cabinet_core::dmeta::Uuid7;
 use big_nodule_core::dispatch::DispatchError;
+use big_nodule_core::dispatch::DispatchScope;
 use big_nodule_core::dispatch::InvocationContext;
 use big_nodule_core::dispatch::NotReadyReason;
 use big_nodule_core::inventory::Readiness;
@@ -27,12 +30,28 @@ pub enum ProviderError {
     Failed { status: u16, body: Value },
 }
 
+/// The caller as dispatch verified it, handed to the provider so it can run its own checks or
+/// forward the authority (a Wasm provider carries `authorization` in the authority header).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caller {
+    /// The capability the caller presented and the signer it was presented with.
+    pub authorization: Authorization,
+    /// The actor that signed the call.
+    pub actor: Uuid7,
+    /// The scope of the minted handle presented, `None` for the operator's identity.
+    pub scope: Option<DispatchScope>,
+}
+
 /// A native service registered as the provider of operations. Its input and output are the
 /// JSON dispatch exchanges with its caller: the edge a dynamic by-NSID call pays anyway.
 #[async_trait]
 pub trait Provider: Send + Sync {
-    async fn call(&self, context: &InvocationContext, input: Value)
-    -> Result<Value, ProviderError>;
+    async fn call(
+        &self,
+        caller: &Caller,
+        context: &InvocationContext,
+        input: Value,
+    ) -> Result<Value, ProviderError>;
 }
 
 /// How a ready provider is reached. A kind is only constructible once its provider can be
@@ -187,7 +206,12 @@ mod tests {
 
     #[async_trait]
     impl Provider for Echo {
-        async fn call(&self, _: &InvocationContext, input: Value) -> Result<Value, ProviderError> {
+        async fn call(
+            &self,
+            _: &Caller,
+            _: &InvocationContext,
+            input: Value,
+        ) -> Result<Value, ProviderError> {
             Ok(input)
         }
     }
