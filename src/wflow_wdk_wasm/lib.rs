@@ -22,7 +22,6 @@ pub use wflow_wdk::StepMeta;
 pub use wflow_wdk::StepState;
 pub use wflow_wdk::WflowBackend;
 pub use wflow_wdk::WflowCtx;
-pub use wflow_wdk::types::CleanupCause;
 
 pub mod wit {
     wit_bindgen::generate!({
@@ -68,7 +67,6 @@ fn to_wit_step_kind(kind: StepKind) -> host::StepKind {
         StepKind::Effect => host::StepKind::Effect,
         StepKind::Sleep => host::StepKind::Sleep,
         StepKind::Recv => host::StepKind::Recv,
-        StepKind::Defer => host::StepKind::Defer,
     }
 }
 
@@ -77,7 +75,6 @@ fn from_wit_step_kind(kind: host::StepKind) -> StepKind {
         host::StepKind::Effect => StepKind::Effect,
         host::StepKind::Sleep => StepKind::Sleep,
         host::StepKind::Recv => StepKind::Recv,
-        host::StepKind::Defer => StepKind::Defer,
     }
 }
 
@@ -95,27 +92,8 @@ fn from_wit_step_meta(meta: host::StepMeta) -> StepMeta {
     }
 }
 
-fn from_wit_cleanup_cause(cause: host::CleanupCause) -> CleanupCause {
-    match cause {
-        host::CleanupCause::Cancelled(reason) => CleanupCause::Cancelled { reason },
-        host::CleanupCause::Failed(error) => CleanupCause::Failed { error },
-        host::CleanupCause::RetriesExhausted(host::RetriesExhausted {
-            retries,
-            max_retries,
-            last_error,
-        }) => CleanupCause::RetriesExhausted {
-            retries,
-            max_retries,
-            last_error,
-        },
-    }
-}
-
 fn from_wit_host_error(err: host::HostError) -> BackendError {
     match err {
-        host::HostError::Interrupted(cause) => {
-            BackendError::Interrupted(from_wit_cleanup_cause(cause))
-        }
         host::HostError::NondeterministicReplay(err) => BackendError::NondeterministicReplay {
             step_id: err.step_id,
             expected: from_wit_step_meta(err.expected),
@@ -173,18 +151,6 @@ impl WflowBackend for WasmWflowBackend {
         Box::pin(async move {
             host::recv_message(self.job_id.clone(), step_id)
                 .await
-                .map_err(from_wit_host_error)
-        })
-    }
-
-    fn begin_cleanup<'a>(
-        &'a self,
-        error_json: &'a str,
-    ) -> LocalBoxFuture<'a, Result<CleanupCause, BackendError>> {
-        Box::pin(async move {
-            host::begin_cleanup(self.job_id.clone(), error_json.to_owned())
-                .await
-                .map(from_wit_cleanup_cause)
                 .map_err(from_wit_host_error)
         })
     }

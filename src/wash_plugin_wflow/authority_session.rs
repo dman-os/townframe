@@ -15,7 +15,6 @@ impl From<host::StepMeta> for StepMeta {
                 host::StepKind::Effect => StepKind::Effect,
                 host::StepKind::Sleep => StepKind::Sleep,
                 host::StepKind::Recv => StepKind::Recv,
-                host::StepKind::Defer => StepKind::Defer,
             },
             name: meta.name,
         }
@@ -31,14 +30,13 @@ impl Session for WasmSession {
         Some(match trap {
             JobTrap::PersistStep {
                 step_id,
-                attempt_id,
                 start_at,
                 end_at,
                 value_json,
                 meta,
+                ..
             } => SessionYield::PersistStep {
                 step_id,
-                attempt_id,
                 start_at,
                 end_at,
                 value_json,
@@ -46,13 +44,12 @@ impl Session for WasmSession {
             },
             JobTrap::WaitStep {
                 step_id,
-                attempt_id,
                 start_at,
                 deets,
                 meta,
+                ..
             } => SessionYield::WaitStep {
                 step_id,
-                attempt_id,
                 start_at,
                 meta: meta.into(),
                 deets: match deets {
@@ -62,7 +59,6 @@ impl Session for WasmSession {
                     WaitTrapDeets::Message { wait_id } => WaitYield::Message { wait_id },
                 },
             },
-            JobTrap::BeginCleanup { error_json } => SessionYield::BeginCleanup { error_json },
             JobTrap::RunComplete(result) => {
                 SessionYield::Complete(result.map_err(|err| match err {
                     types::JobError::Terminal(value) => shared_types::JobError::Terminal(value),
@@ -102,10 +98,6 @@ impl Session for WasmSession {
             .send(SessionResume::Deliver(value_json))
             .is_ok()
     }
-
-    fn interrupt(&self, cause: CleanupCause) -> bool {
-        self.0.interrupt(cause)
-    }
 }
 
 #[async_trait]
@@ -120,7 +112,6 @@ impl Host for WflowPlugin {
         wflow_key: &str,
         args_json: String,
         replay: Vec<ReplayStep>,
-        cleanup: Option<CleanupCause>,
     ) -> Res<Box<dyn Session>> {
         let workload_id = self
             .active_keys
@@ -135,7 +126,7 @@ impl Host for WflowPlugin {
             .cloned()
             .ok_or_else(|| ferr!("workflow workload stopped: {workload_id}"))?;
         let session = self
-            .start_session(&workload, job_id, wflow_key, args_json, replay, cleanup)
+            .start_session(&workload, job_id, wflow_key, args_json, replay.into())
             .await
             .map_err(|err| ferr!("wasm session could not start: {err:?}"))?;
         Ok(Box::new(WasmSession(session)))

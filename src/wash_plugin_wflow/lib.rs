@@ -27,7 +27,6 @@ use wflow_tokio::partition::service;
 use wflow_wdk::session::ReplayStep;
 use wflow_wdk::session::SessionYield;
 use wflow_wdk::session::WaitYield;
-use wflow_wdk::types::CleanupCause;
 
 mod authority_session;
 
@@ -80,12 +79,7 @@ struct ActiveJobCtx {
     pause_cancel: CancellationToken,
     cur_step: AtomicU64,
     active_step: std::sync::Mutex<Option<ActiveStepCtx>>,
-    replay: std::sync::Mutex<Vec<ReplayStep>>,
-    /// Set once the job entered cleanup; every forward boundary reached after
-    /// that returns it as `host-error.interrupted` unless a committed replay
-    /// value exists for the step, which replays as usual so the workflow
-    /// re-registers the defers it derived from it. `Defer` steps never see it.
-    cleanup: std::sync::Mutex<Option<CleanupCause>>,
+    replay: std::sync::Mutex<SessionReplay>,
     ctx_id: Arc<str>,
 }
 
@@ -116,11 +110,6 @@ enum JobTrap {
         meta: host::StepMeta,
     },
     RunComplete(Result<String, types::JobError>),
-    /// Forward work ended in the terminal `error_json` with compensation
-    /// registered; the host records the cause durably and resumes with it.
-    BeginCleanup {
-        error_json: Arc<str>,
-    },
 }
 
 #[derive(Debug)]
@@ -133,31 +122,11 @@ enum WaitTrapDeets {
 enum SessionResume {
     Continue,
     Deliver(Arc<str>),
-    /// Resumes a parked boundary with the durable cause the job entered
-    /// cleanup under: a committed `PersistStep` continues, a wait or a
-    /// `BeginCleanup` returns the cause to the workflow.
-    Interrupt(CleanupCause),
     Stop,
 }
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
     wasmtime::Error::msg(msg.to_string())
-}
-
-fn to_wit_cleanup_cause(cause: CleanupCause) -> host::CleanupCause {
-    match cause {
-        CleanupCause::Cancelled { reason } => host::CleanupCause::Cancelled(reason),
-        CleanupCause::Failed { error } => host::CleanupCause::Failed(error),
-        CleanupCause::RetriesExhausted {
-            retries,
-            max_retries,
-            last_error,
-        } => host::CleanupCause::RetriesExhausted(host::RetriesExhausted {
-            retries,
-            max_retries,
-            last_error,
-        }),
-    }
 }
 
 fn wait_id_for(step_id: u64, attempt_id: u64) -> u64 {
@@ -166,36 +135,58 @@ fn wait_id_for(step_id: u64, attempt_id: u64) -> u64 {
     hi | lo
 }
 
-fn replay_from_job_state(journal: &state::JobState) -> Vec<ReplayStep> {
-    let mut replay: Vec<_> = journal
+#[derive(Debug, Default)]
+struct SessionReplay {
+    steps: Vec<ReplayStep>,
+    // The replacement protocol has no step attempts. This private sidecar is
+    // populated only from the legacy partition journal so run_job can retain
+    // its attempt identities until that engine is deleted.
+    legacy_failed_attempts: Vec<u64>,
+}
+
+impl From<Vec<ReplayStep>> for SessionReplay {
+    fn from(steps: Vec<ReplayStep>) -> Self {
+        let legacy_failed_attempts = vec![0; steps.len()];
+        Self {
+            steps,
+            legacy_failed_attempts,
+        }
+    }
+}
+
+fn replay_from_job_state(journal: &state::JobState) -> SessionReplay {
+    let mut legacy_failed_attempts = Vec::with_capacity(journal.steps.len());
+    let mut steps: Vec<_> = journal
         .steps
         .iter()
         .map(|step| {
             let state::JobStepState::Effect { attempts } = step;
+            legacy_failed_attempts.push(attempts.len() as u64);
             match attempts.last().map(|attempt| &attempt.deets) {
                 Some(job_events::JobEffectResultDeets::Success { value_json }) => {
                     ReplayStep::completed(Arc::clone(value_json))
                 }
-                _ => ReplayStep {
-                    failed_attempts: attempts.len() as u64,
-                    ..default()
-                },
+                _ => ReplayStep::default(),
             }
         })
         .collect();
     for run in &journal.runs {
         if let job_events::JobRunResult::StepWait(wait) = &run.result {
             let index = wait.step_id as usize;
-            if replay.len() <= index {
-                replay.resize_with(index + 1, default);
+            if steps.len() <= index {
+                steps.resize_with(index + 1, default);
+                legacy_failed_attempts.resize(index + 1, 0);
             }
-            replay[index].kind = Some(match wait.deets {
-                job_events::JobWaitResultDeets::Timer { .. } => wflow_core::StepKind::Sleep,
-                job_events::JobWaitResultDeets::Message { .. } => wflow_core::StepKind::Recv,
+            steps[index].kind = Some(match wait.deets {
+                job_events::JobWaitResultDeets::Timer { .. } => wflow_wdk::StepKind::Sleep,
+                job_events::JobWaitResultDeets::Message { .. } => wflow_wdk::StepKind::Recv,
             });
         }
     }
-    replay
+    SessionReplay {
+        steps,
+        legacy_failed_attempts,
+    }
 }
 
 fn lookup_active_job<T>(
@@ -224,10 +215,8 @@ fn lookup_active_job<T>(
 }
 
 impl ActiveJobCtx {
-    /// Parks the session on `trap` until the host resumes it. A hard stop
-    /// (the session was cancelled or its channels closed) is not cooperative
-    /// cleanup: the invocation is being torn down, so it surfaces as a
-    /// protocol error rather than an interruption that would run defers.
+    /// Parks the session on `trap` until the host resumes it. Cancellation or
+    /// channel closure tears down the invocation and surfaces as a protocol error.
     async fn yield_and_wait_resume(&self, trap: JobTrap) -> Result<SessionResume, host::HostError> {
         if self.yield_tx.send(trap).is_err() {
             if self.pause_cancel.is_cancelled() {
@@ -250,14 +239,6 @@ impl ActiveJobCtx {
             }
             Some(cmd) => Ok(cmd),
         }
-    }
-
-    /// Records the durable cause the job entered cleanup under so every later
-    /// forward boundary is interrupted with it. The authority owns which cause
-    /// wins (an earlier cancel over a later failure); the host only mirrors
-    /// what it was resumed with.
-    fn record_cleanup(&self, cause: CleanupCause) {
-        *self.cleanup.lock().expect(ERROR_MUTEX) = Some(cause);
     }
 }
 
@@ -283,17 +264,6 @@ impl SessionHandle {
             .inspect_err(|err| warn_loc!(ERROR_CHANNEL, ?err))
             .ok();
         self.cancel_token.cancel();
-    }
-
-    /// Moves the parked session into cleanup under `cause`: the flag makes
-    /// every later forward boundary return `interrupted`, and the resume wakes
-    /// whichever boundary is parked right now (a committed persist continues,
-    /// a wait or `begin-cleanup` returns the cause). `false` means the session
-    /// was already stopped.
-    #[must_use]
-    fn interrupt(&self, cause: CleanupCause) -> bool {
-        self.active_job.record_cleanup(cause.clone());
-        self.resume_tx.send(SessionResume::Interrupt(cause)).is_ok()
     }
 }
 
@@ -340,6 +310,7 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             let stale_step_id = stale_active.step_id;
             let replay = job.replay.lock().expect(ERROR_MUTEX);
             let stale_completed = replay
+                .steps
                 .get(stale_step_id as usize)
                 .is_some_and(|step| step.value_json.is_some());
             drop(replay);
@@ -361,18 +332,7 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
         }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);
         let replay = job.replay.lock().expect(ERROR_MUTEX);
-        let step = replay.get(step_id as usize);
-        // A job in cleanup only moves through committed forward steps (so the
-        // workflow re-registers the defers it derived from them); the first
-        // uncommitted forward boundary is where it is interrupted.
-        if meta.kind != host::StepKind::Defer
-            && step.is_none_or(|step| step.value_json.is_none())
-            && let Some(cause) = job.cleanup.lock().expect(ERROR_MUTEX).clone()
-        {
-            return Ok(Err(host::HostError::Interrupted(to_wit_cleanup_cause(
-                cause,
-            ))));
-        }
+        let step = replay.steps.get(step_id as usize);
         if let Err(err) = plugin.validate_and_record_meta(&job, step, step_id, &meta) {
             return Ok(Err(err));
         }
@@ -388,8 +348,11 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
                     value_json: value.to_string(),
                 })));
             }
-            Some(step) => step.failed_attempts,
-            None => 0,
+            Some(_) | None => replay
+                .legacy_failed_attempts
+                .get(step_id as usize)
+                .copied()
+                .unwrap_or(0),
         };
         drop(replay);
         let start_at = Timestamp::now();
@@ -446,13 +409,6 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
 
         Ok(match job.yield_and_wait_resume(trap).await {
             Ok(SessionResume::Continue) => Ok(()),
-            // The host only interrupts a parked persist after its commit
-            // landed, so the step is durable and the workflow observes the
-            // cause at its next forward boundary.
-            Ok(SessionResume::Interrupt(cause)) => {
-                job.record_cleanup(cause);
-                Ok(())
-            }
             Ok(SessionResume::Deliver(_)) => Err(host::HostError::Protocol(
                 "persisted step resumed with a delivered value".into(),
             )),
@@ -467,7 +423,7 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
         step_id: host::StepId,
         duration_ms: u64,
     ) -> wasmtime::Result<Result<(), host::HostError>> {
-        let (plugin, job) = match lookup_active_job(accessor, &job_id) {
+        let (_plugin, job) = match lookup_active_job(accessor, &job_id) {
             Ok(pair) => pair,
             Err(err) => return Ok(Err(err)),
         };
@@ -507,11 +463,14 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             Ok(resumed) => resumed,
             Err(err) => return Ok(Err(err)),
         };
-        if let SessionResume::Interrupt(cause) = resumed {
-            plugin.abandon_active_step(&job, cause.clone());
-            return Ok(Err(host::HostError::Interrupted(to_wit_cleanup_cause(
-                cause,
-            ))));
+        match resumed {
+            SessionResume::Continue => {}
+            SessionResume::Deliver(_) => {
+                return Ok(Err(host::HostError::Protocol(
+                    "sleep resumed with a delivered value".into(),
+                )));
+            }
+            SessionResume::Stop => unreachable!(),
         }
         job.active_step.lock().expect(ERROR_MUTEX).take();
         job.cur_step
@@ -524,7 +483,7 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
         job_id: partition_host::JobId,
         step_id: host::StepId,
     ) -> wasmtime::Result<Result<String, host::HostError>> {
-        let (plugin, job) = match lookup_active_job(accessor, &job_id) {
+        let (_plugin, job) = match lookup_active_job(accessor, &job_id) {
             Ok(pair) => pair,
             Err(err) => return Ok(Err(err)),
         };
@@ -567,14 +526,9 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
                 .replay
                 .lock()
                 .expect(ERROR_MUTEX)
+                .steps
                 .get(step_id as usize)
                 .and_then(|step| step.value_json.clone()),
-            SessionResume::Interrupt(cause) => {
-                plugin.abandon_active_step(&job, cause.clone());
-                return Ok(Err(host::HostError::Interrupted(to_wit_cleanup_cause(
-                    cause,
-                ))));
-            }
             SessionResume::Stop => unreachable!(),
         };
         let Some(value) = delivered else {
@@ -586,37 +540,6 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
         job.cur_step
             .store(step_id + 1, std::sync::atomic::Ordering::SeqCst);
         Ok(Ok(value.to_string()))
-    }
-
-    async fn begin_cleanup(
-        accessor: &Accessor<T, Self>,
-        job_id: partition_host::JobId,
-        error_json: String,
-    ) -> wasmtime::Result<Result<host::CleanupCause, host::HostError>> {
-        let (plugin, job) = match lookup_active_job(accessor, &job_id) {
-            Ok(pair) => pair,
-            Err(err) => return Ok(Err(err)),
-        };
-        let trap = JobTrap::BeginCleanup {
-            error_json: error_json.into(),
-        };
-        // The only valid resume carries the cause the host recorded durably;
-        // the guest never gets to proceed to a defer on a plain continue.
-        Ok(match job.yield_and_wait_resume(trap).await {
-            // Forward work is over: the effect whose closure failed terminally
-            // (if any) is still the active step; it never persisted, so its
-            // slot is freed for the first defer instead of reporting a
-            // concurrent step.
-            Ok(SessionResume::Interrupt(cause)) => {
-                plugin.abandon_active_step(&job, cause.clone());
-                Ok(to_wit_cleanup_cause(cause))
-            }
-            Ok(SessionResume::Continue | SessionResume::Deliver(_)) => Err(
-                host::HostError::Protocol("begin-cleanup resumed without a cleanup cause".into()),
-            ),
-            Ok(SessionResume::Stop) => unreachable!(),
-            Err(err) => Err(err),
-        })
     }
 }
 
@@ -731,17 +654,12 @@ impl WflowPlugin {
         meta: &host::StepMeta,
     ) -> Result<(), host::HostError> {
         let expected_kind = replay.and_then(|step| step.kind).map(|kind| match kind {
-            wflow_core::StepKind::Effect => host::StepKind::Effect,
-            wflow_core::StepKind::Sleep => host::StepKind::Sleep,
-            wflow_core::StepKind::Recv => host::StepKind::Recv,
-            wflow_core::StepKind::Defer => host::StepKind::Defer,
+            wflow_wdk::StepKind::Effect => host::StepKind::Effect,
+            wflow_wdk::StepKind::Sleep => host::StepKind::Sleep,
+            wflow_wdk::StepKind::Recv => host::StepKind::Recv,
         });
         if let Some(kind) = expected_kind
             && kind != meta.kind
-            && !matches!(
-                (kind, meta.kind),
-                (host::StepKind::Effect, host::StepKind::Defer)
-            )
         {
             return Err(host::HostError::NondeterministicReplay(
                 host::NondeterministicReplayError {
@@ -772,25 +690,6 @@ impl WflowPlugin {
             metas.steps.push(meta.clone());
         }
         Ok(())
-    }
-
-    /// Abandons `job`'s uncommitted active step for cleanup: a wait the host
-    /// interrupted, or an effect whose closure failed terminally. It never
-    /// persisted, so its step slot is the one the first defer takes: the
-    /// cursor stays put and the boundary identity recorded for the slot is
-    /// dropped, matching what a cold replay in cleanup records there.
-    fn abandon_active_step(&self, job: &ActiveJobCtx, cause: CleanupCause) {
-        job.record_cleanup(cause);
-        let Some(active) = job.active_step.lock().expect(ERROR_MUTEX).take() else {
-            return;
-        };
-        let mut all_metas = self.job_step_metas.lock().expect(ERROR_MUTEX);
-        if let Some(metas) = all_metas.get_mut(&job.job_id)
-            && metas.ctx_id == job.ctx_id
-            && metas.steps.len() == active.step_id as usize + 1
-        {
-            metas.steps.truncate(active.step_id as usize);
-        }
     }
 
     fn drop_session_handle(&self, session: SessionHandle) {
@@ -865,24 +764,18 @@ impl WflowPlugin {
             JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
                 value_json: value_json.into(),
             }),
-            JobTrap::BeginCleanup { .. } => {
-                unreachable!("begin-cleanup is acknowledged in wait_for_session_yield")
-            }
         }
     }
 
     /// Instantiates the workload and starts `wflow_key` as `job_id`, replaying
-    /// `replay` before any step closure runs. `cleanup` seeds the session of a
-    /// job that already entered cleanup durably: its committed forward steps
-    /// replay and the first uncommitted forward boundary is interrupted.
+    /// completed boundaries before any step closure runs.
     async fn start_session(
         &self,
         workload: &Arc<WflowWorkload>,
         job_id: Arc<str>,
         wflow_key: &str,
         args_json: String,
-        replay: Vec<ReplayStep>,
-        cleanup: Option<CleanupCause>,
+        replay: SessionReplay,
     ) -> Result<SessionHandle, job_events::JobRunResult> {
         let mut store = workload
             .resolved_handle
@@ -910,7 +803,7 @@ impl WflowPlugin {
             let mut all_metas = self.job_step_metas.lock().expect(ERROR_MUTEX);
             let metas = all_metas.entry(Arc::clone(&job_id)).or_default();
             metas.ctx_id = Arc::clone(&ctx_id);
-            metas.steps.truncate(replay.len());
+            metas.steps.truncate(replay.steps.len());
         }
         let (yield_tx, yield_rx) = mpsc::unbounded_channel();
         let (resume_tx, resume_rx) = mpsc::unbounded_channel();
@@ -921,7 +814,6 @@ impl WflowPlugin {
             resume_rx: resume_rx.into(),
             pause_cancel: pause_cancel.clone(),
             replay: std::sync::Mutex::new(replay),
-            cleanup: std::sync::Mutex::new(cleanup),
             ctx_id: Arc::clone(&ctx_id),
             cur_step: default(),
             active_step: None.into(),
@@ -1005,24 +897,6 @@ impl WflowPlugin {
                     },
                 ));
             };
-            // The legacy partition journal has no cleanup phase to record the
-            // cause in, so it is acknowledged NON-durably: the defers still run
-            // on a terminal error, but a crash mid-cleanup re-runs forward work
-            // on the next run instead of resuming compensation. Only the
-            // authority runtime makes this durable; this path is slated for
-            // obsolete-path review.
-            if let JobTrap::BeginCleanup { error_json } = trap {
-                if !session.interrupt(CleanupCause::Failed {
-                    error: error_json.to_string(),
-                }) {
-                    return Err(job_events::JobRunResult::WorkerErr(
-                        job_events::JobRunWorkerError::Other {
-                            msg: "session stopped before cleanup was acknowledged".into(),
-                        },
-                    ));
-                }
-                continue;
-            }
             return Self::trap_to_result(trap);
         }
     }
@@ -1248,7 +1122,6 @@ impl service::WflowServiceHost for WflowPlugin {
                     &journal.wflow.key,
                     journal.init_args_json.to_string(),
                     replay_from_job_state(&journal),
-                    None,
                 )
                 .await
             }

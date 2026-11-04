@@ -1,0 +1,78 @@
+package townframe:wflow;
+
+// Legacy partition-worker ingress retained until the production cutover removes
+// the reducer/effect-worker engine.
+interface ingress {
+    use types.{job-id, json};
+
+    record invoke-args {
+        wflow-key: string,
+        args-json: json,
+        idem-key: option<string>,
+    }
+
+    variant invoke-error {
+        wflow-not-found,
+    }
+
+    invoke: func(args: invoke-args) -> result<job-id, invoke-error>;
+}
+
+interface partition-host {
+    use types.{job-id, json};
+    use metastore.{wflow-meta};
+
+    type partition-id = u64;
+
+    record add-job-args {
+        id: job-id,
+        wflow: wflow-meta,
+    }
+
+    add-job: func(partition-id: partition-id, args: add-job-args);
+    send-message: func(partition-id: partition-id, job-id: job-id, payload-json: json);
+}
+
+interface metastore {
+    record wflow-meta {
+        key: string,
+        service: wflow-service-meta,
+    }
+
+    variant wflow-service-meta {
+        wasmcloud(wasmcloud-wflow-service-meta),
+        local-native,
+    }
+
+    record wasmcloud-wflow-service-meta {
+        workload-id: string,
+    }
+
+    get-wflow: func(key: string) -> option<wflow-meta>;
+
+    record partitions-meta {
+        version: string,
+        partition-count: u64,
+    }
+
+    get-partitions: func() -> partitions-meta;
+}
+
+world rt-partition-host {
+    import partition-host;
+}
+
+world rt-host {
+    import host;
+}
+
+world rt-metastore {
+    import metastore;
+}
+
+// Retained for the legacy key-value plugin integration test.
+world keyvalue {
+    import wasi:keyvalue/atomics@0.2.0-draft;
+    import wasi:keyvalue/batch@0.2.0-draft;
+    import wasi:keyvalue/store@0.2.0-draft;
+}

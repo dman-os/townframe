@@ -1,11 +1,9 @@
 package townframe:wflow;
 
-// types used across interfaces
+// Types shared by workflow guests and their host.
 interface types {
     type json = string;
-
     type job-id = string;
-
 
     record job-ctx {
         job-id: job-id,
@@ -25,15 +23,15 @@ interface types {
         fixed(fixed-retry-policy),
         capped-exponential(capped-exponential-retry-policy),
     }
-    
+
     record transient-job-error {
         error-json: json,
-        retry-policy: option<retry-policy>
+        retry-policy: option<retry-policy>,
     }
 
     variant job-error {
         terminal(json),
-        transient(transient-job-error)
+        transient(transient-job-error),
     }
 
     type job-result = result<json, job-error>;
@@ -43,21 +41,20 @@ interface types {
         // FIXME: find a better way of having a single component
         // impl an interface N times
         wflow-key: string,
-        args-json: json
+        args-json: json,
     }
 }
 
-// for a component that implements wflows
+// Implemented by a component that exports workflows.
 interface bundle {
     use types.{run-args, job-result};
 
     run: async func(cx: run-args) -> job-result;
 }
 
-// for the host functionality for wflows
+// Host boundaries available to workflow guests.
 interface host {
     use types.{job-id, json};
-
 
     type step-id = u64;
 
@@ -65,7 +62,6 @@ interface host {
         effect,
         sleep,
         recv,
-        defer,
     }
 
     record step-meta {
@@ -79,34 +75,14 @@ interface host {
         found: step-meta,
     }
 
-    // Forward work used up the transient-retry budget; `last-error` is the
-    // error json of the failure that exhausted it.
-    record retries-exhausted {
-        retries: u64,
-        max-retries: u64,
-        last-error: json,
-    }
-
-    // Why the job left forward work for cleanup: an operator cancel carrying
-    // its reason, the terminal error the workflow failed with, or the retry
-    // budget its forward work exhausted.
-    variant cleanup-cause {
-        cancelled(string),
-        failed(json),
-        retries-exhausted(retries-exhausted),
-    }
-
     variant host-error {
-        // Forward work was interrupted for cleanup; the registered defers run
-        // under this cause. Never returned to a defer step.
-        interrupted(cleanup-cause),
         nondeterministic-replay(nondeterministic-replay-error),
         protocol(string),
     }
 
     variant step-state {
         active(active-step-state),
-        completed(completed-step-state)
+        completed(completed-step-state),
     }
 
     record completed-step-state {
@@ -122,89 +98,9 @@ interface host {
     persist-step: async func(job-id: job-id, step-id: step-id, value-json: json) -> result<_, host-error>;
     sleep: async func(job-id: job-id, step-id: step-id, duration-ms: u64) -> result<_, host-error>;
     recv-message: async func(job-id: job-id, step-id: step-id) -> result<json, host-error>;
-    // Durably records that forward work ended in the terminal `error-json`
-    // with compensation registered and returns the cause cleanup runs under;
-    // a cancel that landed first wins.
-    begin-cleanup: async func(job-id: job-id, error-json: json) -> result<cleanup-cause, host-error>;
-}
-
-// for starting invocations
-interface ingress {
-    use types.{job-id, json};
-
-    record invoke-args {
-        wflow-key: string,
-        args-json: json,
-        idem-key: option<string>,
-    }
-
-    variant invoke-error {
-        wflow-not-found,
-    }
-
-    invoke: func(args: invoke-args) -> result<job-id, invoke-error>;
-}
-
-interface partition-host {
-    use types.{job-id};
-    use metastore.{wflow-meta};
-    use types.{json};
-
-    type partition-id = u64;
-    
-    record add-job-args {
-        id: job-id,
-        wflow: wflow-meta,
-    }
-
-    add-job: func(partition-id: partition-id, args: add-job-args);
-    send-message: func(partition-id: partition-id, job-id: job-id, payload-json: json);
-}
-
-interface metastore {
-    record wflow-meta {
-        key: string,
-        service: wflow-service-meta
-    }
-
-    variant wflow-service-meta {
-        wasmcloud(wasmcloud-wflow-service-meta),
-        local-native,
-    }
-
-    record wasmcloud-wflow-service-meta {
-        workload-id: string,
-    }
-
-    get-wflow: func(key:string) -> option<wflow-meta>;
-
-    record partitions-meta {
-        version: string,
-        partition-count: u64,
-    }
-
-    get-partitions: func() -> partitions-meta;
-}
-
-world rt-partition-host {
-    import partition-host;
-}
-
-world rt-host {
-    import host;
-}
-
-world rt-metastore {
-    import metastore;
 }
 
 world service {
     import host;
     export bundle;
-}
-
-world keyvalue {
-    import wasi:keyvalue/atomics@0.2.0-draft;
-    import wasi:keyvalue/batch@0.2.0-draft;
-    import wasi:keyvalue/store@0.2.0-draft;
 }
