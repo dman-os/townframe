@@ -176,6 +176,8 @@ capability-ref.redeem-presentation() -> presentation-component   // strong while
 
 Presentation `mount`, `dispatch`, and `unmount` stay synchronous and may not suspend. A consumer redeems first, asynchronously, and then mounts the live `presentation-component` synchronously. A surface that renders before redemption completes shows a placeholder for that slot.
 
+The slot is one author-facing component in-process and in a guest (`clay_mdk::hooks::PresentationSlot`). It shows a failed redemption and waits for the reference's status to change (`capability-ref.status-changed`) before redeeming again, and re-redeems when the incarnation it mounted ends (`presentation-component.revoked`), which demand-starts the provider's next incarnation. In a guest the slot's component is a `mount-component` mutation at the slot's position.
+
 Calling a bound reference never activates anything; once its incarnation has closed it returns `revoked`. A lazy reference whose provider is `Closing` waits for a fresh incarnation and never enters the closing one. Concurrent use of lazy references joins one activation.
 
 ### 7. Durable rows persist endpoints, never references

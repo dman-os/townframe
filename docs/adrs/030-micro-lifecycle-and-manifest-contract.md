@@ -433,11 +433,15 @@ interface capability-bank {
         call: async func(request: list<u8>) -> result<list<u8>, capability-error>;
         retain-call: async func() -> result<call-binding, capability-error>;
         redeem-presentation: async func() -> result<presentation-component, capability-error>;
+        status-changed: async func(seen: ref-status);   // completes once status != seen
     }
     resource call-binding {
         call: async func(request: list<u8>) -> result<list<u8>, capability-error>;
     }
-    resource presentation-component;    // mounted synchronously via component-ref
+    resource presentation-component {   // mounted synchronously via component-ref
+        component: func() -> result<component-ref, capability-error>;
+        revoked: async func();          // completes once the provider incarnation ended
+    }
     resource published-capability;
 
     publish-call: func(name: string) -> result<published-capability, capability-error>;
@@ -452,6 +456,15 @@ attachment-slot indices; `encoded-value.capabilities` carries recipient-local au
 `written-value.attachments` names what a write attaches.
 A retained typed proxy is owned by the consumer but becomes inert when its publication
 or provider closes.
+
+`status-changed` and `revoked` are the two waits a presentation slot follows its provider with,
+so that a guest slot behaves as an in-process one without polling: both are level-triggered
+(they compare against the status the caller saw, or the proxy's revocation, when the supervisor's
+status tick wakes them, so a restart that races the wait cannot hide the change) and a reference
+to a live publication has no restart to follow, so neither completes for it. A guest slot
+mounts the redeemed `component-ref` by emitting `mount-component` at its position in the tree it
+sends through `surface.apply`; it keeps the proxy while the component is mounted and drops it
+on unmount, which releases the provider.
 
 ### 10. Installation applies durable registration scopes
 

@@ -208,9 +208,8 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   conformance scenario asserts `GuestResidue::NONE` after close.
 - **Deviations / limits.**
   - A guest `Publication` could attach to rows only while `activate` ran (fixed in C6e below).
-  - Guest `Capability` has `status` and `call`; `redeem_presentation`/`PresentationSlot` stay in-process
-    (guest slots need the `mount-component` GuestDom work in section 2.2). `Context::instance()` is in-process
-    only.
+  - Guest `Capability` has `status` and `call`; `redeem_presentation`/`PresentationSlot` followed in C7a
+    below. `Context::instance()` is in-process only.
   - `Facet::write` in a guest also resyncs the mirror (the host sends no event for the guest's own write); the
     counter's "mirror lagged / released" texts are gone (lag auto-resyncs; revoked watches make `use_facet`
     panic like in-process).
@@ -297,3 +296,38 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   some `requires` or `collection_requests` entry's `contract` names it.
 - **Environment hazard seen.** The root filesystem filled during this item (the wasmtime component cache at `~/.cache/dayframe` is
   ~870 MB and grows); runs here used `XDG_CACHE_HOME` and `TMPDIR` on the big drive.
+
+## C7a notes (2026-11-04): presentation slots inside guest micros
+
+- **WIT.** Two async waits, both host-side level-triggered on the supervisor's status tick (`Activator::changes`):
+  `capability-ref.status-changed(seen: ref-status)` completes once `status() != seen` (receiver taken before the
+  status is read, so nothing is lost), and `presentation-component.revoked()` completes once the proxy's publication
+  is revoked (the proxy keeps the tick receiver it was redeemed with: `PresentationComponent::revocation().wait()`).
+  Bound references have no tick source and never complete (same as native). Implemented in `clay_guest_session`
+  (`CapabilityRef::status_changed`, `Revocation`), `clay_rt_wasmtime` and `clay_rt_wcmp` (shared by wasmi).
+- **One author surface.** `Capability::redeem_presentation` now returns the façade `PresentationComponent` (`component()`
+  -> opaque `Mount`, `revoked()`), `Capability::status_changed(seen)` replaces the tokio-watch `status_changes()`.
+  `PresentationSlotProps` lost `owner`: the in-process mount owner is the redeeming instance (taken from the proxy).
+  The follow loop (`hooks::follow_provider`) is written once over those; only the driver and the render of `Mount`
+  differ. In-process it is a `use_future`; in a guest nothing polls Dioxus tasks, so it is a runtime task
+  (`Runtime::spawn_for_view`, cancelled when the slot component drops, which drops the proxy and releases the provider)
+  that stores state in a cell and ticks the presentations (`Runtime::notify_views`). The loop reads the status *before*
+  redeeming and waits for it to move off that, which (unlike reading after the failure) cannot miss a provider enabled
+  between the failure and the read; a failure that itself changes the status costs one extra redemption attempt.
+- **Wire.** Dioxus cannot write `mount-component`, so a slot is `div { style: "display: contents", data-clay-slot: id }`:
+  `WireMutations::set_attribute` records the attribute as a slot edit and `take_resolving` expands it to
+  `mount-component(ref)` + `append-children(1)`, i.e. the component is a child of the slot `div` (the element is the stack
+  top when its attribute is written, so the stack stays balanced). The `div` is a wrapper, not the bare component the
+  in-process mount produces; `clay_surface` admits only a fixed tag list, so a custom `clay-slot` tag is rejected.
+  `GuestDom` holds `Slots` (id -> `Rc<component-ref>`) provided as Dioxus context; ids are retired when the slot element
+  goes and released after the next flush (the flush may still carry its creation). The slot element is keyed by the
+  component, so a new redemption is a new element.
+- **Not done / question.** `mount`'s granted `components` list in a guest is still refused (assert) with its old message:
+  nothing in the author API names a granted component (layout micros, ADR 015 §10), and which surface's list a Dioxus
+  component would index is a product question.
+- **Proof.** `lifecycle_conformance::context_follows_a_provider` (Wasmtime and wcmp/Wasmi): the `context` fixture's `follow`
+  call parks on `status-changed` while the host-side provider is disabled, redeems when it is enabled, and ends on
+  `revoked` when it is disabled; each step is a `progress/n` row the host waits on (no polling).
+  `clay_mdk` `wasm::tests::a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_disable_and_enable`: the
+  `context` fixture's `slot` presentation shows the counter guest through the real renderer, clickable, then
+  unavailable on disable and mounted again on enable. No new fixture crate; `x/check-dayframe.ts` unchanged.
