@@ -6,6 +6,7 @@ allowed_dependencies = [
     "clay_docs",
     "clay_host",
     "clay_mdk",
+    "clay_store",
     "clay_surface",
     "daybook_types",
     "dayframe_composition",
@@ -13,6 +14,7 @@ allowed_dependencies = [
     "micro_sample",
     "micro_settings",
     "micro_settings_manifest",
+    "sqlite_rs",
     "ui",
 ]
 allow_external_api_types = false

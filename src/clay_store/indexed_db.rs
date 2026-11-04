@@ -24,6 +24,19 @@ pub struct IndexedDbStore {
     db: IdbDatabase,
 }
 
+// Durable collections hold their store behind `Send + Sync` handles because collections are
+// shared across threads natively and the host's cleanup hooks require it. The `IdbDatabase`
+// JS handle is neither, but a wasm32 build without the `atomics` target feature has no
+// threads at all: every handle is only ever touched by the one thread that made it, so the
+// bounds hold vacuously. With `atomics` (shared-memory workers) a JS handle really cannot
+// cross threads, so this fails to compile there instead of becoming unsound.
+#[cfg(not(target_feature = "atomics"))]
+// SAFETY: see above; there is no second thread to send to.
+unsafe impl Send for IndexedDbStore {}
+#[cfg(not(target_feature = "atomics"))]
+// SAFETY: see above; there is no second thread to share with.
+unsafe impl Sync for IndexedDbStore {}
+
 fn js_error(value: JsValue) -> StoreError {
     StoreError::backend(format!("{value:?}"))
 }

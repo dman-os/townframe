@@ -94,6 +94,13 @@ fn unfetchable_counter() -> InstalledMicro {
     })
 }
 
+/// The catalog over a fresh in-memory store.
+async fn memory_runtime(counter: InstalledMicro) -> CompositionRuntime {
+    CompositionRuntime::new(Arc::new(clay_store::MemoryStore::new()), catalog(counter))
+        .await
+        .expect("a memory store does not fail")
+}
+
 async fn settle(done: impl Fn() -> bool) {
     while !done() {
         tokio::task::yield_now().await;
@@ -135,7 +142,7 @@ fn section_refs(
 
 #[tokio::test(flavor = "current_thread")]
 async fn manifest_rows_are_installed_before_anything_runs() {
-    let runtime = CompositionRuntime::new(catalog(stub_counter())).await;
+    let runtime = memory_runtime(stub_counter()).await;
     assert!(runtime.installation_errors.is_empty());
     for micro in runtime.micros() {
         assert_eq!(runtime.state(micro), MicroState::Idle, "{micro}");
@@ -163,7 +170,7 @@ async fn manifest_rows_are_installed_before_anything_runs() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
-    let runtime = CompositionRuntime::new(catalog(stub_counter())).await;
+    let runtime = memory_runtime(stub_counter()).await;
     served(&runtime, async {
         settle(|| {
             runtime.state(&id("dayframe.settings")) == MicroState::Active
@@ -209,7 +216,7 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_disabled_micro_keeps_its_row_but_cannot_be_redeemed_until_enabled() {
-    let runtime = CompositionRuntime::new(catalog(stub_counter())).await;
+    let runtime = memory_runtime(stub_counter()).await;
     served(&runtime, async {
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
@@ -235,7 +242,7 @@ async fn a_disabled_micro_keeps_its_row_but_cannot_be_redeemed_until_enabled() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn an_unfetchable_guest_faults_alone_until_retried() {
-    let runtime = CompositionRuntime::new(catalog(unfetchable_counter())).await;
+    let runtime = memory_runtime(unfetchable_counter()).await;
     served(&runtime, async {
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
@@ -277,8 +284,58 @@ async fn a_manifest_contributing_to_an_undeclared_collection_is_an_installation_
     let mut manifest = micro_counter_manifest::manifest();
     manifest.contributions[0].collection = "nobody.declared.this".into();
     let counter = InstalledMicro::new(manifest, |_resources| Rc::new(Unfetchable));
-    let runtime = CompositionRuntime::new(catalog(counter)).await;
+    let runtime = memory_runtime(counter).await;
     assert_eq!(runtime.installation_errors.len(), 1);
     assert!(runtime.installation_errors[0].contains("nobody.declared.this"));
     runtime.host.close();
+}
+
+// Manifest rows persist in the store, stamps included. Boot 2 changes the row, so its lamport
+// moves above boot 1's only if boot 1's state was loaded; boot 3 reinstalls the same row and
+// must keep that lamport instead of recreating the row at lamport 1.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.sqlite");
+    // Boots over the file and returns the counter section row's stamp. The sqlite runtime
+    // owns the workers and lives exactly as long as the composition; the host closes before
+    // either is dropped (ordered shutdown).
+    let boot = |title: &'static str| {
+        let path = path.clone();
+        async move {
+            let sqlite = sqlite_rs::SqliteRuntime::new(sqlite_rs::RuntimeConfig::default());
+            let store = clay_store::SqliteStore::open(sqlite.database(
+                &path,
+                &[],
+                "_dayframe_composition_test_unused",
+            ))
+            .await
+            .unwrap();
+            let mut manifest = micro_counter_manifest::manifest();
+            manifest.contributions[0].payload["title"] = title.into();
+            let runtime = CompositionRuntime::new(
+                Arc::new(store),
+                catalog(InstalledMicro::new(manifest, |_resources| {
+                    Rc::new(Unfetchable)
+                })),
+            )
+            .await
+            .unwrap();
+            assert!(runtime.installation_errors.is_empty());
+            let row = runtime
+                .collection(SECTIONS)
+                .unwrap()
+                .get(&cbor_key(COUNTER))
+                .expect("the manifest row is installed at boot");
+            runtime.host.close();
+            row.stamp
+        }
+    };
+
+    let first = boot("Counter").await;
+    let second = boot("Counter, renamed").await;
+    let third = boot("Counter, renamed").await;
+    assert_eq!(first.lamport, 1);
+    assert_eq!(second.lamport, 2);
+    assert_eq!(third, second);
 }

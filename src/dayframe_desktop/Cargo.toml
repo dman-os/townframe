@@ -11,11 +11,12 @@ path = "main.rs"
 dioxus = { workspace = true }
 ui = { workspace = true }
 dayframe_composition = { workspace = true }
-futures.workspace = true
 clay_docs = { workspace = true }
 clay_dioxus = { workspace = true }
 clay_host = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
+clay_store = { workspace = true }
+sqlite_rs = { workspace = true }
 micro_settings = { workspace = true }
 micro_settings_manifest = { workspace = true }
 micro_sample = { workspace = true }

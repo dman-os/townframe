@@ -3,8 +3,8 @@
 //! each component's statically-read manifest. A package's bytes are fetched only when an
 //! instance activates, and their digest is verified against the index before the browser
 //! engine (`wcmp`) ever sees them.
-use clay_mdk::native::CollectionBindings;
 use clay_mdk::native::factory;
+use clay_mdk::native::CollectionBindings;
 use dayframe_composition::CompositionRuntime;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
@@ -105,9 +105,14 @@ fn native_micros() -> Vec<InstalledMicro> {
     ]
 }
 
-/// Build the runtime once the package index arrives. An index that cannot be fetched or
-/// parsed is one installation error in the lifecycle panel; the native built-ins still run.
-async fn web_runtime() -> CompositionRuntime {
+/// Build the runtime once the package index arrives, over the browser's IndexedDB so manifest
+/// rows persist across reloads. An index that cannot be fetched or parsed is one installation
+/// error in the lifecycle panel; the native built-ins still run. A store that cannot open or
+/// load (blocked or full browser storage) is an error the caller shows instead of a shell.
+async fn web_runtime() -> Result<CompositionRuntime, String> {
+    let store = clay_store::IndexedDbStore::open("dayframe")
+        .await
+        .map_err(|error| format!("cannot open browser storage: {error}"))?;
     let mut installed = native_micros();
     let mut errors = Vec::new();
     match fetch_bytes("packages/index.json").await {
@@ -129,7 +134,9 @@ async fn web_runtime() -> CompositionRuntime {
         },
         Err(error) => errors.push(error),
     }
-    let mut runtime = CompositionRuntime::new(installed).await;
+    let mut runtime = CompositionRuntime::new(std::sync::Arc::new(store), installed)
+        .await
+        .map_err(|error| format!("cannot load browser storage: {error}"))?;
     runtime.installation_errors.extend(errors);
     micro_sample::seed_mock_defaults(runtime.documents());
     // Demo seed for the counter package `x/dayframe-web.ts` installs: start its config
@@ -143,7 +150,7 @@ async fn web_runtime() -> CompositionRuntime {
         },
         serde_json::json!(0),
     );
-    runtime
+    Ok(runtime)
 }
 
 pub fn main() {
@@ -164,9 +171,12 @@ fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
 #[component]
 fn App() -> Element {
     let mut runtime = use_signal(|| None::<CompositionRuntime>);
+    let mut failure = use_signal(|| None::<String>);
     use_future(move || async move {
-        let built = web_runtime().await;
-        runtime.set(Some(built));
+        match web_runtime().await {
+            Ok(built) => runtime.set(Some(built)),
+            Err(error) => failure.set(Some(error)),
+        }
     });
     rsx! {
         ThemeRoot {
@@ -174,7 +184,9 @@ fn App() -> Element {
             mode: ThemeMode::Dark,
             main {
                 class: "min-h-screen box-border bg-background p-6 font-sans text-foreground",
-                if runtime.read().is_some() {
+                if let Some(error) = failure() {
+                    p { role: "alert", "Dayframe cannot start: {error}" }
+                } else if runtime.read().is_some() {
                     ReadyApp { runtime }
                 } else {
                     p { role: "status", "Loading Dayframe packages…" }

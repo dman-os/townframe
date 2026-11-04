@@ -6,9 +6,11 @@ pub use dayframe_composition::CompositionRuntime;
 
 use clay_mdk::native::factory;
 use clay_mdk::native::CollectionBindings;
+use clay_store::OrderedStore;
 use dayframe_composition::InstalledMicro;
 use micro_settings_manifest::SECTIONS;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
 /// is unusable without it. Sample is eager so its section is written at boot. What each may
@@ -47,18 +49,49 @@ fn native_micros() -> Vec<InstalledMicro> {
     ]
 }
 
-/// The directory scanned for package files: `DAYFRAME_PACKAGE_DIR`, else
-/// `$XDG_DATA_HOME/dayframe/packages` (falling back to `~/.local/share`).
-fn package_directory() -> Option<PathBuf> {
-    if let Some(directory) = std::env::var_os("DAYFRAME_PACKAGE_DIR") {
-        return Some(PathBuf::from(directory));
-    }
+/// The app's data directory: `$XDG_DATA_HOME/dayframe` (falling back to `~/.local/share`).
+fn data_directory() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
         })?;
-    Some(base.join("dayframe").join("packages"))
+    Some(base.join("dayframe"))
+}
+
+/// The directory scanned for package files: `DAYFRAME_PACKAGE_DIR`, else
+/// `<data directory>/packages`.
+fn package_directory() -> Option<PathBuf> {
+    if let Some(directory) = std::env::var_os("DAYFRAME_PACKAGE_DIR") {
+        return Some(PathBuf::from(directory));
+    }
+    Some(data_directory()?.join("packages"))
+}
+
+/// Open the durable store under the shell's collections: the SQLite file named by
+/// `DAYFRAME_STORE_PATH`, else `<data directory>/store.sqlite`. A missing parent directory is
+/// created. Failing here is an external error (no home directory, unwritable disk, a corrupt
+/// file) that the launcher shows instead of a shell.
+pub async fn open_store() -> Result<clay_store::SqliteStore, String> {
+    let path = match std::env::var_os("DAYFRAME_STORE_PATH") {
+        Some(path) => PathBuf::from(path),
+        None => data_directory()
+            .ok_or("no DAYFRAME_STORE_PATH, XDG_DATA_HOME or HOME to place the store under")?
+            .join("store.sqlite"),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    // A `Database` keeps its runtime (and so the sqlite workers) alive.
+    let database = sqlite_rs::SqliteRuntime::new(sqlite_rs::RuntimeConfig::default()).database(
+        &path,
+        &[],
+        "_dayframe_shell_unused",
+    );
+    clay_store::SqliteStore::open(database)
+        .await
+        .map_err(|error| format!("cannot open the store at {}: {error}", path.display()))
 }
 
 /// Read every package in the package directory. A missing directory installs nothing; an
@@ -116,13 +149,15 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
     (installed, errors)
 }
 
-/// Assemble the desktop composition. The constructor is async because durable collections load
-/// before they report bootstrap; with the in-memory store it never parks, so blocking is safe.
-pub fn desktop_runtime() -> CompositionRuntime {
+/// Assemble the desktop composition over `store`. Async because durable collections load
+/// before they report bootstrap, which parks on a disk-backed store.
+pub async fn desktop_runtime<St: OrderedStore + Send + Sync + 'static>(
+    store: Arc<St>,
+) -> Result<CompositionRuntime, clay_store::StoreError> {
     let mut installed = native_micros();
     let (packages, errors) = package_micros();
     installed.extend(packages);
-    let mut runtime = futures::executor::block_on(CompositionRuntime::new(installed));
+    let mut runtime = CompositionRuntime::new(store, installed).await?;
     runtime.installation_errors.extend(errors);
     micro_sample::seed_mock_defaults(runtime.documents());
     // Demo seed for the counter package the check script installs: start its config at
@@ -136,7 +171,7 @@ pub fn desktop_runtime() -> CompositionRuntime {
         },
         serde_json::json!(0),
     );
-    runtime
+    Ok(runtime)
 }
 
 #[cfg(test)]

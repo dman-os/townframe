@@ -10,6 +10,7 @@ dayframe_composition = { workspace = true }
 clay_dioxus = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wcmp", "package"] }
 clay_rt_wcmp = { workspace = true }
+clay_store = { workspace = true }
 clay_rt_wcmp_web = { workspace = true }
 micro_settings = { workspace = true }
 micro_settings_manifest = { workspace = true }

@@ -7,7 +7,7 @@
 //! The catalog is explicit configuration, not a heuristic: each entry says whether the
 //! supervisor starts the micro eagerly, which provider satisfies each of its requirements, and
 //! which declared collections it may read or write. The root declares the collections the
-//! manifests name and mock-installs every manifest-declared row into the declaring micro's
+//! manifests name and installs every manifest-declared row into the declaring micro's
 //! manifest installation scope (ADR 025 §4), so rows are visible while their micro is stopped.
 //! There is no supervisor reconfiguration yet: enablement and startup are fixed by the catalog
 //! except for the enable/disable/retry controls of the lifecycle panel.
@@ -37,6 +37,8 @@ use clay_mdk::native::SHELL_ROOTS;
 use clay_mdk::view::use_rows;
 use clay_mdk::view::AttachedRef;
 use clay_mdk::view::PresentationSlot;
+use clay_store::OrderedStore;
+use clay_store::StoreError;
 use dioxus::prelude::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -104,21 +106,23 @@ pub struct CompositionRuntime {
     pub installation_errors: Vec<String>,
 }
 
-async fn declare(
+/// A failed store read is a boot-time external error (disk, browser storage) the launcher
+/// reports; a refused declaration is a catalog defect the caller records per micro.
+async fn declare<St: OrderedStore + Send + Sync + 'static>(
     collections: &CollectionRegistry<BytesRegistrations>,
-    store: &Arc<clay_store::MemoryStore>,
+    store: &Arc<St>,
     contract: CollectionContract,
-) -> Result<BytesRegistrations, clay_host::DeclareError> {
+) -> Result<Result<BytesRegistrations, clay_host::DeclareError>, StoreError> {
     let registrations = durable_bytes_registrations(
         Arc::clone(store),
         contract.id.clone().into_bytes(),
         NonZeroUsize::new(256).unwrap(),
         [0, 0],
     )
-    .await
-    .expect("the in-memory store does not fail");
-    collections.declare(contract, registrations.clone())?;
-    Ok(registrations)
+    .await?;
+    Ok(collections
+        .declare(contract, registrations.clone())
+        .map(|()| registrations))
 }
 
 impl CompositionRuntime {
@@ -126,12 +130,20 @@ impl CompositionRuntime {
     /// collection the manifests declare, bind one mock configuration document per manifest
     /// configuration request (`<binding>-config`), mock-install each manifest's declared rows,
     /// and configure the supervisor. Nothing runs until [`Self::serve`].
-    pub async fn new(installed: Vec<InstalledMicro>) -> Self {
+    ///
+    /// Collections load from, and manifest rows install into, `store`: reinstalling rows a
+    /// previous boot already persisted keeps their stamps. The store is only needed while
+    /// building (the collections keep their own handles), so the runtime is not generic over
+    /// it. A store failure is an external error returned to the launcher, which owns how it is
+    /// shown; nothing has run by then.
+    pub async fn new<St: OrderedStore + Send + Sync + 'static>(
+        store: Arc<St>,
+        installed: Vec<InstalledMicro>,
+    ) -> Result<Self, StoreError> {
         let host = Host::new();
         let components = NativeComponents::new(&host);
         let documents = DocumentService::new(16);
         let collections = CollectionRegistry::default();
-        let store = Arc::new(clay_store::MemoryStore::new());
         let mut errors = Vec::new();
 
         let roots_collection = declare(
@@ -143,7 +155,7 @@ impl CompositionRuntime {
                 value_schema: "dayframe.shell.root".into(),
             },
         )
-        .await
+        .await?
         .expect("the root declares shell.roots first");
         for micro in &installed {
             for request in &micro.manifest.configuration_requests {
@@ -163,7 +175,7 @@ impl CompositionRuntime {
                         value_schema: contract.value_schema.clone(),
                     },
                 )
-                .await;
+                .await?;
                 if let Err(error) = declared {
                     errors.push(format!("{}: {error}", micro.manifest.id.as_str()));
                 }
@@ -185,7 +197,6 @@ impl CompositionRuntime {
                     ));
                     continue;
                 };
-                // The memory-backed store cannot fail; a durable one would report here.
                 target
                     .install(
                         &manifest_scope(&id),
@@ -193,8 +204,7 @@ impl CompositionRuntime {
                         clay_collection::WriterId::new(id.as_str()),
                         rows,
                     )
-                    .await
-                    .expect("the in-memory store does not fail")
+                    .await?
                     .dispatch();
             }
         }
@@ -225,7 +235,7 @@ impl CompositionRuntime {
         let (roots, feed) =
             CollectionWatch::observe(&host, &shell, supervisor.activator(), &roots_collection)
                 .expect("the shell instance is live");
-        Self {
+        Ok(Self {
             host,
             supervisor,
             components,
@@ -238,7 +248,7 @@ impl CompositionRuntime {
             feed: Rc::new(RefCell::new(Some(Box::pin(feed)))),
             shutdown: Rc::new(Notify::new()),
             installation_errors: errors,
-        }
+        })
     }
 
     /// Run the composition until [`Self::request_shutdown`]: start the eager roots, serve the
