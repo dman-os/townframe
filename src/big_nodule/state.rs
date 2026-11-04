@@ -19,6 +19,9 @@ use crate::executor::NoduleExecutor;
 use crate::executor::ReensureQueue;
 use crate::store;
 use big_cabinet::DatumStoreHandle;
+use big_cabinet::SchemaRegistration;
+use big_cabinet::SchemaRegistrationGroup;
+use big_cabinet::SchemaRepo;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
@@ -101,7 +104,27 @@ pub(crate) struct Stores {
     /// The operator-granted dispatch handle the service mints every nodule's own handle from.
     pub(crate) dispatch_authority: CapId,
     pub(crate) executor: Option<Arc<dyn NoduleExecutor>>,
+    /// The node's schema repo: an enabled nodule's held datums are registered here and retired
+    /// when it is disabled, refused, substituted away or uninstalled.
+    pub(crate) schemas: Arc<SchemaRepo>,
 }
+
+impl Stores {
+    /// The providers the node itself serves `request`'s contract under: dispatch's routes for an
+    /// operation, the boot schemas for a datum. Plugs' own offers come from the snapshot.
+    pub(crate) fn native_offers(&self, request_contract: &str, is_operation: bool) -> Vec<String> {
+        if is_operation {
+            self.dispatch.claimants(request_contract)
+        } else if self.schemas.is_boot_schema(request_contract) {
+            vec![NATIVE_SCHEMAS.to_owned()]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// The provider name a boot schema is offered under in the lockfile.
+const NATIVE_SCHEMAS: &str = "native";
 
 pub(crate) enum Command {
     Admit {
@@ -301,6 +324,9 @@ pub(crate) struct State {
     /// The revision the executor was last asked to host for each plug. A plug is here exactly
     /// while the executor may hold a workload for it, which is what `retire` must undo.
     hosted: BTreeMap<PlugId, Revision>,
+    /// The revision whose datum Lexicons are registered in the node's schema repo for each plug,
+    /// under the plug id as owner. A plug is here exactly while it is enabled and admitted.
+    registered_schemas: BTreeMap<PlugId, Revision>,
     /// Plugs whose executor asked to be ensured again. The state actor constructs it and
     /// outlives nothing that holds a handle to it in a way that matters (see [`ReensureQueue`]).
     reensure: Arc<ReensureQueue>,
@@ -380,6 +406,7 @@ impl State {
             applied_operations,
             locks,
             applied_heads: BTreeMap::new(),
+            registered_schemas: BTreeMap::new(),
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
             admission_cache: Arc::default(),
@@ -733,7 +760,20 @@ impl State {
         // change is still what the offers say, and the one offer is the plug to pin.
         let resolved = snapshot.value.resolve(&self.admission_cache);
         let index = ProviderIndex::new(&resolved);
-        let offers = index.offers(contract, self.stores.dispatch.claimants(contract));
+        let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(plug_id) else {
+            unreachable!("a request awaiting confirmation belongs to an admitted nodule")
+        };
+        let request = installed
+            .nodule
+            .requires
+            .iter()
+            .find(|request| request.binding == binding)
+            .expect("the record reports a status for each request of its nodule");
+        let offers = index.offers(
+            contract,
+            self.stores
+                .native_offers(contract, request.is_operation_call()),
+        );
         let [offer] = offers.as_slice() else {
             unreachable!("a provider change is held only while exactly one provider offers it")
         };
@@ -873,7 +913,8 @@ impl State {
         snapshot: StoreSnapshot<NoduleConfig>,
         trigger: Trigger,
     ) -> Res<BTreeMap<PlugId, NodulesError>> {
-        let resolved = snapshot.value.resolve(&self.admission_cache);
+        let mut resolved = snapshot.value.resolve(&self.admission_cache);
+        self.sync_schemas(&mut resolved);
         let mut revoke_errors: BTreeMap<PlugId, NodulesError> = BTreeMap::new();
         let active_plugs: BTreeSet<PlugId> = self
             .applied_grants
@@ -985,6 +1026,94 @@ impl State {
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
+    }
+
+    /// Brings the schema repo to what `resolved` enables: an enabled, admitted nodule's held
+    /// datum records are registered under its plug id (so it can write its own datums and
+    /// others can read them), and everything of a plug that is disabled, refused or gone is
+    /// retired. A registration the repo refuses (a tag the node already knows, or a Lexicon that
+    /// does not compile) refuses the nodule with the repo's reason, the same way an authority
+    /// conflict does: plugs are external input and this is where their Lexicons are first
+    /// compiled.
+    fn sync_schemas(&mut self, resolved: &mut BTreeMap<PlugId, NoduleResolution>) {
+        let stale: Vec<PlugId> = self
+            .registered_schemas
+            .keys()
+            .filter(|plug_id| {
+                !matches!(
+                    resolved.get(*plug_id),
+                    Some(NoduleResolution::Admitted { installed, .. }) if installed.enabled
+                )
+            })
+            .cloned()
+            .collect();
+        for plug_id in stale {
+            self.stores.schemas.retire(&plug_id.to_string());
+            self.registered_schemas.remove(&plug_id);
+        }
+        let changed: Vec<PlugId> = resolved
+            .iter()
+            .filter(|(plug_id, resolution)| {
+                matches!(
+                    resolution,
+                    NoduleResolution::Admitted { installed, .. }
+                        if installed.enabled
+                            && self.registered_schemas.get(*plug_id) != Some(&installed.revision)
+                )
+            })
+            .map(|(plug_id, _)| plug_id.clone())
+            .collect();
+        for plug_id in changed {
+            let Some(NoduleResolution::Admitted {
+                installed,
+                desired_grants,
+                desired_operations,
+            }) = resolved.remove(&plug_id)
+            else {
+                unreachable!("selected as admitted above");
+            };
+            let split = installed
+                .nodule
+                .registrable_datums(installed.admitted.authority.as_deref());
+            let object = |file: &IndexMap<String, Value>| {
+                Value::Object(file.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            };
+            let group = SchemaRegistrationGroup::new(
+                None,
+                split
+                    .held
+                    .iter()
+                    .map(|(nsid, file)| SchemaRegistration::new(*nsid, object(file))),
+                split.carried.iter().map(|file| object(file)).collect(),
+            );
+            let outcome = self.stores.schemas.register(&plug_id.to_string(), group);
+            let resolution = match outcome {
+                Ok(()) => {
+                    self.registered_schemas
+                        .insert(plug_id.clone(), installed.revision);
+                    NoduleResolution::Admitted {
+                        installed,
+                        desired_grants,
+                        desired_operations,
+                    }
+                }
+                Err(error) => {
+                    // `register` is all or nothing, so an earlier revision's schemas are still
+                    // there, and a refused nodule must not keep them.
+                    self.stores.schemas.retire(&plug_id.to_string());
+                    self.registered_schemas.remove(&plug_id);
+                    NoduleResolution::Refused {
+                        plug_id: plug_id.clone(),
+                        version: Some(installed.version),
+                        revision: Some(installed.revision),
+                        enabled: installed.enabled,
+                        config: installed.config,
+                        reason: format!("schema registration refused: {error}"),
+                    }
+                }
+            };
+            resolved.insert(plug_id, resolution);
+        }
     }
 
     /// Ends a nodule's start: stops routing to it, retires its workload and abandons its
@@ -1464,7 +1593,7 @@ impl State {
             return Ok(BTreeMap::new());
         }
         let mut statuses = BTreeMap::new();
-        for request in installed.nodule.operation_requests() {
+        for request in &installed.nodule.requires {
             let pinned = self
                 .locks
                 .get(plug_id)
@@ -1472,7 +1601,8 @@ impl State {
                 .filter(|pin| pin.contract == request.contract);
             let offers = providers.offers(
                 &request.contract,
-                self.stores.dispatch.claimants(&request.contract),
+                self.stores
+                    .native_offers(&request.contract, request.is_operation_call()),
             );
             statuses.insert(
                 request.binding.clone(),

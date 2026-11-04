@@ -111,6 +111,14 @@ pub struct Handler {
     pub extra: Extra,
 }
 
+/// A nodule's datum Lexicons split for the schema registry: see [`Nodule::registrable_datums`].
+#[derive(Debug, Default)]
+pub struct RegistrableDatums<'a> {
+    /// `(nsid, file)` of each record the nodule holds.
+    pub held: Vec<(&'a str, &'a IndexMap<String, Value>)>,
+    pub carried: Vec<&'a IndexMap<String, Value>>,
+}
+
 /// An ordered, replayable revision stream (ADR 027 §7). `selector` and `entry` are Lexicon
 /// references; `source`, when stated, is the implemented operation whose handler writes it, else
 /// the host does.
@@ -316,7 +324,7 @@ impl Nodule {
         })
     }
 
-    /// The required operation requests whose `statuses` (by binding, see
+    /// The required requests, operation or data, whose `statuses` (by binding, see
     /// [`providers::RequestStatus::evaluate`]) say no provider satisfies them: while any exists
     /// the nodule is held at [`inventory::Readiness::ProviderMissing`]. An optional request
     /// never appears.
@@ -324,9 +332,9 @@ impl Nodule {
         &'a self,
         statuses: &'a BTreeMap<String, providers::RequestStatus>,
     ) -> impl Iterator<Item = &'a Request> {
-        self.operation_requests().filter(|request| {
-            // An enabled nodule has a status for every operation request, which is the only
-            // case this is asked in.
+        self.requires.iter().filter(|request| {
+            // An enabled nodule has a status for every request, which is the only case this is
+            // asked in.
             request.necessity.is_required() && statuses[&request.binding].unresolved.is_some()
         })
     }
@@ -353,6 +361,34 @@ impl Nodule {
         self.lexicons
             .iter()
             .filter(|file| operation_kind(file).is_none())
+    }
+
+    /// The datum Lexicons this nodule brings to the node's schema registry, split for
+    /// registration under the envelope's `authority`: the records it holds (under the authority,
+    /// a `main` record) are its to register; every other datum file is carried so the held ones
+    /// can resolve references to vendored copies and shared type libraries, but is never
+    /// registered by this nodule. A vendored copy of a record is the holder's to register, so
+    /// registering it here would shadow the holder's.
+    pub fn registrable_datums(&self, authority: Option<&str>) -> RegistrableDatums<'_> {
+        let mut split = RegistrableDatums::default();
+        for file in self.datum_lexicons() {
+            let id = file
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("admission checked every Lexicon states its NSID");
+            let is_record = file
+                .get("defs")
+                .and_then(|defs| defs.get("main"))
+                .and_then(|main| main.get("type"))
+                .and_then(Value::as_str)
+                == Some("record");
+            if is_record && authority.is_some_and(|authority| Self::authority_owns(authority, id)) {
+                split.held.push((id, file));
+            } else {
+                split.carried.push(file);
+            }
+        }
+        split
     }
 
     /// The gate before hosting, under the NSID `authority` of the envelope that carries the

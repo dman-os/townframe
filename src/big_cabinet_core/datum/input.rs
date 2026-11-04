@@ -83,7 +83,7 @@ impl Bundle<'_> {
                 .ok_or_else(|| invalid("$", "a Lexicon file is an object"))?;
             check_keys(
                 object,
-                &["lexicon", "id", "description", "defs", "$type"],
+                &["lexicon", "id", "revision", "description", "defs", "$type"],
                 "$",
             )?;
             if object.get("lexicon") != Some(&json!(1)) {

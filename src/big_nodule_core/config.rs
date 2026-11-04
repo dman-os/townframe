@@ -1058,20 +1058,24 @@ impl NoduleConfig {
     /// not install a nodule.
     pub fn resolve(&self, cache: &AdmissionCache) -> BTreeMap<PlugId, NoduleResolution> {
         let mut results = self.resolve_slots(cache);
-        let conflicts = authority_conflicts(&results);
-        for (plug_id, error) in conflicts {
-            if let Some(NoduleResolution::Admitted { installed, .. }) = results.remove(&plug_id) {
-                results.insert(
-                    plug_id.clone(),
-                    NoduleResolution::Refused {
-                        plug_id,
-                        version: Some(installed.version),
-                        revision: Some(installed.revision),
-                        enabled: installed.enabled,
-                        config: installed.config,
-                        reason: error.to_string(),
-                    },
-                );
+        // Authority conflicts first: a refused slot holds nothing, so it does not take part in
+        // the Lexicon comparison below.
+        for conflicts in [authority_conflicts, lexicon_conflicts] {
+            for (plug_id, error) in conflicts(&results) {
+                if let Some(NoduleResolution::Admitted { installed, .. }) = results.remove(&plug_id)
+                {
+                    results.insert(
+                        plug_id.clone(),
+                        NoduleResolution::Refused {
+                            plug_id,
+                            version: Some(installed.version),
+                            revision: Some(installed.revision),
+                            enabled: installed.enabled,
+                            config: installed.config,
+                            reason: error.to_string(),
+                        },
+                    );
+                }
             }
         }
         cache.retain(self.entries.keys());
@@ -1246,6 +1250,88 @@ fn authority_conflicts(
             ))
         })
         .collect()
+}
+
+/// The enabled slots whose copy of a Lexicon conflicts with another enabled slot's. Every plug
+/// vendors the Lexicons it uses or provides, so one NSID can arrive as several copies, and the
+/// registry never picks between copies that disagree: it refuses the ones it cannot reconcile.
+///
+/// Two copies agree when they are identical, or when both declare a `revision` and the revisions
+/// differ: within an NSID only compatible growth is allowed (ADR 028 §4), so the lower revision
+/// is a subset of the higher and each consumer's `minRevision` decides which it needs (the
+/// npm/OSGi reading of a version range, with the AT Protocol rule that an NSID names one
+/// evolving definition). Anything else, a different body at one revision or a body with no
+/// revision to order it by, is a conflict. The plug holding the NSID's authority (ADR 028 §5,
+/// implementing is not owning) is the definition: it is never refused for a vendor's copy, and a
+/// vendored copy that differs from it, or that declares a higher revision than it, is refused.
+/// With no holder enabled, every copy in a conflicting pair is refused. The smallest conflicting
+/// `PlugId` is reported so the reason is stable.
+fn lexicon_conflicts(
+    results: &BTreeMap<PlugId, NoduleResolution>,
+) -> BTreeMap<PlugId, InventoryError> {
+    struct Copy<'a> {
+        plug_id: &'a PlugId,
+        held: bool,
+        revision: Option<u32>,
+        file: &'a IndexMap<String, Value>,
+    }
+    let mut copies: BTreeMap<&str, Vec<Copy<'_>>> = BTreeMap::new();
+    for (plug_id, resolution) in results {
+        let NoduleResolution::Admitted { installed, .. } = resolution else {
+            continue;
+        };
+        if !installed.enabled {
+            continue;
+        }
+        let authority = installed.admitted.authority.as_deref();
+        for file in &installed.nodule.lexicons {
+            let nsid = file
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("admission checked every Lexicon states its NSID");
+            copies.entry(nsid).or_default().push(Copy {
+                plug_id,
+                held: authority.is_some_and(|authority| Nodule::authority_owns(authority, nsid)),
+                revision: installed.nodule.lexicon_revision(nsid),
+                file,
+            });
+        }
+    }
+    let mut conflicts: BTreeMap<PlugId, InventoryError> = BTreeMap::new();
+    for (nsid, group) in &copies {
+        for copy in group {
+            // The copy `copy` is refused against: the first (smallest plug id) copy it cannot
+            // coexist with, where the holder's copy is never the one refused.
+            let against = group
+                .iter()
+                .filter(|other| other.plug_id != copy.plug_id)
+                .filter(|other| !(copy.held && !other.held))
+                .find(|other| {
+                    if other.file == copy.file {
+                        return false;
+                    }
+                    let ordered = matches!(
+                        (copy.revision, other.revision),
+                        (Some(mine), Some(theirs)) if mine != theirs
+                    );
+                    if !ordered {
+                        return true;
+                    }
+                    // Ordered copies coexist, but a vendor may not out-revise the holder.
+                    other.held && copy.revision > other.revision
+                });
+            if let Some(other) = against {
+                conflicts.entry(copy.plug_id.clone()).or_insert_with(|| {
+                    InventoryError::LexiconConflict {
+                        id: copy.plug_id.clone(),
+                        nsid: (*nsid).to_owned(),
+                        other: Box::new(other.plug_id.clone()),
+                    }
+                });
+            }
+        }
+    }
+    conflicts
 }
 
 /// The install whose code fills slot `plug_id` under a substitution by `by`, with its admission.

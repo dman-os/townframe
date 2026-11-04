@@ -191,6 +191,16 @@ pub enum InventoryError {
         existing_plug: Box<PlugId>,
         existing_authority: String,
     },
+    #[error(
+        "plug `{id}` carries Lexicon `{nsid}` in a copy that conflicts with the one carried by \
+         `{other}`: copies must be identical unless their declared revisions differ, and a \
+         vendored copy never out-revises the authority's"
+    )]
+    LexiconConflict {
+        id: PlugId,
+        nsid: String,
+        other: Box<PlugId>,
+    },
     #[error("cannot substitute for `{id}`: {reason}")]
     InvalidSubstitution { id: PlugId, reason: String },
     #[error("nodule for plug `{0}` is not installed")]

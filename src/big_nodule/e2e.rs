@@ -95,6 +95,7 @@ mod dispatch;
 mod executor;
 mod init;
 mod resolution;
+mod schemas;
 mod substitution;
 
 const NODULES_PATH: &str = "nodules";
@@ -225,6 +226,7 @@ struct Node {
     docs: DocsRepo,
     drawers: Drawers,
     sql: TestDb,
+    schemas: Arc<SchemaRepo>,
     dispatch: Dispatch,
     dispatch_stop: StopToken,
     /// What the nodule service mints every nodule's dispatch handle from: the operator's grant of
@@ -331,7 +333,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
     .expect("drawer access");
     let (docs, docs_stop) = big_cabinet::doc::prepare(DocsConfig {
         big_repo: Arc::clone(&repo),
-        schema_repo: schemas,
+        schema_repo: Arc::clone(&schemas),
         authority: authority.client.clone(),
         issuer: docs_actor.capability,
         namespace: docs_namespace,
@@ -364,6 +366,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         &dispatch,
         dispatch_authority,
         &sql,
+        &schemas,
         executor.clone(),
     )
     .await
@@ -383,6 +386,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         docs,
         drawers,
         sql,
+        schemas,
         dispatch,
         dispatch_stop,
         dispatch_authority,
@@ -440,6 +444,7 @@ async fn boot_nodules(
     dispatch: &Dispatch,
     dispatch_authority: CapId,
     sql: &TestDb,
+    schemas: &Arc<SchemaRepo>,
     executor: Option<Arc<dyn NoduleExecutor>>,
 ) -> Result<(Nodules, StopToken), NodulesError> {
     let namespace = authority
@@ -460,6 +465,7 @@ async fn boot_nodules(
         dispatch_client: dispatch.client.clone(),
         dispatch_authority,
         executor,
+        schemas: Arc::clone(schemas),
         sql: (**sql).clone(),
     })
     .await
@@ -477,6 +483,7 @@ impl Node {
             &self.dispatch,
             self.dispatch_authority,
             &self.sql,
+            &self.schemas,
             self.executor.clone(),
         )
         .await?;

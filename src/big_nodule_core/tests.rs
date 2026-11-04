@@ -1116,6 +1116,83 @@ mod admission_tests {
         assert!(refused(example_plug!("d")) && refused(example_plug!("e")));
     }
 
+    /// Resolves the enabled `carriers` (plug name, the authority it holds, the copy of the shared
+    /// Lexicon it carries) and returns the names that were refused.
+    fn lexicon_refusals(carriers: &[(&str, Option<&str>, Value)]) -> Vec<String> {
+        let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
+        for (name, authority, copy) in carriers {
+            let mut nodule = Nodule::default();
+            nodule.lexicons.push(file(copy.clone()));
+            if authority.is_none() {
+                nodule
+                    .requires
+                    .push(data_request("thing", "org.example.shared.thing"));
+            }
+            let mut plug = plug_with(&format!("did:key:z6MkTest/{name}"), "1.0.0", nodule);
+            plug.authority = authority.map(str::to_owned);
+            config.admit(&cache, &plug, None).unwrap();
+            config.set_enabled(&cache, &plug.id, true).unwrap();
+        }
+        config
+            .resolve(&cache)
+            .into_iter()
+            .filter(|(_, resolution)| matches!(resolution, NoduleResolution::Refused { .. }))
+            .map(|(plug_id, _)| plug_id.name.to_string())
+            .collect()
+    }
+
+    fn shared_thing(revision: Option<u32>, field: &str) -> Value {
+        let mut lexicon = json!({
+            "lexicon": 1,
+            "id": "org.example.shared.thing",
+            "defs": { "main": {
+                "type": "record",
+                "key": "tid",
+                "record": { "type": "object", "properties": { field: { "type": "string" } } },
+            } },
+        });
+        if let Some(revision) = revision {
+            lexicon["revision"] = revision.into();
+        }
+        lexicon
+    }
+
+    #[test]
+    fn lexicon_copies_agree_when_identical_or_ordered_and_a_vendor_never_out_revises_the_holder() {
+        const HOLDER: Option<&str> = Some("org.example.shared");
+        // Identical copies and an older revision coexist with the holder's.
+        assert!(
+            lexicon_refusals(&[
+                ("holder", HOLDER, shared_thing(Some(2), "a")),
+                ("same", None, shared_thing(Some(2), "a")),
+                ("older", None, shared_thing(Some(1), "b")),
+            ])
+            .is_empty()
+        );
+        // A different body at the holder's revision, a body with no revision to order it by and a
+        // higher revision than the holder's are each refused; the holder never is.
+        assert_eq!(
+            lexicon_refusals(&[
+                ("holder", HOLDER, shared_thing(Some(2), "a")),
+                ("forked", None, shared_thing(Some(2), "b")),
+                ("unordered", None, shared_thing(None, "c")),
+                ("ahead", None, shared_thing(Some(3), "d")),
+            ]),
+            ["ahead", "forked", "unordered"]
+        );
+        // Without a holder, copies that cannot be ordered are all refused, and one at a distinct
+        // revision is not caught up in it.
+        assert_eq!(
+            lexicon_refusals(&[
+                ("p", None, shared_thing(Some(2), "a")),
+                ("q", None, shared_thing(Some(2), "b")),
+                ("r", None, shared_thing(Some(4), "c")),
+            ]),
+            ["p", "q"]
+        );
+    }
+
     #[test]
     fn refuses_missing_contribution_bad_schema_missing_artifact_and_authority_conflicts() {
         let mut config = NoduleConfig::new();

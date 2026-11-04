@@ -103,7 +103,7 @@ impl Node {
     }
 
     /// Admits `plug` and enables it.
-    async fn install(&self, plug: Plug) {
+    pub(super) async fn install(&self, plug: Plug) {
         let plug_id = plug.id.to_string();
         self.admit(self.operator(), plug).await.unwrap();
         self.set_enabled(&plug_id, true).await;

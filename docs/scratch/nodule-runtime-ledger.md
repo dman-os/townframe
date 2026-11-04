@@ -220,6 +220,12 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 - **P5. Enable-time resolution and lockfile.** NSID → provider plug@version + schema revision recorded in the install datum. Enablement is refused until required NSIDs resolve. A provider change is re-consented.
 - **P6. Substitution.** The node-local "X is satisfied by Y" map, the installed-as slot, and `filledBy` in install datums.
 - **P7. Schema registry by NSID.** Fed by catalogued plugs, comparing vendored copies. Cabinet `SchemaRepo` gains live register/retire and reads from it, which closes the gap where nodules can't write their own datums.
+  - **P7 design (implemented; unreviewed).**
+    - **Data model.** Plugs already vendor Lexicons: `Nodule.lexicons` carries both the files under the plug's `authority` (held) and vendored copies of others', each with an optional `revision`. No envelope field was added. The registry is derived from enabled, admitted nodules and is not stored. A datum NSID's *provider* is the plug that holds the record, since vendoring or implementing is not owning (ADR 028 §5, Debian `Provides`). Boot schemas are native providers, lockfile provider `native`.
+    - **Who registers, when.** The nodule state task, during every reconcile (`sync_schemas`). An enabled, admitted nodule registers its held datum records in `SchemaRepo` under its plug id (`register(owner, group)` replaces the owner's set atomically; `retire(owner)` drops it). Disabled, refused, uninstalled or substituted-away plugs are retired. Vendored records and type libraries are carried for ref resolution, never registered by the vendor. A refused registration (tag already known, Lexicon does not compile) refuses the nodule with the repo's reason, like an authority conflict. The boot set cannot be retired or shadowed. This closes the "nodule cannot write its own datums" gap.
+    - **Conflict rule** (`lexicon_conflicts`, runs in `Inventory::resolve` after authority conflicts; the same stable symmetric refusal; precedents are AT Protocol "an NSID names one evolving definition", ADR 028 §4 compatible growth, npm/OSGi ranges). Copies agree when identical, or when both declare a `revision` and the revisions differ (the lower is a compatible subset; `minRevision` decides who needs which). Otherwise they conflict: a different body at one revision, or a body with no revision to order it. The authority holder's copy is the definition: it is never refused for a vendor's copy, and a vendor that differs, or out-revises it, is refused. With no holder, every copy in a conflicting pair is refused. Nothing is ever picked silently.
+    - **Lockfile.** `lexicon_revision` is the holder's declared `revision` for the NSID (None for a native or undeclared one, which `minRevision` does not hold). Data requests go through the same `RequestStatus::evaluate` as operations: `NoProvider`, `RevisionTooOld`, `ProviderChanged` (re-consent) and the lock all apply, and a required data request with no provider holds the nodule at `ProviderMissing`.
+    - **Not done.** Narrowing drawer/data grants by data requests; the SchemaRepo does not backfill reference edges for a datum registered after index backfill ran (new reference-declaring tags are indexed from new changes only); `set_enabled` does not fail on a Lexicon conflict as it does on an authority conflict (the record is Refused instead); the plug registry (catalogue) is not a feed, only enabled installs are; bad datum Lexicons surface at enable-time as `Refused`, not at `admit`.
 - After P2 and P4: send the Clay agent the concrete type and section names.
 
 ### D3. Durability via the wflow service (deferred)
@@ -250,7 +256,13 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs: P1–P6 done; P7 (schema registry) in flight.
+- big_plugs: P1–P7 done. P7 follow-ups:
+  - drawer/data grant narrowing by data requests;
+  - reference-edge backfill for schemas registered after index backfill;
+  - `set_enabled` should fail early on a Lexicon conflict (today: Refused in the resolution);
+  - a bad datum Lexicon is refused at enable, not at `admit`;
+  - only enabled installs feed the schema registry, not the `big_plugs` catalogue (deliberate: catalogued is not consented).
+- keyhive Arc cycle (group <-> DelegationStore): worked around by detach on stop; not fixing in the fork because upstream is rewriting keyhive. Check the rewrite for the same cycle when migrating.
 - Temp-dir leak: the disk-filling part is fixed (`998b73d9`). The operator stopped the residual work (2026-11-04): `big_repo`'s own suite still leaves about 16 dirs of ~1 MB per run. The unverified WIP is parked in `git stash` ("wip: big_repo residual temp-dir leak"): test stops, `TempDir` ownership in the stress fixture, `SqliteRuntime::drain_workers`. Low priority.
 ## Done
 

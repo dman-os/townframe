@@ -7,8 +7,11 @@
 //! from the same snapshot that decides which nodules are enabled and no provider can appear or
 //! vanish without every dependent being re-evaluated in that same pass.
 //!
-//! Only operation requests (`access: None`) are resolved here. Data and schema requests resolve
-//! against the schema registry (plan item P7); until then they are neither resolved nor blocking.
+//! Every request resolves the same way. A data request (one with `access`) names a datum NSID,
+//! and its provider is the enabled plug that holds the datum (declares the record under its
+//! authority); a copy another plug vendors is not an offer, because implementing or vendoring is
+//! not owning (ADR 028 §5). The datums the node itself registers at boot are native offers,
+//! like routes registered straight into dispatch.
 
 use crate::config::NoduleResolution;
 use big_plugs_core::PlugId;
@@ -139,7 +142,7 @@ pub struct ProviderIndex {
 }
 
 impl ProviderIndex {
-    /// Indexes what each enabled, admitted nodule implements.
+    /// Indexes what each enabled, admitted nodule implements and the datum records it holds.
     ///
     /// A slot filled by a substitution (see [`crate::inventory::InstalledNodule::filled_by`]) is
     /// offered under the slot's plug id with the filler's version and Lexicons. Dependents name
@@ -166,6 +169,18 @@ impl ProviderIndex {
                         lexicon_revision: installed.nodule.lexicon_revision(nsid),
                     });
             }
+            let authority = installed.admitted.authority.as_deref();
+            for (nsid, _) in installed.nodule.registrable_datums(authority).held {
+                offers
+                    .entry(nsid.to_owned())
+                    .or_default()
+                    .push(LockedProvider {
+                        contract: nsid.to_owned(),
+                        provider: plug_id.to_string(),
+                        version: Some(installed.version.clone()),
+                        lexicon_revision: installed.nodule.lexicon_revision(nsid),
+                    });
+            }
         }
         Self {
             offers,
@@ -173,8 +188,9 @@ impl ProviderIndex {
         }
     }
 
-    /// Everything on offer for `nsid`: the enabled nodules that implement it plus `native`, the
-    /// provider ids dispatch's routing table holds for it, from which the nodule service's
+    /// Everything on offer for `nsid`: the enabled nodules that implement or hold it plus
+    /// `native`, the provider ids the node itself serves it under (dispatch's routing table for
+    /// an operation, the boot schemas for a datum), from which the nodule service's
     /// own registrations are dropped.
     pub fn offers(
         &self,

@@ -81,10 +81,13 @@ pub impl big_cabinet::schema::SchemaHandle::fn lexicon (& self) -> & Value
 pub impl big_cabinet::schema::SchemaHandle::fn sidecar (& self) -> Option < Bundle < '_ > >
 pub impl big_cabinet::schema::SchemaRegistration::fn new (datum_tag : impl Into < String > , lexicon : Value) -> Self
 pub impl big_cabinet::schema::SchemaRegistrationGroup < 'a >::fn new (sidecar : Option < Bundle < 'a > > , registrations : impl IntoIterator < Item = SchemaRegistration > , carried_lexicons : Vec < Value > ,) -> Self
+pub impl big_cabinet::schema::SchemaRepo::fn is_boot_schema (& self , datum_tag : & str) -> bool
 pub impl big_cabinet::schema::SchemaRepo::fn open < 'a > (groups : impl IntoIterator < Item = SchemaRegistrationGroup < 'a > > ,) -> Result < Self , SchemaRepoError >
 pub impl big_cabinet::schema::SchemaRepo::fn reference_tags (& self) -> Vec < String >
+pub impl big_cabinet::schema::SchemaRepo::fn register (& self , owner : & str , group : SchemaRegistrationGroup < '_ > ,) -> Result < () , SchemaRepoError >
 pub impl big_cabinet::schema::SchemaRepo::fn require_for_write (& self , datum_tag : & str) -> Result < SchemaHandle , SchemaRepoError >
 pub impl big_cabinet::schema::SchemaRepo::fn resolve_for_read (& self , datum_tag : & str) -> Option < SchemaHandle >
+pub impl big_cabinet::schema::SchemaRepo::fn retire (& self , owner : & str)
 pub impl big_cabinet::schema::SchemaRepo::fn with_groups < 'a > (& self , groups : impl IntoIterator < Item = SchemaRegistrationGroup < 'a > > ,) -> Result < Self , SchemaRepoError >
 pub mod big_cabinet::authority
 pub mod big_cabinet::capability

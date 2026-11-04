@@ -26,6 +26,7 @@ mod e2e;
 use big_cabinet::DatumStoreHandle;
 use big_cabinet::SchemaRegistration;
 use big_cabinet::SchemaRegistrationGroup;
+use big_cabinet::SchemaRepo;
 use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
 use big_cabinet::capability::Invocation;
@@ -106,7 +107,8 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
 /// the dispatch router it registers each admitted nodule's implemented operations in, the dispatch
 /// client and operator-granted dispatch handle it mints every nodule's own handle from (the
 /// ceiling of what any nodule may be granted to invoke), the optional executor that hosts their
-/// handlers, and its database. Without an executor a handler is never
+/// handlers, the node's schema repo it registers each enabled nodule's datum Lexicons in, and its
+/// database. Without an executor a handler is never
 /// ready: its operations are registered not ready with the nodule's own readiness.
 pub struct NodulesConfig {
     pub authority: Client<AuthorityProtocol>,
@@ -121,6 +123,7 @@ pub struct NodulesConfig {
     pub dispatch_client: Client<DispatchProtocol>,
     pub dispatch_authority: CapId,
     pub executor: Option<Arc<dyn executor::NoduleExecutor>>,
+    pub schemas: Arc<SchemaRepo>,
     pub sql: Database,
 }
 
@@ -503,6 +506,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         dispatch_client: config.dispatch_client,
         dispatch_authority: config.dispatch_authority,
         executor: config.executor,
+        schemas: config.schemas,
     })
     .await
     {

@@ -138,7 +138,7 @@ impl BigNode {
             stop.stages.push(Stage::Service(policy_stop));
             let (docs, docs_stop) = big_cabinet::doc::prepare(DocsConfig {
                 big_repo: Arc::clone(&repo),
-                schema_repo: schemas,
+                schema_repo: Arc::clone(&schemas),
                 authority: authority.client.clone(),
                 issuer: docs_actor.capability,
                 namespace: docs_namespace,
@@ -204,6 +204,7 @@ impl BigNode {
                 &dispatch,
                 nodule_dispatch_authority,
                 Arc::clone(&wasm) as Arc<dyn NoduleExecutor>,
+                schemas,
                 config.sql,
             )
             .await?;
@@ -348,6 +349,7 @@ async fn boot_nodules(
     dispatch: &Dispatch,
     dispatch_authority: CapId,
     executor: Arc<dyn NoduleExecutor>,
+    schemas: Arc<SchemaRepo>,
     sql: Database,
 ) -> Res<(Nodules, service_utils_rs::StopToken)> {
     let config_drawer = drawers.local().config_id.clone();
@@ -365,6 +367,7 @@ async fn boot_nodules(
         dispatch_client: dispatch.client.clone(),
         dispatch_authority,
         executor: Some(executor),
+        schemas,
         sql,
     })
     .await?)
