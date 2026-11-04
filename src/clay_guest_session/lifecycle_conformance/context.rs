@@ -140,13 +140,15 @@ fn cbor_text(text: &str) -> Vec<u8> {
     bytes
 }
 
-/// A running `context` fixture beside a lazy host-side provider micro: the fixture's `feed`
-/// collection holds one row, `key`, attaching the provider's publication `publication` (of
-/// `contract`) as a lazy reference, and the supervisor serves its demand. `recipient` is the
-/// host's handle for calling the fixture's publications.
+/// A running `context` fixture beside a lazy host-side provider micro. The fixture's `feed`
+/// collection starts with one row, `key`, attaching the provider's publication `publication` (of
+/// `contract`) as a lazy reference, and the supervisor serves its demand; [`Self::seed`] adds
+/// others. `recipient` is the host's handle for calling the fixture's publications.
 struct ContextRig<E: Incarnations> {
     host: Host,
     registrations: BytesRegistrations,
+    /// The host's writer of `feed`, for rows seeded while the guest runs.
+    seeder: crate::collections::RegistrationWriter,
     world: Rc<ContextWorld>,
     provider: MicroId,
     supervisor: Rc<Supervisor<CapabilityPublication>>,
@@ -159,17 +161,11 @@ struct ContextRig<E: Incarnations> {
 }
 
 impl<E: Incarnations> ContextRig<E> {
-    async fn boot(
-        engine: E,
-        prefix: [u64; 2],
-        key: &str,
-        publication: &str,
-        contract: Nsid,
-    ) -> Self {
+    async fn boot(engine: E, prefix: [u64; 2]) -> Self {
         let host = Host::new();
         let registrations = bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), prefix);
         let provider = MicroId::new("provider");
-        CollectionSession::new(
+        let seeder = CollectionSession::new(
             host.clone(),
             host.start("seeder"),
             crate::collections::CollectionLimits::default(),
@@ -179,19 +175,6 @@ impl<E: Incarnations> ContextRig<E> {
             micro: MicroId::new("seeder"),
             writer: writer_of("seeder"),
         })
-        .unwrap()
-        .put_value(
-            cbor_text(key),
-            clay_collection::WriteBasis::Concurrent,
-            crate::collections::CollectionValue {
-                body: cbor_text(key),
-                attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
-                    micro: provider.clone(),
-                    publication: publication.to_owned(),
-                    contract,
-                })],
-            },
-        )
         .unwrap();
         let world = Rc::new(ContextWorld::default());
         let supervisor = Rc::new(Supervisor::<CapabilityPublication>::new(
@@ -232,6 +215,7 @@ impl<E: Incarnations> ContextRig<E> {
         Self {
             host,
             registrations,
+            seeder,
             world,
             provider,
             supervisor,
@@ -242,6 +226,33 @@ impl<E: Incarnations> ContextRig<E> {
             recipient_instance,
             recipient,
         }
+    }
+
+    /// Write the `feed` row `key`, attaching the provider's `publication` (of `contract`) as a
+    /// lazy reference.
+    fn seed_endpoint(&self, key: &str, publication: &str, contract: Nsid) {
+        self.seed(
+            key,
+            RowAttachment::Endpoint(PublicationEndpoint {
+                micro: self.provider.clone(),
+                publication: publication.to_owned(),
+                contract,
+            }),
+        );
+    }
+
+    /// Write the `feed` row `key`, carrying `attachment`, as the host.
+    fn seed(&self, key: &str, attachment: RowAttachment) {
+        self.seeder
+            .put_value(
+                cbor_text(key),
+                clay_collection::WriteBasis::Concurrent,
+                crate::collections::CollectionValue {
+                    body: cbor_text(key),
+                    attachments: vec![attachment],
+                },
+            )
+            .unwrap();
     }
 
     /// Close the fixture in order: guest, then the provider and host.
@@ -326,6 +337,10 @@ impl ContextWorld {
                     "release".to_owned(),
                     call("org.example.clay.test.context.release"),
                 ),
+                (
+                    "probe".to_owned(),
+                    call("org.example.clay.test.context.probe"),
+                ),
                 ("detail".to_owned(), presentation()),
                 ("slot".to_owned(), presentation()),
             ]),
@@ -387,7 +402,8 @@ impl Root for PresenterRoot {
 ///
 /// A wake the host failed to deliver would leave the call parked, so the scenario would hang.
 pub async fn context_follows_a_provider<E: Incarnations>(engine: E) {
-    let rig = ContextRig::boot(engine, [97, 98], "view", "view", presentation_component()).await;
+    let rig = ContextRig::boot(engine, [97, 98]).await;
+    rig.seed_endpoint("view", "view", presentation_component());
     let (provider, supervisor) = (&rig.provider, &rig.supervisor);
     let registrations = &rig.registrations;
     supervisor.disable(provider).await.unwrap();
@@ -443,14 +459,8 @@ pub async fn context_follows_a_provider<E: Incarnations>(engine: E) {
 /// and release per call, is started once and still live after `hold` returned; `release` drops
 /// the binding, which the provider observes as going idle.
 pub async fn context_retains_a_call<E: Incarnations>(engine: E) {
-    let rig = ContextRig::boot(
-        engine,
-        [99, 100],
-        "echo",
-        "echo",
-        Nsid::literal(ECHO_CONTRACT),
-    )
-    .await;
+    let rig = ContextRig::boot(engine, [99, 100]).await;
+    rig.seed_endpoint("echo", "echo", Nsid::literal(ECHO_CONTRACT));
     let (provider, supervisor) = (&rig.provider, &rig.supervisor);
     let call = |name: &str, request: Vec<u8>| {
         let reference = rig
@@ -487,6 +497,47 @@ pub async fn context_retains_a_call<E: Incarnations>(engine: E) {
         .await
         .unwrap();
     assert_eq!(rig.world.activations.get(), 1);
+    rig.finish().await;
+}
+
+/// ADR 031 validation 9 through a guest: a bound (non-lazy) reference the guest holds, a row
+/// attaching a host-side provider's published `echo`, reads `Live` while the provider's
+/// incarnation runs and answers a call and a `retain_call`; once the provider idle-closed,
+/// `status()` reads `Revoked` through the WIT and a call and a `retain_call` through it fail as
+/// `Revoked`, and the provider is still idle, one activation in all: a reference to a closed
+/// incarnation never starts a new one.
+pub async fn context_sees_a_closed_provider_revoked<E: Incarnations>(engine: E) {
+    let rig = ContextRig::boot(engine, [101, 102]).await;
+    let (provider, supervisor) = (&rig.provider, &rig.supervisor);
+    let lease = supervisor
+        .acquire(provider, "echo")
+        .await
+        .expect("the provider publishes `echo`");
+    rig.seed("bound", RowAttachment::Bound((*lease).clone()));
+    let probe = rig
+        .recipient
+        .mint(&E::publications(&rig.runtime).remove("probe").unwrap())
+        .unwrap();
+    let probed = async || {
+        let response = probe.call(cbor_text("bound")).await.unwrap();
+        ciborium::from_reader::<Vec<String>, _>(response.as_slice()).unwrap()
+    };
+    assert_eq!(probed().await, ["Live", "Ok(())", "Ok(())"]);
+
+    drop(lease);
+    supervisor
+        .changes()
+        .wait_for(|_| supervisor.state(provider) == MicroState::Idle)
+        .await
+        .unwrap();
+    assert_eq!(
+        probed().await,
+        ["Revoked", "Err(Revoked)", "Err(Revoked)"],
+        "the guest's reference to the closed incarnation is revoked"
+    );
+    assert_eq!(supervisor.state(provider), MicroState::Idle);
+    assert_eq!(rig.world.activations.get(), 1);
+    drop(probe);
     rig.finish().await;
 }
 

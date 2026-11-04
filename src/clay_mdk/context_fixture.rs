@@ -15,7 +15,9 @@
 //! `clay_mdk` wasm tests mount `slot`.
 //!
 //! Its calls `hold` and `release` retain a row's call and drop that binding
-//! (`lifecycle_conformance::context_retains_a_call`).
+//! (`lifecycle_conformance::context_retains_a_call`). Its call `probe` reports what the guest sees
+//! through a row's attachment: the reference's status, then what a call and a `retain_call`
+//! through it answer (`lifecycle_conformance::context_sees_a_closed_provider_revoked`).
 use clay_mdk::Access;
 use clay_mdk::CallBinding;
 use clay_mdk::Capability;
@@ -68,6 +70,11 @@ fn manifest() -> MicroManifest {
                 name: "release".into(),
                 kind: PublicationKind::Call,
                 contract: Some(Nsid::literal("org.example.clay.test.context.release")),
+            },
+            PublicationDeclaration {
+                name: "probe".into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal("org.example.clay.test.context.probe")),
             },
             PublicationDeclaration {
                 name: "detail".into(),
@@ -197,6 +204,27 @@ async fn activate(context: Context) -> Result<(), Error> {
                 }
                 *held.borrow_mut() = Some(binding);
                 Ok(replies)
+            }
+        }
+    })?;
+    // `probe` reports the status of the row `key`'s attachment, then what a call and a
+    // `retain_call` through it answer, each as the result's text: a reference the guest holds
+    // must say `Revoked` and fail as `Revoked` once its provider incarnation closed, and neither
+    // may start anything.
+    context.publish_call("probe", {
+        let collection = collection.clone();
+        move |key: String| {
+            let mut collection = collection.clone();
+            async move {
+                let reference = attachment_of(&mut collection, &key).await?;
+                let status = format!("{:?}", reference.status());
+                let call = reference.call::<String, String>(&"probe".to_owned()).await;
+                let retained = reference.retain_call().await.map(drop);
+                Ok(vec![
+                    status,
+                    format!("{:?}", call.as_ref().map(drop)),
+                    format!("{retained:?}"),
+                ])
             }
         }
     })?;
