@@ -109,6 +109,9 @@ struct Tasks {
     /// Wakers of the tasks to rouse at close, and of whoever waits for them to be gone.
     wakers: RefCell<Vec<Waker>>,
     idle: RefCell<Option<Waker>>,
+    /// Wakes the component-model task whose executor adopts newly spawned futures: see
+    /// [`Tasks::start_doorbell`].
+    doorbell: RefCell<Option<Waker>>,
 }
 
 /// Stops one task before the incarnation closes: the view that spawned it was dropped.
@@ -185,6 +188,29 @@ impl Tasks {
             tasks: Rc::clone(self),
             cancel,
         });
+        if let Some(doorbell) = &*self.doorbell.borrow() {
+            doorbell.wake_by_ref();
+        }
+    }
+
+    /// `wit_bindgen::spawn_local` only queues the future on a global list, and the executor of
+    /// whichever component-model task is polled next adopts it. Spawning from `initialize` or a
+    /// call handler is polled right away, but a spawn from a synchronous entry (`mount`,
+    /// `dispatch`, a document event: a view creating a slot while it renders) queues it with
+    /// nothing to poll it, so it would wait for an unrelated wake (a feed's long-poll expiring,
+    /// half a minute later). The doorbell is a task parked in `initialize`'s scope, which
+    /// outlives those entries, whose waker each spawn rings: the executor is polled, adopts the
+    /// queue and polls the new task. Started once, from `initialize`; ends with the other tasks
+    /// when the incarnation closes.
+    fn start_doorbell(self: &Rc<Self>) {
+        let tasks = Rc::clone(self);
+        self.spawn(
+            Box::pin(std::future::poll_fn(move |cx| {
+                *tasks.doorbell.borrow_mut() = Some(cx.waker().clone());
+                Poll::<()>::Pending
+            })),
+            None,
+        );
     }
 
     /// Stop every task and resolve once each has dropped its future (and so its host
@@ -327,6 +353,7 @@ impl Runtime {
             dirty: Cell::new(false),
             tasks: Rc::default(),
         });
+        runtime.tasks.start_doorbell();
         runtime.mirror.set_notifier({
             let runtime = Rc::downgrade(&runtime);
             move || {
