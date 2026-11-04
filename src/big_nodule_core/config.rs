@@ -16,6 +16,7 @@
 //! never delete them, and resolves each nodule's desired state independently for the reconciler.
 
 use crate::Nodule;
+use crate::dispatch::DispatchScope;
 use crate::inventory::InstalledNodule;
 use crate::inventory::InventoryError;
 use crate::inventory::admit_plug_nodule;
@@ -119,7 +120,8 @@ impl NoduleSettings {
 }
 
 /// `org.example.daybook.nodule.grants/<plugId>`: desired local drawer access bindings for an
-/// installed nodule, keyed by portable [`DrawerId`].
+/// installed nodule, keyed by portable [`DrawerId`], and the operations it may invoke through
+/// dispatch.
 #[macros::datum(authority = Nodule::ID, name = "grants")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,19 +130,54 @@ pub struct NoduleGrants {
     #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, String>"))]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub drawers: BTreeMap<DrawerId, EntryAccess>,
+    /// The operations the nodule's own actor may invoke through dispatch, as the scope of the
+    /// capability the nodule service mints for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<OperationGrants>,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
-impl NoduleGrants {
-    pub fn from_drawers(drawers: BTreeMap<DrawerId, DrawerAccess>) -> Self {
+/// The operations a nodule may invoke through dispatch: the wire form of a [`DispatchScope`], as
+/// arrays because datums carry no sets. Authority prefixes match whole NSID segments, exactly as
+/// in any other scope.
+#[macros::datum]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationGrants {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorities: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl From<OperationGrants> for DispatchScope {
+    fn from(grants: OperationGrants) -> Self {
         Self {
-            drawers: drawers
-                .into_iter()
-                .map(|(drawer_id, access)| (drawer_id, EntryAccess::from(access)))
-                .collect(),
+            operations: grants.operations.into_iter().collect(),
+            authorities: grants.authorities.into_iter().collect(),
+        }
+    }
+}
+
+impl From<DispatchScope> for OperationGrants {
+    fn from(scope: DispatchScope) -> Self {
+        Self {
+            operations: scope.operations.into_iter().collect(),
+            authorities: scope.authorities.into_iter().collect(),
             extra: Default::default(),
         }
+    }
+}
+
+impl NoduleGrants {
+    /// Whether the datum grants nothing and carries nothing: it is then deleted rather than
+    /// stored.
+    fn is_empty(&self) -> bool {
+        self.drawers.is_empty() && self.operations.is_none() && self.extra.is_empty()
     }
 }
 
@@ -293,6 +330,7 @@ pub enum NoduleResolution {
     Admitted {
         installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
+        desired_operations: DispatchScope,
     },
     Refused {
         plug_id: PlugId,
@@ -614,29 +652,30 @@ fn artifact_slots(
         .collect()
 }
 
-fn apply_grants_slot(
-    slot: &mut DatumSlot<NoduleGrants>,
-    drawers: BTreeMap<DrawerId, DrawerAccess>,
-) {
-    let extra = match slot {
-        DatumSlot::Accepted { value, .. } => value.extra.clone(),
-        _ => Extra::default(),
+/// Rewrites one part of the grants datum, keeping what `edit` does not touch (the other grant
+/// kind and unknown members). An invalid or absent datum starts from empty, as a rewrite of it
+/// always has.
+fn apply_grants_slot(slot: &mut DatumSlot<NoduleGrants>, edit: impl FnOnce(&mut NoduleGrants)) {
+    let mut grants = match slot {
+        DatumSlot::Accepted { value, .. } => value.clone(),
+        _ => NoduleGrants::default(),
     };
-    let mapped: BTreeMap<DrawerId, EntryAccess> = drawers
+    edit(&mut grants);
+    *slot = if grants.is_empty() {
+        DatumSlot::Absent
+    } else {
+        DatumSlot::Accepted {
+            value: grants,
+            raw: None,
+        }
+    };
+}
+
+fn drawer_entries(drawers: BTreeMap<DrawerId, DrawerAccess>) -> BTreeMap<DrawerId, EntryAccess> {
+    drawers
         .into_iter()
         .map(|(drawer_id, access)| (drawer_id, EntryAccess::from(access)))
-        .collect();
-    if mapped.is_empty() && extra.is_empty() {
-        *slot = DatumSlot::Absent;
-    } else {
-        *slot = DatumSlot::Accepted {
-            value: NoduleGrants {
-                drawers: mapped,
-                extra,
-            },
-            raw: None,
-        };
-    }
+        .collect()
 }
 
 impl NoduleConfig {
@@ -766,7 +805,9 @@ impl NoduleConfig {
             raw: None,
         };
         if let Some(drawers) = drawers {
-            apply_grants_slot(&mut entry.grants, drawers);
+            apply_grants_slot(&mut entry.grants, |grants| {
+                grants.drawers = drawer_entries(drawers);
+            });
         }
         entry.artifacts = artifact_slots(&entry.artifacts, &artifacts);
 
@@ -853,7 +894,44 @@ impl NoduleConfig {
         let (plug, nodule, admitted, artifacts, enabled, (config, configured)) =
             self.validate_installed(plug_id)?;
         let entry = self.entries.get_mut(plug_id).expect("verified installed");
-        apply_grants_slot(&mut entry.grants, drawers);
+        apply_grants_slot(&mut entry.grants, |grants| {
+            grants.drawers = drawer_entries(drawers);
+        });
+        Ok(InstalledNodule::new(
+            plug.id.clone(),
+            plug.version.clone(),
+            plug.revision(),
+            nodule,
+            admitted,
+            artifacts,
+            enabled,
+            config,
+            configured,
+        ))
+    }
+
+    /// Replaces the operations the nodule may invoke through dispatch, keeping its drawer grants.
+    pub fn set_operation_grants(
+        &mut self,
+        plug_id: &PlugId,
+        operations: DispatchScope,
+    ) -> Result<InstalledNodule, InventoryError> {
+        let (plug, nodule, admitted, artifacts, enabled, (config, configured)) =
+            self.validate_installed(plug_id)?;
+        let entry = self.entries.get_mut(plug_id).expect("verified installed");
+        apply_grants_slot(&mut entry.grants, |grants| {
+            // An empty scope is stored as no value at all; a rewrite keeps the unknown members of
+            // the previous value while there is one.
+            let extra = grants
+                .operations
+                .take()
+                .map(|previous| previous.extra)
+                .unwrap_or_default();
+            grants.operations = (operations != DispatchScope::default()).then(|| OperationGrants {
+                extra,
+                ..OperationGrants::from(operations)
+            });
+        });
         Ok(InstalledNodule::new(
             plug.id.clone(),
             plug.version.clone(),
@@ -1163,6 +1241,7 @@ fn resolve_entry(
     };
 
     let mut desired_grants = BTreeMap::new();
+    let mut desired_operations = DispatchScope::default();
     match &entry.grants {
         DatumSlot::Absent => {}
         DatumSlot::Invalid { reason, .. } => {
@@ -1188,6 +1267,7 @@ fn resolve_entry(
                 };
                 desired_grants.insert(drawer_id.clone(), known);
             }
+            desired_operations = value.operations.clone().map(Into::into).unwrap_or_default();
         }
     }
 
@@ -1204,5 +1284,6 @@ fn resolve_entry(
             configured,
         ),
         desired_grants,
+        desired_operations,
     })
 }

@@ -4,11 +4,10 @@ use crate::sqlite_rs_alias::SqlResult;
 
 pub const MIGRATION_TABLE: &str = "_big_nodule_migrations";
 
-pub const MIGRATIONS: &[Migration<'static>] = &[Migration {
-    version: 1,
-    name: "001_nodules.sql",
-    sql: include_str!("migrations/001_nodules.sql"),
-}];
+pub const MIGRATIONS: &[Migration<'static>] = &[
+    Migration { version: 1, name: "001_nodules.sql", sql: include_str!("migrations/001_nodules.sql") },
+    Migration { version: 2, name: "002_applied_operations.sql", sql: include_str!("migrations/002_applied_operations.sql") },
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActorsRow {
@@ -19,11 +18,7 @@ pub struct ActorsRow {
 impl crate::sqlite_rs_alias::FromRow for ActorsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
         row.require_width(3)?;
-        Ok(ActorsRow {
-            plug_id: row.get::<String>("plug_id")?,
-            nodule_id: row.get::<String>("nodule_id")?,
-            actor_uuid: row.get::<String>("actor_uuid")?,
-        })
+        Ok(ActorsRow { plug_id: row.get::<String>("plug_id")?, nodule_id: row.get::<String>("nodule_id")?, actor_uuid: row.get::<String>("actor_uuid")? })
     }
 }
 
@@ -43,73 +38,56 @@ pub struct AppliedGrantsRow {
 impl crate::sqlite_rs_alias::FromRow for AppliedGrantsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
         row.require_width(4)?;
-        Ok(AppliedGrantsRow {
-            plug_id: row.get::<String>("plug_id")?,
-            drawer_id: row.get::<String>("drawer_id")?,
-            access: row.get::<String>("access")?,
-            capability_id: row.get::<Vec<u8>>("capability_id")?,
-        })
+        Ok(AppliedGrantsRow { plug_id: row.get::<String>("plug_id")?, drawer_id: row.get::<String>("drawer_id")?, access: row.get::<String>("access")?, capability_id: row.get::<Vec<u8>>("capability_id")? })
     }
 }
 
 pub const APPLIED_GRANTS_SQL: &str = include_str!("queries/applied_grants.sql");
-pub async fn applied_grants(
-    db: &impl crate::sqlite_rs_alias::QueryExecutor,
-) -> SqlResult<Vec<AppliedGrantsRow>> {
+pub async fn applied_grants(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<AppliedGrantsRow>> {
     let set = db.query(APPLIED_GRANTS_SQL, &[]).await?;
     set.all()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppliedOperationsRow {
+    pub plug_id: String,
+    pub scope: String,
+    pub capability_id: Vec<u8>,
+}
+impl crate::sqlite_rs_alias::FromRow for AppliedOperationsRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(3)?;
+        Ok(AppliedOperationsRow { plug_id: row.get::<String>("plug_id")?, scope: row.get::<String>("scope")?, capability_id: row.get::<Vec<u8>>("capability_id")? })
+    }
+}
+
+pub const APPLIED_OPERATIONS_SQL: &str = include_str!("queries/applied_operations.sql");
+pub async fn applied_operations(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<AppliedOperationsRow>> {
+    let set = db.query(APPLIED_OPERATIONS_SQL, &[]).await?;
+    set.all()
+}
+
 pub const DELETE_APPLIED_GRANT_SQL: &str = include_str!("queries/delete_applied_grant.sql");
-pub async fn delete_applied_grant(
-    db: &impl crate::sqlite_rs_alias::Executor,
-    plug_id: String,
-    drawer_id: String,
-) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(
-        DELETE_APPLIED_GRANT_SQL,
-        &[
-            crate::sqlite_rs_alias::IntoValue::into_value(plug_id),
-            crate::sqlite_rs_alias::IntoValue::into_value(drawer_id),
-        ],
-    )
-    .await
+pub async fn delete_applied_grant(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, drawer_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_APPLIED_GRANT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await
+}
+
+pub const DELETE_APPLIED_OPERATIONS_SQL: &str = include_str!("queries/delete_applied_operations.sql");
+pub async fn delete_applied_operations(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_APPLIED_OPERATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id)]).await
 }
 
 pub const UPSERT_ACTOR_SQL: &str = include_str!("queries/upsert_actor.sql");
-pub async fn upsert_actor(
-    db: &impl crate::sqlite_rs_alias::Executor,
-    plug_id: String,
-    nodule_id: String,
-    actor_uuid: String,
-) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(
-        UPSERT_ACTOR_SQL,
-        &[
-            crate::sqlite_rs_alias::IntoValue::into_value(plug_id),
-            crate::sqlite_rs_alias::IntoValue::into_value(nodule_id),
-            crate::sqlite_rs_alias::IntoValue::into_value(actor_uuid),
-        ],
-    )
-    .await
+pub async fn upsert_actor(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, nodule_id: String, actor_uuid: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_ACTOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(nodule_id), crate::sqlite_rs_alias::IntoValue::into_value(actor_uuid)]).await
 }
 
 pub const UPSERT_APPLIED_GRANT_SQL: &str = include_str!("queries/upsert_applied_grant.sql");
-pub async fn upsert_applied_grant(
-    db: &impl crate::sqlite_rs_alias::Executor,
-    plug_id: String,
-    drawer_id: String,
-    access: String,
-    capability_id: Vec<u8>,
-) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(
-        UPSERT_APPLIED_GRANT_SQL,
-        &[
-            crate::sqlite_rs_alias::IntoValue::into_value(plug_id),
-            crate::sqlite_rs_alias::IntoValue::into_value(drawer_id),
-            crate::sqlite_rs_alias::IntoValue::into_value(access),
-            crate::sqlite_rs_alias::IntoValue::into_value(capability_id),
-        ],
-    )
-    .await
+pub async fn upsert_applied_grant(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, drawer_id: String, access: String, capability_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_APPLIED_GRANT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(drawer_id), crate::sqlite_rs_alias::IntoValue::into_value(access), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
+}
+
+pub const UPSERT_APPLIED_OPERATIONS_SQL: &str = include_str!("queries/upsert_applied_operations.sql");
+pub async fn upsert_applied_operations(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, scope: String, capability_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_APPLIED_OPERATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(scope), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
 }

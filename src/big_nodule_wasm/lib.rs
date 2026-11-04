@@ -7,10 +7,13 @@
 //!
 //! - the ingress still binds a loopback listener (the host requires one) but its [`Router`]
 //!   refuses every incoming request and declines every local-egress match;
-//! - the workloads get no egress at all in this slice. Nodule network facilities are not
-//!   granted yet and the `dispatch.local` egress (a nodule calling another nodule's operation)
-//!   is slice 2c, which replaces [`Sealed::allow_outgoing_request`] and the egress handler for
-//!   that one authority.
+//! - the only egress a workload has is `dispatch.local` (a nodule calling an operation through
+//!   dispatch), served by [`Egress`]; [`Sealed::allow_outgoing_request`] refuses every other
+//!   authority, because nodule network facilities are not granted.
+//!
+//! A nodule learns its own dispatch capability from the `x-nodule-capability` header of every
+//! request it serves and presents it as `authorization` on its outgoing calls. Identity is not
+//! the guest's to claim: [`Egress`] signs each call with the actor of the workload it came from.
 //!
 //! Handler bytes come from the in-process [`BlobService`]. A handler whose bytes are not in the
 //! local store yet is `NotReady(ArtifactsUnavailable)`, and the blob service's availability
@@ -24,6 +27,8 @@
 use async_trait::async_trait;
 use big_blobs::BlobService;
 use big_blobs_core::BlobId;
+use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::CapId;
 use big_nodule::dispatch::Caller;
 use big_nodule::dispatch::Provider;
 use big_nodule::dispatch::ProviderError;
@@ -31,7 +36,10 @@ use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
 use big_nodule::executor::Reensure;
+use big_nodule_core::dispatch::DispatchError;
+use big_nodule_core::dispatch::DispatchProtocol;
 use big_nodule_core::dispatch::InvocationContext;
+use big_nodule_core::dispatch::Invoke;
 use big_nodule_core::inventory::Readiness;
 use big_plugs_core::PlugId;
 use big_sync_core::revisioned_store::RevisionRead;
@@ -43,6 +51,9 @@ use http_body_util::Full;
 use http_body_util::Limited;
 use serde_json::Value;
 use serde_json::json;
+use service_utils_rs::Client;
+use service_utils_rs::ClientError;
+use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -88,6 +99,13 @@ const MAX_HANDLER_OCTETS: u64 = 64 * 1024 * 1024;
 /// is capped at 4 MiB; anything bigger belongs in a blob that the operation returns an id for.
 const MAX_RESPONSE_OCTETS: usize = 4 * 1024 * 1024;
 
+/// The authority a guest addresses dispatch at. It resolves nowhere: [`Egress`] answers it.
+const DISPATCH_AUTHORITY: &str = "dispatch.local";
+
+/// The header every delivered request carries the nodule's own dispatch capability in, as
+/// `Capability <id>`. Absent when the nodule is granted no operations.
+const CAPABILITY_HEADER: &str = "x-nodule-capability";
+
 /// The status a transport failure (workload gone, body failed, oversize response) is reported
 /// under, as an HTTP gateway would.
 const BAD_GATEWAY: u16 = 502;
@@ -95,12 +113,14 @@ const BAD_GATEWAY: u16 = 502;
 /// Hosts nodule handlers as wash workloads. Built by [`boot`].
 pub struct WasmExecutor {
     host: Arc<Host>,
-    ingress: Arc<Ingress<Sealed, NoEgress>>,
+    ingress: Arc<Ingress<Sealed, Egress>>,
     blobs: Arc<BlobService>,
     /// What `ensure` started, by plug. Never locked across an await: `ensure` and `retire` are
     /// only called from the nodule service's state actor, one at a time, so the check, start
     /// and insert in `ensure` cannot interleave with another call for the same plug.
     hosted: Mutex<BTreeMap<PlugId, Running>>,
+    /// The signer of each running workload's outgoing calls, shared with [`Egress`].
+    signers: Signers,
     /// The plugs waiting on a blob that was not in the store, to be woken on its arrival.
     arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<PlugId, Reensure>>>>,
 }
@@ -111,13 +131,21 @@ struct Running {
     provider: Arc<WasmProvider>,
 }
 
-/// Starts the wash host and the feed that wakes handlers whose bytes arrive late. The returned
-/// token stops the feed and then the host, and must outlive (be stopped after) the nodule
-/// service that calls the executor.
-pub async fn boot(blobs: Arc<BlobService>) -> Res<(Arc<WasmExecutor>, StopToken)> {
+/// Starts the wash host and the feed that wakes handlers whose bytes arrive late. Guests' calls
+/// to `dispatch.local` are made through `dispatch`. The returned token stops the feed and then
+/// the host, and must be stopped after the nodule service that calls the executor and before
+/// the dispatch service (and the authority behind it), which in-flight guest calls still use.
+pub async fn boot(
+    blobs: Arc<BlobService>,
+    dispatch: Client<DispatchProtocol>,
+) -> Res<(Arc<WasmExecutor>, StopToken)> {
+    let signers = Signers::default();
     let ingress = Arc::new(
         Ingress::builder(Sealed, "127.0.0.1:0".parse().expect("literal address"))
-            .outgoing_handler(NoEgress)
+            .outgoing_handler(Egress {
+                dispatch,
+                signers: Arc::clone(&signers),
+            })
             .build()
             .await
             .to_eyre()?,
@@ -186,6 +214,7 @@ pub async fn boot(blobs: Arc<BlobService>) -> Res<(Arc<WasmExecutor>, StopToken)
             ingress,
             blobs,
             hosted: Mutex::default(),
+            signers,
             arrivals,
         }),
         stop,
@@ -201,6 +230,9 @@ impl WasmExecutor {
             .contains_key(plug_id)
     }
 
+    /// The signer is forgotten only once the workload is stopped, so its in-flight requests keep
+    /// their identity while it drains; [`Egress`] answers any call that still outlives it as a
+    /// gone upstream.
     async fn stop_workload(&self, running: &Running) {
         self.host
             .workload_stop(WorkloadStopRequest {
@@ -208,6 +240,10 @@ impl WasmExecutor {
             })
             .await
             .expect("stopping a workload this executor started");
+        self.signers
+            .lock()
+            .expect("signers lock")
+            .remove(&running.workload_id);
     }
 }
 
@@ -226,6 +262,9 @@ impl NoduleExecutor for WasmExecutor {
                 Some(running)
                     if running.workload_id == workload_id && running.handler == handler =>
                 {
+                    // The grants may have changed since the last ensure: the handler is told
+                    // the capability that is live now, on its next request.
+                    running.provider.set_capability(spec.capability);
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
                 // Another revision (or handler) of the plug: the reconciler retires first, but
@@ -270,6 +309,11 @@ impl NoduleExecutor for WasmExecutor {
         // `pool_size: 0` is wash's `Ephemeral` instance policy: a fresh store and instance per
         // request, no warm pool, which is the one-instance-per-dispatch rule. The default
         // `LocalResources` allow no outgoing hosts.
+        // Registered before the workload can make a call: [`Egress`] finds its signer by id.
+        self.signers
+            .lock()
+            .expect("signers lock")
+            .insert(workload_id.clone(), spec.actor.capability);
         let started = self
             .host
             .workload_start(WorkloadStartRequest {
@@ -294,6 +338,10 @@ impl NoduleExecutor for WasmExecutor {
             // The bytes are what the envelope declared but are not a component this host can
             // run (not a component, or imports it does not provide): a property of the
             // artifact, reported as readiness rather than crashing the node.
+            self.signers
+                .lock()
+                .expect("signers lock")
+                .remove(&workload_id);
             tracing::warn!(plug = %spec.plug_id, revision = %spec.revision, "handler workload failed to start: {error:#}");
             return Hosted::NotReady(Readiness::ExecutorUnavailable);
         }
@@ -305,6 +353,7 @@ impl NoduleExecutor for WasmExecutor {
         let provider = Arc::new(WasmProvider {
             ingress: Arc::clone(&self.ingress),
             workload_id: workload_id.clone(),
+            capability: Mutex::new(spec.capability),
         });
         self.hosted.lock().expect("hosted lock").insert(
             spec.plug_id.clone(),
@@ -332,8 +381,17 @@ impl NoduleExecutor for WasmExecutor {
 
 /// Calls one running handler workload over in-process `wasi:http`.
 struct WasmProvider {
-    ingress: Arc<Ingress<Sealed, NoEgress>>,
+    ingress: Arc<Ingress<Sealed, Egress>>,
     workload_id: String,
+    /// The nodule's own dispatch capability, delivered in [`CAPABILITY_HEADER`]. Replaced in
+    /// place when the nodule's grants change.
+    capability: Mutex<Option<CapId>>,
+}
+
+impl WasmProvider {
+    fn set_capability(&self, capability: Option<CapId>) {
+        *self.capability.lock().expect("capability lock") = capability;
+    }
 }
 
 /// The wire form of a capability id, which is how the guest sees it in `authorization`.
@@ -367,6 +425,9 @@ impl Provider for WasmProvider {
                 hyper::header::AUTHORIZATION,
                 capability_header(caller.authorization.authority),
             );
+        if let Some(capability) = *self.capability.lock().expect("capability lock") {
+            request = request.header(CAPABILITY_HEADER, capability_header(capability));
+        }
         if let Some(key) = &context.idempotency_key {
             request = request.header("idempotency-key", key);
         }
@@ -439,16 +500,24 @@ impl Router for Sealed {
         Ok(())
     }
 
-    /// Slice 2c opens the `dispatch.local` authority here (and in [`NoEgress`]); nothing else
-    /// is ever allowed, because nodule network facilities are not granted.
+    /// Only `dispatch.local` is allowed, and [`Egress`] answers it without any connection.
+    /// Nothing else ever is, because nodule network facilities are not granted.
     fn allow_outgoing_request(
         &self,
         _workload_id: &str,
-        _request: &hyper::Request<WasiBody>,
+        request: &hyper::Request<WasiBody>,
         _options: Option<RequestOptions>,
         _allowed_hosts: &[AllowedHost],
     ) -> wash_runtime::wasmtime::anyhow::Result<()> {
-        wash_runtime::wasmtime::anyhow::bail!("nodule handlers have no network egress")
+        if request
+            .uri()
+            .authority()
+            .map(|authority| authority.as_str())
+            == Some(DISPATCH_AUTHORITY)
+        {
+            return Ok(());
+        }
+        wash_runtime::wasmtime::anyhow::bail!("nodule handlers may only call {DISPATCH_AUTHORITY}")
     }
 
     fn route_incoming_request(
@@ -459,18 +528,217 @@ impl Router for Sealed {
     }
 }
 
-/// The egress handler behind [`Sealed::allow_outgoing_request`]: it should never be reached, and
-/// refuses if it is.
-struct NoEgress;
+/// The signer (the nodule actor's own capability) of each running workload's outgoing calls,
+/// by workload id. The id is chosen by the host and is not guest-controllable, which is what
+/// makes it the caller identity of a nested call.
+type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
 
-impl OutgoingHandler for NoEgress {
+/// The `dispatch.local` egress: the only outgoing request a workload can make.
+///
+/// `POST /xrpc/<nsid>` with `authorization: Capability <id>` is invoked through dispatch with
+/// the calling workload's nodule actor as the signer. Dispatch then admits the call as it admits
+/// any other: the capability must be live, permit the NSID and be bound to that actor, so a
+/// guest that presents another nodule's capability id is denied there. Nothing else the guest
+/// says (headers, body) is trusted as identity. `idempotency-key` and
+/// `x-request-deadline-unix-ms` pass through as the call's [`InvocationContext`].
+#[derive(Clone)]
+struct Egress {
+    dispatch: Client<DispatchProtocol>,
+    signers: Signers,
+}
+
+impl Egress {
+    /// Reads the guest's request and runs it through dispatch. A malformed request is answered
+    /// like an XRPC server would, not refused as a transport failure.
+    async fn call(
+        &self,
+        workload_id: &str,
+        request: hyper::Request<WasiBody>,
+    ) -> (hyper::StatusCode, Value) {
+        let bad = |status: hyper::StatusCode, error: &str, message: &str| {
+            (status, json!({ "error": error, "message": message }))
+        };
+        let (parts, body) = request.into_parts();
+        let operation = match parts.uri.path().strip_prefix("/xrpc/") {
+            Some(operation) if parts.method == hyper::Method::POST => operation.to_owned(),
+            _ => {
+                return bad(
+                    hyper::StatusCode::NOT_FOUND,
+                    "NotFound",
+                    "dispatch.local serves POST /xrpc/<nsid> only",
+                );
+            }
+        };
+        let header = |name: &str| {
+            parts
+                .headers
+                .get(name)
+                .map(|value| value.to_str().map(str::to_owned))
+        };
+        let Some(Ok(authorization)) = header(hyper::header::AUTHORIZATION.as_str()) else {
+            return bad(
+                hyper::StatusCode::UNAUTHORIZED,
+                "AuthRequired",
+                "an `authorization: Capability <id>` header is required",
+            );
+        };
+        let Some(authority) = authorization
+            .strip_prefix("Capability ")
+            .and_then(|id| serde_json::from_value::<CapId>(Value::String(id.to_owned())).ok())
+        else {
+            return bad(
+                hyper::StatusCode::UNAUTHORIZED,
+                "AuthRequired",
+                "the authorization header is not `Capability <id>`",
+            );
+        };
+        let deadline_unix_ms = match header("x-request-deadline-unix-ms").transpose() {
+            Ok(value) => match value.map(|value| value.parse::<u64>()).transpose() {
+                Ok(deadline) => deadline,
+                Err(_) => {
+                    return bad(
+                        hyper::StatusCode::BAD_REQUEST,
+                        "InvalidRequest",
+                        "the deadline header is not a millisecond timestamp",
+                    );
+                }
+            },
+            Err(_) => {
+                return bad(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "the deadline header is not text",
+                );
+            }
+        };
+        let Ok(idempotency_key) = header("idempotency-key").transpose() else {
+            return bad(
+                hyper::StatusCode::BAD_REQUEST,
+                "InvalidRequest",
+                "the idempotency-key header is not text",
+            );
+        };
+        let Ok(body) = Limited::new(body, MAX_RESPONSE_OCTETS).collect().await else {
+            return bad(
+                hyper::StatusCode::PAYLOAD_TOO_LARGE,
+                "InvalidRequest",
+                "the request body failed or is too large",
+            );
+        };
+        let body = body.to_bytes();
+        let input = if body.is_empty() {
+            Value::Null
+        } else if let Ok(input) = serde_json::from_slice(&body) {
+            input
+        } else {
+            return bad(
+                hyper::StatusCode::BAD_REQUEST,
+                "InvalidRequest",
+                "the request body is not JSON",
+            );
+        };
+
+        // A workload that has been stopped (its nodule disabled, upgraded or retired) while one
+        // of its requests was still running has no identity left to call with. That is a
+        // lifecycle race, not a broken invariant, so it is answered the way a proxy answers a
+        // call from a drained upstream rather than crashing the node.
+        let Some(signer) = self
+            .signers
+            .lock()
+            .expect("signers lock")
+            .get(workload_id)
+            .copied()
+        else {
+            return bad(
+                hyper::StatusCode::SERVICE_UNAVAILABLE,
+                "WorkloadStopped",
+                "the calling handler has been stopped",
+            );
+        };
+        let result = self
+            .dispatch
+            .call(
+                RequestContext::root(),
+                Invoke {
+                    authorization: Authorization { authority, signer },
+                    operation,
+                    input,
+                    context: InvocationContext {
+                        deadline_unix_ms,
+                        idempotency_key,
+                    },
+                },
+            )
+            .await;
+        match result {
+            Ok(output) => (hyper::StatusCode::OK, output.output),
+            Err(ClientError::Operation(error)) => dispatch_error_response(error),
+            Err(ClientError::Transport { message, .. }) => {
+                panic!("in-process dispatch transport failed: {message}")
+            }
+        }
+    }
+}
+
+/// The HTTP form of a dispatch failure, which is the inverse of [`WasmProvider::call`]'s mapping
+/// of a handler's response onto dispatch's errors: denied 403, unknown operation 404, not ready
+/// 503, invalid input 400 as an XRPC `{ error, message }`, a provider's own error as it came, a
+/// deadline 504. The failures of the services behind dispatch are gateway errors.
+fn dispatch_error_response(error: DispatchError) -> (hyper::StatusCode, Value) {
+    use hyper::StatusCode;
+    let named = |status: StatusCode, name: &str| {
+        (
+            status,
+            json!({ "error": name, "message": error.to_string() }),
+        )
+    };
+    match &error {
+        DispatchError::Denied => named(StatusCode::FORBIDDEN, "Denied"),
+        DispatchError::UnknownOperation => named(StatusCode::NOT_FOUND, "UnknownOperation"),
+        DispatchError::NotReady { .. } => named(StatusCode::SERVICE_UNAVAILABLE, "NotReady"),
+        DispatchError::InvalidInput(message) => (
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "InvalidRequest", "message": message }),
+        ),
+        DispatchError::DeadlineExceeded => named(StatusCode::GATEWAY_TIMEOUT, "DeadlineExceeded"),
+        DispatchError::Provider { status, body } => (
+            StatusCode::from_u16(*status).expect("a provider answered a valid status"),
+            body.clone(),
+        ),
+        DispatchError::AuthorityUnavailable(_) => {
+            named(StatusCode::SERVICE_UNAVAILABLE, "AuthorityUnavailable")
+        }
+        DispatchError::Context(_) | DispatchError::Authority(_) => {
+            named(StatusCode::BAD_GATEWAY, "BadGateway")
+        }
+    }
+}
+
+impl OutgoingHandler for Egress {
     fn send_request(
         &self,
-        _workload_id: &str,
-        _request: hyper::Request<WasiBody>,
+        workload_id: &str,
+        request: hyper::Request<WasiBody>,
         _options: Option<RequestOptions>,
         _fut: RequestIoFuture,
     ) -> SendFuture {
-        Box::new(async { Err(wasmtime_wasi_http::Error::ConnectionRefused) })
+        let egress = self.clone();
+        let workload_id = workload_id.to_owned();
+        Box::new(async move {
+            let (status, body) = egress.call(&workload_id, request).await;
+            let body = Full::new(Bytes::from(
+                serde_json::to_vec(&body).expect("a JSON value serializes"),
+            ))
+            .map_err(|never| match never {})
+            .boxed_unsync();
+            let response = hyper::Response::builder()
+                .status(status)
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .expect("a well-formed response");
+            // Nothing is uploaded out of band: the request body was read in full above.
+            let io: RequestIoFuture = Box::new(async { Ok(()) });
+            Ok((response, io))
+        })
     }
 }

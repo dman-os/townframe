@@ -87,6 +87,10 @@ fn config<'a>(
         secrets,
         index_concurrency: NonZeroUsize::new(2).unwrap(),
         blob_storage: big_blobs::Storage::Memory,
+        nodule_operations: big_nodule_core::dispatch::DispatchScope {
+            authorities: ["org.example".to_owned()].into(),
+            ..Default::default()
+        },
     }
 }
 

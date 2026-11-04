@@ -1625,6 +1625,7 @@ dependencies = [
  "async-trait",
  "big_blobs",
  "big_blobs_core",
+ "big_cabinet_core",
  "big_nodule",
  "big_nodule_core",
  "big_plugs_core",

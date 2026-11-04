@@ -4,6 +4,7 @@ dependency_reason = "The Wasm executor hosts nodule handler components in one wa
 allowed_dependencies = [
     "big_blobs",
     "big_blobs_core",
+    "big_cabinet_core",
     "big_nodule",
     "big_nodule_core",
     "big_plugs_core",

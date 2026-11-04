@@ -37,6 +37,10 @@ struct BoundScope<S> {
 pub struct Invocation<S> {
     pub authority: DomainAuthority<S>,
     pub signer: Actor,
+    /// The actor a scoped handle was minted for: its bound signer, whichever signer is presenting
+    /// it now. `None` for an identity, which is nobody's handle. A domain whose handles are
+    /// personal (dispatch) refuses a presenter that is not this actor.
+    pub bound_signer: Option<Uuid7>,
     pub rights: Rights,
     pub originating_actor: Option<Uuid7>,
 }
@@ -113,6 +117,7 @@ impl DomainCapabilities {
             .await?;
         Ok(Invocation {
             authority: DomainAuthority::Scoped(bound.scope),
+            bound_signer: Some(signer.actor_id),
             signer,
             rights: cap.rights,
             originating_actor: bound.originating_actor,
@@ -158,6 +163,7 @@ impl DomainCapabilities {
             Some(actor) => Ok(Invocation {
                 authority: DomainAuthority::Identity(actor.actor_id),
                 originating_actor: Some(actor.actor_id),
+                bound_signer: None,
                 signer,
                 rights: resolved.capability.rights,
             }),

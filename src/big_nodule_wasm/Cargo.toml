@@ -13,6 +13,7 @@ path = "lib.rs"
 # internal
 big_blobs = { path = "../big_blobs" }
 big_blobs_core = { path = "../big_blobs_core" }
+big_cabinet_core = { path = "../big_cabinet_core" }
 big_nodule.workspace = true
 big_nodule_core = { workspace = true, features = ["schemars"] }
 big_plugs_core.workspace = true

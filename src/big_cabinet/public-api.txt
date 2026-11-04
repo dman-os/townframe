@@ -99,7 +99,7 @@ pub mod big_cabinet::schema
 pub struct big_cabinet::authority::Authority  { service: Arc < AuthorityService >, host: Arc < Host < AuthorityHandler > >, client: Client < AuthorityProtocol >, root: CapId, node_issuer: MultibaseKey }
 pub struct big_cabinet::authority::AuthorityService  {  }
 pub struct big_cabinet::capability::DomainCapabilities  {  }
-pub struct big_cabinet::capability::Invocation< S >  { authority: DomainAuthority < S >, signer: Actor, rights: Rights, originating_actor: Option < Uuid7 > }
+pub struct big_cabinet::capability::Invocation< S >  { authority: DomainAuthority < S >, signer: Actor, bound_signer: Option < Uuid7 >, rights: Rights, originating_actor: Option < Uuid7 > }
 pub struct big_cabinet::datum_store::DatumStoreHandle< S >  {  }
 pub struct big_cabinet::doc::DocsConfig  { big_repo: SharedBigRepo, schema_repo: Arc < SchemaRepo >, authority: Client < AuthorityProtocol >, issuer: CapId, namespace: Namespace, node_issuer: MultibaseKey, access: Arc < dyn DocAccess >, sql: Database, datum_set: Option < Arc < DatumSetStore > >, datum_ref: Option < Arc < DatumRefStore > > }
 pub struct big_cabinet::doc::DocsRepo  { host: Arc < Host < DocsHandler > >, client: Client < DocsProtocol > }

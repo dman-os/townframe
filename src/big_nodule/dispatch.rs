@@ -125,8 +125,33 @@ impl DispatchService {
     }
 
     async fn invoke(&self, context: &RequestContext, params: Invoke) -> Res<InvokeOutput> {
+        // The tighter of the caller's request budget and the invocation's own deadline. Like
+        // gRPC, which answers `DEADLINE_EXCEEDED` for a call whose deadline has already passed
+        // without running the handler, an elapsed budget fails here, before admission, lookup
+        // and readiness: no admission work is spent on it and the answer reveals nothing about
+        // which operations exist.
+        let budget = [
+            context.remaining_budget(),
+            params.context.deadline_unix_ms.map(until),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        if budget == Some(Duration::ZERO) {
+            return Err(DispatchError::DeadlineExceeded);
+        }
         let verified = self.caller(context, params.authorization).await?;
         let scope = self.scope_of(&verified)?;
+        // A handle is its holder's: it was minted bound to one actor and only that actor may
+        // invoke through it. Presenting another actor's handle under one's own signer is the
+        // forgery this refuses, and it is what lets the Wasm egress hand a guest nothing but the
+        // handle id: the signer is always the nodule's own actor there.
+        if verified
+            .bound_signer
+            .is_some_and(|holder| holder != verified.signer.actor_id)
+        {
+            return Err(DispatchError::Denied);
+        }
         // Denied is settled before the lookup so an unauthorized caller cannot probe which
         // operations exist.
         if let Some(scope) = scope
@@ -148,16 +173,6 @@ impl DispatchService {
                 });
             }
         };
-        // The tighter of the caller's request budget and the invocation's own deadline. An
-        // elapsed budget still polls the provider once before expiring, which tokio's timeout
-        // guarantees.
-        let budget = [
-            context.remaining_budget(),
-            params.context.deadline_unix_ms.map(until),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
         let call = kind
             .provider()
             .call(&caller, &params.operation, &params.context, params.input);

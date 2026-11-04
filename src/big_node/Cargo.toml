@@ -17,6 +17,7 @@ big_cabinet_core = { path = "../big_cabinet_core" }
 big_nodule.workspace = true
 big_nodule_wasm.workspace = true
 big_repo.workspace = true
+big_nodule_core.workspace = true
 big_sync.workspace = true
 big_sync_core.workspace = true
 secrets_rs.workspace = true
@@ -26,7 +27,6 @@ utils_rs.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
-big_nodule_core.workspace = true
 big_plugs_core.workspace = true
 iroh.workspace = true
 iroh-blobs.workspace = true

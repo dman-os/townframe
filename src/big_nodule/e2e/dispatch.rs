@@ -31,6 +31,7 @@ use big_plugs_core::Contribution;
 use big_plugs_core::Digest;
 use big_plugs_core::NoduleContribution;
 use big_plugs_core::Plug;
+use futures::FutureExt;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::ClientError;
@@ -332,13 +333,14 @@ async fn a_minted_scope_invokes_only_what_it_covers_and_only_narrows() {
 }
 
 #[tokio::test]
-async fn a_call_past_its_deadline_is_cut_off_while_a_released_one_completes() {
+async fn an_elapsed_deadline_fails_before_the_provider_and_a_running_call_is_cut_off() {
     let node = super::node().await;
     let echo = node.register_echo();
     let operator = node.operator();
 
-    // The deadline is already behind us; tokio polls the provider once before the timer, so the
-    // provider is entered and parked on a gate only this test opens.
+    // The deadline is already behind us: the call fails without entering the provider. A
+    // provider that was entered would have signalled `started`, so an unconsumed permit here
+    // means it was.
     let elapsed = InvocationContext {
         deadline_unix_ms: Some(1),
         ..Default::default()
@@ -348,8 +350,30 @@ async fn a_call_past_its_deadline_is_cut_off_while_a_released_one_completes() {
             .await,
         Err(DispatchError::DeadlineExceeded)
     );
+    assert!(
+        echo.started.notified().now_or_never().is_none(),
+        "the provider was entered for a call whose deadline had passed"
+    );
+
+    // A deadline still ahead lets the call in; the provider parks on its gate until the deadline
+    // passes, which cuts it off. The gate is never released.
+    let soon = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 1_000;
+    let future = InvocationContext {
+        deadline_unix_ms: Some(soon),
+        ..Default::default()
+    };
+    assert_eq!(
+        node.invoke_with(operator, ECHO, json!({ "wait": true }), future)
+            .await,
+        Err(DispatchError::DeadlineExceeded)
+    );
     echo.started.notified().await;
 
+    // A call without a deadline completes once released.
     echo.release.notify_one();
     assert!(
         node.invoke(operator, ECHO, json!({ "wait": true }))

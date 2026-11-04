@@ -4,9 +4,11 @@
 # exposed_external_crates: []
 
 impl DatumStore for big_nodule_core::config::NoduleConfig
+impl From < DispatchScope > for big_nodule_core::config::OperationGrants
 impl From < GrammarError > for big_nodule_core::NoduleError
 impl From < InventoryError > for big_nodule_core::config::StoreError
 impl From < InventoryError > for big_nodule_core::protocol::NodulesError
+impl From < OperationGrants > for big_nodule_core::config::DispatchScope
 pub big_nodule_core::config::fn artifact_key (plug_id : & PlugId , artifact : & str) -> DatumKey
 pub big_nodule_core::config::fn config_universe () -> big_cabinet_core :: datum :: Universe
 pub big_nodule_core::config::fn grants_key (plug_id : & PlugId) -> DatumKey
@@ -19,7 +21,7 @@ pub enum big_nodule_core::StateKind { Sqlite, Kv, # [datum (other)] Unknown (Str
 pub enum big_nodule_core::StoreMode { Frontier, Log, # [datum (other)] Unknown (String) }
 pub enum big_nodule_core::config::Admission { Admitted { version : Version , nodule : Nodule , admitted : crate :: Admitted , artifacts : BTreeMap < String , (big_plugs_core :: Artifact , crate :: inventory :: ArtifactState) > , }, # [doc = " The envelope cannot be installed; `version` and `nodule_id` are best-effort reads of the"] # [doc = " raw envelope for the refusal record."] Refused { version : Option < Version > , nodule_id : Option < String > , reason : String , } }
 pub enum big_nodule_core::config::DatumSlot< T > { # [default] Absent, Accepted { value : T , raw : Option < Value > , }, Invalid { raw : Option < Value > , reason : String , } }
-pub enum big_nodule_core::config::NoduleResolution { Admitted { installed : InstalledNodule , desired_grants : BTreeMap < DrawerId , DrawerAccess > , }, Refused { plug_id : PlugId , version : Option < Version > , revision : Option < Revision > , nodule_id : Option < String > , enabled : bool , config : Option < IndexMap < String , Value > > , reason : String , } }
+pub enum big_nodule_core::config::NoduleResolution { Admitted { installed : InstalledNodule , desired_grants : BTreeMap < DrawerId , DrawerAccess > , desired_operations : DispatchScope , }, Refused { plug_id : PlugId , version : Option < Version > , revision : Option < Revision > , nodule_id : Option < String > , enabled : bool , config : Option < IndexMap < String , Value > > , reason : String , } }
 pub enum big_nodule_core::dispatch::DispatchError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("no provider implements the operation")] UnknownOperation, # [doc = " Retryable: the provider exists but is not serving yet."] # [error ("the operation's provider is not ready: {reason:?}")] NotReady { reason : NotReadyReason }, # [error ("the provider refused the input: {0}")] InvalidInput (String), # [error ("the call exceeded its deadline")] DeadlineExceeded, # [doc = " The provider's own XRPC error, passed through untouched."] # [error ("the provider failed with status {status}")] Provider { status : u16 , body : Value } }
 pub enum big_nodule_core::dispatch::NotReadyReason { Provider (Readiness), Ambiguous }
 pub enum big_nodule_core::inventory::ArtifactState { Unavailable, Available }
@@ -46,9 +48,9 @@ pub impl big_nodule_core::config::NoduleConfig::fn remove_carried_key (& mut sel
 pub impl big_nodule_core::config::NoduleConfig::fn resolve (& self , cache : & AdmissionCache) -> BTreeMap < PlugId , NoduleResolution >
 pub impl big_nodule_core::config::NoduleConfig::fn set_drawer_grants (& mut self , plug_id : & PlugId , drawers : BTreeMap < DrawerId , DrawerAccess > ,) -> Result < InstalledNodule , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn set_enabled (& mut self , plug_id : & PlugId , enabled : bool ,) -> Result < InstalledNodule , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn set_operation_grants (& mut self , plug_id : & PlugId , operations : DispatchScope ,) -> Result < InstalledNodule , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn uninstall (& mut self , plug_id : & PlugId) -> Result < () , InventoryError >
 pub impl big_nodule_core::config::NoduleEntry::fn is_empty (& self) -> bool
-pub impl big_nodule_core::config::NoduleGrants::fn from_drawers (drawers : BTreeMap < DrawerId , DrawerAccess >) -> Self
 pub impl big_nodule_core::config::NoduleInstall::fn decode_plug (& self) -> Result < Plug , String >
 pub impl big_nodule_core::config::NoduleInstall::fn from_plug (plug : & Plug , enabled : bool) -> Self
 pub impl big_nodule_core::config::NoduleSettings::fn new (values : IndexMap < String , Value >) -> Self
@@ -72,9 +74,10 @@ pub struct big_nodule_core::RevisionedStore  { key: String, selector: String, en
 pub struct big_nodule_core::config::AdmissionCache  {  }
 pub struct big_nodule_core::config::NoduleConfig  {  }
 pub struct big_nodule_core::config::NoduleEntry  { install: DatumSlot < NoduleInstall >, settings: DatumSlot < NoduleSettings >, grants: DatumSlot < NoduleGrants >, artifacts: BTreeMap < String , DatumSlot < Blob > > }
-pub struct big_nodule_core::config::NoduleGrants  { drawers: BTreeMap < DrawerId , EntryAccess >, extra: Extra }
+pub struct big_nodule_core::config::NoduleGrants  { drawers: BTreeMap < DrawerId , EntryAccess >, operations: Option < OperationGrants >, extra: Extra }
 pub struct big_nodule_core::config::NoduleInstall  { envelope: IndexMap < String , Value >, revision: Revision, enabled: bool, extra: Extra }
 pub struct big_nodule_core::config::NoduleSettings  { values: IndexMap < String , Value >, extra: Extra }
+pub struct big_nodule_core::config::OperationGrants  { operations: Vec < String >, authorities: Vec < String >, extra: Extra }
 pub struct big_nodule_core::dispatch::DispatchScope  { operations: BTreeSet < String >, authorities: BTreeSet < String > }
 pub struct big_nodule_core::dispatch::InvocationContext  { deadline_unix_ms: Option < u64 >, idempotency_key: Option < String > }
 pub struct big_nodule_core::dispatch::Invoke  { authorization: Authorization, operation: String, input: Value, context: InvocationContext }
@@ -88,8 +91,10 @@ pub struct big_nodule_core::protocol::ListNodules  { authorization: Authorizatio
 pub struct big_nodule_core::protocol::MintNoduleCapability  { authorization: Authorization, scope: NoduleScope, rights: Rights }
 pub struct big_nodule_core::protocol::NoduleActor  { actor_id: Uuid7, url: String, public_key: MultibaseKey }
 pub struct big_nodule_core::protocol::NoduleGrantStatus  { desired: DrawerAccess, granted: bool, error: Option < String > }
-pub struct big_nodule_core::protocol::NoduleRecord  { plug_id: PlugId, version: Option < Version >, revision: Option < Revision >, nodule_id: Option < String >, actor: Option < NoduleActor >, enabled: bool, readiness: Readiness, config: Option < IndexMap < String , Value > >, artifacts: BTreeMap < String , ArtifactState >, drawers: BTreeMap < DrawerId , NoduleGrantStatus >, observed_heads: Vec < ChangeHash >, applied_heads: Option < Vec < ChangeHash > >, error: Option < String > }
+pub struct big_nodule_core::protocol::NoduleOperationGrantStatus  { desired: DispatchScope, granted: bool, error: Option < String > }
+pub struct big_nodule_core::protocol::NoduleRecord  { plug_id: PlugId, version: Option < Version >, revision: Option < Revision >, nodule_id: Option < String >, actor: Option < NoduleActor >, enabled: bool, readiness: Readiness, config: Option < IndexMap < String , Value > >, artifacts: BTreeMap < String , ArtifactState >, drawers: BTreeMap < DrawerId , NoduleGrantStatus >, operations: Option < NoduleOperationGrantStatus >, observed_heads: Vec < ChangeHash >, applied_heads: Option < Vec < ChangeHash > >, error: Option < String > }
 pub struct big_nodule_core::protocol::NoduleScope  { admit: bool, plugs: BTreeSet < PlugId > }
 pub struct big_nodule_core::protocol::SetNoduleDrawerGrants  { authorization: Authorization, plug_id: PlugId, drawers: BTreeMap < DrawerId , DrawerAccess > }
 pub struct big_nodule_core::protocol::SetNoduleEnabled  { authorization: Authorization, plug_id: PlugId, enabled: bool }
+pub struct big_nodule_core::protocol::SetNoduleOperationGrants  { authorization: Authorization, plug_id: PlugId, operations: DispatchScope }
 pub struct big_nodule_core::protocol::UninstallNodule  { authorization: Authorization, plug_id: PlugId }

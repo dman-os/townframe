@@ -12,11 +12,11 @@ pub mod big_nodule::dispatch
 pub mod big_nodule::executor
 pub struct big_nodule::NoduleService  {  }
 pub struct big_nodule::Nodules  { host: Arc < Host < NodulesHandler > >, client: Client < NodulesProtocol > }
-pub struct big_nodule::NodulesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, drawers: Client < DrawersProtocol >, config_drawer: DrawerId, actor: Actor, actor_path: String, namespace: Namespace, operator: Uuid7, dispatch: Arc < dispatch :: Router >, executor: Option < Arc < dyn executor :: NoduleExecutor > >, sql: Database }
+pub struct big_nodule::NodulesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, drawers: Client < DrawersProtocol >, config_drawer: DrawerId, actor: Actor, actor_path: String, namespace: Namespace, operator: Uuid7, dispatch: Arc < dispatch :: Router >, dispatch_client: Client < DispatchProtocol >, dispatch_authority: CapId, executor: Option < Arc < dyn executor :: NoduleExecutor > >, sql: Database }
 pub struct big_nodule::dispatch::Dispatch  { host: Arc < Host < DispatchHandler > >, client: Client < DispatchProtocol >, router: Arc < Router > }
 pub struct big_nodule::dispatch::DispatchConfig  { authority: Client < AuthorityProtocol >, namespace: Namespace, operator: Uuid7 }
 pub struct big_nodule::dispatch::DispatchService  {  }
-pub struct big_nodule::executor::HandlerSpec  { plug_id: PlugId, revision: Revision, nodule_id: String, handler: Artifact, actor_id: Uuid7, operations: BTreeMap < String , Option < OperationKind > >, reensure: Reensure }
+pub struct big_nodule::executor::HandlerSpec  { plug_id: PlugId, revision: Revision, nodule_id: String, handler: Artifact, actor: Actor, capability: Option < CapId >, operations: BTreeMap < String , Option < OperationKind > >, reensure: Reensure }
 pub struct big_nodule::executor::Reensure  {  }
 pub trait big_nodule::executor::NoduleExecutor { fn kind (& self) -> & 'static str; async fn ensure (& self , spec : & HandlerSpec) -> Hosted; async fn retire (& self , plug_id : & PlugId) }
 pub type big_nodule::NodulesHandler = Arc < NoduleService >

@@ -40,12 +40,17 @@ use big_nodule_core::Nodule;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
+use big_nodule_core::dispatch::DispatchError;
+use big_nodule_core::dispatch::DispatchProtocol;
+use big_nodule_core::dispatch::DispatchScope;
+use big_nodule_core::dispatch::MintDispatchCapability;
 use big_nodule_core::inventory::ArtifactState;
 use big_nodule_core::inventory::InstalledNodule;
 use big_nodule_core::inventory::InventoryError;
 use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::NoduleActor;
 use big_nodule_core::protocol::NoduleGrantStatus;
+use big_nodule_core::protocol::NoduleOperationGrantStatus;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NoduleScope;
 use big_nodule_core::protocol::NodulesError;
@@ -61,6 +66,7 @@ use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
 use sqlite_rs::Database;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
@@ -79,6 +85,9 @@ pub(crate) struct Stores {
     pub(crate) parent: Actor,
     pub(crate) parent_path: String,
     pub(crate) dispatch: Arc<Router>,
+    pub(crate) dispatch_client: Client<DispatchProtocol>,
+    /// The operator-granted dispatch handle the service mints every nodule's own handle from.
+    pub(crate) dispatch_authority: CapId,
     pub(crate) executor: Option<Arc<dyn NoduleExecutor>>,
 }
 
@@ -105,6 +114,12 @@ pub(crate) enum Command {
         context: RequestContext,
         plug_id: PlugId,
         drawers: BTreeMap<DrawerId, DrawerAccess>,
+        reply: Reply<NoduleRecord>,
+    },
+    SetOperationGrants {
+        context: RequestContext,
+        plug_id: PlugId,
+        operations: DispatchScope,
         reply: Reply<NoduleRecord>,
     },
     Uninstall {
@@ -142,6 +157,9 @@ pub(crate) struct State {
     persisted_actors: BTreeMap<PlugId, (String, Uuid7)>,
     actors: BTreeMap<PlugId, Actor>,
     applied_grants: BTreeMap<PlugId, BTreeMap<DrawerId, (DrawerAccess, CapId)>>,
+    /// The dispatch handle minted for each nodule from its operation grants, with the scope it
+    /// was minted for.
+    applied_operations: BTreeMap<PlugId, (DispatchScope, CapId)>,
     applied_heads: BTreeMap<PlugId, Vec<ChangeHash>>,
     records: BTreeMap<PlugId, NoduleRecord>,
     observed_heads: Vec<ChangeHash>,
@@ -187,6 +205,12 @@ impl State {
                 .insert(row.drawer_id, (row.access, row.capability_id));
         }
 
+        let applied_operations = store::applied_operations(&stores.sql)
+            .await?
+            .into_iter()
+            .map(|row| (row.plug_id, (row.scope, row.capability_id)))
+            .collect();
+
         let mut watch = stores
             .datum_store
             .watch()
@@ -203,6 +227,7 @@ impl State {
             persisted_actors,
             actors: BTreeMap::new(),
             applied_grants,
+            applied_operations,
             applied_heads: BTreeMap::new(),
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
@@ -272,6 +297,14 @@ impl State {
                     },
                 }
             }
+            // Dispatch outlives this service and its router keeps every provider registered, but
+            // an executor's provider reaches back into dispatch (a Wasm guest's outgoing calls
+            // go through dispatch's client), which would make dispatch own itself through the
+            // router. Withdrawing the registrations at shutdown breaks that cycle; a restart
+            // derives them again from the config.
+            for plug_id in state.records.keys() {
+                state.stores.dispatch.unbind(&plug_id.to_string());
+            }
             Res::Ok(())
         };
         tasks
@@ -306,6 +339,18 @@ impl State {
                 drawers,
                 reply,
             } => answer(reply, self.set_drawer_grants(&context, &plug_id, drawers)).await,
+            Command::SetOperationGrants {
+                context,
+                plug_id,
+                operations,
+                reply,
+            } => {
+                answer(
+                    reply,
+                    self.set_operation_grants(&context, &plug_id, operations),
+                )
+                .await
+            }
             Command::Uninstall {
                 context,
                 plug_id,
@@ -458,6 +503,23 @@ impl State {
             .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
     }
 
+    async fn set_operation_grants(
+        &mut self,
+        context: &RequestContext,
+        plug_id: &PlugId,
+        operations: DispatchScope,
+    ) -> Res<NoduleRecord> {
+        let target = plug_id.clone();
+        self.mutate_config(context, move |config| {
+            config.set_operation_grants(&target, operations).map(|_| ())
+        })
+        .await?;
+        self.records
+            .get(plug_id)
+            .cloned()
+            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+    }
+
     async fn uninstall(&mut self, context: &RequestContext, plug_id: &PlugId) -> Res<()> {
         let target = plug_id.clone();
         let domain_error: Arc<Mutex<Option<NodulesError>>> = Arc::new(Mutex::new(None));
@@ -518,7 +580,13 @@ impl State {
     }
 
     async fn any_applied_grant_dead(&self, context: &RequestContext) -> Res<bool> {
-        for (_, cap_id) in self.applied_grants.values().flat_map(BTreeMap::values) {
+        let grant_caps = self
+            .applied_grants
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(|(_, cap_id)| cap_id);
+        let operation_caps = self.applied_operations.values().map(|(_, cap_id)| cap_id);
+        for cap_id in grant_caps.chain(operation_caps) {
             if !self.stores.is_cap_live(context, *cap_id).await? {
                 return Ok(true);
             }
@@ -589,16 +657,26 @@ impl State {
         }
 
         let mut revoke_errors: BTreeMap<PlugId, NodulesError> = BTreeMap::new();
-        let active_plugs: Vec<PlugId> = self.applied_grants.keys().cloned().collect();
+        let active_plugs: BTreeSet<PlugId> = self
+            .applied_grants
+            .keys()
+            .chain(self.applied_operations.keys())
+            .cloned()
+            .collect();
         for plug_id in active_plugs {
             if !matches!(
                 resolved.get(&plug_id),
                 Some(NoduleResolution::Admitted { .. })
             ) {
-                if let Err(err) = self
+                // Both revocations run whatever the first reports; the first failure is the one
+                // the plug's record carries.
+                let drawers = self
                     .revoke_grants_for_plug(context, &plug_id, &BTreeMap::new())
-                    .await
-                {
+                    .await;
+                let operations = self
+                    .revoke_operations_for_plug(context, &plug_id, &DispatchScope::default())
+                    .await;
+                if let Err(err) = drawers.and(operations) {
                     revoke_errors.insert(plug_id.clone(), err);
                 }
                 if !resolved.contains_key(&plug_id) {
@@ -638,6 +716,7 @@ impl State {
                             config,
                             artifacts: BTreeMap::new(),
                             drawers: BTreeMap::new(),
+                            operations: None,
                             observed_heads: snapshot.heads.clone(),
                             applied_heads: self.applied_heads.get(&plug_id).cloned(),
                             error: Some(error),
@@ -647,6 +726,7 @@ impl State {
                 NoduleResolution::Admitted {
                     installed,
                     desired_grants,
+                    desired_operations,
                 } => {
                     let record = self
                         .reconcile_admitted(
@@ -655,6 +735,7 @@ impl State {
                             on_boot,
                             installed,
                             desired_grants,
+                            desired_operations,
                         )
                         .await?;
                     new_records.insert(plug_id, record);
@@ -700,7 +781,12 @@ impl State {
     ///
     /// Registering is a no-op when nothing changed and `ensure` is idempotent, so every
     /// reconcile may call this.
-    async fn serve(&mut self, installed: &mut InstalledNodule, actor_id: Uuid7) -> Readiness {
+    async fn serve(
+        &mut self,
+        installed: &mut InstalledNodule,
+        actor: &Actor,
+        capability: Option<CapId>,
+    ) -> Readiness {
         let plug_id = installed.plug_id.clone();
         let provider_id = plug_id.to_string();
         let hosting = match (&self.stores.executor, &installed.nodule.handler) {
@@ -744,7 +830,8 @@ impl State {
             revision: installed.revision,
             nodule_id: installed.nodule.id.clone(),
             handler: handler.clone(),
-            actor_id,
+            actor: actor.clone(),
+            capability,
             operations: installed.admitted.operations.clone(),
             reensure: self.reensure.handle(plug_id.clone()),
         };
@@ -809,14 +896,29 @@ impl State {
         on_boot: bool,
         mut installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
+        desired_operations: DispatchScope,
     ) -> Res<NoduleRecord> {
         let plug_id = installed.plug_id.clone();
         let actor = self
             .ensure_nodule_actor(context, &plug_id, &installed.nodule.id)
             .await?;
-        let readiness = self.serve(&mut installed, actor.actor_id).await;
+        // The handle is minted (or revoked) before the handler is ensured, so the executor is
+        // handed the handle that is live now. A disabled nodule has none: it is not serving, and
+        // re-enabling it mints a fresh one.
+        let effective_operations = if installed.enabled {
+            desired_operations.clone()
+        } else {
+            DispatchScope::default()
+        };
+        let (capability, operations_error) = self
+            .apply_operations(context, &plug_id, &actor, &effective_operations)
+            .await?;
+        let readiness = self.serve(&mut installed, &actor, capability).await;
 
         let mut apply_errors = Vec::new();
+        if let Some(error) = &operations_error {
+            apply_errors.push(format!("operations: {error}"));
+        }
         if let Err(err) = self
             .revoke_grants_for_plug(context, &plug_id, &desired_grants)
             .await
@@ -942,10 +1044,88 @@ impl State {
                 .map(|(key, (_, state))| (key.clone(), *state))
                 .collect(),
             drawers: drawer_statuses,
+            operations: (desired_operations != DispatchScope::default()).then(|| {
+                NoduleOperationGrantStatus {
+                    desired: desired_operations,
+                    granted: capability.is_some(),
+                    error: operations_error,
+                }
+            }),
             observed_heads: heads.to_vec(),
             applied_heads: self.applied_heads.get(&plug_id).cloned(),
             error,
         })
+    }
+
+    /// Brings the nodule's dispatch handle in line with `desired`, returning the live handle (if
+    /// any) and the reason the grant could not be applied, which is reported on the record
+    /// instead of failing the reconcile, as a drawer grant's failure is. Only storage failures
+    /// are fatal.
+    ///
+    /// A handle minted for exactly `desired` and still live is kept (so a restart or an
+    /// unrelated config change does not change the id the handler holds). Any other handle is
+    /// retracted first and a new one minted, so a changed scope is never a widening of the old
+    /// handle; an empty `desired` only revokes. A revocation that fails leaves the handle
+    /// recorded for the next reconcile to retry, and reports none to the handler: fail closed.
+    async fn apply_operations(
+        &mut self,
+        context: &RequestContext,
+        plug_id: &PlugId,
+        actor: &Actor,
+        desired: &DispatchScope,
+    ) -> Res<(Option<CapId>, Option<String>)> {
+        if let Some((applied, cap_id)) = self.applied_operations.get(plug_id).cloned() {
+            if applied == *desired && self.stores.is_cap_live(context, cap_id).await? {
+                return Ok((Some(cap_id), None));
+            }
+            if let Err(error) = self
+                .revoke_operations_for_plug(context, plug_id, &DispatchScope::default())
+                .await
+            {
+                return match error {
+                    NodulesError::Storage(error) => Err(NodulesError::Storage(error)),
+                    error => Ok((None, Some(error.to_string()))),
+                };
+            }
+        }
+        if *desired == DispatchScope::default() {
+            return Ok((None, None));
+        }
+        let cap_id = match self.stores.mint_operations(context, actor, desired).await {
+            Ok(cap_id) => cap_id,
+            Err(NodulesError::Storage(error)) => return Err(NodulesError::Storage(error)),
+            Err(error) => return Ok((None, Some(error.to_string()))),
+        };
+        if let Err(error) =
+            store::upsert_applied_operations(&self.stores.sql, plug_id, desired, cap_id).await
+        {
+            // The handle exists but is not recorded, so nothing would ever retract it.
+            self.stores.retract_grant_cap(context, cap_id).await?;
+            return Err(error);
+        }
+        self.applied_operations
+            .insert(plug_id.clone(), (desired.clone(), cap_id));
+        Ok((Some(cap_id), None))
+    }
+
+    /// Retracts the nodule's dispatch handle unless it was minted for exactly `keep`, and
+    /// forgets it once retracted.
+    async fn revoke_operations_for_plug(
+        &mut self,
+        context: &RequestContext,
+        plug_id: &PlugId,
+        keep: &DispatchScope,
+    ) -> Res<()> {
+        let Some((applied, cap_id)) = self.applied_operations.get(plug_id).cloned() else {
+            return Ok(());
+        };
+        if applied == *keep {
+            return Ok(());
+        }
+        self.stores.retract_grant_cap(context, cap_id).await?;
+        store::delete_applied_operations(&self.stores.sql, plug_id).await?;
+        self.applied_operations.remove(plug_id);
+        Ok(())
     }
 
     async fn revoke_grants_for_plug(
@@ -1036,6 +1216,32 @@ impl Stores {
         }
     }
 
+    /// Mints the handle a nodule invokes dispatch with, from the service's own dispatch
+    /// authority. The nodule's actor is presented as the signer, which binds the handle to it:
+    /// dispatch refuses the handle under any other actor, and retracting the actor kills it.
+    async fn mint_operations(
+        &self,
+        context: &RequestContext,
+        actor: &Actor,
+        scope: &DispatchScope,
+    ) -> Res<CapId> {
+        self.dispatch_client
+            .call(
+                context.child(),
+                MintDispatchCapability {
+                    authorization: Authorization {
+                        authority: self.dispatch_authority,
+                        signer: actor.capability,
+                    },
+                    scope: scope.clone(),
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .map(|capability| capability.capability_id)
+            .map_err(dispatch_error)
+    }
+
     async fn grant_with_cap(
         &self,
         context: &RequestContext,
@@ -1093,6 +1299,23 @@ impl Stores {
             return Err(err);
         }
         Ok(cap_id)
+    }
+}
+
+fn dispatch_error(error: ClientError<DispatchError>) -> NodulesError {
+    match error {
+        ClientError::Operation(DispatchError::Context(error)) => error.into(),
+        ClientError::Operation(DispatchError::Authority(error)) => NodulesError::Authority(error),
+        ClientError::Operation(DispatchError::AuthorityUnavailable(msg)) => {
+            NodulesError::AuthorityUnavailable(msg)
+        }
+        // Dispatch refuses a scope wider than the authority the service was granted.
+        ClientError::Operation(DispatchError::Denied) => NodulesError::Rejected(
+            "the operation grant exceeds the dispatch authority granted to the nodule service"
+                .into(),
+        ),
+        ClientError::Operation(other) => NodulesError::Rejected(other.to_string()),
+        ClientError::Transport { message, .. } => NodulesError::Storage(message),
     }
 }
 

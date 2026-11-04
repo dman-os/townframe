@@ -13,8 +13,9 @@
 
 use crate::dispatch::Provider;
 use async_trait::async_trait;
+use big_cabinet_core::authority::Actor;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::datum::operation::OperationKind;
-use big_cabinet_core::dmeta::Uuid7;
 use big_nodule_core::inventory::Readiness;
 use big_plugs_core::Artifact;
 use big_plugs_core::PlugId;
@@ -33,8 +34,14 @@ pub struct HandlerSpec {
     /// The handler artifact as the envelope declares it: key, digest, size and media type. Its
     /// bytes are retained and fetched through the `Blob` datum the config document carries.
     pub handler: Artifact,
-    /// The nodule's durable actor, which the handler's outgoing calls are made as.
-    pub actor_id: Uuid7,
+    /// The nodule's durable actor, which the handler's outgoing calls are made as: the executor
+    /// signs them with `actor.capability`, never with anything the handler says about itself.
+    pub actor: Actor,
+    /// The dispatch capability minted from the nodule's operation grants, which the handler is
+    /// told so it can present it on its own outgoing calls. `None` when nothing is granted. It
+    /// changes whenever the grants do, and `ensure` runs on every reconcile, so an executor that
+    /// already hosts the revision takes the new value from the spec.
+    pub capability: Option<CapId>,
     /// The operations the handler implements, by NSID (`None` kind for a foreign contract).
     pub operations: BTreeMap<String, Option<OperationKind>>,
     /// Ask the state actor to call `ensure` again for this plug.

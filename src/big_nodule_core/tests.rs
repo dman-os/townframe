@@ -629,6 +629,65 @@ mod admission_tests {
     }
 
     #[test]
+    fn operation_grants_resolve_beside_drawer_grants_and_revoke_to_absence() {
+        use crate::dispatch::DispatchScope;
+        let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
+        let id: PlugId = "@example/photos".parse().unwrap();
+        let drawer = DocId::random();
+        config
+            .admit(
+                &cache,
+                &plug_with("@example/photos", "1.0.0", photos()),
+                Some(BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])),
+            )
+            .unwrap();
+        let scope = DispatchScope {
+            operations: ["org.example.search.query".to_owned()].into(),
+            authorities: ["org.example.callee".to_owned()].into(),
+        };
+        config.set_operation_grants(&id, scope.clone()).unwrap();
+        let resolved = |config: &NoduleConfig| {
+            let Some(NoduleResolution::Admitted {
+                desired_grants,
+                desired_operations,
+                ..
+            }) = config.resolve(&cache).remove(&id)
+            else {
+                panic!("the nodule is admitted");
+            };
+            (desired_grants, desired_operations)
+        };
+        assert_eq!(
+            resolved(&config),
+            (
+                BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
+                scope
+            )
+        );
+
+        // Rewriting the drawer grants keeps the operations, and emptying the operations keeps the
+        // drawer grants; with nothing left the datum is absent.
+        config.set_drawer_grants(&id, BTreeMap::new()).unwrap();
+        assert_eq!(resolved(&config).1.authorities.len(), 1);
+        config
+            .set_drawer_grants(&id, BTreeMap::from([(drawer.clone(), DrawerAccess::Write)]))
+            .unwrap();
+        config
+            .set_operation_grants(&id, DispatchScope::default())
+            .unwrap();
+        assert_eq!(
+            resolved(&config),
+            (
+                BTreeMap::from([(drawer, DrawerAccess::Write)]),
+                DispatchScope::default()
+            )
+        );
+        config.set_drawer_grants(&id, BTreeMap::new()).unwrap();
+        assert!(config.entry(&id).unwrap().grants.is_absent());
+    }
+
+    #[test]
     fn an_upgrade_that_invalidates_settings_is_admitted_refused_and_repaired_by_configure() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
@@ -711,6 +770,7 @@ mod admission_tests {
         let Some(NoduleResolution::Admitted {
             installed,
             desired_grants,
+            ..
         }) = config.resolve(&cache).remove(&id)
         else {
             panic!("rewritten settings repair the nodule");

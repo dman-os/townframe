@@ -147,9 +147,17 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- Slice 2c (fresh subagent, running). Design D2e below.
+- Next: the small 2a and 2b follow-ups (handler-less `Ready`, double reconcile), then init as a lifecycle binding (to-do 9).
 ## Done
 
+- 2026-11-04: Slice 2c (D2e) plus gRPC deadline fail-fast.
+  - `NoduleGrants.operations` (`OperationGrants` datum record, arrays; `DispatchScope` uses `BTreeSet` with `deny_unknown_fields`, which datums reject). `SetNoduleOperationGrants` op, `NoduleRecord.operations` status, migration `002_applied_operations`.
+  - The nodule service's dispatch authority is minted by the operator at boot with scope `big_node::Config.nodule_operations` (the ceiling) and retracted at shutdown. Each nodule cap is minted from it, bound to the nodule actor.
+  - Holder check: `Invocation.bound_signer`. Dispatch refuses a scoped handle presented by anyone but the actor it was minted for. Before this, dispatch handles were bearer tokens, so a callee could replay its caller's cap.
+  - Wasm egress admits only `dispatch.local`. The signer comes from the workload id, and the guest supplies only the cap id. `x-nodule-capability` is delivered per request and updated in place on regrant. One `DispatchError` to HTTP mapping (403/404/503/400/504, provider passthrough, 502 for backend faults).
+  - Reference cycle (dispatch, router, provider, ingress, egress, dispatch client): broken by the state actor unbinding all registrations at shutdown.
+  - Manager review fix: a call from a workload stopped mid-request answers 503 `WorkloadStopped` instead of panicking the node, and the signer is dropped only after `workload_stop`.
+  - Verified: clippy clean, 57 nodule tests, big_cabinet 399/399 in isolation (the agent's drawer-model timeouts were load).
 - 2026-11-04: Slice 2b.
   - New `big_nodule_wasm` crate: one wash `Host`; the ingress router (`Sealed`) refuses all incoming routes and egress is denied (`NoEgress`) until 2c. Workload id `nodule/<plug>/<revision>`, `pool_size: 0` (ephemeral instance per request). Handler bytes come from `BlobService::read_all` (64 MiB cap), with a BLAKE3 digest `assert`.
   - Late bytes: `ensure` registers a waiter before its `stat`, and a task follows `open_availability` from the head read at boot (`BlobService::availability_revision`), so nothing polls and boot does not replay the announcement history (manager fix on review).
@@ -266,6 +274,12 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
   - `lifecycle::sensitive_root_creation_replays_every_boundary_without_replacing_groups_or_docs`
 
   They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
+
+### Slice 2c follow-ups
+- [authority] The service's dispatch authority is minted per boot and retracted on clean shutdown, so nodule caps rotate on every restart (the subagent's claim that they stay stable across restarts is wrong). After a crash, the previous boot's authority is never retracted: a live orphan cap. Fix by persisting the service authority, or by sweeping at boot.
+- [convention] Nested calls inherit a deadline only if the guest forwards the header. gRPC propagates deadlines through the context automatically, so the guest SDK should do the same.
+- [decided] Production default for `nodule_operations` is empty (deny by default, the ocap convention). Caps stay stable across revision upgrades, because the actor is the same.
+- [nit] The egress request body cap reuses `MAX_RESPONSE_OCTETS`, so give it one message-size constant.
 
 ### Slice 2b follow-ups
 - Decided (operator, 2026-11-04): follow gRPC. A call whose deadline has already elapsed fails fast with the deadline error, checked first in `invoke`, and the provider is never entered. This supersedes the slice 1 "provider entered once" test contract. Folded into slice 2c.

@@ -7,7 +7,6 @@ use crate::NodulesConfig;
 use crate::boot;
 use crate::dispatch::Dispatch;
 use crate::dispatch::DispatchConfig;
-use crate::dispatch::Router;
 use crate::executor::NoduleExecutor;
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
@@ -25,6 +24,7 @@ use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
@@ -45,6 +45,8 @@ use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_nodule_core::Config;
 use big_nodule_core::Nodule;
 use big_nodule_core::config::NoduleSettings;
+use big_nodule_core::dispatch::DispatchScope;
+use big_nodule_core::dispatch::MintDispatchCapability;
 use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::ConfigureNodule;
@@ -147,6 +149,58 @@ fn settings_of(thumbnails: bool) -> IndexMap<String, Value> {
         .collect()
 }
 
+/// The authority prefix the nodule service is granted dispatch over in these tests: no nodule can
+/// be granted anything outside it.
+const OPERATIONS_CEILING: &str = "org.example";
+
+/// The schemas the nodule config document and its test notes need.
+fn test_schemas() -> Arc<SchemaRepo> {
+    Arc::new(
+        SchemaRepo::open([
+            crate::schema_group(),
+            blob_schemas(),
+            SchemaRegistrationGroup::new(
+                None,
+                [SchemaRegistration::new(
+                    NOTE,
+                    json!({
+                        "lexicon": 1,
+                        "id": NOTE,
+                        "defs": {"main": {"type": "record", "key": "tid", "record": {
+                            "type": "object",
+                            "required": ["value"],
+                            "properties": {"value": {"type": "string"}}
+                        }}}
+                    }),
+                )],
+                Vec::new(),
+            ),
+        ])
+        .expect("schemas"),
+    )
+}
+
+/// The operator grants the nodule service dispatch over [`OPERATIONS_CEILING`], to mint the
+/// nodules' own handles from.
+async fn grant_nodule_dispatch(authority: &Authority, dispatch: &Dispatch) -> CapId {
+    dispatch
+        .client
+        .call(
+            RequestContext::root(),
+            MintDispatchCapability {
+                authorization: Authorization::identity(authority.root),
+                scope: DispatchScope {
+                    authorities: [OPERATIONS_CEILING.to_owned()].into(),
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW,
+            },
+        )
+        .await
+        .expect("dispatch authority for the nodule service")
+        .capability_id
+}
+
 fn id(plug_id: &str) -> PlugId {
     plug_id.parse().unwrap()
 }
@@ -168,6 +222,9 @@ struct Node {
     sql: TestDb,
     dispatch: Dispatch,
     dispatch_stop: StopToken,
+    /// What the nodule service mints every nodule's dispatch handle from: the operator's grant of
+    /// everything under [`OPERATIONS_CEILING`].
+    dispatch_authority: CapId,
     nodules: Nodules,
     executor: Option<Arc<dyn NoduleExecutor>>,
     stop: Option<StopToken>,
@@ -248,29 +305,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
     )
     .await
     .expect("repo boot");
-    let schemas = Arc::new(
-        SchemaRepo::open([
-            crate::schema_group(),
-            blob_schemas(),
-            SchemaRegistrationGroup::new(
-                None,
-                [SchemaRegistration::new(
-                    NOTE,
-                    json!({
-                        "lexicon": 1,
-                        "id": NOTE,
-                        "defs": {"main": {"type": "record", "key": "tid", "record": {
-                            "type": "object",
-                            "required": ["value"],
-                            "properties": {"value": {"type": "string"}}
-                        }}}
-                    }),
-                )],
-                Vec::new(),
-            ),
-        ])
-        .expect("schemas"),
-    );
+    let schemas = test_schemas();
     let (indexes, index_stop) = Indexes::boot(
         Arc::clone(&repo),
         Arc::clone(&schemas),
@@ -315,12 +350,14 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         nodules_actor.actor_id,
     )
     .await;
+    let dispatch_authority = grant_nodule_dispatch(&authority, &dispatch).await;
     let (nodules, stop) = boot_nodules(
         &authority,
         &docs,
         &drawers,
         &nodules_actor,
-        &dispatch.router,
+        &dispatch,
+        dispatch_authority,
         &sql,
         executor.clone(),
     )
@@ -343,6 +380,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         sql,
         dispatch,
         dispatch_stop,
+        dispatch_authority,
         nodules,
         executor,
         stop: Some(stop),
@@ -385,12 +423,17 @@ async fn grant_drawer_admin(
         .expect("grant drawer");
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test wiring of already-built services"
+)]
 async fn boot_nodules(
     authority: &Authority,
     docs: &DocsRepo,
     drawers: &Drawers,
     nodules_actor: &Actor,
-    dispatch: &Arc<Router>,
+    dispatch: &Dispatch,
+    dispatch_authority: CapId,
     sql: &TestDb,
     executor: Option<Arc<dyn NoduleExecutor>>,
 ) -> Result<(Nodules, StopToken), NodulesError> {
@@ -408,7 +451,9 @@ async fn boot_nodules(
         actor_path: NODULES_PATH.into(),
         namespace,
         operator: authority.service.operator_uuid(),
-        dispatch: Arc::clone(dispatch),
+        dispatch: Arc::clone(&dispatch.router),
+        dispatch_client: dispatch.client.clone(),
+        dispatch_authority,
         executor,
         sql: (**sql).clone(),
     })
@@ -424,7 +469,8 @@ impl Node {
             &self.docs,
             &self.drawers,
             &self.nodules_actor,
-            &self.dispatch.router,
+            &self.dispatch,
+            self.dispatch_authority,
             &self.sql,
             self.executor.clone(),
         )

@@ -12,8 +12,10 @@ use big_cabinet::drawer::access::DrawerWorker;
 use big_cabinet::index::Indexes;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::drawer::DrawerAccess as EntryAccess;
 use big_cabinet_core::drawer::protocol::DrawerScope;
@@ -24,6 +26,8 @@ use big_nodule::NodulesConfig;
 use big_nodule::dispatch::Dispatch;
 use big_nodule::dispatch::DispatchConfig;
 use big_nodule::executor::NoduleExecutor;
+use big_nodule_core::dispatch::DispatchScope;
+use big_nodule_core::dispatch::MintDispatchCapability;
 use big_nodule_wasm::WasmExecutor;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
@@ -47,6 +51,10 @@ pub struct Config<'a> {
     pub secrets: &'a SecretStore,
     pub index_concurrency: NonZeroUsize,
     pub blob_storage: big_blobs::Storage,
+    /// The operator's grant of dispatch to the nodule service: the ceiling of what any nodule
+    /// can be granted to invoke. A nodule's own operation grants are minted from it, so a grant
+    /// outside it is reported on the nodule's record as not applied.
+    pub nodule_operations: DispatchScope,
 }
 
 pub struct BigNode {
@@ -174,18 +182,18 @@ impl BigNode {
             )
             .await?;
             stop.stages.push(Stage::Service(blob_stop));
-            // Dispatch boots first: the nodule service registers its providers in dispatch's
-            // router, so it must stop first and dispatch last (reverse of construction).
-            let (dispatch, dispatch_stop) = big_nodule::dispatch::boot(DispatchConfig {
-                authority: authority.client.clone(),
-                namespace: dispatch_namespace,
-                operator: authority.service.operator_uuid(),
-            });
-            stop.stages.push(Stage::Service(dispatch_stop));
+            let (dispatch, nodule_dispatch_authority) = boot_dispatch(
+                &authority,
+                dispatch_namespace,
+                config.nodule_operations,
+                &mut stop,
+            )
+            .await?;
             // The Wasm executor is called by the nodule service, so it boots before it and
             // stops after it. It reads handler bytes from the blob service, which stops later
-            // still.
-            let (wasm, wasm_stop) = big_nodule_wasm::boot(Arc::clone(&blobs.service)).await?;
+            // still, and its guests call dispatch, which stops later still.
+            let (wasm, wasm_stop) =
+                big_nodule_wasm::boot(Arc::clone(&blobs.service), dispatch.client.clone()).await?;
             stop.stages.push(Stage::Service(wasm_stop));
             let (nodules, nodules_stop) = boot_nodules(
                 &authority,
@@ -194,7 +202,8 @@ impl BigNode {
                 &drawers_actor,
                 &nodules_actor,
                 nodules_namespace,
-                Arc::clone(&dispatch.router),
+                &dispatch,
+                nodule_dispatch_authority,
                 Arc::clone(&wasm) as Arc<dyn NoduleExecutor>,
                 config.sql,
             )
@@ -246,7 +255,8 @@ async fn boot_nodules(
     drawers_actor: &Actor,
     nodules_actor: &Actor,
     namespace: Namespace,
-    dispatch: Arc<big_nodule::dispatch::Router>,
+    dispatch: &Dispatch,
+    dispatch_authority: CapId,
     executor: Arc<dyn NoduleExecutor>,
     sql: Database,
 ) -> Res<(Nodules, service_utils_rs::StopToken)> {
@@ -261,11 +271,65 @@ async fn boot_nodules(
         actor_path: "nodules".into(),
         namespace,
         operator: authority.service.operator_uuid(),
-        dispatch,
+        dispatch: Arc::clone(&dispatch.router),
+        dispatch_client: dispatch.client.clone(),
+        dispatch_authority,
         executor: Some(executor),
         sql,
     })
     .await?)
+}
+
+/// Boots dispatch first: the nodule service registers its providers in dispatch's router, so it
+/// must stop first and dispatch last (reverse of construction).
+///
+/// Then the operator mints the dispatch handle the nodule service mints every nodule's own
+/// handle from: `scope` is the most any nodule can be granted. It is retracted once the nodule
+/// service has stopped, which also kills the handles minted from it.
+async fn boot_dispatch(
+    authority: &Authority,
+    namespace: Namespace,
+    scope: DispatchScope,
+    stop: &mut StopToken,
+) -> Res<(Dispatch, CapId)> {
+    let (dispatch, dispatch_stop) = big_nodule::dispatch::boot(DispatchConfig {
+        authority: authority.client.clone(),
+        namespace,
+        operator: authority.service.operator_uuid(),
+    });
+    stop.stages.push(Stage::Service(dispatch_stop));
+    let capability = dispatch
+        .client
+        .call(
+            RequestContext::root(),
+            MintDispatchCapability {
+                authorization: Authorization::identity(authority.root),
+                scope,
+                rights: Rights::USE | Rights::NARROW,
+            },
+        )
+        .await?
+        .capability_id;
+    let (retract, tasks) = service_utils_rs::StopToken::new();
+    let cancellation = tasks.clone();
+    let client = authority.client.clone();
+    tasks
+        .spawn(async move {
+            cancellation.cancelled().await;
+            client
+                .call(
+                    RequestContext::root(),
+                    RetractCapability {
+                        via: capability,
+                        capability,
+                    },
+                )
+                .await
+                .expect("retracting the nodule service's dispatch authority");
+        })
+        .expect("a fresh stop token accepts tasks");
+    stop.stages.push(Stage::Service(retract));
+    Ok((dispatch, capability))
 }
 
 /// Mints the drawers actor's admin capability over the node's config drawer and grants it to the

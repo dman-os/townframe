@@ -8,6 +8,7 @@
 //! nodules. Nothing here serves a handler; a record reports readiness so a caller can see that
 //! execution is unavailable rather than be told a dispatch succeeded.
 
+use crate::dispatch::DispatchScope;
 use crate::inventory::ArtifactState;
 use crate::inventory::InventoryError;
 use crate::inventory::Readiness;
@@ -95,6 +96,17 @@ pub struct SetNoduleDrawerGrants {
     pub drawers: BTreeMap<DrawerId, DrawerAccess>,
 }
 
+/// Replaces the operations the nodule's actor may invoke through dispatch. The service mints one
+/// dispatch capability for the actor from it (see [`NoduleOperationGrantStatus`]); an empty scope
+/// revokes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetNoduleOperationGrants {
+    pub authorization: Authorization,
+    pub plug_id: PlugId,
+    pub operations: DispatchScope,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UninstallNodule {
@@ -135,6 +147,16 @@ pub struct NoduleGrantStatus {
     pub error: Option<String>,
 }
 
+/// Desired and effective state of the dispatch capability a nodule's operation grants mint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoduleOperationGrantStatus {
+    pub desired: DispatchScope,
+    pub granted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// One installed nodule as the management surface reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,6 +178,9 @@ pub struct NoduleRecord {
     pub artifacts: BTreeMap<String, ArtifactState>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub drawers: BTreeMap<DrawerId, NoduleGrantStatus>,
+    /// Absent when the nodule has no operation grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<NoduleOperationGrantStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observed_heads: Vec<ChangeHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +238,7 @@ operations! {
     ConfigureNodule => NoduleRecord, procedure, "configureNodule";
     SetNoduleEnabled => NoduleRecord, procedure, "setNoduleEnabled";
     SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants";
+    SetNoduleOperationGrants => NoduleRecord, procedure, "setNoduleOperationGrants";
     UninstallNodule => (), procedure, "uninstallNodule";
     GetNodule => NoduleRecord, query, "getNodule";
     ListNodules => Vec<NoduleRecord>, query, "listNodules";
@@ -226,6 +252,7 @@ declare_service_protocol! {
             ConfigureNodule(ConfigureNodule),
             SetNoduleEnabled(SetNoduleEnabled),
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
+            SetNoduleOperationGrants(SetNoduleOperationGrants),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)

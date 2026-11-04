@@ -4,8 +4,9 @@
 //! Portable desired state (installed envelopes, enablement, settings, and local drawer grants)
 //! lives in the node's config drawer document and is projected through
 //! [`big_cabinet::DatumStoreHandle`] over [`big_nodule_core::config::NoduleConfig`].
-//! Host-specific state (each nodule's durable local actor and the service-owned drawer grant
-//! capabilities applied on this node) lives in SQLite.
+//! Host-specific state (each nodule's durable local actor, the service-owned drawer grant
+//! capabilities and the dispatch handles minted from operation grants applied on this node)
+//! lives in SQLite.
 
 #![recursion_limit = "256"]
 
@@ -33,6 +34,7 @@ use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
@@ -48,6 +50,7 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::config_universe;
+use big_nodule_core::dispatch::DispatchProtocol;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::ConfigureNodule;
 use big_nodule_core::protocol::GetNodule;
@@ -60,6 +63,7 @@ use big_nodule_core::protocol::NodulesMessage;
 use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetNoduleDrawerGrants;
 use big_nodule_core::protocol::SetNoduleEnabled;
+use big_nodule_core::protocol::SetNoduleOperationGrants;
 use big_nodule_core::protocol::UninstallNodule;
 use big_plugs_core::PlugId;
 use service_utils_rs::Client;
@@ -97,8 +101,10 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
 /// drawers services it reads config from and applies grants through, the node's config drawer,
 /// the subsystem actor it provisions nodule actors under and that actor's registry path, the
 /// namespace it mints management handles in, the operator whose identity administers nodules,
-/// the dispatch router it registers each admitted nodule's implemented operations in, the optional
-/// executor that hosts their handlers, and its database. Without an executor a handler is never
+/// the dispatch router it registers each admitted nodule's implemented operations in, the dispatch
+/// client and operator-granted dispatch handle it mints every nodule's own handle from (the
+/// ceiling of what any nodule may be granted to invoke), the optional executor that hosts their
+/// handlers, and its database. Without an executor a handler is never
 /// ready: its operations are registered not ready with the nodule's own readiness.
 pub struct NodulesConfig {
     pub authority: Client<AuthorityProtocol>,
@@ -110,6 +116,8 @@ pub struct NodulesConfig {
     pub namespace: Namespace,
     pub operator: Uuid7,
     pub dispatch: Arc<dispatch::Router>,
+    pub dispatch_client: Client<DispatchProtocol>,
+    pub dispatch_authority: CapId,
     pub executor: Option<Arc<dyn executor::NoduleExecutor>>,
     pub sql: Database,
 }
@@ -300,6 +308,24 @@ impl NoduleService {
             .await
     }
 
+    async fn set_operation_grants(
+        &self,
+        context: &RequestContext,
+        params: SetNoduleOperationGrants,
+    ) -> Res<NoduleRecord> {
+        let caller = self.caller(context, params.authorization).await?;
+        self.require_manage(&caller, &params.plug_id)?;
+        let context = context.clone();
+        self.state
+            .ask(|reply| Command::SetOperationGrants {
+                context,
+                plug_id: params.plug_id,
+                operations: params.operations,
+                reply,
+            })
+            .await
+    }
+
     async fn uninstall(&self, context: &RequestContext, params: UninstallNodule) -> Res<()> {
         let caller = self.caller(context, params.authorization).await?;
         self.require_manage(&caller, &params.plug_id)?;
@@ -358,6 +384,7 @@ handlers! {
     ConfigureNodule => configure: NoduleRecord;
     SetNoduleEnabled => set_enabled: NoduleRecord;
     SetNoduleDrawerGrants => set_drawer_grants: NoduleRecord;
+    SetNoduleOperationGrants => set_operation_grants: NoduleRecord;
     UninstallNodule => uninstall: ();
     GetNodule => get: NoduleRecord;
     ListNodules => list: Vec<NoduleRecord>;
@@ -371,6 +398,7 @@ service_utils_rs::bind_service_protocol! {
             ConfigureNodule(ConfigureNodule),
             SetNoduleEnabled(SetNoduleEnabled),
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
+            SetNoduleOperationGrants(SetNoduleOperationGrants),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)
@@ -427,6 +455,8 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         parent: config.actor,
         parent_path: config.actor_path,
         dispatch: config.dispatch,
+        dispatch_client: config.dispatch_client,
+        dispatch_authority: config.dispatch_authority,
         executor: config.executor,
     })
     .await
