@@ -259,7 +259,11 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - Manager fix: the agent rewrote stored grants on substitution, which silently discarded operator config. Now `substituted_grants` computes them at resolve: shared requests keep any covering grant, filler additions need an exact operation grant (a prefix is consent for X's code), and clearing restores exactly what was stored.
   - Data and drawer request narrowing waits for P7.
 - 2026-11-04: Clay wire fixes, `11e2d155`. `Request` necessity/resolution default to required/configured and are skipped on the wire when default. `micro_pair` maps sidecar `authority` to `Plug.authority`.
-- **Bug found:** `sqlite_rs::ephemeral` test databases leak their `TempDir` (about 60 `.tmp*` dirs of about 4.6 MB per nodule test run, even when tests pass; it filled `/`). Being fixed before P7.
+- 2026-11-04: temp-dir leak fixed, `998b73d9`.
+  - Root cause is a keyhive_core cycle: a `Group` holds the hive-wide `Arc<Mutex<DelegationStore>>`, which holds a delegation to `Agent::Group(Arc<Group>)`. Every object in the cycle holds a `BigRepoKeyhiveListener` clone carrying storage and database.
+  - `BigRepoStopToken::stop` now detaches the listener storage, and a leaked listener used afterwards panics. Nodule and node suites went from 60 leaked dirs per run to 0.
+  - The `big_repo` suite still leaves 16; the same agent is on it.
+  - **Operator decision pending:** fix the cycle in our keyhive fork (a `Weak` back-reference, or a teardown clearing shared stores) plus a pin bump. That needs a fork push, like wasmCloud's. Until then, keyhive objects (small) leak per `BigRepo`. There is also a smaller `async_channel` buffered-event cycle.
 - 2026-11-04: P5 resolution and lockfile.
   - The lockfile is SQLite `nodule_resolution_lock` (node-local per D8; the consent is this node's) and appears on `NoduleRecord.requests`.
   - Resolution comes from the config snapshot plus router-native providers (a provider is a string; native ones have no version or revision). Built-in providers register at boot by contract, so router registration does not trigger reconciles.
