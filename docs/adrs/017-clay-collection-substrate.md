@@ -299,8 +299,10 @@ contribution it hid resurfaces. A delete made by a scope that later ends is ther
 delete meant to outlive its writer is written from a permanent scope. ADR 025 §4 specifies the
 scope classes.
 
-Write authority is a grant of key prefixes carried by the binding; a write outside it fails with
-`forbidden`. Guests have no `clear` and no per-key withdrawal of their contribution.
+There is no key-level write authorization yet: any micro bound to a collection with Register may
+write any key, so a micro can supersede another's row. Write authority will be scoped by the
+collection query language once it exists (guest and host run the same query engine), and the grant
+will be the query. Guests have no `clear` and no per-key withdrawal of their contribution.
 
 A collection has no merge policy, materializer, or business hook. Union, priority, and grouping are
 expressed by consumers or by separate collections (§11). The single-process host orders every

@@ -25,7 +25,6 @@ use std::sync::OnceLock;
 
 use crate::collections::BytesRegistrations;
 use crate::collections::CollectionSession;
-use crate::collections::RegistrationGrant;
 use crate::collections::bytes_registrations;
 use clay_collection::Change;
 use clay_collection::ReadLimits;
@@ -525,8 +524,7 @@ pub async fn registration_scope_ownership<E: Incarnations>(engine: E) {
         let mut owned_rows = Vec::new();
         let mut published_versions = Vec::new();
         for name in ["first", "other"] {
-            // Each incarnation writes under its own key prefix, and the fixture asserts that a
-            // key outside it is refused.
+            // Each incarnation writes under its own key prefix.
             let prefix = format!("{name}/").into_bytes();
             let instance = host.create(name).unwrap();
             host.begin_initialization(&instance).unwrap();
@@ -1082,7 +1080,7 @@ pub async fn dropped_call_finishes_in_the_guest_without_leaks<E: Incarnations>(e
 }
 
 /// The fixture's `registrations` roles take `[role, key-prefix]` arguments and bind `a` and
-/// `b` to `micro`'s grant of exactly that prefix.
+/// `b` to `micro`'s grant; the prefix namespaces the keys the incarnation writes.
 fn registration_context(
     role: &str,
     registrations: &BytesRegistrations,
@@ -1095,10 +1093,9 @@ fn registration_context(
         ciborium::Value::Bytes(prefix.to_vec()),
     ]);
     ciborium::into_writer(&arguments_value, &mut arguments).unwrap();
-    let grant = || RegistrationGrant {
-        registrations: registrations.clone(),
+    let grant = || clay_host::Grant {
+        collection: registrations.clone(),
         micro: micro.clone(),
-        prefixes: vec![prefix.to_vec()],
     };
     InitialContext {
         arguments,

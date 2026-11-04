@@ -33,14 +33,14 @@ pub enum GrantError {
     Undeclared(String),
 }
 
-/// Write authority over one declared collection for one singleton micro: the collection, the
-/// micro whose stable identity stamps its writes, and the key prefixes it may write. An empty
-/// prefix is every key; manifest admission narrows it (ADR 024 §13).
+/// Write authority over one declared collection for one singleton micro: the collection and
+/// the micro whose stable identity stamps its writes. There is no key-level authorization yet:
+/// a grant covers every key, so one micro can supersede another's row. Authority will be scoped
+/// by the collection query language once it exists, and the grant will be the query.
 #[derive(Clone)]
 pub struct Grant<C> {
     pub collection: C,
     pub micro: MicroId,
-    pub prefixes: Vec<Vec<u8>>,
 }
 
 struct Declared<C> {
@@ -99,8 +99,8 @@ impl<C: Clone> CollectionRegistry<C> {
         Some(declared.get(id)?.collection.clone())
     }
 
-    /// Issue `micro` write authority over the full key space of collection `id`. Narrower
-    /// prefixes come with manifest admission.
+    /// Issue `micro` write authority over every key of collection `id`. Narrower authority
+    /// waits for the collection query language: the grant will carry the query.
     pub fn grant(&self, id: &str, micro: &MicroId) -> Result<Grant<C>, GrantError> {
         let collection = self
             .collection(id)
@@ -108,7 +108,6 @@ impl<C: Clone> CollectionRegistry<C> {
         Ok(Grant {
             collection,
             micro: micro.clone(),
-            prefixes: vec![Vec::new()],
         })
     }
 }

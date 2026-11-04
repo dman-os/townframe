@@ -434,7 +434,6 @@ fn failure(error: collection_registration::MutationError) -> String {
             format!("conflict@{}", current.lamport)
         }
         collection_registration::MutationError::Conflict(None) => "conflict@none".into(),
-        collection_registration::MutationError::Forbidden => "forbidden".into(),
         collection_registration::MutationError::Revoked => "revoked".into(),
         collection_registration::MutationError::KeyTooLarge => "key-too-large".into(),
         collection_registration::MutationError::ValueTooLarge => "value-too-large".into(),

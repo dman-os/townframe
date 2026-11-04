@@ -342,30 +342,6 @@ pub async fn durable_bytes_registrations<St: clay_store::OrderedStore + Send + S
     .await
 }
 
-/// What a micro's registration binding is allowed to write into one collection: the
-/// collection, the micro whose identity stamps its writes, and the key prefixes it may
-/// write (ADR 024 §13). An empty prefix grants every key. Enforced here, in the session,
-/// not in `clay_collection`.
-#[derive(Clone)]
-pub struct RegistrationGrant {
-    pub registrations: BytesRegistrations,
-    /// Singleton micros are their own stable writer identity: it breaks ties between
-    /// concurrent writes and survives restarts.
-    pub micro: MicroId,
-    pub prefixes: Vec<Bytes>,
-}
-
-impl From<clay_host::Grant<BytesRegistrations>> for RegistrationGrant {
-    /// A grant the declared-collection registry issued, in the session's terms.
-    fn from(grant: clay_host::Grant<BytesRegistrations>) -> Self {
-        Self {
-            registrations: grant.collection,
-            micro: grant.micro,
-            prefixes: grant.prefixes,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectionLimits {
     pub readers: usize,
@@ -551,12 +527,11 @@ impl CollectionSession {
 
     pub fn grant_writer(
         &self,
-        grant: RegistrationGrant,
+        grant: clay_host::Grant<BytesRegistrations>,
     ) -> Result<RegistrationWriter, AccessError> {
-        let RegistrationGrant {
-            registrations,
+        let clay_host::Grant {
+            collection: registrations,
             micro,
-            prefixes,
         } = grant;
         let permit = self.state.admit(Budget::Writers)?;
         let writer_id = WriterId::new(micro.as_str());
@@ -592,7 +567,6 @@ impl CollectionSession {
         }
         Ok(RegistrationWriter {
             writer,
-            prefixes,
             stamp_bytes: STAMP_LAMPORT_BYTES + writer_id.as_bytes().len(),
             _permit: permit,
         })
@@ -613,8 +587,6 @@ const STAMP_LAMPORT_BYTES: usize = 8;
 /// its rows, belong to the incarnation and are withdrawn when it closes.
 pub struct RegistrationWriter {
     writer: SubstrateWriter,
-    /// Key prefixes this writer may write; see [`RegistrationGrant`].
-    prefixes: Vec<Bytes>,
     /// What each row's stamp adds to a page, fixed by the writer identity.
     stamp_bytes: usize,
     _permit: Permit,
@@ -622,11 +594,7 @@ pub struct RegistrationWriter {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WriteFailure {
-    Conflict {
-        current: Option<Stamp>,
-    },
-    /// The key lies outside the writer's granted key prefixes.
-    Forbidden,
+    Conflict { current: Option<Stamp> },
     Revoked,
     KeyTooLarge,
     ValueTooLarge,
@@ -693,9 +661,6 @@ impl RegistrationWriter {
             .host
             .check(&state.instance)
             .map_err(|_| WriteFailure::Revoked)?;
-        if !self.prefixes.iter().any(|prefix| key.starts_with(prefix)) {
-            return Err(WriteFailure::Forbidden);
-        }
         if key.len() > state.limits.key_bytes {
             return Err(WriteFailure::KeyTooLarge);
         }
@@ -898,14 +863,15 @@ fn page_bytes(page: &BytesPage) -> usize {
             .sum::<usize>()
 }
 
-/// A grant of every key for the session tests; production mint sites pass the manifest's
-/// prefixes.
+/// A grant of `micro` over `registrations` for the session tests.
 #[cfg(test)]
-fn full_grant(registrations: &BytesRegistrations, micro: &str) -> RegistrationGrant {
-    RegistrationGrant {
-        registrations: registrations.clone(),
+fn full_grant(
+    registrations: &BytesRegistrations,
+    micro: &str,
+) -> clay_host::Grant<BytesRegistrations> {
+    clay_host::Grant {
+        collection: registrations.clone(),
         micro: MicroId::new(micro),
-        prefixes: vec![Vec::new()],
     }
 }
 

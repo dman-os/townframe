@@ -85,7 +85,7 @@ impl micro_lifecycle::Guest for Lifecycle {
         context: micro_lifecycle::InitialContext,
     ) -> Result<micro_lifecycle::Initialized, InitializationError> {
         // The role, as one CBOR text, or `[role, key-prefix]` for the registration roles: the
-        // prefix is the key prefix the host granted this incarnation's writers.
+        // prefix namespaces the keys this incarnation writes, so the fixture can tell incarnations apart.
         let (role, prefix) = match ciborium::from_reader(context.arguments.as_slice()) {
             Ok(ciborium::Value::Text(role)) => (role, Vec::new()),
             Ok(ciborium::Value::Array(arguments)) => match <[_; 2]>::try_from(arguments) {
@@ -201,7 +201,7 @@ impl micro_lifecycle::Guest for Lifecycle {
 }
 
 /// Exercise the causal-map write surface through `a` and `b`, two scopes of one micro under
-/// the granted key `prefix`. The sequence has the same outcome whether the scopes are still
+/// the key `prefix`. The sequence has the same outcome whether the scopes are still
 /// staged or already published (a scope sees its own staged candidates but not another's, so
 /// only `Observed` bases and own-candidate comparisons are used across scopes). It leaves the
 /// visible rows `b`'s `x` and `a`'s `y`.
@@ -257,18 +257,6 @@ async fn register(prefix: &[u8], bindings: Vec<collection_registration::Registra
         .await
         .unwrap();
     assert_eq!(a_y2.lamport, 3);
-    // Keys outside the granted prefix are refused for both writers and both verbs.
-    let outside = b"\xffoutside".to_vec();
-    assert!(matches!(
-        first
-            .put(outside.clone(), WriteBasis::Concurrent, value("no"))
-            .await,
-        Err(MutationError::Forbidden)
-    ));
-    assert!(matches!(
-        second.delete(outside, WriteBasis::Concurrent).await,
-        Err(MutationError::Forbidden)
-    ));
     drop((first, second));
 }
 

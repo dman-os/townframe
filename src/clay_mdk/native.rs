@@ -260,7 +260,7 @@ impl<R: RendererRegistry> Context<R> {
             .collections
             .grant(id, &self.micro)
             .map_err(|_| AccessError::Denied)?;
-        let writer = self.sessions.grant_writer(grant.into())?;
+        let writer = self.sessions.grant_writer(grant)?;
         Ok(Registration::new(writer, self.collection(id)?))
     }
 
