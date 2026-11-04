@@ -72,11 +72,7 @@ impl<C> Default for CollectionRegistry<C> {
 impl<C: Clone> CollectionRegistry<C> {
     /// Declare `collection` under `contract.id`. The id is unique: two manifests naming one
     /// collection is a conflict the admitting layer reports, not a merge.
-    pub fn declare(
-        &self,
-        contract: CollectionContract,
-        collection: C,
-    ) -> Result<(), DeclareError> {
+    pub fn declare(&self, contract: CollectionContract, collection: C) -> Result<(), DeclareError> {
         let mut declared = self.declared.lock().unwrap();
         if declared.contains_key(&contract.id) {
             return Err(DeclareError::AlreadyDeclared(contract.id));

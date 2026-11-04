@@ -2,8 +2,9 @@
 //! imports a wasm micro is linked against. A micro writes one `activate(&Context)` and one
 //! Dioxus view; [`export_micro!`] turns that into the `micro-client` world the host drives,
 //! running `activate` inside `micro-lifecycle.initialize` (ADR 024 §5).
-//! Initialization receives already-granted configuration bindings and publishes one component —
-//! the surface the host mounts — exactly as a native activation receives a [`crate::native::Context`].
+//! Initialization receives already-granted configuration bindings and publishes one named
+//! presentation — the surface the host mounts — exactly as a native activation receives a
+//! [`crate::native::Context`]. The name must be one the micro's manifest declares.
 //! What the guest cannot yet do (require publications, write collections, mount roots, provide
 //! contracts) is absent here rather than stubbed; such bindings fail initialization as an
 //! invalid configuration.
@@ -21,6 +22,7 @@ pub use crate::mirror::MirrorStatus;
 pub use crate::mirror::MirrorWatch;
 pub use dom::GuestDom;
 
+use crate::capability_bank;
 use crate::documents;
 use crate::micro_lifecycle;
 use crate::mirror::DocumentMirror;
@@ -39,6 +41,7 @@ mod dom;
 pub struct Context {
     configs: BTreeMap<String, ConfigDocument>,
     presentation: Rc<RefCell<Option<GuestDom>>>,
+    published: Rc<RefCell<Vec<micro_lifecycle::NamedPublication>>>,
     changes: Rc<Cell<Option<Signal<u64>>>>,
 }
 
@@ -50,16 +53,16 @@ impl Context {
         self.configs.get(name)
     }
 
-    /// Publish this micro's presentation. The host mounts it into every placement it grants the
-    /// incarnation; a guest has exactly one, so publishing twice is a programming error. Unlike
-    /// the native twin this returns no [`crate::ComponentRef`]: a guest cannot yet place its own
-    /// component anywhere (that arrives with the collections waist), so there is nothing to hold.
+    /// Publish this micro's presentation as the manifest-declared publication `name`. The host
+    /// mounts it into every placement it grants the incarnation, and other micros reach it
+    /// through that name once initialization succeeds. A guest has exactly one presentation, so
+    /// publishing twice is a programming error.
     ///
     /// `render` runs as the presentation's root scope and its output is rendered once per
     /// mounted surface, so hooks called directly in `render` hold state every surface shares
     /// — a child component's hooks hold per-surface state instead. Keep the micro's model in
     /// `render`; keep child components presentational.
-    pub fn publish_component(&self, render: impl Fn() -> Element + 'static) {
+    pub fn publish_component(&self, name: &str, render: impl Fn() -> Element + 'static) {
         let dom = GuestDom::new_with_props(
             root,
             RootProps {
@@ -71,6 +74,15 @@ impl Context {
             self.presentation.borrow_mut().replace(dom).is_none(),
             "guest micro published more than one component"
         );
+        // The bank refuses only past its publication limit, which one presentation cannot hit.
+        let capability = capability_bank::publish_presentation(name)
+            .expect("the capability bank admits a guest's first publication");
+        self.published
+            .borrow_mut()
+            .push(micro_lifecycle::NamedPublication {
+                name: name.to_owned(),
+                capability,
+            });
     }
 }
 
@@ -174,7 +186,7 @@ thread_local! {
 
 impl Runtime {
     /// The MDK's `initialize`: bind the granted configuration documents, run `activate`, and
-    /// answer with a [`crate::StatelessRoot`] and no named publications. Bindings the authoring surface
+    /// answer with a [`crate::StatelessRoot`] and the publications `activate` staged. Bindings the authoring surface
     /// cannot express yet (collections, registrations, requirements) are a configuration the
     /// micro cannot run under, not a guest fault. `arguments` are unused: no MDK micro takes
     /// any yet.
@@ -196,6 +208,7 @@ impl Runtime {
         }
         let mirror = DocumentMirror::default();
         let presentation = Rc::new(RefCell::new(None));
+        let published = Rc::new(RefCell::new(Vec::new()));
         let changes = Rc::new(Cell::new(None));
         let context = Context {
             configs: configs
@@ -203,6 +216,7 @@ impl Runtime {
                 .map(|binding| (binding.name.clone(), mirror.bind(binding)))
                 .collect(),
             presentation: presentation.clone(),
+            published: published.clone(),
             changes: changes.clone(),
         };
         let runtime = Self {
@@ -229,7 +243,7 @@ impl Runtime {
             .map_err(|error| micro_lifecycle::InitializationError::Rejected(error.to_string()))?;
         Ok(micro_lifecycle::Initialized {
             root: micro_lifecycle::InstanceRoot::new(crate::StatelessRoot),
-            publications: Vec::new(),
+            publications: published.take(),
         })
     }
 
@@ -297,8 +311,8 @@ impl Runtime {
         Err(format!("this guest micro serves no call {publication:?}"))
     }
 
-    /// A guest micro has exactly one presentation until the authoring API grows named
-    /// publications, so `publication` is not consulted.
+    /// A guest micro has exactly one presentation until the authoring API grows more, so
+    /// `publication` is not consulted.
     pub fn mount(
         _publication: &str,
         placement: &presentation::MountPoint,

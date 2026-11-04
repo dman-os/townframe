@@ -320,9 +320,9 @@ pub extern "C" fn __wasilibc_task_hook(hook: i32, prev_context_0: i32, hook_stac
 }
 
 mod manifest;
+pub use manifest::AttachmentDeclaration;
 pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
-pub use manifest::AttachmentDeclaration;
 pub use manifest::ConfigurationRequest;
 pub use manifest::ContractRef;
 pub use manifest::ContributionDeclaration;
@@ -399,6 +399,9 @@ pub mod native;
 
 #[cfg(feature = "view")]
 pub mod view;
+
+#[cfg(any(feature = "wasmtime", feature = "wcmp"))]
+mod engine;
 
 #[cfg(feature = "wasmtime")]
 pub mod wasm;
