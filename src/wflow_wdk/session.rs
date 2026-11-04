@@ -7,7 +7,6 @@ use crate::types;
 pub enum SessionYield {
     PersistStep {
         step_id: u64,
-        attempt_id: u64,
         start_at: Timestamp,
         end_at: Timestamp,
         value_json: Arc<str>,
@@ -17,16 +16,9 @@ pub enum SessionYield {
     },
     WaitStep {
         step_id: u64,
-        attempt_id: u64,
         start_at: Timestamp,
         deets: WaitYield,
         meta: StepMeta,
-    },
-    /// Forward work ended in the terminal `error_json` with compensation
-    /// registered. The host records the cause durably and resumes the session
-    /// with it (an earlier cancel's cause wins) before any cleanup step runs.
-    BeginCleanup {
-        error_json: Arc<str>,
     },
     Complete(types::JobResult),
     Panicked(String),
@@ -47,7 +39,6 @@ pub struct ReplayStep {
     /// step as durably unnamed, `Some(Some(name))` pins its boundary name.
     pub name: Option<Option<Arc<str>>>,
     pub value_json: Option<Arc<str>>,
-    pub failed_attempts: u64,
 }
 
 impl ReplayStep {
@@ -64,7 +55,6 @@ impl ReplayStep {
             kind: Some(meta.kind),
             name: Some(meta.name.as_deref().map(Arc::from)),
             value_json: Some(value_json.into()),
-            failed_attempts: 0,
         }
     }
 }

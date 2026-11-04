@@ -1,7 +1,6 @@
 mod interlude {
     pub(crate) use serde::de::DeserializeOwned;
     pub(crate) use std::cell::Cell;
-    pub(crate) use std::cell::RefCell;
     pub(crate) use std::rc::Rc;
     pub(crate) use utils_rs::prelude::*;
 }
@@ -16,26 +15,86 @@ use std::pin::Pin;
 
 use crate::interlude::*;
 
-pub use wflow_core::ActiveStepState;
-pub use wflow_core::CompletedStepState;
-pub use wflow_core::StepId;
-pub use wflow_core::StepKind;
-pub use wflow_core::StepMeta;
-pub use wflow_core::StepState;
+pub type StepId = u64;
+
+/// The kind of host boundary that produced or was entered at a workflow step.
+/// Replay checks this so an invocation that reaches a committed index with
+/// another boundary kind is rejected as nondeterministic instead of reading a
+/// foreign value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    Effect,
+    Sleep,
+    Recv,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepMeta {
+    pub kind: StepKind,
+    pub name: Option<String>,
+}
+
+impl StepMeta {
+    pub fn new(kind: StepKind, name: Option<&str>) -> Self {
+        Self {
+            kind,
+            name: name.map(str::to_owned),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveStepState {
+    pub id: StepId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedStepState {
+    pub id: StepId,
+    pub value_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepState {
+    Completed(CompletedStepState),
+    Active(ActiveStepState),
+}
 
 pub type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 pub mod types {
     use crate::interlude::*;
 
-    /// The retry schedule, its bounds and the failure classes are the durable
-    /// authority's own types: a workflow, its submitter and the partition all
-    /// speak one representation, so nothing has to be converted or kept in
-    /// step across a boundary.
-    pub use wflow_core::partition::CleanupCause;
-    pub use wflow_core::partition::JobFailure;
-    pub use wflow_core::partition::RetryBudget;
-    pub use wflow_core::partition::RetryPolicy;
+    /// How a failed workflow activation is rescheduled by the authority.
+    ///
+    /// The delay is a pure function of the retry attempt count so every host
+    /// computes the same schedule; the scheduler owns the clock and optional
+    /// jitter on top of it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum RetryPolicy {
+        /// Re-run as soon as a worker is available; no deadline is armed.
+        Immediate,
+        /// Re-run after a constant delay.
+        Fixed { delay_ms: u64 },
+        /// Re-run after `base_ms` doubled per attempt, never exceeding `cap_ms`.
+        CappedExponential { base_ms: u64, cap_ms: u64 },
+    }
+
+    impl RetryPolicy {
+        /// The delay before the retry following `attempts` failures. The exponent
+        /// is clamped so absurd attempt counts saturate instead of overflowing.
+        pub fn delay_ms(&self, attempts: u64) -> u64 {
+            match self {
+                Self::Immediate => 0,
+                Self::Fixed { delay_ms } => *delay_ms,
+                Self::CappedExponential { base_ms, cap_ms } => {
+                    let exponent = attempts.min(63);
+                    (*cap_ms).min((*base_ms).saturating_mul(1u64 << exponent))
+                }
+            }
+        }
+    }
 
     pub type Json = String;
     pub type JobId = String;
@@ -70,8 +129,6 @@ pub mod types {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum BackendError {
-    /// forward work interrupted for cleanup: {0:?}
-    Interrupted(types::CleanupCause),
     /// nondeterministic replay at step {step_id}: expected {expected:?}, found {found:?}
     NondeterministicReplay {
         step_id: StepId,
@@ -82,12 +139,8 @@ pub enum BackendError {
     Protocol(String),
 }
 
-/// The host side of one workflow invocation. Every forward boundary
-/// (`next_step` for an effect/sleep/receive, the wait it parks on) may return
-/// [`BackendError::Interrupted`] once the job entered cleanup: the workflow
-/// propagates it out of its body and [`run_wflow`] runs the registered defers
-/// under the durable cause it carries. Cleanup (`Defer`) steps are never
-/// interrupted.
+/// The host side of one workflow invocation. Each boundary either replays a
+/// completed value or yields the active step to be persisted or parked.
 pub trait WflowBackend {
     fn next_step(&self, meta: StepMeta) -> LocalBoxFuture<'_, Result<StepState, BackendError>>;
 
@@ -104,15 +157,6 @@ pub trait WflowBackend {
     ) -> LocalBoxFuture<'_, Result<(), BackendError>>;
 
     fn recv_message(&self, step_id: StepId) -> LocalBoxFuture<'_, Result<String, BackendError>>;
-
-    /// Durably records that forward work ended in the terminal `error_json`
-    /// while compensation was registered, before any cleanup step runs. The
-    /// cause returned is the durable one: a cancel that landed first wins and
-    /// a replay that reaches the same error again gets the recorded cause.
-    fn begin_cleanup<'a>(
-        &'a self,
-        error_json: &'a str,
-    ) -> LocalBoxFuture<'a, Result<types::CleanupCause, BackendError>>;
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -121,24 +165,12 @@ pub enum JobErrorX {
     Terminal(eyre::Report),
     /// transient error {0:?}
     Transient(eyre::Report),
-    /// forward work interrupted for cleanup: {0:?}
-    Interrupted(types::CleanupCause),
 }
 
 impl From<BackendError> for JobErrorX {
     fn from(err: BackendError) -> Self {
-        match err {
-            BackendError::Interrupted(cause) => Self::Interrupted(cause),
-            BackendError::NondeterministicReplay { .. } | BackendError::Protocol(_) => {
-                Self::Terminal(eyre::Report::new(err))
-            }
-        }
+        Self::Terminal(eyre::Report::new(err))
     }
-}
-
-struct RegisteredDefer {
-    name: String,
-    action: Box<dyn FnOnce() -> LocalBoxFuture<'static, Result<(), JobErrorX>>>,
 }
 
 #[derive(Clone)]
@@ -146,7 +178,6 @@ pub struct WflowCtx {
     pub job: types::JobCtx,
     in_step: Rc<Cell<bool>>,
     backend: Rc<dyn WflowBackend>,
-    defers: Rc<RefCell<Vec<RegisteredDefer>>>,
 }
 
 struct StepGuard {
@@ -186,7 +217,6 @@ impl WflowCtx {
             job,
             in_step: Rc::new(Cell::new(false)),
             backend,
-            defers: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -243,7 +273,7 @@ impl WflowCtx {
                 })?;
                 Ok(value)
             }
-            StepState::Active(active_op_state) => {
+            StepState::Active(active_step) => {
                 let Json(result) = func().await?;
                 let json = serde_json::to_string(&result).map_err(|err| {
                     JobErrorX::Terminal(ferr!(
@@ -251,7 +281,7 @@ impl WflowCtx {
                         type_name = std::any::type_name::<O>()
                     ))
                 })?;
-                self.backend.persist_step(active_op_state.id, &json).await?;
+                self.backend.persist_step(active_step.id, &json).await?;
                 Ok(result)
             }
         }
@@ -279,12 +309,12 @@ impl WflowCtx {
         let _step_guard = self.enter_step("sleep")?;
         let state = self.backend.next_step(meta).await?;
         match state {
-            StepState::Completed(_completed) => Ok(()),
-            StepState::Active(active_op_state) => {
+            StepState::Completed(_) => Ok(()),
+            StepState::Active(active_step) => {
                 let duration_ms: u64 = duration.as_millis().try_into().map_err(|_| {
                     JobErrorX::Terminal(ferr!("duration too large for host sleep API"))
                 })?;
-                self.backend.sleep(active_op_state.id, duration_ms).await?;
+                self.backend.sleep(active_step.id, duration_ms).await?;
                 Ok(())
             }
         }
@@ -314,100 +344,10 @@ impl WflowCtx {
         let state = self.backend.next_step(meta).await?;
         let value_json = match state {
             StepState::Completed(completed) => completed.value_json,
-            StepState::Active(active_op_state) => {
-                self.backend.recv_message(active_op_state.id).await?
-            }
+            StepState::Active(active_step) => self.backend.recv_message(active_step.id).await?,
         };
         O::decode(&value_json)
     }
-
-    pub fn defer<F, Fut>(&mut self, name: &'static str, func: F) -> Result<(), JobErrorX>
-    where
-        F: FnOnce() -> Fut + 'static,
-        Fut: Future<Output = Result<(), JobErrorX>> + 'static,
-    {
-        if self.in_step.get() {
-            return Err(JobErrorX::Terminal(ferr!(
-                "cannot register workflow defer from inside an active step"
-            )));
-        }
-        self.defers.borrow_mut().push(RegisteredDefer {
-            name: name.to_owned(),
-            action: Box::new(move || Box::pin(func())),
-        });
-        Ok(())
-    }
-
-    pub fn disarm_defers(&mut self) {
-        self.defers.borrow_mut().clear();
-    }
-
-    /// Runs the registered defers in reverse order, each as a durable `Defer`
-    /// step, and settles the job with the outcome `cause` prescribes. A defer
-    /// that fails transiently propagates so the host re-runs the job: replay
-    /// skips the committed defers and resumes at the outstanding one. A defer
-    /// that fails terminally settles the job as [`JobFailure::CleanupFailed`]
-    /// with the remaining compensation outstanding, never archived as done.
-    async fn finish_cleanup(&mut self, cause: types::CleanupCause) -> types::JobResult {
-        let defers = std::mem::take(&mut *self.defers.borrow_mut());
-        for registered in defers.into_iter().rev() {
-            let _step_guard = self.enter_step("defer").map_err(job_error_from_x)?;
-            let meta = StepMeta::new(StepKind::Defer, Some(&registered.name));
-            let state = self
-                .backend
-                .next_step(meta)
-                .await
-                .map_err(|err| job_error_from_x(err.into()))?;
-            let StepState::Active(active_op_state) = state else {
-                continue;
-            };
-            match (registered.action)().await {
-                Ok(()) => {}
-                Err(JobErrorX::Transient(err)) => {
-                    return Err(job_error_from_x(JobErrorX::Transient(err)));
-                }
-                Err(err) => {
-                    return Err(failure_envelope(&types::JobFailure::CleanupFailed {
-                        cause,
-                        defer: registered.name,
-                        error: format!("{err:?}"),
-                    }));
-                }
-            }
-            self.backend
-                .persist_step(active_op_state.id, "null")
-                .await
-                .map_err(|err| job_error_from_x(err.into()))?;
-        }
-        Err(cleanup_settlement(cause))
-    }
-}
-
-/// The terminal error a cleanup settles with once its defers ran: a cancel
-/// and an exhausted forward budget are classified failures, a terminal error
-/// is the workflow's own.
-fn cleanup_settlement(cause: types::CleanupCause) -> types::JobError {
-    match cause {
-        types::CleanupCause::Cancelled { reason } => {
-            failure_envelope(&types::JobFailure::Cancelled { reason })
-        }
-        types::CleanupCause::Failed { error } => types::JobError::Terminal(error),
-        types::CleanupCause::RetriesExhausted {
-            retries,
-            max_retries,
-            last_error,
-        } => failure_envelope(&types::JobFailure::RetriesExhausted {
-            retries,
-            max_retries,
-            last_error,
-        }),
-    }
-}
-
-/// The terminal error whose JSON is the classified `failure`, the one shape
-/// hosts settle budget exhaustion and cleanup outcomes with.
-fn failure_envelope(failure: &types::JobFailure) -> types::JobError {
-    types::JobError::Terminal(serde_json::to_string(failure).expect(ERROR_JSON))
 }
 
 pub fn job_error_from_x(err: JobErrorX) -> types::JobError {
@@ -421,19 +361,11 @@ pub fn job_error_from_x(err: JobErrorX) -> types::JobError {
             }))
             .expect(ERROR_JSON),
         }),
-        // Only reachable when a workflow swallows the interruption and maps it
-        // to another error itself; its defers then never ran, which is what the
-        // envelope records.
-        JobErrorX::Interrupted(cause) => cleanup_settlement(cause),
     }
 }
 
-/// Runs one workflow invocation to its terminal outcome. Success disarms the
-/// registered defers. A terminal error with defers registered first records
-/// the cause durably ([`WflowBackend::begin_cleanup`]) so a crash mid-cleanup
-/// resumes compensation instead of re-running forward work, then runs them;
-/// without defers it settles directly. An interruption carries the cause the
-/// host already recorded and goes straight to the defers.
+/// Runs one workflow invocation directly to a success, terminal failure, or
+/// transient failure outcome.
 pub async fn run_wflow<F, R>(
     args: types::RunArgs,
     backend: Rc<dyn WflowBackend>,
@@ -450,36 +382,19 @@ where
     let mut cx = WflowCtx::new(args.ctx, backend);
     let args_json = &args.args_json;
 
-    let outcome = handler(&mut cx, &args.wflow_key, args_json).await;
-    match outcome {
-        Ok(value) => {
-            cx.disarm_defers();
-            serde_json::to_string(&value).map_err(|err| {
-                types::JobError::Terminal(
-                    serde_json::to_string(&json!({
-                        "msg": format!(
-                            "error serializing result to json for {key}: {err}",
-                            key = args.wflow_key
-                        )
-                    }))
-                    .expect(ERROR_JSON),
-                )
-            })
-        }
-        Err(JobErrorX::Terminal(err)) => {
-            let error = format!("{err:?}");
-            if cx.defers.borrow().is_empty() {
-                return Err(types::JobError::Terminal(error));
-            }
-            let cause = cx
-                .backend
-                .begin_cleanup(&error)
-                .await
-                .map_err(|err| job_error_from_x(err.into()))?;
-            cx.finish_cleanup(cause).await
-        }
-        Err(JobErrorX::Interrupted(cause)) => cx.finish_cleanup(cause).await,
-        Err(err @ JobErrorX::Transient(_)) => Err(job_error_from_x(err)),
+    match handler(&mut cx, &args.wflow_key, args_json).await {
+        Ok(value) => serde_json::to_string(&value).map_err(|err| {
+            types::JobError::Terminal(
+                serde_json::to_string(&json!({
+                    "msg": format!(
+                        "error serializing result to json for {key}: {err}",
+                        key = args.wflow_key
+                    )
+                }))
+                .expect(ERROR_JSON),
+            )
+        }),
+        Err(err) => Err(job_error_from_x(err)),
     }
 }
 

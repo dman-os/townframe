@@ -3,7 +3,6 @@ role = "interface"
 dependency_reason = "shared workflow development kit authoring interface"
 allowed_dependencies = [
     "utils_rs",
-    "wflow_core",
 ]
 allow_external_api_types = false
 
