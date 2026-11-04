@@ -250,7 +250,8 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
-- big_plugs: P1–P6 done. Next: fix the ephemeral-SQLite temp-dir leak, then P7 (schema registry).
+- big_plugs: P1–P6 done; P7 (schema registry) in flight.
+- Temp-dir leak: the disk-filling part is fixed (`998b73d9`). The operator stopped the residual work (2026-11-04): `big_repo`'s own suite still leaves about 16 dirs of ~1 MB per run. The unverified WIP is parked in `git stash` ("wip: big_repo residual temp-dir leak"): test stops, `TempDir` ownership in the stress fixture, `SqliteRuntime::drain_workers`. Low priority.
 ## Done
 
 - 2026-11-04: P6 substitution, `eee4f9b9`.
