@@ -488,3 +488,18 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   ADR 025 §11 → C6b unified async `Context` (native; binding-based collection/registration,
   multi-presentation, publish_call, require) → C6c guest parity (counter: second presentation + a
   call; a guest registration write) → C7.
+
+## big_plugs coordination (2026-11-04, peer session on ../townframe-p3N-2)
+
+- Operator direction relayed by the peer: a plug is the one package format for every kind
+  (nodules, micros, Lexicon schemas); plug-level dependencies; one auditable request → grant →
+  minted-capability story across kinds, statically answerable incl. transitively through services;
+  node configuration is node-local.
+- Answered: Clay needs list/get(section + component bytes by digest)/watch from the plug store;
+  enablement, bindings and grants stay in Clay's desired state (ADR 025 §12) — share request/grant
+  *types* across kinds, not datums. `MicroManifest` becomes the plug's `micro` section verbatim
+  (sidecar JSON is its standalone form); willing to move contract/schema ids to NSIDs.
+- Open for the operator: micros requiring nodule operations by NSID (grant minted like a nodule's,
+  exposed as the same call capability); whether the envelope's id/version replace the manifest's
+  `id`/`package_version`. Schema gaps for later: lookup by schema id (not datum tag) and a repo
+  that grows on plug import.
