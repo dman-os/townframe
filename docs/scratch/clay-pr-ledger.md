@@ -536,3 +536,9 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
     `collection_requests` (ADR 024 §14 says contributions target a local binding).
   - Drop `FacetAccess.owner_plug_id` (plug-id reference that breaks under substitution); the
     request names the datum NSID and configuration picks the document.
+- ADR numbering: origin/main has 023–026; the peer branch takes 027 (plugs/nodules) and 028 (plug
+  identity, naming, dependencies, malleability). Ours renumber after C6c, before rebasing on main:
+  023 → 029 (cross-guest capability bank), 024 → 030 (micro lifecycle/manifest), 025 → 031
+  (manifest-declared collections); update every cross-reference in docs and source comments.
+  The nodule manifest adopts our request shape `{binding, contract, access, necessity}` +
+  `minRevision`.
