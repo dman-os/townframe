@@ -23,7 +23,6 @@ use clay_collection::Stamp;
 use clay_collection::Stamped;
 use clay_collection::Transaction;
 use clay_collection::WriteBasis;
-use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -31,35 +30,13 @@ use crate::Capability;
 use crate::Error;
 use crate::RowAttachment;
 
-/// The CBOR tag a value uses to name one of its row's attachments by index. Equal to
-/// `clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG`, which the in-process backend
-/// asserts at compile time.
-pub const CAPABILITY_ATTACHMENT_TAG: u64 = 43000;
-
 #[cfg(feature = "in_process")]
 const _: () = assert!(
-    CAPABILITY_ATTACHMENT_TAG == clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG
+    crate::CAPABILITY_ATTACHMENT_TAG == clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG
 );
 
-/// A value's reference to one of its row's attachments, written under the reserved CBOR tag.
-/// The body alone conveys no authority: the index names an entry of the row's attachment list,
-/// which the host mints into a recipient-local [`Capability`] on read.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Attachment(ciborium::tag::Required<u64, CAPABILITY_ATTACHMENT_TAG>);
-
-impl Attachment {
-    pub fn at(index: u64) -> Self {
-        Self(ciborium::tag::Required(index))
-    }
-
-    pub fn index(self) -> usize {
-        usize::try_from(self.0.0).expect("attachment index fits in memory")
-    }
-}
-
 /// One live row of a collection: its decoded key and value, its writer's stamp, and the
-/// recipient-local references its value attaches (indexed by [`Attachment`]).
+/// recipient-local references its value attaches (indexed by [`crate::Attachment`]).
 pub struct Row<K, V> {
     pub key: K,
     pub value: V,
