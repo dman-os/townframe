@@ -14,6 +14,9 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 --webview        webview renderer (AT-SPI interaction checks)
                 --fresh          start from an empty store in a new temp file
                 --store <path>   use this store file (DAYFRAME_STORE_PATH)
+  android     build the Android APK (dayframe_mobile, aarch64-linux-android)
+                --release        release profile (unsigned unless Dioxus.toml configures signing)
+                --install        adb install the APK on the attached device
   web         build and serve dayframe_web (--build: build only)
   showcase    run the design showcase (dayframe_showcase) natively
   packages    only (re)build the Wasm packages and print the DAYFRAME_* env lines
@@ -60,6 +63,47 @@ switch (command) {
       "--hot-patch",
       "false",
     ).env(env);
+    break;
+  }
+  case "android": {
+    await useDotenvTargetDir();
+    const env = await prepareDayframePackages();
+    // The APK carries its packages as assets: `dayframe_mobile` bundles `packages/` with
+    // `asset!`, so stage the prepared counter and layout beside the crate (gitignored).
+    const staged = root.join("src/dayframe_mobile/packages");
+    await Deno.mkdir(staged.toString(), { recursive: true });
+    for (const name of ["counter", "layout"]) {
+      for (const suffix of ["manifest.json", "component.wasm"]) {
+        await $`cp ${
+          $.path(env["DAYFRAME_PACKAGE_DIR"]).join(`${name}.${suffix}`)
+        } ${staged.join(`${name}.${suffix}`)}`;
+      }
+    }
+    // `dx build` assembles through Gradle into the target dir; `--release` also needs a
+    // signing config in Dioxus.toml to yield a signed APK.
+    await $`deno run --allow-all ${
+      root.join("x/dx.ts")
+    } build --platform android --target aarch64-linux-android --renderer native -p dayframe_mobile ${
+      flag("--release") ? ["--release"] : []
+    }`.cwd(root);
+    const metadata =
+      await $`cargo metadata --locked --no-deps --format-version 1`
+        .json<{ target_directory: string }>();
+    const apks =
+      await $`find ${metadata.target_directory} -name '*.apk' -path '*dayframe_mobile*' -printf '%T@ %p\n'`
+        .text();
+    const apk = apks.trim().split("\n").filter(Boolean).sort().pop()?.split(
+      " ",
+    )[1];
+    if (!apk) {
+      throw new Error("dx reported success but no dayframe_mobile APK exists");
+    }
+    console.log(`apk: ${apk}`);
+    if (flag("--install")) {
+      // `adb install` fails with "no devices/emulators found" when nothing is attached; that is
+      // the right error, not something to paper over.
+      await $`adb install -r ${apk}`;
+    }
     break;
   }
   case "web":
