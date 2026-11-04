@@ -226,8 +226,11 @@ jobs:
           # Prepare the wasm guest components first: the clay_*/micro_* tests read
           # DAYFRAME_<NAME>_COMPONENT paths printed by the prepare step.
           nix develop .#ci-desktop --command deno run --allow-all x/check-dayframe.ts --prepare-only > /tmp/dayframe-components.env
+          # `set -a` exports every variable the prepare step prints, so a new fixture needs no
+          # edit here (a hand-kept export list silently left new fixtures unset).
+          set -a
           source /tmp/dayframe-components.env
-          export DAYFRAME_COUNTER_COMPONENT DAYFRAME_COLLECTION_PROBE_COMPONENT
+          set +a
           #
           # `--no-report` accumulates llvm profile data across the nextest and doctest runs (it
           # implies `--no-clean`, so the earlier run's data survives) and the final `report`
