@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 
 pub(crate) const SKIN: SectionsSkin = SectionsSkin {
     root: "bg-canvas text-text",
-    pane: "bg-canvas",
+    pane: "bg-surface",
     handle: "group flex cursor-col-resize justify-center focus-visible:outline-2 focus-visible:outline-focus",
     grip: "h-full w-px bg-border group-hover:w-0.5 group-hover:bg-primary group-data-[state=dragging]:w-0.5 group-data-[state=dragging]:bg-primary",
 };
