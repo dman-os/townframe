@@ -73,6 +73,14 @@ impl Readiness {
     }
 }
 
+/// The plug whose code fills a slot under a substitution, and the version of it that does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilledBy {
+    pub plug_id: PlugId,
+    pub version: Version,
+}
+
 /// An admitted nodule installed in a standalone [`Inventory`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstalledNodule {
@@ -84,6 +92,9 @@ pub struct InstalledNodule {
     pub artifacts: BTreeMap<String, (Artifact, ArtifactState)>,
     pub enabled: bool,
     pub config: Option<IndexMap<String, Value>>,
+    /// Set when a substitution fills this slot: `plug_id` is the slot, while `version`,
+    /// `revision`, `nodule`, `admitted` and `artifacts` are the filler's.
+    pub filled_by: Option<FilledBy>,
     configured: bool,
 }
 
@@ -112,6 +123,7 @@ impl InstalledNodule {
             artifacts,
             enabled,
             config,
+            filled_by: None,
             configured,
         }
     }
@@ -179,6 +191,8 @@ pub enum InventoryError {
         existing_plug: Box<PlugId>,
         existing_authority: String,
     },
+    #[error("cannot substitute for `{id}`: {reason}")]
+    InvalidSubstitution { id: PlugId, reason: String },
     #[error("nodule for plug `{0}` is not installed")]
     UnknownPlug(PlugId),
     #[error("nodule for plug `{0}` declares no config schema")]

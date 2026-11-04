@@ -95,6 +95,7 @@ mod dispatch;
 mod executor;
 mod init;
 mod resolution;
+mod substitution;
 
 const NODULES_PATH: &str = "nodules";
 const NOTE: &str = "org.example.note";
@@ -739,7 +740,19 @@ async fn an_enabled_plug_holds_its_authority_against_equal_and_nested_prefixes()
                 extra: Default::default(),
             }));
         rival.authority = Some(authority.into());
-        let refused = node.admit(operator, rival).await.unwrap_err().to_string();
+        // Installing a rival is not holding: the prefix is refused at enablement, which is what
+        // lets a substitute for a plug be installed beside it.
+        let rival_id = rival.id.clone();
+        node.admit(operator, rival).await.unwrap();
+        let refused = node
+            .call(SetNoduleEnabled {
+                authorization: operator,
+                plug_id: rival_id,
+                enabled: true,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(
             refused.contains("overlaps `org.example.photos`"),
             "{name}: {refused}"

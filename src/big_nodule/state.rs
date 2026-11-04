@@ -140,6 +140,12 @@ pub(crate) enum Command {
         binding: String,
         reply: Reply<NoduleRecord>,
     },
+    SetSubstitution {
+        context: RequestContext,
+        plug_id: PlugId,
+        by: Option<PlugId>,
+        reply: Reply<NoduleRecord>,
+    },
     Uninstall {
         context: RequestContext,
         plug_id: PlugId,
@@ -528,6 +534,12 @@ impl State {
                 binding,
                 reply,
             } => answer(reply, self.confirm_resolution(&context, &plug_id, &binding)).await,
+            Command::SetSubstitution {
+                context,
+                plug_id,
+                by,
+                reply,
+            } => answer(reply, self.set_substitution(&context, &plug_id, by)).await,
             Command::Uninstall {
                 context,
                 plug_id,
@@ -622,8 +634,27 @@ impl State {
         enabled: bool,
     ) -> Res<NoduleRecord> {
         let target = plug_id.clone();
+        let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
-            config.set_enabled(&target, enabled).map(|_| ())
+            config.set_enabled(&cache, &target, enabled).map(|_| ())
+        })
+        .await?;
+        self.records
+            .get(plug_id)
+            .cloned()
+            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+    }
+
+    async fn set_substitution(
+        &mut self,
+        context: &RequestContext,
+        plug_id: &PlugId,
+        by: Option<PlugId>,
+    ) -> Res<NoduleRecord> {
+        let target = plug_id.clone();
+        let cache = Arc::clone(&self.admission_cache);
+        self.mutate_config(context, move |config| {
+            config.set_substitution(&cache, &target, by)
         })
         .await?;
         self.records
@@ -915,6 +946,7 @@ impl State {
                             version,
                             revision,
                             actor: self.actors.get(&plug_id).map(nodule_actor),
+                            filled_by: None,
                             enabled,
                             readiness: Readiness::Refused,
                             config,
@@ -1631,6 +1663,7 @@ impl State {
             version: Some(installed.version.clone()),
             revision: Some(installed.revision),
             actor: Some(nodule_actor(&actor)),
+            filled_by: installed.filled_by.clone(),
             enabled: installed.enabled,
             readiness,
             config: installed.config.clone(),

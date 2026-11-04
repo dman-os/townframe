@@ -89,7 +89,7 @@ impl FakeExecutor {
         })
     }
 
-    fn log(&self) -> Vec<String> {
+    pub(super) fn log(&self) -> Vec<String> {
         self.state.lock().unwrap().log.clone()
     }
 

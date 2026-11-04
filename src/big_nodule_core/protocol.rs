@@ -10,6 +10,7 @@
 
 use crate::dispatch::DispatchScope;
 use crate::inventory::ArtifactState;
+use crate::inventory::FilledBy;
 use crate::inventory::InventoryError;
 use crate::inventory::Readiness;
 use crate::providers::RequestStatus;
@@ -120,6 +121,18 @@ pub struct ConfirmNoduleResolution {
     pub binding: String,
 }
 
+/// Sets, or with `by` absent clears, the node-local substitution of slot `plug_id`: the plug `by`
+/// (installed, and holding the slot's authority or none) is run *as* `plug_id` (ADR 028 §3). The
+/// caller must manage both plugs, since `by`'s code runs with the slot's grants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetNoduleSubstitution {
+    pub authorization: Authorization,
+    pub plug_id: PlugId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<PlugId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UninstallNodule {
@@ -205,6 +218,10 @@ pub struct NoduleRecord {
     pub revision: Option<Revision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<NoduleActor>,
+    /// The plug whose code runs in this slot under a substitution. `version` and `revision`
+    /// above are then the filler's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filled_by: Option<FilledBy>,
     pub enabled: bool,
     pub readiness: Readiness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,6 +300,7 @@ operations! {
     SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants";
     SetNoduleOperationGrants => NoduleRecord, procedure, "setNoduleOperationGrants";
     ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution";
+    SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution";
     UninstallNodule => (), procedure, "uninstallNodule";
     GetNodule => NoduleRecord, query, "getNodule";
     ListNodules => Vec<NoduleRecord>, query, "listNodules";
@@ -298,6 +316,7 @@ declare_service_protocol! {
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
             SetNoduleOperationGrants(SetNoduleOperationGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
+            SetNoduleSubstitution(SetNoduleSubstitution),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)

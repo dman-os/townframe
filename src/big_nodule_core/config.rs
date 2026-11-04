@@ -6,6 +6,8 @@
 //! - [`NoduleInstall`][]: `org.example.daybook.nodule.install/<plugId>`
 //! - [`NoduleSettings`][]: `org.example.daybook.nodule.settings/<plugId>`
 //! - [`NoduleGrants`][]: `org.example.daybook.nodule.grants/<plugId>`
+//! - [`NoduleSubstitution`][]: `org.example.daybook.nodule.substitution/<plugId>`, present only
+//!   while another installed plug fills the slot
 //!
 //! Beside them, each installed nodule's handler artifact is referenced by a
 //! `org.example.daybook.blob/nodule.artifact/<plugId>/<artifactKey>` [`Blob`] datum (see
@@ -17,6 +19,7 @@
 
 use crate::Nodule;
 use crate::dispatch::DispatchScope;
+use crate::inventory::FilledBy;
 use crate::inventory::InstalledNodule;
 use crate::inventory::InventoryError;
 use crate::inventory::admit_plug_nodule;
@@ -180,7 +183,23 @@ impl NoduleGrants {
     }
 }
 
-/// The three portable nodule configuration datum declarations.
+/// `org.example.daybook.nodule.substitution/<plugId>`: the node-local substitution "references to
+/// this plug are satisfied by `by`" (ADR 028 §3), as Cargo's `[patch]` does it. `by`'s code and
+/// manifest are installed *as* this plug: every other slot state (actor, grants, operation caps,
+/// initializer done-ness, the resolution lockfile, dispatch registrations) stays keyed by this
+/// plug id. Absence means the slot runs its own install; deleting the datum reinstalls it.
+#[macros::datum(authority = Nodule::ID, name = "substitution")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoduleSubstitution {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub by: PlugId,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// The portable nodule configuration datum declarations.
 #[cfg(feature = "schemars")]
 pub fn config_universe() -> big_cabinet_core::datum::Universe {
     use big_cabinet_core::datum::Declaration;
@@ -189,6 +208,7 @@ pub fn config_universe() -> big_cabinet_core::datum::Universe {
         Declaration::of::<NoduleInstall>().expect("NoduleInstall declaration is valid"),
         Declaration::of::<NoduleSettings>().expect("NoduleSettings declaration is valid"),
         Declaration::of::<NoduleGrants>().expect("NoduleGrants declaration is valid"),
+        Declaration::of::<NoduleSubstitution>().expect("NoduleSubstitution declaration is valid"),
     ])
 }
 
@@ -204,6 +224,11 @@ pub fn settings_key(plug_id: &PlugId) -> DatumKey {
 
 pub fn grants_key(plug_id: &PlugId) -> DatumKey {
     DatumKey::from_text(NoduleGrants::ID, plug_id.to_string())
+        .expect("a PlugId is a valid datum key slot")
+}
+
+pub fn substitution_key(plug_id: &PlugId) -> DatumKey {
+    DatumKey::from_text(NoduleSubstitution::ID, plug_id.to_string())
         .expect("a PlugId is a valid datum key slot")
 }
 
@@ -307,6 +332,7 @@ pub struct NoduleEntry {
     pub install: DatumSlot<NoduleInstall>,
     pub settings: DatumSlot<NoduleSettings>,
     pub grants: DatumSlot<NoduleGrants>,
+    pub substitution: DatumSlot<NoduleSubstitution>,
     pub artifacts: BTreeMap<String, DatumSlot<Blob>>,
 }
 
@@ -315,6 +341,7 @@ impl NoduleEntry {
         self.install.is_absent()
             && self.settings.is_absent()
             && self.grants.is_absent()
+            && self.substitution.is_absent()
             && self.artifacts.is_empty()
     }
 }
@@ -467,7 +494,9 @@ impl From<InventoryError> for StoreError {
 impl DatumStore for NoduleConfig {
     fn owns(key: &DatumKey) -> bool {
         match key.tag().as_str() {
-            NoduleInstall::ID | NoduleSettings::ID | NoduleGrants::ID => true,
+            NoduleInstall::ID | NoduleSettings::ID | NoduleGrants::ID | NoduleSubstitution::ID => {
+                true
+            }
             Blob::ID => key
                 .slot_bytes()
                 .starts_with(ARTIFACT_SLOT_PREFIX.as_bytes()),
@@ -506,6 +535,7 @@ impl DatumStore for NoduleConfig {
                 NoduleInstall::ID => entry.install = DatumSlot::from_read(datum_read),
                 NoduleSettings::ID => entry.settings = DatumSlot::from_read(datum_read),
                 NoduleGrants::ID => entry.grants = DatumSlot::from_read(datum_read),
+                NoduleSubstitution::ID => entry.substitution = DatumSlot::from_read(datum_read),
                 _ => unreachable!("checked by NoduleConfig::owns"),
             }
         }
@@ -534,6 +564,12 @@ impl DatumStore for NoduleConfig {
                 &mut patch,
             )?;
             diff_slot(grants_key(plug_id), &prev.grants, &next.grants, &mut patch)?;
+            diff_slot(
+                substitution_key(plug_id),
+                &prev.substitution,
+                &next.substitution,
+                &mut patch,
+            )?;
             let absent = DatumSlot::Absent;
             let artifacts: BTreeSet<&String> =
                 prev.artifacts.keys().chain(next.artifacts.keys()).collect();
@@ -702,27 +738,6 @@ impl NoduleConfig {
         drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
     ) -> Result<InstalledNodule, InventoryError> {
         let (nodule, admitted, artifacts) = admit_plug_nodule(plug)?;
-        for (other_plug, other_entry) in &self.entries {
-            if other_plug == &plug.id {
-                continue;
-            }
-            if let Some(other_install) = other_entry.install.accepted()
-                && let Admission::Admitted {
-                    admitted: other_admitted,
-                    ..
-                } = &*cache.admission(other_plug, other_install)
-                && let (Some(mine), Some(theirs)) = (&admitted.authority, &other_admitted.authority)
-                && (Nodule::authority_owns(mine, theirs) || Nodule::authority_owns(theirs, mine))
-            {
-                return Err(InventoryError::AuthorityConflict {
-                    id: plug.id.clone(),
-                    authority: mine.clone(),
-                    existing_plug: Box::new(other_plug.clone()),
-                    existing_authority: theirs.clone(),
-                });
-            }
-        }
-
         let revision = plug.revision();
         let (enabled, install_extra, config, configured) =
             if let Some(existing_entry) = self.entries.get(&plug.id) {
@@ -794,6 +809,11 @@ impl NoduleConfig {
             });
         }
         entry.artifacts = artifact_slots(&entry.artifacts, &artifacts);
+        // A plug installed disabled holds nothing yet; an upgrade of an enabled one must not
+        // take a prefix another enabled slot holds.
+        if enabled {
+            self.ensure_no_authority_conflict(cache, &plug.id)?;
+        }
 
         Ok(InstalledNodule::new(
             plug.id.clone(),
@@ -843,19 +863,31 @@ impl NoduleConfig {
         ))
     }
 
+    /// Enabling is where two holders of one prefix are refused (ADR 028 §5), and where a plug
+    /// that fills another slot is refused its own: one code lineage per slot.
     pub fn set_enabled(
         &mut self,
+        cache: &AdmissionCache,
         plug_id: &PlugId,
         enabled: bool,
     ) -> Result<InstalledNodule, InventoryError> {
         let (plug, nodule, admitted, artifacts, _, (config, configured)) =
             self.validate_installed(plug_id)?;
+        if enabled && let Some(slot) = self.slot_filled_by(plug_id) {
+            return Err(InventoryError::InvalidSubstitution {
+                id: slot,
+                reason: format!("`{plug_id}` fills it, so it cannot also be enabled on its own"),
+            });
+        }
         let entry = self.entries.get_mut(plug_id).expect("verified installed");
         if let DatumSlot::Accepted { value, raw } = &mut entry.install
             && value.enabled != enabled
         {
             value.enabled = enabled;
             *raw = None;
+        }
+        if enabled {
+            self.ensure_no_authority_conflict(cache, plug_id)?;
         }
         Ok(InstalledNodule::new(
             plug.id.clone(),
@@ -868,6 +900,88 @@ impl NoduleConfig {
             config,
             configured,
         ))
+    }
+
+    /// The slot `plug_id`'s code fills by substitution, if any.
+    fn slot_filled_by(&self, plug_id: &PlugId) -> Option<PlugId> {
+        self.entries.iter().find_map(|(slot, entry)| {
+            entry
+                .substitution
+                .accepted()
+                .is_some_and(|substitution| &substitution.by == plug_id)
+                .then(|| slot.clone())
+        })
+    }
+
+    /// Sets or, with `by` absent, clears the substitution of slot `plug_id`: from now on `by`'s
+    /// code and manifest run in the slot, which keeps everything else it has (actor, settings,
+    /// grants, enablement, initializer done-ness, lockfile, dispatch registrations). Clearing
+    /// reinstalls the slot's own envelope, which was never touched.
+    ///
+    /// Grants never widen silently (ADR 028 §3). A different publisher's manifest asks for a
+    /// different set of things, and a granted authority prefix would otherwise cover whatever it
+    /// newly asks for. So the slot's operation grants are narrowed here, once, to exactly the
+    /// operations the filler requests *identically* (binding, contract and access) to a request
+    /// of the slot's own install: those keep their grants, and every other request the filler
+    /// makes is ungranted (a required one holds the nodule at `NeedsConfiguration`) until the
+    /// operator grants it. Clearing does not restore the wider grants; grants only ever narrow
+    /// here.
+    pub fn set_substitution(
+        &mut self,
+        cache: &AdmissionCache,
+        plug_id: &PlugId,
+        by: Option<PlugId>,
+    ) -> Result<(), InventoryError> {
+        let invalid = |reason: String| InventoryError::InvalidSubstitution {
+            id: plug_id.clone(),
+            reason,
+        };
+        self.validate_installed_plug(plug_id)?;
+        let Some(by) = by else {
+            self.entries
+                .get_mut(plug_id)
+                .expect("verified installed")
+                .substitution = DatumSlot::Absent;
+            return Ok(());
+        };
+        if &by == plug_id {
+            return Err(invalid("a plug cannot substitute for itself".into()));
+        }
+        // Reuses `resolve`'s checks, so what is refused here is exactly what would be refused
+        // when reconciling.
+        let entry = &self.entries[plug_id];
+        let install = entry.install.accepted().expect("verified installed");
+        filler(plug_id, install, &by, &self.entries, cache).map_err(invalid)?;
+        self.validate_installed_plug(&by)?;
+        if self.entries[&by]
+            .install
+            .accepted()
+            .is_some_and(|install| install.enabled)
+        {
+            return Err(invalid(format!(
+                "`{by}` is enabled on its own, and one code lineage cannot fill the slot while \
+                 running beside it"
+            )));
+        }
+        // The slot's stored grants are left as configured: what reaches the filler is narrowed
+        // when the slot is resolved (`resolve_entry`), so clearing the substitution restores them.
+        let entry = self.entries.get_mut(plug_id).expect("verified installed");
+        let extra = match &entry.substitution {
+            DatumSlot::Accepted { value, .. } => value.extra.clone(),
+            _ => Extra::default(),
+        };
+        entry.substitution = DatumSlot::Accepted {
+            value: NoduleSubstitution { by, extra },
+            raw: None,
+        };
+        if self.entries[plug_id]
+            .install
+            .accepted()
+            .is_some_and(|install| install.enabled)
+        {
+            self.ensure_no_authority_conflict(cache, plug_id)?;
+        }
+        Ok(())
     }
 
     pub fn set_drawer_grants(
@@ -943,58 +1057,9 @@ impl NoduleConfig {
     /// failing unrelated valid nodules. Orphan settings or grants (where `install` is absent) do
     /// not install a nodule.
     pub fn resolve(&self, cache: &AdmissionCache) -> BTreeMap<PlugId, NoduleResolution> {
-        let mut results = BTreeMap::new();
-        for (plug_id, entry) in &self.entries {
-            if let Some(resolution) = resolve_entry(plug_id, entry, cache) {
-                results.insert(plug_id.clone(), resolution);
-            }
-        }
-        // A plug conflicts with another when one authority equals or dot-prefixes the other.
-        // Looking each authority up by itself, by each of its dotted prefixes and by the key range
-        // of its descendants is O(n * depth) rather than comparing every pair. The smallest
-        // conflicting `PlugId` is reported so the reason is stable. Every NSID a nodule holds is
-        // under its authority, so this subsumes overlap between held NSIDs.
-        let mut authorities: BTreeMap<&str, Vec<&PlugId>> = BTreeMap::new();
-        for (plug_id, resolution) in &results {
-            if let NoduleResolution::Admitted { installed, .. } = resolution
-                && let Some(authority) = &installed.admitted.authority
-            {
-                authorities.entry(authority).or_default().push(plug_id);
-            }
-        }
-        let conflicts: BTreeMap<PlugId, String> = results
-            .iter()
-            .filter_map(|(plug_id, resolution)| {
-                let NoduleResolution::Admitted { installed, .. } = resolution else {
-                    return None;
-                };
-                let id = installed.admitted.authority.as_deref()?;
-                let ancestors = id
-                    .match_indices('.')
-                    .filter_map(|(dot, _)| authorities.get_key_value(&id[..dot]));
-                let same_or_descendants = authorities
-                    .range::<str, _>((Bound::Included(id), Bound::Unbounded))
-                    .take_while(|(other, _)| Nodule::authority_owns(id, other));
-                let (other_plug, other_authority) = ancestors
-                    .chain(same_or_descendants)
-                    .flat_map(|(other, holders)| {
-                        holders
-                            .iter()
-                            .filter(|holder| **holder != plug_id)
-                            .map(move |holder| (*holder, *other))
-                    })
-                    .min_by_key(|(holder, _)| *holder)?;
-                let error = InventoryError::AuthorityConflict {
-                    id: plug_id.clone(),
-                    authority: id.to_owned(),
-                    existing_plug: Box::new(other_plug.clone()),
-                    existing_authority: other_authority.to_owned(),
-                };
-                Some((plug_id.clone(), error.to_string()))
-            })
-            .collect();
-
-        for (plug_id, reason) in conflicts {
+        let mut results = self.resolve_slots(cache);
+        let conflicts = authority_conflicts(&results);
+        for (plug_id, error) in conflicts {
             if let Some(NoduleResolution::Admitted { installed, .. }) = results.remove(&plug_id) {
                 results.insert(
                     plug_id.clone(),
@@ -1004,7 +1069,7 @@ impl NoduleConfig {
                         revision: Some(installed.revision),
                         enabled: installed.enabled,
                         config: installed.config,
-                        reason,
+                        reason: error.to_string(),
                     },
                 );
             }
@@ -1012,6 +1077,29 @@ impl NoduleConfig {
         cache.retain(self.entries.keys());
 
         results
+    }
+
+    fn resolve_slots(&self, cache: &AdmissionCache) -> BTreeMap<PlugId, NoduleResolution> {
+        let mut results = BTreeMap::new();
+        for (plug_id, entry) in &self.entries {
+            if let Some(resolution) = resolve_entry(plug_id, entry, &self.entries, cache) {
+                results.insert(plug_id.clone(), resolution);
+            }
+        }
+        results
+    }
+
+    /// Fails when `plug_id`'s slot holds an authority prefix that another enabled slot also
+    /// holds.
+    fn ensure_no_authority_conflict(
+        &self,
+        cache: &AdmissionCache,
+        plug_id: &PlugId,
+    ) -> Result<(), InventoryError> {
+        match authority_conflicts(&self.resolve_slots(cache)).remove(plug_id) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     #[expect(
@@ -1105,9 +1193,158 @@ impl NoduleConfig {
     }
 }
 
+/// The slots whose enabled authority equals or nests with another enabled slot's. The authority
+/// of a slot is the one its running code holds (a filler's, under a substitution), so a
+/// substitution is exempt from the rule exactly because the original install is not running.
+fn authority_conflicts(
+    results: &BTreeMap<PlugId, NoduleResolution>,
+) -> BTreeMap<PlugId, InventoryError> {
+    // A plug conflicts with another when one authority equals or dot-prefixes the other.
+    // Looking each authority up by itself, by each of its dotted prefixes and by the key range
+    // of its descendants is O(n * depth) rather than comparing every pair. The smallest
+    // conflicting `PlugId` is reported so the reason is stable. Every NSID a nodule holds is
+    // under its authority, so this subsumes overlap between held NSIDs.
+    let enabled_authority = |resolution: &'_ NoduleResolution| match resolution {
+        NoduleResolution::Admitted { installed, .. } if installed.enabled => {
+            installed.admitted.authority.clone()
+        }
+        _ => None,
+    };
+    let mut authorities: BTreeMap<String, Vec<&PlugId>> = BTreeMap::new();
+    for (plug_id, resolution) in results {
+        if let Some(authority) = enabled_authority(resolution) {
+            authorities.entry(authority).or_default().push(plug_id);
+        }
+    }
+    results
+        .iter()
+        .filter_map(|(plug_id, resolution)| {
+            let id = enabled_authority(resolution)?;
+            let ancestors = id
+                .match_indices('.')
+                .filter_map(|(dot, _)| authorities.get_key_value(&id[..dot]));
+            let same_or_descendants = authorities
+                .range::<str, _>((Bound::Included(id.as_str()), Bound::Unbounded))
+                .take_while(|(other, _)| Nodule::authority_owns(&id, other));
+            let (other_plug, other_authority) = ancestors
+                .chain(same_or_descendants)
+                .flat_map(|(other, holders)| {
+                    holders
+                        .iter()
+                        .filter(|holder| **holder != plug_id)
+                        .map(move |holder| (*holder, other))
+                })
+                .min_by_key(|(holder, _)| *holder)?;
+            Some((
+                plug_id.clone(),
+                InventoryError::AuthorityConflict {
+                    id: plug_id.clone(),
+                    authority: id.clone(),
+                    existing_plug: Box::new(other_plug.clone()),
+                    existing_authority: other_authority.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The install whose code fills slot `plug_id` under a substitution by `by`, with its admission.
+///
+/// The filler must be installed and admissible, and its NSID authority must be absent or equal
+/// to the authority the slot's own install holds: only a substitution may hold another plug's
+/// prefix (ADR 028 §5), and a fork that renamed its prefix is a different slot, not a drop-in.
+fn filler<'a>(
+    plug_id: &PlugId,
+    install: &NoduleInstall,
+    by: &PlugId,
+    entries: &'a BTreeMap<PlugId, NoduleEntry>,
+    cache: &AdmissionCache,
+) -> Result<(&'a NoduleInstall, Arc<Admission>), String> {
+    let Some(filler_install) = entries.get(by).and_then(|entry| entry.install.accepted()) else {
+        return Err(format!("substitute `{by}` is not installed"));
+    };
+    let admission = cache.admission(by, filler_install);
+    let Admission::Admitted {
+        admitted: filler_admitted,
+        ..
+    } = &*admission
+    else {
+        return Err(format!("substitute `{by}` is not admissible"));
+    };
+    let Admission::Admitted {
+        admitted: own_admitted,
+        ..
+    } = &*cache.admission(plug_id, install)
+    else {
+        return Err(format!(
+            "the slot's own install is not admissible, so substitute `{by}` cannot be checked against it"
+        ));
+    };
+    if filler_admitted.authority.is_some() && filler_admitted.authority != own_admitted.authority {
+        return Err(format!(
+            "substitute `{by}` holds authority `{}`, not this plug's ({}): a drop-in replacement \
+             holds the same prefix or none",
+            filler_admitted.authority.as_deref().unwrap_or_default(),
+            own_admitted
+                .authority
+                .as_deref()
+                .map_or("none".to_owned(), |authority| format!("`{authority}`")),
+        ));
+    }
+    Ok((filler_install, admission))
+}
+
+/// The operation grants that reach the code filling a substituted slot. The slot's grants were
+/// given for its own code's requests: a request the filler shares with that code (same binding,
+/// contract and access) keeps whatever grant covered it, while one the filler adds or widens is
+/// covered only by a grant naming that exact operation. A prefix grant is broad consent given for
+/// the slot's own code and never silently stretches to the filler's additions (ADR 028 §3), so
+/// granting one means naming it. This is computed, never written back: the stored grants are
+/// untouched, and clearing the substitution restores exactly what was granted.
+fn substituted_grants(own: &Nodule, filler: &Nodule, granted: &DispatchScope) -> DispatchScope {
+    DispatchScope {
+        operations: filler
+            .operation_requests()
+            .filter(|request| {
+                let shared = own.requires.iter().any(|own| {
+                    (&own.binding, &own.contract, &own.access)
+                        == (&request.binding, &request.contract, &request.access)
+                });
+                if shared {
+                    granted.permits(&request.contract)
+                } else {
+                    granted.operations.contains(&request.contract)
+                }
+            })
+            .map(|request| request.contract.clone())
+            .collect(),
+        authorities: BTreeSet::new(),
+    }
+}
+
+/// The install whose code runs in slot `plug_id`, its admission and, under a substitution, the
+/// plug filling it: the slot's own install unless its substitution datum names another.
+fn code_source<'a>(
+    plug_id: &PlugId,
+    entry: &'a NoduleEntry,
+    install: &'a NoduleInstall,
+    entries: &'a BTreeMap<PlugId, NoduleEntry>,
+    cache: &AdmissionCache,
+) -> Result<(&'a NoduleInstall, Arc<Admission>, Option<PlugId>), String> {
+    match &entry.substitution {
+        DatumSlot::Absent => Ok((install, cache.admission(plug_id, install), None)),
+        DatumSlot::Invalid { reason, .. } => Err(format!("invalid substitution datum: {reason}")),
+        DatumSlot::Accepted { value, .. } => {
+            let (source, admission) = filler(plug_id, install, &value.by, entries, cache)?;
+            Ok((source, admission, Some(value.by.clone())))
+        }
+    }
+}
+
 fn resolve_entry(
     plug_id: &PlugId,
     entry: &NoduleEntry,
+    entries: &BTreeMap<PlugId, NoduleEntry>,
     cache: &AdmissionCache,
 ) -> Option<NoduleResolution> {
     let install = match &entry.install {
@@ -1125,19 +1362,38 @@ fn resolve_entry(
         DatumSlot::Accepted { value, .. } => value,
     };
 
-    let refuse =
-        |version: Option<Version>, config: Option<IndexMap<String, Value>>, reason: String| {
-            NoduleResolution::Refused {
-                plug_id: plug_id.clone(),
-                version,
-                revision: Some(install.revision),
-                enabled: install.enabled,
-                config,
-                reason,
+    let refuse_at = |revision: Revision,
+                     version: Option<Version>,
+                     config: Option<IndexMap<String, Value>>,
+                     reason: String| {
+        NoduleResolution::Refused {
+            plug_id: plug_id.clone(),
+            version,
+            revision: Some(revision),
+            enabled: install.enabled,
+            config,
+            reason,
+        }
+    };
+
+    // The code that runs in this slot: its own install, or the filler's under a substitution.
+    // Everything else about the slot (settings, grants, enablement) is the slot's own.
+    let (source, admission, filled_from) =
+        match code_source(plug_id, entry, install, entries, cache) {
+            Ok(source) => source,
+            Err(reason) => {
+                return Some(refuse_at(
+                    install.revision,
+                    None,
+                    entry.settings.accepted().map(|s| s.values.clone()),
+                    reason,
+                ));
             }
         };
-
-    let admission = cache.admission(plug_id, install);
+    let refuse =
+        |version: Option<Version>, config: Option<IndexMap<String, Value>>, reason: String| {
+            refuse_at(source.revision, version, config, reason)
+        };
     let (version, nodule, admitted, artifacts) = match &*admission {
         Admission::Refused { version, reason } => {
             return Some(refuse(
@@ -1221,19 +1477,30 @@ fn resolve_entry(
             desired_operations = value.operations.clone().map(Into::into).unwrap_or_default();
         }
     }
+    if filled_from.is_some() {
+        let Admission::Admitted { nodule: own, .. } = &*cache.admission(plug_id, install) else {
+            unreachable!("code_source admitted the slot's own install while checking the filler");
+        };
+        desired_operations = substituted_grants(own, &nodule, &desired_operations);
+    }
 
+    let mut installed = InstalledNodule::new(
+        plug_id.clone(),
+        version.clone(),
+        source.revision,
+        nodule,
+        admitted,
+        artifacts,
+        install.enabled,
+        config,
+        configured,
+    );
+    installed.filled_by = filled_from.map(|filler| FilledBy {
+        plug_id: filler,
+        version: version.clone(),
+    });
     Some(NoduleResolution::Admitted {
-        installed: InstalledNodule::new(
-            plug_id.clone(),
-            version.clone(),
-            install.revision,
-            nodule,
-            admitted,
-            artifacts,
-            install.enabled,
-            config,
-            configured,
-        ),
+        installed,
         desired_grants,
         desired_operations,
     })

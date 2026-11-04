@@ -140,6 +140,12 @@ pub struct ProviderIndex {
 
 impl ProviderIndex {
     /// Indexes what each enabled, admitted nodule implements.
+    ///
+    /// A slot filled by a substitution (see [`crate::inventory::InstalledNodule::filled_by`]) is
+    /// offered under the slot's plug id with the filler's version and Lexicons. Dependents name
+    /// the slot, so a substitution is not a provider change for them: their pin stays on the slot
+    /// and only its version moves, as for any upgrade. The operator's substitution is itself the
+    /// consent, and enablement survives it (ADR 028 §3).
     pub fn new(resolved: &BTreeMap<PlugId, NoduleResolution>) -> Self {
         let mut offers: BTreeMap<String, Vec<LockedProvider>> = BTreeMap::new();
         for (plug_id, resolution) in resolved {

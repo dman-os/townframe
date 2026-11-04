@@ -65,6 +65,7 @@ use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetNoduleDrawerGrants;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleOperationGrants;
+use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::protocol::UninstallNodule;
 use big_plugs_core::PlugId;
 use service_utils_rs::Client;
@@ -309,6 +310,27 @@ impl NoduleService {
             .await
     }
 
+    async fn set_substitution(
+        &self,
+        context: &RequestContext,
+        params: SetNoduleSubstitution,
+    ) -> Res<NoduleRecord> {
+        let caller = self.caller(context, params.authorization).await?;
+        self.require_manage(&caller, &params.plug_id)?;
+        if let Some(by) = &params.by {
+            self.require_manage(&caller, by)?;
+        }
+        let context = context.clone();
+        self.state
+            .ask(|reply| Command::SetSubstitution {
+                context,
+                plug_id: params.plug_id,
+                by: params.by,
+                reply,
+            })
+            .await
+    }
+
     async fn set_drawer_grants(
         &self,
         context: &RequestContext,
@@ -405,6 +427,7 @@ handlers! {
     SetNoduleDrawerGrants => set_drawer_grants: NoduleRecord;
     SetNoduleOperationGrants => set_operation_grants: NoduleRecord;
     ConfirmNoduleResolution => confirm_resolution: NoduleRecord;
+    SetNoduleSubstitution => set_substitution: NoduleRecord;
     UninstallNodule => uninstall: ();
     GetNodule => get: NoduleRecord;
     ListNodules => list: Vec<NoduleRecord>;
@@ -420,6 +443,7 @@ service_utils_rs::bind_service_protocol! {
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
             SetNoduleOperationGrants(SetNoduleOperationGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
+            SetNoduleSubstitution(SetNoduleSubstitution),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)

@@ -547,7 +547,7 @@ fn requests_are_validated_and_an_unknown_necessity_is_required() {
     // An unknown necessity is carried through the wire and counts as required.
     let value = json!({
         "requires": [
-            { "binding": "tags", "contract": "org.example.tags.apply", "necessity": "someday", "resolution": "configured" },
+            { "binding": "tags", "contract": "org.example.tags.apply", "necessity": "someday" },
             { "binding": "log", "contract": "org.example.log.write", "necessity": "optional", "resolution": "atRuntime", "minRevision": 3 },
         ],
     });
@@ -750,7 +750,7 @@ mod admission_tests {
         assert_eq!(installed.config, Some(settings(json!(true))));
         assert_eq!(resolved(&config, &cache, &id), installed);
 
-        let enabled = config.set_enabled(&id, true).unwrap();
+        let enabled = config.set_enabled(&cache, &id, true).unwrap();
         assert!(enabled.enabled);
         assert_eq!(enabled.readiness(), Readiness::ArtifactsUnavailable);
         assert!(!enabled.readiness().is_ready());
@@ -798,7 +798,7 @@ mod admission_tests {
         assert!(installed.artifacts.is_empty());
         assert_eq!(installed.readiness(), Readiness::Disabled);
 
-        let enabled = config.set_enabled(&id, true).unwrap();
+        let enabled = config.set_enabled(&cache, &id, true).unwrap();
         assert_eq!(enabled.readiness(), Readiness::Ready);
         assert!(matches!(
             config.configure(&id, IndexMap::new()),
@@ -813,7 +813,7 @@ mod admission_tests {
         let id: PlugId = example_plug!("photos").parse().unwrap();
         let v1 = plug_with(example_plug!("photos"), "1.0.0", photos());
         config.admit(&cache, &v1, None).unwrap();
-        config.set_enabled(&id, true).unwrap();
+        config.set_enabled(&cache, &id, true).unwrap();
 
         // Unconfigured upgrade adopts the new version's defaults and keeps `enabled`.
         let mut nodule_v2 = photos();
@@ -936,7 +936,7 @@ mod admission_tests {
                 Some(BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])),
             )
             .unwrap();
-        config.set_enabled(&id, true).unwrap();
+        config.set_enabled(&cache, &id, true).unwrap();
         config.configure(&id, settings(json!(true))).unwrap();
 
         // v2 requires a string `endpoint` the stored settings lack.
@@ -994,8 +994,8 @@ mod admission_tests {
 
         // Enabling and grants still work on the refused nodule, and `configure` validates against
         // the newly installed revision: a bad rewrite is refused, a conforming one repairs it.
-        config.set_enabled(&id, false).unwrap();
-        config.set_enabled(&id, true).unwrap();
+        config.set_enabled(&cache, &id, false).unwrap();
+        config.set_enabled(&cache, &id, true).unwrap();
         assert!(matches!(
             config.configure(&id, settings(json!(true))),
             Err(InventoryError::Nodule(_))
@@ -1076,8 +1076,8 @@ mod admission_tests {
     #[test]
     fn authority_conflicts_cover_equal_ancestor_and_descendant_prefixes() {
         let cache = AdmissionCache::new();
-        // Admitting pairwise-conflicting nodules is refused by `admit`, so seed the config with
-        // install datums the way an import would, then let `resolve` find the conflicts.
+        // Enabling conflicting nodules is refused by `set_enabled`, so seed the config with
+        // enabled install datums the way an import would, then let `resolve` find the conflicts.
         let mut read = DatumsRead {
             heads: Vec::new(),
             datums: BTreeMap::new(),
@@ -1094,7 +1094,7 @@ mod admission_tests {
             read.datums.insert(
                 install_key(&plug.id),
                 DatumRead::Accepted {
-                    value: serde_json::to_value(NoduleInstall::from_plug(&plug, false)).unwrap(),
+                    value: serde_json::to_value(NoduleInstall::from_plug(&plug, true)).unwrap(),
                     version: DatumVersion::default(),
                 },
             );
@@ -1166,22 +1166,27 @@ mod admission_tests {
 
         let valid = plug_with(example_plug!("photos"), "1.0.0", photos());
         config.admit(&cache, &valid, None).unwrap();
+        config.set_enabled(&cache, &valid.id, true).unwrap();
 
+        // Installing a rival holds nothing; enabling it is refused while `photos` holds the prefix.
         let duplicate_authority = plug_with(example_plug!("other-photos"), "1.0.0", photos());
+        config.admit(&cache, &duplicate_authority, None).unwrap();
         assert!(matches!(
-            config.admit(&cache, &duplicate_authority, None),
+            config.set_enabled(&cache, &duplicate_authority.id, true),
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
         let mut nested = plug_with(example_plug!("sub-photos"), "1.0.0", Nodule::default());
         nested.authority = Some("org.example.photos.sub".into());
+        config.admit(&cache, &nested, None).unwrap();
         assert!(matches!(
-            config.admit(&cache, &nested, None),
+            config.set_enabled(&cache, &nested.id, true),
             Err(InventoryError::AuthorityConflict { authority, .. }) if authority == "org.example.photos.sub"
         ));
         let mut sibling = plug_with(example_plug!("photosynthesis"), "1.0.0", Nodule::default());
         sibling.authority = Some("org.example.photosynthesis".into());
         config.admit(&cache, &sibling, None).unwrap();
+        config.set_enabled(&cache, &sibling.id, true).unwrap();
     }
 }
 
@@ -1236,6 +1241,7 @@ mod declaration {
         use crate::config::NoduleGrants;
         use crate::config::NoduleInstall;
         use crate::config::NoduleSettings;
+        use crate::config::NoduleSubstitution;
         use crate::config::config_universe;
 
         let universe = config_universe();
@@ -1246,11 +1252,16 @@ mod declaration {
             .collect();
         assert_eq!(
             ids,
-            [NoduleInstall::ID, NoduleSettings::ID, NoduleGrants::ID]
+            [
+                NoduleInstall::ID,
+                NoduleSettings::ID,
+                NoduleGrants::ID,
+                NoduleSubstitution::ID
+            ]
         );
         let bundle = Bundle::new(&universe, Vec::new());
         let lexicons = bundle.lexicons().unwrap();
-        assert_eq!(lexicons.len(), 3);
+        assert_eq!(lexicons.len(), 4);
 
         let grants_lex = lexicons
             .iter()
@@ -1478,7 +1489,9 @@ mod config_tests {
 
         // Mutating `example/photos` leaves broken, orphan, malformed, and unowned keys untouched.
         let mut after = before.clone();
-        after.set_enabled(&photos_id, true).unwrap();
+        after
+            .set_enabled(&AdmissionCache::new(), &photos_id, true)
+            .unwrap();
         after
             .configure(
                 &photos_id,

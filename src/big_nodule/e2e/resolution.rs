@@ -89,7 +89,7 @@ fn unresolved(locked: Option<LockedProvider>, reason: Unresolved) -> RequestStat
 }
 
 impl Node {
-    async fn record(&self, plug_id: &str) -> NoduleRecord {
+    pub(super) async fn record(&self, plug_id: &str) -> NoduleRecord {
         self.get(self.operator(), plug_id).await.unwrap()
     }
 
