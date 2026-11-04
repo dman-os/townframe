@@ -45,7 +45,6 @@ pub use collections::Registration;
 pub use collections::Row;
 
 use crate::ComponentRef;
-use crate::manifest::ContractRef;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
 use crate::manifest::PublicationKind;
@@ -407,7 +406,7 @@ pub(crate) fn declared_publications(
                 ),
                 (PublicationKind::Call, Some(contract)) => (
                     clay_guest_session::capabilities::PublicationKind::Call,
-                    contract_identity(contract),
+                    contract.clone(),
                 ),
                 (PublicationKind::Call, None) => {
                     unreachable!("a validated manifest gives every call a contract")
@@ -420,16 +419,6 @@ pub(crate) fn declared_publications(
             ))
         })
         .collect()
-}
-
-/// A manifest contract id `namespace.name` in the session's terms: the last dotted segment is
-/// the name, the rest the namespace, and the integer version is the major of `(major, 0, 0)`.
-fn contract_identity(contract: &ContractRef) -> ContractIdentity {
-    let (namespace, name) = contract
-        .id
-        .rsplit_once('.')
-        .unwrap_or(("", contract.id.as_str()));
-    ContractIdentity::new(namespace, name, (contract.version, 0, 0))
 }
 
 pub(crate) fn routine_facets(

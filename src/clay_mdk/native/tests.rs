@@ -342,7 +342,7 @@ async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
 }
 
 #[test]
-fn manifest_contracts_map_to_session_contracts() {
+fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
     let manifest = MicroManifest {
         schema: MANIFEST_SCHEMA,
         id: ManifestId::new("native.contracts"),
@@ -353,10 +353,11 @@ fn manifest_contracts_map_to_session_contracts() {
             PublicationDeclaration {
                 name: "echo".into(),
                 kind: PublicationKind::Call,
-                contract: Some(ContractRef {
-                    id: "dayframe.lifecycle.echo".into(),
-                    version: 2,
-                }),
+                contract: Some(ContractIdentity::new(
+                    "dayframe.lifecycle",
+                    "echo",
+                    (2, 0, 0),
+                )),
             },
             PublicationDeclaration {
                 name: "future".into(),

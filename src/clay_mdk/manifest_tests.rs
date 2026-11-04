@@ -1,10 +1,7 @@
 use super::*;
 
-fn shelf() -> ContractRef {
-    ContractRef {
-        id: "dayframe.shelf".into(),
-        version: 1,
-    }
+fn shelf() -> ContractIdentity {
+    ContractIdentity::new("dayframe", "shelf", (1, 0, 0))
 }
 
 fn canonical_manifest() -> MicroManifest {
@@ -22,10 +19,11 @@ fn canonical_manifest() -> MicroManifest {
             PublicationDeclaration {
                 name: "increment".into(),
                 kind: PublicationKind::Call,
-                contract: Some(ContractRef {
-                    id: "dayframe.counter.increment".into(),
-                    version: 1,
-                }),
+                contract: Some(ContractIdentity::new(
+                    "dayframe.counter",
+                    "increment",
+                    (1, 0, 0),
+                )),
             },
         ],
         requires: vec![RequiredContract {
