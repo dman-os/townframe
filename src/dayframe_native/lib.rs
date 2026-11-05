@@ -10,9 +10,9 @@ use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
 use clay_store::OrderedStore;
 use dayframe_composition::Application;
+pub use dayframe_composition::CompositionRuntime;
 use dayframe_composition::HostInputs;
 use dayframe_composition::Insets;
-pub use dayframe_composition::CompositionRuntime;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
 use dioxus_native::winit::event::ButtonSource;
@@ -260,16 +260,22 @@ pub fn runtime_loader<Fut>(build: impl Fn() -> Fut + 'static) -> RuntimeLoader
 where
     Fut: Future<Output = Result<CompositionRuntime, String>> + 'static,
 {
-    Callback::new(move |()| -> Pin<Box<dyn Future<Output = Result<CompositionRuntime, String>>>> {
-        Box::pin(build())
-    })
+    Callback::new(
+        move |()| -> Pin<Box<dyn Future<Output = Result<CompositionRuntime, String>>>> {
+            Box::pin(build())
+        },
+    )
 }
+
+/// Reads the system chrome currently covering the window, in logical px, given the window's
+/// scale factor. Only a shell whose window has such chrome (Android) supplies one.
+pub type InsetsSource = Callback<f64, Insets>;
 
 /// The launch screen shared by the native shells: loads the runtime once, shows a failure
 /// instead of a shell when the store or packages cannot be loaded, and mounts the
 /// [`Application`] when it is ready.
 #[component]
-pub fn Shell(load: RuntimeLoader) -> Element {
+pub fn Shell(load: RuntimeLoader, insets: Option<InsetsSource>) -> Element {
     let mut runtime = use_signal(|| None::<CompositionRuntime>);
     let mut failure = use_signal(|| None::<String>);
     use_future(move || async move {
@@ -287,7 +293,7 @@ pub fn Shell(load: RuntimeLoader) -> Element {
                 if let Some(error) = failure() {
                     p { role: "alert", "Dayframe cannot start: {error}" }
                 } else if runtime.read().is_some() {
-                    ReadyApp { runtime }
+                    ReadyApp { runtime, insets }
                 } else {
                     p { role: "status", "Loading Dayframe…" }
                 }
@@ -298,13 +304,13 @@ pub fn Shell(load: RuntimeLoader) -> Element {
 
 /// Mounts the shell once the runtime exists; `Application` takes the runtime as a signal.
 #[component]
-fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
+fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>, insets: Option<InsetsSource>) -> Element {
     let initial = runtime
         .read()
         .clone()
         .expect("ReadyApp mounts only with a built runtime");
     let runtime = use_signal(|| initial);
-    let host = use_host_inputs();
+    let host = use_host_inputs(insets);
     rsx! { Application { runtime, host } }
 }
 
@@ -313,7 +319,7 @@ fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
 /// `KEYCODE_BACK` arrives from winit as `BrowserBack`; a mouse's back button is the desktop
 /// equivalent. Neither is a key Blitz delivers to a focused element, so they are taken from the
 /// window event stream.
-fn use_host_inputs() -> HostInputs {
+fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
     let window: Arc<dyn Window> = use_hook(consume_context);
     let logical_size = |window: &Arc<dyn Window>| {
         let size = window.surface_size();
@@ -325,13 +331,23 @@ fn use_host_inputs() -> HostInputs {
     let mut height = use_signal(|| initial.1);
     let mut platform_back = use_signal(|| 0_u64);
     let can_back = use_signal(|| false);
-    // A desktop window has no system chrome over its surface.
-    let insets = use_signal(Insets::default);
+    // A window without an `InsetsSource` (desktop) has no system chrome over its surface. With
+    // one, the insets are re-read whenever the surface changes: winit-android reports neither
+    // `InsetsChanged` nor `ContentRectChanged` (both are `warn!("TODO")`), and a rotation, a
+    // bar appearing or a cutout all change the surface's size.
+    let read_insets = move |window: &Arc<dyn Window>| {
+        insets_source.map_or_else(Insets::default, |source| source.call(window.scale_factor()))
+    };
+    let mut insets = use_signal({
+        let window = window.clone();
+        move || read_insets(&window)
+    });
     dioxus_native::use_window_event(move |event, _| match event {
         WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
             let (w, h) = logical_size(&window);
             width.set(w);
             height.set(h);
+            insets.set(read_insets(&window));
         }
         WindowEvent::KeyboardInput { event, .. }
             if event.state == ElementState::Pressed
