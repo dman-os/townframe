@@ -1139,7 +1139,8 @@ impl BigKeyhiveHandle {
             .into_iter()
             .map(|(doc_id, refs)| Ok((keyhive_doc_id(doc_id)?, refs)))
             .collect::<Res<BTreeMap<_, _>>>()?;
-        let update = kh
+        let instr_member = member.clone(); // INSTR
+        let update = match kh
             .add_member_with_manual_content(
                 member,
                 &Membered::Group(group_id, group.shared()),
@@ -1147,7 +1148,13 @@ impl BigKeyhiveHandle {
                 after_content,
             )
             .await
-            .map_err(|err| ferr!("group member add failed: {err}"))?;
+        {
+            Ok(update) => update,
+            Err(err) => {
+                instr_explain_member_add_failure(kh, &instr_member, &err).await; // INSTR
+                return Err(ferr!("group member add failed: {err}"));
+            }
+        };
         let affected_docs = update
             .cgka_ops
             .iter()
@@ -1292,6 +1299,62 @@ impl BigKeyhiveHandle {
         let kh = self.keyhive.as_ref();
         Ok(kh.get_agent(identifier).await)
     }
+}
+
+/// INSTR: which copy of the added member's individual the failed add selected prekeys
+/// from, beside the hive registry's copy and whatever else the hive files under that id.
+async fn instr_explain_member_add_failure(
+    kh: &BigKeyhiveKeyhive,
+    member: &BigKeyhiveAgent,
+    err: &keyhive_core::principal::document::AddMemberError,
+) {
+    let id = member.id();
+    let (kind, passed_ops, passed_live, passed_arc) = match member {
+        BigKeyhiveAgent::Individual(_, indie) => {
+            let locked = indie.lock().await;
+            (
+                "individual",
+                locked.prekey_ops().len(),
+                locked.prekeys().len(),
+                Some(Arc::clone(indie)),
+            )
+        }
+        BigKeyhiveAgent::Active(..) => ("active", 0, 0, None),
+        BigKeyhiveAgent::Group(..) => ("group", 0, 0, None),
+        BigKeyhiveAgent::Document(..) => ("document", 0, 0, None),
+    };
+    let registry = kh.get_individual(id.into()).await;
+    let (reg_ops, reg_live, same_arc) = match &registry {
+        Some(reg) => {
+            let locked = reg.lock().await;
+            (
+                locked.prekey_ops().len(),
+                locked.prekeys().len(),
+                passed_arc.as_ref().is_some_and(|p| Arc::ptr_eq(p, reg)),
+            )
+        }
+        None => (0, 0, false),
+    };
+    let resolved = match kh.get_agent(id).await {
+        Some(BigKeyhiveAgent::Individual(..)) => "individual",
+        Some(BigKeyhiveAgent::Active(..)) => "active",
+        Some(BigKeyhiveAgent::Group(..)) => "group",
+        Some(BigKeyhiveAgent::Document(..)) => "document",
+        None => "none",
+    };
+    tracing::warn!(
+        %id,
+        %err,
+        kind,
+        passed_ops,
+        passed_live,
+        registered = registry.is_some(),
+        reg_ops,
+        reg_live,
+        same_arc,
+        resolved,
+        "INSTR group member add failed"
+    );
 }
 
 pub(crate) fn keyhive_doc_id(

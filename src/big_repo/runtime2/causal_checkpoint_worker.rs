@@ -428,6 +428,7 @@ async fn run_task(
                 if added.is_empty() {
                     continue;
                 }
+                tracing::debug!(%doc_id, %agent, added = added.len(), "INSTR reader reconcile seated readers");
                 // Persisting publishes the adds to the peers and admits them locally. The
                 // task is keyed by its admission row and never replaced, so issued adds are
                 // not dropped before they are persisted.
