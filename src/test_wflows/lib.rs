@@ -234,7 +234,6 @@ async fn sleep_then_effect(cx: &mut WflowCtx, args: SleepThenEffectArgs) -> Resu
     Ok(())
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 struct NondeterministicReplayArgs {
     key: String,
