@@ -934,6 +934,15 @@ impl<P: Clone + 'static> Supervisor<P> {
                 _ => unreachable!(),
             };
             let mut failures = CloseError::default();
+            // An incarnation its runtime already closed (a guest trap, a refused batch) is a
+            // fault, as `state` reports it. Capture the cause before the close below consumes
+            // the incarnation, so releasing the micro (its lease dropped when its section was
+            // withdrawn) keeps it `Faulted` instead of clobbering it to `Idle`.
+            let ended = (self.host.lifecycle(&instance) == Lifecycle::Closed).then(|| {
+                self.host
+                    .fault(&instance)
+                    .unwrap_or_else(|| "incarnation ended outside supervision".into())
+            });
             let dependents = self
                 .inner
                 .borrow()
@@ -961,7 +970,7 @@ impl<P: Clone + 'static> Supervisor<P> {
             drop(publications);
             self.host.close_instance(&instance).unwrap();
             let state = match closed {
-                Ok(()) => NodeState::Idle,
+                Ok(()) => ended.map_or(NodeState::Idle, NodeState::Faulted),
                 Err(message) => {
                     failures.0.insert(identity.clone(), message.clone());
                     NodeState::Faulted(message)

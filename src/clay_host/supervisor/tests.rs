@@ -1010,13 +1010,38 @@ async fn a_runtime_recorded_cause_is_the_fault_of_an_incarnation_it_closed() {
     let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
     supervisor.start(&id("solo")).await.unwrap();
     let instance = supervisor.instance(&id("solo")).unwrap();
-    host.record_fault(&instance, "guest trapped in presentation.mount: boom".into());
+    host.record_fault(
+        &instance,
+        "guest trapped in presentation.mount: boom".into(),
+    );
     // The first cause stands.
     host.record_fault(&instance, "a later, derived failure".into());
     host.close_instance(&instance).unwrap();
     assert_eq!(
         supervisor.state(&id("solo")),
         MicroState::Faulted("guest trapped in presentation.mount: boom".into())
+    );
+}
+
+// Releasing a micro whose runtime closed it (its section was withdrawn with the surface) closes it
+// from the supervisor's side; the recorded cause must survive that, or the fault is only visible
+// until the micro is let go.
+#[tokio::test]
+async fn closing_an_incarnation_its_runtime_closed_keeps_its_cause_as_the_fault() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(host.clone(), [controls.micro("solo")]);
+    supervisor.start(&id("solo")).await.unwrap();
+    let instance = supervisor.instance(&id("solo")).unwrap();
+    host.record_fault(
+        &instance,
+        "guest trapped in presentation.dispatch: boom".into(),
+    );
+    host.close_instance(&instance).unwrap();
+    supervisor.close(id("solo")).await.unwrap();
+    assert_eq!(
+        supervisor.state(&id("solo")),
+        MicroState::Faulted("guest trapped in presentation.dispatch: boom".into())
     );
 }
 

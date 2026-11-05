@@ -33,11 +33,13 @@ function matchesAt(
 // renderer's native-tls into wasm32. See CONTRIBUTING.md on `resolver.feature-unification`.
 const isolated = ["--config", 'resolver.feature-unification="selected"'];
 
-// Only the shells' packages: the test-only guest fixtures are not served.
-const packageDirectory =
-  (await prepareDayframePackages({ testFixtures: false }))[
-    "DAYFRAME_PACKAGE_DIR"
-  ];
+// Only the shells' packages: the test-only guest fixtures are not served. The one exception is
+// the `trapper` micro the e2e's sync-export trap spec opens, served when the e2e asks for it
+// (`DAYFRAME_WEB_TRAPPER=1`, which `playwright.config.ts` sets) and never in a plain serve.
+const packageDirectory = (await prepareDayframePackages({
+  testFixtures: false,
+  trapper: Deno.env.get("DAYFRAME_WEB_TRAPPER") === "1",
+}))["DAYFRAME_PACKAGE_DIR"];
 
 // BLAKE3, the digest big_blobs uses and `clay_mdk::package::Package::digest` computes (Deno's
 // Deno's own WebCrypto lacks it; `@std/crypto` adds it).
