@@ -81,6 +81,25 @@ fn PlacedSlot(
     rsx! { PresentationSlot { reference, placeholder_chrome } }
 }
 
+/// `row`'s `attachment` mounted in `placement`, keyed by `key` (a different key is a fresh mount).
+fn placed_slot(
+    shell: &Shell,
+    placement: Placement,
+    key: String,
+    row: &Row<String, Panel>,
+    attachment: clay_mdk::Attachment,
+) -> Element {
+    rsx! {
+        PlacedSlot {
+            key: "{key}",
+            placement,
+            reference: row.attachments[attachment.index()].clone(),
+            title: row.value.title.clone(),
+            shell: shell.clone(),
+        }
+    }
+}
+
 pub(crate) fn frame(shell: Shell) -> Element {
     rsx! { Frame { shell } }
 }
@@ -316,25 +335,21 @@ fn Frame(shell: Shell) -> Element {
         .rule(1, DETAILS_RULE)
         .keyboard(host.keyboard);
 
-    let main_slot = rsx! {
-        PlacedSlot {
-            key: "{main.key}",
-            placement: Placement::Main,
-            reference: main.attachments[main.value.content.index()].clone(),
-            title: main.value.title.clone(),
-            shell: shell.clone(),
-        }
-    };
+    let main_slot = placed_slot(
+        &shell,
+        Placement::Main,
+        main.key.clone(),
+        main,
+        main.value.content,
+    );
     let details_slot = details.map(|(row_panel, row, attachment)| {
-        rsx! {
-            PlacedSlot {
-                key: "{row_panel.key}/{row:?}",
-                placement: Placement::Details,
-                reference: row_panel.attachments[attachment.index()].clone(),
-                title: row_panel.value.title.clone(),
-                shell: shell.clone(),
-            }
-        }
+        placed_slot(
+            &shell,
+            Placement::Details,
+            format!("{}/{row:?}", row_panel.key),
+            row_panel,
+            attachment,
+        )
     });
     let details_name = details.map_or_else(
         || "Details".to_owned(),
