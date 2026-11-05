@@ -25,6 +25,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::watch;
 
+mod style;
+pub use style::SurfaceStyle;
+
 type Renderer = Rc<dyn Fn(&Arc<Mount>) -> Element>;
 
 /// Handle through which a mounted surface commits wire batches into its retained [`SurfaceTree`].
@@ -169,7 +172,7 @@ impl NativeComponents {
         + 'static,
     ) -> Result<(ComponentRef, RenderGuard), AccessError> {
         let reference = self.host.publish_component(owner)?;
-        let guard = self.attach_surface(owner, reference, mount_surface);
+        let guard = self.attach_surface(owner, reference, None, mount_surface);
         Ok((reference, guard))
     }
 
@@ -183,6 +186,7 @@ impl NativeComponents {
         &self,
         owner: &Instance,
         reference: ComponentRef,
+        style: Option<SurfaceStyle>,
         mount_surface: impl Fn(Arc<Mount>, SurfaceWriter) -> Result<SurfaceSession, PresentationError>
         + 'static,
     ) -> RenderGuard {
@@ -196,6 +200,7 @@ impl NativeComponents {
                         mount: SharedMount(mount.clone()),
                         owner: owner.clone(),
                         factory: factory.clone(),
+                        style: style.clone(),
                     }
                 }
             }),
@@ -358,7 +363,12 @@ fn MountedComponent(
 }
 
 #[component]
-fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) -> Element {
+fn MountedSurface(
+    mount: SharedMount,
+    owner: Instance,
+    factory: SurfaceFactory,
+    style: Option<SurfaceStyle>,
+) -> Element {
     let path = use_hook(|| try_consume_context::<MountPath>().unwrap_or_default());
     let writer = use_hook(|| {
         let mut writer = SurfaceWriter::new(mount.0.clone());
@@ -422,11 +432,22 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         response
     });
     let tree = writer.tree.lock().unwrap();
-    tree.render(&handler, &|reference| {
+    let content = tree.render(&handler, &|reference| {
         rsx! {
             ComponentMount { owner: owner.clone(), reference: *reference }
         }
-    })
+    });
+    // A presentation with a host-provided stylesheet is wrapped in the element the sheet is
+    // scoped to; one without renders bare, exactly as before.
+    match style {
+        None => content,
+        Some(style) => rsx! {
+            div { "data-clay-scope": "{style.scope()}",
+                style { "{style.scoped()}" }
+                {content}
+            }
+        },
+    }
 }
 
 #[cfg(test)]

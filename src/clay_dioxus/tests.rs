@@ -137,7 +137,7 @@ fn a_surface_attached_to_an_issued_reference_mounts_like_a_published_one() {
     let owner = host.start("publisher");
     let reference = host.publish_component(&owner).unwrap();
     let mounts = Rc::new(Cell::new(0));
-    let _surface = components.attach_surface(&owner, reference, {
+    let _surface = components.attach_surface(&owner, reference, None, {
         let mounts = mounts.clone();
         move |_, writer| {
             mounts.set(mounts.get() + 1);

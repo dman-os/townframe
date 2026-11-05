@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use clay_dioxus::RenderGuard;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
-use clay_dioxus::RenderGuard;
 use clay_host::Activator;
 use clay_host::ComponentRef;
 use clay_host::Factory;
@@ -168,7 +168,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                 registrations,
                 requirements,
                 publications: declared,
-                micro: Some(micro),
+                micro: Some(micro.clone()),
                 activator: Some(activator),
                 ..InitialContext::default()
             };
@@ -185,9 +185,25 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                     .expect("a presentation publication has a component");
                 let mounted = runtime.clone();
                 let name = name.clone();
+                // A presentation may name a stylesheet the host delivers (and scopes) for it:
+                // the manifest's `stylesheets` member maps a publication name to CSS text. The
+                // sheet is package input, so one the host rejects fails this activation.
+                let style = manifest
+                    .extra
+                    .get("stylesheets")
+                    .and_then(|sheets| sheets.get(name.as_str()))
+                    .map(|sheet| {
+                        let sheet = sheet
+                            .as_str()
+                            .ok_or_else(|| format!("stylesheet of {name} is not text"))?;
+                        clay_dioxus::SurfaceStyle::new(&format!("{micro}/{name}"), sheet)
+                            .map_err(|error| format!("stylesheet of {name}: {error}"))
+                    })
+                    .transpose()?;
                 surfaces.push(resources.components.attach_surface(
                     &instance,
                     component,
+                    style,
                     move |_mount, writer| E::mount(&mounted, &name, Arc::new(writer)),
                 ));
             }

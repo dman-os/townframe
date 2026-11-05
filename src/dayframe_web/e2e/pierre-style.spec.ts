@@ -64,6 +64,13 @@ const options = [
     row: "[data-line]",
     addition: "[data-line][data-line-type='change-addition']",
   },
+  {
+    id: "b",
+    url: "/",
+    title: "Pierre rows (b) host stylesheet",
+    row: ".pd-line",
+    addition: ".pd-line.pd-line-type--change-addition",
+  },
 ];
 
 for (const option of options) {

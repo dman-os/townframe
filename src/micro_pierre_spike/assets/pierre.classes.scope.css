@@ -1,0 +1,1873 @@
+@layer base, theme, rendered, unsafe;
+
+@layer base {
+  :scope {
+    --diffs-font-fallback:
+      'SF Mono', Monaco, Consolas, 'Ubuntu Mono', 'Liberation Mono',
+      'Courier New', monospace;
+    --diffs-header-font-fallback:
+      system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+      'Noto Sans', 'Liberation Sans', Arial, sans-serif;
+
+    --diffs-mixer: light-dark(black, white);
+    --diffs-gap-fallback: 8px;
+    --diffs-scrollbar-gutter-fallback: 6px;
+    --diffs-scrollbar-gutter: var(
+      --diffs-scrollbar-gutter-override,
+      var(
+        --diffs-scrollbar-gutter-measured,
+        var(--diffs-scrollbar-gutter-fallback)
+      )
+    );
+
+    --diffs-added-light: #0dbe4e;
+    --diffs-added-dark: #5ecc71;
+    --diffs-modified-light: #009fff;
+    --diffs-modified-dark: #69b1ff;
+    --diffs-deleted-light: #ff2e3f;
+    --diffs-deleted-dark: #ff6762;
+    --diffs-warning-light: #d5a910;
+    --diffs-warning-dark: #ffd452;
+
+    /*
+    // Available CSS Color Overrides
+    --diffs-bg-buffer-override
+    --diffs-bg-hover-override
+    --diffs-bg-context-override
+    --diffs-bg-context-gutter-override
+    --diffs-bg-separator-override
+    --diffs-bg-caret-override
+
+    --diffs-fg-number-override
+    --diffs-fg-number-addition-override
+    --diffs-fg-number-deletion-override
+    --diffs-fg-conflict-marker-override
+
+    --diffs-deletion-color-override
+    --diffs-addition-color-override
+    --diffs-modified-color-override
+
+    --diffs-bg-deletion-override
+    --diffs-bg-deletion-number-override
+    --diffs-bg-deletion-emphasis-override
+
+    --diffs-bg-addition-override
+    --diffs-bg-addition-number-override
+    --diffs-bg-addition-emphasis-override
+
+    --conflict-bg-current-override
+    --conflict-bg-current-number-override
+    --conflict-bg-current-header-override
+    --conflict-bg-incoming-override
+    --conflict-bg-incoming-number-override
+    --conflict-bg-incoming-header-override
+
+    // Line Selection Color Overrides (for enableLineSelection)
+    --diffs-selection-color-override
+    --diffs-bg-selection-override
+    --diffs-bg-selection-number-override
+
+    // Available CSS Layout Overrides
+    --diffs-gap-inline
+    --diffs-gap-block
+    --diffs-gap-style
+    --diffs-scrollbar-gutter-override
+    --diffs-tab-size
+    --diffs-popover-gap (edit mode: inset for edge-clamped popovers)
+    */
+
+    color-scheme: light dark;
+    display: block;
+    font-family: var(
+      --diffs-header-font-family,
+      var(--diffs-header-font-fallback)
+    );
+    font-size: var(--diffs-font-size, 13px);
+    line-height: var(--diffs-line-height, 20px);
+    font-feature-settings: var(--diffs-font-features);
+
+    /* NOTE(amadeus): we cannot use 'in oklch' because current versions of cursor
+     * and vscode use an older build of chrome that appears to have a bug with
+     * color-mix and 'in oklch', so use 'in lab' instead */
+    --diffs-bg: light-dark(
+      var(--diffs-light-bg, #fff),
+      var(--diffs-dark-bg, #000)
+    );
+    --diffs-bg-buffer: var(
+      --diffs-bg-buffer-override,
+      light-dark(
+        color-mix(in lab, var(--diffs-bg) 92%, var(--diffs-mixer)),
+        color-mix(in lab, var(--diffs-bg) 92%, var(--diffs-mixer))
+      )
+    );
+    --diffs-bg-context: var(
+      --diffs-bg-context-override,
+      light-dark(
+        color-mix(in lab, var(--diffs-bg) 98.5%, var(--diffs-mixer)),
+        color-mix(in lab, var(--diffs-bg) 92.5%, var(--diffs-mixer))
+      )
+    );
+    --diffs-bg-context-gutter: var(
+      --diffs-bg-context-gutter-override,
+      light-dark(
+        color-mix(in lab, var(--diffs-bg-context) 90%, var(--diffs-bg)),
+        color-mix(in lab, var(--diffs-bg-context) 45%, var(--diffs-bg))
+      )
+    );
+    --diffs-bg-separator: var(
+      --diffs-bg-separator-override,
+      light-dark(
+        color-mix(in lab, var(--diffs-bg) 96%, var(--diffs-mixer)),
+        color-mix(in lab, var(--diffs-bg) 85%, var(--diffs-mixer))
+      )
+    );
+
+    --diffs-fg: light-dark(var(--diffs-light, #000), var(--diffs-dark, #fff));
+    --diffs-fg-number: var(
+      --diffs-fg-number-override,
+      light-dark(
+        color-mix(in lab, var(--diffs-fg) 65%, var(--diffs-bg)),
+        color-mix(in lab, var(--diffs-fg) 65%, var(--diffs-bg))
+      )
+    );
+    --diffs-fg-conflict-marker: var(
+      --diffs-fg-conflict-marker-override,
+      var(--diffs-fg-number)
+    );
+
+    --diffs-deletion-base: var(
+      --diffs-deletion-color-override,
+      light-dark(
+        var(
+          --diffs-light-deletion-color,
+          var(--diffs-deletion-color, var(--diffs-deleted-light))
+        ),
+        var(
+          --diffs-dark-deletion-color,
+          var(--diffs-deletion-color, var(--diffs-deleted-dark))
+        )
+      )
+    );
+    --diffs-addition-base: var(
+      --diffs-addition-color-override,
+      light-dark(
+        var(
+          --diffs-light-addition-color,
+          var(--diffs-addition-color, var(--diffs-added-light))
+        ),
+        var(
+          --diffs-dark-addition-color,
+          var(--diffs-addition-color, var(--diffs-added-dark))
+        )
+      )
+    );
+    --diffs-modified-base: var(
+      --diffs-modified-color-override,
+      light-dark(
+        var(
+          --diffs-light-modified-color,
+          var(--diffs-modified-color, var(--diffs-modified-light))
+        ),
+        var(
+          --diffs-dark-modified-color,
+          var(--diffs-modified-color, var(--diffs-modified-dark))
+        )
+      )
+    );
+
+    /* NOTE(amadeus): we cannot use 'in oklch' because current versions of cursor
+   * and vscode use an older build of chrome that appears to have a bug with
+   * color-mix and 'in oklch', so use 'in lab' instead */
+    --diffs-bg-deletion: var(
+      --diffs-bg-deletion-override,
+      light-dark(
+        color-mix(in lab, var(--diffs-bg) 88%, var(--diffs-deletion-base)),
+        color-mix(in lab, var(--diffs-bg) 80%, var(--diffs-deletion-base))
+      )
+    );
+    --diffs-bg-deletion-emphasis: var(
+      --diffs-bg-deletion-emphasis-override,
+      light-dark(
+        rgb(from var(--diffs-deletion-base) r g b / 0.15),
+        rgb(from var(--diffs-deletion-base) r g b / 0.2)
+      )
+    );
+
+    --diffs-bg-addition: var(
+      --diffs-bg-addition-override,
+      light-dark(
+        color-mix(in lab, var(--diffs-bg) 88%, var(--diffs-addition-base)),
+        color-mix(in lab, var(--diffs-bg) 80%, var(--diffs-addition-base))
+      )
+    );
+    --diffs-bg-addition-emphasis: var(
+      --diffs-bg-addition-emphasis-override,
+      light-dark(
+        rgb(from var(--diffs-addition-base) r g b / 0.15),
+        rgb(from var(--diffs-addition-base) r g b / 0.2)
+      )
+    );
+
+    --diffs-selection-base: var(--diffs-modified-base);
+    --diffs-selection-number-fg: light-dark(
+      color-mix(in lab, var(--diffs-selection-base) 65%, var(--diffs-mixer)),
+      color-mix(in lab, var(--diffs-selection-base) 75%, var(--diffs-mixer))
+    );
+    background-color: var(--diffs-bg);
+    color: var(--diffs-fg);
+  }
+
+  /* NOTE(mdo): Some semantic HTML elements (e.g. `pre`, `code`) have default
+ * user-agent styles. These must be overridden to use our custom styles. */
+  pre,
+  code,
+  .pd-error-wrapper {
+    isolation: isolate;
+    margin: 0;
+    padding: 0;
+    display: block;
+    outline: none;
+    font-family: var(--diffs-font-family, var(--diffs-font-fallback));
+  }
+
+  pre,
+  code {
+    background-color: var(--diffs-bg);
+  }
+
+  code {
+    contain: content;
+  }
+
+  input,
+  button {
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  .pd-icon-sprite {
+    display: none;
+  }
+
+  /* NOTE(mdo): Headers and separators are within pre/code, so we need to reset
+   * their font-family explicitly. */
+  .pd-diffs-header,
+  .pd-separator {
+    font-family: var(
+      --diffs-header-font-family,
+      var(--diffs-header-font-fallback)
+    );
+  }
+
+  .pd-diffs-header.pd-sticky {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background-color: var(--diffs-bg);
+  }
+
+  .pd-file-info {
+    padding: 10px;
+    font-weight: 700;
+    color: var(--fg);
+    /* NOTE(amadeus): we cannot use 'in oklch' because current versions of cursor
+   * and vscode use an older build of chrome that appears to have a bug with
+   * color-mix and 'in oklch', so use 'in lab' instead */
+    background-color: color-mix(in lab, var(--bg) 98%, var(--fg));
+    border-block: 1px solid color-mix(in lab, var(--bg) 95%, var(--fg));
+  }
+
+  .pd-diff,
+  .pd-file {
+    /* This feels a bit crazy to me... so I need to think about it a bit more... */
+    --diffs-grid-number-column-width: minmax(min-content, max-content);
+    --diffs-code-grid: var(--diffs-grid-number-column-width) 1fr;
+
+    &.pd-dehydrated {
+      --diffs-code-grid: var(--diffs-grid-number-column-width) minmax(0, 1fr);
+    }
+
+    &:hover .pd-code::-webkit-scrollbar-thumb {
+      background-color: var(--diffs-bg-context);
+    }
+  }
+
+  /* iOS WebKit uses overlay scrollbars, so unmeasured layout compensation
+   * should start at zero rather than the desktop custom-scrollbar fallback. */
+  @supports (-webkit-touch-callout: none) {
+    :scope {
+      --diffs-scrollbar-gutter-fallback: 0px;
+    }
+  }
+
+  .pd-line span,
+  .pd-edit-prediction-suffix span {
+    color: light-dark(
+      var(--diffs-token-light, var(--diffs-light)),
+      var(--diffs-token-dark, var(--diffs-dark))
+    );
+    background-color: light-dark(
+      var(--diffs-token-light-bg, inherit),
+      var(--diffs-token-dark-bg, inherit)
+    );
+    font-weight: light-dark(
+      var(--diffs-token-light-font-weight, inherit),
+      var(--diffs-token-dark-font-weight, inherit)
+    );
+    font-style: light-dark(
+      var(--diffs-token-light-font-style, inherit),
+      var(--diffs-token-dark-font-style, inherit)
+    );
+    text-decoration: light-dark(
+      var(--diffs-token-light-text-decoration, inherit),
+      var(--diffs-token-dark-text-decoration, inherit)
+    );
+  }
+
+  /* Line Color and BG Calculations */
+  .pd-line,
+  .pd-gutter-buffer,
+  .pd-column-number,
+  .pd-line-annotation,
+  .pd-no-newline,
+  .pd-merge-conflict,
+  .pd-merge-conflict-actions,
+  .pd-editor-overlay {
+    /* Pre-fill css variables for appropriate up-mixing */
+    --diffs-computed-decoration-bg: var(--diffs-bg);
+    --diffs-computed-diff-line-bg: var(--diffs-computed-decoration-bg);
+    --diffs-computed-selected-line-bg: var(--diffs-computed-diff-line-bg);
+    --diffs-computed-editor-active-line-bg: var(
+      --diffs-computed-selected-line-bg
+    );
+    --diffs-computed-hovered-line-bg: var(
+      --diffs-computed-editor-active-line-bg
+    );
+
+    --diffs-hover-mix-target: var(
+      --diffs-bg-hover-override,
+      var(--diffs-mixer)
+    );
+    --diffs-line-bg: var(--diffs-computed-hovered-line-bg);
+
+    color: var(--diffs-fg);
+    background-color: var(--diffs-line-bg, var(--diffs-bg));
+  }
+
+  .pd-line,
+  .pd-no-newline {
+    &.pd-decoration-bg {
+      --mix-deco-light: 92%;
+      --mix-deco-dark: 85%;
+
+      &.pd-decoration-bg-depth--2 {
+        --mix-deco-light: 88%;
+        --mix-deco-dark: 80%;
+      }
+
+      &.pd-decoration-bg-depth--3 {
+        --mix-deco-light: 85%;
+        --mix-deco-dark: 78%;
+      }
+
+      --diffs-hover-mix-target: var(--diffs-decoration-bg);
+
+      --diffs-computed-decoration-bg: light-dark(
+        color-mix(
+          in lab,
+          var(--diffs-bg) var(--mix-deco-light),
+          var(--diffs-decoration-bg)
+        ),
+        color-mix(
+          in lab,
+          var(--diffs-bg) var(--mix-deco-dark),
+          var(--diffs-decoration-bg)
+        )
+      );
+    }
+  }
+
+  .pd-line-annotation,
+  .pd-gutter-buffer--annotation {
+    --diffs-annotation-bg: var(--diffs-bg-context);
+    --diffs-computed-decoration-bg: var(--diffs-annotation-bg);
+    --diffs-hover-mix-target: var(--diffs-computed-editor-active-line-bg);
+  }
+
+  .pd-merge-conflict-actions,
+  .pd-gutter-buffer--merge-conflict-action,
+  .pd-gutter-buffer--merge-conflict-marker-base,
+  .pd-gutter-buffer--merge-conflict-marker-separator,
+  .pd-merge-conflict--marker-base,
+  .pd-merge-conflict--marker-separator {
+    --diffs-computed-decoration-bg: var(--diffs-bg-context);
+    --diffs-hover-mix-target: var(--diffs-computed-editor-active-line-bg);
+  }
+
+  .pd-gutter-buffer--merge-conflict-marker-start,
+  .pd-merge-conflict--marker-start {
+    --diffs-computed-decoration-bg: light-dark(
+      color-mix(
+        in lab,
+        var(--diffs-bg) 78%,
+        var(--conflict-bg-current-header-override, var(--diffs-addition-base))
+      ),
+      color-mix(
+        in lab,
+        var(--diffs-bg) 68%,
+        var(--conflict-bg-current-header-override, var(--diffs-addition-base))
+      )
+    );
+    --diffs-hover-mix-target: var(--diffs-computed-editor-active-line-bg);
+  }
+
+  .pd-gutter-buffer--merge-conflict-marker-end,
+  .pd-merge-conflict--marker-end {
+    --diffs-computed-decoration-bg: light-dark(
+      color-mix(
+        in lab,
+        var(--diffs-bg) 78%,
+        var(--conflict-bg-incoming-header-override, var(--diffs-modified-base))
+      ),
+      color-mix(
+        in lab,
+        var(--diffs-bg) 68%,
+        var(--conflict-bg-incoming-header-override, var(--diffs-modified-base))
+      )
+    );
+    --diffs-hover-mix-target: var(--diffs-computed-editor-active-line-bg);
+  }
+
+  .pd-has-merge-conflict .pd-line-annotation,
+  .pd-has-merge-conflict .pd-gutter-buffer--annotation {
+    --diffs-computed-decoration-bg: var(--diffs-bg);
+    --diffs-hover-mix-target: var(--diffs-computed-editor-active-line-bg);
+  }
+
+  /* We are using where here to not affect the nesting impacts later on for
+   * hover and selection */
+  :where(.pd-background) {
+    .pd-gutter-buffer,
+    .pd-column-number {
+      --mix-light: 91%;
+      --mix-dark: 85%;
+    }
+
+    .pd-line,
+    .pd-no-newline {
+      --mix-light: 88%;
+      --mix-dark: 80%;
+    }
+
+    .pd-gutter-buffer,
+    .pd-column-number,
+    .pd-line,
+    .pd-no-newline {
+      --diffs-diff-line-mix-target: var(--diffs-bg);
+
+      &.pd-line-type--change-deletion {
+        --diffs-diff-line-mix-target: var(
+          --diffs-bg-deletion-override,
+          var(--diffs-deletion-base)
+        );
+        --diffs-hover-mix-target: var(--diffs-diff-line-mix-target);
+
+        &:where(.pd-gutter-buffer, .pd-column-number) {
+          color: var(
+            --diffs-fg-number-deletion-override,
+            var(--diffs-deletion-base)
+          );
+
+          --diffs-diff-line-mix-target: var(
+            --diffs-bg-deletion-number-override,
+            var(--diffs-deletion-base)
+          );
+        }
+
+        --diffs-computed-diff-line-bg: light-dark(
+          color-mix(
+            in lab,
+            var(--diffs-computed-decoration-bg) var(--mix-light),
+            var(--diffs-diff-line-mix-target)
+          ),
+          color-mix(
+            in lab,
+            var(--diffs-computed-decoration-bg) var(--mix-dark),
+            var(--diffs-diff-line-mix-target)
+          )
+        );
+      }
+
+      &.pd-line-type--change-addition {
+        --diffs-diff-line-mix-target: var(
+          --diffs-bg-addition-override,
+          var(--diffs-addition-base)
+        );
+        --diffs-hover-mix-target: var(--diffs-diff-line-mix-target);
+
+        &:where(.pd-gutter-buffer, .pd-column-number) {
+          color: var(
+            --diffs-fg-number-addition-override,
+            var(--diffs-addition-base)
+          );
+
+          --diffs-diff-line-mix-target: var(
+            --diffs-bg-addition-number-override,
+            var(--diffs-addition-base)
+          );
+        }
+
+        --diffs-computed-diff-line-bg: light-dark(
+          color-mix(
+            in lab,
+            var(--diffs-computed-decoration-bg) var(--mix-light),
+            var(--diffs-diff-line-mix-target)
+          ),
+          color-mix(
+            in lab,
+            var(--diffs-computed-decoration-bg) var(--mix-dark),
+            var(--diffs-diff-line-mix-target)
+          )
+        );
+      }
+
+      &.pd-merge-conflict--current {
+        --diffs-diff-line-mix-target: var(
+          --conflict-bg-current-override,
+          var(--diffs-addition-base)
+        );
+        --diffs-hover-mix-target: var(--diffs-diff-line-mix-target);
+
+        &:where(.pd-gutter-buffer, .pd-column-number) {
+          color: var(
+            --diffs-fg-number-addition-override,
+            var(--diffs-addition-base)
+          );
+
+          --diffs-diff-line-mix-target: var(
+            --conflict-bg-current-number-override,
+            var(--diffs-addition-base)
+          );
+        }
+
+        --diffs-computed-diff-line-bg: light-dark(
+          color-mix(
+            in lab,
+            var(--diffs-computed-decoration-bg) var(--mix-light),
+            var(--diffs-diff-line-mix-target)
+          ),
+          color-mix(
+            in lab,
+            var(--diffs-computed-decoration-bg) var(--mix-dark),
+            var(--diffs-diff-line-mix-target)
+          )
+        );
+      }
+
+      &.pd-merge-conflict--incoming {
+        --diffs-diff-line-mix-target: var(
+          --conflict-bg-incoming-override,
+          var(--diffs-modified-base)
+        );
+        --diffs-hover-mix-target: var(--diffs-diff-line-mix-target);
+
+        &:where(.pd-gutter-buffer, .pd-column-number) {
+          color: var(--diffs-modified-base);
+
+          --diffs-diff-line-mix-target: var(
+            --conflict-bg-incoming-number-override,
+            var(--diffs-modified-base)
+          );
+        }
+
+        --diffs-computed-diff-line-bg: light-dark(
+          color-mix(
+            in lab,
+            var(--diffs-computed-decoration-bg) var(--mix-light),
+            var(--diffs-diff-line-mix-target)
+          ),
+          color-mix(
+            in lab,
+            var(--diffs-computed-decoration-bg) var(--mix-dark),
+            var(--diffs-diff-line-mix-target)
+          )
+        );
+      }
+    }
+  }
+
+  /* Order is important for rationalizing these selectors and for order of
+   * application, therefore we need to disable this style-lint rule */
+  /* stylelint-disable-next-line no-duplicate-selectors */
+  .pd-gutter-buffer,
+  .pd-column-number,
+  .pd-line,
+  .pd-line-annotation,
+  .pd-merge-conflict,
+  .pd-merge-conflict-actions,
+  .pd-no-newline,
+  .pd-editor-overlay {
+    --diffs-selection-mix-target: var(
+      --diffs-bg-selection-override,
+      var(--diffs-selection-base)
+    );
+    --diffs-selection-emphasis-mix-target: var(--diffs-selection-mix-target);
+
+    &:where(.pd-editor-overlay),
+    &:where(
+        .pd-line,
+        .pd-line-annotation,
+        .pd-merge-conflict,
+        .pd-merge-conflict-actions,
+        .pd-no-newline
+      ).pd-selected-line {
+      --mix-selection-light: 82%;
+      --mix-selection-dark: 75%;
+      --diffs-hover-mix-target: var(--diffs-selection-mix-target);
+    }
+
+    &:where(
+      .pd-gutter-buffer.pd-selected-line,
+      .pd-column-number:is(.pd-selected-line, .pd-editor-active-line)
+    ) {
+      --mix-selection-light: 75%;
+      --mix-selection-dark: 60%;
+      --diffs-selection-mix-target: var(
+        --diffs-bg-selection-number-override,
+        var(--diffs-selection-base)
+      );
+      --diffs-hover-mix-target: var(--diffs-selection-mix-target);
+    }
+
+    /* Keep the light-theme emphasis on a selected changed line tied to its
+     * resolved diff and selection colors. */
+    &:where(.pd-line.pd-selected-line):is(
+        .pd-line-type--change-addition,
+        .pd-line-type--change-deletion
+      ) {
+      --diffs-selection-emphasis-mix-target: light-dark(
+        color-mix(
+          in lab,
+          var(--diffs-diff-line-mix-target, var(--diffs-selection-mix-target))
+            var(--mix-selection-light),
+          var(--diffs-selection-mix-target)
+        ),
+        var(--diffs-selection-mix-target)
+      );
+    }
+
+    &:where(.pd-editor-overlay),
+    &.pd-selected-line {
+      --diffs-computed-selected-line-bg: light-dark(
+        color-mix(
+          in lab,
+          var(--diffs-computed-diff-line-bg) var(--mix-selection-light),
+          var(--diffs-selection-mix-target)
+        ),
+        color-mix(
+          in lab,
+          var(--diffs-computed-diff-line-bg) var(--mix-selection-dark),
+          var(--diffs-selection-mix-target)
+        )
+      );
+    }
+  }
+
+  /* The editor's active line sits above selection, but hover remains the final
+   * line-background treatment. */
+  .pd-line.pd-editor-active-line,
+  .pd-column-number.pd-editor-active-line {
+    --diffs-computed-editor-active-line-bg: color-mix(
+      in lab,
+      var(--diffs-computed-selected-line-bg)
+        var(--diffs-editor-active-line-source-mix, 100%),
+      var(--diffs-selection-emphasis-mix-target)
+    );
+  }
+
+  @media (pointer: fine) {
+    .pd-line.pd-hovered,
+    .pd-gutter-buffer.pd-hovered,
+    .pd-column-number.pd-hovered,
+    .pd-line-annotation.pd-hovered,
+    .pd-no-newline.pd-hovered,
+    .pd-merge-conflict.pd-hovered,
+    .pd-merge-conflict-actions.pd-hovered,
+    .pd-editor-overlay.pd-hovered {
+      --diffs-computed-hovered-line-bg: light-dark(
+        color-mix(
+          in lab,
+          var(--diffs-computed-editor-active-line-bg) 97%,
+          var(--diffs-hover-mix-target)
+        ),
+        color-mix(
+          in lab,
+          var(--diffs-computed-editor-active-line-bg) 91%,
+          var(--diffs-hover-mix-target)
+        )
+      );
+    }
+  }
+
+  .pd-gutter-buffer.pd-selected-line,
+  .pd-column-number:is(.pd-selected-line, .pd-editor-active-line) {
+    color: var(--diffs-selection-number-fg);
+  }
+
+  .pd-no-newline {
+    user-select: none;
+
+    span {
+      opacity: 0.6;
+    }
+  }
+
+  .pd-diff-type--split.pd-overflow--scroll {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+
+    .pd-additions {
+      border-left: 1px solid var(--diffs-bg);
+    }
+
+    .pd-deletions {
+      border-right: 1px solid var(--diffs-bg);
+    }
+  }
+
+  .pd-code {
+    display: grid;
+    grid-auto-flow: dense;
+    grid-template-columns: var(--diffs-code-grid);
+    overflow: var(--diffs-overflow-override, scroll) clip;
+    overscroll-behavior-x: none;
+    tab-size: var(--diffs-tab-size, 2);
+    align-self: flex-start;
+    padding-top: var(--diffs-gap-block, var(--diffs-gap-fallback));
+    padding-bottom: max(
+      0px,
+      calc(
+        var(--diffs-gap-block, var(--diffs-gap-fallback)) -
+          var(--diffs-scrollbar-gutter)
+      )
+    );
+    scrollbar-gutter: stable;
+  }
+
+  .pd-diffs-scrollbar-measure {
+    position: absolute;
+    top: -200px;
+    left: -200px;
+    opacity: 0;
+    pointer-events: none;
+    width: 100px;
+    height: 100px;
+    padding: 0;
+    grid-template-columns: none;
+    scrollbar-gutter: auto;
+  }
+
+  .pd-container-size {
+    container-type: inline-size;
+  }
+
+  .pd-code::-webkit-scrollbar {
+    width: 0;
+    height: var(--diffs-scrollbar-gutter);
+  }
+
+  .pd-code::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .pd-code::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    border: 1px solid transparent;
+    background-clip: content-box;
+    border-radius: 3px;
+  }
+
+  .pd-code::-webkit-scrollbar-corner {
+    background-color: transparent;
+  }
+
+  /*
+   * If we apply these rules globally it will mean that webkit will opt into the
+   * standards compliant version of custom css scrollbars, which we do not want
+   * because the custom stuff will look better
+  */
+  @supports (-moz-appearance: none) {
+    .pd-code {
+      scrollbar-width: thin;
+      scrollbar-color: var(--diffs-bg-context) transparent;
+      padding-bottom: var(--diffs-gap-block, var(--diffs-gap-fallback));
+    }
+  }
+
+  .pd-diffs-header ~ .pd-diff,
+  .pd-diffs-header ~ .pd-file {
+    .pd-code,
+    &.pd-overflow--wrap,
+    &.pd-dehydrated.pd-diff-type--split.pd-overflow--scroll {
+      padding-top: 0;
+    }
+  }
+
+  .pd-gutter {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-template-columns: subgrid;
+    grid-column: 1;
+    z-index: 3;
+    position: relative;
+    background-color: var(--diffs-bg);
+
+    .pd-gutter-buffer,
+    .pd-column-number {
+      border-right: var(--diffs-gap-style, 2px solid var(--diffs-bg));
+    }
+  }
+
+  .pd-content {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-template-columns: subgrid;
+    grid-column: 2;
+    min-width: 0;
+    background-color: var(--diffs-bg);
+  }
+
+  /* Both split layouts that share one grid across the two columns: wrap
+   * always, and scroll while dehydrated. Scroll mode normally renders each
+   * column as its own scroll container, where paired annotation rows only get
+   * equal heights once the resize manager measures them — before hydration
+   * that measurement hasn't run, so the side hosting the annotation content
+   * would be taller and the rows below it would shift on hydration. The
+   * shared grid gives paired rows equal heights in pure CSS; the dehydrated
+   * scroll variant keeps nowrap text and clips horizontal overflow until
+   * hydration swaps in the real scroll containers. */
+  .pd-diff-type--split.pd-overflow--wrap,
+  .pd-dehydrated.pd-diff-type--split.pd-overflow--scroll {
+    display: grid;
+    grid-auto-flow: dense;
+    grid-template-columns: repeat(2, var(--diffs-code-grid));
+    padding-block: var(--diffs-gap-block, var(--diffs-gap-fallback));
+
+    .pd-code {
+      display: contents;
+    }
+
+    .pd-deletions {
+      .pd-gutter {
+        grid-column: 1;
+      }
+
+      .pd-content {
+        grid-column: 2;
+        border-right: 1px solid var(--diffs-bg);
+      }
+    }
+
+    .pd-additions {
+      .pd-gutter {
+        grid-column: 3;
+        border-left: 1px solid var(--diffs-bg);
+      }
+
+      .pd-content {
+        grid-column: 4;
+      }
+    }
+  }
+
+  .pd-dehydrated.pd-diff-type--split.pd-overflow--scroll
+    .pd-content {
+    overflow: clip;
+  }
+
+  .pd-overflow--scroll .pd-gutter {
+    position: sticky;
+    left: 0;
+  }
+
+  .pd-interactive-lines .pd-line {
+    cursor: pointer;
+  }
+
+  .pd-interactive-line-numbers .pd-column-number {
+    cursor: pointer;
+    touch-action: none;
+  }
+
+  .pd-content-buffer,
+  .pd-gutter-buffer {
+    position: relative;
+    user-select: none;
+    min-height: 1lh;
+  }
+
+  .pd-gutter-buffer {
+    padding-left: 2ch;
+    padding-right: 1ch;
+
+    &::before {
+      content: '';
+      display: block;
+      min-width: var(
+        --diffs-min-number-column-width,
+        var(--diffs-min-number-column-width-default, 3ch)
+      );
+    }
+  }
+
+  .pd-gutter-buffer--annotation {
+    --diffs-annotation-bg: var(--diffs-bg-context-gutter);
+    min-height: 0;
+  }
+
+  .pd-gutter-buffer--buffer {
+    --diffs-line-bg: var(--diffs-bg-context-gutter);
+  }
+
+  .pd-content-buffer {
+    grid-column: 1;
+    /* We multiply by 1.414 (√2) to better approximate the diagonal repeat distance */
+    background-size: 8px 8px;
+    background-position: 5px 0;
+    background-origin: border-box;
+    /* This is incredibley expensive... */
+    background-image: repeating-linear-gradient(
+      -45deg,
+      transparent,
+      transparent calc(3px * 1.414),
+      var(--diffs-bg-buffer) calc(3px * 1.414),
+      var(--diffs-bg-buffer) calc(4px * 1.414)
+    );
+  }
+
+  /* Hunk Separators */
+  /* --------------- */
+  .pd-separator {
+    box-sizing: content-box;
+    background-color: var(--diffs-bg);
+  }
+
+  .pd-separator--simple {
+    min-height: 4px;
+  }
+
+  .pd-separator--line-info,
+  .pd-separator--line-info-basic,
+  .pd-separator--metadata,
+  .pd-separator--simple {
+    background-color: var(--diffs-bg-separator);
+  }
+
+  .pd-separator--line-info,
+  .pd-separator--line-info-basic,
+  .pd-separator--metadata {
+    height: 32px;
+    position: relative;
+  }
+
+  .pd-separator-wrapper {
+    user-select: none;
+    fill: currentColor;
+    position: absolute;
+    inset-inline: 0;
+    display: flex;
+    align-items: center;
+    background-color: var(--diffs-bg);
+    height: 100%;
+  }
+
+  .pd-content .pd-separator-wrapper {
+    display: none;
+  }
+
+  .pd-separator--metadata .pd-separator-wrapper {
+    inset-inline: 100% auto;
+    padding-inline: 1ch;
+    height: 100%;
+    background-color: var(--diffs-bg-separator);
+    color: var(--diffs-fg-number);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: min-content;
+  }
+
+  .pd-separator--line-info {
+    margin-block: var(--diffs-gap-block, var(--diffs-gap-fallback));
+
+    .pd-separator-wrapper {
+      min-width: 16px;
+    }
+  }
+
+  .pd-separator--line-info-basic,
+  .pd-separator--metadata {
+    margin-block: 0;
+  }
+
+  .pd-separator--line-info.pd-separator-first {
+    margin-top: 0;
+  }
+
+  .pd-separator--line-info.pd-separator-last {
+    margin-bottom: 0;
+  }
+
+  .pd-expand-index .pd-separator-wrapper {
+    display: grid;
+    grid-template-columns: 32px auto;
+  }
+
+  .pd-expand-index .pd-separator-wrapper.pd-separator-multi-button {
+    grid-template-columns: 32px 32px auto;
+  }
+
+  .pd-expand-button,
+  .pd-separator-content {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    background-color: var(--diffs-bg-separator);
+  }
+
+  .pd-expand-index .pd-separator-content:hover {
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .pd-expand-button {
+    justify-content: center;
+    flex-shrink: 0;
+    cursor: pointer;
+    min-width: 32px;
+    align-self: stretch;
+    color: var(--diffs-fg-number);
+    border-right: 2px solid var(--diffs-bg);
+
+    &:hover {
+      color: var(--diffs-fg);
+    }
+
+    &.pd-expand-all-button {
+      display: none;
+    }
+  }
+
+  .pd-expand-down .pd-icon {
+    transform: scaleY(-1);
+  }
+
+  .pd-separator-content {
+    flex: 1 1 auto;
+    padding: 0 1ch;
+    height: 100%;
+    color: var(--diffs-fg-number);
+
+    overflow: hidden;
+    justify-content: flex-start;
+  }
+
+  .pd-separator--line-info,
+  .pd-separator--line-info-basic {
+    .pd-separator-content {
+      height: 100%;
+      user-select: none;
+      overflow: clip;
+    }
+  }
+
+  .pd-unmodified-lines {
+    display: block;
+    overflow: hidden;
+    min-width: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 0 1 auto;
+  }
+
+  @supports (width: 1cqi) {
+    .pd-unified {
+      .pd-separator--line-info .pd-separator-wrapper {
+        padding-inline: var(--diffs-gap-inline, var(--diffs-gap-fallback));
+        width: 100cqi;
+
+        .pd-separator-content {
+          border-radius: 6px;
+        }
+      }
+
+      .pd-separator--line-info.pd-expand-index
+        .pd-separator-wrapper
+        .pd-separator-content {
+        border-top-left-radius: unset;
+        border-bottom-left-radius: unset;
+      }
+    }
+
+    .pd-gutter {
+      .pd-separator--line-info .pd-separator-wrapper {
+        padding-left: var(--diffs-gap-inline, var(--diffs-gap-fallback));
+      }
+
+      .pd-separator--line-info .pd-separator-content {
+        border-top-left-radius: 6px;
+        border-bottom-left-radius: 6px;
+      }
+
+      .pd-separator--line-info.pd-expand-index .pd-separator-content {
+        border-top-left-radius: unset;
+        border-bottom-left-radius: unset;
+      }
+    }
+
+    .pd-additions {
+      .pd-content .pd-separator--line-info {
+        background-color: var(--diffs-bg);
+
+        .pd-separator-wrapper {
+          display: none;
+        }
+      }
+
+      .pd-gutter .pd-separator--line-info .pd-separator-wrapper {
+        display: block;
+        height: 100%;
+        background-color: var(--diffs-bg-separator);
+        border-top-right-radius: 6px;
+        border-bottom-right-radius: 6px;
+
+        .pd-separator-content,
+        .pd-expand-button {
+          display: none;
+        }
+      }
+    }
+
+    .pd-overflow--scroll
+      .pd-additions
+      .pd-gutter
+      .pd-separator--line-info
+      .pd-separator-wrapper {
+      width: calc(100cqi - var(--diffs-gap-inline, var(--diffs-gap-fallback)));
+    }
+
+    .pd-overflow--wrap
+      .pd-additions
+      .pd-content
+      .pd-separator--line-info
+      .pd-separator-wrapper {
+      background-color: var(--diffs-bg-separator);
+      display: block;
+      height: 100%;
+      margin-right: var(--diffs-gap-inline, var(--diffs-gap-fallback));
+      border-top-right-radius: 6px;
+      border-bottom-right-radius: 6px;
+
+      .pd-separator-content,
+      .pd-expand-button {
+        display: none;
+      }
+    }
+
+    .pd-separator--line-info .pd-separator-wrapper {
+      .pd-expand-both,
+      .pd-expand-down,
+      .pd-expand-up {
+        border-top-left-radius: 6px;
+        border-bottom-left-radius: 6px;
+      }
+    }
+
+    @media (pointer: fine) {
+      .pd-separator--line-info .pd-separator-wrapper {
+        &.pd-separator-multi-button {
+          .pd-expand-up {
+            border-top-left-radius: 6px;
+            border-bottom-left-radius: unset;
+          }
+
+          .pd-expand-down {
+            border-bottom-left-radius: 6px;
+            border-top-left-radius: unset;
+          }
+        }
+      }
+    }
+  }
+
+  @media (pointer: coarse) {
+    .pd-separator--line-info-basic
+      .pd-separator-wrapper.pd-separator-multi-button {
+      grid-template-columns: 34px 34px auto;
+
+      .pd-separator-content {
+        grid-column: unset;
+        grid-row: unset;
+      }
+    }
+
+    @supports (width: 1cqi) {
+      .pd-separator--line-info .pd-separator-wrapper {
+        .pd-expand-both,
+        .pd-expand-down,
+        .pd-expand-up {
+          border-top-left-radius: 6px;
+          border-bottom-left-radius: 6px;
+        }
+
+        &.pd-separator-multi-button {
+          .pd-expand-up {
+            border-top-left-radius: 6px;
+            border-bottom-left-radius: 6px;
+          }
+
+          .pd-expand-down {
+            border-bottom-left-radius: unset;
+            border-top-left-radius: unset;
+          }
+        }
+      }
+    }
+  }
+
+  @media (pointer: fine) {
+    .pd-separator-wrapper.pd-separator-multi-button {
+      display: grid;
+      grid-template-rows: 50% 50%;
+
+      .pd-separator-content {
+        grid-column: 2;
+        grid-row: 1 / -1;
+        min-width: min-content;
+      }
+
+      .pd-expand-button {
+        grid-column: 1;
+      }
+    }
+
+    .pd-separator--line-info .pd-separator-wrapper,
+    .pd-separator--line-info
+      .pd-separator-wrapper.pd-separator-multi-button {
+      grid-template-columns: 34px auto;
+    }
+
+    .pd-separator--line-info-basic.pd-expand-index
+      .pd-separator-wrapper {
+      grid-template-columns: 100% auto;
+    }
+
+    .pd-separator--line-info,
+    .pd-separator--line-info-basic {
+      .pd-separator-multi-button {
+        .pd-expand-up {
+          border-bottom: 1px solid var(--diffs-bg);
+          border-right: 2px solid var(--diffs-bg);
+        }
+        .pd-expand-down {
+          border-top: 1px solid var(--diffs-bg);
+          border-right: 2px solid var(--diffs-bg);
+        }
+      }
+    }
+  }
+
+  /* Hunk separator content is duplicated across gutters and content columns,
+   * so custom CSS can do some stuff. Lets hide things for defaults */
+  .pd-additions .pd-gutter .pd-separator-wrapper,
+  .pd-additions .pd-separator--line-info-basic .pd-separator-wrapper,
+  .pd-content .pd-separator-wrapper {
+    display: none;
+  }
+
+  .pd-line-annotation {
+    min-height: var(--diffs-annotation-min-height, 0);
+    z-index: 2;
+  }
+
+  .pd-merge-conflict-actions {
+    z-index: 2;
+  }
+
+  .pd-separator--custom {
+    display: grid;
+    grid-template-columns: subgrid;
+  }
+
+  .pd-line,
+  .pd-column-number,
+  .pd-no-newline {
+    position: relative;
+    padding-inline: 1ch;
+  }
+
+  .pd-indicators--classic .pd-line {
+    padding-inline-start: 2ch;
+  }
+
+  .pd-indicators--classic {
+    .pd-line-type--change-addition,
+    .pd-line-type--change-deletion {
+      &.pd-no-newline,
+      &.pd-line {
+        &::before {
+          display: inline-block;
+          width: 1ch;
+          height: 1lh;
+          position: absolute;
+          top: 0;
+          left: 0;
+          user-select: none;
+        }
+      }
+    }
+
+    .pd-line-type--change-addition {
+      &.pd-line,
+      &.pd-no-newline {
+        &::before {
+          content: '+';
+          color: var(--diffs-addition-base);
+        }
+      }
+    }
+
+    .pd-line-type--change-deletion {
+      &.pd-line,
+      &.pd-no-newline {
+        &::before {
+          content: '-';
+          color: var(--diffs-deletion-base);
+        }
+      }
+    }
+  }
+
+  .pd-indicators--bars {
+    .pd-line-type--change-deletion,
+    .pd-line-type--change-addition {
+      &.pd-column-number {
+        &::before {
+          content: '';
+          display: block;
+          width: 4px;
+          height: 100%;
+          position: absolute;
+          top: 0;
+          left: 0;
+          user-select: none;
+          contain: strict;
+        }
+      }
+    }
+
+    .pd-line-type--change-deletion {
+      &.pd-column-number {
+        &::before {
+          background-image: linear-gradient(
+            0deg,
+            var(--diffs-bg-deletion) 50%,
+            var(--diffs-deletion-base) 50%
+          );
+          background-repeat: repeat;
+          background-size: 2px 2px;
+          background-size: calc(1lh / round(1lh / 2px))
+            calc(1lh / round(1lh / 2px));
+        }
+      }
+    }
+
+    .pd-line-type--change-addition {
+      &.pd-column-number {
+        &::before {
+          background-color: var(--diffs-addition-base);
+        }
+      }
+    }
+  }
+
+  .pd-overflow--wrap {
+    .pd-line {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* Annotations wrap in every overflow mode (see the base
+     * .pd-annotation-content rule). In wrap mode, also break long words so
+     * they do not overflow the wrapped column. */
+    .pd-annotation-content {
+      word-break: break-word;
+    }
+  }
+
+  .pd-overflow--scroll .pd-line {
+    white-space: pre;
+    min-height: 1lh;
+  }
+
+  .pd-column-number {
+    box-sizing: content-box;
+    text-align: right;
+    user-select: none;
+    color: var(--diffs-fg-number);
+    padding-left: 2ch;
+  }
+
+  .pd-line-number-content {
+    display: inline-block;
+    min-width: var(
+      --diffs-min-number-column-width,
+      var(--diffs-min-number-column-width-default, 3ch)
+    );
+    position: relative;
+    z-index: 1;
+  }
+
+  .pd-disable-line-numbers {
+    .pd-gutter-buffer,
+    .pd-column-number {
+      min-width: 4px;
+      padding: 0;
+
+      &::before {
+        min-width: 0;
+      }
+    }
+
+    .pd-line-number-content {
+      display: none;
+    }
+
+    .pd-gutter-utility-slot {
+      right: unset;
+      left: 0;
+      justify-content: flex-start;
+    }
+
+    &.pd-indicators--bars .pd-gutter-utility-slot {
+      /* Using 5px here because theres a 2px separator after the bar */
+      left: 6px;
+    }
+  }
+
+  .pd-file.pd-disable-line-numbers {
+    .pd-gutter-buffer,
+    .pd-column-number {
+      min-width: 0;
+      border-right: 0;
+    }
+  }
+
+  .pd-diff-span {
+    border-radius: 3px;
+    box-decoration-break: clone;
+  }
+
+  .pd-line-type--change-addition .pd-diff-span {
+    background-color: var(--diffs-bg-addition-emphasis);
+  }
+
+  .pd-line-type--change-deletion .pd-diff-span {
+    background-color: var(--diffs-bg-deletion-emphasis);
+  }
+
+  .pd-merge-conflict--marker-start,
+  .pd-merge-conflict--marker-base,
+  .pd-merge-conflict--marker-separator,
+  .pd-merge-conflict--marker-end {
+    padding-left: 1ch;
+    color: var(--diffs-fg);
+  }
+
+  .pd-merge-conflict--marker-start,
+  .pd-merge-conflict--marker-end {
+    display: flex;
+    align-items: center;
+
+    &::after {
+      color: var(--diffs-fg-conflict-marker);
+      font-style: normal;
+      font-size: 0.75rem;
+      line-height: 1.25rem;
+      padding-left: 1ch;
+      font-family: var(
+        --diffs-header-font-family,
+        var(--diffs-header-font-fallback)
+      );
+    }
+  }
+
+  .pd-merge-conflict--marker-start::after {
+    content: '(Current Change)';
+  }
+
+  .pd-merge-conflict--marker-end::after {
+    content: '(Incoming Change)';
+  }
+
+  .pd-merge-conflict-actions-content {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding-inline: 0.5rem;
+    min-height: 1.75rem;
+    font-family: var(
+      --diffs-header-font-family,
+      var(--diffs-header-font-fallback)
+    );
+    font-size: 0.75rem;
+    line-height: 1.2;
+    color: var(--diffs-fg);
+  }
+
+  .pd-merge-conflict-action {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--diffs-fg-number);
+    font: inherit;
+    font-style: normal;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .pd-merge-conflict-action:hover {
+    color: var(--diffs-fg);
+  }
+
+  .pd-merge-conflict-action--current:hover {
+    color: var(--diffs-addition-base);
+  }
+
+  .pd-merge-conflict-action--incoming:hover {
+    color: var(--diffs-modified-base);
+  }
+
+  .pd-merge-conflict-action-separator {
+    color: var(--diffs-fg-number);
+    opacity: 0.6;
+    user-select: none;
+  }
+
+  /* Default Header Styles */
+  /* --------------------- */
+  .pd-diffs-header--default {
+    position: relative;
+    background-color: var(--diffs-bg);
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--diffs-gap-inline, var(--diffs-gap-fallback));
+    min-height: calc(
+      1lh + (var(--diffs-gap-block, var(--diffs-gap-fallback)) * 3)
+    );
+    padding-inline: 16px;
+    top: 0;
+    z-index: 2;
+  }
+
+  .pd-header-content {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--diffs-gap-inline, var(--diffs-gap-fallback));
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .pd-header-content .pd-prev-name,
+  .pd-header-content .pd-title {
+    direction: rtl;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .pd-prev-name {
+    opacity: 0.7;
+  }
+
+  .pd-rename-icon {
+    fill: currentColor;
+    flex-shrink: 0;
+    flex-grow: 0;
+  }
+
+  .pd-diffs-header--default .pd-metadata {
+    display: flex;
+    align-items: center;
+    gap: 1ch;
+    white-space: nowrap;
+  }
+
+  .pd-diffs-header--default .pd-additions-count {
+    font-family: var(--diffs-font-family, var(--diffs-font-fallback));
+    color: var(--diffs-addition-base);
+  }
+
+  .pd-diffs-header--default .pd-deletions-count {
+    font-family: var(--diffs-font-family, var(--diffs-font-fallback));
+    color: var(--diffs-deletion-base);
+  }
+
+  .pd-change-icon {
+    fill: currentColor;
+    flex-shrink: 0;
+  }
+
+  .pd-change-icon--change,
+  .pd-change-icon--rename-pure,
+  .pd-change-icon--rename-changed {
+    color: var(--diffs-modified-base);
+  }
+
+  .pd-change-icon--new {
+    color: var(--diffs-addition-base);
+  }
+
+  .pd-change-icon--deleted {
+    color: var(--diffs-deletion-base);
+  }
+
+  .pd-change-icon--file {
+    opacity: 0.6;
+  }
+
+  .pd-annotation-content {
+    position: relative;
+    display: flow-root;
+    align-self: flex-start;
+    z-index: 2;
+    min-width: 0;
+    isolation: isolate;
+    /* Annotations contain prose, not code. The text must wrap in every
+     * overflow mode. Slotted annotation content inherits this white-space
+     * value. In scroll mode without this rule, the text inherits
+     * `white-space: pre` from the `pre` element. Then long text does not
+     * wrap. */
+    white-space: normal;
+  }
+
+  /* Sticky positioning has a composite costs, so we should _only_ pay it if we
+   * need to */
+  .pd-overflow--scroll .pd-annotation-content {
+    position: sticky;
+    width: var(--diffs-column-content-width, auto);
+    left: var(--diffs-column-number-width, 0);
+  }
+
+  .pd-overflow--scroll .pd-merge-conflict-actions-content {
+    position: sticky;
+    width: var(--diffs-column-content-width, auto);
+    left: var(--diffs-column-number-width, 0);
+  }
+
+  /* Undo some of the stuff that the 'pre' tag does */
+  .pd-annotation-slot {
+    text-wrap-mode: wrap;
+    word-break: normal;
+    white-space-collapse: collapse;
+  }
+
+  .pd-gutter-utility-slot {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    display: flex;
+    justify-content: flex-end;
+    touch-action: none;
+  }
+
+  .pd-utility-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    appearance: none;
+    width: 1lh;
+    height: 1lh;
+    margin-right: calc((1lh - 1ch) * -1);
+    padding: 0;
+    cursor: pointer;
+    font-size: var(--diffs-font-size, 13px);
+    line-height: var(--diffs-line-height, 20px);
+    border-radius: 4px;
+    background-color: var(--diffs-modified-base);
+    color: var(--diffs-bg);
+    fill: currentColor;
+    position: relative;
+    z-index: 4;
+    touch-action: none;
+
+    &::before {
+      content: '';
+      display: block;
+      position: absolute;
+      inset: 0 0 0 -4px;
+    }
+  }
+
+  /* Decoration Bars */
+  /* --------------- */
+  .pd-decoration-bar-stack {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: -2px;
+    width: 6px;
+    pointer-events: none;
+    isolation: isolate;
+    z-index: 1;
+    background-color: var(--diffs-decoration-bar-color, transparent);
+    /* overflow: clip visible; */
+    box-sizing: content-box;
+    border-left: 2px solid var(--diffs-bg);
+    border-right: 2px solid var(--diffs-bg);
+
+    .pd-decoration-bar-depth--1 & {
+      background-color: color-mix(
+        in lab,
+        var(--diffs-bg) 20%,
+        var(--diffs-decoration-bar-color, transparent)
+      );
+    }
+
+    .pd-decoration-bar-depth--2 & {
+      background-color: color-mix(
+        in lab,
+        var(--diffs-bg) 45%,
+        var(--diffs-decoration-bar-color, transparent)
+      );
+    }
+
+    .pd-decoration-bar-depth--3 & {
+      background-color: color-mix(
+        in lab,
+        var(--diffs-bg) 65%,
+        var(--diffs-decoration-bar-color, transparent)
+      );
+    }
+
+    .pd-decoration-bar-start & {
+      border-top-left-radius: 5px;
+      border-top-right-radius: 5px;
+
+      /* &::before { */
+      /*   content: ''; */
+      /*   position: absolute; */
+      /*   box-sizing: content-box; */
+      /*   display: block; */
+      /*   width: 6px; */
+      /*   height: 6px; */
+      /*   z-index: 1; */
+      /*   border-top-left-radius: 3px; */
+      /*   border-top-right-radius: 3px; */
+      /*   border-top: 2px solid var(--diffs-bg); */
+      /*   border-left: 2px solid var(--diffs-bg); */
+      /*   border-right: 2px solid var(--diffs-bg); */
+      /*   left: -2px; */
+      /*   top: -2px; */
+      /* } */
+    }
+
+    .pd-decoration-bar-end & {
+      z-index: 3;
+      border-bottom-left-radius: 5px;
+      border-bottom-right-radius: 5px;
+
+      /* &::after { */
+      /*   content: ''; */
+      /*   position: absolute; */
+      /*   box-sizing: content-box; */
+      /*   display: block; */
+      /*   width: 6px; */
+      /*   height: 6px; */
+      /*   border-bottom-left-radius: 3px; */
+      /*   border-bottom-right-radius: 3px; */
+      /*   border-bottom: 2px solid var(--diffs-bg); */
+      /*   border-left: 2px solid var(--diffs-bg); */
+      /*   border-right: 2px solid var(--diffs-bg); */
+      /*   left: -2px; */
+      /*   bottom: -2px; */
+      /* } */
+    }
+
+    /* .pd-decoration-bar-end & { */
+    /*   border-bottom-left-radius: 5px; */
+    /*   border-bottom-right-radius: 5px; */
+    /*   border-bottom: 2px solid var(--diffs-bg); */
+    /*   border-left: 2px solid var(--diffs-bg); */
+    /*   border-right: 2px solid var(--diffs-bg); */
+    /*   right: -2px; */
+    /*   bottom: -2px; */
+    /*   z-index: 3; */
+    /* } */
+  }
+
+  .pd-placeholder {
+    contain: strict;
+  }
+
+  .pd-error-wrapper {
+    overflow: auto;
+    padding: var(--diffs-gap-block, var(--diffs-gap-fallback))
+      var(--diffs-gap-inline, var(--diffs-gap-fallback));
+    max-height: 400px;
+    scrollbar-width: none;
+
+    .pd-error-message {
+      font-weight: bold;
+      font-size: 18px;
+      color: var(--diffs-deletion-base);
+    }
+
+    .pd-error-stack {
+      color: var(--diffs-fg-number);
+    }
+  }
+}
+
+@layer base, theme, rendered, unsafe;
+@layer rendered {
+  :scope {
+  color-scheme: dark;
+  --diffs-scrollbar-gutter-measured: 0px;
+  --diffs-dark:#fafafa;--diffs-dark-bg:#0a0a0a;--diffs-dark-addition-color:#07c480;--diffs-dark-deletion-color:#ff2e3f;--diffs-dark-modified-color:#009fff;--diffs-light:#0a0a0a;--diffs-light-bg:#ffffff;--diffs-light-addition-color:#18a46c;--diffs-light-deletion-color:#d52c36;--diffs-light-modified-color:#009fff;
+  }
+}
+
+.hl-0{--diffs-token-dark:#FF678D;--diffs-token-light:#D32A61}
+.hl-1{--diffs-token-dark:#636363;--diffs-token-light:#636363}
+.hl-2{--diffs-token-dark:#FFA359;--diffs-token-light:#D47628}
+.hl-3{--diffs-token-dark:#5ECC71;--diffs-token-light:#199F43}
+.hl-4{--diffs-token-dark:#737373;--diffs-token-light:#737373}
+.hl-5{--diffs-token-dark:#D568EA;--diffs-token-light:#A631BE}
+.hl-6{--diffs-token-dark:#08C0EF;--diffs-token-light:#08C0EF}
+.hl-7{--diffs-token-dark:#FAFAFA;--diffs-token-light:#0A0A0A}
+.hl-8{--diffs-token-dark:#A3A3A3;--diffs-token-light:#636363}
+.hl-9{--diffs-token-dark:#9D6AFB;--diffs-token-light:#693ACF}
+.hl-10{--diffs-token-dark:#68CDF2;--diffs-token-light:#1CA1C7}
+.hl-11{--diffs-token-dark:#FFAB16;--diffs-token-light:#D5901C}
+.pd-ncw-1{--diffs-min-number-column-width-default:1ch}
+.pd-ncw-2{--diffs-min-number-column-width-default:2ch}
+.pd-ncw-3{--diffs-min-number-column-width-default:3ch}
+.pd-ncw-4{--diffs-min-number-column-width-default:4ch}
+.pd-ncw-5{--diffs-min-number-column-width-default:5ch}
+.pd-ncw-6{--diffs-min-number-column-width-default:6ch}
+.pd-ncw-7{--diffs-min-number-column-width-default:7ch}
+.pd-ncw-8{--diffs-min-number-column-width-default:8ch}

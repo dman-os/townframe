@@ -40,6 +40,9 @@ struct Mode {
     /// The class of the wrapper the guest emits around the rows, standing in for the shadow host
     /// Pierre's stylesheet is written against (`:host`); `None` when the host supplies it.
     host_class: Option<&'static str>,
+    /// CSS the manifest asks the host to deliver and scope for this presentation (the manifest's
+    /// `stylesheets` member).
+    stylesheet: Option<&'static str>,
 }
 
 /// A hostile guest's probe of what the wire already lets through: one element whose raw `style`
@@ -53,12 +56,21 @@ const MODES: &[Mode] = &[
         title: "Pierre probe (raw style)",
         rows: PROBE,
         host_class: None,
+        stylesheet: None,
     },
     Mode {
         publication: "rows-a",
         title: "Pierre rows (a) widened vocabulary",
         rows: include_str!("assets/rows.verbatim.json"),
         host_class: Some("pd-host"),
+        stylesheet: None,
+    },
+    Mode {
+        publication: "rows-b",
+        title: "Pierre rows (b) host stylesheet",
+        rows: include_str!("assets/rows.classes.json"),
+        host_class: None,
+        stylesheet: Some(include_str!("assets/pierre.classes.scope.css")),
     },
 ];
 
@@ -111,7 +123,15 @@ pub fn manifest() -> clay_mdk::MicroManifest {
                 }],
             })
             .collect(),
-        extra: Default::default(),
+        extra: BTreeMap::from([(
+            "stylesheets".to_owned(),
+            serde_json::json!(
+                MODES
+                    .iter()
+                    .filter_map(|mode| Some((mode.publication, mode.stylesheet?)))
+                    .collect::<BTreeMap<_, _>>()
+            ),
+        )]),
     }
 }
 
