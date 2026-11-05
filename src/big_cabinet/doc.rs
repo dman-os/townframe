@@ -117,6 +117,8 @@ use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::DatumMetadata;
 use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::Dmeta;
+use big_cabinet_core::dmeta::DmetaSchema;
+use big_cabinet_core::dmeta::DmetaWrite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
@@ -219,7 +221,7 @@ pub struct DocsService {
     system_actor: Actor,
     node_issuer: MultibaseKey,
     raw: CompiledSchema,
-    dmeta: SchemaHandle,
+    dmeta: DmetaSchema,
     branch: SchemaHandle,
     commands: Commands,
     datum_set: Option<Arc<DatumSetStore>>,
@@ -584,7 +586,8 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         system_actor: actor,
         node_issuer: config.node_issuer,
         raw: CompiledSchema::compile(serde_json::json!({})).expect("the empty schema compiles"),
-        dmeta,
+        dmeta: DmetaSchema::new(dmeta.compiled().clone())
+            .expect("dmeta's member declarations compile on their own"),
         branch,
         commands: Commands::open(config.sql).await?,
         datum_set: config.datum_set,

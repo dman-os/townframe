@@ -32,6 +32,8 @@ mod e2e;
 pub use attribution::Attribution;
 pub use attribution::AttributionError;
 #[cfg(feature = "schemars")]
+pub use storage::DmetaSchema;
+pub use storage::DmetaWrite;
 pub use storage::StorageError;
 
 use jiff::Timestamp;

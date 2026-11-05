@@ -45,13 +45,9 @@ impl DocsService {
                 let heads = resolve(doc, &params.at)?;
                 // A merge brings the source's history into the target unexamined, so it is held to
                 // what a write's base is held to: every datum it brings — including one whose
-                // content was deleted — must be accepted.
+                // content was removed but whose signatures remain — must be accepted.
                 let gate = Gate::new(doc, &heads);
-                let keys: BTreeSet<_> = present_keys(doc, &heads)?
-                    .into_iter()
-                    .chain(gate.keys())
-                    .collect();
-                for key in keys {
+                for key in gate.keys() {
                     unaccepted(gate.verify(&key)).map_err(|verdict| {
                         DocsError::BaseNotAccepted {
                             datum_key: key,
