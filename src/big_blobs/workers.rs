@@ -310,6 +310,7 @@ fn spawn_worker(
                 if cancel.is_cancelled() { return Ok::<_, utils_rs::prelude::eyre::Report>(()); }
                 for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
                 if let Some((document, generation)) = queue.next().await? {
+                    tracing::info!(%document, generation, "INSTR blob worker next"); // INSTR
                     if let Some(waiting) = enqueue_root_members(config, &queue, &document).await? {
                         poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
                         queue.finish(&document, generation, waiting).await?;
@@ -545,6 +546,7 @@ async fn poll_document(
             Err(error) => return Err(error.into()),
         };
         let documents = affected_documents(&document, &mut known, &page.events);
+        tracing::info!(%document, events = page.events.len(), tags = ?page.events.iter().filter_map(|event| match event { big_cabinet_core::doc::DatumEvent::Datum { datum_key, .. } => Some(datum_key.tag().as_str().to_owned()), _ => None }).collect::<BTreeSet<_>>(), enqueued = documents.len(), polled_itself = documents.contains(&document), "INSTR blob poll_document page"); // INSTR
         queue
             .ingest(&source, page.through, documents, false)
             .await?;
@@ -741,6 +743,7 @@ async fn enqueue_root_members(
             Err(error) => return Err(error.into()),
         }
         let members = sqlite::queries::drawer_members(sql, drawer.clone()).await?;
+        tracing::info!(%document, %drawer, members = members.len(), "INSTR blob worker enqueue_root_members"); // INSTR
 
         for member in members {
             queue.enqueue(&member.parse()?).await?;

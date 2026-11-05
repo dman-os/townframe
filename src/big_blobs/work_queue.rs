@@ -51,6 +51,7 @@ impl WorkQueue {
             tx.rollback().await?;
             return Ok(());
         }
+        tracing::info!(source, revision, documents = documents.len(), rearm_waiting, "INSTR work queue ingest"); // INSTR
         for document in documents {
             sqlite::queries::enqueue(&tx, document.to_string()).await?;
         }
