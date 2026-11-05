@@ -3,7 +3,7 @@
 Status: Living ledger. Operator decisions are marked as such; everything else is the PR owner's working state.
 Owner: Claude (PR owner) with Sonnet subagents; operator reviews.
 Scope: Branches `feat/dayframe-shell` and `feat/dayframe-android`; FDR 006, ADR 032, `clay_dioxus_kit`, `micro_shell`, `dayframe_mobile`.
-Updated: 2026-11-05 (S1, S2 and S3 landed)
+Updated: 2026-11-05 (S1, S2, S2b and S3 landed)
 
 Branch `feat/dayframe-shell`, stacked on PR #79 (`feat/better-collections`). Design: FDR 006
 (shell grammar) and ADR 032 (shell micro and component kit), both accepted 2026-11-05.
@@ -34,6 +34,7 @@ Branch `feat/dayframe-shell`, stacked on PR #79 (`feat/better-collections`). Des
 |----|------|-------------------|-------|
 | S1 | `clay_dioxus_kit` foundation: conventions, Sections, ListDetails, Sheet, NavButton, showcase | `feat/dayframe-shell` (main checkout) | done (KIT-001..090 in the crate README) |
 | S2 | `micro_shell` + manifest, navigation stack, panels collection, chrome button, sheets; Settings migration | `feat/dayframe-shell` | done: see "S2 notes"; native screenshots beyond home blocked on pointer input |
+| S2b | The shell is the whole frame: edge-to-edge `Application`, toolbar/layout/lifecycle as panels and a Settings section, kit `Drawer`/`AppBar`/`ListRow`, insets, dev seed | `feat/dayframe-shell` | done except native screenshots: see "S2b notes" |
 | S3 | Android: `dayframe_mobile` on the composition, Wasmtime on Android, constraints doc | `feat/dayframe-android` (isolated worktree) | done: APK builds; never run (no device); see `dayframe-android.md` |
 | S4 | Web tests: Playwright flows, Bombadil invariants | `feat/dayframe-shell` | after S2's first flow |
 
@@ -146,3 +147,53 @@ Product questions: should going home from the sidebar push (back returns to wher
 built) or reset the stack? Should the shell's open-context stack persist across restarts on a
 device? Should the toolbar and layout become panels (sidebar and sheet sockets) rather than pinned
 roots?
+
+## S2b notes (2026-11-05)
+
+What landed: kit `AppBar`, `Drawer`, `ListRow` (+ `ListDetails { current }`); `HostInputs` height,
+typed `Insets` and `start`; `Application` mounts the shell root at the window size, no card,
+heading or 560 px constant; `RootRow.pinned` removed; the toolbar is a `sidebar` panel, the layout a
+list panel (it requires the nav button); the lifecycle controls are a locked built-in micro
+(`dayframe_composition::lifecycle`) contributing a Settings section; Settings rows are `ListRow`s
+(Settings no longer requires `navigate`); `DAYFRAME_SHELL_OPEN` seed (documented in the native
+dev-loop skill); `tailwind.css` regenerated.
+
+Decisions and rejected alternatives:
+
+- **Lifecycle section.** A composition-owned micro reading `CompositionRuntime` from the Dioxus
+  context `Application` provides. Rejected: a cell holding the runtime inside the micro (supervisor
+  to runtime reference cycle); the composition auto-adding it (breaks catalogs without Settings).
+- **Insets** are applied by `Application` (it pads the frame and hands the shell the remaining size),
+  so neither shell nor kit reads them. Android fills `HostInputs::insets`.
+- **Toolbar** in the sidebar socket rather than a list panel: it has no list shape and belongs
+  wherever navigation is.
+- **Nav button on a wide host.** Back only while details are open beside the list, otherwise
+  "open sidebar", so a hidden sidebar can always be brought back (found by the Playwright spec).
+- **ListRow context** is in-tree only; guests cannot highlight the open row until the shell reports
+  it reactively (needs a subscribable `opened`).
+- **Packages** may require shell publications: both launchers apply `satisfied_by(shell)` to every
+  discovered package.
+
+Findings:
+
+- Returning to the Wasm layout in the browser (leave it, come back) remounts a new guest
+  incarnation whose panels stay "Loading section..." for roughly 30 s or more on `wcmp`, matching
+  the 30 s collection long poll the desktop layout scenario guards with a paused clock. Not fixed
+  here; the Playwright spec carries a 180 s timeout and a comment. Needs instrumentation in the
+  guest session collection feed.
+- Lifecycle, the layout and a Settings section share the main/details positions, so the browser
+  suite cannot see a provider disappear beside a mounted sibling or the `Active` state; the desktop
+  e2e tests (`runtime.state()`) carry those.
+
+Verification: see the S2b report; `cargo x guardrails lint` clean after extracting `use_start` and
+generalising `open_panel`; `check-matrix` finished for `micro_shell`, `micro_shell_manifest`,
+`micro_settings`, `micro_settings_manifest`, `micro_toolbar_manifest`, `micro_layout_manifest`,
+`micro_layout`, `clay_dioxus_kit`, `dayframe_composition`. `clay_mdk` tests need
+`DAYFRAME_COUNTER_COMPONENT` and a context-component fixture.
+
+Design-language gaps: motion (drawer does not slide), selected-row role, app-bar metrics,
+directionality (leading = left), scrim, safe-area vocabulary.
+
+Product questions: going home from the sidebar: push or reset? Persist the stack? Should lifecycle
+be reachable beside the layout (a sheet)? Should a hidden wide sidebar persist across restarts
+(it is device-local state today)?
