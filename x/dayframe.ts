@@ -18,6 +18,8 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 --abi <arm64|x86_64>  target ABI, default arm64 (aarch64-linux-android);
                                  x86_64 is what an emulator on this host runs
                 --release        release profile (unsigned unless Dioxus.toml configures signing)
+                --guest-profile <dev|wasm-release>  cargo profile of the bundled Wasm guests,
+                                 default dev (15 to 17 MB components, slow to compile on a phone)
                 --install        adb install the APK on the attached device
   web         build and serve dayframe_web (--build: build only)
   showcase    run the design showcase (dayframe_showcase) natively
@@ -69,7 +71,19 @@ switch (command) {
   }
   case "android": {
     await useDotenvTargetDir();
-    const env = await prepareDayframePackages({ testFixtures: false });
+    const guestProfileFlag = rest.indexOf("--guest-profile");
+    const guestProfile = guestProfileFlag >= 0
+      ? rest[guestProfileFlag + 1]
+      : "dev";
+    if (guestProfile !== "dev" && guestProfile !== "wasm-release") {
+      throw new Error(
+        `--guest-profile must be dev or wasm-release, got ${guestProfile}`,
+      );
+    }
+    const env = await prepareDayframePackages({
+      testFixtures: false,
+      guestProfile,
+    });
     // The APK carries its packages as assets: `dayframe_mobile` bundles `packages/` with
     // `asset!`, so stage the prepared counter and layout beside the crate (gitignored).
     const staged = root.join("src/dayframe_mobile/packages");
