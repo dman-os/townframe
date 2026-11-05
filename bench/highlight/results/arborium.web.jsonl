@@ -1,0 +1,12 @@
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"rust","size":"1k","tokens":7067,"initMs":5.34,"ms":[87.38,14.87,14.2,13.67,15],"peakMiB":9.4}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"rust","size":"10k","tokens":82831,"initMs":1.81,"ms":[363.31,264.31,260.01],"peakMiB":29.4}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"rust","size":"100k","tokens":726553,"initMs":1.97,"ms":[2952.08,2229.93],"peakMiB":206.8}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"ts","size":"1k","tokens":7297,"initMs":5.3,"ms":[89.68,13.22,11.41,11.06,10.93],"peakMiB":9.3}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"ts","size":"10k","tokens":64853,"initMs":1.59,"ms":[188.66,78.66,76.98],"peakMiB":20.8}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"ts","size":"100k","tokens":677671,"initMs":1.88,"ms":[1416.98,1035.24],"peakMiB":152.3}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"json","size":"1k","tokens":2813,"initMs":2.53,"ms":[15.67,5.81,4.58,4.3,4.01],"peakMiB":5.6}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"json","size":"10k","tokens":42097,"initMs":5.53,"ms":[68.25,44.7,47.77],"peakMiB":13.3}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"json","size":"100k","tokens":464232,"initMs":1.75,"ms":[628.86,505.02],"peakMiB":97.3}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"md","size":"1k","tokens":2024,"initMs":5.1,"ms":[115.51,26.9,31.86,27.58,26.87],"peakMiB":11.2}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"md","size":"10k","tokens":13590,"initMs":1.74,"ms":[291.9,193.25,178.58],"peakMiB":29.7}
+{"engine":"arborium","target":"wasm32-unknown-unknown/node","lang":"md","size":"100k","tokens":180939,"initMs":5.34,"ms":[3358.98,1939.45],"peakMiB":246.8}

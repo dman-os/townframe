@@ -1,0 +1,12 @@
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"rust","size":"1k","tokens":8754,"initMs":7.35,"ms":[223.05,102.44,109.85,108.87,105.56],"peakMiB":14.1}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"rust","size":"10k","tokens":103060,"initMs":10.45,"ms":[2049.07,2261.42,2214.87],"peakMiB":17.7}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"rust","size":"100k","tokens":916810,"initMs":11.67,"ms":[26051.9,19447.97],"peakMiB":51.8}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"ts","size":"1k","tokens":9217,"initMs":8.62,"ms":[1387,588.52,681.14,783.13,884.94],"peakMiB":97.9}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"ts","size":"10k","tokens":80591,"initMs":7.07,"ms":[7330.85,6101.78,5942.09],"peakMiB":109.4}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"ts","size":"100k","tokens":866470,"initMs":7.81,"ms":[113172.75,126716.63],"peakMiB":143.1}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"json","size":"1k","tokens":6624,"initMs":9.46,"ms":[83.15,25.68,26.04,23.43,23.67],"peakMiB":4.5}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"json","size":"10k","tokens":89491,"initMs":8.66,"ms":[323.88,256.59,264.33],"peakMiB":6.6}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"json","size":"100k","tokens":946552,"initMs":9.05,"ms":[2707.72,2612.88],"peakMiB":31.3}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"md","size":"1k","tokens":6804,"initMs":7.81,"ms":[746.31,503.42,502.56,497.88,497.1],"peakMiB":23.6}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"md","size":"10k","tokens":48612,"initMs":7.78,"ms":[2421.64,2150.56,2175.79],"peakMiB":26.3}
+{"engine":"syntect","target":"wasm32-unknown-unknown/node","lang":"md","size":"100k","tokens":467565,"initMs":7.12,"ms":[34471.34,33832.44],"peakMiB":113.3}

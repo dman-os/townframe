@@ -1,0 +1,12 @@
+{"engine":"syntect","lang":"rust","size":"1k","bytes":32766,"lines":1000,"tokens":8754,"initMs":2.63,"ms":[188.46,127.91,133.00,120.93,126.35],"peakMiB":14.1}
+{"engine":"syntect","lang":"rust","size":"10k","bytes":373994,"lines":10000,"tokens":103060,"initMs":2.87,"ms":[2168.99,2179.34,2359.15],"peakMiB":17.8}
+{"engine":"syntect","lang":"rust","size":"100k","bytes":3582864,"lines":100000,"tokens":916810,"initMs":4.69,"ms":[27041.00,27590.57],"peakMiB":42.6}
+{"engine":"syntect","lang":"ts","size":"1k","bytes":28790,"lines":1000,"tokens":9217,"initMs":2.93,"ms":[1521.00,951.64,754.64,718.72,1087.43],"peakMiB":96.9}
+{"engine":"syntect","lang":"ts","size":"10k","bytes":321024,"lines":10000,"tokens":80591,"initMs":2.48,"ms":[8414.53,7735.80,7524.05],"peakMiB":108.4}
+{"engine":"syntect","lang":"ts","size":"100k","bytes":3221177,"lines":100000,"tokens":866470,"initMs":5.92,"ms":[143127.86,83047.03],"peakMiB":133.6}
+{"engine":"syntect","lang":"json","size":"1k","bytes":26656,"lines":1000,"tokens":6624,"initMs":4.46,"ms":[35.63,30.42,32.04,30.30,30.26],"peakMiB":4.3}
+{"engine":"syntect","lang":"json","size":"10k","bytes":193966,"lines":10000,"tokens":89491,"initMs":3.16,"ms":[407.34,394.08,398.23],"peakMiB":6.6}
+{"engine":"syntect","lang":"json","size":"100k","bytes":1809695,"lines":100000,"tokens":946552,"initMs":2.70,"ms":[4169.43,4021.57],"peakMiB":31.9}
+{"engine":"syntect","lang":"md","size":"1k","bytes":52509,"lines":1000,"tokens":6804,"initMs":2.90,"ms":[770.54,579.11,563.03,590.49,582.79],"peakMiB":22.9}
+{"engine":"syntect","lang":"md","size":"10k","bytes":458605,"lines":10000,"tokens":48612,"initMs":2.51,"ms":[2874.58,2589.38,2576.93],"peakMiB":24.6}
+{"engine":"syntect","lang":"md","size":"100k","bytes":3963580,"lines":100000,"tokens":467565,"initMs":2.62,"ms":[43716.86,41353.55],"peakMiB":102.3}

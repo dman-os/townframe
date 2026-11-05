@@ -1,0 +1,8 @@
+pass2 start 2026-11-05T16:56:38+03:00 loadavg 4.67 10.79 11.05 9/1306 1555608
+highlights done 2026-11-05T16:56:48+03:00 loadavg 4.56 10.57 10.97 5/1304 1557043
+matrix done 2026-11-05T17:00:29+03:00 loadavg 4.37 7.33 9.58 5/1316 1585642
+probe start 4.39 7.15 9.47 8/1330 1586814
+node done 2026-11-05T17:03:30+03:00 loadavg 5.29 6.43 8.82 5/1340 1607277
+probe done 5.00 6.29 8.72 4/1316 1608942
+syntect.*.jsonl come from the first pass (run1), taken while other agents were building: loadavg 5-25 during that pass (host not quiet); everything else is pass2 above.
+machine: AMD Ryzen 9 7940HS 16 threads, node v24.21.0, wasmtime 49.0.2, rustc 1.100.0-nightly 2026-09-16

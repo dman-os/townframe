@@ -1,0 +1,12 @@
+{"engine":"irosashi-min","lang":"rust","size":"1k","bytes":32766,"lines":1000,"tokens":8605,"initMs":0.73,"ms":[19.86,13.97,14.69,13.61,14.35],"peakMiB":6.8}
+{"engine":"irosashi-min","lang":"rust","size":"10k","bytes":373994,"lines":10000,"tokens":102307,"initMs":0.71,"ms":[183.37,191.85,171.95,170.41,173.23],"peakMiB":13.2}
+{"engine":"irosashi-min","lang":"rust","size":"100k","bytes":3582864,"lines":100000,"tokens":905113,"initMs":0.74,"ms":[1620.39,1591.17,1636.98],"peakMiB":70.1}
+{"engine":"irosashi-min","lang":"ts","size":"1k","bytes":28790,"lines":1000,"tokens":8217,"initMs":0.62,"ms":[86.06,35.54,29.69,29.39,29.72],"peakMiB":15.6}
+{"engine":"irosashi-min","lang":"ts","size":"10k","bytes":321024,"lines":10000,"tokens":70794,"initMs":0.99,"ms":[428.46,346.10,347.40,348.44,347.74],"peakMiB":20.9}
+{"engine":"irosashi-min","lang":"ts","size":"100k","bytes":3221177,"lines":100000,"tokens":767666,"initMs":0.69,"ms":[3942.99,3113.07,3002.43],"peakMiB":72.6}
+{"engine":"irosashi-min","lang":"json","size":"1k","bytes":26656,"lines":1000,"tokens":5624,"initMs":0.61,"ms":[4.01,2.29,2.38,2.49,2.55],"peakMiB":5.9}
+{"engine":"irosashi-min","lang":"json","size":"10k","bytes":193966,"lines":10000,"tokens":79480,"initMs":0.68,"ms":[42.44,35.10,34.71,34.41,33.73],"peakMiB":10.9}
+{"engine":"irosashi-min","lang":"json","size":"100k","bytes":1809695,"lines":100000,"tokens":846305,"initMs":0.77,"ms":[369.28,341.88,339.14],"peakMiB":62.6}
+{"engine":"irosashi-min","lang":"md","size":"1k","bytes":52509,"lines":1000,"tokens":6359,"initMs":0.81,"ms":[23.39,10.48,10.65,9.46,9.80],"peakMiB":13.3}
+{"engine":"irosashi-min","lang":"md","size":"10k","bytes":458605,"lines":10000,"tokens":44209,"initMs":0.75,"ms":[90.31,80.64,74.93,65.83,63.89],"peakMiB":16.4}
+{"engine":"irosashi-min","lang":"md","size":"100k","bytes":3963580,"lines":100000,"tokens":432970,"initMs":0.66,"ms":[851.61,809.10,805.05],"peakMiB":55.4}
