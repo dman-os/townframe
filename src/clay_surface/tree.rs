@@ -192,6 +192,13 @@ impl<C: Clone> SurfaceTree<C> {
         self.revision
     }
 
+    /// Whether the guest element id names a live element.
+    pub fn contains_element(&self, id: NodeId) -> bool {
+        self.element_to_node
+            .get(id as usize)
+            .is_some_and(Option::is_some)
+    }
+
     /// Live nodes in the arena, root included.
     pub fn node_count(&self) -> usize {
         self.nodes.len() - self.vacant_slots.len()

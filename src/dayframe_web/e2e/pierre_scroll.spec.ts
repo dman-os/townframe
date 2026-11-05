@@ -26,7 +26,10 @@ function stats(values: number[]) {
   return { n: sorted.length, median: round(at(0.5)), p95: round(at(0.95)), max: round(at(1)) };
 }
 
-async function openSpike(page: Page) {
+/// `coalesce: false` is the host before the scroll coalescer (every browser scroll event is a
+/// synchronous guest dispatch), which is what the baseline tests measure.
+async function openSpike(page: Page, { coalesce = false } = {}) {
+  await page.addInitScript((off) => { (window as any).__clayNoCoalesce = off; }, !coalesce);
   await page.goto("/");
   await expect(
     page.getByRole("button", { name: "Open Settings", exact: true }),
@@ -290,3 +293,76 @@ test("element commands: the round trip of a jump to the committed window", async
   void scroller;
   expect(failures).toEqual([]);
 });
+
+// Chromium delivers at most one native scroll event per frame, so the coalescer has nothing to
+// merge under a real wheel. A host that delivers every scroll position (synthesised here by
+// dispatching a scroll event after each programmatic scrollTop write) is the case it exists for.
+for (const [name, steps, delta] of [["continuous-100px", 200, 100]] as const) {
+  test(`coalesced wheel profile ${name}`, async ({ page }) => {
+    const failures = watchFailures(page);
+    const { scroller } = await openSpike(page, { coalesce: true });
+    report(`coalesced-${name}`, await wheelProfile(page, scroller, steps, delta));
+    expect(failures).toEqual([]);
+  });
+}
+
+for (const coalesce of [false, true]) {
+  test(`scroll coalescing ${coalesce ? "on" : "off"}: a burst of scroll events per frame, and the last position wins`, async ({ page }) => {
+    const failures = watchFailures(page);
+    const burst = 8;
+    const frames = 100;
+    const { scroller, window: win } = await openSpike(page, { coalesce });
+    await installProbe(page);
+    const before = await page.evaluate(() => (window as any).__clayTiming.length);
+    // Each frame: `burst` scrollTop writes of 20 px, each followed by a scroll event.
+    const finalTop = await scroller.evaluate(async (el, { burst, frames }) => {
+      for (let f = 0; f < frames; f++) {
+        for (let b = 0; b < burst; b++) {
+          el.scrollTop += 20;
+          el.dispatchEvent(new Event("scroll"));
+        }
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      return el.scrollTop;
+    }, { burst, frames });
+    // The guest saw the last position, whether or not it saw the ones before it.
+    const clientHeight = await scroller.evaluate((el) => el.clientHeight);
+    const expected = Math.max(0, Math.floor((finalTop + clientHeight / 2) / LINE) - 25);
+    await expect(win).toHaveAttribute("data-value", String(expected));
+    const data = await page.evaluate(() => ({
+      timing: (window as any).__clayTiming as [string, number, number, number, number][],
+      frames: (window as any).__probe.frames as number[],
+      longtasks: (window as any).__probe.longtasks as number[],
+    }));
+    const records = data.timing.slice(before);
+    const scrollDispatches = records.filter((r) => r[0] === "dispatch:scroll");
+    const intervals = data.frames.slice(1);
+    report(`burst-coalesce-${coalesce ? "on" : "off"}`, {
+      burst,
+      frames,
+      finalTop,
+      scrollDispatches: scrollDispatches.length,
+      // Events the host dropped because the guest had committed a newer revision than the one
+      // the listener was rendered from (the host re-renders asynchronously after a commit).
+      staleScrollsDropped: records.filter((r) => r[0] === "stale:scroll").length,
+      dispatchesPerFrame: Math.round((scrollDispatches.length / frames) * 100) / 100,
+      guestDispatchMs: stats(scrollDispatches.map((r) => r[2] - r[1])),
+      coalesceFlushes: records.filter((r) => r[0] === "coalesce").length,
+      frameIntervalMs: stats(intervals),
+      framesOver25ms: intervals.filter((f) => f > 25).length,
+      longTasks: data.longtasks.length,
+    });
+    if (coalesce) {
+      // One delivery per frame, plus the frame that follows the last burst.
+      expect(scrollDispatches.length).toBeLessThanOrEqual(frames + 3);
+    } else {
+      // Without it the guest is entered for the first event of a burst and the host drops the
+      // rest as stale: it never sees most positions, and which one it sees is a race.
+      expect(scrollDispatches.length + records.filter((r) => r[0] === "stale:scroll").length)
+        .toBeGreaterThanOrEqual(burst * frames);
+    }
+    expect(failures).toEqual([]);
+  });
+}

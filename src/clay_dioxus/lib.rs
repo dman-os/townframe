@@ -21,6 +21,7 @@ use clay_surface::ScrollBehavior;
 use clay_surface::SurfaceEventHandler;
 use clay_surface::SurfaceTree;
 use dioxus::prelude::*;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -33,6 +34,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
+mod frames;
 mod timing;
 
 type Renderer = Rc<dyn Fn(&Arc<Mount>) -> Element>;
@@ -504,6 +506,9 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     // `element-reply` event. The raw session handler is used: a reply is not an input event
     // and must not be dropped as stale.
     let handles = use_hook(ElementHandles::default);
+    // Hooks stay above the early returns below.
+    let held = use_hook(|| Rc::new(RefCell::new(BTreeMap::<NodeId, clay_surface::Event>::new())));
+    let received = use_hook(|| Rc::new(Cell::new(0_u64)));
     let command_session = session.as_ref().ok().cloned();
     let command_writer = writer.clone();
     let command_handles = handles.clone();
@@ -560,7 +565,7 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     };
     let dispatch = session.handler();
     let writer_for_event = writer.clone();
-    let handler: SurfaceEventHandler = Rc::new(move |event| {
+    let deliver: SurfaceEventHandler = Rc::new(move |event| {
         if !writer_for_event.is_live() {
             return EventResponse::default();
         }
@@ -573,6 +578,7 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         }
         let current_revision = writer_for_event.revision();
         if event.revision != current_revision {
+            timing::record(&format!("stale:{}", event.name), timing::now(), 0.0, 0.0);
             let mut rev = revision;
             rev.set(current_revision);
             return EventResponse::default();
@@ -587,6 +593,50 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         rev.set(writer_for_event.revision());
         response
     });
+    // A scroll event is a snapshot of where the element is, so the last one per animation frame
+    // is the only one the guest needs; holding the rest until the frame spares it a synchronous
+    // render per event. The held event is sent with the then-current revision: its element is
+    // checked to be live instead, because a snapshot that arrived while a newer revision was
+    // being projected would otherwise be dropped as stale and the final scroll position lost.
+    let writer_for_frame = writer.clone();
+    let handler: SurfaceEventHandler = {
+        let deliver = deliver.clone();
+        Rc::new(move |event| {
+            if event.name != "scroll" || !frames::coalescing() {
+                return deliver(event);
+            }
+            received.set(received.get() + 1);
+            let first = {
+                let mut held = held.borrow_mut();
+                let first = held.is_empty();
+                held.insert(event.element, event);
+                first
+            };
+            if first {
+                let (held, received, deliver, writer) = (
+                    held.clone(),
+                    received.clone(),
+                    deliver.clone(),
+                    writer_for_frame.clone(),
+                );
+                frames::next_frame(move || {
+                    let started = timing::now();
+                    let events = std::mem::take(&mut *held.borrow_mut());
+                    let mut delivered = 0.0;
+                    for (element, mut event) in events {
+                        if writer.is_live() && writer.tree.lock().unwrap().contains_element(element)
+                        {
+                            event.revision = writer.revision();
+                            deliver(event);
+                            delivered += 1.0;
+                        }
+                    }
+                    timing::record("coalesce", started, received.replace(0) as f64, delivered);
+                });
+            }
+            EventResponse::default()
+        })
+    };
     let tree = writer.tree.lock().unwrap();
     let started = timing::now();
     let projected = tree.render(

@@ -22,9 +22,11 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 # Pierre scroll spike: `window.__clayTiming` records of the host's per-revision phases, read by
 # the Playwright spec. Browser builds only; off everywhere else.
 [features]
-spike-timing = ["dep:web-sys", "dep:js-sys", "dep:wasm-bindgen"]
+spike-timing = []
 
+# The browser is the only host here with a frame source, which the scroll coalescer (`frames.rs`)
+# and the timing records (`timing.rs`) use.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-web-sys = { workspace = true, optional = true, features = ["Window", "Performance"] }
-js-sys = { workspace = true, optional = true }
-wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, features = ["Window", "Performance"] }
+js-sys.workspace = true
+wasm-bindgen.workspace = true
