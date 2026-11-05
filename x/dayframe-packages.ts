@@ -18,8 +18,13 @@ export async function prepareDayframePackages(
 
   // One cargo invocation per artifact kind, so cargo schedules the guests together.
   const guests = testFixtures
-    ? ["micro_counter", "micro_layout", "micro_collection_probe"]
-    : ["micro_counter", "micro_layout"];
+    ? [
+      "micro_counter",
+      "micro_layout",
+      "micro_pierre_spike",
+      "micro_collection_probe",
+    ]
+    : ["micro_counter", "micro_layout", "micro_pierre_spike"];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
   } --target wasm32-wasip3`;
@@ -36,6 +41,10 @@ export async function prepareDayframePackages(
   const components: Record<string, [string, string]> = {
     counter: ["wasm32-wasip3/debug/micro_counter.wasm", "counter"],
     layout: ["wasm32-wasip3/debug/micro_layout.wasm", "layout"],
+    pierreSpike: [
+      "wasm32-wasip3/debug/micro_pierre_spike.wasm",
+      "pierre-spike",
+    ],
     ...(testFixtures
       ? {
         collectionProbe: [
@@ -74,6 +83,8 @@ export async function prepareDayframePackages(
     const [name, manifestCrate] of [
       ["counter", "micro_counter_manifest"],
       ["layout", "micro_layout_manifest"],
+      // The style spike is a guest-only fixture with no manifest crate; it emits its own sidecar.
+      ["pierre-spike", "micro_pierre_spike"],
     ]
   ) {
     await $`cp ${directory.join(`${name}.component.wasm`)} ${

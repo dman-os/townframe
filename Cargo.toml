@@ -63,6 +63,7 @@ members = [
   "./src/micro_counter",
   "./src/micro_collection_probe",
   "./src/micro_counter_manifest",
+  "./src/micro_pierre_spike",
   "./src/ui",
   "./src/clay_dioxus_kit",
   "./src/dayframe_composition",

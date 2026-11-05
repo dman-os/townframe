@@ -1,0 +1,12 @@
+version = 1
+role = "plugin"
+dependency_reason = "style spike for the Pierre diff viewer port: a guest micro that renders Pierre-shaped rows through the presentation wire"
+allowed_dependencies = [
+    "clay_mdk",
+    "micro_settings_manifest",
+]
+allow_external_api_types = false
+
+[builds.native]
+
+[builds.wasm32-wasip3]

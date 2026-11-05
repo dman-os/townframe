@@ -9429,6 +9429,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "micro_pierre_spike"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "dioxus",
+ "micro_settings_manifest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "micro_sample"
 version = "0.1.0"
 dependencies = [

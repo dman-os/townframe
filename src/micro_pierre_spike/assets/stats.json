@@ -1,0 +1,35 @@
+{
+  "nodes": 1526,
+  "texts": 1088,
+  "dataAttributesSeen": {
+    "data-diff": 1,
+    "data-indicators": 1,
+    "data-background": 1,
+    "data-diff-type": 1,
+    "data-overflow": 1,
+    "data-code": 1,
+    "data-unified": 1,
+    "data-container-size": 1,
+    "data-gutter": 1,
+    "data-line-type": 434,
+    "data-column-number": 217,
+    "data-line-index": 434,
+    "data-line-number-content": 217,
+    "data-content": 1,
+    "data-line": 217,
+    "data-alt-line": 161,
+    "data-diff-span": 24
+  },
+  "dataAttributesDropped": {
+    "data-line-index": 434,
+    "data-alt-line": 161
+  },
+  "attributeSelectorsRewritten": 397,
+  "selectedNames": 78,
+  "selectedValues": 39,
+  "hostSelectors": 2,
+  "tokenClasses": 12,
+  "columnWidths": [
+    3
+  ]
+}
