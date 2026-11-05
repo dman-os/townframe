@@ -269,8 +269,6 @@ is inside a four-byte character; fails with the old code).
 - `wcmp`: a callback task parked in `waitable-set.wait` (via `wit_bindgen::block_on`) or `thread.yield` (blocking) on the
   Wasmi provider did not resume after the host released what it waited for, in a lifecycle-conformance probe (not
   committed). Unexplained; not needed by anything in the app today.
-- `e2e::home_to_settings_to_a_section_and_back_at_a_compact_width` still fails: a Blitz defect, diagnosed and pinned in the
-  S7 notes below; it needs a `blitz-dom` patch (not made).
 
 ## S7 notes (2026-11-05): `invalid SlotMap key` at `blitz-dom form.rs:38` (compact scenario)
 
@@ -288,14 +286,15 @@ is inside a four-byte character; fails with the old code).
   (`NodeId(19)`, 10 nodes, containing 24). The hamburger exists only below the side-by-side width, which is why the wide
   scenarios pass. This is the normal Dioxus template protocol, not a usage error in the shell or kit, so no change in our
   code avoids it honestly.
-- **Pin.** `dayframe_desktop::e2e::blitz_flush_resets_the_form_owner_of_a_button_dropped_in_the_same_batch` (`should_panic`
-  on `invalid SlotMap key`) is the minimal Blitz-level repro: create a `button`, append it to the root, drop it, drop the
-  mutator. When a fixed Blitz lands this test starts failing, and it should be deleted together with the compact
-  scenario passing.
-- **Fix needed (not made, by brief).** In `blitz-dom` `mutator.rs` `flush`: skip ids whose node is gone
-  (`if self.doc.get_node(id).is_some()`), or drop ids from `form_nodes` and `controls_to_form` in
-  `remove_and_drop_node_with` / `remove_and_drop_all_children`. Needs a Blitz fork or an upstream PR; the decision is the
-  owner's.
+- **Fix (dman-os fork).** Upstream `main` (104 commits past beta.4) has no fix. `dman-os/blitz` branch
+  `form-nodes-dropped-in-batch` (`ffaf2bd0`, from tag `v0.3.0-beta.4`): dropping a node unqueues it from `form_nodes`
+  (both mutator drop paths), and `remove_node_from_tree` forgets a dropped control's `controls_to_form` entry (node ids are
+  slab indices and get reused, so skipping dead ids in `flush` alone could reset an unrelated node). The root `Cargo.toml`
+  patches every `blitz-*` crate to that rev, since blitz-dom reaches its siblings by path inside the fork's workspace; the
+  lock gains the fork's vendored `accesskit_xplat` and `stylo_taffy`. No upstream PR (owner's call).
+- **Regression.** `dayframe_desktop::e2e::blitz_flush_skips_a_button_dropped_in_the_same_batch` (create a `button`, append
+  it to the root, drop it, drop the mutator) panicked on beta.4 and passes on the pin; the compact scenario passes.
+  `cargo nextest run -p dayframe_desktop`: 16/16.
 
 ## S5 notes (2026-11-05): the 30 s layout stall on `wcmp`
 

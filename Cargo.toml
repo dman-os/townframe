@@ -362,6 +362,15 @@ autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f6
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+# blitz 0.3.0-beta.4 plus a fix: a form control added and dropped in one mutation batch stayed
+# queued and the mutator's flush indexed its freed node id. Every blitz crate comes from the same
+# rev, since blitz-dom reaches its siblings by path inside that workspace.
+blitz-dom = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-html = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-net = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-paint = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-shell = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }

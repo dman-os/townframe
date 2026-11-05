@@ -659,14 +659,12 @@ async fn the_toolbar_button_increments_a_stopped_wasm_counter() {
     .await;
 }
 
-// Pins a defect in blitz-dom 0.3.0-beta.4 (`DocumentMutator::process_added_subtree` records every
-// added form-associated element in `form_nodes`; `remove_and_drop_node` never forgets them; `flush`
-// then calls `reset_form_owner(id)`, which indexes the node slab with an id that was already freed,
-// `form.rs:38`). A renderer that mounts a button and unmounts it within one mutation batch hits it,
-// which Dioxus does whenever a render creates a subtree that the same diff then replaces.
+// blitz-dom queues every added form control for the mutator's flush to reset its form owner. Dioxus
+// mounts and drops a control within one mutation batch whenever a render creates a subtree that the
+// same diff replaces (a template's original after it is cloned), so the drop must unqueue it, or the
+// flush indexes a freed node id (the dman-os blitz pin in the root Cargo.toml carries that fix).
 #[test]
-#[should_panic(expected = "invalid SlotMap key")]
-fn blitz_flush_resets_the_form_owner_of_a_button_dropped_in_the_same_batch() {
+fn blitz_flush_skips_a_button_dropped_in_the_same_batch() {
     let mut document = BaseDocument::new(DocumentConfig::default());
     let mut mutator = document.mutate();
     let button = mutator.create_element(
