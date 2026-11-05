@@ -292,6 +292,31 @@ async fn slow_spawn_does_not_block_unrelated_work_and_late_session_is_dropped() 
 }
 
 #[tokio::test]
+async fn stop_aborts_a_pending_host_spawn_before_completing() {
+    let host = ScriptHost::registered();
+    let spawn_gate = Arc::new(Gate::default());
+    spawn_gate.close();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "blocked",
+        SpawnPlan::Blocked {
+            gate: Arc::clone(&spawn_gate),
+            session: Box::new(ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped))),
+        },
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "blocked", "null"))
+        .await
+        .unwrap();
+
+    spawn_gate.entered.notified().await;
+    runtime.stop().await;
+    dropped.wait_for(1).await;
+    assert_eq!(host.replay_lengths("blocked"), vec![0]);
+}
+
+#[tokio::test]
 async fn cancellation_aborts_a_session_parked_in_next_yield() {
     let host = ScriptHost::registered();
     let yield_gate = Arc::new(Gate::default());

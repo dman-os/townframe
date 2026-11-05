@@ -2,7 +2,7 @@
 //!
 //! One actor owns the journal writer and pure authority. Commands follow
 //! `prepare → append → publish`; only durable intents may affect a session.
-//! Host creation runs in detached tasks and returns tagged by the full lease,
+//! Host creation runs in actor-tracked tasks and returns tagged by the full lease,
 //! while each session awaiting its next yield remains abortable by key and lease.
 //! Late creation/yield completion is fenced against current authority state.
 //!
@@ -361,7 +361,6 @@ impl AuthorityRuntime {
         let reclamation_through = (journal.compacted_through() < journal.snapshot_cut())
             .then_some(journal.snapshot_cut());
         let (commands, commands_rx) = mpsc::channel(COMMAND_QUEUE);
-        let (spawned_tx, spawned_rx) = mpsc::unbounded_channel();
         let actor = Actor {
             journal,
             authority,
@@ -378,8 +377,7 @@ impl AuthorityRuntime {
             waiting: HashMap::new(),
             deadlines: BTreeSet::new(),
             waiters: HashMap::new(),
-            spawned_tx,
-            spawned_rx,
+            pending_spawns: FuturesUnordered::new(),
         };
         Ok(Self {
             commands,
@@ -589,8 +587,9 @@ struct Actor<W> {
     deadlines: BTreeSet<(u64, DeadlineRef)>,
     /// Completion wakeup hints for in-flight `await_result` callers.
     waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
-    spawned_tx: mpsc::UnboundedSender<Spawned>,
-    spawned_rx: mpsc::UnboundedReceiver<Spawned>,
+    /// Join handles fence host creation to the actor lifecycle. In particular,
+    /// shutdown aborts and joins these before acknowledging completion.
+    pending_spawns: FuturesUnordered<tokio::task::JoinHandle<Spawned>>,
 }
 
 impl<W: Writer> Actor<W> {
@@ -615,17 +614,30 @@ impl<W: Writer> Actor<W> {
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(Command::Shutdown { reply }) => {
+                        self.stop_pending_spawns().await;
                         self.final_snapshot().await;
                         let _cancelled = reply.send(());
                         break;
                     }
                     Some(command) => self.handle_command(command).await,
                     None => {
+                        self.stop_pending_spawns().await;
                         self.final_snapshot().await;
                         break;
                     }
                 },
-                Some(spawned) = self.spawned_rx.recv() => self.handle_spawned(spawned).await,
+                Some(spawned) = self.pending_spawns.next(), if !self.pending_spawns.is_empty() => {
+                    match spawned {
+                        Ok(spawned) => self.handle_spawned(spawned).await,
+                        Err(error) if error.is_cancelled() => {
+                            panic!("host spawn task was cancelled");
+                        }
+                        Err(error) => {
+                            self.stop_pending_spawns().await;
+                            std::panic::resume_unwind(error.into_panic());
+                        }
+                    }
+                }
                 Some(yielded) = self.sessions.next(), if !self.sessions.is_empty() => {
                     if let Ok(yielded) = yielded {
                         self.handle_yield(yielded).await;
@@ -935,7 +947,7 @@ impl<W: Writer> Actor<W> {
         }
     }
 
-    fn execute(&self, key: String, lease: authority::Lease, replay: Vec<authority::Step>) {
+    fn execute(&mut self, key: String, lease: authority::Lease, replay: Vec<authority::Step>) {
         let job = &self.authority.jobs()[&key];
         let invocation: Invocation = serde_json::from_str(&job.args).expect(ERROR_JSON);
         let replay = replay
@@ -949,8 +961,7 @@ impl<W: Writer> Actor<W> {
             })
             .collect();
         let host = Arc::clone(&self.host);
-        let spawned = self.spawned_tx.clone();
-        tokio::spawn(async move {
+        self.pending_spawns.push(tokio::spawn(async move {
             let outcome = match host
                 .spawn(
                     Arc::from(key.as_str()),
@@ -963,14 +974,26 @@ impl<W: Writer> Actor<W> {
                 Ok(session) => SpawnOutcome::Session(session),
                 Err(_) => SpawnOutcome::Failed,
             };
-            // Receiver closure means the runtime is shutting down; the completed
-            // session is dropped here rather than requiring spawn cancellation.
-            let _runtime_stopped = spawned.send(Spawned {
+            Spawned {
                 key,
                 lease,
                 outcome,
-            });
-        });
+            }
+        }));
+    }
+
+    async fn stop_pending_spawns(&mut self) {
+        for spawn in self.pending_spawns.iter_mut() {
+            spawn.abort();
+        }
+        while let Some(spawned) = self.pending_spawns.next().await {
+            if let Err(error) = spawned {
+                if error.is_cancelled() {
+                    continue;
+                }
+                std::panic::resume_unwind(error.into_panic());
+            }
+        }
     }
 
     async fn handle_spawned(&mut self, spawned: Spawned) {
