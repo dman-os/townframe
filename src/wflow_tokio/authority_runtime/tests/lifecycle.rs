@@ -543,3 +543,91 @@ async fn recovery_rejects_an_unregistered_workflow() {
     assert!(error.to_string().contains("is not registered"), "{error:?}");
     gate.open();
 }
+
+#[tokio::test(start_paused = true)]
+async fn snapshot_follows_the_dirtying_timer_without_sleeping() {
+    let host = ScriptHost::registered();
+    host.push(
+        "timed",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(1)]))),
+    );
+    let store = MemoryStore::default();
+    let (runtime, mut commits) = start_script_counted(&store, host).await;
+    runtime
+        .submit(Submission::new("timed", "timed", "null"))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(runtime.reader.snapshot().await.unwrap().is_none());
+
+    tokio::time::advance(Duration::from_secs(60)).await;
+    let snapshot = published_snapshot(&runtime, &mut commits).await;
+    assert!(snapshot.cut > 0);
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn snapshot_after_transition_threshold_reclaims_in_bounded_pages() {
+    let host = ScriptHost::registered();
+    for _ in 0..34 {
+        host.push(
+            "counted",
+            SpawnPlan::Session(Box::new(ScriptSession::new([complete(1)]))),
+        );
+    }
+    let store = MemoryStore::default();
+    let (counter, mut commits) = watch::channel(0);
+    let writer = CountingWriter {
+        inner: store.writer().unwrap(),
+        commits: counter,
+    };
+    let runtime = AuthorityRuntime::start_with_config(
+        writer,
+        0,
+        host,
+        AuthorityRuntimeConfig {
+            compaction_page_size: NonZeroUsize::new(1).unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    for index in 0..34 {
+        let key = format!("counted-{index}");
+        runtime
+            .submit(Submission::new(key, "counted", "null"))
+            .await
+            .unwrap();
+    }
+
+    let snapshot = fully_reclaimed(&runtime, &mut commits).await;
+    assert!(snapshot.cut >= SNAPSHOT_TRANSITIONS);
+    assert_eq!(snapshot.compacted_through, snapshot.cut);
+    let stale = runtime
+        .reader
+        .read(1, NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap_err();
+    assert!(stale.downcast_ref::<StaleReaderError>().is_some());
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn graceful_stop_publishes_the_latest_snapshot() {
+    let host = ScriptHost::registered();
+    host.push(
+        "final",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(1)]))),
+    );
+    let store = MemoryStore::default();
+    let (runtime, _) = start_script_counted(&store, host).await;
+    runtime
+        .submit(Submission::new("final", "final", "null"))
+        .await
+        .unwrap();
+    let reader = runtime.reader.clone();
+    runtime.stop().await;
+    let snapshot = reader.snapshot().await.unwrap().unwrap();
+    assert!(snapshot.cut > 0);
+}

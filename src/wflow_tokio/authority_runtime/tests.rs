@@ -9,6 +9,8 @@ use wflow_core::kvstore::atomic::CommitError;
 use wflow_core::kvstore::atomic::MemoryStore;
 use wflow_core::kvstore::atomic::MemoryWriter;
 use wflow_core::kvstore::atomic::Store;
+use wflow_core::kvstore::journal::JournalSnapshot;
+use wflow_core::kvstore::journal::StaleReaderError;
 use wflow_wdk::JobErrorX;
 use wflow_wdk::Json;
 
@@ -61,6 +63,33 @@ async fn start(
 /// Resolves once the runtime has issued `count` commits.
 async fn committed(commits: &mut watch::Receiver<u64>, count: u64) {
     commits.wait_for(|commits| *commits >= count).await.unwrap();
+}
+
+/// Waits on the counting writer rather than sleeping while maintenance publishes.
+async fn published_snapshot(
+    runtime: &AuthorityRuntime,
+    commits: &mut watch::Receiver<u64>,
+) -> JournalSnapshot {
+    loop {
+        if let Some(snapshot) = runtime.reader.snapshot().await.unwrap() {
+            return snapshot;
+        }
+        commits.changed().await.unwrap();
+    }
+}
+
+async fn fully_reclaimed(
+    runtime: &AuthorityRuntime,
+    commits: &mut watch::Receiver<u64>,
+) -> JournalSnapshot {
+    loop {
+        if let Some(snapshot) = runtime.reader.snapshot().await.unwrap() {
+            if snapshot.compacted_through == snapshot.cut {
+                return snapshot;
+            }
+        }
+        commits.changed().await.unwrap();
+    }
 }
 
 /// The job's durable transitions, in commit order.

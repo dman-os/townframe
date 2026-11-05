@@ -52,6 +52,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use wflow_core::kvstore::atomic::Mutation;
 use wflow_core::kvstore::atomic::Writer;
+use wflow_core::kvstore::journal::CompactionProgress;
 use wflow_core::kvstore::journal::Journal;
 use wflow_core::kvstore::journal::JournalReader;
 use wflow_core::partition::JobFailure;
@@ -75,6 +76,9 @@ mod tests;
 const LOCAL_WORKER: u64 = 1;
 const COMMAND_QUEUE: usize = 64;
 const RECOVERY_PAGE: NonZeroUsize = NonZeroUsize::new(512).unwrap();
+const DEFAULT_COMPACTION_PAGE: NonZeroUsize = NonZeroUsize::new(512).unwrap();
+const SNAPSHOT_TRANSITIONS: u64 = 100;
+const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
 const RESULT_INDEX_PREFIX: &[u8] = b"result/";
 
 /// Window the host spreads retry fire times over, handed to the authority as
@@ -240,6 +244,21 @@ impl JobHandle {
     }
 }
 
+/// Runtime persistence maintenance settings.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthorityRuntimeConfig {
+    /// Maximum number of journal entries reclaimed by one maintenance turn.
+    pub compaction_page_size: NonZeroUsize,
+}
+
+impl Default for AuthorityRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            compaction_page_size: DEFAULT_COMPACTION_PAGE,
+        }
+    }
+}
+
 pub struct AuthorityRuntime {
     commands: mpsc::Sender<Command>,
     reader: JournalReader,
@@ -284,6 +303,22 @@ impl AuthorityRuntime {
         partition_incarnation: u64,
         host: Arc<dyn session::Host>,
     ) -> Res<Self> {
+        Self::start_with_config(
+            writer,
+            partition_incarnation,
+            host,
+            AuthorityRuntimeConfig::default(),
+        )
+        .await
+    }
+
+    /// Opens a runtime with bounded journal reclamation configured by the caller.
+    pub async fn start_with_config<W: Writer + 'static>(
+        writer: W,
+        partition_incarnation: u64,
+        host: Arc<dyn session::Host>,
+        config: AuthorityRuntimeConfig,
+    ) -> Res<Self> {
         let journal = Journal::open(writer, partition_incarnation).await?;
         let reader = journal.reader();
         let snapshot = match reader.snapshot().await? {
@@ -317,11 +352,22 @@ impl AuthorityRuntime {
                 );
             }
         }
+        let dirty_transitions = journal.frontier().saturating_sub(journal.snapshot_cut());
+        let dirty_since = (dirty_transitions > 0).then(tokio::time::Instant::now);
+        let reclamation_through = (journal.compacted_through() < journal.snapshot_cut())
+            .then_some(journal.snapshot_cut());
         let (commands, commands_rx) = mpsc::channel(COMMAND_QUEUE);
         let (spawned_tx, spawned_rx) = mpsc::unbounded_channel();
         let actor = Actor {
             journal,
             authority,
+            config,
+            dirty_transitions,
+            dirty_since,
+            maintenance_ready: reclamation_through.is_some()
+                || dirty_transitions >= SNAPSHOT_TRANSITIONS,
+            reclamation_through,
+
             host,
             sessions: FuturesUnordered::new(),
             running: HashMap::new(),
@@ -521,6 +567,11 @@ struct Actor<W> {
     host: Arc<dyn session::Host>,
     journal: Journal<W>,
     authority: authority::Authority,
+    config: AuthorityRuntimeConfig,
+    dirty_transitions: u64,
+    dirty_since: Option<tokio::time::Instant>,
+    maintenance_ready: bool,
+    reclamation_through: Option<u64>,
     /// Armed deadlines as `(fire_at_ms, what)`, earliest first.
     deadlines: BTreeSet<(u64, DeadlineRef)>,
     /// Completion wakeup hints for in-flight `await_result` callers.
@@ -547,10 +598,14 @@ impl<W: Writer> Actor<W> {
         }
         loop {
             let next_deadline = self.deadlines.first().map(|(fire_at_ms, ..)| *fire_at_ms);
+            let maintenance_deadline = self.dirty_since.map(|since| since + SNAPSHOT_INTERVAL);
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => self.handle_command(command).await,
-                    None => break,
+                    None => {
+                        self.final_snapshot().await;
+                        break;
+                    }
                 },
                 Some(spawned) = self.spawned_rx.recv() => self.handle_spawned(spawned).await,
                 Some(yielded) = self.sessions.next(), if !self.sessions.is_empty() => {
@@ -560,8 +615,63 @@ impl<W: Writer> Actor<W> {
                 }
                 () = tokio::time::sleep(until(next_deadline.unwrap_or_default())),
                     if next_deadline.is_some() => self.fire_due().await,
+                () = tokio::task::yield_now(), if self.maintenance_ready => {
+                    self.maintain().await;
+                }
+                () = tokio::time::sleep_until(maintenance_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                    if maintenance_deadline.is_some() => self.maintain().await,
             }
         }
+    }
+
+    async fn final_snapshot(&mut self) {
+        if self.authority.revision() <= self.journal.snapshot_cut() {
+            return;
+        }
+        let cut = self.authority.revision();
+        let snapshot = serde_json::to_vec(&self.authority.snapshot())
+            .expect(ERROR_JSON)
+            .into();
+        self.journal
+            .save_snapshot(cut, snapshot)
+            .await
+            .unwrap_or_else(|error| panic!("final authority snapshot failed: {error}"));
+    }
+
+    /// Performs one snapshot or one reclamation page. Keeping this to one journal
+    /// transaction lets the actor return to command handling between pages.
+    async fn maintain(&mut self) {
+        if self.reclamation_through.is_none() {
+            let cut = self.authority.revision();
+            if cut > self.journal.snapshot_cut() {
+                let snapshot = serde_json::to_vec(&self.authority.snapshot())
+                    .expect(ERROR_JSON)
+                    .into();
+                self.journal
+                    .save_snapshot(cut, snapshot)
+                    .await
+                    .unwrap_or_else(|error| panic!("authority snapshot failed: {error}"));
+                self.dirty_transitions = 0;
+                self.dirty_since = None;
+                self.reclamation_through = Some(cut);
+            } else {
+                self.dirty_transitions = 0;
+                self.dirty_since = None;
+            }
+        }
+        if let Some(through) = self.reclamation_through {
+            match self
+                .journal
+                .compact_page(through, self.config.compaction_page_size)
+                .await
+                .unwrap_or_else(|error| panic!("journal reclamation failed: {error}"))
+            {
+                CompactionProgress::Pending { .. } => {}
+                CompactionProgress::Complete { .. } => self.reclamation_through = None,
+            }
+        }
+        self.maintenance_ready =
+            self.reclamation_through.is_some() || self.dirty_transitions >= SNAPSHOT_TRANSITIONS;
     }
 
     async fn handle_command(&mut self, command: Command) {
@@ -1269,6 +1379,13 @@ impl<W: Writer> Actor<W> {
             .unwrap_or_else(|err| panic!("authority journal commit failed: {err}"));
         let intents = std::mem::take(&mut proposal.intents);
         let ack = self.authority.publish(*proposal);
+        self.dirty_transitions = self.dirty_transitions.saturating_add(1);
+        if self.dirty_since.is_none() {
+            self.dirty_since = Some(tokio::time::Instant::now());
+        }
+        if self.dirty_transitions >= SNAPSHOT_TRANSITIONS {
+            self.maintenance_ready = true;
+        }
         assert_eq!(
             position,
             self.authority.revision(),
