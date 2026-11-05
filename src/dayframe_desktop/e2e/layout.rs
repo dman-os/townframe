@@ -5,13 +5,16 @@
 //! scenario proved (interactive children, one child's withdrawal not touching the others) is
 //! proven here on the capability path.
 use super::composed;
+use super::press_platform_back;
 use super::HeadlessDom;
 use super::Launch;
+use crate::composition::assemble;
 use crate::composition::desktop_runtime;
 use crate::composition::CompositionRuntime;
 use clay_docs::FacetRoute;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
+use dayframe_composition::HostInputs;
 
 const COUNTER_PANEL: &str = "section[aria-label=\"Counter (Wasm) panel\"]";
 const SAMPLE_PANEL: &str = "section[aria-label=\"Sample micro panel\"]";
@@ -52,6 +55,7 @@ struct Layout {
     runtime: CompositionRuntime,
     ui: HeadlessDom,
     counter: MicroId,
+    host: std::rc::Rc<std::cell::RefCell<Option<HostInputs>>>,
 }
 
 impl Layout {
@@ -63,13 +67,20 @@ impl Layout {
         let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
             .await
             .unwrap();
+        Self::start_on(runtime, visible).await
+    }
+
+    /// [`Self::start`] over a runtime the caller assembled.
+    async fn start_on(runtime: CompositionRuntime, visible: &[&str]) -> Self {
         // Before serving, nothing drives the persister, so the acknowledgement is dropped.
         drop(runtime.set_enabled(&MicroId::local(micro_layout_manifest::ID), true));
         runtime.documents().mock_documents().seed(
             arrangement_route(),
             serde_json::json!({ "visible": visible }),
         );
-        let mut ui = HeadlessDom::new(composed, Launch::new(runtime.clone(), super::WIDE_PX));
+        let launch = Launch::new(runtime.clone(), super::WIDE_PX);
+        let host = launch.host.clone();
+        let mut ui = HeadlessDom::new(composed, launch);
         ui.wait_until("home offers the layout", |ui| ui.find(OPEN_LAYOUT).is_some())
             .await;
         ui.click(OPEN_LAYOUT);
@@ -83,8 +94,29 @@ impl Layout {
             runtime,
             ui,
             counter: MicroId::local(micro_counter_manifest::ID),
+            host,
         }
     }
+}
+
+/// The desktop composition with its packages on `wcmp` over Wasmi, the engine the browser
+/// build runs (over the page's own `WebAssembly` instead of Wasmi).
+async fn wasmi_runtime() -> CompositionRuntime {
+    assemble(
+        std::sync::Arc::new(clay_store::MemoryStore::new()),
+        |resources, id, manifest, bindings, bytes| {
+            clay_mdk::host::wcmp_factory(resources, id, manifest, bindings, move || {
+                let bytes = bytes.clone();
+                async move {
+                    let engine = wcmp::Engine::with_backend(wcmp_wasm_core_wasmi::Wasmi::new())
+                        .map_err(|error| error.to_string())?;
+                    clay_rt_wcmp::WcmpPackage::load(engine, &bytes).await
+                }
+            })
+        },
+    )
+    .await
+    .unwrap()
 }
 
 // Showing a panel is what starts its provider: a panel that is installed but not shown is only a
@@ -102,6 +134,7 @@ async fn a_hidden_panel_never_activates_its_provider_until_it_is_shown() {
         runtime,
         mut ui,
         counter,
+        ..
     } = Layout::start(&["dayframe.sample"]).await;
     ui.wait_until("the sample panel is mounted", |ui| {
         ui.find(SAMPLE_FLAG).is_some()
@@ -145,6 +178,47 @@ async fn a_hidden_panel_never_activates_its_provider_until_it_is_shown() {
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),
         "a layout step waited for a timer: {:?}",
+        started.elapsed()
+    );
+}
+
+// The same walk on `wcmp` (Wasmi here, the page's `WebAssembly` in the browser), leaving the
+// layout and opening it again. A task the guest spawns from a synchronous entry (a panel's slot
+// created while the layout renders inside `mount`) is only polled once the engine's driver
+// ticks the store, and nothing but the entry itself knew it had to: each of the two mounts
+// waited out the feed's long poll (30 virtual seconds) before its panels appeared. The clock is
+// paused, so it advances only when every task is parked on a timer.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn returning_to_the_wcmp_layout_mounts_its_panels_without_waiting_for_a_timer() {
+    let started = tokio::time::Instant::now();
+    let Layout {
+        runtime,
+        mut ui,
+        counter,
+        host,
+    } = Layout::start_on(
+        wasmi_runtime().await,
+        &["dayframe.sample", "dayframe.counter"],
+    )
+    .await;
+    enable_counter(&runtime, true);
+    ui.wait_until("the first incarnation mounted both panels", |ui| {
+        ui.find(SAMPLE_FLAG).is_some() && ui.find(COUNTER_INCREMENT).is_some()
+    })
+    .await;
+    press_platform_back(&host);
+    ui.wait_until("home again with the layout's guest released", |ui| {
+        ui.find(OPEN_LAYOUT).is_some() && runtime.state(&counter) == MicroState::Idle
+    })
+    .await;
+    ui.click(OPEN_LAYOUT);
+    ui.wait_until("the new incarnation mounted both panels", |ui| {
+        ui.find(SAMPLE_FLAG).is_some() && ui.find(COUNTER_INCREMENT).is_some()
+    })
+    .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "returning to the layout waited for a timer: {:?}",
         started.elapsed()
     );
 }
@@ -196,6 +270,7 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
         runtime,
         mut ui,
         counter,
+        ..
     } = Layout::start(&["dayframe.counter", "dayframe.sample"]).await;
     enable_counter(&runtime, true);
     ui.wait_until("both panels mounted", |ui| {

@@ -180,7 +180,7 @@ Findings:
   incarnation whose panels stay "Loading section..." for roughly 30 s or more on `wcmp`, matching
   the 30 s collection long poll the desktop layout scenario guards with a paused clock. Not fixed
   here; the Playwright spec carries a 180 s timeout and a comment. Needs instrumentation in the
-  guest session collection feed.
+  guest session collection feed. (Fixed in S5: the cause was in the `wcmp` driver, not the feed.)
 - Lifecycle, the layout and a Settings section share the main/details positions, so the browser
   suite cannot see a provider disappear beside a mounted sibling or the `Active` state; the desktop
   e2e tests (`runtime.state()`) carry those.
@@ -197,3 +197,22 @@ directionality (leading = left), scrim, safe-area vocabulary.
 Product questions: going home from the sidebar: push or reset? Persist the stack? Should lifecycle
 be reachable beside the layout (a sheet)? Should a hidden wide sidebar persist across restarts
 (it is device-local state today)?
+
+## S5 notes (2026-11-05): the 30 s layout stall on `wcmp`
+
+- **Root cause.** The C7c doorbell works, but under `wcmp` nothing ticked the store after it rang. A guest task spawned from a
+  synchronous entry (`mount`, `dispatch`, `unmount`, a document delivery) is adopted when the guest's executor is next polled; the
+  doorbell wakes that executor with a stream write inside the store (wit-bindgen's inter-task wakeup), which involves no host
+  waker. `clay_rt_wcmp` runs a store's event loop only in `WcmpIncarnation::tick`, driven by `IncarnationWake`, and the sync
+  entries never rang it: the new task (a layout panel's `PresentationSlot`) waited for an unrelated wake, which for a layout is its
+  collection feed's long poll (30 s). Wasmtime is unaffected (its store is driven by the host's own concurrent runtime), which is
+  why C7c's paused-clock test passed. The feed and the host side of the collection were not involved.
+- **Evidence.** New in-crate scenario `dayframe_desktop::e2e::layout::returning_to_the_wcmp_layout_mounts_its_panels_without_waiting_for_a_timer`
+  runs the real `Application` with the packages on `wcmp` over Wasmi (the desktop composition now takes the package engine as a
+  parameter: `composition::assemble`), under `start_paused`. Per-checkpoint virtual times before the fix: first mount of the two
+  panels +30 s, return to the layout +30 s more (60 s total); the same walk on Wasmtime: 0.4 s wall, no virtual time.
+- **Fix.** `clay_rt_wcmp::first_poll`, the one place every sync entry goes through, now rings the incarnation's waker after the
+  call returns, so the driver ticks the store once per entry and the doorbell's wake is delivered. One extra bounded
+  `run_until_stalled` per entry, no loop. The test above fails (60 s) without the ring and passes with it.
+- **Spec.** `e2e/layout.spec.ts` lost its 180 s timeout and the comment calling the latency a finding.
+- **dman-os wcmp fork.** Untouched; the fault was in this repo's driver.

@@ -189,18 +189,29 @@ impl WcmpStoreState {
 #[error("guest presentation call suspended on its first poll")]
 pub struct Suspended;
 
-/// Drive a presentation call to completion on its first poll. The WIT *exports* are sync-typed
-/// (ADR 018 §3), but the WASI p3 *imports* are lifted through component-model async, so a guest
-/// can still suspend inside a sync-typed export — synchronous exports do not imply non-suspending
-/// execution. Both failure shapes are handled identically: a guest that blocks inside a sync-typed
-/// call fails with the spec's `CannotBlock` cause (`Ready(Err)`), and a guest that suspends returns
-/// `Pending`, mapped to [`Suspended`]. Either way the caller withdraws the surface and closes the
+/// Drive a synchronous guest entry (`mount`, `dispatch`, `unmount`, a document delivery) to
+/// completion on its first poll. The WIT *exports* are sync-typed (ADR 018 §3), but the WASI p3
+/// *imports* are lifted through component-model async, so a guest can still suspend inside a
+/// sync-typed export — synchronous exports do not imply non-suspending execution. Both failure
+/// shapes are handled identically: a guest that blocks inside a sync-typed call fails with the
+/// spec's `CannotBlock` cause (`Ready(Err)`), and a guest that suspends returns `Pending`,
+/// mapped to [`Suspended`]. Either way the caller withdraws the surface and closes the
 /// instance — never a host panic.
+///
+/// `waker` is the incarnation's: it is rung once the entry returns, whatever it answered. An
+/// entry can make guest tasks runnable with no host waker involved: spawning a task from it
+/// queues the task and wakes the guest's executor through a stream write inside the store (see
+/// `Tasks::start_doorbell` in `clay_mdk`), and a store only runs its event loop when the
+/// incarnation's driver ticks it. Nothing else would wake the driver for that, so the new task
+/// would sit unpolled until an unrelated wake: a collection feed's long poll expiring (30 s) is
+/// the only one a layout has.
 pub fn first_poll<F: Future>(call: F, waker: &Waker) -> Result<F::Output, Suspended> {
-    match std::pin::pin!(call).poll(&mut Context::from_waker(waker)) {
+    let entered = match std::pin::pin!(call).poll(&mut Context::from_waker(waker)) {
         Poll::Ready(output) => Ok(output),
         Poll::Pending => Err(Suspended),
-    }
+    };
+    waker.wake_by_ref();
+    entered
 }
 
 struct IncarnationWake {

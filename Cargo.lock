@@ -4250,6 +4250,7 @@ dependencies = [
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
+ "clay_rt_wcmp",
  "clay_store",
  "clay_surface",
  "daybook_types",
@@ -4273,6 +4274,8 @@ dependencies = [
  "sqlite_rs",
  "tokio",
  "ui",
+ "wcmp",
+ "wcmp-wasm-core-wasmi",
 ]
 
 [[package]]

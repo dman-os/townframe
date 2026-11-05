@@ -11,11 +11,6 @@ import { openLifecycle, watchFailures } from "./shell";
 test("the wcmp layout shows only the arranged panels and a disabled provider leaves a placeholder", async ({
   page,
 }) => {
-  // Leaving the layout releases its guest, and coming back mounts a new incarnation whose panels
-  // stay "Loading section…" for about half a minute on `wcmp` (observed; it matches the 30 s
-  // collection long poll the desktop layout scenario guards against with a paused clock). That
-  // latency is a finding recorded in the shell ledger, not something to hide behind retries.
-  test.setTimeout(180_000);
   const failures = watchFailures(page);
 
   await page.goto("/");
@@ -83,7 +78,6 @@ test("the wcmp layout shows only the arranged panels and a disabled provider lea
     page.getByRole("button", { name: "Enable dayframe.counter micro" }),
   ).toBeEnabled();
   await page.getByRole("button", { name: "Show Layout" }).click();
-  // Returning remounts the layout guest on a new incarnation, which takes a moment.
   await expect(counterPanel.getByRole("alert")).toContainText("unavailable", {
     timeout: 60_000,
   });
