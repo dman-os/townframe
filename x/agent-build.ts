@@ -18,8 +18,8 @@ const DEFAULT_MEM_MAX = Deno.env.get("TOWNFRAME_CGROUP_MEMORY_MAX") ?? "10G";
 // bound the sum: concurrent agents can otherwise overrun the host and trigger the kernel OOM
 // killer. The slice is the shared budget; MemoryHigh throttles and MemoryMax contains failures.
 const BUILD_SLICE = "townframe-builds.slice";
-const SLICE_MEM_HIGH = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_HIGH") ?? "7G";
-const SLICE_MEM_MAX = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_MAX") ?? "9G";
+const SLICE_MEM_HIGH = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_HIGH") ?? "10G";
+const SLICE_MEM_MAX = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_MAX") ?? "11G";
 const DEFAULT_SCCACHE_SIZE = Deno.env.get("SCCACHE_CACHE_SIZE") ?? "8G";
 
 function runtimeFifoPath(): string {
