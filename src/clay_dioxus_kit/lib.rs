@@ -6,6 +6,7 @@ pub mod headless;
 
 mod app_bar;
 mod drawer;
+mod layer;
 mod list_details;
 mod list_row;
 mod nav_button;
@@ -22,6 +23,7 @@ pub use headless::sections::SectionPane;
 pub use headless::sections::SizeRule;
 pub use headless::sections::Snap;
 pub use headless::sections::Split;
+pub use layer::Layer;
 pub use list_details::ListDetails;
 pub use list_row::ListRow;
 pub use nav_button::NavButton;

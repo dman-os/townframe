@@ -3,7 +3,7 @@ use crate::headless::nav_button::NavButtonMode;
 use crate::headless::nav_button::{self};
 use dioxus::prelude::*;
 
-const CLASS: &str = "inline-flex size-11 cursor-pointer items-center justify-center rounded-pill text-text hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus";
+const CLASS: &str = "inline-flex size-12 shrink-0 cursor-pointer items-center justify-center rounded-pill text-text hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus";
 
 /// The back / open-sidebar button a micro mounts in its app bar (FDR 006).
 #[component]
@@ -40,6 +40,13 @@ mod tests {
 
     fn app(mode: NavButtonMode) -> Element {
         rsx! { NavButton { mode, onclick: |_| {} } }
+    }
+
+    #[test]
+    fn the_button_is_a_48_px_touch_target() {
+        let page = Page::with_props(app, NavButtonMode::Back);
+        let class = page.attr(page.by_role("button", "Back"), "class").unwrap();
+        assert!(class.split(' ').any(|class| class == "size-12"), "{class}");
     }
 
     #[test]
