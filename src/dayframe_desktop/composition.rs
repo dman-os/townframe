@@ -1,7 +1,6 @@
 //! Desktop composition root: native built-ins linked by this shell plus every package in
 //! the package directory, read statically (manifest and digest from the component bytes,
 //! never by running the guest) and activated on Wasmtime (ADR 018 §7).
-pub use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
 
 use clay_store::OrderedStore;
