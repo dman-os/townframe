@@ -107,3 +107,56 @@ test("the wcmp layout shows only the arranged panels and a disabled provider lea
   await expect(counterPanel).toBeHidden();
   expect(failures).toEqual([]);
 });
+
+// Hiding a native panel renders inside the layout guest's document callback, which drops that
+// panel's slot and so cancels the slot's pending host call. On the browser engine the cancel
+// used to suspend the synchronous callback, the host (which cannot resume a sync export) closed
+// the layout, and its region became "Component withdrawn." with no control at all: a dead end at
+// a phone width, where the sidebar's own button is not on screen to hide it. Round after round,
+// at both widths, the layout must stay mounted with its toggles and its way out.
+for (const width of [420, 1200]) {
+  test(`hiding a shown panel leaves the layout mounted with its controls at ${width}px`, async ({
+    page,
+  }) => {
+    const failures = watchFailures(page);
+    await page.setViewportSize({ width: 1200, height: 800 });
+    await page.goto("/");
+    await expect(
+      page.getByRole("button", { name: "Open Settings", exact: true }),
+    ).toBeVisible({ timeout: 60_000 });
+    await openLifecycle(page);
+    await page
+      .getByRole("button", { name: "Enable dayframe.layout micro" })
+      .click();
+    await page.getByRole("button", { name: "Show Layout" }).click();
+    await expect(
+      page.getByRole("button", { name: "Show Sample micro panel" }),
+    ).toBeVisible({ timeout: 60_000 });
+    await page.setViewportSize({ width, height: 800 });
+
+    const layout = page.getByRole("region", { name: "Layout" });
+    // The panel's own way out: at a phone width the layout is reached through the sidebar, so
+    // its app bar offers back (or the sidebar when it is the stack's base); a wide window
+    // shows the sidebar's hide button.
+    const way = page.getByRole("button", {
+      name: width < 600 ? /^(Back|Open sidebar)$/ : "Hide sidebar",
+    });
+    for (let round = 0; round < 3; round++) {
+      await page
+        .getByRole("button", { name: "Show Sample micro panel" })
+        .click();
+      await expect(
+        page.getByRole("button", { name: "Disable sample configuration flag" }),
+      ).toBeVisible({ timeout: 30_000 });
+      await page
+        .getByRole("button", { name: "Hide Sample micro panel" })
+        .click();
+      await expect(
+        page.getByRole("button", { name: "Show Sample micro panel" }),
+      ).toBeVisible();
+      await expect(layout.getByText("Component withdrawn.")).toHaveCount(0);
+      await expect(way).toBeVisible();
+    }
+    expect(failures).toEqual([]);
+  });
+}
