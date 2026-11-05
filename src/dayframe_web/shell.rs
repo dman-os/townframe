@@ -6,6 +6,7 @@
 use clay_mdk::host::factory;
 use dayframe_composition::CompositionRuntime;
 use dayframe_composition::HostInputs;
+use dayframe_composition::Insets;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
 use serde::Deserialize;
@@ -66,8 +67,9 @@ async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpP
 
 /// The shell's native built-ins. The shell micro is the frame: eager, and locked because nothing
 /// is usable without it. Settings is an on-demand panel: home lists its declared row, and
-/// opening it starts it. Toolbar is on-demand: its pinned root row starts it when the frame
-/// mounts it. Sample is eager so its section is written at boot. Collection access is resolved
+/// opening it starts it. Toolbar is on-demand: its sidebar panel row starts it when the sidebar
+/// mounts it. Sample is eager so its section is written at boot. The lifecycle controls are the
+/// composition's own Settings section. Collection access is resolved
 /// by the composition from each manifest's requests and configuration, not hand-written here.
 fn native_micros() -> Vec<InstalledMicro> {
     let shell = clay_mdk::MicroId::local(micro_shell_manifest::ID);
@@ -139,6 +141,7 @@ fn native_micros() -> Vec<InstalledMicro> {
                 },
             )
         },
+        dayframe_composition::lifecycle::micro(),
     ]
 }
 
@@ -170,19 +173,24 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                         }
                     };
                     let sidecar = entry.sidecar.clone();
-                    installed.push(InstalledMicro::new(
-                        id,
-                        sidecar.clone(),
-                        move |id, resources, bindings| {
-                            clay_mdk::host::wcmp_factory(
-                                resources,
-                                id,
-                                sidecar.manifest,
-                                bindings,
-                                move || indexed_package(entry.clone()),
-                            )
-                        },
-                    ));
+                    installed.push(
+                        InstalledMicro::new(
+                            id,
+                            sidecar.clone(),
+                            move |id, resources, bindings| {
+                                clay_mdk::host::wcmp_factory(
+                                    resources,
+                                    id,
+                                    sidecar.manifest,
+                                    bindings,
+                                    move || indexed_package(entry.clone()),
+                                )
+                            },
+                        )
+                        // A package may require the shell's publications (the layout's app bar
+                        // button); the shell is the only provider a package can name today.
+                        .satisfied_by(&clay_mdk::MicroId::local(micro_shell_manifest::ID)),
+                    );
                 }
             }
             Err(error) => errors.push(format!("package index is not an index: {error}")),
@@ -224,21 +232,21 @@ fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
     rsx! { dayframe_composition::Application { runtime, host } }
 }
 
-/// The horizontal chrome the `main` element in `App` draws around the application: its `p-6`
-/// on both sides.
-const MAIN_PADDING_PX: f64 = 48.0;
-
-fn inner_width() -> f64 {
-    web_sys::window()
-        .expect("the shell runs in a window")
-        .inner_width()
-        .expect("a window has a width")
-        .as_f64()
-        .expect("a window width is a number")
-        - MAIN_PADDING_PX
+fn inner_size() -> (f64, f64) {
+    let window = web_sys::window().expect("the shell runs in a window");
+    let dimension = |value: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| {
+        value
+            .expect("a window has a size")
+            .as_f64()
+            .expect("a window size is a number")
+    };
+    (
+        dimension(window.inner_width()),
+        dimension(window.inner_height()),
+    )
 }
 
-/// What the page tells the shell: its width (the shell never measures the DOM), and the
+/// What the page tells the shell: its size (the shell never measures the DOM), and the
 /// browser's back button.
 ///
 /// The browser has no event for "back was pressed" that can be cancelled, only `popstate` after
@@ -249,13 +257,21 @@ fn inner_width() -> f64 {
 /// home leaves one spare entry, and the press after that is a no-op before the next leaves the
 /// page.
 fn use_host_inputs() -> HostInputs {
-    let mut width = use_signal(inner_width);
+    let initial = inner_size();
+    let mut width = use_signal(|| initial.0);
+    let mut height = use_signal(|| initial.1);
     let mut platform_back = use_signal(|| 0_u64);
     let can_back = use_signal(|| false);
     let mut guarded = use_signal(|| false);
+    // A browser viewport has no system chrome over it.
+    let insets = use_signal(Insets::default);
     let listeners = use_hook(|| {
         let window = web_sys::window().expect("the shell runs in a window");
-        let on_resize = Closure::<dyn FnMut()>::new(move || width.set(inner_width()));
+        let on_resize = Closure::<dyn FnMut()>::new(move || {
+            let (w, h) = inner_size();
+            width.set(w);
+            height.set(h);
+        });
         let on_pop = Closure::<dyn FnMut()>::new(move || {
             guarded.set(false);
             platform_back += 1;
@@ -290,9 +306,12 @@ fn use_host_inputs() -> HostInputs {
     });
     HostInputs {
         width: width.into(),
+        height: height.into(),
+        insets: insets.into(),
         platform_back,
         can_back,
         keyboard: true,
+        start: None,
     }
 }
 
@@ -311,7 +330,7 @@ fn App() -> Element {
             family: "material".to_string(),
             mode: ThemeMode::Dark,
             main {
-                class: "min-h-screen box-border bg-background p-6 font-sans text-foreground",
+                class: "bg-background font-sans text-foreground",
                 if let Some(error) = failure() {
                     p { role: "alert", "Dayframe cannot start: {error}" }
                 } else if runtime.read().is_some() {

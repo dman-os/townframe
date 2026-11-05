@@ -22,8 +22,7 @@ const SAMPLE_FLAG: &str =
 const SHOW_COUNTER: &str = "button[aria-label=\"Show Counter (Wasm) panel\"]";
 const HIDE_COUNTER: &str = "button[aria-label=\"Hide Counter (Wasm) panel\"]";
 const SHOW_SAMPLE: &str = "button[aria-label=\"Show Sample micro panel\"]";
-const ENABLE_COUNTER: &str = "button[aria-label=\"Enable dayframe.counter micro\"]";
-const DISABLE_COUNTER: &str = "button[aria-label=\"Disable dayframe.counter micro\"]";
+const OPEN_LAYOUT: &str = "button[aria-label=\"Open Layout\"]";
 
 fn arrangement_route() -> FacetRoute {
     FacetRoute {
@@ -42,6 +41,13 @@ fn stored_arrangement(runtime: &CompositionRuntime) -> Option<serde_json::Value>
         .get(&arrangement_route())
 }
 
+/// What the lifecycle section's toggle does (it is not on screen beside the layout, which fills
+/// the main position): write the counter's install datum, which the reconciler applies.
+fn enable_counter(runtime: &CompositionRuntime, enabled: bool) {
+    // The acknowledgement resolves once the datum is stored; the scenarios wait on the UI.
+    drop(runtime.set_enabled(&MicroId::local(micro_counter_manifest::ID), enabled));
+}
+
 struct Layout {
     runtime: CompositionRuntime,
     ui: HeadlessDom,
@@ -49,10 +55,10 @@ struct Layout {
 }
 
 impl Layout {
-    /// Boot the shell with the layout enabled and `visible` as the stored arrangement. Home is
-    /// showing, so Settings' counter section is not mounted (it would be a second mount of the
-    /// counter's view, and a second holder of the guest). The counter package stays disabled,
-    /// as discovered.
+    /// Boot the shell with the layout enabled and `visible` as the stored arrangement, and open
+    /// the Layout panel from home. Settings' counter section is not mounted (it would be a second
+    /// mount of the counter's view, and a second holder of the guest). The counter package stays
+    /// disabled, as discovered.
     async fn start(visible: &[&str]) -> Self {
         let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
             .await
@@ -64,6 +70,9 @@ impl Layout {
             serde_json::json!({ "visible": visible }),
         );
         let mut ui = HeadlessDom::new(composed, Launch::new(runtime.clone(), super::WIDE_PX));
+        ui.wait_until("home offers the layout", |ui| ui.find(OPEN_LAYOUT).is_some())
+            .await;
+        ui.click(OPEN_LAYOUT);
         // The toggles list the installed panels, which the guest reads from its mirror of the
         // collection: they appear once the layout is running and bootstrapped.
         ui.wait_until("the layout lists the installed panels", |ui| {
@@ -99,9 +108,9 @@ async fn a_hidden_panel_never_activates_its_provider_until_it_is_shown() {
     })
     .await;
     assert_eq!(runtime.state(&counter), MicroState::Disabled);
-    ui.click(ENABLE_COUNTER);
+    enable_counter(&runtime, true);
     ui.wait_until("the counter is enabled and its panel is offered", |ui| {
-        ui.find(DISABLE_COUNTER).is_some() && ui.find(SHOW_COUNTER).is_some()
+        ui.find(SHOW_COUNTER).is_some()
     })
     .await;
     ui.wait_until("an enabled counter nothing holds is idle", |_| {
@@ -168,7 +177,7 @@ async fn an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangeme
 
     // Enabling the provider mounts its panel where the placeholder was; the unregistered id
     // stays a placeholder.
-    ui.click(ENABLE_COUNTER);
+    enable_counter(&runtime, true);
     ui.wait_until("the counter's panel replaced its placeholder", |ui| {
         ui.find(COUNTER_INCREMENT).is_some()
     })
@@ -188,7 +197,7 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
         mut ui,
         counter,
     } = Layout::start(&["dayframe.counter", "dayframe.sample"]).await;
-    ui.click(ENABLE_COUNTER);
+    enable_counter(&runtime, true);
     ui.wait_until("both panels mounted", |ui| {
         ui.find(COUNTER_INCREMENT).is_some() && ui.find(SAMPLE_FLAG).is_some()
     })
@@ -202,7 +211,7 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
     })
     .await;
 
-    ui.click(DISABLE_COUNTER);
+    enable_counter(&runtime, false);
     ui.wait_until("the counter's panel is a placeholder", |ui| {
         ui.find(COUNTER_INCREMENT).is_none()
             && ui
@@ -222,7 +231,7 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
     })
     .await;
 
-    ui.click(ENABLE_COUNTER);
+    enable_counter(&runtime, true);
     ui.wait_until("the counter's panel is back on a new incarnation", |ui| {
         ui.find(COUNTER_INCREMENT).is_some()
     })

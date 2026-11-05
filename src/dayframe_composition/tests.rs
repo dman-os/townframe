@@ -265,7 +265,6 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
         let root = &runtime.roots.rows().unwrap()[0];
         assert_eq!(root.key, micro_shell_manifest::ID);
         assert_eq!(root.value.title, "Shell");
-        assert!(!root.value.pinned);
         let view = root.attachments[root.value.content.index()]
             .redeem_presentation()
             .await
@@ -297,6 +296,35 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
         assert!(sample.attachments[0].redeem_presentation().await.is_ok());
     })
     .await;
+}
+
+// The lifecycle controls are a built-in micro whose declared Settings section is listed before
+// anything runs, locked like the shell (it has no install datum and no toggle of its own).
+#[tokio::test(flavor = "current_thread")]
+async fn the_lifecycle_controls_are_a_locked_settings_section() {
+    let mut micros = catalog(stub_counter());
+    micros.push(lifecycle::micro());
+    let runtime = CompositionRuntime::new(Arc::new(clay_store::MemoryStore::new()), micros)
+        .await
+        .expect("a memory store does not fail");
+    assert!(runtime.installation_errors.is_empty());
+    let lifecycle = id(lifecycle::ID);
+    assert!(runtime.is_locked(&lifecycle));
+    let row = runtime
+        .collection(&sections())
+        .unwrap()
+        .get(&cbor_key(lifecycle::ID))
+        .unwrap()
+        .value
+        .unwrap();
+    let section: Section = ciborium::from_reader(row.body.as_slice()).unwrap();
+    assert_eq!(section.title, "Micro lifecycle");
+    assert!(matches!(
+        row.attachments.as_slice(),
+        [RowAttachment::Endpoint(endpoint)] if endpoint.micro == supervised(lifecycle::ID)
+    ));
+    assert_eq!(runtime.state(&lifecycle), MicroState::Idle);
+    runtime.host.close();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1195,18 +1223,37 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
         serde_json::json!(0),
     );
     served(&runtime, async {
-        // The shell mounts the toolbar through its pinned root row.
-        let mut roots = runtime.roots.clone();
-        while runtime.roots.rows().unwrap().len() < 2 {
-            roots.changed().await.unwrap();
-        }
-        let rows = runtime.roots.rows().unwrap();
-        let root = rows
+        // The shell mounts the toolbar through its sidebar panel row.
+        let (panels, panels_feed) = Collection::<String, micro_shell_manifest::Panel>::observe(
+            &runtime.host,
+            runtime.shell(),
+            runtime.supervisor.activator(),
+            &runtime
+                .collection(&Nsid::literal(micro_shell_manifest::PANELS))
+                .unwrap(),
+        )
+        .unwrap();
+        tokio::task::spawn_local(panels_feed);
+        let mut panel_changes = panels.clone();
+        let rows = loop {
+            let rows = panels.rows().unwrap();
+            if rows
+                .iter()
+                .any(|row| row.key == micro_toolbar_manifest::ID)
+            {
+                break rows;
+            }
+            panel_changes.changed().await.unwrap();
+        };
+        let panel = rows
             .iter()
             .find(|row| row.key == micro_toolbar_manifest::ID)
             .unwrap();
-        assert!(root.value.pinned);
-        let toolbar = root.attachments[root.value.content.index()].clone();
+        assert_eq!(
+            panel.value.sockets,
+            [micro_shell_manifest::Socket::Sidebar]
+        );
+        let toolbar = panel.attachments[panel.value.content.index()].clone();
         let mut dom = VirtualDom::new_with_props(
             slot_app,
             SlotApp {
@@ -1601,18 +1648,23 @@ struct FrameApp {
     width: f64,
 }
 
-/// What `Application` supplies around the shell's root, without the lifecycle panel and without
+/// What `Application` supplies around the shell's root, without the lifecycle section and without
 /// serving the composition (the scenario serves it).
 fn frame_app(props: FrameApp) -> Element {
     use_context_provider(|| props.components.clone());
     let width = use_signal(|| props.width).into();
+    let height = use_signal(|| 800.0).into();
+    let insets = use_signal(Insets::default).into();
     let platform_back = use_signal(|| 0_u64);
     let can_back = use_signal(|| false);
     use_context_provider(|| HostInputs {
         width,
+        height,
+        insets,
         platform_back,
         can_back,
         keyboard: false,
+        start: None,
     });
     rsx! { PresentationSlot { reference: props.reference } }
 }

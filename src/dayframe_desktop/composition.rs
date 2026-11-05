@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 /// The shell's native built-ins. The shell micro is the frame: eager, and locked because nothing
 /// is usable without it. Settings is an on-demand panel: home lists its declared row, and
-/// opening it starts it. Toolbar is on-demand: its pinned root row starts it when the frame
-/// mounts it. Sample is eager so its section is written at boot. Collection access is resolved
+/// opening it starts it. Toolbar is on-demand: its sidebar panel row starts it when the sidebar
+/// mounts it. Sample is eager so its section is written at boot. The lifecycle controls are the
+/// composition's own Settings section. Collection access is resolved
 /// by the composition from each manifest's requests and configuration, not hand-written here.
 fn native_micros() -> Vec<InstalledMicro> {
     let shell = clay_mdk::MicroId::local(micro_shell_manifest::ID);
@@ -86,6 +87,7 @@ fn native_micros() -> Vec<InstalledMicro> {
                 },
             )
         },
+        dayframe_composition::lifecycle::micro(),
     ]
 }
 
@@ -185,22 +187,29 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
             Ok(package) => {
                 let sidecar = package.sidecar().clone();
                 let bytes = package.bytes().to_vec();
-                installed.push(InstalledMicro::new(
-                    package.id().clone(),
-                    sidecar.clone(),
-                    move |id, resources, bindings| {
-                        clay_mdk::host::wasm_factory(
-                            resources,
-                            id,
-                            sidecar.manifest,
-                            bindings,
-                            move || {
-                                let bytes = bytes.clone();
-                                async move { clay_mdk::host::WasmPackage::from_bytes(bytes).await }
-                            },
-                        )
-                    },
-                ));
+                installed.push(
+                    InstalledMicro::new(
+                        package.id().clone(),
+                        sidecar.clone(),
+                        move |id, resources, bindings| {
+                            clay_mdk::host::wasm_factory(
+                                resources,
+                                id,
+                                sidecar.manifest,
+                                bindings,
+                                move || {
+                                    let bytes = bytes.clone();
+                                    async move {
+                                        clay_mdk::host::WasmPackage::from_bytes(bytes).await
+                                    }
+                                },
+                            )
+                        },
+                    )
+                    // A package may require the shell's publications (the layout's app bar
+                    // button); the shell is the only provider a package can name today.
+                    .satisfied_by(&clay_mdk::MicroId::local(micro_shell_manifest::ID)),
+                );
             }
             Err(error) => errors.push(error),
         }

@@ -10,6 +10,7 @@ use blitz_dom::QualName;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
 use dayframe_composition::HostInputs;
+use dayframe_composition::Insets;
 use dioxus::prelude::*;
 use dioxus_core::ElementId;
 use dioxus_core::RenderTargetId;
@@ -32,6 +33,7 @@ mod layout;
 /// Host widths on either side of the compact breakpoint.
 const COMPACT_PX: f64 = 400.0;
 pub(crate) const WIDE_PX: f64 = 1200.0;
+const WINDOW_HEIGHT_PX: f64 = 800.0;
 
 /// What a launcher hands `Application`: the runtime and its window's width. `host` is filled
 /// with the inputs `Application` was given, so a scenario can press the platform back.
@@ -39,7 +41,7 @@ pub(crate) const WIDE_PX: f64 = 1200.0;
 pub(crate) struct Launch {
     runtime: CompositionRuntime,
     width: f64,
-    host: std::rc::Rc<std::cell::Cell<Option<HostInputs>>>,
+    host: std::rc::Rc<std::cell::RefCell<Option<HostInputs>>>,
 }
 
 impl Launch {
@@ -56,15 +58,20 @@ impl Launch {
 pub(crate) fn composed(launch: Launch) -> Element {
     let runtime = use_signal(|| launch.runtime.clone());
     let width = use_signal(|| launch.width);
+    let height = use_signal(|| WINDOW_HEIGHT_PX);
+    let insets = use_signal(Insets::default);
     let platform_back = use_signal(|| 0_u64);
     let can_back = use_signal(|| false);
     let host = HostInputs {
         width: width.into(),
+        height: height.into(),
+        insets: insets.into(),
         platform_back,
         can_back,
         keyboard: false,
+        start: None,
     };
-    launch.host.set(Some(host));
+    *launch.host.borrow_mut() = Some(host.clone());
     rsx! { Application { runtime, host } }
 }
 
@@ -248,8 +255,12 @@ const COUNTER_VALUE: &str = "button[aria-label=\"Increment Wasm counter\"]";
 const TOOLBAR_INCREMENT: &str = "[role=\"toolbar\"] button[aria-label=\"Increment\"]";
 
 /// The platform back gesture, as a launcher reports it.
-fn press_platform_back(host: &std::cell::Cell<Option<HostInputs>>) {
-    let mut presses = host.get().expect("the application mounted").platform_back;
+fn press_platform_back(host: &std::cell::RefCell<Option<HostInputs>>) {
+    let mut presses = host
+        .borrow()
+        .as_ref()
+        .expect("the application mounted")
+        .platform_back;
     presses += 1;
 }
 
@@ -257,7 +268,7 @@ struct Shell {
     runtime: CompositionRuntime,
     ui: HeadlessDom,
     counter: MicroId,
-    host: std::rc::Rc<std::cell::Cell<Option<HostInputs>>>,
+    host: std::rc::Rc<std::cell::RefCell<Option<HostInputs>>>,
 }
 
 impl Shell {
@@ -333,7 +344,7 @@ async fn home_to_settings_to_a_section_and_back_at_a_compact_width() {
     .await;
     assert_eq!(runtime.state(&counter), MicroState::Active);
     assert_eq!(
-        ui.text("section[aria-label=\"Counter (Wasm)\"] h3"),
+        ui.text("section[aria-label=\"Counter (Wasm)\"] h2"),
         "Counter (Wasm)"
     );
 
@@ -435,7 +446,7 @@ async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_g
     .await;
     assert_eq!(runtime.state(&counter), MicroState::Active);
     assert_eq!(
-        ui.text("section[aria-label=\"Counter (Wasm)\"] h3"),
+        ui.text("section[aria-label=\"Counter (Wasm)\"] h2"),
         "Counter (Wasm)"
     );
     assert_eq!(ui.text(COUNTER_VALUE), "0");
@@ -527,12 +538,11 @@ async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
     })
     .await;
 
-    ui.click("button[aria-label=\"Disable dayframe.counter micro\"]");
+    // The lifecycle section would replace the counter's in the details position, so the micro
+    // is disabled through the install datum its toggle writes.
+    drop(runtime.set_enabled(&counter, false));
     ui.wait_until("disabled counter withdrew its rendered section", |ui| {
         ui.find(COUNTER_VALUE).is_none()
-            && ui
-                .find("button[aria-label=\"Enable dayframe.counter micro\"]")
-                .is_some()
     })
     .await;
     assert_eq!(runtime.state(&counter), MicroState::Disabled);
@@ -545,7 +555,7 @@ async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
 
     // The section stayed open while its micro was disabled, and its slot re-redeems when the
     // supervisor records the micro enabled: a fresh incarnation mounts without reopening.
-    ui.click("button[aria-label=\"Enable dayframe.counter micro\"]");
+    drop(runtime.set_enabled(&counter, true));
     ui.wait_until("reenabled counter section recovered", |ui| {
         ui.find(COUNTER_VALUE).is_some()
     })
@@ -557,6 +567,41 @@ async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
         ui.text(COUNTER_VALUE) == (before + 1).to_string()
     })
     .await;
+}
+
+// The lifecycle controls are a Settings section: its toggle writes the install datum, the
+// supervisor follows, and its status line reads the micro's state.
+#[tokio::test(flavor = "current_thread")]
+async fn the_lifecycle_section_enables_and_disables_a_micro() {
+    let Shell {
+        runtime,
+        mut ui,
+        counter,
+        ..
+    } = Shell::start_in_settings().await;
+    ui.click("button[aria-label=\"Open Micro lifecycle settings\"]");
+    let disable = "button[aria-label=\"Disable dayframe.counter micro\"]";
+    let enable = "button[aria-label=\"Enable dayframe.counter micro\"]";
+    ui.wait_until("the counter is listed enabled", |ui| ui.find(disable).is_some())
+        .await;
+    ui.click(disable);
+    ui.wait_until("the counter is disabled", |ui| ui.find(enable).is_some())
+        .await;
+    assert_eq!(runtime.state(&counter), MicroState::Disabled);
+    ui.click(enable);
+    ui.wait_until("the counter is enabled again", |ui| {
+        ui.find(disable).is_some()
+    })
+    .await;
+    // The row of the opened section is the current one in the list.
+    assert_eq!(
+        ui.attribute(
+            "button[aria-label=\"Open Micro lifecycle settings\"]",
+            "aria-current"
+        )
+        .as_deref(),
+        Some("true")
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

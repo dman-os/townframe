@@ -1,4 +1,5 @@
 use dayframe_composition::HostInputs;
+use dayframe_composition::Insets;
 use dioxus::prelude::*;
 use dioxus_native::winit::event::ButtonSource;
 use dioxus_native::winit::event::ElementState;
@@ -46,7 +47,7 @@ fn App() -> Element {
             family: "material".to_string(),
             mode: ThemeMode::Dark,
             main {
-                class: "min-h-screen box-border bg-background p-6 font-sans text-foreground",
+                class: "bg-background font-sans text-foreground",
                 if let Some(error) = failure() {
                     p { role: "alert", "Dayframe cannot start: {error}" }
                 } else if runtime.read().is_some() {
@@ -71,26 +72,30 @@ fn ReadyApp(runtime: Signal<Option<composition::CompositionRuntime>>) -> Element
     rsx! { composition::Application { runtime, host } }
 }
 
-/// The horizontal chrome the `main` element in `App` draws around the application: its `p-6`
-/// on both sides.
-const MAIN_PADDING_PX: f64 = 48.0;
-
-/// What the window tells the shell: its logical width (the shell never measures the DOM, and
+/// What the window tells the shell: its logical size (the shell never measures the DOM, and
 /// Blitz panics if it tries to from a handler), and the platform back gesture. Android's
 /// `KEYCODE_BACK` arrives from winit as `BrowserBack`; a mouse's back button is the desktop
 /// equivalent. Neither is a key Blitz delivers to a focused element, so they are taken from the
 /// window event stream.
 fn use_host_inputs() -> HostInputs {
     let window: Arc<dyn Window> = use_hook(consume_context);
-    let logical_width = |window: &Arc<dyn Window>| {
-        window.surface_size().width as f64 / window.scale_factor() - MAIN_PADDING_PX
+    let logical_size = |window: &Arc<dyn Window>| {
+        let size = window.surface_size();
+        let scale = window.scale_factor();
+        (size.width as f64 / scale, size.height as f64 / scale)
     };
-    let mut width = use_signal(|| logical_width(&window));
+    let initial = logical_size(&window);
+    let mut width = use_signal(|| initial.0);
+    let mut height = use_signal(|| initial.1);
     let mut platform_back = use_signal(|| 0_u64);
     let can_back = use_signal(|| false);
+    // A desktop window has no system chrome over its surface.
+    let insets = use_signal(Insets::default);
     dioxus_native::use_window_event(move |event, _| match event {
         WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-            width.set(logical_width(&window));
+            let (w, h) = logical_size(&window);
+            width.set(w);
+            height.set(h);
         }
         WindowEvent::KeyboardInput { event, .. }
             if event.state == ElementState::Pressed
@@ -108,9 +113,13 @@ fn use_host_inputs() -> HostInputs {
     });
     HostInputs {
         width: width.into(),
+        height: height.into(),
+        insets: insets.into(),
         platform_back,
         can_back,
         // Blitz cannot take keyboard focus (`tabindex` panics it).
         keyboard: false,
+        // The development seed: see `HostInputs::start`.
+        start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
     }
 }
