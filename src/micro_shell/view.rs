@@ -161,12 +161,17 @@ fn destinations(panels: &[Row<String, Panel>]) -> Vec<&Row<String, Panel>> {
     found
 }
 
-/// Ask the shell to open `panel`, showing a refusal (the panel vanished since it was listed)
-/// where `failure` is rendered.
-fn open_panel(shell: &Shell, panel: String, mut failure: Signal<Option<String>>) {
+/// Ask the shell to open `panel`, or one `row` of it, showing a refusal (the panel vanished since
+/// it was listed) where `failure` is rendered.
+fn open_panel(
+    shell: &Shell,
+    panel: String,
+    row: Option<String>,
+    mut failure: Signal<Option<String>>,
+) {
     let shell = shell.clone();
     spawn(async move {
-        let result = shell.navigate(NavigateRequest { panel, row: None }).await;
+        let result = shell.navigate(NavigateRequest { panel, row }).await;
         failure.set(result.err().map(|problem| problem.to_string()));
     });
 }
@@ -188,6 +193,25 @@ fn use_host_wiring(shell: &Shell, host: &HostInputs, can_go_back: bool) {
     });
     let mut can_back = host.can_back;
     use_effect(use_reactive!(|(can_go_back,)| can_back.set(can_go_back)));
+}
+
+/// A development seed (`HostInputs::start`) opens its stack once the panels have loaded; a step
+/// the shell refuses is shown through `failure`.
+fn use_start(shell: &Shell, host: &HostInputs, failure: Signal<Option<String>>) {
+    let shell = shell.clone();
+    let start = host.start.clone();
+    let mut failure = failure;
+    use_future(move || {
+        let shell = shell.clone();
+        let start = start.clone();
+        async move {
+            if let Some(spec) = start
+                && let Err(problem) = shell.start_on(&spec).await
+            {
+                failure.set(Some(format!("DAYFRAME_SHELL_OPEN: {problem}")));
+            }
+        }
+    });
 }
 
 /// The sheet over the arrangement, if one is open.
@@ -226,23 +250,7 @@ fn Frame(shell: Shell) -> Element {
     let failure = use_signal(|| None::<String>);
 
     use_host_wiring(&shell, &host, state.navigation.can_back());
-    // A development seed (`HostInputs::start`) opens its stack once the panels have loaded.
-    use_future({
-        let shell = shell.clone();
-        let start = host.start.clone();
-        let mut failure = failure;
-        move || {
-            let shell = shell.clone();
-            let start = start.clone();
-            async move {
-                if let Some(spec) = start
-                    && let Err(problem) = shell.start_on(&spec).await
-                {
-                    failure.set(Some(format!("DAYFRAME_SHELL_OPEN: {problem}")));
-                }
-            }
-        }
-    });
+    use_start(&shell, &host, failure);
 
     let frame = state.navigation.frame();
     let find = |key: &str| panels.iter().find(|row| row.key == key);
@@ -271,20 +279,7 @@ fn Frame(shell: Shell) -> Element {
     let on_open = {
         let shell = shell.clone();
         let panel = main.key.clone();
-        move |row: String| {
-            let shell = shell.clone();
-            let panel = panel.clone();
-            let mut failure = failure;
-            spawn(async move {
-                let result = shell
-                    .navigate(NavigateRequest {
-                        panel,
-                        row: Some(row),
-                    })
-                    .await;
-                failure.set(result.err().map(|problem| problem.to_string()));
-            });
-        }
+        move |row: String| open_panel(&shell, panel.clone(), Some(row), failure)
     };
     let on_back = {
         let shell = shell.clone();
@@ -455,7 +450,7 @@ fn Sidebar(shell: Shell) -> Element {
                     onclick: {
                         let shell = shell.clone();
                         let key = row.key.clone();
-                        move |_| open_panel(&shell, key.clone(), failure)
+                        move |_| open_panel(&shell, key.clone(), None, failure)
                     },
                     "{row.value.title}"
                 }
@@ -493,7 +488,7 @@ fn Home(shell: Shell) -> Element {
                         onclick: {
                             let shell = shell.clone();
                             let key = row.key.clone();
-                            move |_| open_panel(&shell, key.clone(), failure)
+                            move |_| open_panel(&shell, key.clone(), None, failure)
                         },
                         "{row.value.title}"
                     }
@@ -521,7 +516,13 @@ fn NavigationButton(shell: Shell) -> Element {
     if placement == Placement::Details && wide {
         return rsx! {};
     }
-    let mode = if state.navigation.can_back() {
+    // On a wide host the main position is never covered, so back there only has a use while
+    // details are open beside it; otherwise the button stays the way to bring a hidden sidebar
+    // back (the platform gesture still goes back).
+    let has_details = state.navigation.frame().details.is_some();
+    let mode = if state.navigation.can_back()
+        && !(wide && placement == Placement::Main && !has_details)
+    {
         NavButtonMode::Back
     } else {
         NavButtonMode::Sidebar

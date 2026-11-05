@@ -123,11 +123,27 @@ match it.
   (nothing pushed shows home); going home is an ordinary push.
 - **Sheets are panels.** A sheet is a panel row whose sockets include `sheet`; `open_sheet`
   names it. A sheet goes with its panel: entries naming a retracted panel are pruned.
-- **Host inputs.** The native shell receives the width available to its frame and the platform
-  back gesture from the composition as a Dioxus context (`micro_shell::HostInputs`); it never
-  measures the DOM.
-- **Sidebar.** Wide hosts keep it beside the content (a user can hide it, and the button then
-  offers to show it); compact hosts show it as a sheet because the kit has no left drawer yet.
+- **Host inputs.** The native shell receives the size of its frame and the platform back gesture
+  from the composition as a Dioxus context (`micro_shell::HostInputs`); it never measures the DOM.
+  A launcher hands the composition the whole window plus typed `Insets` (the system chrome over
+  it, zero everywhere until the Android launcher fills them); the composition pads the frame by
+  them and gives the shell the size that remains, so neither the shell nor the kit sees an inset.
+  The shell is the whole app: `Application` mounts its root edge to edge, with no card or heading.
+- **Sidebar.** Wide hosts keep it beside the content as a `Sections` pane (a user can hide it,
+  and the nav button then offers to show it); compact hosts show it as the kit's left `Drawer`.
+  The toolbar is a panel in its `sidebar` socket.
+- **Panels instead of roots.** The shell is the only root. The toolbar contributes a `sidebar`
+  panel and the layout a list panel home offers; `RootRow.pinned` is gone. The micro lifecycle
+  controls are the composition's own built-in micro contributing a Settings section, so they and
+  the layout are never on screen together.
+- **Opening is the scaffold's.** A list inside the shell uses the kit's `ListRow`, which opens
+  itself through the list scaffold's `on_open` (the shell's one navigation path) and marks the
+  open row with `aria-current` from the `current` the shell passes. That channel is a Dioxus
+  context, so a guest's list cannot use it: it asks the shell to navigate, and cannot mark the
+  open row until the shell can report it reactively.
+- **Development seed.** `HostInputs::start` (the desktop launcher fills it from
+  `DAYFRAME_SHELL_OPEN`) starts the shell on a given stack so states that need clicks can be
+  captured.
 
 ## Component kit conventions
 
