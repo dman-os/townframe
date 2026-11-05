@@ -358,3 +358,66 @@ Other findings:
   or avoid full-screen captures while the user is using the phone.
 - No fixes were committed: the one real bug (back at Home) needs a rebuild or a manifest hook, so it is pinned, not fixed.
 - Release arm64 build: not run (disk).
+
+## A4 notes (back at Home, first Wasm section open)
+
+Captures (cropped to the top 60 to 70 percent of the screen; the crop helper is `/run/media/asdf/p3N/tmp/a4/crop.py`) and build logs:
+`/run/media/asdf/p3N/tmp/a4/`. Debug arm64 build, installed on the ZTE 8050 (`build1b.log`); the first attempt failed at link with
+`ld.lld: failed to open .../dayframe_mobile: Invalid argument` (ntfs3 target dir) and the identical retry linked, cause unknown.
+
+### 1. System back at Home: fixed and verified on the phone
+
+- dx at the pinned rev (`a3e1e68`) has a supported hook after all: `[application] android_manifest = "<file>"` in `Dioxus.toml`
+  (`packages/cli/src/build/android.rs`, `config/app.rs`). dx writes that file verbatim as `AndroidManifest.xml` and renders no
+  template for it, so `src/dayframe_mobile/AndroidManifest.xml` is a copy of dx's `AndroidManifest.xml.hbs` (no permissions,
+  features, deep links configured, `lib_name` = `main`) plus `android:enableOnBackInvokedCallback="true"`. Cost: when the
+  dioxus rev is bumped the copy must be re-diffed against the new template (the file's header says so).
+- Guard against dx dropping the hook: `x/dayframe.ts android` runs `apkanalyzer manifest print <apk>` after the build and throws
+  if the shipped manifest lacks the attribute. It passed on this build.
+- Phone (ZTE 8050, API 33), `adb shell input keyevent KEYCODE_BACK`:
+  - At Home: `topResumedActivity` went from `com.example.mobile/...MainActivity` to `org.mozilla.firefox/...` and
+    `pidof com.example.mobile` still returned a pid: the task moved to back, the process lives (the A3 build stayed on MainActivity).
+  - Settings -> back showed Home (`b-settings.png`, `b-afterback.png`).
+  - Sample micro, Greeting field focused (`dumpsys input_method`: `mInputShown=true`): first back -> `mInputShown=false` and still on
+    Sample micro (`kb1.png`); this needed a tap on the text field, no text was typed.
+- Gesture back (edge swipe) not exercised separately from the key event: unverified. With the opt-in the platform delivers
+  back to the `OnBackInvokedCallback` only (a key event may no longer reach winit); the three checks above passed through that path.
+
+### 2. First Wasm section open after process start
+
+Measured with instrumentation (`INSTR` `eprintln!` lines in `clay_rt_wasmtime::WasmPackage::from_bytes` and `instantiate`, its own
+commit `f4cd3d87`, to be dropped; stderr reaches logcat as `RustStdoutStderr`). Debug guest, cold process, tap Counter (Wasm):
+
+| step | time |
+| --- | --- |
+| `engine()` | 73 ms |
+| `compile_component`, counter debug component, 15,098,908 B | **6.55 s** |
+| `instantiate_async` | 36 ms |
+
+So the 5.5 s of A3 is the Cranelift compile of the debug component, nothing else. `cache_path` returned `None` on the phone:
+`clay_rt_wasmtime` already has a precompiled-artifact cache (`$DAYFRAME_COMPONENT_CACHE`, else `$XDG_CACHE_HOME`/`$HOME/.cache`),
+but an Android app has neither, so every process start compiles from scratch and `run-as com.example.mobile ls cache` is empty.
+
+Levers:
+
+- (a) Release guests: `x/dayframe.ts android --guest-profile wasm-release` (new; commit `855d2285`). There was no
+  `DAYFRAME_GUEST_PROFILE`; the flag selects the workspace's existing `wasm-release` cargo profile and
+  `dayframe-packages.ts` takes a `guestProfile` option. **Not measured on the phone**: the release guest build was stopped at the
+  5 GB disk floor (4.9 GB free; the guest `wasm-release` compile was in its last crates, `micro_layout`) before an APK existed.
+  Expected effect is a smaller, faster-to-compile component, but that is unverified; do not rely on it.
+- (b) Cache in app storage: point `cache_path` at the app's `cache`/`files` dir. Small change (an explicit
+  `set_component_cache_directory` from `android_main` using `app.internal_data_path()`, or `DAYFRAME_COMPONENT_CACHE` set before
+  the engine is built; env mutation needs care, the explicit setter is cleaner). It removes the compile from every start after the
+  first, regardless of guest profile, so it is the lever that fixes the symptom; the first open after install still compiles.
+  Not implemented: no disk left to build and verify it on the phone, and unverified code is not committed.
+- (c) Build-time AOT (`Engine::precompile_component` at build, ship `.cwasm`, `Component::deserialize`): no first-open compile at
+  all, but the artifact is bound to the engine's compatibility hash (wasmtime version and config, target triple/CPU features), needs
+  a host-side step that builds an aarch64 engine config (cross-compile target set), and `deserialize` of untrusted-looking bytes is
+  `unsafe` (APK content is trusted). Larger change than (b); worth it only if the first-after-install compile matters.
+
+Why the shell's "Loading section…" state is not shown: it exists (`render_state` in `src/clay_mdk/hooks.rs`, `SlotState::Loading`
+with `role="status"`), but the compile is a synchronous call inside an async fn (`compile_component` calls `Component::new` /
+`precompile_component` with no `spawn_blocking`). The frame that would show Loading is painted by the same runtime that polls
+that future; whether it is the UI thread is unverified (the `INSTR` lines are logged from the stdio thread and do not name the
+polling thread). The A3 observation (old frame frozen for the whole compile) fits a blocked UI thread. Next check: log the thread
+name and a heartbeat in the instrumentation, or move the compile to `spawn_blocking` and see whether Loading then paints.
