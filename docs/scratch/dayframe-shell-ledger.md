@@ -397,3 +397,52 @@ Finding 2 was fixed (S6): see Finding 3 there.
   Playwright clears it at the start of each run, so a run of the plain e2e step followed by the Bombadil step keeps only the latter's.
 - Properties to add as the shell grows: forward after back, a resized pane never below its rule, the open row marked
   `aria-current` exactly while its details are open.
+
+## K2 notes (kit gates, CI, Blitz pins)
+
+Kit conventions made mechanical: `clay_dioxus_kit/conventions.rs` (a `cfg(test)` module; 11 tests over the crate's own
+sources as text, comments stripped) plus what `guardrails.toml` already did. The README's new "Mechanical enforcement"
+section maps every rule to what fails; rules not listed stay review-only. Checked: KIT-001 (guardrails refuses any workspace
+crate; a test refuses any other runtime dependency), 002, 010/011 (headless names no class and imports no styled part; styled
+uses semantic tokens only), 012, 040 (breakpoints only in `width.rs`; no DOM measuring or window queries), 052 (`tabindex`
+only in the Sections opt-in), 071, 072, 080, 090, and that every cited `KIT-nnn` exists. Verified by mutation: a palette
+utility, an arbitrary value, a stray breakpoint literal, `tabindex` and `get_client_rect` each fail with file and line, and a
+workspace dependency fails `cargo x guardrails lint` (`ERROR_DEPENDENCY_BOUNDARY`). No xtask change: neither guardrails
+mechanism reads source text, and a crate-local test does.
+
+Gate-forced edits: `headless/nav_button.rs` mentioned Blitz without a `# Renderer limits` section (KIT-090): section added
+(doc only). Findings left for K1 / a rule decision, not fixed: (1) KIT-011 says the one allowed bracket form is
+`data-[state=...]`, but `sections.rs` uses `group-data-[state=dragging]:...`; the gate allows the `group-` form and the rule's
+wording should say so. (2) The README describes skins as `<Component>Skin` structs; `NavButton` and `ListRow` pass a `const`
+class string / a `class` prop instead (KIT-003/011 are review-only, so nothing fails). (3) `NavButton`'s chevron is drawn from
+`border-b-2 border-l-2` and the showcase `Frame` outlines with `bg-border p-px` because of the S1 border report; see below.
+
+CI: no gap found, no workflow change. `tests` runs `cargo llvm-cov nextest --workspace --all-targets` in `ci-desktop` after
+`x/check-dayframe.ts --prepare-only`, so the kit (incl. the new conventions tests), `micro_shell` and the `dayframe_desktop`
+e2e scenarios all run there (nextest `ci` profile, 3 retries; the new pins are deterministic). `rust-target-matrix` runs
+`check-matrix` per target and covers the new crates: the kit declares native / wasm32-unknown-unknown / wasm32-wasip3,
+`micro_shell` and `micro_shell_manifest` native + wasm32-unknown (+ wasip3 for the manifest), `dayframe_showcase` has no
+`[builds]` and so defaults to native (xtask guardrails matrix.rs: empty builds means native). `pre-commit` runs guardrails lint / api /
+doctor. Added CI minutes: none (the conventions tests run in ~0.05 s; the pins ~0.6 s, plus compiling three more blitz crates
+as dev-dependencies of `dayframe_desktop`, which it already links).
+
+Blitz pins, `dayframe_desktop/e2e/blitz_limits.rs` (document level, blitz fork rev ffaf2bd):
+
+- (a) AT-SPI startup panic: reproduced without a bus. `BaseDocument::build_accessibility_tree()` on a document that has
+  not had its first `resolve()` panics at stylo `data.rs:187` (`ElementStyles::primary()` unwraps `None`), reached from
+  `blitz-dom/src/accessibility.rs:190` (`is_hidden_from_accessibility_tree`). The window asks for the tree
+  (`InitialTreeRequested`, `blitz-shell/src/application.rs:82`) before the first resolve. A resolved document, and an element
+  under `display:none`, are fine. Pinned as the defect. A fix needs one of: `get_primary()` in `accessibility.rs:190`
+  (unstyled counts as visible), or `resolve()` before `build_accessibility_tree()` in the `InitialTreeRequested` arm. When
+  fixed the first assertion flips; invert the test.
+- (b) borders and (c) rounded `overflow-hidden`: NOT reproducible at the scene level. With the shipped `tailwind.css` painted
+  through `blitz-paint` into the CPU renderer (`anyrender_vello_cpu` 0.18, the same `anyrender` 0.14 `PaintScene` blitz
+  uses), `border`, `border-b-2 border-l-2 border-current` and the showcase `Frame` (nested rounded clips) all paint
+  correctly. So the S1 observation lives below the scene: the native window renders with `anyrender_vello_hybrid` 0.11 (GPU;
+  it has no headless image renderer, so no hermetic pin is possible), or in the `asset!` CSS pipeline `dx` applies to the
+  stylesheet. Those tests are therefore regression guards of the scene, not pins of the defect. Still owed: a windowed
+  GPU run of the showcase `Frame` to say which, and if it is the renderer, an upstream issue against vello_hybrid; if it is
+  the asset pipeline, compare the `dx`-processed stylesheet against the source. Until then the `bg-border p-px` outline and the
+  border-built chevron are unverified on the native renderer.
+- Environment note: a fresh worktree needs the gitignored `src/*/wit/deps/` trees (copied from the main checkout here) before
+  `dayframe_desktop` compiles; the first build in a new target dir took roughly 10 minutes.
