@@ -124,6 +124,19 @@ switch (command) {
     if (!apk) {
       throw new Error("dx reported success but no dayframe_mobile APK exists");
     }
+    // `src/dayframe_mobile/AndroidManifest.xml` replaces dx's generated manifest to opt in to
+    // predictive back (dx's template has no hook for application attributes). Check the shipped
+    // APK's manifest rather than trust that dx still honors `android_manifest`: without the
+    // attribute, API 33 ignores `MainActivity`'s back callback and back at Home does nothing.
+    const shippedManifest = await $`apkanalyzer manifest print ${apk}`.text();
+    if (
+      !/android:enableOnBackInvokedCallback="true"/.test(shippedManifest)
+    ) {
+      throw new Error(
+        `${apk} lacks android:enableOnBackInvokedCallback="true"; ` +
+          "dx did not use src/dayframe_mobile/AndroidManifest.xml (Dioxus.toml android_manifest)",
+      );
+    }
     console.log(`apk: ${apk}`);
     if (flag("--install")) {
       // `adb install` fails with "no devices/emulators found" when nothing is attached; that is
