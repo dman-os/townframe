@@ -19,8 +19,8 @@ const DEFAULT_MEM_MAX = Deno.env.get("TOWNFRAME_CGROUP_MEMORY_MAX") ?? "10G";
 // the agent sessions instead of a build. The slice is the shared budget; a scope that pushes it
 // past MemoryHigh is throttled, past MemoryMax its biggest process is killed inside the slice.
 const BUILD_SLICE = "townframe-builds.slice";
-const SLICE_MEM_HIGH = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_HIGH") ?? "7G";
-const SLICE_MEM_MAX = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_MAX") ?? "9G";
+const SLICE_MEM_HIGH = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_HIGH") ?? "10G";
+const SLICE_MEM_MAX = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_MAX") ?? "11G";
 const DEFAULT_SCCACHE_SIZE = Deno.env.get("SCCACHE_CACHE_SIZE") ?? "8G";
 
 function runtimeFifoPath(): string {

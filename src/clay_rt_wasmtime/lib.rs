@@ -23,7 +23,6 @@ use clay_guest_session::capabilities::GuestCall;
 use clay_guest_session::capabilities::InFlightCall;
 use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
-use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
 use clay_host::ComponentRef;
 use clay_host::Host;
@@ -459,19 +458,16 @@ impl wit_presentation::HostSurface for WasmStoreState {
         edits: Vec<wit_presentation::Mutation>,
     ) -> wasmtime::Result<Result<u64, wit_presentation::PresentationError>> {
         let edits: Vec<_> = edits.into_iter().map(convert_mutation).collect();
-        if let Err(reason) = ingress_budget(&edits) {
-            self.table.get(&surface)?.writer().withdraw();
-            return Ok(Err(wit_presentation::PresentationError::Unsupported(
-                reason.into(),
-            )));
+        let surface = self.table.get(&surface)?.clone();
+        if let Err(error) = self.presentation.admit(&surface, &edits) {
+            return Ok(Err(convert_error(error)));
         }
         let converted = map_mutations(edits, |reference| {
             self.table.get(&reference).map(|component| component.0)
         })?;
-        let surface = self.table.get(&surface)?;
         Ok(self
             .presentation
-            .apply(surface, &converted)
+            .apply(&surface, &converted)
             .map_err(convert_error))
     }
 
