@@ -1154,24 +1154,16 @@ where
             // Return the entrypoint first, followed by the decrypted causal
             // ancestors. Consumers can therefore materialize the exact blob
             // requested as well as its closure.
+            // Keyhive's causal walk already unwrapped each ancestor's envelope:
+            // `state.complete` holds plaintexts. Re-parsing them as envelopes
+            // would read the first plaintext bytes as a length and preallocate
+            // up to 1 MiB per ancestor before failing.
+            let mut seen = std::collections::HashSet::from([encrypted.content_ref.clone()]);
             let mut complete = vec![(encrypted.content_ref.clone(), entrypoint_envelope.plaintext)];
-            for (content_ref, ciphertext_or_plaintext) in state.complete {
-                if complete
-                    .iter()
-                    .any(|(known_ref, _)| known_ref == &content_ref)
-                {
-                    continue;
+            for (content_ref, plaintext) in state.complete {
+                if seen.insert(content_ref.clone()) {
+                    complete.push((content_ref, plaintext));
                 }
-                match bincode::deserialize::<'_, Envelope<Vec<u8>, Vec<u8>>>(
-                    &ciphertext_or_plaintext,
-                ) {
-                    Ok(env) => {
-                        complete.push((content_ref, env.plaintext));
-                    }
-                    Err(_) => {
-                        complete.push((content_ref, ciphertext_or_plaintext));
-                    }
-                };
             }
 
             let mut blockers = Vec::new();
