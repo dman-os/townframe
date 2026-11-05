@@ -4,7 +4,7 @@ use crate::headless::app_bar::{self};
 use dioxus::prelude::*;
 
 const SKIN: AppBarSkin = AppBarSkin {
-    root: "gap-2 p-2 text-text",
+    root: "min-h-11 gap-2 p-2 text-text",
     leading: "flex items-center",
     title: "m-0 text-lg font-semibold",
     trailing: "flex items-center gap-1",

@@ -772,6 +772,9 @@
     min-height: calc(var(--df-spacing) * 10);
     padding-inline: calc(var(--df-spacing) * 4);
   }
+  .min-h-11 {
+    min-height: calc(var(--df-spacing) * 11);
+  }
   .min-h-16 {
     min-height: calc(var(--df-spacing) * 16);
   }

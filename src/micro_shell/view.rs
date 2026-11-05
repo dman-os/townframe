@@ -420,25 +420,23 @@ fn Sidebar(shell: Shell) -> Element {
         });
     rsx! {
         nav { class: "flex flex-col gap-2", "aria-label": "Sidebar",
-            AppBar {
-                title: "Dayframe",
-                trailing: wide.then(|| rsx! {
-                    button {
-                        class: BUTTON,
-                        r#type: "button",
-                        "aria-label": "Hide sidebar",
-                        onclick: {
-                            let shell = shell.clone();
-                            move |_| {
-                                shell.edit(|state| {
-                                    state.sidebar_hidden = true;
-                                    true
-                                });
-                            }
-                        },
-                        "Hide sidebar"
-                    }
-                }),
+            AppBar { title: "Dayframe" }
+            if wide {
+                button {
+                    class: "{BUTTON} mx-2",
+                    r#type: "button",
+                    "aria-label": "Hide sidebar",
+                    onclick: {
+                        let shell = shell.clone();
+                        move |_| {
+                            shell.edit(|state| {
+                                state.sidebar_hidden = true;
+                                true
+                            });
+                        }
+                    },
+                    "Hide sidebar"
+                }
             }
             for row in destinations(&panels) {
                 button {
