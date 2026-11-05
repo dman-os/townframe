@@ -33,6 +33,7 @@
 //! Rescheduled sync tasks inside the workers are not this machine's business: big_sync races
 //! keyhive membership by retrying on purpose.
 
+mod access;
 mod policy;
 
 pub use policy::MirrorPolicy;
@@ -40,10 +41,12 @@ pub use policy::PeerPolicy;
 pub use policy::PolicyContext;
 
 use big_blobs::sync::BlobSyncBackend;
+use big_repo::AccessSubject;
 use big_repo::BigRepo;
 use big_repo::BigRepoConnection;
 use big_repo::BigRepoSyncBackend;
 use big_repo::ConnFinishSignal;
+use big_repo::KeyhiveAccessDelta;
 use big_sync::BackendId;
 use big_sync::rpc::WireBigSyncRpcClient;
 use big_sync_core::ObjKey;
@@ -81,8 +84,9 @@ pub struct PeersConfig {
     /// The first redial delay of a dial target; each consecutive failure doubles it.
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
-    /// How often the policy's dial targets are re-read, and incomplete part answers re-asked,
-    /// when nothing else prompts it.
+    /// How often the policy's dial targets are re-read when nothing else prompts it. It only
+    /// drives dialing: a peer's parts are recomputed when the policy or keyhive access changes
+    /// (see [`access`]), never on this timer.
     pub sweep_interval: Duration,
 }
 
@@ -249,6 +253,9 @@ impl PeersStop {
 /// The parts of a node the peers service is built over.
 pub(crate) struct Node<'a> {
     pub repo: &'a big_repo::SharedBigRepo,
+    /// The repo's `scope_key`: the service's access-stream cursor shares the repo's database with
+    /// other repos' and is namespaced by it.
+    pub scope_key: &'a str,
     pub drawers: &'a big_cabinet::Drawers,
     pub blobs: &'a big_blobs::Blobs,
     pub blob_workers: &'a big_blobs::workers::BlobWorkers,
@@ -413,6 +420,8 @@ pub(crate) async fn boot(
         })
         .expect("a fresh stop token accepts tasks");
 
+    let access_rx = access::spawn(&tasks, Arc::clone(node.repo), node.scope_key);
+
     let (events, _) = broadcast::channel(1024);
     let (commands_tx, commands_rx) = mpsc::unbounded_channel();
     let (internal_tx, internal_rx) = mpsc::unbounded_channel();
@@ -441,7 +450,7 @@ pub(crate) async fn boot(
     tasks
         .spawn(async move {
             actor
-                .run(commands_rx, incoming_rx, ends_rx, internal_rx)
+                .run(commands_rx, incoming_rx, ends_rx, internal_rx, access_rx)
                 .await
                 .unwrap()
         })
@@ -477,10 +486,11 @@ struct Link {
     conn: BigRepoConnection,
     addr: iroh::EndpointAddr,
     rpc: Arc<dyn WireBigSyncRpcClient>,
-    /// Some wanted group is not (yet) one the peer is known to be a member of. Keyhive
-    /// membership arrives on its own schedule and BigRepo has no change signal for it, so an
-    /// incomplete answer is re-asked on the sweep tick until it is complete.
-    incomplete: bool,
+    /// The groups the last policy answer wanted from the peer, readable or not. An access delta
+    /// naming one of them (or the peer itself) is what makes the answer worth recomputing:
+    /// whether the peer is a member of a wanted group is keyhive state that arrives on its own
+    /// schedule, and the access stream says when it did.
+    watch: HashSet<[u8; 32]>,
 }
 
 struct Redial {
@@ -540,6 +550,7 @@ impl Actor {
         mut incoming: mpsc::UnboundedReceiver<BigRepoConnection>,
         mut ends: mpsc::UnboundedReceiver<ConnFinishSignal>,
         mut internal: mpsc::UnboundedReceiver<Internal>,
+        mut access: mpsc::UnboundedReceiver<KeyhiveAccessDelta>,
     ) -> Res<()> {
         let cancel = self.tasks.clone();
         let mut sweep_tick = tokio::time::interval(self.sweep_interval);
@@ -568,14 +579,19 @@ impl Actor {
                 event = self.stats.recv() => self.stat(event).await?,
                 changed = self.changes.changed() => {
                     changed.wrap_err("the peer policy dropped its change signal")?;
-                    self.reapply(false).await?;
+                    self.reapply(|_, _| true).await?;
                     next_due = self.sweep().await;
+                }
+                Some(delta) = access.recv() => {
+                    // A grant is several admissions; recompute once for the burst.
+                    let mut burst = vec![delta];
+                    while let Ok(more) = access.try_recv() {
+                        burst.push(more);
+                    }
+                    self.access_changed(&burst).await?;
                 }
                 _ = due => next_due = self.sweep().await,
-                _ = sweep_tick.tick() => {
-                    self.reapply(true).await?;
-                    next_due = self.sweep().await;
-                }
+                _ = sweep_tick.tick() => next_due = self.sweep().await,
             }
         }
         for (peer, slot) in std::mem::take(&mut self.slots) {
@@ -776,13 +792,13 @@ impl Actor {
                 HashMap::new(),
             )
             .await?;
-        let mut link = Link {
+        let watch = self.apply(&peer, &rpc).await?;
+        let link = Link {
             conn,
             addr,
             rpc,
-            incomplete: false,
+            watch,
         };
-        link.incomplete = self.apply(&peer, &link).await?;
         self.slots.insert(peer.clone(), Slot::Connected(link));
         self.peers.send_modify(|peers| {
             peers.insert(peer.clone());
@@ -794,13 +810,16 @@ impl Actor {
     /// Asks the policy what it wants from `peer`, bounds that by what the peer may have (keyhive
     /// access, as BigRepo projects it) and sets the document worker's routes to the result.
     ///
-    /// Answers whether the access bound dropped any wanted group.
-    async fn apply(&mut self, peer: &PeerKey, link: &Link) -> Res<bool> {
+    /// Answers the wanted groups, which is what a later access delta is matched against.
+    async fn apply(
+        &mut self,
+        peer: &PeerKey,
+        rpc: &Arc<dyn WireBigSyncRpcClient>,
+    ) -> Res<HashSet<[u8; 32]>> {
         let wanted = self.policy.wanted(&self.ctx, peer).await?;
         let groups: Vec<[u8; 32]> = wanted.groups.iter().map(|group| group.0).collect();
         let readable = big_repo::groups_with_member(self.ctx.repo.keyhive(), peer, &groups).await?;
-        let incomplete = readable.len() < groups.len();
-        tracing::debug!(%peer, wanted_groups = groups.len(), readable = readable.len(), wanted_docs = wanted.docs.len(), incomplete, "applying peer parts");
+        tracing::debug!(local = %self.local(), %peer, wanted_groups = groups.len(), readable = readable.len(), wanted_docs = wanted.docs.len(), "applying peer parts");
         let parts = readable
             .into_iter()
             .map(|group| (big_repo::group_part_id(group), BigRepo::BACKEND_ID.into()))
@@ -812,20 +831,17 @@ impl Actor {
             .collect();
         self.watched_docs.extend(wanted.docs);
         self.docs
-            .set_peer(peer.clone(), Arc::clone(&link.rpc), parts, objects)
+            .set_peer(peer.clone(), Arc::clone(rpc), parts, objects)
             .await?;
-        Ok(incomplete)
+        Ok(groups.into_iter().collect())
     }
 
-    /// Re-asks the policy for every connected peer, or only those whose last answer was
-    /// incomplete.
-    async fn reapply(&mut self, only_incomplete: bool) -> Res<()> {
+    /// Re-asks the policy for every connected peer `touched` selects and sets its parts again.
+    async fn reapply(&mut self, touched: impl Fn(&PeerKey, &Link) -> bool) -> Res<()> {
         let peers: Vec<PeerKey> = self
             .slots
             .iter()
-            .filter(|(_, slot)| {
-                matches!(slot, Slot::Connected(link) if link.incomplete || !only_incomplete)
-            })
+            .filter(|(peer, slot)| matches!(slot, Slot::Connected(link) if touched(peer, link)))
             .map(|(peer, _)| peer.clone())
             .collect();
         for peer in peers {
@@ -834,14 +850,34 @@ impl Actor {
             let Some(Slot::Connected(mut link)) = self.slots.remove(&peer) else {
                 unreachable!("filtered as connected above");
             };
-            let applied = self.apply(&peer, &link).await;
-            if let Ok(incomplete) = applied {
-                link.incomplete = incomplete;
+            let applied = self.apply(&peer, &link.rpc).await;
+            if let Ok(watch) = &applied {
+                link.watch.clone_from(watch);
             }
             self.slots.insert(peer, Slot::Connected(link));
             applied?;
         }
         Ok(())
+    }
+
+    /// Keyhive access deltas (each the closure of one subject, as it now is) recompute the parts
+    /// of the connected peers they can change. A document subject is a drawer or a document: it
+    /// matters to a peer that wanted it as a group, or that is in its closure. A group subject
+    /// can sit anywhere in a membership chain, so every peer is recomputed.
+    async fn access_changed(&mut self, deltas: &[KeyhiveAccessDelta]) -> Res<()> {
+        self.reapply(|peer, link| {
+            deltas.iter().any(|delta| match delta.subject {
+                AccessSubject::Group(_) => true,
+                AccessSubject::Document(id) => {
+                    link.watch.contains(&id.to_bytes())
+                        || delta
+                            .agents
+                            .keys()
+                            .any(|agent| PeerKey::new(agent.to_bytes()) == *peer)
+                }
+            })
+        })
+        .await
     }
 
     async fn unregister(&mut self, peer: &PeerKey) -> Res<()> {
@@ -903,7 +939,7 @@ impl Actor {
                     doc: obj_id,
                 });
                 if descriptor_arrived {
-                    self.reapply(false).await?;
+                    self.reapply(|_, _| true).await?;
                 }
             }
             Ok(SyncStatEvent::PeerPartFullySynced { peer_id, part_id }) => {

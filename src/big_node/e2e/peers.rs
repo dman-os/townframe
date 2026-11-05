@@ -215,3 +215,100 @@ async fn default_policy_replicates_mirrored_drawers_only() {
     shutdown(reader, reader_stop).await;
     shutdown(owner, owner_stop).await;
 }
+
+/// Wants whatever the test last set, from every peer, and dials nobody. Wanting the groups
+/// directly (rather than through the mirror intent) means they are known before keyhive has
+/// admitted anyone into them, which is the window the access stream closes.
+struct Scripted {
+    wanted: std::sync::Mutex<big_cabinet::drawer::Mirrored>,
+    changes: tokio::sync::watch::Sender<u64>,
+}
+
+#[async_trait::async_trait]
+impl crate::peers::PeerPolicy for Scripted {
+    async fn dial(&self, _node: &crate::peers::PolicyContext) -> Vec<iroh::EndpointAddr> {
+        Vec::new()
+    }
+
+    async fn accept(&self, _node: &crate::peers::PolicyContext, _peer: &PeerKey) -> bool {
+        true
+    }
+
+    async fn wanted(
+        &self,
+        _node: &crate::peers::PolicyContext,
+        _peer: &PeerKey,
+    ) -> utils_rs::prelude::Res<big_cabinet::drawer::Mirrored> {
+        Ok(self.wanted.lock().unwrap().clone())
+    }
+
+    fn changes(&self, _node: &crate::peers::PolicyContext) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+}
+
+/// A grant that lands after the connection is acted on when keyhive admits it. The reader already
+/// wants the drawer's groups but the owner is not yet a member of them in the reader's keyhive;
+/// the sweep is set to an hour, so the only thing that can make the reader subscribe to the
+/// groups once the grant is admitted is the access stream. Before it was consumed this waited
+/// for the sweep tick.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_after_connecting_replicates_without_waiting_for_a_sweep() {
+    utils_rs::testing::setup_tracing_once();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let scripted = Arc::new(Scripted {
+        wanted: Default::default(),
+        changes: tokio::sync::watch::channel(0).0,
+    });
+    let (owner, owner_stop) = node(
+        163,
+        secrets().await,
+        &runtime,
+        PeersConfig {
+            loopback_only: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let (reader, reader_stop) = node(
+        164,
+        secrets().await,
+        &runtime,
+        PeersConfig {
+            loopback_only: true,
+            policy: crate::peers::PolicyChoice::Custom(Arc::clone(&scripted) as _),
+            sweep_interval: std::time::Duration::from_secs(3600),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let owner_key = owner.repo.local_peer_id();
+    let mut events = reader.peers.as_ref().unwrap().subscribe();
+    let link = network::link(&owner, &reader).await;
+    link.sync_keyhive(&owner, &reader).await;
+
+    let drawer = collection(&owner, "granted-late").await;
+    let doc = create_in(&owner, &drawer, "doc-in-granted-late", "granted late").await;
+    remember(&owner, &drawer, true).await;
+    let mut wanted = owner
+        .drawers
+        .mirrored(&RequestContext::root())
+        .await
+        .unwrap();
+    assert!(!wanted.groups.is_empty());
+    // Only the groups: a wanted document arriving also re-applies the parts, which would stand
+    // in for the access stream.
+    wanted.docs.clear();
+    *scripted.wanted.lock().unwrap() = wanted;
+    scripted.changes.send_modify(|revision| *revision += 1);
+
+    invite(&owner, &reader, &drawer, Access::Read).await;
+    link.sync_keyhive(&owner, &reader).await;
+
+    doc_synced(&mut events, &owner_key, &doc).await;
+    assert!(reader.repo.contains_sedimentree_id(doc).await.unwrap());
+
+    shutdown(reader, reader_stop).await;
+    shutdown(owner, owner_stop).await;
+}

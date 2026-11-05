@@ -167,6 +167,8 @@ struct Attachments {
     peers: Option<peers::PeersConfig>,
     /// The key the peers service's endpoint is built from: the node's keyhive identity.
     identity: [u8; 32],
+    /// The repo's scope key, which namespaces the peers service's cursors in the shared database.
+    scope_key: Arc<str>,
 }
 
 impl Attachments {
@@ -175,6 +177,7 @@ impl Attachments {
             listeners: config.listeners.clone(),
             peers: config.peers.clone(),
             identity: config.repo.node_identity_seed,
+            scope_key: Arc::clone(&config.repo.scope_key),
         }
     }
 }
@@ -188,7 +191,16 @@ impl BigNode {
         stop.stages.push(self.register_built_ins());
         self.listeners = attach_listeners(self, attachments.listeners, stop).await?;
         if let Some(config) = attachments.peers {
-            self.peers = Some(attach_peers(self, config, attachments.identity, stop).await?);
+            self.peers = Some(
+                attach_peers(
+                    self,
+                    config,
+                    attachments.identity,
+                    &attachments.scope_key,
+                    stop,
+                )
+                .await?,
+            );
         }
         Ok(())
     }
@@ -505,11 +517,13 @@ async fn attach_peers(
     node: &BigNode,
     config: peers::PeersConfig,
     identity: [u8; 32],
+    scope_key: &str,
     stop: &mut StopToken,
 ) -> Res<peers::Peers> {
     let (peers, peers_stop) = peers::boot(
         peers::Node {
             repo: &node.repo,
+            scope_key,
             drawers: &node.drawers,
             blobs: &node.blobs,
             blob_workers: &node.blob_workers,

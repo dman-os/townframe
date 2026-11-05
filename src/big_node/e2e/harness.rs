@@ -173,8 +173,7 @@ impl Cluster {
         cfg.repo.scope_key = member.nickname.into();
         cfg.peers = Some(PeersConfig {
             loopback_only: true,
-            // BigRepo has no keyhive-change signal, so an incomplete access answer is re-asked
-            // on this tick (see the N4 notes); it is a product timer, not a test sleep.
+            // Only re-reads the dial targets; a peer's parts follow keyhive access changes.
             sweep_interval: std::time::Duration::from_millis(200),
             ..Default::default()
         });
