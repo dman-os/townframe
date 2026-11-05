@@ -650,9 +650,19 @@ impl WasmPackage {
     }
 
     pub async fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, String> {
+        let started = std::time::Instant::now();
         let engine = engine()?;
+        eprintln!("INSTR wasm engine ready in {:?}", started.elapsed());
+        let compile_started = std::time::Instant::now();
         let component = compile_component(&engine, bytes.as_ref())?;
+        eprintln!(
+            "INSTR wasm compile_component {} bytes in {:?} (cache path: {:?})",
+            bytes.as_ref().len(),
+            compile_started.elapsed(),
+            cache_path(&engine, bytes.as_ref()).map(|path| path.exists()),
+        );
         let linker = linker(&engine)?;
+        eprintln!("INSTR wasm package ready in {:?}", started.elapsed());
         Ok(Self {
             engine,
             component,
@@ -684,11 +694,16 @@ impl WasmPackage {
         store
             .set_fuel(fuel_per_call.load(Ordering::Relaxed))
             .unwrap();
+        let instantiate_started = std::time::Instant::now();
         let client = MicroClient::instantiate_async(&mut store, &self.component, &self.linker)
             .await
             .map_err(|error| {
                 ActivationError::Initialization(format!("instantiating Wasm component: {error:#}"))
             })?;
+        eprintln!(
+            "INSTR wasm instantiate_async in {:?}",
+            instantiate_started.elapsed()
+        );
         Ok((
             WasmIncarnation {
                 store,
