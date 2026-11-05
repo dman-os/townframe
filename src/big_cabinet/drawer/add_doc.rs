@@ -200,10 +200,12 @@ impl DrawerService {
         };
         core.authorize(context, &caller.authority, &params.drawer_id, needed)
             .await?;
-        // Granting the docs group on a doc gives away what the caller holds on it: the caller
-        // must itself reach the doc at the level it confers, through whatever path carries it.
+        // Granting the docs group on a doc gives away what the caller holds on it: the `reach`
+        // handle must itself reach the doc at the level it confers, through whatever path carries
+        // it. It may be a handle lent by whoever asked for the entry, not the drawer's own.
+        let reach = core.invocation(context, params.reach).await?;
         if core
-            .doc_level(context, &caller.authority, &params.doc_id)
+            .doc_level(context, &reach.authority, &params.doc_id)
             .await?
             < Some(params.access)
         {
@@ -249,6 +251,7 @@ mod tests {
         {
             let request = AddDoc {
                 capability: CapId::default(),
+                reach: CapId::default(),
                 command: CommandId::try_from("add-1".to_owned()).unwrap(),
                 drawer_id: DocId::new([1; 32]),
                 doc_id: DocId::new([2; 32]),
@@ -259,6 +262,7 @@ mod tests {
                 value,
                 json!({
                     "capability": "00000000-0000-0000-0000-000000000000",
+                    "reach": "00000000-0000-0000-0000-000000000000",
                     "command": "add-1",
                     "drawerId": DocId::new([1; 32]).to_string(),
                     "docId": DocId::new([2; 32]).to_string(),
@@ -280,6 +284,7 @@ mod tests {
     fn an_unknown_access_level_is_refused() {
         let error = serde_json::from_value::<AddDoc>(json!({
             "capability": "00000000-0000-0000-0000-000000000000",
+            "reach": "00000000-0000-0000-0000-000000000000",
             "command": "add-1",
             "drawerId": DocId::new([1; 32]).to_string(),
             "docId": DocId::new([2; 32]).to_string(),

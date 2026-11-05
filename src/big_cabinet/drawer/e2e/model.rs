@@ -32,6 +32,7 @@ impl RecordedCommand {
         match self.clone() {
             Self::AddDoc(mut req) => {
                 req.capability = capability;
+                req.reach = capability;
                 node.drawers()
                     .call(RequestContext::root(), req)
                     .await
@@ -524,6 +525,7 @@ impl ScriptRun {
             } => {
                 let recorded = RecordedCommand::AddDoc(AddDoc {
                     capability,
+                    reach: capability,
                     command,
                     drawer_id: self.model.drawers[drawer].clone(),
                     doc_id: self.model.docs[doc].clone(),
@@ -571,6 +573,7 @@ impl ScriptRun {
                 };
                 let recorded = RecordedCommand::AddDoc(AddDoc {
                     capability,
+                    reach: capability,
                     command,
                     drawer_id: self.model.drawers[drawer].clone(),
                     doc_id: self.model.docs[doc].clone(),

@@ -175,6 +175,9 @@ pub(crate) struct Projection {
     pub(crate) capabilities: DomainCapabilities,
     pub(crate) grants: Arc<Grants>,
     pub(crate) actor: Actor,
+    /// The authority's root identity, the node operator (ADR 032 section 5). It holds no
+    /// standing grants and needs none: see [`Projection::granted`].
+    pub(crate) operator: Uuid7,
     pub(crate) state: State,
     pub(crate) datum_set: Arc<crate::index::DatumSetStore>,
     pub(crate) ledger: Ledger,
@@ -479,6 +482,20 @@ impl Projection {
         actor: Uuid7,
         bounds: BTreeMap<DrawerId, state::Reach>,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
+        // The operator is the cabinet's superuser: it holds Admin on every drawer this node
+        // projects without a standing grant, so what it reaches is what Admin on each bounding
+        // drawer reaches (a doc at the level it is entered, a drawer through its links). That is
+        // what lets the operator turn its own standing into a handle on a drawer that synced in
+        // from a peer, where no local grant exists for anyone. Its proof is the identity
+        // capability it presents, which every minted handle already depends on, so there is no
+        // grant to cite here.
+        if actor == self.operator {
+            return Ok(bounds
+                .values()
+                .filter_map(|bound| bound.apply(Access::Admin))
+                .max()
+                .map(|access| (access, Vec::new())));
+        }
         let candidates: Vec<_> = bounds
             .iter()
             .flat_map(|(drawer, bound)| {
@@ -637,6 +654,9 @@ impl Core {
         authority: &DomainAuthority<DrawerScope>,
     ) -> Result<Vec<CapId>, DrawersError> {
         match authority {
+            // The operator creates drawers without a grant, as it reaches every drawer without
+            // one (see `Projection::granted`).
+            DomainAuthority::Identity(actor) if *actor == self.operator => Ok(Vec::new()),
             DomainAuthority::Identity(actor) => {
                 let proof = self
                     .grants

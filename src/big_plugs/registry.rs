@@ -40,9 +40,7 @@ use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumsRead;
-use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsProtocol;
-use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
@@ -438,10 +436,9 @@ enum Command {
 }
 
 /// What importing an existing document needs: the drawers service, and the registry actor whose
-/// identity enters the document in the registry drawer and reads it first. The actor is Admin on
-/// the registry drawer, but it reaches only the documents the operator has made reachable to it,
-/// which is what bounds an import: a publish handle cannot pull in a document the registry
-/// itself could not read.
+/// identity enters the document in the registry drawer. The actor is Admin on the registry drawer
+/// and holds nothing anywhere else: the document itself is reached only through the handles the
+/// caller lends for the import, which is what bounds it.
 pub(crate) struct DocImport {
     pub(crate) authority: Client<AuthorityProtocol>,
     pub(crate) drawers: Client<DrawersProtocol>,
@@ -764,14 +761,16 @@ impl Registry {
             .map_err(|error| PlugsError::AuthorityUnavailable(error.to_string()))
     }
 
-    /// Enters an existing document in the registry drawer, after checking that it is a plug
-    /// document and that `permitted` accepts its plug id. The version contents are not looked at:
-    /// the follower folds the document like any other that arrives in the drawer, which is where
-    /// each version's signature is verified. Returns once the registry serves the document.
+    /// Enters an existing document in the registry drawer at Read, after checking through the
+    /// caller's `read` handle that it is a plug document and that `permitted` accepts its plug id.
+    /// The version contents are not looked at: the follower folds the document like any other that
+    /// arrives in the drawer, which is where each version's signature is verified. Returns once the
+    /// registry serves the document.
     pub(crate) async fn import_document(
         &self,
         doc: &DocId,
-        source_drawer: &DrawerId,
+        read: CapId,
+        reach: CapId,
         permitted: impl Fn(&PlugId) -> Result<(), PlugsError>,
     ) -> Result<PlugRecord, PlugsError> {
         let _gate = self
@@ -779,25 +778,7 @@ impl Registry {
             .acquire()
             .await
             .expect("the registry's gate is never closed");
-        let read_capability = self
-            .docs
-            .call_with(
-                RequestContext::root(),
-                Authorization::identity(self.import.actor).metadata(),
-                MintDocCapability {
-                    scope: DocScope {
-                        read: [doc.clone()].into(),
-                        ..DocScope::default()
-                    },
-                    rights: Rights::USE,
-                },
-            )
-            .await
-            .map_err(docs_error)?
-            .capability_id;
-        let read = read_doc(&self.docs, read_capability, doc).await;
-        self.retract(read_capability).await?;
-        let read = read?;
+        let read = read_doc(&self.docs, read, doc).await?;
         let Some(DatumRead::Accepted { value, .. }) = read.datums.get(&identity_key()) else {
             return Err(PlugsError::Rejected(format!(
                 "document {doc} has no readable plug identity datum"
@@ -809,9 +790,9 @@ impl Registry {
             })?
             .id;
         permitted(&id)?;
-        // The handle covers the registry drawer and the document's own drawer, which is what
-        // lets the drawers service see the registry actor reach the document at the level it
-        // confers. It lives for this one call.
+        // The registry's own handle covers only its own drawer, where it is Admin. What the entry
+        // gives away on the document is covered by the caller's `reach`, so the registry never
+        // needs standing access to the drawer the document came from. It lives for this one call.
         let entry = self
             .import
             .drawers
@@ -820,10 +801,7 @@ impl Registry {
                 Authorization::identity(self.import.actor).metadata(),
                 MintDrawerCapability {
                     scope: DrawerScope {
-                        drawers: BTreeMap::from([
-                            (self.drawer.clone(), DrawerAccess::Write),
-                            (source_drawer.clone(), DrawerAccess::Write),
-                        ]),
+                        drawers: BTreeMap::from([(self.drawer.clone(), DrawerAccess::Write)]),
                         create: false,
                     },
                     rights: Rights::USE,
@@ -839,13 +817,16 @@ impl Registry {
                 RequestContext::root(),
                 AddDoc {
                     capability: entry,
+                    reach,
                     // Entering a document is idempotent, so a fresh command per call costs
                     // nothing and never replays a stale ledger answer.
                     command: CommandId::try_from(format!("plug registry import {}", Uuid7::new()))
                         .expect("an import command is within bounds"),
                     drawer_id: self.drawer.clone(),
                     doc_id: doc.clone(),
-                    access: DrawerAccess::Write,
+                    // Read is all the registry needs to serve the document, and the author's
+                    // document is not the registry's to write: see `ImportPlugDocument`.
+                    access: DrawerAccess::Read,
                 },
             )
             .await

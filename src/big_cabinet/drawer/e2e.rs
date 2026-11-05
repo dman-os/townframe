@@ -231,6 +231,7 @@ impl Node {
             self.authority.client.clone(),
             self.drawers_actor.capability,
             self.drawers_namespace,
+            self.authority.service.operator_uuid(),
             self.sql.clone(),
             Arc::clone(&self.datum_set),
         )
@@ -640,11 +641,13 @@ impl Node {
                 scope.drawers.insert(root.clone(), access);
             }
         }
+        let capability = self.mint_drawer(actor, scope).await?;
         self.drawers()
             .call(
                 RequestContext::root(),
                 AddDoc {
-                    capability: self.mint_drawer(actor, scope).await?,
+                    capability,
+                    reach: capability,
                     command: command(name),
                     drawer_id: drawer.clone(),
                     doc_id: doc.clone(),

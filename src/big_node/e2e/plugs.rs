@@ -1197,63 +1197,83 @@ async fn author_document(node: &BigNode, command: &str, id: &str, versions: &[Pl
         .doc_id
 }
 
-/// Lets the registry's own actor reach documents in the node's local drawer, which is what an
-/// import of a document made there requires.
-async fn make_reachable_to_the_registry(node: &BigNode) {
+/// Installs the plug document `doc_id`, found in `drawer`, into the registry as `authorization`
+/// asks. The operator lends the registry the two handles the import needs, one to read the
+/// document and one reaching it through `drawer`, and retracts them once the call returns: the
+/// registry keeps no standing access to `drawer`. The operator reaches every drawer without a
+/// grant, including one that synced in from a peer.
+pub(super) async fn import_document(
+    node: &BigNode,
+    authorization: Authorization,
+    drawer: &DocId,
+    doc_id: &DocId,
+) -> Result<big_plugs_core::protocol::PlugRecord, PlugsError> {
+    use big_cabinet_core::authority::RetractCapability;
     use big_cabinet_core::drawer::DrawerAccess;
     use big_cabinet_core::drawer::protocol::DrawerScope;
-    use big_cabinet_core::drawer::protocol::GrantDrawer;
     use big_cabinet_core::drawer::protocol::MintDrawerCapability;
-    let drawer = node.drawers.local().present_id;
-    let cap = node
+    let read = node
+        .docs
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(node).metadata(),
+            MintDocCapability {
+                scope: DocScope {
+                    read: BTreeSet::from([doc_id.clone()]),
+                    ..DocScope::default()
+                },
+                rights: Rights::USE,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    let reach = node
         .drawers
         .client
         .call_with(
             RequestContext::root(),
-            Authorization::identity(node.drawers_actor.capability).metadata(),
+            operator(node).metadata(),
             MintDrawerCapability {
                 scope: DrawerScope {
-                    drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
+                    drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
                     create: false,
                 },
-                rights: Rights::USE | Rights::DELEGATE,
+                rights: Rights::USE,
             },
         )
         .await
-        .unwrap();
-    node.drawers
-        .client
-        .call(
-            RequestContext::root(),
-            GrantDrawer {
-                capability: cap.capability_id,
-                drawer_id: drawer,
-                subject_id: node.plugs_actor.actor_id,
-                access: DrawerAccess::Write,
-            },
-        )
-        .await
-        .unwrap();
-}
-
-async fn import_document(
-    node: &BigNode,
-    authorization: Authorization,
-    doc_id: &DocId,
-) -> Result<big_plugs_core::protocol::PlugRecord, PlugsError> {
-    let source_drawer = node.drawers.local().present_id;
-    node.plugs
+        .unwrap()
+        .capability_id;
+    let imported = node
+        .plugs
         .client
         .call_with(
             RequestContext::root(),
             authorization.metadata(),
             ImportPlugDocument {
                 doc_id: doc_id.clone(),
-                source_drawer,
+                read,
+                reach,
             },
         )
         .await
-        .map_err(operation)
+        .map_err(operation);
+    for capability in [read, reach] {
+        node.authority
+            .client
+            .call(
+                RequestContext::root(),
+                RetractCapability {
+                    via: capability,
+                    capability,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    imported
 }
 
 #[tokio::test]
@@ -1261,7 +1281,7 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     let secrets = secrets().await;
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
-    make_reachable_to_the_registry(&node).await;
+    let present = node.drawers.local().present_id;
     let info = put(&node, b"authored handler").await;
 
     // Authored and signed by the namespace owner outside the registry.
@@ -1273,7 +1293,9 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
         std::slice::from_ref(&genuine),
     )
     .await;
-    let record = import_document(&node, operator, &doc).await.unwrap();
+    let record = import_document(&node, operator, &present, &doc)
+        .await
+        .unwrap();
     assert_eq!(record.id, plug_id("photos"));
     assert_eq!(record.doc_id, doc);
     assert_eq!(record.versions.len(), 1);
@@ -1285,8 +1307,35 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     );
     // Importing it again is a no-op.
     assert_eq!(
-        import_document(&node, operator, &doc).await.unwrap(),
+        import_document(&node, operator, &present, &doc)
+            .await
+            .unwrap(),
         record
+    );
+    // The document is the author's, entered at Read: the registry serves it and never writes it,
+    // so neither a new version nor a removal lands in it.
+    assert_eq!(
+        publish(&node, operator, photos("1.1.0", &info)).await,
+        Err(PlugsError::Denied)
+    );
+    assert_eq!(
+        node.plugs
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator.metadata(),
+                RemovePlugVersion {
+                    id: plug_id("photos"),
+                    version: "1.0.0".parse().unwrap(),
+                },
+            )
+            .await
+            .map_err(operation),
+        Err(PlugsError::Denied)
+    );
+    assert_eq!(
+        get_version(&node, PHOTOS, "1.0.0").await.unwrap().envelope,
+        genuine
     );
 
     // A tampered document: signed by another key, and one version edited after signing.
@@ -1295,7 +1344,9 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     let mut edited = sign_as_example(unsigned(other, "1.1.0", &info));
     edited.title = Some("edited after signing".into());
     let tampered = author_document(&node, "author other", other, &[forged, edited]).await;
-    let record = import_document(&node, operator, &tampered).await.unwrap();
+    let record = import_document(&node, operator, &present, &tampered)
+        .await
+        .unwrap();
     assert_eq!(record.versions.len(), 2);
     for summary in &record.versions {
         assert!(summary.unverified.is_some(), "{summary:?}");
@@ -1335,7 +1386,7 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
         doc
     };
     assert!(matches!(
-        import_document(&node, operator, &no_identity).await,
+        import_document(&node, operator, &present, &no_identity).await,
         Err(PlugsError::Rejected(_))
     ));
     let scoped = mint(
@@ -1348,7 +1399,7 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     .await;
     let outside = author_document(&node, "author scoped", PHOTOS, &[genuine]).await;
     assert!(matches!(
-        import_document(&node, scoped, &outside).await,
+        import_document(&node, scoped, &present, &outside).await,
         Err(PlugsError::NamespaceNotPermitted { .. })
     ));
     let reader = mint(
@@ -1360,7 +1411,7 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     )
     .await;
     assert_eq!(
-        import_document(&node, reader, &outside).await,
+        import_document(&node, reader, &present, &outside).await,
         Err(PlugsError::Denied)
     );
     shutdown(node, stop).await;

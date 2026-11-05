@@ -15,11 +15,11 @@ use crate::Revision;
 use crate::Version;
 use crate::signature::SignatureError;
 use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
-use big_cabinet_core::drawer::protocol::DrawerId;
 use serde::Deserialize;
 use serde::Serialize;
 use service_core_rs::ContextError;
@@ -88,20 +88,29 @@ pub struct PublishPlugVersion {
 #[serde(rename_all = "camelCase")]
 pub struct GetPublisher {}
 
-/// Adds an existing document, one an author wrote and signed elsewhere, to the registry drawer.
-/// `source_drawer` is a drawer the document is in: entering a document confers access the caller
-/// must itself hold on it, so the registry's handle is scoped to the registry drawer and the
-/// drawer the document comes from, and no wider.
+/// Installs a plug from an existing document, one an author wrote and signed elsewhere, by
+/// entering it in the registry drawer, so the registry follows it as the author publishes more.
+/// The document can be in any drawer the caller can read, including one that synced in from a
+/// peer. The registry holds no standing access to anything but its own drawer: the caller lends
+/// it two handles for this one call.
+/// - `read` is a docs-domain handle that reads `doc_id`. The registry reads the plug identity
+///   through it before anything is entered.
+/// - `reach` is a drawers-domain handle that reaches `doc_id` at Read or above. Entering the
+///   document gives the registry drawer's members Read on it, which the caller must itself hold.
+///
+/// The document is entered at Read: the registry serves an author's document and never writes
+/// it, so publishing to or removing versions of a plug whose document was installed this way is
+/// refused (`Denied`) rather than written into the author's document.
 /// The document must carry a plug identity datum. Nothing is checked here beyond that: each
 /// version in it is verified as it is folded in, exactly as for a document that synced into the
 /// drawer, so an unsigned or badly signed version is listed as unverified and never served, and
-/// no downgrade rule applies (arrival order is not version order). The registry's own actor must
-/// itself reach the document, so importing is limited to documents the operator made reachable.
+/// no downgrade rule applies (arrival order is not version order).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlugDocument {
     pub doc_id: DocId,
-    pub source_drawer: DrawerId,
+    pub read: CapId,
+    pub reach: CapId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

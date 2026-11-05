@@ -69,7 +69,7 @@ pub struct big_plugs_core::catalog::Catalog  {  }
 pub struct big_plugs_core::protocol::GetPlug  { id: PlugId }
 pub struct big_plugs_core::protocol::GetPlugVersion  { id: PlugId, version: Version }
 pub struct big_plugs_core::protocol::GetPublisher  {  }
-pub struct big_plugs_core::protocol::ImportPlugDocument  { doc_id: DocId, source_drawer: DrawerId }
+pub struct big_plugs_core::protocol::ImportPlugDocument  { doc_id: DocId, read: CapId, reach: CapId }
 pub struct big_plugs_core::protocol::ListPlugs  {  }
 pub struct big_plugs_core::protocol::MintPlugsCapability  { scope: PlugsScope, rights: Rights }
 pub struct big_plugs_core::protocol::PlugChange  { seq: u64, plug_id: PlugId, removed: bool }

@@ -426,7 +426,7 @@ impl PlugService {
         // The document's namespace is known only after it is read, so the scope is checked
         // against it by the registry once it has.
         self.registry
-            .import_document(&params.doc_id, &params.source_drawer, |id| {
+            .import_document(&params.doc_id, params.read, params.reach, |id| {
                 self.require_publish(&caller, &id.namespace)
             })
             .await

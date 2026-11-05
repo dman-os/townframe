@@ -142,10 +142,17 @@ pub struct DrawerCreated {
     pub drawer_id: DrawerId,
     pub heads: Vec<ChangeHash>,
 }
+/// Enters `doc_id` in `drawer_id`'s roster at `access`. Two authorities are checked, because
+/// two different things are given away: `capability` must hold Write on the drawer (Admin to
+/// confer Admin), and `reach` must reach the document at `access` or above, since entering it
+/// delegates that access to the drawer's members. They are separate so a service can enter a
+/// document into a drawer it owns using a handle its caller lent it for the document alone; a
+/// caller holding both passes the same handle twice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddDoc {
     pub capability: CapId,
+    pub reach: CapId,
     pub command: CommandId,
     pub drawer_id: DrawerId,
     pub doc_id: DocId,

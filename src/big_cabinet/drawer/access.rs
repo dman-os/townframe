@@ -303,12 +303,14 @@ impl DrawerAccess {
     /// `issuer` is DrawerService's own actor capability, carrying `use` and `delegate`. `sql` is
     /// the projection and ledger store; DocsRepo may share the same `Database`. `datum_set` is
     /// where drawer docs that arrived by sync are discovered: a doc carrying the drawer datum is
-    /// a drawer this node can project without anyone having remembered it.
+    /// a drawer this node can project without anyone having remembered it. `operator` is the
+    /// authority's root identity: it reaches every drawer without a standing grant.
     pub async fn open(
         big_repo: SharedBigRepo,
         authority: Client<AuthorityProtocol>,
         issuer: CapId,
         namespace: Namespace,
+        operator: Uuid7,
         sql: Database,
         datum_set: Arc<crate::index::DatumSetStore>,
     ) -> Result<(Arc<Self>, DrawerProvider, StopToken), DrawersError> {
@@ -335,6 +337,7 @@ impl DrawerAccess {
             issuer,
             namespace,
             actor,
+            operator,
             state,
             datum_set,
             ledger,

@@ -263,7 +263,7 @@ pub struct big_cabinet_core::drawer::UnknownDrawerAccess  { 0: String }
 pub struct big_cabinet_core::drawer::UnknownLayoutTag  { 0: String }
 pub struct big_cabinet_core::drawer::UnknownMetaRoot  { 0: String }
 pub struct big_cabinet_core::drawer::protocol::AddChild  { capability: CapId, command: CommandId, parent_id: DrawerId, child_id: DrawerId, access: Access }
-pub struct big_cabinet_core::drawer::protocol::AddDoc  { capability: CapId, command: CommandId, drawer_id: DrawerId, doc_id: DocId, access: Access }
+pub struct big_cabinet_core::drawer::protocol::AddDoc  { capability: CapId, reach: CapId, command: CommandId, drawer_id: DrawerId, doc_id: DocId, access: Access }
 pub struct big_cabinet_core::drawer::protocol::CreateDrawer  { capability: CapId, command: CommandId, layout: CreateLayout }
 pub struct big_cabinet_core::drawer::protocol::CreateMetaDoc  { capability: CapId, command: CommandId, drawer_id: DrawerId, kind: String, name: String, root: MetaRoot }
 pub struct big_cabinet_core::drawer::protocol::DrawerCreated  { drawer_id: DrawerId, heads: Vec < ChangeHash > }

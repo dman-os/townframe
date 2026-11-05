@@ -359,6 +359,10 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
     - Per-node footprint: a fresh node is 12 MiB of Rust heap and 73 MiB resident. Booting it takes 7 s and allocates 350 MiB.
     - Storage: a note is 1,065 B saved and 3,368 B stored. The drawer roster grows by 383 B saved per entry but about 5.8 KB stored per change. The node directory grows by 57 KB per note (WAL included).
     - Replication runs at 27 ms per note and is flat at 10 notes. Each dispatch `readDatums` takes about 25 ms on all three paths.
+- **D27. The datum gate drops ADR 020 condition 2 from the default path** (operator, 2026-11-05).
+  - Verification is: each signature verifies against X at its introducing change, and X at the combined signature heads equals X now. A new key must be absent.
+  - Hidden losing-conflict operations are not checked, because the docs service offers no way to read conflicted values. If a conflicted-values read is ever added, forgery verification belongs on that path, not the default one.
+  - This removes `Gate::footprints` (a full-history decode per write). ADR 020 needs amending.
 - **D26. Drawer keyhive architecture.** Revisit against upstream `design/keyline/patterns.md` together with the Keyline migration. Topics: supply roles at Edit rather than Admin, flat vs nested child drawers, rotating roles, the steward pattern.
 - Naming: cabinet's self-doc `LocalDrawers.registry_id` is the known-drawers list, not the plug registry. Rename to `known_drawers_id` (proposed, not decided).
 

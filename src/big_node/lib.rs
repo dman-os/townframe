@@ -243,16 +243,16 @@ impl BigNode {
             )
             .await?;
             stop.stages.push(Stage::Indexes(index_stop));
-            let (drawer_access, provider, policy_stop) = DrawerAccess::open(
-                Arc::clone(&repo),
-                authority.client.clone(),
-                drawers_actor.capability,
+            let (drawer_access, provider) = open_drawer_access(
+                &repo,
+                &authority,
+                &drawers_actor,
                 drawers_namespace,
-                config.sql.clone(),
-                Arc::clone(&indexes.datum_set),
+                &config.sql,
+                &indexes,
+                &mut stop,
             )
             .await?;
-            stop.stages.push(Stage::Service(policy_stop));
             let (docs, docs_stop) = big_cabinet::doc::prepare(DocsConfig {
                 big_repo: Arc::clone(&repo),
                 schema_repo: Arc::clone(&schemas),
@@ -463,6 +463,36 @@ async fn boot_plugs(
     .await?;
     stop.stages.push(Stage::Service(plugs_stop));
     Ok(plugs)
+}
+
+/// Opens the drawer access policy the docs service consults, as the drawers actor. The
+/// authority's root identity is handed to it as the operator, the cabinet's superuser: it reaches
+/// every drawer on this node without a standing grant, so it can lend a handle on a drawer that
+/// synced in from a peer, where no local actor holds one.
+async fn open_drawer_access(
+    repo: &SharedBigRepo,
+    authority: &Authority,
+    drawers_actor: &Actor,
+    namespace: Namespace,
+    sql: &Database,
+    indexes: &Indexes,
+    stop: &mut StopToken,
+) -> Res<(
+    Arc<DrawerAccess>,
+    big_cabinet::drawer::access::DrawerProvider,
+)> {
+    let (access, provider, policy_stop) = DrawerAccess::open(
+        Arc::clone(repo),
+        authority.client.clone(),
+        drawers_actor.capability,
+        namespace,
+        authority.service.operator_uuid(),
+        sql.clone(),
+        Arc::clone(&indexes.datum_set),
+    )
+    .await?;
+    stop.stages.push(Stage::Service(policy_stop));
+    Ok((access, provider))
 }
 
 /// Starts the drawer policy worker, recovers the documents it needs, then boots the drawers

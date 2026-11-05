@@ -519,26 +519,24 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
 }
 
 /// A plug published on one node is installed and invoked on another (ADR 032 section 9). Alice
-/// publishes the nodule's plug in her registry and lets Bob read her registry drawer; the plug
-/// document and, through Bob's mirror of the drawer's blob inventory, the handler bytes sync to
-/// Bob. Bob admits the nodule from the version the synced document carries and invokes it through
-/// his dispatch once the synced bytes make it ready.
+/// publishes the nodule's plug in her registry and invites Bob's node to her registry drawer at
+/// `access`; the plug document and, through Bob's mirror of the drawer's blob inventory, the
+/// handler bytes sync to Bob. Bob's operator installs the document into Bob's registry, lending the
+/// registry a handle on Alice's drawer it holds without any grant (the operator reaches every
+/// drawer), then admits the nodule from what Bob's registry serves and invokes it through his
+/// dispatch once the synced bytes make it ready.
 ///
-/// Bob does not import the document into his own registry (`ImportPlugDocument`): that needs his
-/// registry actor granted Alice's drawer, granting a drawer takes Admin on it, and Bob's drawers
-/// actor is refused an Admin capability on a drawer he joined from a peer (it holds no local grant
-/// there), even when Alice invited him at Admin.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_plug_published_on_one_node_is_installed_and_invoked_on_another() {
-    use super::blobs::all_datums;
+/// Installing enters Alice's document in Bob's registry drawer at Read, which Bob's node signs as
+/// a Keyhive delegation on a document it holds only through Alice's drawer: both invite levels
+/// are exercised, since Read is the lowest that can carry it.
+async fn install_a_plug_published_on_another_node(access: big_cabinet_core::drawer::DrawerAccess) {
     use super::harness::Cluster;
     use super::harness::Topology;
+    use super::plugs::import_document;
     use super::plugs::operator;
     use super::plugs::publish;
-    use big_cabinet_core::doc::DatumRead;
-    use big_cabinet_core::drawer::DrawerAccess;
     use big_plugs_core::protocol::GetPlug;
-    use big_plugs_core::registry::version_key;
+    use big_plugs_core::protocol::GetPlugVersion;
     use big_plugs_core::test_support::sign_as_example;
 
     let bytes = guest_bytes();
@@ -567,26 +565,35 @@ async fn a_plug_published_on_one_node_is_installed_and_invoked_on_another() {
         .unwrap()
         .doc_id;
     let registry = publisher.registry_drawer.clone();
-    cluster
-        .admit(alice, bob, &registry, DrawerAccess::Read)
-        .await;
+    cluster.admit(alice, bob, &registry, access).await;
     cluster.mirror_blobs(bob, &registry).await;
     cluster
         .until(async |cluster| cluster.read_note(bob, &document).await.is_some())
         .await;
 
     let node = cluster.node(bob);
-    let synced = match all_datums(node, &document)
+    let installed = import_document(node, operator(node), &registry, &document)
         .await
-        .datums
-        .remove(&version_key(&envelope.version))
-    {
-        Some(DatumRead::Accepted { value, .. }) => serde_json::from_value(value).unwrap(),
-        other => panic!("the version synced unsettled: {other:?}"),
-    };
-    assert_eq!(synced, envelope);
+        .unwrap();
+    assert_eq!(installed.id, spec.plug);
+    assert_eq!(installed.doc_id, document);
+    let served = node
+        .plugs
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(node).metadata(),
+            GetPlugVersion {
+                id: spec.plug.clone(),
+                version: envelope.version.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        .envelope;
+    assert_eq!(served, envelope);
 
-    admit(node, synced).await;
+    admit(node, served).await;
     set_enabled(node, &spec, true).await;
     // There is no signal for "reconciled" to subscribe to (see the late-bytes test above): the
     // record is looked at until the synced handler bytes have made the nodule ready.
@@ -606,4 +613,14 @@ async fn a_plug_published_on_one_node_is_installed_and_invoked_on_another() {
         json!({ "from": "bob" })
     );
     cluster.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plug_published_on_one_node_is_installed_and_invoked_on_another() {
+    install_a_plug_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Read).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plug_published_on_one_node_is_installed_by_an_admin_member_of_its_drawer() {
+    install_a_plug_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Admin).await;
 }

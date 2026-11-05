@@ -50,7 +50,7 @@ pub impl big_cabinet::doc::access::LedgerAccess::async fn open (sql : Database ,
 pub impl big_cabinet::doc::access::LedgerAccess::fn object (request : AccessRequest < '_ >) -> String
 pub impl big_cabinet::drawer::Drawers::async fn mint_drawer_capability (& self , context : & RequestContext , authorization : Authorization , drawer_id : & DrawerId , access : Access , rights : Rights ,) -> Result < Capability , DrawersError >
 pub impl big_cabinet::drawer::Drawers::fn local (& self) -> LocalDrawers
-pub impl big_cabinet::drawer::access::DrawerAccess::async fn open (big_repo : SharedBigRepo , authority : Client < AuthorityProtocol > , issuer : CapId , namespace : Namespace , sql : Database , datum_set : Arc < crate :: index :: DatumSetStore > ,) -> Result < (Arc < Self > , DrawerProvider , StopToken) , DrawersError >
+pub impl big_cabinet::drawer::access::DrawerAccess::async fn open (big_repo : SharedBigRepo , authority : Client < AuthorityProtocol > , issuer : CapId , namespace : Namespace , operator : Uuid7 , sql : Database , datum_set : Arc < crate :: index :: DatumSetStore > ,) -> Result < (Arc < Self > , DrawerProvider , StopToken) , DrawersError >
 pub impl big_cabinet::drawer::access::DrawerAccess::fn grants (& self) -> & Arc < crate :: grants :: Grants >
 pub impl big_cabinet::drawer::access::DrawerAccess::fn object (access : Access , drawer : & DrawerId) -> String
 pub impl big_cabinet::drawer::access::DrawerProvider::fn start (self , docs : Client < DocsProtocol >) -> (DrawerWorker , StopToken)

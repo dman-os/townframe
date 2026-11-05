@@ -724,6 +724,7 @@ async fn serving_requests_leaves_no_service_handles_in_the_authority() {
                     RequestContext::root(),
                     AddDoc {
                         capability: alice_edits,
+                        reach: alice_edits,
                         command: command(&format!("{name} {round}")),
                         drawer_id: shared.clone(),
                         doc_id: doc.clone(),
@@ -863,14 +864,16 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
     let known_doc = node.create_doc(&alice, &home, "known").await.unwrap();
     let foreign_doc = node.create_doc(&alice, &home, "foreign").await.unwrap();
     node.grant(&alice, &shared, &bob, Access::Read).await;
+    let capability = node
+        .drawer_capability(&alice, &[&home, &shared])
+        .await
+        .unwrap();
     node.drawers()
         .call(
             RequestContext::root(),
             AddDoc {
-                capability: node
-                    .drawer_capability(&alice, &[&home, &shared])
-                    .await
-                    .unwrap(),
+                capability,
+                reach: capability,
                 command: command("enter known"),
                 drawer_id: shared.clone(),
                 doc_id: known_doc.clone(),
