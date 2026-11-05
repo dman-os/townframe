@@ -62,20 +62,23 @@ fn view(
     let rows = use_rows(&panels);
     let snapshot = use_facet(&config);
     let mut failure = use_signal(|| None::<String>);
+    // Every state is the body of one frame (see `framed`). `Loading` is also what a released or
+    // revoked document watch reads as, so it must keep the frame's app bar (the shell's
+    // sidebar/back button): without it a compact host has no way out of the panel.
     let arrangement = match snapshot.state {
         FacetState::Loading => {
-            return rsx! { p { role: "status", "Loading layout…" } };
+            return framed(
+                rsx! { PresentationSlot { reference: nav_button } },
+                rsx! { p { role: "status", "Loading layout…" } },
+            );
         }
         // No document yet: nothing is shown (see `LayoutConfig`).
         FacetState::Absent => LayoutConfig::default(),
         FacetState::Present(arrangement) => arrangement,
     };
-    rsx! {
-        div { class: "flex flex-col gap-4",
-            AppBar {
-                title: "Layout",
-                leading: rsx! { PresentationSlot { reference: nav_button.clone() } },
-            }
+    framed(
+        rsx! { PresentationSlot { reference: nav_button } },
+        rsx! {
             div { class: "mx-4 flex flex-wrap gap-2", role: "toolbar", "aria-label": "Panels",
                 for row in rows.iter() {
                     {
@@ -135,6 +138,51 @@ fn view(
                     }
                 }
             }
+        },
+    )
+}
+
+/// The layout's frame: the app bar with `leading` (the shell's sidebar/back button), then `body`.
+/// Every state of the view goes through it, so no state leaves the panel without a way out.
+fn framed(leading: Element, body: Element) -> Element {
+    rsx! {
+        div { class: "flex flex-col gap-4",
+            AppBar { title: "Layout", leading }
+            {body}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dioxus_core::Mutation;
+    use dioxus_core::VirtualDom;
+
+    // The app bar's leading button is rendered beside the body whatever the body is, which is
+    // what keeps the `Loading layout…` state from being a dead end on a compact host.
+    #[test]
+    fn the_frame_keeps_the_leading_button_beside_a_loading_body() {
+        fn app() -> Element {
+            framed(
+                rsx! { button { "aria-label": "Open sidebar" } },
+                rsx! { p { role: "status", "Loading layout…" } },
+            )
+        }
+        let mut dom = VirtualDom::new(app);
+        let edits = dom.rebuild_to_vec().edits;
+        let attribute = |value: &str| {
+            edits.iter().any(|edit| {
+                matches!(edit, Mutation::SetAttribute { value: dioxus_core::AttributeValue::Text(text), .. } if text == value)
+            })
+        };
+        let text = |value: &str| {
+            edits
+                .iter()
+                .any(|edit| matches!(edit, Mutation::CreateText { value: text } if text == value))
+        };
+        assert!(attribute("Open sidebar"), "{edits:?}");
+        assert!(text("Loading layout…"), "{edits:?}");
+        assert!(text("Layout"), "the app bar's title: {edits:?}");
     }
 }

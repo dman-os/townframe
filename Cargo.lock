@@ -9412,6 +9412,7 @@ dependencies = [
  "clay_dioxus_kit",
  "clay_mdk",
  "dioxus",
+ "dioxus-core",
  "micro_layout_manifest",
 ]
 
