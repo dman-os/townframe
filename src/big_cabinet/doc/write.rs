@@ -157,7 +157,10 @@ impl DocsService {
                 Ok(sorted(doc.get_heads()))
             })
             .await
-            .map_err(|error| Failure::Ambiguous(repository(error)))?;
+            .map_err(|error| match commit_refusal(&error) {
+                Some(denied) => Failure::Refused(denied),
+                None => Failure::Ambiguous(repository(error)),
+            })?;
         tracing::debug!(?instr_handle, ?instr_staged, ?instr_signed, committed = ?instr_start.elapsed(), "INSTR commit_write timing"); // INSTR
         Ok(committed?)
     }

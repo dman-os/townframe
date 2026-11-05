@@ -686,24 +686,17 @@ where
                 ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
-            let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
-            let local_write = access.is_some_and(|access| access.is_editor());
-            // Public-member path: a doc that grants editor access to the
-            // well-known Public agent may be written by anyone (the writer
-            // encrypts through Public's well-known keys).
-            let public_ident = keyhive_core::principal::public::Public.id();
-            let public_access = self.keyhive.agent_access_on(&public_ident, doc_ident).await;
-            let public_write = public_access.is_some_and(|access| access.is_editor());
+            // Own editor access, or the Public-member path: a doc that grants
+            // editor access to the well-known Public agent may be written by
+            // anyone (the writer encrypts through Public's well-known keys).
+            let writable = self.keyhive.can_write(&local_ident, doc_ident).await;
             tracing::debug!(
                 %doc_id,
                 local_peer_id = %self.local_peer_id,
-                local_access = ?access,
-                public_access = ?public_access,
-                local_write,
-                public_write,
+                writable,
                 "document write-access probe"
             );
-            Ok(local_write || public_write)
+            Ok(writable)
         })
     }
 

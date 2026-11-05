@@ -149,6 +149,20 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
     assert_eq!(owner.read_note(&alice, &doc).await.unwrap(), expected);
     assert_eq!(reader.read_note(&bob, &doc).await.unwrap(), expected);
 
+    // A cabinet grant can exceed this node's keyhive standing: the reader holds only keyhive
+    // Read on the shared drawer, so keyhive refuses the commit a Write grant authorizes. That
+    // refusal is the caller's write denied, not a repository fault. The second attempt runs
+    // on the handle re-acquired after the first rejection broke the bundle.
+    let dave = reader.actor("dave").await;
+    reader.provision(&dave, &drawer, Access::Write).await;
+    for _ in 0..2 {
+        assert_eq!(
+            reader.write_note(&dave, &doc, "beyond keyhive Read").await,
+            Err(DocsError::Denied)
+        );
+    }
+    assert_eq!(reader.read_note(&bob, &doc).await.unwrap(), expected);
+
     drop(observations);
     drop(mirror);
     drop(peers);

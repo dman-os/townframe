@@ -110,9 +110,19 @@ impl DocsService {
                 Err(error)
             }
             (None, Ok(Err(error))) => Err(error),
-            // Persistence failed after the merge may have been applied in memory: the row stays
-            // for the boot pass, which reads the outcome off the target.
-            (_, Err(error)) => Err(repository(error)),
+            (command, Err(error)) => match commit_refusal(&error) {
+                // Keyhive refused the commit for this node's standing: nothing persisted, so
+                // the command is settled as refused rather than left for the boot pass.
+                Some(denied) => {
+                    if let Some(command) = command {
+                        self.commands.discard(command).await?;
+                    }
+                    Err(denied)
+                }
+                // Persistence failed after the merge may have been applied in memory: the row
+                // stays for the boot pass, which reads the outcome off the target.
+                None => Err(repository(error)),
+            },
         }
     }
 }

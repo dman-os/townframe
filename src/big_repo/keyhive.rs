@@ -569,6 +569,19 @@ impl BigKeyhiveHandle {
         None
     }
 
+    /// Whether `agent` may commit to `document`: editor access of its own (direct or through
+    /// groups), or editor access granted to the well-known Public agent, which anyone may write
+    /// through by encrypting with Public's well-known keys. This is the predicate the doc
+    /// worker's commit gate enforces, so a caller that asks first gets the gate's answer.
+    pub async fn can_write(&self, agent: &Identifier, document: Identifier) -> bool {
+        let editor = |access: Option<Access>| access.is_some_and(|access| access.is_editor());
+        editor(self.agent_access_on(agent, document).await)
+            || editor(
+                self.agent_access_on(&keyhive_core::principal::public::Public.id(), document)
+                    .await,
+            )
+    }
+
     /// What [`Access`] `agent` holds on this doc/group through its own delegation, ignoring
     /// whatever it reaches through the groups it is a member of. None if it is not a member.
     pub async fn direct_access_on(
@@ -699,16 +712,6 @@ impl BigKeyhiveHandle {
                     .then_some(group_id.to_bytes())
             })
             .collect())
-    }
-
-    /// Whether `doc_id` is shaped like a Keyhive document id (an Ed25519
-    /// verifying key). The shape is not a classifier: blake3-derived object ids
-    /// pass it about half the time. Only the frontier worker's test-only scope
-    /// assertion uses this — the document/derived scope boundary, not id shape,
-    /// is what keeps non-documents out of the frontier source.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn is_valid_keyhive_document_id(doc_id: DocumentId) -> bool {
-        keyhive_doc_id(doc_id).is_ok()
     }
 
     pub(crate) async fn current_cgka_ops_count(&self, doc_id: DocumentId) -> Res<usize> {
