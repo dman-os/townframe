@@ -198,6 +198,80 @@ Product questions: going home from the sidebar: push or reset? Persist the stack
 be reachable beside the layout (a sheet)? Should a hidden wide sidebar persist across restarts
 (it is device-local state today)?
 
+## S6 notes (2026-11-05): `nested or concurrent __wasilibc_task_hook Start` on `wcmp` (Bombadil finding 2)
+
+- **Root cause.** The MDK's task hook assumed a guest instance never has two tasks holding a stack at once (one static
+  stack, "a held stack means two tasks are running at once, which the component model never does"). That is false for a
+  callback task suspended in the *middle* of its callback: a blocking built-in (a synchronous `subtask.cancel` of a host
+  import, `thread.yield`, `waitable-set.wait`) parks the task's thread with its frames on its stack, no hook fires, and the
+  component model lets a synchronous-typed export ignore the instance's entry gate, so the engine runs the host's next
+  sync entry meanwhile. In the layout this is: the viewer hides the sample panel, the layout drops the futures awaiting the
+  panel (`subtask.cancel` of a host import, which `wcmp` can only finish on the next turn that polls host tasks, so the
+  built-in blocks), and the host's document delivery (`call_changed`) is already waiting; it starts inside the blocked
+  task's turn, finds the stack held, panics, and the incarnation is withdrawn ("Component withdrawn.").
+- **Engine difference.** `wcmp` admits the sync export (documented in `call_concurrent.rs`: "a synchronous export's task
+  ignores the entry gate ... inside the first's nested turn when the first blocks"). Wasmtime 50 answers `Pending` on
+  the first poll of the same call (confirmed by a probe: `call_mount` returns "suspended on its first poll" while a
+  relay task waits in `waitable-set.wait`), and Wasmtime's host-import cancel does not block at all, so the overlap never
+  occurs there. So the bug is in `clay_mdk`'s hook (a wrong invariant), not in the `wcmp` fork or the driver; the fork
+  behaves as its documentation says. The driver's `first_poll` is unrelated (S4 already ruled out the S5 ring).
+- **Evidence.** (1) The flake is a race: the S4 scenario failed 1 in 6 serial runs and 15 of 48 under 8-way load; paused
+  clock never (0 of 40), because the race is host task interleaving. (2) The failure vanished from every build that
+  touched the hook's code or statics (a 12-entry ring, a stack canary): 0 of 190; so instrumentation had to be host-side.
+  (3) Host-side ring of every `context.get/set` plus the origin (source line) of every blocking built-in, in the fork
+  (branch `s6-hook-trace`, commit `b0dffa8`, instrumentation only): the failing START of thread T1.35 comes right after
+  thread T0.3 resumed (`prev_context_0` was its parked state), ran, and stopped mid-execution with its stack pointer deep
+  in the init stack (1047888, not back at 1048576) at a `try_block` whose origin is `executor/cancel.rs:186`
+  (`subtask.cancel`); no BLOCK/FINISH hook for T0.3 follows; the host's realloc tasks (T2.10-16) and T1.35's START do.
+- **Fix** (`clay_mdk`): `task_stacks.rs` hands the static stack to the first task and a heap-allocated 512 KiB stack
+  (16 at most, crash beyond) to any task that starts while it is held; freed by the stack pointer the finishing task
+  carries (an unknown one crashes). wit-bindgen's per-task state moves from the single `CURRENT` pointer to a cell beside
+  each stack (found from the address of a local in `get/set_task_context`), because with two live tasks one pointer cannot
+  be right and no hook fires for the mid-callback park. BLOCK/RESUME still park the state in context slot 0. Rejected:
+  context slot 1 for the state (the toolchain's `wasmparser` accepts only `context.get/set 0`: "immediate must be zero").
+- **Regression coverage.** The desktop scenario `e2e::layout::hiding_a_native_panel_leaves_the_layout_mounted` (wcmp over
+  Wasmi, six hide/show rounds): 11 of 12 runs fail without the fix under 4-way load, 0 of 48 with it under 8-way load. It
+  is not deterministic and a paused clock does not make it so (the clock is not what varies), so it is the scenario and
+  not the gate; the hook's side is pinned deterministically by the unit tests of `task_stacks` (overlapping tasks get
+  distinct stacks, per-stack state, refusal of unknown stacks). A deterministic engine-level scenario (a fixture whose call
+  blocks in `waitable-set.wait` while the host mounts) failed without the fix on both engines with exactly this panic, but
+  I could not make it complete with the fix on `wcmp` (the blocked task never resumes after the gate opens, with or
+  without the mount: a separate `wcmp` question, see Open) and Wasmtime refuses the sync entry by design, so it was dropped.
+- **Bombadil, and why the CI step stays non-blocking.** Local runs after the fix: `e2e:all` green once, then 4 full Bombadil
+  runs (2 widths each): 3 green, 1 red; a 420-only loop: red on its 2nd run; the same 420-only loop at `HEAD` (hook unfixed) was red 2 of 8,
+  one being the new Finding 3 below and one the sample's greeting panic below. So the fault Finding 2 describes is gone
+  but a different violation remains at the same rate, and flipping the step to blocking would make CI flaky. Left as the
+  brief's last item undone on purpose.
+
+### Finding 3 (open): the layout shows no controls for a moment after a panel is hidden at 420 px
+
+`navigationAlwaysReachable` is violated about 200 ms after a click on "Hide Sample micro panel" or "Hide Counter (Wasm)
+panel" at a phone width: frame `lists: [Layout]`, `navigation: []`, `clickablePoints: []` (not even the toggles), no console
+error, no guest panic, and the screenshot of the next state shows the layout intact. It reproduces at `HEAD` (before the
+hook fix) at the same rate, so it is not the hook. Evidence: Bombadil traces (the property text and frame above); the
+desktop scenario with an assertion that the layout's `Panels` toolbar is present in every DOM render between the click and
+the panel's removal (Wasmi, wide) did not see it, so the transient is specific to the browser engine/timing or the
+compact layout. Hypothesis (unverified): the layout's `view` returns a bare `Loading layout…` without its app bar when the
+arrangement facet reads `Loading`, and a write makes the facet read `Loading` for a moment (`FacetState::Loading` is also
+what a released or revoked mirror reports); the Finding 1 fix (always give a placeholder its app bar) was applied to
+`PresentationSlot` placeholders and not to this guest's own Loading branch. Next step: capture the guest's states with a
+Bombadil `--reproduce` of a saved trace, or instrument `micro_layout::view` to log the facet state per render.
+
+### Finding 4 (fixed): the sample's greeting field panicked on a multi-byte character
+
+Bombadil, typing `🀃|Ä0RｒbE…` into the sample detail's Greeting field (browser build): `micro_sample/view.rs:65` did
+`String::truncate(120)` at a byte offset inside a character, which panics (`is_char_boundary`), failing
+`noConsoleErrors`. The clamp is now by characters (`clamp_greeting`, limit 120) with a unit test (a string whose byte 120
+is inside a four-byte character; fails with the old code).
+
+### Open (S6)
+
+- `wcmp`: a callback task parked in `waitable-set.wait` (via `wit_bindgen::block_on`) or `thread.yield` (blocking) on the
+  Wasmi provider did not resume after the host released what it waited for, in a lifecycle-conformance probe (not
+  committed). Unexplained; not needed by anything in the app today.
+- `e2e::home_to_settings_to_a_section_and_back_at_a_compact_width` fails at `HEAD` and with this change alike (a Blitz
+  panic `blitz-dom ... form.rs:38 invalid SlotMap key`). Not caused by S6; not diagnosed here.
+
 ## S5 notes (2026-11-05): the 30 s layout stall on `wcmp`
 
 - **Root cause.** The C7c doorbell works, but under `wcmp` nothing ticked the store after it rang. A guest task spawned from a
@@ -220,8 +294,7 @@ be reachable beside the layout (a sheet)? Should a hidden wide sidebar persist a
 ## S4 notes (2026-11-05): Bombadil on the web build
 
 **Decision: keep.** It earned its place on the first day: two real faults in the shell stack that the scripted Playwright flows
-had not walked into, found in minutes, with a repro trace each. It is wired in non-blocking (see "Open") until the second fault is
-fixed.
+had not walked into, found in minutes, with a repro trace each. It is wired in non-blocking; the second fault was fixed in S6 but a third (transient) violation remains.
 
 - **What it is.** Bombadil 0.7.10 (Antithesis, MIT, Rust) explores a page by clicking, typing, scrolling, reloading and going
   back, and checks temporal-logic properties (`always`, `eventually(...).within(...)`, `next`) over the states it reaches. The
@@ -263,7 +336,7 @@ an app bar with the panel's title and the button. Rejected: a Dioxus context for
 such as the layout's own, would each draw a second app bar); asking the micro (it is the absent party). Regression:
 `e2e/shell.spec.ts` "a panel that is unavailable still offers the way back or the sidebar" fails without the fix.
 
-### Finding 2 (open): hiding a native panel in the Wasm layout takes the whole layout down on `wcmp`
+### Finding 2 (fixed in S6): hiding a native panel in the Wasm layout takes the whole layout down on `wcmp`
 
 Repro in the browser: enable the layout in Settings, open Layout, "Show Sample micro panel", then "Hide Sample micro panel": the
 layout's region becomes "Component withdrawn." and stays. Bombadil reached it on about one run in four (it needs the lifecycle toggle,
@@ -290,12 +363,12 @@ Evidence so far:
 Bombadil is one dev dependency with no browser download (`pnpm add` took 12.5 s here) and adds nothing to `pnpm run e2e`. Measured
 locally against a running server, `pnpm run bombadil` takes 2.0 minutes (2 x 60 s of exploration). The CI step runs after the e2e step
 in the same job, where the web server restarts first (the build is already in the target directory; not measured, assume 1 to 2
-minutes), so expect roughly 3 to 4 minutes added. It is `continue-on-error` until
-Finding 2 is fixed, so a red exploration shows as an annotation without blocking. Flip it when the fault is gone.
+minutes), so expect roughly 3 to 4 minutes added. It stays `continue-on-error` after
+Finding 2 was fixed (S6): see Finding 3 there.
 
 ### Open
 
-- Finding 2, above; then make the CI step blocking.
+- Finding 2 is fixed (S6); the CI step stays non-blocking until Finding 3 (S6 notes) is fixed.
 - Bombadil's output directory holds the trace for `--reproduce`; the e2e artifact upload already collects `test-results/`, but
   Playwright clears it at the start of each run, so a run of the plain e2e step followed by the Bombadil step keeps only the latter's.
 - Properties to add as the shell grows: forward after back, a resized pane never below its rule, the open row marked

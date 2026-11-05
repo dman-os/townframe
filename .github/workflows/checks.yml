@@ -449,9 +449,10 @@ jobs:
       # width and 60 s at a desktop width by default (BOMBADIL_TIME_LIMIT), driving the pinned
       # Chromium of the flake's browser farm, plus the web server's restart (the build itself is
       # already in the target directory). Adds roughly 3 to 4 minutes (2.0 minutes measured locally for the exploration itself). Non-blocking for now: the
-      # exploration found a layout fault (docs/scratch/dayframe-shell-ledger.md, S4 notes,
-      # "hiding a native panel") that is still open, and it reproduces on a minority of runs.
-      # Make the step blocking when that is fixed.
+      # layout fault of the first exploration is fixed (docs/scratch/dayframe-shell-ledger.md, S6
+      # notes), but a transient `navigationAlwaysReachable` violation right after hiding a panel at
+      # a phone width (S6 "Finding 3") still reproduces on about one 420 px run in five, with or
+      # without that fix. Make the step blocking when that is fixed.
       - name: Explore dayframe web with Bombadil
         continue-on-error: true
         run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run bombadil
