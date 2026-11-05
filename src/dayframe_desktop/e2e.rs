@@ -1,5 +1,6 @@
 use crate::composition::desktop_runtime;
 use crate::composition::Application;
+use dayframe_composition::HostInputs;
 use crate::composition::CompositionRuntime;
 use blitz_dom::ns;
 use blitz_dom::BaseDocument;
@@ -27,6 +28,24 @@ use dioxus_html::SerializedMouseData;
 use dioxus_native_dom::DioxusState;
 
 mod layout;
+
+/// Host widths on either side of the compact breakpoint.
+const COMPACT_PX: f64 = 400.0;
+pub(crate) const WIDE_PX: f64 = 1200.0;
+
+/// `Application` as a launcher mounts it, in a window `width` logical px wide.
+pub(crate) fn composed((runtime, width): (CompositionRuntime, f64)) -> Element {
+    let runtime = use_signal(move || runtime);
+    let width = use_signal(move || width);
+    let platform_back = use_signal(|| 0_u64);
+    let can_back = use_signal(|| false);
+    let host = HostInputs {
+        width: width.into(),
+        platform_back,
+        can_back,
+    };
+    rsx! { Application { runtime, host } }
+}
 
 struct HeadlessDom {
     dom: VirtualDom,
@@ -194,7 +213,10 @@ impl HeadlessDom {
     }
 }
 
+const HOME: &str = "section[aria-label=\"Home\"]";
+const OPEN_SETTINGS: &str = "button[aria-label=\"Open Settings\"]";
 const SETTINGS: &str = "section[aria-label=\"Settings\"]";
+const BACK: &str = "button[aria-label=\"Back\"]";
 const SAMPLE: &str = "button[aria-label=\"Open Sample micro settings\"]";
 const COUNTER: &str = "button[aria-label=\"Open Counter (Wasm) settings\"]";
 const COUNTER_VALUE: &str = "button[aria-label=\"Increment Wasm counter\"]";
@@ -207,12 +229,8 @@ struct Shell {
 }
 
 impl Shell {
-    async fn start() -> Self {
-        fn composed(runtime: CompositionRuntime) -> Element {
-            let runtime = use_signal(move || runtime);
-            rsx! { Application { runtime } }
-        }
-
+    /// Boot the desktop composition in a window `width` px wide, showing home.
+    async fn start(width: f64) -> Self {
         let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
             .await
             .unwrap();
@@ -221,9 +239,9 @@ impl Shell {
         // datum when the shell starts serving.
         // Before serving, nothing drives the persister, so the acknowledgement is dropped.
         drop(runtime.set_enabled(&MicroId::local(micro_counter_manifest::ID), true));
-        let mut ui = HeadlessDom::new(composed, runtime.clone());
-        ui.wait_until("Settings sections listed", |ui| {
-            ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
+        let mut ui = HeadlessDom::new(composed, (runtime.clone(), width));
+        ui.wait_until("home lists Settings", |ui| {
+            ui.find(HOME).is_some() && ui.find(OPEN_SETTINGS).is_some()
         })
         .await;
         Self {
@@ -232,6 +250,117 @@ impl Shell {
             counter: MicroId::local(micro_counter_manifest::ID),
         }
     }
+
+    /// Boot at a wide window and open Settings from home.
+    async fn start_in_settings() -> Self {
+        let mut shell = Self::start(WIDE_PX).await;
+        shell.open_settings().await;
+        shell
+    }
+
+    /// Press Settings on home and wait for its sections to be listed.
+    async fn open_settings(&mut self) {
+        self.ui.click(OPEN_SETTINGS);
+        self.ui
+            .wait_until("Settings sections listed", |ui| {
+                ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
+            })
+            .await;
+    }
+}
+
+// Home lists Settings from its declared row and opening it is what starts it; going back from
+// it returns to home and releases it. The whole walk at a compact width, where the section's
+// details come over the list: Home, Settings, a section, back to the list, back to home.
+#[tokio::test(flavor = "current_thread")]
+async fn home_to_settings_to_a_section_and_back_at_a_compact_width() {
+    let settings = MicroId::local(micro_settings_manifest::ID);
+    let Shell {
+        runtime,
+        mut ui,
+        counter,
+    } = Shell::start(COMPACT_PX).await;
+    assert_eq!(runtime.state(&settings), MicroState::Idle);
+    ui.click(OPEN_SETTINGS);
+    ui.wait_until("Settings list over home", |ui| {
+        ui.find(COUNTER).is_some() && ui.find(HOME).is_none()
+    })
+    .await;
+    assert_eq!(runtime.state(&settings), MicroState::Active);
+
+    ui.click(COUNTER);
+    ui.wait_until("the counter section is the details", |ui| {
+        ui.find(COUNTER_VALUE).is_some()
+    })
+    .await;
+    assert_eq!(runtime.state(&counter), MicroState::Active);
+    assert_eq!(
+        ui.text("section[aria-label=\"Counter (Wasm)\"] h3"),
+        "Counter (Wasm)"
+    );
+
+    // Back dismisses the details: the guest is released and the list is still there, mounted
+    // beneath, so Settings never stopped.
+    ui.click(BACK);
+    ui.wait_until("details gone, list showing", |ui| {
+        ui.find(COUNTER_VALUE).is_none() && ui.find(COUNTER).is_some()
+    })
+    .await;
+    ui.wait_until("nothing holds the counter, so it idles", |_| {
+        runtime.state(&counter) == MicroState::Idle
+    })
+    .await;
+    assert_eq!(runtime.state(&settings), MicroState::Active);
+
+    ui.click(BACK);
+    ui.wait_until("home again", |ui| ui.find(HOME).is_some()).await;
+    ui.wait_until("leaving Settings released it", |_| {
+        runtime.state(&settings) == MicroState::Idle
+    })
+    .await;
+    assert!(ui.find(BACK).is_none(), "home is the base of the stack");
+}
+
+// The same walk in a window wide enough for the list and the details side by side: opening a
+// section does not hide the list, so the sections stay listed and another can replace the first.
+#[tokio::test(flavor = "current_thread")]
+async fn home_to_settings_to_a_section_and_back_at_a_wide_width() {
+    let Shell {
+        runtime,
+        mut ui,
+        counter,
+    } = Shell::start(WIDE_PX).await;
+    ui.click(OPEN_SETTINGS);
+    ui.wait_until("Settings listed beside the sidebar", |ui| {
+        ui.find(COUNTER).is_some() && ui.find("button[aria-label=\"Show Home\"]").is_some()
+    })
+    .await;
+    ui.click(COUNTER);
+    ui.wait_until("the counter section beside the list", |ui| {
+        ui.find(COUNTER_VALUE).is_some() && ui.find(SAMPLE).is_some()
+    })
+    .await;
+    assert_eq!(runtime.state(&counter), MicroState::Active);
+
+    // Another row replaces the details, and one back leaves the details altogether.
+    ui.click(SAMPLE);
+    ui.wait_until("the sample section replaced the counter's", |ui| {
+        ui.find(COUNTER_VALUE).is_none()
+            && ui
+                .find("button[aria-label=\"Disable sample configuration flag\"]")
+                .is_some()
+    })
+    .await;
+    ui.click(BACK);
+    ui.wait_until("details gone", |ui| {
+        ui.find("button[aria-label=\"Disable sample configuration flag\"]").is_none()
+            && ui.find(COUNTER).is_some()
+    })
+    .await;
+
+    // The sidebar goes home without back.
+    ui.click("button[aria-label=\"Show Home\"]");
+    ui.wait_until("home", |ui| ui.find(HOME).is_some()).await;
 }
 
 // Opening the counter's Settings section is what starts its Wasm guest: the section is a
@@ -242,12 +371,11 @@ async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_g
         runtime,
         mut ui,
         counter,
-    } = Shell::start().await;
-    // Sections sort by micro id, so the counter's opens first; select the sample's to start
-    // with the counter's section unmounted and its guest idle.
+    } = Shell::start_in_settings().await;
+    // Open the sample's section first, with the counter's section unmounted and its guest idle.
     ui.click(SAMPLE);
-    ui.wait_until("sample section selected, counter idle", |ui| {
-        ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
+    ui.wait_until("sample section opened, counter idle", |ui| {
+        ui.find("button[aria-label=\"Disable sample configuration flag\"]").is_some()
             && runtime.state(&counter) == MicroState::Idle
     })
     .await;
@@ -258,13 +386,12 @@ async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_g
 
     ui.click(COUNTER);
     ui.wait_until("counter section mounted", |ui| {
-        ui.attribute(COUNTER, "aria-pressed").as_deref() == Some("true")
-            && ui.find(COUNTER_VALUE).is_some()
+        ui.find(COUNTER_VALUE).is_some()
     })
     .await;
     assert_eq!(runtime.state(&counter), MicroState::Active);
     assert_eq!(
-        ui.text("section[aria-label=\"Settings\"] h3"),
+        ui.text("section[aria-label=\"Counter (Wasm)\"] h3"),
         "Counter (Wasm)"
     );
     assert_eq!(ui.text(COUNTER_VALUE), "0");
@@ -292,8 +419,10 @@ async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_g
 
     ui.click(SAMPLE);
     ui.wait_until("switched away from the counter section", |ui| {
-        ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")
-            && ui.find(COUNTER_VALUE).is_none()
+        ui.find(COUNTER_VALUE).is_none()
+            && ui
+                .find("button[aria-label=\"Disable sample configuration flag\"]")
+                .is_some()
     })
     .await;
     ui.wait_until("nothing holds the counter, so it idles", |_| {
@@ -319,7 +448,7 @@ async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_g
 async fn external_document_changes_reach_the_counter_guest() {
     let Shell {
         runtime, mut ui, ..
-    } = Shell::start().await;
+    } = Shell::start_in_settings().await;
     ui.click(COUNTER);
     ui.wait_until("counter section mounted", |ui| {
         ui.find(COUNTER_VALUE).is_some()
@@ -346,21 +475,10 @@ async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
         runtime,
         mut ui,
         counter,
-    } = Shell::start().await;
+    } = Shell::start_in_settings().await;
     ui.click(COUNTER);
     ui.wait_until("counter section mounted", |ui| {
         ui.find(COUNTER_VALUE).is_some()
-    })
-    .await;
-
-    ui.click("button[aria-label=\"Close Settings\"]");
-    ui.wait_until("Settings closed", |ui| {
-        ui.find(SETTINGS).is_none() && ui.find("button[aria-label=\"Open Settings\"]").is_some()
-    })
-    .await;
-    ui.click("button[aria-label=\"Open Settings\"]");
-    ui.wait_until("Settings reopened", |ui| {
-        ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
     })
     .await;
 
@@ -398,7 +516,7 @@ async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn the_sample_section_edits_its_configuration() {
-    let Shell { mut ui, .. } = Shell::start().await;
+    let Shell { mut ui, .. } = Shell::start_in_settings().await;
     ui.click(SAMPLE);
     ui.wait_until("sample section mounted", |ui| {
         ui.find("button[aria-label=\"Disable sample configuration flag\"]")
@@ -414,8 +532,8 @@ async fn the_sample_section_edits_its_configuration() {
 }
 
 // The toolbar's Increment button is a manifest-declared row contributed by the counter package,
-// attached to a lazy endpoint to the guest's `increment` call. It renders, pinned outside
-// Settings, with the Wasm guest stopped; pressing it starts the guest on Wasmtime for the
+// attached to a lazy endpoint to the guest's `increment` call. It renders, pinned outside the
+// shell's panels, with the Wasm guest stopped; pressing it starts the guest on Wasmtime for the
 // length of the call, and the increment is visible once the counter's section is opened.
 #[tokio::test(flavor = "current_thread")]
 async fn the_toolbar_button_increments_a_stopped_wasm_counter() {
@@ -423,14 +541,9 @@ async fn the_toolbar_button_increments_a_stopped_wasm_counter() {
         runtime,
         mut ui,
         counter,
-    } = Shell::start().await;
-    // Closing Settings unmounts the counter's section, so nothing holds the guest and it idles;
-    // the pinned toolbar stays on screen.
-    ui.click("button[aria-label=\"Close Settings\"]");
-    ui.wait_until("Settings closed, counter idle", |ui| {
-        ui.find(SETTINGS).is_none() && runtime.state(&counter) == MicroState::Idle
-    })
-    .await;
+    } = Shell::start(WIDE_PX).await;
+    // Home is showing, so nothing mounts the counter's section and the guest idles; the pinned
+    // toolbar is on screen.
     ui.wait_until("the toolbar lists the counter's button", |ui| {
         ui.find(TOOLBAR_INCREMENT).is_some()
     })
@@ -445,8 +558,8 @@ async fn the_toolbar_button_increments_a_stopped_wasm_counter() {
     })
     .await;
 
-    ui.click("button[aria-label=\"Open Settings\"]");
-    ui.wait_until("Settings reopened", |ui| ui.find(COUNTER).is_some())
+    ui.click(OPEN_SETTINGS);
+    ui.wait_until("Settings listed", |ui| ui.find(COUNTER).is_some())
         .await;
     ui.click(COUNTER);
     ui.wait_until("the counter shows the toolbar's increment", |ui| {

@@ -155,7 +155,7 @@ fn open_panel(shell: &Shell, panel: String, mut failure: Signal<Option<String>>)
 #[component]
 fn Frame(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
-    let width_px = (host.width)();
+    let width_px = *host.width.read();
     let width = WidthClass::from_px(width_px);
     let state = use_state(&shell);
     let panels = use_rows(&shell.panels);
@@ -353,7 +353,7 @@ fn Frame(shell: Shell) -> Element {
 #[component]
 fn Sidebar(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
-    let wide = WidthClass::from_px((host.width)()).fits_side_by_side();
+    let wide = WidthClass::from_px(*host.width.read()).fits_side_by_side();
     let state = use_state(&shell);
     let panels = use_rows(&shell.panels);
     let failure = use_signal(|| None::<String>);
@@ -457,7 +457,7 @@ fn Home(shell: Shell) -> Element {
 fn NavigationButton(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
     let state = use_state(&shell);
-    let wide = WidthClass::from_px((host.width)()).fits_side_by_side();
+    let wide = WidthClass::from_px(*host.width.read()).fits_side_by_side();
     let mode = if state.navigation.can_back() {
         NavButtonMode::Back
     } else {

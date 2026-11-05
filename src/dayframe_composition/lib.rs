@@ -4,6 +4,11 @@
 //! engine-specific factory for it. Engine-specific guest factories (Wasmtime on desktop, `wcmp`
 //! on the web) and native built-ins are both just catalog entries (ADR 018 §7).
 //!
+//! The frame is the shell micro's (ADR 032): `Application` mounts the roots the catalog
+//! registered, which are the shell's frame, laid out from its panels, and the pinned roots
+//! (toolbar, layout) above it. It supplies the shell what only the host knows, as
+//! [`HostInputs`].
+//!
 //! The catalog is explicit configuration, not a heuristic: each entry says whether the
 //! supervisor starts the micro eagerly, which provider satisfies each of its requirements, and
 //! which declared collections it may read or write. The root declares the collections the
@@ -54,6 +59,7 @@ use clay_store::BatchOp;
 use clay_store::OrderedStore;
 use clay_store::StoreError;
 use dioxus::prelude::*;
+pub use micro_shell::HostInputs;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cell::RefCell;
@@ -102,6 +108,23 @@ pub type FactoryBuilder = Box<
 >;
 
 impl InstalledMicro {
+    /// Satisfy every requirement of this micro from `provider`: each binds the provider's
+    /// publication of the same name. A catalog convention that spares each launcher spelling
+    /// the same table out; a micro whose requirements come from several providers sets
+    /// `requirements` itself.
+    pub fn satisfied_by(mut self, provider: &MicroId) -> Self {
+        for request in &self.sidecar.manifest.requires {
+            self.requirements.insert(
+                request.binding.clone(),
+                Requirement {
+                    provider: SupervisorId::from(provider),
+                    publication: request.binding.clone(),
+                },
+            );
+        }
+        self
+    }
+
     /// An on-demand, unlocked micro with no requirements, admitted disabled.
     pub fn new(
         id: MicroId,
@@ -788,10 +811,26 @@ impl CompositionRuntime {
     }
 }
 
+/// The height of the frame the shell lays out, in logical px (a renderer/layout boundary,
+/// FOUND-008). The shell fills the frame; the page scrolls around it.
+const FRAME_HEIGHT_PX: u32 = 560;
+
+/// The horizontal chrome `Application` draws around the frame: its own `p-6` on both sides.
+const APPLICATION_PADDING_PX: f64 = 48.0;
+
+/// The shell UI. `host` is what the launcher knows about its window, with `host.width` the
+/// width of the box `Application` is mounted in; the frame is the shell micro's root (and any
+/// other unpinned root), and pinned roots stay above it. Each owner of chrome subtracts its
+/// own, so the shell is handed the width of its frame.
 #[component]
-pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
+pub fn Application(runtime: Signal<CompositionRuntime>, host: HostInputs) -> Element {
     let shell = runtime.read().clone();
     use_context_provider(|| shell.components.clone());
+    let frame_width = use_memo(move || (*host.width.read() - APPLICATION_PADDING_PX).max(1.0));
+    use_context_provider(|| HostInputs {
+        width: frame_width.into(),
+        ..host
+    });
     // The composition outlives this scope's tasks: shutdown must keep being served after the
     // scope is gone, so it is spawned forever and stopped by `request_shutdown`.
     let serving = shell.clone();
@@ -824,28 +863,30 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
             }
         }
     });
-    let mut settings_open = use_signal(|| true);
     let roots = use_rows(&shell.roots);
 
     rsx! {
         section { class: "flex flex-col gap-6 rounded-lg border border-border bg-surface p-6 text-foreground",
             header { class: "flex flex-wrap items-center gap-4",
                 h1 { class: "text-2xl font-semibold", "Dayframe" }
-                button {
-                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                    "aria-label": if settings_open() { "Close Settings" } else { "Open Settings" },
-                    onclick: move |_| settings_open.toggle(),
-                    if settings_open() { "Close Settings" } else { "Open Settings" }
+            }
+            // A pinned root (the toolbar) shows above the frame whatever the frame shows.
+            // The root's presentation is a row attachment: a lazy endpoint the shell redeems,
+            // which starts the micro that publishes it. A micro that arranges other micros'
+            // presentations (the layout, ADR 031 §13) redeems them itself through slots of its
+            // own; the composition never pushes components.
+            for row in roots.iter().filter(|row| row.value.pinned) {
+                div { key: "{row.key}", "aria-label": "{row.value.title}",
+                    PresentationSlot {
+                        reference: row.attachments[row.value.content.index()].clone(),
+                    }
                 }
             }
-            // A pinned root (the toolbar) shows however Settings is folded; the toggle covers
-            // every other root.
-            for row in roots.iter().filter(|row| row.value.pinned || settings_open()) {
-                div { key: "{row.key}", "aria-label": "{row.value.title}",
-                    // The root's presentation is a row attachment: a lazy endpoint the
-                    // shell redeems, which starts the micro that publishes it. A micro that
-                    // arranges other micros' presentations (the layout, ADR 031 §13) redeems
-                    // them itself through slots of its own; the shell never pushes components.
+            for row in roots.iter().filter(|row| !row.value.pinned) {
+                div {
+                    key: "{row.key}",
+                    "aria-label": "{row.value.title}",
+                    style: "height:{FRAME_HEIGHT_PX}px;min-width:0",
                     PresentationSlot {
                         reference: row.attachments[row.value.content.index()].clone(),
                     }

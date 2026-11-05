@@ -5,14 +5,12 @@
 //! scenario proved (interactive children, one child's withdrawal not touching the others) is
 //! proven here on the capability path.
 use super::HeadlessDom;
-use super::SETTINGS;
+use super::composed;
 use crate::composition::desktop_runtime;
-use crate::composition::Application;
 use crate::composition::CompositionRuntime;
 use clay_docs::FacetRoute;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
-use dioxus::prelude::*;
 
 const COUNTER_PANEL: &str = "section[aria-label=\"Counter (Wasm) panel\"]";
 const SAMPLE_PANEL: &str = "section[aria-label=\"Sample micro panel\"]";
@@ -50,15 +48,11 @@ struct Layout {
 }
 
 impl Layout {
-    /// Boot the shell with the layout enabled and `visible` as the stored arrangement, Settings
-    /// folded (its counter section would be a second mount of the counter's view, and a second
-    /// holder of the guest). The counter package stays disabled, as discovered.
+    /// Boot the shell with the layout enabled and `visible` as the stored arrangement. Home is
+    /// showing, so Settings' counter section is not mounted (it would be a second mount of the
+    /// counter's view, and a second holder of the guest). The counter package stays disabled,
+    /// as discovered.
     async fn start(visible: &[&str]) -> Self {
-        fn composed(runtime: CompositionRuntime) -> Element {
-            let runtime = use_signal(move || runtime);
-            rsx! { Application { runtime } }
-        }
-
         let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
             .await
             .unwrap();
@@ -68,16 +62,13 @@ impl Layout {
             arrangement_route(),
             serde_json::json!({ "visible": visible }),
         );
-        let mut ui = HeadlessDom::new(composed, runtime.clone());
+        let mut ui = HeadlessDom::new(composed, (runtime.clone(), super::WIDE_PX));
         // The toggles list the installed panels, which the guest reads from its mirror of the
         // collection: they appear once the layout is running and bootstrapped.
         ui.wait_until("the layout lists the installed panels", |ui| {
             ui.find(SHOW_SAMPLE).is_some() || ui.find(SAMPLE_PANEL).is_some()
         })
         .await;
-        ui.click("button[aria-label=\"Close Settings\"]");
-        ui.wait_until("Settings folded", |ui| ui.find(SETTINGS).is_none())
-            .await;
         Self {
             runtime,
             ui,

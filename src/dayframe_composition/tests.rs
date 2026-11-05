@@ -33,26 +33,55 @@ fn cbor_key(key: &str) -> Vec<u8> {
     bytes
 }
 
-/// Settings (eager, locked) and Sample (eager) as the desktop links them, plus a counter whose
-/// guest is `counter`: a catalog entry like any other.
-fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
-    let settings = InstalledMicro {
+/// The shell (eager, locked) as the launchers link it.
+fn shell_micro() -> InstalledMicro {
+    InstalledMicro {
         eager: true,
         locked: true,
         ..InstalledMicro::new(
+            id(micro_shell_manifest::ID),
+            micro_shell_manifest::sidecar(),
+            |id, resources, bindings| {
+                factory(
+                    resources,
+                    id,
+                    micro_shell_manifest::manifest(),
+                    bindings,
+                    micro_shell::activate,
+                )
+            },
+        )
+    }
+}
+
+/// Settings as the launchers link it: on demand, its panel a declared row, its requirements
+/// satisfied by the shell; `activations` counts how often it starts.
+fn settings_micro(activations: Rc<std::cell::Cell<usize>>) -> InstalledMicro {
+    InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(
             id(micro_settings_manifest::ID),
             micro_settings_manifest::sidecar(),
-            |id, resources, bindings| {
+            move |id, resources, bindings| {
                 factory(
                     resources,
                     id,
                     micro_settings_manifest::manifest(),
                     bindings,
-                    micro_settings::activate,
+                    move |context| {
+                        activations.set(activations.get() + 1);
+                        micro_settings::activate(context)
+                    },
                 )
             },
         )
-    };
+        .satisfied_by(&id(micro_shell_manifest::ID))
+    }
+}
+
+/// The shell (eager), Settings (on demand) and Sample (eager) as the desktop links them, plus a
+/// counter whose guest is `counter`: a catalog entry like any other.
+fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
     let sample = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
@@ -70,7 +99,12 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
             },
         )
     };
-    vec![settings, sample, counter]
+    vec![
+        shell_micro(),
+        settings_micro(Rc::default()),
+        sample,
+        counter,
+    ]
 }
 
 /// A counter that publishes its declared view without any engine.
@@ -218,23 +252,26 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
     let runtime = memory_runtime(stub_counter()).await;
     served(&runtime, async {
         settle(&runtime, || {
-            runtime.state(&id("dayframe.settings")) == MicroState::Active
+            runtime.state(&id(micro_shell_manifest::ID)) == MicroState::Active
                 && runtime.state(&id(micro_sample::ID)) == MicroState::Active
         })
         .await;
-        // The shell mounts the root through its manifest-declared endpoint.
+        // The frame mounts the shell's root through its manifest-declared endpoint. Settings is
+        // a panel, not a root, and nothing has started it.
         let mut roots = runtime.roots.clone();
         while runtime.roots.rows().unwrap().is_empty() {
             roots.changed().await.unwrap();
         }
         let root = &runtime.roots.rows().unwrap()[0];
-        assert_eq!(root.key, "dayframe.settings");
-        assert_eq!(root.value.title, "Settings");
+        assert_eq!(root.key, micro_shell_manifest::ID);
+        assert_eq!(root.value.title, "Shell");
+        assert!(!root.value.pinned);
         let view = root.attachments[root.value.content.index()]
             .redeem_presentation()
             .await
             .unwrap();
         assert!(view.component().is_ok());
+        assert_eq!(runtime.state(&id(micro_settings_manifest::ID)), MicroState::Idle);
 
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
@@ -305,7 +342,7 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
             runtime.state(&id(COUNTER)),
             MicroState::Faulted(message) if message.contains("fetched")
         ));
-        assert_eq!(runtime.state(&id("dayframe.settings")), MicroState::Active);
+        assert_eq!(runtime.state(&id("dayframe.shell")), MicroState::Active);
         assert_eq!(runtime.state(&id(micro_sample::ID)), MicroState::Active);
         // Demand does not retry a fault; the retry control does, and it fails again.
         let supervisor = &runtime.supervisor;
@@ -569,10 +606,10 @@ async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
         install_datum_of(&runtime, micro_sample::ID).unwrap()["enabled"],
         true
     );
-    assert_eq!(install_datum_of(&runtime, "dayframe.settings"), None);
+    assert_eq!(install_datum_of(&runtime, "dayframe.shell"), None);
     assert_eq!(runtime.state(&id(COUNTER)), MicroState::Disabled);
     assert_eq!(runtime.state(&id(micro_sample::ID)), MicroState::Idle);
-    assert_eq!(runtime.state(&id("dayframe.settings")), MicroState::Idle);
+    assert_eq!(runtime.state(&id("dayframe.shell")), MicroState::Idle);
     runtime.host.close();
 }
 
@@ -629,8 +666,8 @@ async fn a_disabled_micro_stays_disabled_across_a_reboot() {
         install_datum_of(&second, micro_sample::ID).unwrap()["enabled"],
         false
     );
-    assert_eq!(install_datum_of(&second, "dayframe.settings"), None);
-    assert_eq!(second.state(&id("dayframe.settings")), MicroState::Idle);
+    assert_eq!(install_datum_of(&second, "dayframe.shell"), None);
+    assert_eq!(second.state(&id("dayframe.shell")), MicroState::Idle);
     second.host.close();
 }
 
@@ -759,7 +796,7 @@ async fn a_contract_with_one_declared_collection_binds_by_default() {
         assert_eq!(activations(&mut seen, 1).await, [true]);
         // The built-ins resolved their sections binding the same way.
         reaches(&runtime, &id(micro_sample::ID), MicroState::Active).await;
-        reaches(&runtime, &id("dayframe.settings"), MicroState::Active).await;
+        reaches(&runtime, &id("dayframe.shell"), MicroState::Active).await;
     })
     .await;
 }
@@ -1058,7 +1095,7 @@ async fn a_slot_does_not_redeem_a_faulted_micro_again_until_it_is_retried() {
     .await;
 }
 
-/// The catalog the toolbar scenarios run: Settings, Sample and the Toolbar as the desktop links
+/// The catalog the toolbar scenarios run: the shell, Settings, Sample and the Toolbar as the desktop links
 /// them, and the real counter (its native `ACTIVATE` entry, the same source the Wasm guest is
 /// built from), counting how many times it is activated.
 fn toolbar_catalog(activations: Rc<std::cell::Cell<usize>>) -> Vec<InstalledMicro> {
@@ -1548,6 +1585,216 @@ async fn an_untouched_declared_collection_reads_known_empty_without_starting_its
             None,
             "reading a declared collection starts no incarnation"
         );
+    })
+    .await;
+}
+
+// ── the shell (ADR 032) ───────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, PartialEq, Props)]
+struct FrameApp {
+    components: NativeComponents,
+    reference: Capability,
+    width: f64,
+}
+
+/// What `Application` supplies around the shell's root, without the lifecycle panel and without
+/// serving the composition (the scenario serves it).
+fn frame_app(props: FrameApp) -> Element {
+    use_context_provider(|| props.components.clone());
+    let width = use_signal(|| props.width).into();
+    let platform_back = use_signal(|| 0_u64);
+    let can_back = use_signal(|| false);
+    use_context_provider(|| HostInputs {
+        width,
+        platform_back,
+        can_back,
+    });
+    rsx! { PresentationSlot { reference: props.reference } }
+}
+
+/// Run the slot's tasks until its rendering no longer contains `text`.
+async fn slot_lacks(dom: &mut VirtualDom, tree: &mut clay_surface::SurfaceTree, text: &str) {
+    loop {
+        dom.render_immediate(tree);
+        if !tree.text_content().contains(text) {
+            return;
+        }
+        dom.wait_for_work().await;
+    }
+}
+
+/// A micro whose only job is to contribute a sheet panel to the shell.
+fn sheet_micro() -> InstalledMicro {
+    let manifest = clay_mdk::MicroManifest {
+        entrypoints: clay_mdk::Entrypoints::micro_client(),
+        publications: vec![clay_mdk::PublicationDeclaration {
+            name: "page".into(),
+            kind: clay_mdk::PublicationKind::Presentation,
+            contract: None,
+        }],
+        requires: vec![],
+        configuration_requests: vec![],
+        collection_contracts: vec![],
+        collection_requests: vec![clay_mdk::Request {
+            binding: "panels".into(),
+            contract: Nsid::literal(micro_shell_manifest::PANELS),
+            access: Some(clay_mdk::Access::Write),
+            necessity: clay_mdk::Necessity::Required,
+            resolution: clay_mdk::BindingResolution::Configured,
+            min_revision: None,
+        }],
+        contributions: vec![clay_mdk::ContributionDeclaration {
+            id: "panel".into(),
+            binding: "panels".into(),
+            key: "tests.sheet".into(),
+            payload: serde_json::json!({
+                "title": "Pick a color",
+                "sockets": ["sheet"],
+                "content": { "$attachment": 0 },
+            }),
+            attachments: vec![clay_mdk::AttachmentDeclaration {
+                index: 0,
+                publication: "page".into(),
+            }],
+        }],
+        extra: BTreeMap::new(),
+    };
+    let sidecar = clay_mdk::Sidecar::new("tests.sheet", 1, manifest.clone())
+        .with_authority("org.example.test");
+    InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(id("tests.sheet"), sidecar, move |id, resources, bindings| {
+            factory(resources, id, manifest, bindings, |context| async move {
+                context.publish_component("page", || rsx! { p { "sheet body" } })?;
+                Ok(())
+            })
+        })
+    }
+}
+
+// Home lists Settings from its declared panel row without starting it; opening it starts it
+// once; opening a section mounts that section's attachment as the details; back returns to the
+// list and then home; a sheet is on the stack, so back dismisses it too. Every step is a call
+// of the shell's contract, which is what a micro's own button makes.
+#[tokio::test(flavor = "current_thread")]
+async fn home_opens_settings_then_a_section_and_back_unwinds_to_home() {
+    use micro_shell_manifest::NavigateRequest;
+    use micro_shell_manifest::OpenSheetRequest;
+    let activations = Rc::<std::cell::Cell<usize>>::default();
+    let mut micros = catalog(stub_counter());
+    micros[1] = settings_micro(Rc::clone(&activations));
+    micros.push(sheet_micro());
+    let runtime = CompositionRuntime::new(Arc::new(clay_store::MemoryStore::new()), micros)
+        .await
+        .expect("a memory store does not fail");
+    assert!(runtime.installation_errors.is_empty());
+    let settings = id(micro_settings_manifest::ID);
+    let shell = micro_shell_manifest::ID;
+    served(&runtime, async {
+        let mut roots = runtime.roots.clone();
+        while runtime.roots.rows().unwrap().is_empty() {
+            roots.changed().await.unwrap();
+        }
+        let rows = runtime.roots.rows().unwrap();
+        let root = rows.iter().find(|row| row.key == shell).unwrap();
+        // A compact host: the details come over the list.
+        let mut dom = VirtualDom::new_with_props(
+            frame_app,
+            FrameApp {
+                components: runtime.components.clone(),
+                reference: root.attachments[root.value.content.index()].clone(),
+                width: 400.0,
+            },
+        );
+        let mut tree = clay_surface::SurfaceTree::new();
+        dom.rebuild(&mut tree);
+
+        // Home lists Settings from its row; nothing has started it.
+        slot_shows(&mut dom, &mut tree, "Home").await;
+        slot_shows(&mut dom, &mut tree, "Settings").await;
+        assert_eq!(runtime.state(&settings), MicroState::Idle);
+        assert_eq!(activations.get(), 0);
+
+        let navigate = |panel: &str, row: Option<&str>| NavigateRequest {
+            panel: panel.into(),
+            row: row.map(Into::into),
+        };
+        call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::NAVIGATE,
+            &navigate(micro_settings_manifest::ID, None),
+        )
+        .await;
+        slot_shows(&mut dom, &mut tree, "Counter (Wasm)").await;
+        assert_eq!(runtime.state(&settings), MicroState::Active);
+        assert_eq!(activations.get(), 1);
+
+        // The counter's section is the details; its micro starts only now.
+        assert_eq!(runtime.state(&id(COUNTER)), MicroState::Idle);
+        call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::NAVIGATE,
+            &navigate(micro_settings_manifest::ID, Some(COUNTER)),
+        )
+        .await;
+        slot_shows(&mut dom, &mut tree, "stub counter").await;
+        assert_eq!(runtime.state(&id(COUNTER)), MicroState::Active);
+        assert_eq!(
+            call_publication::<_, Option<String>>(
+                &runtime,
+                shell,
+                micro_shell_manifest::OPENED,
+                &micro_settings_manifest::ID.to_owned(),
+            )
+            .await
+            .as_deref(),
+            Some(COUNTER)
+        );
+
+        // A sheet over the details; back dismisses it, not the details under it.
+        call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::OPEN_SHEET,
+            &OpenSheetRequest {
+                panel: "tests.sheet".into(),
+            },
+        )
+        .await;
+        slot_shows(&mut dom, &mut tree, "sheet body").await;
+        assert!(
+            call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::BACK, &()).await
+        );
+        slot_lacks(&mut dom, &mut tree, "sheet body").await;
+        assert!(tree.text_content().contains("stub counter"));
+        assert!(
+            !call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::FORWARD, &())
+                .await,
+            "a dismissed sheet is not a forward entry"
+        );
+
+        // Back from the details returns to the list, and then to home, which unmounts Settings.
+        assert!(
+            call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::BACK, &()).await
+        );
+        slot_lacks(&mut dom, &mut tree, "stub counter").await;
+        assert!(tree.text_content().contains("Counter (Wasm)"));
+        assert!(
+            call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::BACK, &()).await
+        );
+        slot_lacks(&mut dom, &mut tree, "Counter (Wasm)").await;
+        slot_shows(&mut dom, &mut tree, "Home").await;
+        assert!(
+            !call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::BACK, &()).await,
+            "home is the base of the stack"
+        );
+        settle(&runtime, || runtime.state(&settings) == MicroState::Idle).await;
+        assert_eq!(activations.get(), 1, "Settings started once for the whole visit");
+
+        drop(dom);
     })
     .await;
 }

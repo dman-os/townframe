@@ -11,16 +11,33 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
-/// is unusable without it. Toolbar is on-demand: its pinned root row starts it when the shell
-/// mounts it. Sample is eager so its section is written at boot. Collection access
-/// is resolved by the composition from each manifest's requests and configuration, not
-/// hand-written here.
+/// The shell's native built-ins. The shell micro is the frame: eager, and locked because nothing
+/// is usable without it. Settings is an on-demand panel: home lists its declared row, and
+/// opening it starts it. Toolbar is on-demand: its pinned root row starts it when the frame
+/// mounts it. Sample is eager so its section is written at boot. Collection access is resolved
+/// by the composition from each manifest's requests and configuration, not hand-written here.
 fn native_micros() -> Vec<InstalledMicro> {
+    let shell = clay_mdk::MicroId::local(micro_shell_manifest::ID);
     vec![
         InstalledMicro {
             eager: true,
             locked: true,
+            ..InstalledMicro::new(
+                shell.clone(),
+                micro_shell_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_shell_manifest::manifest(),
+                        bindings,
+                        micro_shell::activate,
+                    )
+                },
+            )
+        },
+        InstalledMicro {
+            enabled_on_admission: true,
             ..InstalledMicro::new(
                 clay_mdk::MicroId::local(micro_settings_manifest::ID),
                 micro_settings_manifest::sidecar(),
@@ -34,6 +51,7 @@ fn native_micros() -> Vec<InstalledMicro> {
                     )
                 },
             )
+            .satisfied_by(&shell)
         },
         InstalledMicro {
             enabled_on_admission: true,

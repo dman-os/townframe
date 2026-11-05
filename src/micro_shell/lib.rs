@@ -43,7 +43,7 @@ pub struct HostInputs {
     /// The logical px width available to the frame. The host owns the window, so it classifies
     /// nothing: the shell derives the width class from this and passes the px down as the
     /// extent a drag converts pointer travel with.
-    pub width: Signal<f64>,
+    pub width: ReadSignal<f64>,
     /// Incremented by the host for every platform back gesture (Android `KEYCODE_BACK`, which
     /// winit reports as `BrowserBack`, a mouse back button, a browser's back).
     pub platform_back: Signal<u64>,
