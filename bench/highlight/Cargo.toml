@@ -1,0 +1,43 @@
+# Standalone workspace on purpose: this is a spike benchmark, not product code. It must not enter
+# the root workspace (lockfile sync, guardrails budgets) and must stay buildable for
+# wasm32-wasip3 and wasm32-unknown-unknown with one engine per build so the wasm size of each
+# candidate is attributable.
+[workspace]
+
+[package]
+name = "highlight-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+# "irosashi" alone = tokenizer with only the grammars in grammars/ (engine name irosashi-min);
+# "irosashi-full" adds the crate's embedded 257 grammars + 65 themes (engine name irosashi).
+irosashi = ["dep:irosashi"]
+irosashi-full = ["irosashi", "irosashi/embedded-assets"]
+syntect = ["dep:syntect", "dep:two-face"]
+arborium = ["dep:arborium"]
+
+[dependencies]
+irosashi = { version = "0.3.0", optional = true, default-features = false }
+syntect = { version = "5.3.0", optional = true, default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5.2", optional = true, default-features = false, features = ["syntect-fancy"] }
+arborium = { version = "2.18.2", optional = true, default-features = false, features = ["lang-rust", "lang-typescript", "lang-json", "lang-markdown"] }
+serde_json = "1"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = "=0.2.127"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "hlbench"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

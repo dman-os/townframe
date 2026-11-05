@@ -1,0 +1,17 @@
+# Standalone workspace: drives @pierre/highlights' hand-written WAT core module under wasmtime, the
+# engine a desktop/Android host (or guest) would use, to measure lex time and memory without
+# Node's JS glue.
+[workspace]
+
+[package]
+name = "pierre-wasmtime"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "runtime", "std"] }
+unicode-ident = "1"
+
+[profile.release]
+opt-level = 3

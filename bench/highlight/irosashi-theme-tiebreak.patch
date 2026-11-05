@@ -1,0 +1,25 @@
+--- a/src/theme/matcher.rs
++++ b/src/theme/matcher.rs
+@@ -103,19 +103,19 @@
+             };
+             let s = rule.settings;
+             if s.foreground.is_some()
+-                && (result.foreground.is_none() || score.greater_than(fg_score))
++                && (result.foreground.is_none() || !fg_score.greater_than(score))
+             {
+                 result.foreground = s.foreground;
+                 fg_score = score;
+             }
+             if s.background.is_some()
+-                && (result.background.is_none() || score.greater_than(bg_score))
++                && (result.background.is_none() || !bg_score.greater_than(score))
+             {
+                 result.background = s.background;
+                 bg_score = score;
+             }
+             if s.font_style.is_some()
+-                && (result.font_style.is_none() || score.greater_than(fs_score))
++                && (result.font_style.is_none() || !fs_score.greater_than(score))
+             {
+                 result.font_style = s.font_style;
+                 fs_score = score;

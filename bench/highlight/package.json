@@ -1,0 +1,11 @@
+{
+  "name": "highlight-bench",
+  "private": true,
+  "type": "module",
+  "description": "P3 highlight spike: Shiki oracle and @pierre/highlights comparison harness",
+  "dependencies": {
+    "@pierre/highlights": "0.4.0",
+    "@pierre/theme": "2.0.0",
+    "shiki": "4.4.1"
+  }
+}
