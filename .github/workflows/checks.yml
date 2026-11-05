@@ -450,13 +450,12 @@ jobs:
       # Bombadil property-based exploration of the same build (ADR 032 section 9): 60 s at a phone
       # width and 60 s at a desktop width by default (BOMBADIL_TIME_LIMIT), driving the pinned
       # Chromium of the flake's browser farm, plus the web server's restart (the build itself is
-      # already in the target directory). Adds roughly 3 to 4 minutes (2.0 minutes measured locally for the exploration itself). Non-blocking for now: the
-      # layout fault of the first exploration is fixed (docs/scratch/dayframe-shell-ledger.md, S6
-      # notes), but a transient `navigationAlwaysReachable` violation right after hiding a panel at
-      # a phone width (S6 "Finding 3") still reproduces on about one 420 px run in five, with or
-      # without that fix. Make the step blocking when that is fixed.
+      # already in the target directory). Adds roughly 3 to 4 minutes (2.0 minutes measured
+      # locally for the exploration itself). Blocking: the layout collapse its first explorations
+      # found (hiding a panel withdrew the layout; a synchronous cancel of a host call suspended a
+      # sync export in the browser engine) is fixed in `wcmp` and held by a Playwright spec, and
+      # ten consecutive 60 s runs at 420 px were green (docs/scratch/dayframe-shell-ledger.md, S8).
       - name: Explore dayframe web with Bombadil
-        continue-on-error: true
         run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run bombadil
 
       - name: Upload e2e artifacts
