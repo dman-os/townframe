@@ -1,5 +1,6 @@
-//! Settings presentation: the sections collection's rows, ordered and filtered by the viewer's
-//! preferences, with the selected section's presentation mounted from its row attachment.
+//! Settings presentations: the list panel (the sections collection's rows, ordered and filtered
+//! by the viewer's preferences) and the section panel (the presentation the shell has open,
+//! mounted from its row attachment). The shell owns which one is shown and where.
 use crate::SettingsMicro;
 use clay_mdk::Error;
 use clay_mdk::Operation;
@@ -9,15 +10,17 @@ use clay_mdk::hooks::PresentationSlot;
 use clay_mdk::hooks::use_facet;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
+use micro_settings_manifest::ID;
 use micro_settings_manifest::Section;
+use micro_shell_manifest::NavigateRequest;
 
 #[derive(Props, Clone, PartialEq)]
-pub struct SettingsViewProps {
+pub struct SettingsListProps {
     pub micro: SettingsMicro,
 }
 
 #[expect(non_snake_case, reason = "Dioxus component naming")]
-pub fn SettingsView(props: SettingsViewProps) -> Element {
+pub fn SettingsList(props: SettingsListProps) -> Element {
     let preferences = props.micro.preferences(&use_facet(&props.micro.config));
     let mut receipt = use_signal(|| None::<OperationReceipt>);
     let mut error = use_signal(|| None::<String>);
@@ -56,14 +59,13 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
                 .is_some_and(|config| !config.hidden.contains(&row.key))
         })
         .collect();
-    let mut selected = use_signal(|| None::<String>);
-    let active = selected()
-        .and_then(|name| shown.iter().find(|row| row.key == name).copied())
-        .or_else(|| shown.first().copied());
-    let active_key = active.map(|row| row.key.clone());
+    let mut opening = use_signal(|| None::<String>);
     rsx! {
-        section { class: "flex flex-col gap-4", "aria-label": "Settings",
-            h2 { class: "text-xl font-semibold", "Settings" }
+        section { class: "flex flex-col gap-4 p-4", "aria-label": "Settings",
+            header { class: "flex items-center gap-2",
+                PresentationSlot { reference: props.micro.shell.nav_button.clone() }
+                h2 { class: "text-xl font-semibold", "Settings" }
+            }
             details { class: "rounded-md border border-border p-4",
                 summary { "Choose settings sections" }
                 if preferences.is_none() { p { role: "status", "Settings preferences are loading." } }
@@ -104,32 +106,66 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
                 if let Some(problem) = error() { p { role: "alert", "{problem}" } }
                 if let Some(receipt) = receipt() { p { role: "status", "Settings operation {receipt.id}: {receipt.status:?}" } }
             }
-            div { class: "flex flex-wrap gap-6",
-                nav { class: "flex flex-col gap-2", "aria-label": "Settings sections",
-                    for row in &shown {
-                        {
-                            let name = row.key.clone();
-                            let pressed = active_key.as_deref() == Some(row.key.as_str());
-                            rsx! {
-                                button { key: "{row.key}", class: "rounded-md border border-border px-4 py-2 text-left focus-visible:outline", "aria-label": "Open {row.value.title} settings", "aria-pressed": pressed, onclick: move |_| selected.set(Some(name.clone())),
-                                    if pressed { "▸ " }
-                                    "{row.value.title}"
-                                }
+            nav { class: "flex flex-col gap-2", "aria-label": "Settings sections",
+                for row in &shown {
+                    {
+                        let key = row.key.clone();
+                        let navigate = props.micro.shell.navigate.clone();
+                        rsx! {
+                            button {
+                                key: "{row.key}",
+                                class: "rounded-md border border-border px-4 py-2 text-left focus-visible:outline",
+                                "aria-label": "Open {row.value.title} settings",
+                                onclick: move |_| {
+                                    let key = key.clone();
+                                    let navigate = navigate.clone();
+                                    spawn(async move {
+                                        let request = NavigateRequest { panel: ID.to_owned(), row: Some(key) };
+                                        opening.set(navigate.call::<_, ()>(&request).await.err().map(|problem| problem.to_string()));
+                                    });
+                                },
+                                "{row.value.title}"
                             }
                         }
                     }
-                    if shown.is_empty() { p { "No settings sections are available." } }
                 }
-                div { class: "min-w-0 flex-1",
-                    if let Some(row) = active {
-                        div { key: "{row.key}",
-                            h3 { class: "mb-4 text-lg font-semibold", "{row.value.title}" }
-                            PresentationSlot {
-                                reference: row.attachments[row.value.detail.index()].clone(),
-                            }
-                        }
-                    } else { p { "Select a section." } }
-                }
+                if shown.is_empty() { p { "No settings sections are available." } }
+            }
+            if let Some(problem) = opening() { p { role: "alert", "{problem}" } }
+        }
+    }
+}
+
+/// The details of the Settings list: the section the shell has open. A presentation takes no
+/// parameters, so it asks the shell which row is open when it mounts; the shell mounts it keyed
+/// by that row, so a different row is a fresh mount and a fresh question.
+#[derive(Props, Clone, PartialEq)]
+pub struct SettingsSectionProps {
+    pub micro: SettingsMicro,
+}
+
+#[expect(non_snake_case, reason = "Dioxus component naming")]
+pub fn SettingsSection(props: SettingsSectionProps) -> Element {
+    let rows = use_rows(&props.micro.sections);
+    let opened = props.micro.shell.opened.clone();
+    let open = use_resource(move || {
+        let opened = opened.clone();
+        async move { opened.call::<_, Option<String>>(&ID.to_owned()).await }
+    });
+    let key = match &*open.read() {
+        None => return rsx! { p { role: "status", "Loading section…" } },
+        Some(Err(problem)) => return rsx! { p { role: "alert", "{problem}" } },
+        Some(Ok(None)) => return rsx! { p { "Select a section." } },
+        Some(Ok(Some(key))) => key.clone(),
+    };
+    let Some(row) = rows.iter().find(|row| row.key == key) else {
+        return rsx! { p { role: "alert", "The {key} section is not available." } };
+    };
+    rsx! {
+        section { class: "p-4", "aria-label": "{row.value.title}",
+            h3 { class: "mb-4 text-lg font-semibold", "{row.value.title}" }
+            PresentationSlot {
+                reference: row.attachments[row.value.detail.index()].clone(),
             }
         }
     }

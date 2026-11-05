@@ -7,6 +7,12 @@
 //! exist while it is stopped declares the row in its manifest, which stores an endpoint to its
 //! own presentation; a micro that only contributes while running writes the row at runtime with
 //! a bound reference. Settings treats both alike.
+//!
+//! Settings is a **list panel** of the shell (ADR 032 §8): it contributes one `shell.panels` row
+//! whose content is the list of its sections and whose details presentation shows the section
+//! the shell has open. It arranges nothing itself; the shell owns the stack, the layout and the
+//! back button, which Settings requires from it ([`SHELL_NAVIGATE`], [`SHELL_OPENED`],
+//! [`SHELL_NAV_BUTTON`]).
 use clay_mdk::Access;
 use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
@@ -22,7 +28,6 @@ use clay_mdk::Nsid;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
-use clay_mdk::SHELL_ROOTS;
 use clay_mdk::Sidecar;
 use serde::Deserialize;
 use serde::Serialize;
@@ -35,14 +40,22 @@ pub const AUTHORITY: &str = "org.example.dayframe.settings";
 pub const CONFIG_NAME: &str = "settings";
 pub const CONFIG_TAG: &str = "org.example.dayframe.settings.config";
 pub const CONFIG_KEY: &str = "main";
-/// The Settings presentation, which the shell mounts as a root.
-pub const VIEW: &str = "view";
+/// The Settings list: the content of its panel, the sections and the viewer's preferences.
+pub const LIST: &str = "list";
+/// The presentation of the section the shell has open, mounted in the details position.
+pub const SECTION: &str = "section";
 /// The contract NSID, and so the declared collection's id, of the sections collection.
 pub const SECTIONS: &str = "org.example.dayframe.settings.sections";
 /// The local binding name under which Settings reads its sections collection.
 pub const SECTIONS_BINDING: &str = "sections";
-/// The local binding name under which Settings registers its root into `shell.roots`.
-pub const ROOTS_BINDING: &str = "roots";
+/// The local binding name under which Settings contributes its panel to `shell.panels`.
+pub const PANELS_BINDING: &str = "panels";
+/// The local binding names under which Settings requires what it uses of the shell. Each is
+/// the name of the shell publication it binds, so a catalog satisfies all of them from one
+/// provider (`InstalledMicro::satisfied_by`).
+pub const SHELL_NAVIGATE: &str = micro_shell_manifest::NAVIGATE;
+pub const SHELL_OPENED: &str = micro_shell_manifest::OPENED;
+pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
 /// Schema NSIDs of [`SECTIONS`] keys (the contributing micro's id, text) and values
 /// ([`Section`]), and of its selector (the whole collection).
 pub const SECTION_KEY_SCHEMA: &str = "org.example.dayframe.settings.sectionKey";
@@ -58,16 +71,30 @@ pub struct Section {
 }
 
 /// The Settings micro's package declaration: it declares the sections collection, publishes its
-/// view, and registers that view as a shell root.
+/// list and section presentations, requires the shell's navigation, and contributes its panel
+/// row to the shell.
 pub fn manifest() -> MicroManifest {
+    let presentation = |name: &str| PublicationDeclaration {
+        name: name.into(),
+        kind: PublicationKind::Presentation,
+        contract: None,
+    };
+    let requires = |binding: &str, contract: &str| Request {
+        binding: binding.into(),
+        contract: Nsid::literal(contract),
+        access: None,
+        necessity: Necessity::Required,
+        resolution: BindingResolution::Configured,
+        min_revision: None,
+    };
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: VIEW.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
-        requires: vec![],
+        publications: vec![presentation(LIST), presentation(SECTION)],
+        requires: vec![
+            requires(SHELL_NAVIGATE, micro_shell_manifest::NAVIGATE_CONTRACT),
+            requires(SHELL_OPENED, micro_shell_manifest::OPENED_CONTRACT),
+            requires(SHELL_NAV_BUTTON, micro_shell_manifest::NAV_BUTTON_CONTRACT),
+        ],
         configuration_requests: vec![ConfigurationRequest {
             binding: CONFIG_NAME.into(),
             facets: vec![FacetAccess {
@@ -88,8 +115,8 @@ pub fn manifest() -> MicroManifest {
             offered: vec![CollectionCapability::Read, CollectionCapability::Register],
         }],
         // Settings reads sections through a binding configuration resolves; with one declared
-        // sections collection the default binds it. It also registers its root row into the
-        // runtime-defined `shell.roots` collection, which the runtime satisfies.
+        // sections collection the default binds it. It also writes its panel row into the
+        // shell's panels collection.
         collection_requests: vec![
             Request {
                 binding: SECTIONS_BINDING.into(),
@@ -100,26 +127,36 @@ pub fn manifest() -> MicroManifest {
                 min_revision: None,
             },
             Request {
-                binding: ROOTS_BINDING.into(),
-                contract: Nsid::literal(SHELL_ROOTS),
+                binding: PANELS_BINDING.into(),
+                contract: Nsid::literal(micro_shell_manifest::PANELS),
                 access: Some(Access::Write),
                 necessity: Necessity::Required,
                 resolution: BindingResolution::Configured,
                 min_revision: None,
             },
         ],
+        // Declared, not written at runtime: the shell lists Settings on home while it is
+        // stopped, and opening it is what starts it.
         contributions: vec![ContributionDeclaration {
-            id: "root".into(),
-            binding: ROOTS_BINDING.into(),
+            id: "panel".into(),
+            binding: PANELS_BINDING.into(),
             key: ID.into(),
             payload: serde_json::json!({
                 "title": "Settings",
+                "sockets": ["list"],
                 "content": { "$attachment": 0 },
+                "details": { "$attachment": 1 },
             }),
-            attachments: vec![clay_mdk::AttachmentDeclaration {
-                index: 0,
-                publication: VIEW.into(),
-            }],
+            attachments: vec![
+                clay_mdk::AttachmentDeclaration {
+                    index: 0,
+                    publication: LIST.into(),
+                },
+                clay_mdk::AttachmentDeclaration {
+                    index: 1,
+                    publication: SECTION.into(),
+                },
+            ],
         }],
         extra: Default::default(),
     }
@@ -158,9 +195,9 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_declares_a_settings_root_row() {
+    fn the_manifest_declares_a_settings_panel_row() {
         sidecar().validate().unwrap();
         let rows = declared_rows(&clay_mdk::MicroId::local(ID), &sidecar()).unwrap();
-        assert_eq!(rows.keys().collect::<Vec<_>>(), [ROOTS_BINDING]);
+        assert_eq!(rows.keys().collect::<Vec<_>>(), [PANELS_BINDING]);
     }
 }
