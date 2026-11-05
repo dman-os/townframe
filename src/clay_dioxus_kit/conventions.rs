@@ -218,10 +218,18 @@ fn headless_parts_hold_no_styling() {
             });
             // A `use` of a Tailwind-looking token is not possible, but a literal in a skin
             // default would be: the skin structs hold no literal either.
-            found.extend(source.literals().into_iter().filter_map(|(line_number, literal)| {
-                looks_like_utility_classes(literal)
-                    .then(|| format!("KIT-011: {}:{line_number}: utility classes in a headless part: {literal:?}", source.path))
-            }));
+            found.extend(
+                source
+                    .literals()
+                    .into_iter()
+                    .filter(|(_, literal)| looks_like_utility_classes(literal))
+                    .map(|(line_number, literal)| {
+                        format!(
+                            "KIT-011: {}:{line_number}: utility classes in a headless part: {literal:?}",
+                            source.path
+                        )
+                    }),
+            );
             found
         })
         .collect();
