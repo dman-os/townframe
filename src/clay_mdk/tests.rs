@@ -827,6 +827,17 @@ impl presentation::HostSurface for TestHost {
             }
         }
     }
+    fn element_command(
+        &mut self,
+        _surface: Resource<Surface>,
+        _element: u32,
+        _command: presentation::ElementCommand,
+    ) -> wasmtime::Result<Result<(), PresentationError>> {
+        Ok(Err(PresentationError::Unsupported(
+            "element commands".into(),
+        )))
+    }
+
     fn retain(
         &mut self,
         surface: Resource<Surface>,

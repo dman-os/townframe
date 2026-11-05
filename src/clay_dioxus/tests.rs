@@ -91,6 +91,56 @@ async fn wire_slots_mount_through_context_preserve_identity_and_revoke_nested_su
     host.close();
 }
 
+#[tokio::test]
+async fn element_commands_reach_only_elements_that_announced_mounted() {
+    use clay_surface::ElementCommand;
+    use clay_surface::ScrollBehavior;
+    use clay_surface::ScrollOffsets;
+    use clay_surface::SurfaceSink;
+    let host = Host::new();
+    let components = NativeComponents::new(&host);
+    let owner = host.start("owner");
+    let writer = Rc::new(RefCell::new(None));
+    let (reference, _surface) = components
+        .publish_surface(&owner, {
+            let writer = writer.clone();
+            move |_, sink| {
+                sink.apply(&counter_initial_batch())?;
+                *writer.borrow_mut() = Some(sink);
+                Ok(SurfaceSession::new(|_| EventResponse::default()))
+            }
+        })
+        .unwrap();
+    fn app(props: (NativeComponents, Instance, ComponentRef)) -> Element {
+        use_context_provider(|| props.0.clone());
+        rsx! { ComponentMount { owner: props.1, reference: props.2 } }
+    }
+    let mut dom = VirtualDom::new_with_props(app, (components, owner, reference));
+    let mut tree = SurfaceTree::new();
+    dom.rebuild(&mut tree);
+    let writer = writer.borrow().clone().unwrap();
+    let scroll = ElementCommand::Scroll(ScrollOffsets {
+        left: 0.0,
+        top: 40.0,
+        behavior: ScrollBehavior::Instant,
+    });
+    // Element 1 exists in the guest's tree but never announced `mounted`: the host holds no
+    // handle for it, so the command is refused at the boundary instead of reaching a renderer.
+    assert!(matches!(
+        SurfaceSink::element_command(&writer, 1, scroll),
+        Err(PresentationError::InvalidBatch(_))
+    ));
+    writer.mounted.lock().unwrap().insert(1);
+    assert_eq!(SurfaceSink::element_command(&writer, 1, scroll), Ok(()));
+    writer.withdraw();
+    assert_eq!(
+        SurfaceSink::element_command(&writer, 1, scroll),
+        Err(PresentationError::Revoked)
+    );
+    drop(dom);
+    host.close();
+}
+
 #[test]
 fn recursive_component_slots_are_rejected_without_recursing_into_the_factory() {
     let host = Host::new();

@@ -7,6 +7,9 @@
 //! box of the full file height. The DOM is read only through the `scroll` event payload.
 use clay_mdk::Context;
 use clay_mdk::Error;
+use dioxus::html::MountedData;
+use dioxus::html::ScrollBehavior;
+use dioxus::html::geometry::PixelsVector2D;
 use dioxus::prelude::*;
 
 pub const ID: &str = "dayframe.pierre_spike_scroll";
@@ -158,6 +161,9 @@ fn view() -> Element {
     let mut tokens = use_signal(|| 1_usize);
     let mut viewport = use_signal(|| SCROLLER_HEIGHT);
     let mut profile = use_signal(|| DEFAULT_PROFILE);
+    // The scroller's handle, from its `mounted` event: the guest end of the element commands.
+    let mut scroller = use_signal(|| None::<std::rc::Rc<MountedData>>);
+    let mut measured = use_signal(String::new);
     let mut range = use_signal(|| window(0.0, SCROLLER_HEIGHT, 1_000_000, DEFAULT_PROFILE));
 
     let (start, count) = range();
@@ -197,8 +203,55 @@ fn view() -> Element {
                     }
                 }
             }
+            div { style: "display:flex;gap:8px;flex-wrap:wrap",
+                for (name, line) in [("top", 0_usize), ("500000", 500_000)] {
+                    button {
+                        key: "{name}",
+                        "data-testid": "jump-{name}",
+                        // `scrollTo` on the scroller: the guest learns the new position the same
+                        // way it learns a user's, from the scroll event that follows.
+                        onclick: move |_| {
+                            let Some(handle) = scroller.peek().clone() else {
+                                measured.set("the scroller has not announced mounted".into());
+                                return;
+                            };
+                            spawn(async move {
+                                let scrolled = handle
+                                    .scroll(
+                                        PixelsVector2D::new(0.0, line as f64 * LINE_HEIGHT),
+                                        ScrollBehavior::Instant,
+                                    )
+                                    .await;
+                                // A failed command is shown, never dropped.
+                                if let Err(error) = scrolled {
+                                    measured.set(format!("scroll failed: {error}"));
+                                }
+                            });
+                        },
+                        "jump to line {line}"
+                    }
+                }
+                button {
+                    "data-testid": "measure",
+                    onclick: move |_| {
+                        let handle = scroller.peek().clone().expect("the scroller has mounted");
+                        spawn(async move {
+                            let rect = handle.get_client_rect().await.expect("the host read the rect");
+                            let size = handle.get_scroll_size().await.expect("the host read the size");
+                            let offset = handle.get_scroll_offset().await.expect("the host read the offset");
+                            measured.set(format!(
+                                "rect {}x{} scroll-size {}x{} scroll-offset {},{}",
+                                rect.size.width, rect.size.height, size.width, size.height, offset.x, offset.y
+                            ));
+                        });
+                    },
+                    "measure"
+                }
+                span { "data-testid": "measured", "{measured}" }
+            }
             div {
                 "data-testid": "scroller",
+                onmounted: move |event| scroller.set(Some(event.data())),
                 style: "height:{SCROLLER_HEIGHT}px;overflow-y:auto;position:relative;border:1px solid gray",
                 onscroll: move |event| {
                     let data = event.data();

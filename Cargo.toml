@@ -150,7 +150,6 @@ micro_layout_manifest = { path = "./src/micro_layout_manifest" }
 micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
-micro_pierre_spike_scroll = { path = "./src/micro_pierre_spike_scroll" }
 dayframe_composition = { path = "./src/dayframe_composition" }
 
 #

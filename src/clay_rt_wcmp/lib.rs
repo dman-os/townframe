@@ -30,10 +30,14 @@ use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_surface::AttributeValue;
+use clay_surface::ElementCommand;
+use clay_surface::ElementRead;
 use clay_surface::Event;
 use clay_surface::EventResponse;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
+use clay_surface::ScrollBehavior;
+use clay_surface::ScrollOffsets;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
 use std::cell::RefCell;
@@ -198,11 +202,7 @@ impl WcmpStoreState {
 /// incarnation's driver ticks it. Nothing else would wake the driver for that, so the new task
 /// would sit unpolled until an unrelated wake: a collection feed's long poll expiring (30 s) is
 /// the only one a layout has.
-pub fn first_poll<F: Future>(
-    call: F,
-    waker: &Waker,
-    export: impl std::fmt::Display,
-) -> F::Output {
+pub fn first_poll<F: Future>(call: F, waker: &Waker, export: impl std::fmt::Display) -> F::Output {
     let entered = match std::pin::pin!(call).poll(&mut Context::from_waker(waker)) {
         Poll::Ready(output) => output,
         Poll::Pending => panic!(
@@ -319,6 +319,31 @@ pub fn convert_mutation(
     }
 }
 
+pub fn convert_element_command(command: wit_presentation::ElementCommand) -> ElementCommand {
+    use wit_presentation::ElementCommand as Wire;
+    let offsets = |offsets: wit_presentation::ScrollOffsets| ScrollOffsets {
+        left: offsets.left,
+        top: offsets.top,
+        behavior: match offsets.behavior {
+            wit_presentation::ScrollBehavior::Instant => ScrollBehavior::Instant,
+            wit_presentation::ScrollBehavior::Smooth => ScrollBehavior::Smooth,
+        },
+    };
+    match command {
+        Wire::Scroll(to) => ElementCommand::Scroll(offsets(to)),
+        Wire::ScrollBy(by) => ElementCommand::ScrollBy(offsets(by)),
+        Wire::SetFocus(focus) => ElementCommand::SetFocus(focus),
+        Wire::Read((request, what)) => ElementCommand::Read {
+            request,
+            what: match what {
+                wit_presentation::ElementRead::ClientRect => ElementRead::ClientRect,
+                wit_presentation::ElementRead::ScrollOffset => ElementRead::ScrollOffset,
+                wit_presentation::ElementRead::ScrollSize => ElementRead::ScrollSize,
+            },
+        },
+    }
+}
+
 fn convert_error(error: PresentationError) -> wit_presentation::PresentationError {
     match error {
         PresentationError::Revoked => wit_presentation::PresentationError::Revoked,
@@ -382,6 +407,19 @@ impl wit_presentation::HostSurface for WcmpStoreState {
         Ok(self
             .presentation
             .apply(&surface, &converted)
+            .map_err(convert_error))
+    }
+
+    fn element_command(
+        &mut self,
+        surface: Resource<WcmpSurface>,
+        element: u32,
+        command: wit_presentation::ElementCommand,
+    ) -> wcmp::Result<Result<(), wit_presentation::PresentationError>> {
+        let surface = self.table.get(&surface)?;
+        Ok(self
+            .presentation
+            .element_command(surface, element, convert_element_command(command))
             .map_err(convert_error))
     }
 
@@ -851,7 +889,10 @@ impl WcmpRuntime {
             Err(trap) => {
                 guard.take();
                 drop(guard);
-                self.trapped(writer, format!("guest trapped in presentation.dispatch: {trap}"));
+                self.trapped(
+                    writer,
+                    format!("guest trapped in presentation.dispatch: {trap}"),
+                );
                 EventResponse::default()
             }
         }

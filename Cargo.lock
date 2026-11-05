@@ -2717,6 +2717,7 @@ dependencies = [
  "dioxus-core",
  "dioxus-html",
  "js-sys",
+ "serde_json",
  "tokio",
  "wasm-bindgen",
  "web-sys",

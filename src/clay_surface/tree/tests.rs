@@ -586,14 +586,21 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
         let tree = props.tree.borrow();
         let child = tree.node(SurfaceNodeId::ROOT).children[0];
         let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
-        let rendered = tree.render_node(child, &dispatch, &|_| {
-            unreachable!("test has no component slots")
-        })?;
+        let rendered = tree.render_node(
+            child,
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )?;
         props
             .keys
             .borrow_mut()
             .push(rendered.key().map(str::to_owned));
-        tree.render(&dispatch, &|_| unreachable!("test has no component slots"))
+        tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )
     }
     let tree = Rc::new(std::cell::RefCell::new(SurfaceTree::new()));
     tree.borrow_mut().apply(&counter_initial_batch()).unwrap();
@@ -793,9 +800,11 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
     }
     fn app(props: Props) -> Element {
         let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
-        props
-            .tree
-            .render(&dispatch, &|_| unreachable!("test has no component slots"))
+        props.tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )
     }
     let mut tree = SurfaceTree::new();
     tree.apply(&[

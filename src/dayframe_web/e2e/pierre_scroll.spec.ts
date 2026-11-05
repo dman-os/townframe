@@ -72,9 +72,10 @@ async function installProbe(page: Page) {
     // deno-lint-ignore no-explicit-any
     const w = window as any;
     const scroller = document.querySelector('[data-testid="scroller"]')!;
-    const probe = { scrolls: [] as number[][], mutations: [] as number[][], frames: [] as number[], longtasks: [] as number[], running: true };
+    const probe = { clicks: [] as number[], scrolls: [] as number[][], mutations: [] as number[][], frames: [] as number[], longtasks: [] as number[], running: true };
     w.__probe = probe;
     w.__clayTiming = [];
+    document.addEventListener("click", () => probe.clicks.push(performance.now()), { capture: true });
     scroller.addEventListener("scroll", () => {
       probe.scrolls.push([performance.now(), (scroller as HTMLElement).scrollTop]);
     }, { capture: true, passive: true });
@@ -240,3 +241,52 @@ for (const [name, steps, delta] of [["continuous-100px", 200, 100], ["chunk-per-
     expect(failures).toEqual([]);
   });
 }
+
+test("element commands: the guest scrolls the scroller to line 500,000 and back with scrollTo, and reads its geometry", async ({ page }) => {
+  const failures = watchFailures(page);
+  const { scroller, window: win } = await openSpike(page);
+
+  // `onmounted` handed the guest a handle; `scroll` is a guest-to-host element command. The DOM
+  // is the witness that the host ran it, and the window shows the guest saw the scroll event.
+  await page.getByTestId("jump-500000").click();
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBe(500_000 * LINE);
+  await expect(win).toHaveAttribute("data-value", "499989");
+  await expect(win.getByText("let v500000 = step(")).toBeVisible();
+
+  await page.getByTestId("jump-top").click();
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBe(0);
+  await expect(win).toHaveAttribute("data-value", "0");
+  await expect(win.getByText("let v0 = step(")).toBeVisible();
+
+  // Reads are answered by a later `element-reply` event; the values are the DOM's own.
+  await page.getByTestId("jump-500000").click();
+  await expect(win).toHaveAttribute("data-value", "499989");
+  const dom = await scroller.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    return { w: rect.width, h: rect.height, sw: el.scrollWidth, sh: el.scrollHeight, top: el.scrollTop };
+  });
+  await page.getByTestId("measure").click();
+  await expect(page.getByTestId("measured")).toHaveText(
+    `rect ${dom.w}x${dom.h} scroll-size ${dom.sw}x${dom.sh} scroll-offset 0,${dom.top}`,
+  );
+  expect(failures).toEqual([]);
+});
+
+test("element commands: the round trip of a jump to the committed window", async ({ page }) => {
+  const failures = watchFailures(page);
+  const { scroller, window: win } = await openSpike(page);
+  const samples: number[] = [];
+  for (let i = 0; i < 20; i++) {
+    const line = i % 2 === 0 ? "500000" : "top";
+    await installProbe(page);
+    await page.getByTestId(`jump-${line}`).click();
+    await expect(win).toHaveAttribute("data-value", line === "top" ? "0" : "499989");
+    const { clicks, mutations } = await page.evaluate(() => (window as any).__probe as { clicks: number[]; mutations: number[][] });
+    // From the click event in the page to the last DOM mutation batch of the jump's window.
+    samples.push(mutations[mutations.length - 1][0] - clicks[0]);
+    await page.evaluate(() => { (window as any).__probe.running = false; });
+  }
+  report("jump-roundtrip-ms", stats(samples));
+  void scroller;
+  expect(failures).toEqual([]);
+});
