@@ -388,6 +388,11 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
     - `process_pending_fragment_requests` keeps pending fragment work in memory only; after a crash those boundaries never get fragments (bounded growth).
     - Deletes in `mutate_tree_in_tx` rehydrate the tree from SQLite (rare, O(tree)).
     - Existing stores keep old snapshot blobs until a fragment covers them; nothing repacks.
+  - Stress seed 1 timeout (aarch64 box, 2 of 8 runs, both the first run after a fresh build; 6 local runs pass). Triage, not pinned:
+    - Keyhive CGKA update ops keep being minted to 240 s (~1,380 distinct events; passing runs ~320, all by 80 s). Nothing is stuck in pending; ops are still being produced.
+    - Hypothesis: a causal-checkpoint feedback loop. A CGKA op admission triggers `EnsureCoverage(doc)` on every node; `reconcile_causal_coverage` (doc_worker.rs ~1484) persists a checkpoint whenever `current_causal_epoch` is None, via `persist_causal_checkpoint` (native.rs ~456), which `force_pcs_update`s and can mint a new update op; that op retriggers coverage on every node. Passing runs show it too (50–58 persists, ~32 with cur=None) but it damps. Nothing but timing damps it. Possibly amplified by D23's reader reconcile (more CGKA adds). INSTR `0a2a9618` logs each persist with epoch and known checkpoints.
+    - big_repo wrong turn: the frontier worker's per-doc task is `replace`d on every admitted CGKA op row, cancelling the in-flight publish; the doc worker still serves the queued `AcquireHandle{Internal}` with a full load/decrypt and then finds the caller gone (8.2k–8.6k "caller dropped before response" in a failing run, ~300 in a passing one). Same keyed-replace in the causal checkpoint worker's `EnsureCoverage`.
+    - Next: in a failing run, check whether `known` grows and `cur` stays None for one doc; read the keyhive fork's `force_pcs_update` for when the PCS root is underivable after concurrent update ops.
 - **D28. Follow-ups to D24** (operator, 2026-11-05):
   - Blob retention targets only inventories the node can write.
   - A write keyhive refuses for access becomes a typed error that the docs service maps to `Denied`.
