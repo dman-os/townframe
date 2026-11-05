@@ -106,7 +106,10 @@ impl ChildDelegation {
 }
 
 impl Core {
-    /// The level `member` holds on `group` in Keyhive, `None` when it holds nothing.
+    /// The level `member` holds on `group` through its own delegation, `None` when it has none.
+    /// Access reached through other groups does not count: with drawer 2 holding 1 and 1
+    /// holding 0, 2 reaches 0's groups through 1, but there is no 2→0 delegation for a link to
+    /// skip or an unlink to revoke.
     pub(super) async fn group_level(
         &self,
         member: &BigKeyhiveGroup,
@@ -114,7 +117,7 @@ impl Core {
     ) -> Option<KeyhiveAccess> {
         self.big_repo
             .keyhive()
-            .agent_access_on(&member.id().into(), group.id().into())
+            .direct_access_on(&member.id().into(), group.id().into())
             .await
     }
 
