@@ -296,3 +296,20 @@ without that driver it should not occur. A `LimitsExceeded` from `vello_hybrid` 
   profile by `x/dayframe-packages.ts` regardless (so the release APK still carries 15 to 16 MB debug guests), and release
   needs a signing config for an installable APK (Dioxus.toml) or `apksigner` with a debug key.
 - Disk freed on the way: the emulator SDK (9.6 GB, no longer needed with a phone) and the worktree's host `debug/` target dir.
+
+## A3 notes (phone)
+
+A3 had the phone (ZTE 8050, `LZ0V50ETDC6009467`, listed as `device`) but **no APK was produced; every checklist item is
+not run**. The arm64 debug build (`./x/agent-build.ts -- deno run --allow-all x/dayframe.ts android --abi arm64`) was started
+and stopped by PID at the disk floor, so nothing was installed on the phone.
+
+- Progress: 1034/1926 crates compiled (dx's counter; 2 restarts resume from cached artifacts, the second began at 828).
+  The worktree's target dir (`/run/media/asdf/p3N/tmp/townframe-target-p3n-4/townframe-p3N-4/agent-a13a9caba8415d784`)
+  was 13 GB at the stop and is intact; re-running the same command resumes.
+- Disk: 23 GB free at start, 8.0 GB at the stop, 6.4 GB seconds later with my build already dead, so other lanes'
+  builds and tests are also writing to the volume (`townframe-target-p3n-2` 35 GB, `-p3n-4` 61 GB in total).
+- Host CPU was saturated by other lanes (load average 55 to 85, CPU pressure `some avg60` ~82): the first 800 crates took
+  about 45 minutes; the first run died when the session's scratchpad (and its log) was removed at a day rollover.
+- Need before retrying: roughly 10 to 12 GB free beyond the current target dir for the remaining ~890 crates, plus
+  Gradle's assembly and the APK (~200 MB debug). Release arm64 is a second full profile in the same target dir
+  (another ~12 GB+), so it needs space freed first (the p3n-2 and p3n-4 host `debug/` dirs are the candidates, by their owners).
