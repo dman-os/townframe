@@ -621,6 +621,13 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
 
+Big_cabinet read/write options discussed with the operator 2026-11-06, deferred because none is a pure win yet:
+- Store the gate verdict per datum-set row at projection time (the gate is a function of doc and heads), so pages and `readDatums` at projected heads skip re-verification; other heads fall back to the gate. Saves CPU, not wire, on a local node.
+- `readDatums` patch mode (`since` heads -> `doc.diff` patches per datum), and a splice input format for text datums so a keystroke is not a full-value upload. Today full-string writes already become splices (`TextReconciler::update`), so merge intent is preserved; the gain is wire size for remote clients.
+- Client-held Automerge (editors producing changes locally): only pays for remote, offline clients without a local node. Datums leaving the node must be signed either way (debounced checkpoint claims); delegated session keys via `ActorMetadata.delegation` beat handing private keys to subsystems.
+- Automerge 0.12 authors (PR #54, stale against big_cabinet): defer until subduction checks the commit signer against the author footer. `Author` is an unauthenticated change footer; `set_author` re-randomizes the actor, so ADR 020's per-doc actor must be re-set after it.
+- Two-phase write: today's dry stage + rollback; alternatives are a pure JSON->native claim mirror (one stage; also lets the authority check what it signs, no-op write detection, ETags) or staging on a clone held across the signing await (needs a per-doc writer gate: the clone's actor would collide on seq). Automerge has no detached change builder (`transaction*` take `&mut self`). Re-measure the dry stage after cost 2 before choosing.
+
 ## Open questions for the operator
 
 - Lifecycle review questions 1–7: resolved 2026-11-04. See ADR 027 §10 and ADR 028.
