@@ -1858,11 +1858,9 @@ async fn precompiled_artifacts_are_reused_by_content() {
     ));
     let artifact = {
         let engine = engine().unwrap();
-        // The cache directory is process-global configuration; this test owns it for its duration.
-        let previous = std::env::var_os("DAYFRAME_COMPONENT_CACHE");
-        // SAFETY: tests in this binary do not read this variable concurrently except through
-        // this test, which restores it before returning.
-        unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", &directory) };
+        // The cache directory is process-global configuration that can be set once, and this is
+        // the only test that sets it: it then names the directory for the rest of the binary.
+        set_component_cache_directory(directory.clone());
         let first = compile_component(&engine, &bytes).unwrap();
         let artifact = cache_path(&engine, &bytes).unwrap();
         assert!(artifact.exists(), "a cold compile publishes its artifact");
@@ -1874,14 +1872,14 @@ async fn precompiled_artifacts_are_reused_by_content() {
             "a warm load must not recompile"
         );
         drop((first, second));
-        match previous {
-            Some(previous) => unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", previous) },
-            None => unsafe { std::env::remove_var("DAYFRAME_COMPONENT_CACHE") },
-        }
+        assert!(
+            artifact.starts_with(&directory),
+            "the explicit directory wins over the environment"
+        );
         artifact
     };
     // A warm load produces a component on the shared engine, from the published artifact.
-    let package = WasmPackage::from_bytes(&bytes).await.unwrap();
+    let package = WasmPackage::from_bytes(bytes).await.unwrap();
     assert!(Engine::same(&package.engine, &engine().unwrap()));
     assert!(artifact.exists());
     std::fs::remove_dir_all(directory).ok();

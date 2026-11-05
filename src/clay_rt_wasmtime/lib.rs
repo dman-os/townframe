@@ -599,20 +599,36 @@ fn compile_component(engine: &Engine, bytes: &[u8]) -> Result<Component, String>
     unsafe { Component::deserialize(engine, &compiled) }.map_err(|error| error.to_string())
 }
 
-/// `$DAYFRAME_COMPONENT_CACHE`, else the XDG/home cache, keyed by content and engine
-/// compatibility. `None` means the process has no cache location at all (no `HOME`, no
-/// `XDG_CACHE_HOME`); compilation then happens in memory only.
+/// Where compiled artifacts live, set once by a composition root that has app storage of its own.
+static CACHE_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keep compiled components under `directory` (created on first write). A composition root whose
+/// process has no `$HOME` or XDG cache, an Android app, sets this once before it loads a
+/// package; without it every start recompiles every guest. Setting it twice is a programming
+/// error, since artifacts would then be split between two directories.
+pub fn set_component_cache_directory(directory: PathBuf) {
+    CACHE_DIRECTORY
+        .set(directory)
+        .expect("the component cache directory is set once per process");
+}
+
+/// The directory set by [`set_component_cache_directory`], else `$DAYFRAME_COMPONENT_CACHE`,
+/// else the XDG/home cache, keyed by content and engine compatibility. `None` means the process
+/// has no cache location at all; compilation then happens in memory only.
 fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
-    let directory = match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
-        Some(directory) => PathBuf::from(directory),
-        None => {
-            let base = std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
-                })?;
-            base.join("dayframe").join("components")
-        }
+    let directory = match CACHE_DIRECTORY.get() {
+        Some(directory) => directory.clone(),
+        None => match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
+            Some(directory) => PathBuf::from(directory),
+            None => {
+                let base = std::env::var_os("XDG_CACHE_HOME")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
+                    })?;
+                base.join("dayframe").join("components")
+            }
+        },
     };
     let mut key = blake3::Hasher::new();
     key.update(bytes);

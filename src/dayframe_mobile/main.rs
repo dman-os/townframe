@@ -39,12 +39,18 @@ mod android {
 
     #[no_mangle]
     fn android_main(app: dioxus_native::AndroidApp) {
+        let data_directory = app
+            .internal_data_path()
+            .expect("the activity has an internal data path");
         DATA_DIRECTORY
-            .set(
-                app.internal_data_path()
-                    .expect("the activity has an internal data path"),
-            )
+            .set(data_directory.clone())
             .expect("android_main runs once");
+        // Android has no `$HOME` or XDG cache for Wasmtime to find, so without this every process
+        // start recompiles every guest (6.5 s for a debug counter on a ZTE 8050). The artifacts
+        // are regenerable, so they sit under the internal data dir and go with the app.
+        dayframe_native::set_component_cache_directory(
+            data_directory.join("component-cache"),
+        );
         register_back_callback(&app);
         dioxus_native::set_android_app(app);
         dioxus::launch(App);

@@ -167,6 +167,9 @@ impl<F> PackageEngine for F where
 {
 }
 
+/// Where Wasmtime keeps compiled guests; see `clay_rt_wasmtime::set_component_cache_directory`.
+pub use clay_mdk::host::set_component_cache_directory;
+
 /// The Wasmtime [`PackageEngine`], what both native shells run packages on.
 pub fn wasmtime_engine(
     resources: Resources,
