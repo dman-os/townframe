@@ -333,53 +333,85 @@ async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> 
     Ok(())
 }
 
-// Ignored, not broken, and not redundant. What this test is for is *our* layer: that a boundary
-// commit travelling through BigRepo's Automerge document and encrypted envelope still produces a
-// requested fragment, that the fragment is persisted, and that it durably absorbs the covered
-// loose head with every stored blob decoding as its envelope type. The boundary *semantics* are
-// covered deterministically in subduction's own fragment tests, which pass an explicit depth
-// metric — ours would prove only that the wiring does not block them.
-//
-// What makes it unaffordable today is the trigger: `Depth::is_boundary()` is
-// `CountLeadingZeroBytes(commit_id) > 0`, i.e. p = 1/256 per commit, and the loop below brute-
-// forces up to 2000 commits to land one. On a loaded box that measured 1342 probes in 120s, so the
-// default-class 120s cap cuts ~0.5% of iterations and the 2000-attempt bound panics on ~0.04% —
-// either way ~7% of 60-minute soaks fail with no product defect present.
-//
-// Re-enable by constructing the boundary condition instead of drawing for it (a depth >= 1 commit
-// built by hand, or the depth-metric seam — `BigRepoSubduction` pins `CountLeadingZeroBytes`), then
-// assert on that commit rather than on whichever hash happens to arrive.
-#[ignore = "boundary trigger is a 1/256 draw; re-enable by constructing the depth >= 1 commit"]
+/// A local commit stores its own Automerge change, not a materialization of the document: the
+/// bytes a write adds to storage are bounded by the change it made, whatever the size of the
+/// document it lands in. Loading the document is the sedimentree's job, from the fragments that
+/// boundary commits compact plus the loose commits no fragment covers, so the test also writes
+/// two boundary commits (each stores a fragment, and minimization discards the loose commits it
+/// covers) and reloads the document from disk in a fresh repo.
 #[tokio::test]
-async fn local_boundary_commit_stores_fragment_and_prunes_covered_loose_history() -> Res<()> {
-    let (repo, _part_store, _stop_token) = boot_repo().await?;
+async fn local_commits_store_change_bytes_and_reload_from_fragments_and_loose_commits() -> Res<()> {
+    // Per-blob cost a loose commit adds on top of its change bytes: the keyhive envelope
+    // (nonce, content/pred refs, PCS hashes, one ancestor key per parent) and its encoding.
+    const ENVELOPE_OVERHEAD: usize = 1024;
+    const WRITES: usize = 64;
+    const BOUNDARY_WRITES: [usize; 2] = [20, 45];
+
+    /// Write note `index`, grinding a nonce into its body until the change hash lands on the
+    /// requested side of the sedimentree boundary (a leading zero byte, the depth metric both
+    /// Automerge's and sedimentree's fragments use). The commit time is pinned so the hash a
+    /// probe on a clone finds is the hash the real write produces.
+    fn write_note(doc: &mut automerge::Automerge, index: usize, boundary: bool) -> usize {
+        let commit = |doc: &mut automerge::Automerge, nonce: u32| {
+            doc.transact_with(
+                |_| automerge::transaction::CommitOptions::default().with_time(0),
+                |tx| {
+                    tx.put(
+                        automerge::ROOT,
+                        format!("note-{index:03}"),
+                        // Hash-derived text so the document cannot compress its notes away.
+                        format!(
+                            "{} #{nonce}",
+                            blake3::hash(format!("note {index}").as_bytes()).to_hex()
+                        ),
+                    )
+                },
+            )
+            .expect("failed writing note")
+            .hash
+            .expect("a put is a change")
+        };
+        let nonce = (0_u32..)
+            .find(|nonce| (commit(&mut doc.clone(), *nonce).0[0] == 0) == boundary)
+            .expect(ERROR_IMPOSSIBLE);
+        let head = commit(doc, nonce);
+        assert_eq!(
+            head.0[0] == 0,
+            boundary,
+            "the probe and the write hash alike"
+        );
+        doc.get_change_by_hash(&head)
+            .expect(ERROR_IMPOSSIBLE)
+            .raw_bytes()
+            .len()
+    }
+
+    let temp_root = tempdir()?;
+    let repo_path = temp_root.path().join("change-bytes");
+    let (repo, _part_store, stop) = _boot_disk_repo(repo_path.clone()).await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
         .expect("failed seeding doc");
-
     let handle = repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
-    let mut stored_blob_count = repo.inspect_stored_doc_blobs(doc_id.clone()).await?.len();
+    let sed_id =
+        sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
+    let stored_bytes = |blobs: Vec<Vec<u8>>| blobs.iter().map(Vec::len).sum::<usize>();
+    let mut stored = stored_bytes(repo.inspect_stored_doc_blobs(doc_id.clone()).await?);
 
-    for attempt in 0..2_000_u32 {
-        let heads = handle
-            .with_document(|doc| {
-                doc.transact(|tx| tx.put(automerge::ROOT, "boundary_probe", attempt))
-                    .expect("failed writing boundary probe");
-                doc.get_heads()
-            })
+    let mut largest_change = 0;
+    for index in 0..WRITES {
+        let boundary = BOUNDARY_WRITES.contains(&index);
+        let change_len = handle
+            .with_document(|doc| write_note(doc, index, boundary))
             .await?;
-        assert_eq!(heads.len(), 1, "boundary probe commits should stay linear");
-        let head = heads[0];
-        let next_stored_blob_count = repo.inspect_stored_doc_blobs(doc_id.clone()).await?.len();
-
-        if head.0[0] == 0 {
-            repo.wait_for_quiescence(None).await?;
-
-            let sed_id = sedimentree_core::id::SedimentreeId::new(
-                doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
-            );
-            let head_id = sedimentree_core::loose_commit::id::CommitId::new(head.0);
+        largest_change = largest_change.max(change_len);
+        let next = stored_bytes(repo.inspect_stored_doc_blobs(doc_id.clone()).await?);
+        if boundary {
+            // The boundary commit stored its fragment, and minimization dropped the loose
+            // commits it covers, the boundary's own among them.
+            let head = handle.with_document_read(|doc| doc.get_heads()).await;
+            let head_id = sedimentree_core::loose_commit::id::CommitId::new(head[0].0);
             let fragments = <SqliteBigRepoStore as subduction_core::storage::traits::Storage<
                 future_form::Sendable,
             >>::load_fragment_metas(&repo.sqlite_store, sed_id)
@@ -396,21 +428,58 @@ async fn local_boundary_commit_stores_fragment_and_prunes_covered_loose_history(
                 .is_none(),
                 "the persisted fragment should durably absorb its covered loose head"
             );
-            for raw in repo.inspect_stored_doc_blobs(doc_id).await? {
-                decode_encrypted_blob(raw.as_slice())?;
-            }
-            return Ok(());
+        } else {
+            assert!(
+                next <= stored + change_len + ENVELOPE_OVERHEAD,
+                "write {index} grew storage by {} bytes for a {change_len} byte change",
+                next.saturating_sub(stored),
+            );
         }
-
-        assert_eq!(
-            next_stored_blob_count,
-            stored_blob_count + 1,
-            "non-boundary local commit should only add its loose commit"
-        );
-        stored_blob_count = next_stored_blob_count;
+        stored = next;
     }
 
-    panic!("failed to find a boundary Automerge commit after 2000 attempts");
+    let (expected_content, expected_heads, materialized_len) = handle
+        .with_document_read(|doc| {
+            (
+                serde_json::to_value(automerge::AutoSerde::from(doc)).expect(ERROR_IMPOSSIBLE),
+                doc.get_heads(),
+                doc.save().len(),
+            )
+        })
+        .await;
+    // The per-write bound above only discriminates once a materialized document outgrows a
+    // change plus its envelope; past that, a loose commit carrying the document would fail it.
+    assert!(
+        materialized_len > 2 * (largest_change + ENVELOPE_OVERHEAD),
+        "the document ({materialized_len} bytes) must outgrow a change for the bound to bite"
+    );
+    // O(writes × change), not O(writes × document).
+    assert!(
+        stored <= WRITES * (largest_change + ENVELOPE_OVERHEAD),
+        "{WRITES} writes stored {stored} bytes; a materialized document is {materialized_len}"
+    );
+    drop(handle);
+    stop().await?;
+    drop(repo);
+
+    let (reopened, _part_store, reopened_stop) = _boot_disk_repo(repo_path).await?;
+    let DocLookup::Ready(reloaded) = reopened.get_doc(&doc_id).await? else {
+        panic!("a fully local document must reload ready");
+    };
+    assert!(!reloaded.is_partially_decrypted());
+    let (content, heads) = reloaded
+        .with_document_read(|doc| {
+            (
+                serde_json::to_value(automerge::AutoSerde::from(doc)).expect(ERROR_IMPOSSIBLE),
+                doc.get_heads(),
+            )
+        })
+        .await;
+    assert_eq!(heads, expected_heads);
+    assert_eq!(content, expected_content);
+    drop(reloaded);
+    reopened_stop().await?;
+    Ok(())
 }
 
 #[tokio::test]

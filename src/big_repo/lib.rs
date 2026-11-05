@@ -1564,27 +1564,25 @@ impl BigDocHandle {
                 return (out, None);
             }
 
-            // Capture the current materialization while holding the same lock
-            // as the mutation. Any newly retained head must remain
-            // independently loadable after sedimentree minimization discards
-            // its predecessors.
-            let snapshot = doc.save();
+            // Each loose commit carries exactly the Automerge change it names
+            // (as a change chunk, compressed when Automerge finds it worth it),
+            // never a materialization of the document. Minimization deletes a
+            // loose commit only when a stored fragment covers its range
+            // (`CommitDag::simplify` in sedimentree_core), and that fragment's
+            // blob is the Automerge bundle of the same members
+            // (`process_pending_fragment_requests`), so the fragments plus the
+            // remaining loose commits always load the whole history.
             let changes = doc
                 .get_changes(&before_heads)
                 .into_iter()
-                .map(|change| {
+                .map(|mut change| {
                     let head = CommitId::new(change.hash().0);
                     let parents = change
                         .deps()
                         .iter()
                         .map(|dep| CommitId::new(dep.0))
                         .collect::<BTreeSet<_>>();
-                    let bytes = if after_heads.contains(&change.hash()) {
-                        snapshot.clone()
-                    } else {
-                        change.raw_bytes().to_vec()
-                    };
-                    (head, parents, bytes)
+                    (head, parents, change.bytes().into_owned())
                 })
                 .collect::<Vec<_>>();
             let patches = if self
