@@ -299,17 +299,62 @@ without that driver it should not occur. A `LimitsExceeded` from `vello_hybrid` 
 
 ## A3 notes (phone)
 
-A3 had the phone (ZTE 8050, `LZ0V50ETDC6009467`, listed as `device`) but **no APK was produced; every checklist item is
-not run**. The arm64 debug build (`./x/agent-build.ts -- deno run --allow-all x/dayframe.ts android --abi arm64`) was started
-and stopped by PID at the disk floor, so nothing was installed on the phone.
+Device: ZTE 8050 (`LZ0V50ETDC6009467`), Android 13, arm64, Mali, 1080x2408. Build: `./x/agent-build.ts -- deno run --allow-all
+x/dayframe.ts android --abi arm64` (debug), finished on the third attempt: the first two were stopped by PID at the disk floor
+(8 GB, then 5 GB), and the retries resumed from cached artifacts (target dir kept). APK:
+`<target>/townframe-p3N-4/agent-a13a9caba8415d784/dx/dayframe_mobile/debug/android/app/app/build/outputs/apk/debug/app-debug.apk`,
+213,265,895 B; `lib/arm64-v8a/libmain.so` 888,191,848 B uncompressed (debug, unstripped); the two debug guests inside are 15.1 MB
+(counter) and 17.0 MB (layout). Captures: `/run/media/asdf/p3N/tmp/a3/shots/` (outside the repo; the build log is
+`/run/media/asdf/p3N/tmp/a3/build-debug2.log`). The app is left installed on the phone.
 
-- Progress: 1034/1926 crates compiled (dx's counter; 2 restarts resume from cached artifacts, the second began at 828).
-  The worktree's target dir (`/run/media/asdf/p3N/tmp/townframe-target-p3n-4/townframe-p3N-4/agent-a13a9caba8415d784`)
-  was 13 GB at the stop and is intact; re-running the same command resumes.
-- Disk: 23 GB free at start, 8.0 GB at the stop, 6.4 GB seconds later with my build already dead, so other lanes'
-  builds and tests are also writing to the volume (`townframe-target-p3n-2` 35 GB, `-p3n-4` 61 GB in total).
-- Host CPU was saturated by other lanes (load average 55 to 85, CPU pressure `some avg60` ~82): the first 800 crates took
-  about 45 minutes; the first run died when the session's scratchpad (and its log) was removed at a day rollover.
-- Need before retrying: roughly 10 to 12 GB free beyond the current target dir for the remaining ~890 crates, plus
-  Gradle's assembly and the APK (~200 MB debug). Release arm64 is a second full profile in the same target dir
-  (another ~12 GB+), so it needs space freed first (the p3n-2 and p3n-4 host `debug/` dirs are the candidates, by their owners).
+Results (debug build only; release not run):
+
+1. Launch and Mali render: **pass.** `am start -W` TotalTime 4494 ms on the first launch after install, 1217 / 933 ms on later
+   cold starts (page cache warm). A "Loading Dayframe..." splash showed at 6 s (`01-home.png`), the shell at 26 s after the install
+   launch (`01b-home.png`, the Sample micro detail: the first run opened on it, cause not investigated), and the shell is up
+   almost immediately on later cold starts (`25-cold-restart.png`). No `panicked`/`F libc`/`FATAL` lines. Logcat is full of
+   `mali_gralloc: Requested R8 format is not supported with this allocator` errors at startup (harmless to the render, but noisy).
+   No wgpu debug-label crash on Mali (finding 1 of A1 does not reproduce here).
+2. Flows: **pass.** Home lists Layout and Settings; Settings lists Counter (Wasm), Micro lifecycle, Sample micro (`03-settings.png`);
+   "Choose settings sections" expands (`04-choose.png`). Insets: header sits below the status bar and nothing is under the cutout.
+3. Back: **partial.** KEYCODE_BACK from a section returns to Settings, Settings to Home, and with the keyboard up the first back
+   dismisses the keyboard (IME consumes it) and the second navigates. **Fail: back at Home does nothing** (`14-after-home-back.png`,
+   `topResumedActivity` stays MainActivity, process alive). Cause (logcat): `OnBackInvokedCallback: OnBackInvokedCallback is not
+   enabled for the application. Set 'android:enableOnBackInvokedCallback="true"' in the application manifest.` On API 33 the
+   dispatcher callback that `MainActivity.kt` registers is ignored unless the manifest opts in, so the A1 `moveTaskToBack` path
+   never runs; winit gets the key, the shell has nowhere to go and swallows it. Not fixed: the dx manifest template has no hook for
+   the attribute (A1 finding 2) and the alternative (Rust calling `moveTaskToBack` when `can_back` is false on the key path) needs
+   a rebuild. Gesture back (swipe from the left edge) not exercised separately from the key event: unverified.
+4. Sidebar: **pass** by button (hamburger opens a drawer with Home/Layout/Settings/Increment, `15-sidebar-button.png`; back closes
+   it). A left-edge swipe at Home opened nothing (`17-edge-swipe-horiz.png`): no edge-drag drawer exists or it is not
+   recognized; unverified which.
+5. Wasm guest: **pass.** Settings -> Micro lifecycle -> "Enable dayframe.counter micro" turned `Disabled` into `Idle`; before that
+   the section showed "Section unavailable: Unavailable" (`05-counter.png`, not enabled on admission, as A1 finding 4). Opening
+   Counter (Wasm) then renders the guest ("0", Refresh counter) and two presses give "2", "Operation 9: Accepted"
+   (`09-counter.png`). Wasmtime JIT under Android's SELinux works: no mmap/trap/avc lines in logcat. Layout micro enabled too:
+   Layout shows Hide/Show buttons and the Sample and Counter panels toggle without a hang (`19-layout2.png`, `21-layout-hide-sample.png`);
+   the desktop wcmp hang did not occur.
+   Guest timing: the first open of a Wasm section after process start takes about 5.5 s on the debug (unoptimized) guests (polled with
+   `screencap`, ~0.5 s granularity; the compile of a 15 MB debug component is the suspected cost, unverified), and during that
+   time the old frame stays on screen with no loading indicator, so taps look lost. This showed three times (Layout row, Show Counter,
+   Counter section) before I recognized it. A second open in the same process was not cleanly measured (the poll caught other
+   changes). No per-call dispatch timing is logged, so Counter/Layout dispatch latency is unmeasured.
+6. Text input: **partial.** Tapping the Sample micro Greeting field raises the soft keyboard (`dumpsys input_method`:
+   `mInputShown=true`, `mIsInputViewShown=true`) and `input text hello` (injected key events) arrives: "Hello from a microhello"
+   (`10-text.png`), and persists. Real IME composition, accents and swipe typing: **not run** (cannot be driven over adb; the
+   NativeActivity delivers key events only, as in S3).
+7. TalkBack: **not run** (changes a system setting, off limits).
+8. Persistence: **partial.** After `force-stop` and relaunch the Sample micro greeting is still "Hello from a microhello"
+   (`27-persist-sample.png`). The counter value and enabled-micro state across the restart were not read back cleanly: unverified.
+9. Memory (`dumpsys meminfo`, saved at `/run/media/asdf/p3N/tmp/a3/meminfo-settings.txt`): TOTAL PSS 450,043 KB (native heap
+   198 MB, GL mtrack 41 MB, .so mmap 160 MB) after the first Settings and Wasm session; 248,002 KB right after a cold start and
+   ~245 MB after reopening a guest. `gfxinfo` frame stats were empty (0 frames: the Blitz renderer does not go through HWUI), so
+   no jank numbers.
+
+Other findings:
+- The phone's clipboard UI (a floating clip chip, "Shell pasted from your clipboard") overlaid some of my screenshots with clipboard
+  contents; those captures (`08`, `08b`, `11`, `12`) were deleted at once and are not referenced. Nothing in the app reads the
+  clipboard in this run (unverified why the system raised it; likely the keyboard's clipboard suggestions). Future runs should crop
+  or avoid full-screen captures while the user is using the phone.
+- No fixes were committed: the one real bug (back at Home) needs a rebuild or a manifest hook, so it is pinned, not fixed.
+- Release arm64 build: not run (disk).
