@@ -41,12 +41,25 @@ pub(crate) enum SurfaceNodeKind<C> {
     Component(C),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct SurfaceNode<C> {
     generation: u64,
     pub(crate) kind: SurfaceNodeKind<C>,
     parent: Option<SurfaceNodeId>,
     pub(crate) children: Vec<SurfaceNodeId>,
+    /// The revision of the last batch that changed this node or anything below it. The
+    /// incremental projection re-renders a node only when this moves; it is bookkeeping, not
+    /// content, so it is outside equality.
+    pub(crate) subtree: u64,
+}
+
+impl<C: PartialEq> PartialEq for SurfaceNode<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.kind == other.kind
+            && self.parent == other.parent
+            && self.children == other.children
+    }
 }
 
 /// Retained logical tree for one mounted surface.
@@ -81,17 +94,38 @@ impl<C: PartialEq> PartialEq for SurfaceTree<C> {
 }
 
 impl<C: Clone> SurfaceTree<C> {
+    // Feature `spike-raised-limits` (Pierre scroll spike, docs/scratch/pierre-spikes.md) raises
+    // the five budgets a Pierre-sized window runs into, to measure what raising them costs. The
+    // default values are the shipped ones.
+    #[cfg(not(feature = "spike-raised-limits"))]
     pub const MAX_BATCH_MUTATIONS: usize = 4096;
+    #[cfg(feature = "spike-raised-limits")]
+    pub const MAX_BATCH_MUTATIONS: usize = 128 * 1024;
+    #[cfg(not(feature = "spike-raised-limits"))]
     pub const MAX_BATCH_BYTES: usize = 256 * 1024;
+    #[cfg(feature = "spike-raised-limits")]
+    pub const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
     pub const MAX_STRING_BYTES: usize = 64 * 1024;
+    #[cfg(not(feature = "spike-raised-limits"))]
     pub const MAX_NODE_SLOTS: usize = 8192;
+    #[cfg(feature = "spike-raised-limits")]
+    pub const MAX_NODE_SLOTS: usize = 32768;
+    #[cfg(not(feature = "spike-raised-limits"))]
     pub const MAX_ELEMENT_ID: NodeId = 8191;
+    #[cfg(feature = "spike-raised-limits")]
+    pub const MAX_ELEMENT_ID: NodeId = 32767;
     pub const MAX_STACK_DEPTH: usize = 256;
     pub const MAX_TREE_DEPTH: usize = 64;
+    #[cfg(not(feature = "spike-raised-limits"))]
     pub const MAX_RETAINED_BYTES: usize = 1024 * 1024;
+    #[cfg(feature = "spike-raised-limits")]
+    pub const MAX_RETAINED_BYTES: usize = 8 * 1024 * 1024;
     pub const MAX_ATTRIBUTES_PER_NODE: usize = 64;
     pub const MAX_LISTENERS_PER_NODE: usize = 32;
+    #[cfg(not(feature = "spike-raised-limits"))]
     pub const MAX_BATCH_WORK: usize = 128 * 1024;
+    #[cfg(feature = "spike-raised-limits")]
+    pub const MAX_BATCH_WORK: usize = 32 * 1024 * 1024;
 
     pub fn new() -> Self {
         Self {
@@ -100,6 +134,7 @@ impl<C: Clone> SurfaceTree<C> {
                 kind: SurfaceNodeKind::Root,
                 parent: None,
                 children: Vec::new(),
+                subtree: 0,
             })],
             vacant_slots: Vec::new(),
             next_generation: 1,
@@ -186,17 +221,17 @@ impl<C: Clone> SurfaceTree<C> {
         self.revision = revision;
         self.next_generation = next_generation;
         self.failure = failure;
+        // The emptied root is a change the projection must see.
+        self.node_mut(SurfaceNodeId::ROOT).subtree = revision;
     }
 
     pub fn revision(&self) -> u64 {
         self.revision
     }
 
-    /// Whether the guest element id names a live element.
-    pub fn contains_element(&self, id: NodeId) -> bool {
-        self.element_to_node
-            .get(id as usize)
-            .is_some_and(Option::is_some)
+    /// The revision of the last batch that changed anything.
+    pub fn root_stamp(&self) -> u64 {
+        self.node(SurfaceNodeId::ROOT).subtree
     }
 
     /// Live nodes in the arena, root included.
@@ -264,6 +299,7 @@ impl<C: Clone> SurfaceTree<C> {
             kind,
             parent: None,
             children: Vec::new(),
+            subtree: self.revision + 1,
         });
         if index == self.nodes.len() {
             self.nodes.push(node);
@@ -317,6 +353,7 @@ impl<C: Clone> SurfaceTree<C> {
             && *element_id == Some(id)
         {
             *element_id = None;
+            self.touch(previous);
         }
         self.element_to_node[index] = Some(node);
         if let SurfaceNodeKind::Element { element_id, .. } = &mut self.node_mut(node).kind {
@@ -350,7 +387,36 @@ impl<C: Clone> SurfaceTree<C> {
                 .filter(|node| node.generation == parent.1)
         {
             parent_node.children.retain(|&existing| existing != child);
+            self.touch(parent);
         }
+    }
+
+    /// Record that `id` changed in the batch being applied (revision `self.revision + 1`): it
+    /// and each attached ancestor move to that revision, stopping at the first ancestor that
+    /// already has it (everything above it was marked then). Cost is the depth of the first
+    /// change under a subtree, not the size of the tree.
+    pub(crate) fn touch(&mut self, id: SurfaceNodeId) {
+        let stamp = self.revision + 1;
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let node = self.node_mut(id);
+            if node.subtree == stamp {
+                break;
+            }
+            node.subtree = stamp;
+            current = node.parent;
+        }
+    }
+
+    /// Whether `element` still names the node a listener was rendered for. Listeners carry the
+    /// node's generation (`SurfaceNodeId.1`), which a node keeps for as long as it lives, so an
+    /// event is stale exactly when its element was removed or its id reassigned.
+    pub fn event_is_current(&self, element: NodeId, generation: u64) -> bool {
+        self.element_to_node
+            .get(element as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|node| node.1 == generation)
     }
 
     fn drop_subtree(&mut self, root: SurfaceNodeId) {

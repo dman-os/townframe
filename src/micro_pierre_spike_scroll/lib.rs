@@ -194,7 +194,7 @@ fn view() -> Element {
                         "{name} window"
                     }
                 }
-                for per_line in [1_usize, 3, 18, 38] {
+                for per_line in [1_usize, 3, 7, 18, 38] {
                     button {
                         key: "{per_line}",
                         "data-testid": "tokens-{per_line}",
@@ -407,7 +407,7 @@ mod budgets {
 
     #[test]
     fn print_window_budgets() {
-        for tokens in [1, 3, 18, 38] {
+        for tokens in [1, 3, 7, 18, 38] {
             let max = max_first_window(tokens);
             let per_row =
                 (commits((0, 6, tokens), None)[0].0 - commits((0, 2, tokens), None)[0].0) / 4;

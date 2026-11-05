@@ -106,6 +106,12 @@ pub struct ElementHandles(
     Rc<std::cell::RefCell<std::collections::BTreeMap<NodeId, Rc<dioxus_html::MountedData>>>>,
 );
 
+impl PartialEq for ElementHandles {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 impl ElementHandles {
     pub fn insert(&self, element: NodeId, mounted: dioxus_html::MountedData) {
         self.0.borrow_mut().insert(element, Rc::new(mounted));

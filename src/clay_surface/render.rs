@@ -12,8 +12,13 @@ use crate::wire::SurfaceEventHandler;
 use dioxus::prelude::*;
 use dioxus_core::ListenerCallback;
 use dioxus_html::PlatformEventData;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 impl<C: Clone> SurfaceTree<C> {
+    /// Project the whole tree. Every node is rebuilt on every call, whatever changed; see
+    /// [`SurfaceRoot`] for the projection that rebuilds only what a batch touched.
     pub fn render(
         &self,
         dispatch: &SurfaceEventHandler,
@@ -44,53 +49,174 @@ impl<C: Clone> SurfaceTree<C> {
             SurfaceNodeKind::Component(reference) => rsx! {
                 Fragment { key: "{id.1}", {component(reference)} }
             },
-            SurfaceNodeKind::Element {
-                tag,
-                namespace,
-                attributes,
-                listeners,
-                element_id,
-            } => {
-                let mut attrs = Vec::with_capacity(attributes.len() + listeners.len());
-                for ((name, ns), value) in attributes {
-                    let (attr_name, attr_ns) =
-                        static_attribute(name, ns.as_deref()).expect("validated surface attribute");
-                    let volatile = attr_name == "value" || attr_name == "checked";
-                    let attr_value = match value {
-                        AttributeValue::Text(text) => {
-                            dioxus_core::AttributeValue::Text(text.clone())
-                        }
-                        AttributeValue::Float(float) => dioxus_core::AttributeValue::Float(*float),
-                        AttributeValue::Int(int) => dioxus_core::AttributeValue::Int(*int),
-                        AttributeValue::Boolean(bool) => dioxus_core::AttributeValue::Bool(*bool),
-                        AttributeValue::None => dioxus_core::AttributeValue::None,
-                    };
-                    attrs.push(dioxus_core::Attribute::new(
-                        attr_name, attr_value, attr_ns, volatile,
-                    ));
-                }
-                if let Some(guest_element) = *element_id {
-                    let guest_node_id =
-                        NodeId::try_from(guest_element.raw()).expect("element id fits NodeId");
-                    for listener_name in listeners {
-                        attrs.push(
-                            surface_listener_attribute(
-                                listener_name,
-                                self.revision,
-                                guest_node_id,
-                                dispatch.clone(),
-                                handles,
-                            )
-                            .expect("validated surface listener"),
-                        );
-                    }
-                }
+            SurfaceNodeKind::Element { tag, namespace, .. } => {
+                let attrs = self.element_attributes(id, dispatch, handles);
                 let children = node
                     .children
                     .iter()
                     .map(|&child| self.render_node(child, dispatch, component, handles));
-                let key = id.1;
-                render_element_tag(tag, namespace.as_deref(), key, attrs, children)
+                render_element_tag(tag, namespace.as_deref(), id.1, attrs, children)
+            }
+        }
+    }
+
+    /// The host attributes and listeners of element `id`. A listener carries the node's
+    /// generation, so the host can tell an event for a node that is gone from one for a node
+    /// that merely changed (see [`SurfaceTree::event_is_current`]).
+    fn element_attributes(
+        &self,
+        id: SurfaceNodeId,
+        dispatch: &SurfaceEventHandler,
+        handles: &ElementHandles,
+    ) -> Vec<dioxus_core::Attribute> {
+        let SurfaceNodeKind::Element {
+            attributes,
+            listeners,
+            element_id,
+            ..
+        } = &self.node(id).kind
+        else {
+            unreachable!("element_attributes is called on elements")
+        };
+        let mut attrs = Vec::with_capacity(attributes.len() + listeners.len());
+        for ((name, ns), value) in attributes {
+            let (attr_name, attr_ns) =
+                static_attribute(name, ns.as_deref()).expect("validated surface attribute");
+            let volatile = attr_name == "value" || attr_name == "checked";
+            let attr_value = match value {
+                AttributeValue::Text(text) => dioxus_core::AttributeValue::Text(text.clone()),
+                AttributeValue::Float(float) => dioxus_core::AttributeValue::Float(*float),
+                AttributeValue::Int(int) => dioxus_core::AttributeValue::Int(*int),
+                AttributeValue::Boolean(bool) => dioxus_core::AttributeValue::Bool(*bool),
+                AttributeValue::None => dioxus_core::AttributeValue::None,
+            };
+            attrs.push(dioxus_core::Attribute::new(
+                attr_name, attr_value, attr_ns, volatile,
+            ));
+        }
+        if let Some(guest_element) = *element_id {
+            let guest_node_id =
+                NodeId::try_from(guest_element.raw()).expect("element id fits NodeId");
+            for listener_name in listeners {
+                attrs.push(
+                    surface_listener_attribute(
+                        listener_name,
+                        id.1,
+                        guest_node_id,
+                        dispatch.clone(),
+                        handles,
+                    )
+                    .expect("validated surface listener"),
+                );
+            }
+        }
+        attrs
+    }
+}
+
+/// What every node of one incrementally projected surface shares. Its parts are the same objects
+/// from one revision to the next, so equality is identity and costs four pointer comparisons.
+pub struct SurfaceProjection<C: 'static> {
+    pub tree: Arc<Mutex<SurfaceTree<C>>>,
+    pub dispatch: SurfaceEventHandler,
+    pub component: Rc<dyn Fn(&C) -> Element>,
+    pub handles: ElementHandles,
+}
+
+impl<C> Clone for SurfaceProjection<C> {
+    fn clone(&self) -> Self {
+        Self {
+            tree: self.tree.clone(),
+            dispatch: self.dispatch.clone(),
+            component: self.component.clone(),
+            handles: self.handles.clone(),
+        }
+    }
+}
+
+impl<C> PartialEq for SurfaceProjection<C> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.tree, &other.tree)
+            && Rc::ptr_eq(&self.dispatch, &other.dispatch)
+            && Rc::ptr_eq(&self.component, &other.component)
+            && self.handles == other.handles
+    }
+}
+
+/// The incremental projection of a retained tree: a `VirtualDom` component per node that has
+/// element grandchildren, memoized on `(node, subtree stamp)`. A batch moves the stamp of every
+/// node it touched and of that node's ancestors, so on the next render Dioxus skips every
+/// subtree the batch left alone and rebuilds only the touched ones (plus, per touched parent,
+/// the cheap component element of each of its children). Leaf-level elements (a span and its
+/// text, say) are built inline by their parent: a component per text node would cost more than
+/// it saves. `stamp` is the root's, so the root re-renders only when something changed.
+#[component]
+pub fn SurfaceRoot<C: Clone + 'static>(projection: SurfaceProjection<C>, stamp: u64) -> Element {
+    let _ = stamp;
+    let tree = projection.tree.lock().unwrap();
+    let root_children = &tree.node(SurfaceNodeId::ROOT).children;
+    rsx! {
+        for &child in root_children {
+            {tree.render_child(child, &projection)}
+        }
+    }
+}
+
+#[component]
+fn SurfaceNodeView<C: Clone + 'static>(
+    projection: SurfaceProjection<C>,
+    id: SurfaceNodeId,
+    stamp: u64,
+) -> Element {
+    let _ = stamp;
+    let tree = projection.tree.lock().unwrap();
+    tree.render_incremental(id, &projection)
+}
+
+impl<C: Clone + 'static> SurfaceTree<C> {
+    /// Whether `id` gets its own component: an element with an element child that itself has
+    /// children, i.e. one whose subtree is more than a tag around text.
+    fn is_boundary(&self, id: SurfaceNodeId) -> bool {
+        let node = self.node(id);
+        matches!(node.kind, SurfaceNodeKind::Element { .. })
+            && node.children.iter().any(|&child| {
+                let child = self.node(child);
+                matches!(child.kind, SurfaceNodeKind::Element { .. }) && !child.children.is_empty()
+            })
+    }
+
+    fn render_child(&self, id: SurfaceNodeId, projection: &SurfaceProjection<C>) -> Element {
+        if self.is_boundary(id) {
+            rsx! {
+                SurfaceNodeView::<C> {
+                    key: "{id.1}",
+                    projection: projection.clone(),
+                    id,
+                    stamp: self.node(id).subtree,
+                }
+            }
+        } else {
+            self.render_incremental(id, projection)
+        }
+    }
+
+    fn render_incremental(&self, id: SurfaceNodeId, projection: &SurfaceProjection<C>) -> Element {
+        let node = self.node(id);
+        match &node.kind {
+            SurfaceNodeKind::Root => unreachable!("root is never a child node"),
+            SurfaceNodeKind::Text(text) => rsx! {
+                Fragment { key: "{id.1}", "{text}" }
+            },
+            SurfaceNodeKind::Component(reference) => rsx! {
+                Fragment { key: "{id.1}", {(projection.component)(reference)} }
+            },
+            SurfaceNodeKind::Element { tag, namespace, .. } => {
+                let attrs = self.element_attributes(id, &projection.dispatch, &projection.handles);
+                let children = node
+                    .children
+                    .iter()
+                    .map(|&child| self.render_child(child, projection));
+                render_element_tag(tag, namespace.as_deref(), id.1, attrs, children)
             }
         }
     }

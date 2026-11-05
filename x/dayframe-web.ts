@@ -49,7 +49,11 @@ async function blake3Hex(bytes: Uint8Array): Promise<string> {
 
 // `wasm-release`, as `cargo x guardrails check-matrix` builds it: a debug build also links
 // Dioxus devtools, whose hot-reload socket finds no `dx serve` here and logs an error per retry.
-await $`cargo build --locked ${isolated} -p dayframe_web --bin dayframe_web --target wasm32-unknown-unknown --profile wasm-release`;
+// `DAYFRAME_RAISED_LIMITS=1` raises the surface budgets (Pierre scroll spike measurements only).
+const raisedLimits = Deno.env.get("DAYFRAME_RAISED_LIMITS") === "1"
+  ? ["--features", "spike-raised-limits"]
+  : [];
+await $`cargo build --locked ${isolated} -p dayframe_web --bin dayframe_web --target wasm32-unknown-unknown --profile wasm-release ${raisedLimits}`;
 const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
   .json<{ target_directory: string }>();
 const target = $.path(metadata.target_directory);

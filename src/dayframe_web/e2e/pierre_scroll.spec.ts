@@ -145,6 +145,14 @@ async function wheelProfile(page: Page, scroller: Locator, steps: number, delta:
     const nextScroll = data.probe.scrolls.find((s) => s[0] > t);
     if (next && (!nextScroll || next[0] < nextScroll[0])) commitLatency.push(next[0] - t);
   }
+  // From the end of each guest scroll dispatch (its batch is applied) to the first DOM mutation
+  // batch after it: the host's projection, the VDOM diff and the DOM apply, which the host
+  // schedules after the commit and which cannot be told apart without instrumenting dioxus-web.
+  const hostTail: number[] = [];
+  for (const r of data.timing.filter((r) => r[0] === "dispatch:scroll")) {
+    const next = data.probe.mutations.find((m) => m[0] >= r[2]);
+    if (next) hostTail.push(next[0] - r[2]);
+  }
   const frames = data.probe.frames.slice(1);
   const metric = (k: string) => Math.round((after[k] - before[k]) * 1000) / 1000;
   return {
@@ -159,6 +167,7 @@ async function wheelProfile(page: Page, scroller: Locator, steps: number, delta:
     commitsWithMutations: committing.length,
     domMutationBatches: data.probe.mutations.length,
     scrollToCommitMs: stats(commitLatency),
+    hostTailMs: stats(hostTail),
     frameIntervalMs: stats(frames),
     framesOver25ms: frames.filter((f) => f > 25).length,
     framesOver50ms: frames.filter((f) => f > 50).length,
@@ -365,4 +374,29 @@ for (const coalesce of [false, true]) {
     }
     expect(failures).toEqual([]);
   });
+}
+
+// Budget-scale measurements need the raised surface budgets: build the site with
+// DAYFRAME_RAISED_LIMITS=1 and run with PIERRE_RAISED=1. Rows carry `spans` token spans each in
+// Pierre's 200 row window (centred, so 200 rows are committed by the jump).
+if (process.env.PIERRE_RAISED) {
+  for (const spans of [3, 7, 18, 38]) {
+    test(`retained-tree scale: ${spans} spans per line, Pierre window, whole-tree vs incremental projection`, async ({ page }) => {
+      test.setTimeout(900_000);
+      const failures = watchFailures(page);
+      const { scroller, window: win } = await openSpike(page, { coalesce: true });
+      await page.getByTestId(`tokens-${spans}`).click();
+      await page.getByTestId("profile-pierre").click();
+      await page.getByTestId("jump-500000").click();
+      await expect(win).toHaveAttribute("data-state", "200", { timeout: 120_000 });
+      for (const incremental of [false, true]) {
+        await page.evaluate((off) => { (window as any).__clayNoIncremental = off; }, !incremental);
+        // One quiet frame so the projection switch itself is not in the measurement.
+        await frame(page);
+        const profile = await wheelProfile(page, scroller, 60, 1000);
+        report(`scale-spans${spans}-${incremental ? "incremental" : "whole-tree"}`, profile);
+      }
+      expect(failures).toEqual([]);
+    });
+  }
 }

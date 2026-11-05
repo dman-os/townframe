@@ -17,6 +17,8 @@ mod replay;
 mod tree;
 mod wire;
 
+pub use render::SurfaceProjection;
+pub use render::SurfaceRoot;
 pub use replay::replay;
 pub use tree::SurfaceTree;
 pub use wire::AttributeValue;

@@ -35,5 +35,21 @@ mod imp {
     }
 }
 
+/// Whether to project incrementally (the default). A browser page can turn it off
+/// (`window.__clayNoIncremental = true`) to measure the whole-tree projection it replaces.
+pub(crate) fn incremental() -> bool {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let window = web_sys::window().expect("a window");
+        !js_sys::Reflect::get(&window, &"__clayNoIncremental".into())
+            .expect("window is readable")
+            .is_truthy()
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        true
+    }
+}
+
 pub(crate) use imp::coalescing;
 pub(crate) use imp::next_frame;

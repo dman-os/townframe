@@ -23,6 +23,7 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 # the Playwright spec. Browser builds only; off everywhere else.
 [features]
 spike-timing = []
+spike-raised-limits = ["clay_surface/spike-raised-limits"]
 
 # The browser is the only host here with a frame source, which the scroll coalescer (`frames.rs`)
 # and the timing records (`timing.rs`) use.

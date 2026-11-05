@@ -32,6 +32,8 @@ console_error_panic_hook = "0.1.7"
 [features]
 default = ["web"]
 web = ["dioxus/web"]
+# Pierre scroll spike: raise the surface budgets (see `clay_surface`).
+spike-raised-limits = ["clay_dioxus/spike-raised-limits"]
 
 [[bin]]
 name = "dayframe_web"

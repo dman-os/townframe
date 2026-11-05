@@ -512,15 +512,15 @@ fn stale_host_listener_is_suppressed_after_external_apply_then_current_listener_
     assert_eq!(host_tree.text_content(), "replacement");
     let current_host_id = host_tree.listener_id("button", "click").unwrap();
     click(&dom, current_host_id);
-    assert_eq!(&*received.borrow(), &[(current_revision, 1)]);
+    // A listener carries its node's generation, not the surface revision.
+    let generation = received.borrow()[0].0;
+    assert_eq!(&*received.borrow(), &[(generation, 1)]);
     dom.render_immediate(&mut host_tree);
     assert_eq!(host_tree.text_content(), "1");
     let current_host_id = host_tree.listener_id("button", "click").unwrap();
     click(&dom, current_host_id);
-    assert_eq!(
-        &*received.borrow(),
-        &[(current_revision, 1), (current_revision + 1, 1)]
-    );
+    // The button survived the text update, so its listener is still current.
+    assert_eq!(&*received.borrow(), &[(generation, 1), (generation, 1)]);
     dom.render_immediate(&mut host_tree);
     assert_eq!(host_tree.text_content(), "2");
 }

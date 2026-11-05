@@ -12,6 +12,7 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
     fn set_id(&mut self, id: ElementId) {
         let node = self.top().node;
         self.set_mapping(id, node);
+        self.touch(node);
         if let Some(top) = self.stack.last_mut() {
             top.element_id = Some(id);
         }
@@ -79,6 +80,7 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             self.node_mut(child).parent = Some(parent);
         }
         self.node_mut(parent).children.extend(children);
+        self.touch(parent);
     }
 
     fn replace_with(&mut self, m: usize) {
@@ -100,6 +102,7 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             .position(|&existing| existing == target.node)
             .expect("target node must be in parent's children");
         siblings.splice(pos..=pos, replacements);
+        self.touch(parent);
         self.drop_subtree(target.node);
     }
 
@@ -122,6 +125,7 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             .position(|&existing| existing == anchor)
             .expect("anchor node must be in parent's children");
         siblings.splice(pos + 1..pos + 1, nodes);
+        self.touch(parent);
     }
 
     fn insert_before(&mut self, m: usize) {
@@ -143,10 +147,12 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             .position(|&existing| existing == anchor)
             .expect("anchor node must be in parent's children");
         siblings.splice(pos..pos, nodes);
+        self.touch(parent);
     }
 
     fn set_attribute(&mut self, name: &str, ns: Option<&str>, value: BorrowedAttributeValue<'_>) {
         let node = self.top().node;
+        self.touch(node);
         let SurfaceNodeKind::Element { attributes, .. } = &mut self.node_mut(node).kind else {
             panic!("set_attribute called on non-element surface node");
         };
@@ -186,6 +192,7 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
 
     fn set_text(&mut self, value: &str) {
         let node = self.top().node;
+        self.touch(node);
         match &mut self.node_mut(node).kind {
             SurfaceNodeKind::Text(text) => {
                 let previous_bytes = text.len();
@@ -218,6 +225,7 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             })
             .expect("event listener target must be mapped to an ElementId");
         self.set_mapping(element_id, entry.node);
+        self.touch(entry.node);
         let SurfaceNodeKind::Element { listeners, .. } = &mut self.node_mut(entry.node).kind else {
             panic!("add_event_listener called on non-element surface node");
         };
@@ -228,6 +236,7 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
 
     fn remove_event_listener(&mut self, name: &str) {
         let node = self.top().node;
+        self.touch(node);
         if let SurfaceNodeKind::Element { listeners, .. } = &mut self.node_mut(node).kind
             && listeners.remove(name)
         {

@@ -557,96 +557,124 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         }
     });
 
-    let _current_revision = revision();
-    let session = match session {
-        Err(error) => return rsx! { p { "Component unavailable: {error}" } },
-        Ok(session) if writer.is_live() => session,
-        Ok(_) => return rsx! { p { "Component withdrawn." } },
-    };
-    let dispatch = session.handler();
-    let writer_for_event = writer.clone();
-    let deliver: SurfaceEventHandler = Rc::new(move |event| {
-        if !writer_for_event.is_live() {
-            return EventResponse::default();
-        }
-        if event.name == "mounted" {
-            writer_for_event
-                .mounted
+    // The handler and the component renderer are built once, so the incremental projection can
+    // memoize on their identity. Built here, above the early returns, because it is a hook.
+    let handler_session = session.as_ref().ok().cloned();
+    let handler_writer = writer.clone();
+    let handler_owner = owner.clone();
+    let projection = use_hook(move || {
+        let session = handler_session?;
+        let dispatch = session.handler();
+        let writer = handler_writer;
+        let writer_for_event = writer.clone();
+        let deliver: SurfaceEventHandler = Rc::new(move |event| {
+            if !writer_for_event.is_live() {
+                return EventResponse::default();
+            }
+            if event.name == "mounted" {
+                writer_for_event
+                    .mounted
+                    .lock()
+                    .unwrap()
+                    .insert(event.element);
+            }
+            // A listener carries its node's generation: the event is stale only if that node
+            // was removed or its element id reassigned, not whenever any batch landed.
+            if !writer_for_event
+                .tree
                 .lock()
                 .unwrap()
-                .insert(event.element);
-        }
-        let current_revision = writer_for_event.revision();
-        if event.revision != current_revision {
-            timing::record(&format!("stale:{}", event.name), timing::now(), 0.0, 0.0);
+                .event_is_current(event.element, event.revision)
+            {
+                timing::record(&format!("stale:{}", event.name), timing::now(), 0.0, 0.0);
+                let mut rev = revision;
+                rev.set(writer_for_event.revision());
+                return EventResponse::default();
+            }
+            let started = timing::now();
+            let kind = timing::ENABLED.then(|| format!("dispatch:{}", event.name));
+            let response = dispatch(event);
+            if let Some(kind) = kind {
+                timing::record(&kind, started, 0.0, 0.0);
+            }
             let mut rev = revision;
-            rev.set(current_revision);
-            return EventResponse::default();
-        }
-        let started = timing::now();
-        let kind = timing::ENABLED.then(|| format!("dispatch:{}", event.name));
-        let response = dispatch(event);
-        if let Some(kind) = kind {
-            timing::record(&kind, started, 0.0, 0.0);
-        }
-        let mut rev = revision;
-        rev.set(writer_for_event.revision());
-        response
-    });
-    // A scroll event is a snapshot of where the element is, so the last one per animation frame
-    // is the only one the guest needs; holding the rest until the frame spares it a synchronous
-    // render per event. The held event is sent with the then-current revision: its element is
-    // checked to be live instead, because a snapshot that arrived while a newer revision was
-    // being projected would otherwise be dropped as stale and the final scroll position lost.
-    let writer_for_frame = writer.clone();
-    let handler: SurfaceEventHandler = {
-        let deliver = deliver.clone();
-        Rc::new(move |event| {
-            if event.name != "scroll" || !frames::coalescing() {
-                return deliver(event);
-            }
-            received.set(received.get() + 1);
-            let first = {
-                let mut held = held.borrow_mut();
-                let first = held.is_empty();
-                held.insert(event.element, event);
-                first
-            };
-            if first {
-                let (held, received, deliver, writer) = (
-                    held.clone(),
-                    received.clone(),
-                    deliver.clone(),
-                    writer_for_frame.clone(),
-                );
-                frames::next_frame(move || {
-                    let started = timing::now();
-                    let events = std::mem::take(&mut *held.borrow_mut());
-                    let mut delivered = 0.0;
-                    for (element, mut event) in events {
-                        if writer.is_live() && writer.tree.lock().unwrap().contains_element(element)
-                        {
-                            event.revision = writer.revision();
+            rev.set(writer_for_event.revision());
+            response
+        });
+        // A scroll event is a snapshot of where the element is, so the last one per animation
+        // frame is the only one the guest needs; holding the rest until the frame spares it a
+        // synchronous render per event.
+        let handler: SurfaceEventHandler = {
+            let deliver = deliver.clone();
+            Rc::new(move |event| {
+                if event.name != "scroll" || !frames::coalescing() {
+                    return deliver(event);
+                }
+                received.set(received.get() + 1);
+                let first = {
+                    let mut held = held.borrow_mut();
+                    let first = held.is_empty();
+                    held.insert(event.element, event);
+                    first
+                };
+                if first {
+                    let (held, received, deliver) =
+                        (held.clone(), received.clone(), deliver.clone());
+                    frames::next_frame(move || {
+                        let started = timing::now();
+                        let events = std::mem::take(&mut *held.borrow_mut());
+                        let delivered = events.len() as f64;
+                        for (_, event) in events {
                             deliver(event);
-                            delivered += 1.0;
                         }
-                    }
-                    timing::record("coalesce", started, received.replace(0) as f64, delivered);
-                });
+                        timing::record("coalesce", started, received.replace(0) as f64, delivered);
+                    });
+                }
+                EventResponse::default()
+            })
+        };
+        let component: Rc<dyn Fn(&ComponentRef) -> Element> = Rc::new(move |reference| {
+            rsx! {
+                ComponentMount { owner: handler_owner.clone(), reference: *reference }
             }
-            EventResponse::default()
+        });
+        Some(clay_surface::SurfaceProjection {
+            tree: writer.tree.clone(),
+            dispatch: handler,
+            component,
+            handles: handles.clone(),
         })
-    };
+    });
+
+    let _current_revision = revision();
+    if !matches!(session, Ok(_)) || !writer.is_live() {
+        return match session {
+            Err(error) => rsx! { p { "Component unavailable: {error}" } },
+            Ok(_) => rsx! { p { "Component withdrawn." } },
+        };
+    }
+    let projection = projection.expect("a live session has a projection");
+    if frames::incremental() {
+        let stamp = {
+            let tree = writer.tree.lock().unwrap();
+            let started = timing::now();
+            let stamp = tree.root_stamp();
+            timing::record(
+                "render",
+                started,
+                tree.node_count() as f64,
+                tree.revision() as f64,
+            );
+            stamp
+        };
+        return rsx! { clay_surface::SurfaceRoot::<ComponentRef> { projection, stamp } };
+    }
     let tree = writer.tree.lock().unwrap();
     let started = timing::now();
     let projected = tree.render(
-        &handler,
-        &|reference| {
-            rsx! {
-                ComponentMount { owner: owner.clone(), reference: *reference }
-            }
-        },
-        &handles,
+        &projection.dispatch,
+        &*projection.component,
+        &projection.handles,
     );
     timing::record(
         "render",
