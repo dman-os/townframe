@@ -7,5 +7,5 @@
     "noEmit": true,
     "types": ["@playwright/test", "node"]
   },
-  "include": ["playwright.config.ts", "e2e/**/*.ts"]
+  "include": ["playwright.config.ts", "e2e/**/*.ts", "bombadil/**/*.ts"]
 }

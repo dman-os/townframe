@@ -216,3 +216,87 @@ be reachable beside the layout (a sheet)? Should a hidden wide sidebar persist a
   `run_until_stalled` per entry, no loop. The test above fails (60 s) without the ring and passes with it.
 - **Spec.** `e2e/layout.spec.ts` lost its 180 s timeout and the comment calling the latency a finding.
 - **dman-os wcmp fork.** Untouched; the fault was in this repo's driver.
+
+## S4 notes (2026-11-05): Bombadil on the web build
+
+**Decision: keep.** It earned its place on the first day: two real faults in the shell stack that the scripted Playwright flows
+had not walked into, found in minutes, with a repro trace each. It is wired in non-blocking (see "Open") until the second fault is
+fixed.
+
+- **What it is.** Bombadil 0.7.10 (Antithesis, MIT, Rust) explores a page by clicking, typing, scrolling, reloading and going
+  back, and checks temporal-logic properties (`always`, `eventually(...).within(...)`, `next`) over the states it reaches. The
+  specification is a TypeScript module whose extractors run inside the page. It drives Chromium itself over CDP (`CHROME` names the
+  binary); it is not built on Playwright.
+- **Install, reproducible.** The npm package `@antithesishq/bombadil`, pinned `0.7.10` in `src/dayframe_web/package.json` and
+  `pnpm-lock.yaml`. It ships the prebuilt linux-x64 binary and the TypeScript types, so no cargo build and no Nix build; the
+  existing `pnpm install --frozen-lockfile --filter @townframe/dayframe_web` installs it. Rejected: `cargo install` of a rev (a
+  cold Rust build in CI for no gain), the release binary by `curl` (a second pin to keep beside the lockfile).
+- **Harness.** `e2e/bombadil.spec.ts` (tagged `@bombadil`) spawns Bombadil per width (420 and 1024) against Playwright's
+  `webServer`, with `CHROME=chromium.executablePath()` so it drives the flake's pinned browser. `pnpm run e2e` skips it,
+  `pnpm run bombadil` runs only it, `pnpm run e2e:all` both; `x/dayframe.ts bombadil` wraps the script.
+  `BOMBADIL_TIME_LIMIT` (default `60s`) is the exploration per width. Exit 2 (a violation) fails the test with the property, the
+  state and the `--reproduce` command in the message; the trace is in the test's output directory.
+- **Seeds.** Bombadil 0.7.10 has no seed option (checked in `--help` and the source). Runs are not seeded; a run is reproduced from
+  its trace (`--reproduce <dir>`, best effort) and `bombadil browser shrink` minimizes one.
+- **Properties** (`src/dayframe_web/bombadil/shell.ts`, roles and accessible names only, each with its FDR 006 / ADR 032 reason at
+  the site): `oneMainRegion`, `navigationAlwaysReachable`, `backReturnsToTheList` (a click that lands on "Back" while a details
+  region is open must leave that list on screen and the details gone), `overlaysBelongToTheirPanel`, `loadingSectionsFinish`
+  (`eventually(no "Loading section…").within(15 s)`), `shellBoots`, plus Bombadil's defaults for page errors, rejected promises,
+  console errors and HTTP errors. An action generator waits while the shell has not booted, otherwise Bombadil stops with "no
+  actions available" during the Wasm compile. Mutation check: each of the first five was made to fail on purpose (inverted
+  predicate) and Bombadil reported it within 40 s, so none is vacuous; the 1 ms bound on `loadingSectionsFinish` fires, so
+  "Loading section…" does occur during exploration.
+- **Property mistakes.** None needed fixing after the fact: the first violation was a real dead end, not a property error. The
+  design choices that avoided false alarms: outermost panel regions only (a guest's own sections are regions too), regions inside
+  a dialog excluded, a list covered by details is `aria-hidden` on a phone (so it does not count), and the nav-button property
+  accepts "Hide sidebar" because a wide window with the sidebar showing has no nav button in the panel by design.
+- **Sheets.** No micro opens a sheet yet, so the sheet half of `overlaysBelongToTheirPanel` is exercised only through the
+  drawer (the compact sidebar dialog) until one does.
+
+### Finding 1 (fixed): an unavailable or loading panel had no way out
+
+A panel's own app bar places the sidebar/back button. Packages are admitted disabled, so on a fresh install home's "Layout" opens a
+panel whose micro has no presentation: a placeholder with no button. On a phone that is a dead end except for the platform back; on
+a wide window with the sidebar hidden, the same. Found at the first run (`navigationAlwaysReachable`). Fix (`c91afeb2`):
+`PresentationSlot` takes optional `placeholder_chrome`, rendered above the Loading and Unavailable placeholders, and the shell passes
+an app bar with the panel's title and the button. Rejected: a Dioxus context for the chrome (nested slots inside a mounted panel,
+such as the layout's own, would each draw a second app bar); asking the micro (it is the absent party). Regression:
+`e2e/shell.spec.ts` "a panel that is unavailable still offers the way back or the sidebar" fails without the fix.
+
+### Finding 2 (open): hiding a native panel in the Wasm layout takes the whole layout down on `wcmp`
+
+Repro in the browser: enable the layout in Settings, open Layout, "Show Sample micro panel", then "Hide Sample micro panel": the
+layout's region becomes "Component withdrawn." and stays. Bombadil reached it on about one run in four (it needs the lifecycle toggle,
+then the layout, then show and hide). Hiding the Counter's panel (a Wasm guest) is fine; it is the native sample's.
+
+Evidence so far:
+- Same on the desktop composition with the packages on `wcmp` over Wasmi (the browser's engine), and not on Wasmtime: a scenario
+  `Layout::start_on(wasmi_runtime().await, &["dayframe.sample"])`, click `Hide Sample micro panel`, wait for the panel to go, wait
+  for `Show Sample micro panel`, passes on Wasmtime and hangs on Wasmi. It is not committed because a hanging test cannot be
+  skipped; the body is the four lines above in `dayframe_desktop/e2e/layout.rs` style.
+- The guest panics: `internal error: entered unreachable code: nested or concurrent __wasilibc_task_hook Start`
+  (`clay_mdk/lib.rs`, `task_stack_alloc`). The call that hits it is a document delivery (`document_events::call_changed`, the
+  arrangement facet echoing the write) made after the hide's `dispatch`, so the shared task stack was still marked in use after
+  `dispatch` returned. The host then closes the incarnation; the shell's `MountedComponent` for the layout shows its mount not live
+  (`signal=false mount=false path=true`, instrumented and reverted).
+- Not the S5 ring: the same panic with `waker.wake_by_ref()` removed from `first_poll`; no host-side nesting of `first_poll`
+  (instrumented depth counter, reverted).
+- Next step: record the hook sequence (`INIT_STACK_IN_USE`) into a static ring, not `eprintln!` (the hook runs on a 1024-byte
+  stack; printing from it deadlocked the run), and dump it at the panic; suspect a sync export whose `prev_context_0` is 0 at
+  `SYNC_FINISH` (`task_stack_free` then keeps the stack held), which only the `wcmp` hosts produce.
+
+### Cost and CI
+
+Bombadil is one dev dependency with no browser download (`pnpm add` took 12.5 s here) and adds nothing to `pnpm run e2e`. Measured
+locally against a running server, `pnpm run bombadil` takes 2.0 minutes (2 x 60 s of exploration). The CI step runs after the e2e step
+in the same job, where the web server restarts first (the build is already in the target directory; not measured, assume 1 to 2
+minutes), so expect roughly 3 to 4 minutes added. It is `continue-on-error` until
+Finding 2 is fixed, so a red exploration shows as an annotation without blocking. Flip it when the fault is gone.
+
+### Open
+
+- Finding 2, above; then make the CI step blocking.
+- Bombadil's output directory holds the trace for `--reproduce`; the e2e artifact upload already collects `test-results/`, but
+  Playwright clears it at the start of each run, so a run of the plain e2e step followed by the Bombadil step keeps only the latter's.
+- Properties to add as the shell grows: forward after back, a resized pane never below its rule, the open row marked
+  `aria-current` exactly while its details are open.

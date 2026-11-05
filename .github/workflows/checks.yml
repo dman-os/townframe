@@ -445,6 +445,17 @@ jobs:
       - name: Run dayframe web e2e
         run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run e2e
 
+      # Bombadil property-based exploration of the same build (ADR 032 section 9): 60 s at a phone
+      # width and 60 s at a desktop width by default (BOMBADIL_TIME_LIMIT), driving the pinned
+      # Chromium of the flake's browser farm, plus the web server's restart (the build itself is
+      # already in the target directory). Adds roughly 3 to 4 minutes (2.0 minutes measured locally for the exploration itself). Non-blocking for now: the
+      # exploration found a layout fault (docs/scratch/dayframe-shell-ledger.md, S4 notes,
+      # "hiding a native panel") that is still open, and it reproduces on a minority of runs.
+      # Make the step blocking when that is fixed.
+      - name: Explore dayframe web with Bombadil
+        continue-on-error: true
+        run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run bombadil
+
       - name: Upload e2e artifacts
         if: always()
         uses: actions/upload-artifact@v6
