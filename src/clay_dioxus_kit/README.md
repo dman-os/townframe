@@ -44,8 +44,9 @@ the rest are enforced by review.
   that the headless part applies to its parts. The styled part is the only code that names
   classes, and it uses only Tailwind utilities that resolve to semantic tokens (`bg-surface`,
   `text-text`, `rounded-xl`, spacing steps); no palette utilities and no arbitrary values
-  (COMPOSE-001). The one `[...]` form allowed is Tailwind's `data-[state=...]` variant, which is
-  COMPOSE-003's "data attribute" variant mechanism. A second skin is a second set of strings
+  (COMPOSE-001). The only `[...]` forms allowed are Tailwind's `data-[state=...]` and
+  `group-data-[state=...]` variants (the latter styles a part from its group's state, as the
+  `Sections` grip does), which are COMPOSE-003's "data attribute" variant mechanism. A second skin is a second set of strings
   over the same headless part.
 - **KIT-012** Variants are explicit enum props (`NavButtonMode`, `WidthClass`). Styled components
   take no `class` or `style` pass-through (COMPOSE-003).
