@@ -55,7 +55,11 @@ test("home, Settings and a section unwind with back at a compact and a wide widt
   await page.getByRole("button", { name: "Open sidebar" }).click();
   const drawer = page.getByRole("dialog", { name: "Sidebar" });
   await expect(drawer).toBeVisible();
-  expect(await drawer.boundingBox()).toMatchObject({ x: 0, y: 0, height: 800 });
+  // The panel slides in from the leading edge (`animate-slide-in-leading`), so it is measured once
+  // the slide has settled, not at its starting offset.
+  await expect
+    .poll(() => drawer.boundingBox())
+    .toMatchObject({ x: 0, y: 0, height: 800 });
   // The scrim is what the drawer leaves uncovered at the right of the frame.
   await page
     .getByRole("button", { name: "Dismiss Sidebar" })

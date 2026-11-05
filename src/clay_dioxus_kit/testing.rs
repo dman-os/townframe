@@ -781,6 +781,16 @@ impl Page {
 }
 
 impl Page {
+    /// The child elements of `node`, in order (including ones hidden from assistive technology).
+    pub(crate) fn children(&self, node: Node) -> Vec<Node> {
+        self.dom.nodes[node.0]
+            .children
+            .iter()
+            .copied()
+            .map(Node)
+            .collect()
+    }
+
     /// The parent element of `node`.
     pub(crate) fn parent(&self, node: Node) -> Node {
         Node(self.dom.nodes[node.0].parent.expect("node has a parent"))

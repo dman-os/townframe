@@ -239,23 +239,16 @@ be reachable beside the layout (a sheet)? Should a hidden wide sidebar persist a
   without the mount: a separate `wcmp` question, see Open) and Wasmtime refuses the sync entry by design, so it was dropped.
 - **Bombadil, and why the CI step stays non-blocking.** Local runs after the fix: `e2e:all` green once, then 4 full Bombadil
   runs (2 widths each): 3 green, 1 red; a 420-only loop: red on its 2nd run; the same 420-only loop at `HEAD` (hook unfixed) was red 2 of 8,
-  one being the new Finding 3 below and one the sample's greeting panic below. So the fault Finding 2 describes is gone
+  one being Finding 3 below (fixed in S8) and one the sample's greeting panic below. So the fault Finding 2 describes is gone
   but a different violation remains at the same rate, and flipping the step to blocking would make CI flaky. Left as the
   brief's last item undone on purpose.
 
-### Finding 3 (open): the layout shows no controls for a moment after a panel is hidden at 420 px
+### Finding 3 (fixed in S8): hiding a shown panel withdrew the layout in the browser engine
 
-`navigationAlwaysReachable` is violated about 200 ms after a click on "Hide Sample micro panel" or "Hide Counter (Wasm)
-panel" at a phone width: frame `lists: [Layout]`, `navigation: []`, `clickablePoints: []` (not even the toggles), no console
-error, no guest panic, and the screenshot of the next state shows the layout intact. It reproduces at `HEAD` (before the
-hook fix) at the same rate, so it is not the hook. Evidence: Bombadil traces (the property text and frame above); the
-desktop scenario with an assertion that the layout's `Panels` toolbar is present in every DOM render between the click and
-the panel's removal (Wasmi, wide) did not see it, so the transient is specific to the browser engine/timing or the
-compact layout. Hypothesis (unverified): the layout's `view` returns a bare `Loading layout…` without its app bar when the
-arrangement facet reads `Loading`, and a write makes the facet read `Loading` for a moment (`FacetState::Loading` is also
-what a released or revoked mirror reports); the Finding 1 fix (always give a placeholder its app bar) was applied to
-`PresentationSlot` placeholders and not to this guest's own Loading branch. Next step: capture the guest's states with a
-Bombadil `--reproduce` of a saved trace, or instrument `micro_layout::view` to log the facet state per render.
+Not a transient and not the layout's `Loading` branch: after "Show" then "Hide" of the sample panel the layout's region is
+permanently "Component withdrawn." (no app bar, no toggles). `navigationAlwaysReachable` only caught it at a phone width because
+at a wide width the sidebar's own "Hide sidebar" button keeps the property true over a dead layout. The S6 hypothesis (a bare
+`Loading layout…`) was wrong; that branch did lack the app bar and was fixed separately. Root cause and fix: S8 notes.
 
 ### Finding 4 (fixed): the sample's greeting field panicked on a multi-byte character
 
@@ -269,6 +262,41 @@ is inside a four-byte character; fails with the old code).
 - `wcmp`: a callback task parked in `waitable-set.wait` (via `wit_bindgen::block_on`) or `thread.yield` (blocking) on the
   Wasmi provider did not resume after the host released what it waited for, in a lifecycle-conformance probe (not
   committed). Unexplained; not needed by anything in the app today.
+
+## S8 notes (2026-11-05): the layout withdrawn after hiding a panel in the browser (Bombadil finding 3)
+
+- **Reproduction.** Deterministic in the browser build, no Bombadil needed: enable the layout, open Layout, "Show Sample micro
+  panel", "Hide Sample micro panel": the layout's region becomes "Component withdrawn." at every width, no console output. The
+  desktop scenario `hiding_a_native_panel_leaves_the_layout_mounted` passes because Wasmi completes the call that the browser
+  engine suspends. Now a Playwright spec (`e2e/layout.spec.ts`, "hiding a shown panel leaves the layout mounted ...", 420 and 1200
+  px, three rounds each).
+- **Chain, by temporary panics in the web build** (all reverted): the layout instance is closed `Requested` by its own driver;
+  `clay_guest_session::drive` closed it on `DeliveryOutcome::Trapped`; that came from `Err(Suspended)` in `clay_rt_wcmp`'s
+  `deliver`: the guest's `document-events.changed` callback returned `Pending` on its first poll. `first_poll` dropped the half-run
+  call and the host withdrew the incarnation. No trap, no dependency close, no supervisor close was involved.
+- **Why it suspends.** The callback renders (`guest.rs` `mutate` -> `dom.update`), which drops the sample's `PresentationSlot`
+  and so cancels the slot's pending host call. In `wcmp`, a synchronous `subtask.cancel` of a host callee only marked the host
+  task aborted and then waited for a *later* turn to drop its future (`executor/cancel.rs`, `abort_host_callee`); on a provider
+  that hands waits to its driver (the browser) that wait suspends the calling thread, which made the sync export `Pending`.
+  Wasmtime and the native test backends resolve it within the built-in.
+- **Fix (wcmp fork, branch `s8-sync-host-cancel`, rev `a5db353b`).** A synchronous cancel takes the aborted host task out of the
+  set and drops it at once, with the store lent as in a turn, so the subtask is resolved before the built-in returns
+  (`HostTaskSet::take_aborted`). Pinned in the root `Cargo.toml`/`Cargo.lock` and `src/wasm_utils_rs`. Confirmed by the same
+  probe failing before and passing after, then by the Playwright spec. The fork's regression test
+  (`it_completes_a_synchronous_cancel_of_a_host_callee_on_the_first_poll`) polls the call once and asserts it is `Ready`; it
+  passes on the native test backends before the fix too, because only the browser's provider defers the wait, so it documents the
+  contract and does not by itself reproduce the browser failure.
+- **No more silent withdrawals.** A sync export that returns `Pending` on its first poll now panics naming the export and the
+  incarnation (`first_poll`). Guest traps (`presentation.mount/dispatch/unmount`, a document delivery, a failed store drive) are
+  recorded with their message by `Host::record_fault` and the supervisor reports it as the micro's `Faulted` cause instead of
+  "ended outside supervision". `DeliveryOutcome::Trapped` carries the cause (the Wasmtime runtime too). The Wasmtime runtime keeps
+  its own `Suspended` handling.
+- **`micro_layout`.** The `Loading layout…` state now renders inside the same frame as every other state, so it keeps the app
+  bar's sidebar/back button (`framed`, with a unit test).
+- **Property fix.** After the kit's motion rules the drawer's scrim fades in from opacity 0, and `checkVisibility({opacityProperty})`
+  made `overlaysBelongToTheirPanel` fail within seconds on every 420 px run (the "Dismiss Sidebar" scrim read as absent). The
+  frame no longer reads opacity.
+- **Bombadil.** Ten consecutive 60 s runs at 420 px green after the fixes. The CI step is blocking now.
 
 ## S7 notes (2026-11-05): `invalid SlotMap key` at `blitz-dom form.rs:38` (compact scenario)
 
@@ -392,7 +420,7 @@ Finding 2 was fixed (S6): see Finding 3 there.
 
 ### Open
 
-- Finding 2 is fixed (S6); the CI step stays non-blocking until Finding 3 (S6 notes) is fixed.
+- Findings 2 and 3 are fixed (S6, S8); the CI step is blocking.
 - Bombadil's output directory holds the trace for `--reproduce`; the e2e artifact upload already collects `test-results/`, but
   Playwright clears it at the start of each run, so a run of the plain e2e step followed by the Bombadil step keeps only the latter's.
 - Properties to add as the shell grows: forward after back, a resized pane never below its rule, the open row marked
