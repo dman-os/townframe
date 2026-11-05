@@ -1,0 +1,6 @@
+
+## K5: browser sync-export trap (stopped at the fork-architecture check, no code changed)
+
+- A web-provider-only fix (catch the RuntimeError from the sync JS call) is impossible. Every thread entry, sync-typed exports included, runs through `WebAssembly.promising` (wcmp-wasm-core-web `store.rs:start_resumable`, entrance.rs:27-58). A trapped promising call returns a rejected promise; JS cannot read a rejection reason synchronously. The store can tell it trapped (no recorded return, no suspended frame) but not why (store.rs:~440-446 `watch(&promise)`; flight.rs:238).
+- A JS try/catch frame between the stack and its suspender breaks JSPI suspension, and wasm cannot catch traps: documented at wcmp `concurrency/host_suspension_provider.rs:680-687`. `start_at_rest` (:540-541) answers `EntryStatus::Running` by design.
+- Viable fork change is one layer up, not in the web provider: a sync-typed export (`instance/func.rs:856` already holds `may_not_suspend`) could start as a plain core call (`store/store_context.rs:1803-1810` is the existing no-provider path; web `func_call` = `apply`, store.rs:175, returns the RuntimeError synchronously). Cost: changes thread bookkeeping (`set_own_stack`, deferred flight) for sync exports on every provider, so wasmi/web conformance in the fork (nix lanes) must be rerun.
