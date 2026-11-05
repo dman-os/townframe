@@ -1,0 +1,31 @@
+package townframe:highlights@0.1.0;
+
+/// What `highlights.wasm` imports from its host as `env.is_id_start` / `env.is_id_continue`:
+/// the Unicode identifier classes, which the lexers ask about only for non-ASCII code points.
+interface ident {
+    is-id-start: func(c: char) -> bool;
+    is-id-continue: func(c: char) -> bool;
+}
+
+interface highlight {
+    /// Lex `text` with the language whose id in Pierre's `languages.js` table is `lang` (Rust is
+    /// 120). Answers Pierre's mode-3 records: pairs `(end_utf16, token_id)` of u32s; a pair
+    /// whose token id is 0xFFFFFFFF ends a line.
+    highlight: func(text: string, lang: u8) -> list<u32>;
+}
+
+/// The wrapper around the unmodified `highlights.wasm`.
+world wrapper {
+    import ident;
+    export highlight;
+}
+
+/// The component the wrapper's `ident` import is plugged with.
+world ident-provider {
+    export ident;
+}
+
+/// What a guest that highlights imports.
+world client {
+    import highlight;
+}

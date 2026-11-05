@@ -1,0 +1,21 @@
+[package]
+name = "highlights-ident"
+version = "0.1.0"
+edition = "2024"
+
+# Its own workspace: a build input of the wrapper script, not a member of the repo workspace.
+[workspace]
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+unicode-ident = "1.0.24"
+wit-bindgen = { version = "=0.62.0", default-features = false, features = ["macros"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1

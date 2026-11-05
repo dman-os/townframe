@@ -18,7 +18,12 @@ export async function prepareDayframePackages(
 
   // One cargo invocation per artifact kind, so cargo schedules the guests together.
   const guests = testFixtures
-    ? ["micro_counter", "micro_layout", "micro_collection_probe"]
+    ? [
+      "micro_counter",
+      "micro_layout",
+      "micro_collection_probe",
+      "micro_highlight_spike",
+    ]
     : ["micro_counter", "micro_layout"];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
@@ -32,6 +37,25 @@ export async function prepareDayframePackages(
   const directory = target.join("dayframe");
   await Deno.mkdir(directory.toString(), { recursive: true });
 
+  // The wrapper around Pierre's unmodified `highlights.wasm` (H1 spike): rebuilt from the module
+  // at `PIERRE_HIGHLIGHTS_WASM` by `bench/highlight/component/build.ts`.
+  const highlightDirectory = directory.join("highlight");
+  const pierreWasm = Deno.env.get("PIERRE_HIGHLIGHTS_WASM") ??
+    $.path(
+      import.meta.resolve(
+        "../bench/highlight/node_modules/@pierre/highlights/dist/highlights.wasm",
+      ),
+    )
+      .toString();
+  if (testFixtures) {
+    await $`deno run --allow-read --allow-write --allow-run --allow-env bench/highlight/component/build.ts ${pierreWasm} ${highlightDirectory}`;
+    // The spike micro imports `highlight`; `wac plug` satisfies that import with the wrapper.
+    await $`wac plug --plug ${
+      highlightDirectory.join("highlighter.component.wasm")
+    } ${target.join("wasm32-wasip3/debug/micro_highlight_spike.wasm")} -o ${
+      highlightDirectory.join("micro_highlight_spike.composed.wasm")
+    }`;
+  }
   // Prepared guest components, keyed by the guest name `component_package`/env vars use.
   const components: Record<string, [string, string]> = {
     counter: ["wasm32-wasip3/debug/micro_counter.wasm", "counter"],
@@ -41,6 +65,10 @@ export async function prepareDayframePackages(
         collectionProbe: [
           "wasm32-wasip3/debug/micro_collection_probe.wasm",
           "collection-probe",
+        ],
+        highlightSpike: [
+          "dayframe/highlight/micro_highlight_spike.composed.wasm",
+          "highlight-spike",
         ],
         sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
         lifecycle: [

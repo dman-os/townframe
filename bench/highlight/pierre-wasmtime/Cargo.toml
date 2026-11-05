@@ -10,7 +10,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-wasmtime = { version = "49", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "runtime", "std", "component-model"] }
 unicode-ident = "1"
 
 [profile.release]

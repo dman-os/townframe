@@ -1,0 +1,136 @@
+;; The wrapper component around Pierre's `highlights.wasm` (see build.ts and wit/highlights.wit).
+;; The placeholder line inside $Pierre is replaced by the module fields of `wasm-tools print highlights.wasm`;
+;; build.ts checks the module's bytes are in the final component verbatim.
+;;
+;; Instantiation order (a core instance cannot import its own exports):
+;;   $Table  owns the `env` functions Pierre imports and a 2-slot funcref table they dispatch through
+;;   $Pierre instantiated over $Table's `env` functions
+;;   $Glue   imports Pierre's memory, fills $Table's slots with functions that read the code point
+;;           out of that memory and call the lowered component `ident` import, and exports the
+;;           canonical-ABI entry points that lift/lower directly against Pierre's memory.
+(component
+  (core module $Table
+    (type $cb (func (param i32 i32) (result i32)))
+    (table (export "t") 2 funcref)
+    (func (export "is_id_start") (type $cb) (call_indirect (type $cb) (local.get 0) (local.get 1) (i32.const 0)))
+    (func (export "is_id_continue") (type $cb) (call_indirect (type $cb) (local.get 0) (local.get 1) (i32.const 1)))
+  )
+
+  (core module $Pierre
+@PIERRE@)
+
+  (core module $Glue
+    (import "pierre" "memory" (memory $m 0))
+    (import "pierre" "highlight" (func $highlight))
+    (import "table" "t" (table $t 2 funcref))
+    (import "ident" "is-id-start" (func $ident_start (param i32) (result i32)))
+    (import "ident" "is-id-continue" (func $ident_continue (param i32) (result i32)))
+
+    ;; Pierre's memory map (highlighter.js): control block at 0, input at 81920.
+    (global $INPUT i32 (i32.const 81920))
+
+    ;; The code point of the UTF-8 sequence of `len` bytes at `ptr`, decoded as highlighter.js's
+    ;; `#idClass` does (Pierre only asks about non-ASCII, so `len` is 2, 3 or 4).
+    (func $cp (param $ptr i32) (param $len i32) (result i32)
+      (if (result i32) (i32.eq (local.get $len) (i32.const 2))
+        (then
+          (i32.or
+            (i32.shl (i32.and (i32.load8_u (local.get $ptr)) (i32.const 31)) (i32.const 6))
+            (i32.and (i32.load8_u offset=1 (local.get $ptr)) (i32.const 63))))
+        (else
+          (if (result i32) (i32.eq (local.get $len) (i32.const 3))
+            (then
+              (i32.or
+                (i32.or
+                  (i32.shl (i32.and (i32.load8_u (local.get $ptr)) (i32.const 15)) (i32.const 12))
+                  (i32.shl (i32.and (i32.load8_u offset=1 (local.get $ptr)) (i32.const 63)) (i32.const 6)))
+                (i32.and (i32.load8_u offset=2 (local.get $ptr)) (i32.const 63))))
+            (else
+              (i32.or
+                (i32.or
+                  (i32.shl (i32.and (i32.load8_u (local.get $ptr)) (i32.const 7)) (i32.const 18))
+                  (i32.shl (i32.and (i32.load8_u offset=1 (local.get $ptr)) (i32.const 63)) (i32.const 12)))
+                (i32.or
+                  (i32.shl (i32.and (i32.load8_u offset=2 (local.get $ptr)) (i32.const 63)) (i32.const 6))
+                  (i32.and (i32.load8_u offset=3 (local.get $ptr)) (i32.const 63)))))))))
+    (func $start (param i32 i32) (result i32)
+      (call $ident_start (call $cp (local.get 0) (local.get 1))))
+    (func $continue (param i32 i32) (result i32)
+      (call $ident_continue (call $cp (local.get 0) (local.get 1))))
+    (elem (table $t) (i32.const 0) func $start $continue)
+
+    ;; The only allocation the canonical ABI asks for is the `text` argument: fresh and 1-aligned.
+    ;; Hand out Pierre's input address, with the room `writeInput` reserves past it (a NUL and the
+    ;; SIMD lookahead, 96 bytes), so the caller's copy of the string is the only copy.
+    (func (export "cabi_realloc") (param $old i32) (param $old_size i32) (param $align i32) (param $size i32) (result i32)
+      (local $need i32)
+      (if (i32.or (i32.or (local.get $old) (local.get $old_size)) (i32.ne (local.get $align) (i32.const 1)))
+        (then unreachable))
+      ;; 1 GiB cap keeps the page arithmetic in i32; a larger text traps instead of wrapping.
+      (if (i32.gt_u (local.get $size) (i32.const 0x40000000)) (then unreachable))
+      (local.set $need
+        (i32.shr_u
+          (i32.add (i32.add (i32.add (global.get $INPUT) (local.get $size)) (i32.const 96)) (i32.const 65535))
+          (i32.const 16)))
+      (if (i32.gt_u (local.get $need) (memory.size))
+        (then
+          (if (i32.eq (memory.grow (i32.sub (local.get $need) (memory.size))) (i32.const -1))
+            (then unreachable))))
+      (global.get $INPUT))
+
+    ;; `highlight(text, lang) -> list<u32>`: `text` is already at INPUT (see cabi_realloc).
+    ;; Writes Pierre's control block (lang id, mode 3 = UTF-16 line records, byte length), calls
+    ;; it, and answers the address of the (ptr, len) pair the canonical ABI reads a list result
+    ;; from. The pair sits just past the records, in Pierre's own memory, which nothing reads
+    ;; again before the next call rewrites everything; the records themselves are lifted in
+    ;; place from Pierre's output buffer.
+    (func (export "highlight") (param $ptr i32) (param $len i32) (param $lang i32) (result i32)
+      (local $out i32)
+      (local $bytes i32)
+      (local $ret i32)
+      (i32.store8 (i32.add (local.get $ptr) (local.get $len)) (i32.const 0))
+      (i32.store8 (i32.const 0) (local.get $lang))
+      (i32.store8 offset=1 (i32.const 0) (i32.const 3))
+      (i32.store offset=2 (i32.const 0) (local.get $len))
+      (call $highlight)
+      (local.set $out (i32.load offset=6 (i32.const 0)))
+      (local.set $bytes (i32.load offset=10 (i32.const 0)))
+      (local.set $ret
+        (i32.and (i32.add (i32.add (local.get $out) (local.get $bytes)) (i32.const 7)) (i32.const -8)))
+      (if (i32.gt_u (i32.add (local.get $ret) (i32.const 8)) (i32.shl (memory.size) (i32.const 16)))
+        (then
+          (if (i32.eq (memory.grow (i32.const 1)) (i32.const -1)) (then unreachable))))
+      (i32.store (local.get $ret) (local.get $out))
+      (i32.store offset=4 (local.get $ret) (i32.shr_u (local.get $bytes) (i32.const 2)))
+      (local.get $ret))
+  )
+
+  (type $ident_ty (instance
+    (export "is-id-start" (func (param "c" char) (result bool)))
+    (export "is-id-continue" (func (param "c" char) (result bool)))))
+  (import "townframe:highlights/ident@0.1.0" (instance $ident (type $ident_ty)))
+  (core func $id_start (canon lower (func $ident "is-id-start")))
+  (core func $id_continue (canon lower (func $ident "is-id-continue")))
+
+  (core instance $table (instantiate $Table))
+  (core instance $pierre
+    (instantiate $Pierre
+      (with "env" (instance
+        (export "is_id_start" (func $table "is_id_start"))
+        (export "is_id_continue" (func $table "is_id_continue"))))))
+  (core instance $lowered
+    (export "is-id-start" (func $id_start))
+    (export "is-id-continue" (func $id_continue)))
+  (core instance $glue
+    (instantiate $Glue
+      (with "pierre" (instance $pierre))
+      (with "table" (instance $table))
+      (with "ident" (instance $lowered))))
+
+  (func $highlight (param "text" string) (param "lang" u8) (result (list u32))
+    (canon lift (core func $glue "highlight")
+      (memory (core memory $pierre "memory"))
+      (realloc (core func $glue "cabi_realloc"))))
+  (instance $highlight_api (export "highlight" (func $highlight)))
+  (export "townframe:highlights/highlight@0.1.0" (instance $highlight_api))
+)

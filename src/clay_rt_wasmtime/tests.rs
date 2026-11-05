@@ -1771,6 +1771,51 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     host.close();
 }
 
+/// H1: the spike micro, composed (`wac plug`) with the wrapper component around Pierre's
+/// unmodified `highlights.wasm`, renders the line count, record count, record-stream digest and
+/// token histogram that the direct path (`bench/highlight/pierre-wasmtime`, `PIERRE_GOLDEN_OUT`)
+/// produced for the same text: the records the guest got through the canonical ABI equal the
+/// records the core module wrote.
+#[tokio::test]
+async fn highlight_spike_records_equal_the_direct_path_golden() {
+    use clay_guest_session::capabilities::DeclaredPublication;
+    use clay_guest_session::capabilities::PublicationKind;
+    use clay_guest_session::capabilities::presentation_component;
+    let package = WasmPackage::from_env("highlight-spike")
+        .await
+        .expect("prepared highlight-spike component is valid");
+    let host = Host::new();
+    let owner = host.start("highlight-spike");
+    let (runtime, _driver) = WasmRuntime::initialize(
+        &host,
+        owner,
+        &package,
+        InitialContext {
+            publications: BTreeMap::from([(
+                "view".to_owned(),
+                DeclaredPublication {
+                    kind: PublicationKind::Presentation,
+                    contract: presentation_component(),
+                },
+            )]),
+            ..InitialContext::default()
+        },
+    )
+    .await
+    .unwrap();
+    let sink = Arc::new(RecordingSink::new());
+    let _session = runtime.mount("view", sink.clone() as _).unwrap();
+    let rendered = sink.tree(SurfaceTree::text_content);
+    // The view prints the golden's four lines, then the guest-side timing.
+    let golden = include_str!("../micro_highlight_spike/snippet.golden.txt");
+    let expected = golden.lines().collect::<String>();
+    assert!(
+        rendered.starts_with(&expected),
+        "rendered {rendered:?}, golden {expected:?}"
+    );
+    host.close();
+}
+
 // ── One engine per process, and a precompiled artifact cache (F10/W6) ────
 
 #[tokio::test]

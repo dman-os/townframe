@@ -9406,6 +9406,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "micro_highlight_spike"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "dioxus",
+ "wit-bindgen 0.62.0",
+]
+
+[[package]]
 name = "micro_layout"
 version = "0.1.0"
 dependencies = [

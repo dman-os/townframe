@@ -1,0 +1,1000 @@
+use crate::interlude::*;
+
+use automerge::ObjId;
+
+use autosurgeon::HydrateError;
+use autosurgeon::ReadDoc;
+use autosurgeon::Reconciler;
+
+pub mod json;
+pub use json::ThroughJson;
+
+pub mod date {
+    use super::*;
+
+    pub fn reconcile<R: autosurgeon::Reconciler>(
+        ts: &Timestamp,
+        mut reconciler: R,
+    ) -> Result<(), R::Error> {
+        reconciler.timestamp(ts.as_second())
+    }
+
+    pub fn hydrate<'a, D: autosurgeon::ReadDoc>(
+        doc: &D,
+        obj: &ObjId,
+        prop: autosurgeon::Prop<'a>,
+    ) -> Result<Timestamp, autosurgeon::HydrateError> {
+        use automerge::ScalarValue;
+        use automerge::Value;
+
+        match doc.get(obj, &prop)? {
+            Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
+                ScalarValue::Timestamp(ts) => match Timestamp::from_second(*ts) {
+                    Ok(dt) => Ok(dt),
+                    Err(err) => Err(autosurgeon::HydrateError::unexpected(
+                        "a valid timestamp",
+                        format!("error converting timestamp: {err}"),
+                    )),
+                },
+                ScalarValue::Str(val) => val.parse::<Timestamp>().map_err(|err| {
+                    autosurgeon::HydrateError::unexpected(
+                        "a valid ISO 8601 timestamp string",
+                        format!("error parsing ISO 8601 timestamp '{val}': {err}"),
+                    )
+                }),
+                _ => Err(autosurgeon::HydrateError::unexpected(
+                    "a string or timestamp",
+                    format!("unexpected scalar type: {:?}", scalar),
+                )),
+            },
+            _ => Err(autosurgeon::HydrateError::unexpected(
+                "a scalar value",
+                "value is not a scalar".to_string(),
+            )),
+        }
+    }
+}
+
+pub mod skip {
+    use super::*;
+
+    pub fn reconcile<T: Default, R: Reconciler>(
+        _value: &T,
+        _reconciler: R,
+    ) -> Result<(), R::Error> {
+        Ok(())
+    }
+
+    pub fn hydrate<'a, D: ReadDoc, T: Default>(
+        _doc: &D,
+        _obj: &ObjId,
+        _prop: autosurgeon::Prop<'a>,
+    ) -> Result<T, HydrateError> {
+        Ok(T::default())
+    }
+}
+
+pub mod through_str {
+    use super::*;
+
+    use std::str::FromStr;
+
+    pub fn reconcile<T: AsRef<str>, R: Reconciler>(
+        value: &T,
+        mut reconciler: R,
+    ) -> Result<(), R::Error> {
+        reconciler.str(value)
+    }
+
+    pub fn hydrate<'a, D: ReadDoc, T: FromStr>(
+        doc: &D,
+        obj: &ObjId,
+        prop: autosurgeon::Prop<'a>,
+    ) -> Result<T, HydrateError> {
+        use automerge::ScalarValue;
+        use automerge::Value;
+        let string = match doc.get(obj, &prop)? {
+            Some((Value::Scalar(scalar), _)) => {
+                match scalar.as_ref() {
+                    // If stored as a string (new format), use it directly
+                    ScalarValue::Str(str_val) => str_val.to_string(),
+                    // If stored as a timestamp (old format), convert to ISO 8601
+                    _ => {
+                        return Err(autosurgeon::HydrateError::unexpected(
+                            "a string",
+                            format!("unexpected scalar type: {:?}", scalar),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(autosurgeon::HydrateError::unexpected(
+                    "a scalar value",
+                    "value is not a scalar".to_string(),
+                ));
+            }
+        };
+        match string.parse() {
+            Ok(val) => Ok(val),
+            Err(_err) => Err(autosurgeon::HydrateError::unexpected(
+                format!("a string repr of {}", std::any::type_name::<T>()),
+                "failure parsing string".to_string(),
+            )),
+        }
+    }
+}
+
+pub mod path {
+    use super::*;
+    use std::path::PathBuf;
+
+    pub fn reconcile<R: Reconciler>(
+        path: &std::path::Path,
+        mut reconciler: R,
+    ) -> Result<(), R::Error> {
+        reconciler.str(path.to_string_lossy())
+    }
+
+    pub fn hydrate<'a, D: ReadDoc>(
+        doc: &D,
+        obj: &ObjId,
+        prop: autosurgeon::Prop<'a>,
+    ) -> Result<PathBuf, HydrateError> {
+        use automerge::ScalarValue;
+        use automerge::Value;
+        let string = match doc.get(obj, &prop)? {
+            Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
+                ScalarValue::Str(str_val) => str_val.to_string(),
+                _ => {
+                    return Err(autosurgeon::HydrateError::unexpected(
+                        "a string",
+                        format!("unexpected scalar type: {:?}", scalar),
+                    ));
+                }
+            },
+            _ => {
+                return Err(autosurgeon::HydrateError::unexpected(
+                    "a scalar value",
+                    "value is not a scalar".to_string(),
+                ));
+            }
+        };
+        Ok(PathBuf::from(string))
+    }
+}
+
+pub mod utf8_path {
+    use super::*;
+    use camino::Utf8PathBuf;
+
+    pub fn reconcile<R: Reconciler>(path: &Utf8PathBuf, mut reconciler: R) -> Result<(), R::Error> {
+        reconciler.str(path.as_str())
+    }
+
+    pub fn hydrate<'a, D: ReadDoc>(
+        doc: &D,
+        obj: &ObjId,
+        prop: autosurgeon::Prop<'a>,
+    ) -> Result<Utf8PathBuf, HydrateError> {
+        use automerge::ScalarValue;
+        use automerge::Value;
+        let string = match doc.get(obj, &prop)? {
+            Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
+                ScalarValue::Str(str_val) => str_val.to_string(),
+                _ => {
+                    return Err(autosurgeon::HydrateError::unexpected(
+                        "a string",
+                        format!("unexpected scalar type: {:?}", scalar),
+                    ));
+                }
+            },
+            _ => {
+                return Err(autosurgeon::HydrateError::unexpected(
+                    "a scalar value",
+                    "value is not a scalar".to_string(),
+                ));
+            }
+        };
+        Ok(Utf8PathBuf::from(string))
+    }
+}
+use crate::interlude::*;
+
+use automerge::ObjId;
+
+use automerge::*;
+use autosurgeon::Hydrate;
+use autosurgeon::HydrateError;
+use autosurgeon::Prop;
+use autosurgeon::ReadDoc;
+use autosurgeon::Reconciler;
+use std::borrow::Cow;
+use std::collections::HashSet;
+
+const BASE64_FIELD_SUFFIX: &str = "Base64";
+const TIMESTAMP_FIELD_SUFFIX_SNAKE: &str = "_at";
+const TIMESTAMP_FIELD_SUFFIX_TS_SNAKE: &str = "_ts";
+
+fn decode_base64_field(value: &str) -> Option<Vec<u8>> {
+    data_encoding::BASE64
+        .decode(value.as_bytes())
+        .ok()
+        .or_else(|| data_encoding::BASE64_NOPAD.decode(value.as_bytes()).ok())
+}
+
+fn encode_base64_field(value: &[u8]) -> String {
+    data_encoding::BASE64.encode(value)
+}
+
+fn is_base64_field(key: &str) -> bool {
+    key.ends_with(BASE64_FIELD_SUFFIX)
+}
+
+fn is_timestamp_field(key: &str) -> bool {
+    let key_lc = key.to_ascii_lowercase();
+    key_lc == "timestamp"
+        || key_lc == "ts"
+        || key_lc.ends_with(TIMESTAMP_FIELD_SUFFIX_SNAKE)
+        || key_lc.ends_with(TIMESTAMP_FIELD_SUFFIX_TS_SNAKE)
+        || key.ends_with("At")
+        || key.ends_with("Ts")
+        || key.ends_with("Timestamp")
+}
+
+fn epoch_int_to_seconds(raw: i64) -> i64 {
+    const MILLIS_THRESHOLD: i64 = 100_000_000_000;
+    if raw.unsigned_abs() >= MILLIS_THRESHOLD as u64 {
+        raw / 1000
+    } else {
+        raw
+    }
+}
+
+fn timestamp_seconds_from_string(raw: &str) -> Option<i64> {
+    if let Ok(ts) = raw.parse::<Timestamp>() {
+        return Some(ts.as_second());
+    }
+    if let Some(with_utc_offset) = raw
+        .strip_suffix('Z')
+        .map(|prefix| format!("{prefix}+00:00"))
+        && let Ok(ts) = with_utc_offset.parse::<Timestamp>()
+    {
+        return Some(ts.as_second());
+    }
+    let parsed_int = raw.parse::<i64>().ok()?;
+    Some(epoch_int_to_seconds(parsed_int))
+}
+
+fn timestamp_seconds_from_json(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::String(text) => timestamp_seconds_from_string(text),
+        serde_json::Value::Number(number) => {
+            if let Some(int_value) = number.as_i64() {
+                return Some(epoch_int_to_seconds(int_value));
+            }
+            number
+                .as_u64()
+                .and_then(|uint| i64::try_from(uint).ok())
+                .map(epoch_int_to_seconds)
+        }
+        _ => None,
+    }
+}
+
+fn timestamp_seconds_from_json_array(value: &serde_json::Value) -> Option<Vec<i64>> {
+    let serde_json::Value::Array(items) = value else {
+        return None;
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let seconds = timestamp_seconds_from_json(item)?;
+        out.push(seconds);
+    }
+    Some(out)
+}
+
+struct TimestampScalarValue(i64);
+
+impl autosurgeon::Reconcile for TimestampScalarValue {
+    type Key<'a> = autosurgeon::reconcile::NoKey;
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
+        reconciler.timestamp(self.0)
+    }
+}
+
+struct TimestampSeqValue(Vec<i64>);
+
+impl autosurgeon::Reconcile for TimestampSeqValue {
+    type Key<'a> = autosurgeon::reconcile::NoKey;
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
+        use autosurgeon::reconcile::SeqReconciler;
+
+        let mut seq = reconciler.seq()?;
+        let old_len = seq.len()?;
+        if old_len > self.0.len() {
+            for idx in (self.0.len()..old_len).rev() {
+                seq.delete(idx)?;
+            }
+        }
+        for (idx, seconds) in self.0.iter().enumerate() {
+            if idx < old_len {
+                seq.set(idx, TimestampScalarValue(*seconds))?;
+            } else {
+                seq.insert(idx, TimestampScalarValue(*seconds))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum JsonHeuristicKey<'a> {
+    Str(Cow<'a, str>),
+    U64(u64),
+    I64(i64),
+}
+
+fn heuristic_json_key_from_value<'a>(value: &'a serde_json::Value) -> Option<JsonHeuristicKey<'a>> {
+    match value {
+        serde_json::Value::String(text) => Some(JsonHeuristicKey::Str(Cow::Borrowed(text))),
+        serde_json::Value::Number(number) => {
+            if let Some(uint_value) = number.as_u64() {
+                Some(JsonHeuristicKey::U64(uint_value))
+            } else {
+                number.as_i64().map(JsonHeuristicKey::I64)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn heuristic_json_object_key<'a>(value: &'a serde_json::Value) -> Option<JsonHeuristicKey<'a>> {
+    let obj = match value {
+        serde_json::Value::Object(obj) => obj,
+        _ => return None,
+    };
+    if let Some(key) = obj.get("id").and_then(heuristic_json_key_from_value) {
+        return Some(key);
+    }
+    obj.get("key").and_then(heuristic_json_key_from_value)
+}
+
+fn can_use_heuristic_keyed_array(values: &[serde_json::Value]) -> bool {
+    if values.is_empty() {
+        return false;
+    }
+    let mut seen = HashSet::with_capacity(values.len());
+    for value in values {
+        let Some(key) = heuristic_json_object_key(value) else {
+            return false;
+        };
+        if !seen.insert(key) {
+            return false;
+        }
+    }
+    true
+}
+
+fn hydrate_heuristic_key<'a, D: ReadDoc>(
+    doc: &D,
+    obj: &automerge::ObjId,
+    prop: Prop<'_>,
+) -> Result<autosurgeon::reconcile::LoadKey<JsonHeuristicKey<'a>>, autosurgeon::ReconcileError> {
+    let Some((automerge::Value::Object(_), item_obj)) = doc.get(obj, &prop)? else {
+        return Ok(autosurgeon::reconcile::LoadKey::KeyNotFound);
+    };
+    for field in ["id", "key"] {
+        let Some((automerge::Value::Scalar(scalar), _)) = doc.get(&item_obj, field)? else {
+            continue;
+        };
+        match scalar.as_ref() {
+            automerge::ScalarValue::Str(text) => {
+                return Ok(autosurgeon::reconcile::LoadKey::Found(
+                    JsonHeuristicKey::Str(Cow::Owned(text.to_string())),
+                ));
+            }
+            automerge::ScalarValue::Uint(uint_value) => {
+                return Ok(autosurgeon::reconcile::LoadKey::Found(
+                    JsonHeuristicKey::U64(*uint_value),
+                ));
+            }
+            automerge::ScalarValue::Int(int_value) => {
+                if let Ok(uint_value) = u64::try_from(*int_value) {
+                    return Ok(autosurgeon::reconcile::LoadKey::Found(
+                        JsonHeuristicKey::U64(uint_value),
+                    ));
+                }
+                return Ok(autosurgeon::reconcile::LoadKey::Found(
+                    JsonHeuristicKey::I64(*int_value),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(autosurgeon::reconcile::LoadKey::KeyNotFound)
+}
+
+struct HeuristicallyKeyedJsonValue<'a>(&'a serde_json::Value);
+
+impl autosurgeon::Reconcile for HeuristicallyKeyedJsonValue<'_> {
+    type Key<'a> = JsonHeuristicKey<'a>;
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
+        reconcile_value(self.0, reconciler)
+    }
+
+    fn hydrate_key<'a, D: ReadDoc>(
+        doc: &D,
+        obj: &automerge::ObjId,
+        prop: Prop<'_>,
+    ) -> Result<autosurgeon::reconcile::LoadKey<Self::Key<'a>>, autosurgeon::ReconcileError> {
+        hydrate_heuristic_key(doc, obj, prop)
+    }
+
+    fn key(&self) -> autosurgeon::reconcile::LoadKey<Self::Key<'_>> {
+        heuristic_json_object_key(self.0)
+            .map(autosurgeon::reconcile::LoadKey::Found)
+            .unwrap_or(autosurgeon::reconcile::LoadKey::KeyNotFound)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct ThroughJson<T>(pub T);
+
+impl<T> std::ops::Deref for ThroughJson<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for ThroughJson<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T> From<T> for ThroughJson<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+pub fn reconcile<T: serde::Serialize, R: Reconciler>(
+    value: &T,
+    reconciler: R,
+) -> Result<(), R::Error> {
+    let value = serde_json::to_value(value).expect(ERROR_JSON);
+    reconcile_value(&value, reconciler)
+}
+
+pub fn reconcile_value<R: Reconciler>(
+    value: &serde_json::Value,
+    mut reconciler: R,
+) -> Result<(), R::Error> {
+    match value {
+        serde_json::Value::Null => reconciler.none(),
+        serde_json::Value::Bool(val) => reconciler.boolean(*val),
+        serde_json::Value::Number(val) => {
+            if let Some(int) = val.as_u64() {
+                reconciler.u64(int)
+            } else if let Some(uint) = val.as_i64() {
+                reconciler.i64(uint)
+            } else if let Some(float) = val.as_f64() {
+                reconciler.f64(float)
+            } else {
+                panic!("attempt to reconcile unsupported json number: {val}")
+            }
+        }
+        serde_json::Value::String(val) => reconciler.str(val),
+        serde_json::Value::Array(val) => {
+            if can_use_heuristic_keyed_array(val) {
+                let keyed = val
+                    .iter()
+                    .map(HeuristicallyKeyedJsonValue)
+                    .collect::<Vec<_>>();
+                return autosurgeon::Reconcile::reconcile(&keyed, reconciler);
+            }
+
+            use autosurgeon::reconcile::SeqReconciler;
+
+            let mut seq = reconciler.seq()?;
+            // Delete any extra items
+            let old_len = seq.len()?;
+            if old_len > val.len() {
+                for idx in (val.len()..old_len).rev() {
+                    seq.delete(idx)?;
+                }
+            }
+            // Set or insert items
+            for (idx, item) in val.iter().enumerate() {
+                if idx < old_len {
+                    seq.set(idx, ThroughJson(item))?;
+                } else {
+                    seq.insert(idx, ThroughJson(item))?;
+                }
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(val) => {
+            use autosurgeon::reconcile::MapReconciler;
+
+            let mut map_reconciler = reconciler.map()?;
+            let mut keys_to_del = vec![];
+            for (key, _) in map_reconciler.entries() {
+                if !val.contains_key(&key[..]) {
+                    keys_to_del.push(key.to_string());
+                }
+            }
+            for key in keys_to_del {
+                map_reconciler.delete(key)?;
+            }
+            // Put or update entries
+            for (key, value) in val {
+                if is_base64_field(key)
+                    && let serde_json::Value::String(encoded) = value
+                {
+                    if let Some(bytes) = decode_base64_field(encoded) {
+                        map_reconciler.put(key, autosurgeon::bytes::ByteVec::from(bytes))?;
+                        continue;
+                    }
+                    warn!(key, "invalid base64 payload, storing as string");
+                }
+                if is_timestamp_field(key) {
+                    if let Some(seconds) = timestamp_seconds_from_json(value) {
+                        map_reconciler.put(key, TimestampScalarValue(seconds))?;
+                        continue;
+                    }
+                    if let Some(seconds_seq) = timestamp_seconds_from_json_array(value) {
+                        map_reconciler.put(key, TimestampSeqValue(seconds_seq))?;
+                        continue;
+                    }
+                    debug!(
+                        key,
+                        ?value,
+                        "failed to coerce timestamp field; storing raw json"
+                    );
+                }
+                map_reconciler.put(key, ThroughJson(value))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+pub fn hydrate<'a, D: ReadDoc, T: serde::de::DeserializeOwned>(
+    doc: &D,
+    obj: &ObjId,
+    prop: autosurgeon::Prop<'a>,
+) -> Result<T, HydrateError> {
+    let value = ThroughJson::hydrate(doc, obj, prop)?;
+    Ok(value.0)
+}
+
+pub fn hydrate_value<'a, D: ReadDoc>(
+    doc: &D,
+    obj: &ObjId,
+    prop: autosurgeon::Prop<'a>,
+) -> Result<serde_json::Value, HydrateError> {
+    let value = match doc.get(obj, &prop)? {
+        Some((automerge::Value::Scalar(scalar), _)) => ThroughJson::hydrate_scalar(scalar),
+        Some((automerge::Value::Object(obj_type), obj)) => match obj_type {
+            ObjType::Map | ObjType::Table => ThroughJson::hydrate_map(doc, &obj),
+            ObjType::List => ThroughJson::hydrate_seq(doc, &obj),
+            ObjType::Text => ThroughJson::hydrate_text(doc, &obj),
+        },
+        None => ThroughJson::hydrate_none(),
+    }?;
+    Ok(value.0)
+}
+
+pub fn from_value<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+) -> Result<T, HydrateError> {
+    match serde_json::from_value(value) {
+        Ok(value) => Ok(value),
+        Err(err) => Err(autosurgeon::HydrateError::unexpected(
+            format!("a json repr of {}", std::any::type_name::<T>()),
+            format!("failure parsing json: {err:?}"),
+        )),
+    }
+}
+
+impl<T> autosurgeon::Reconcile for ThroughJson<T>
+where
+    T: serde::Serialize,
+{
+    type Key<'a> = autosurgeon::reconcile::NoKey;
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
+        reconcile(&self.0, reconciler)
+    }
+}
+
+impl<T> autosurgeon::Hydrate for ThroughJson<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn hydrate<D: ReadDoc>(
+        doc: &D,
+        obj: &automerge::ObjId,
+        prop: Prop<'_>,
+    ) -> Result<Self, HydrateError> {
+        let value = hydrate_value(doc, obj, prop)?;
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_bool(value: bool) -> Result<Self, HydrateError> {
+        let value = serde_json::Value::Bool(value);
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_bytes(value: &[u8]) -> Result<Self, HydrateError> {
+        let value = serde_json::Value::Array(
+            value
+                .iter()
+                .map(|byte| serde_json::Value::Number(serde_json::Number::from(*byte)))
+                .collect(),
+        );
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_f64(value: f64) -> Result<Self, HydrateError> {
+        let value =
+            serde_json::Value::Number(serde_json::Number::from_f64(value).ok_or_else(|| {
+                autosurgeon::HydrateError::unexpected(
+                    "a real float",
+                    format!("NaN and Infinite unsupported by json, found: {value}"),
+                )
+            })?);
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_counter(value: i64) -> Result<Self, HydrateError> {
+        let value = serde_json::Value::Number(value.into());
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_int(value: i64) -> Result<Self, HydrateError> {
+        let value = serde_json::Value::Number(serde_json::Number::from(value));
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_uint(value: u64) -> Result<Self, HydrateError> {
+        let value = serde_json::Value::Number(serde_json::Number::from(value));
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_string(value: &'_ str) -> Result<Self, HydrateError> {
+        let value = serde_json::Value::String(String::from(value));
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_timestamp(value: i64) -> Result<Self, HydrateError> {
+        let value = match Timestamp::from_second(value) {
+            Ok(ts) => serde_json::Value::String(ts.to_string()),
+            Err(err) => {
+                return Err(autosurgeon::HydrateError::unexpected(
+                    "a valid timestamp",
+                    format!("error converting timestamp: {err}"),
+                ));
+            }
+        };
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_unknown(_type_code: u8, _bytes: &[u8]) -> Result<Self, HydrateError> {
+        Err(HydrateError::Unexpected(
+            autosurgeon::hydrate::Unexpected::Unknown,
+        ))
+    }
+
+    fn hydrate_map<D: ReadDoc>(doc: &D, obj: &automerge::ObjId) -> Result<Self, HydrateError> {
+        let value = {
+            let mut map = serde_json::Map::new();
+            for item in doc.map_range(obj, ..) {
+                let value = match doc.get(obj, item.key.clone())? {
+                    Some((automerge::Value::Scalar(scalar), _)) if is_base64_field(&item.key) => {
+                        match scalar.as_ref() {
+                            automerge::ScalarValue::Bytes(bytes) => {
+                                serde_json::Value::String(encode_base64_field(bytes))
+                            }
+                            _ => hydrate_value(doc, obj, autosurgeon::Prop::Key(item.key.clone()))?,
+                        }
+                    }
+                    _ => hydrate_value(doc, obj, autosurgeon::Prop::Key(item.key.clone()))?,
+                };
+                map.insert(item.key.to_string(), value);
+            }
+            serde_json::Value::Object(map)
+        };
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_seq<D: ReadDoc>(doc: &D, obj: &automerge::ObjId) -> Result<Self, HydrateError> {
+        let value = {
+            let mut arr = Vec::new();
+            for ii in 0..doc.length(obj) {
+                let value = hydrate_value(doc, obj, autosurgeon::Prop::Index(ii as u32))?;
+                arr.push(value);
+            }
+            serde_json::Value::Array(arr)
+        };
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_text<D: ReadDoc>(doc: &D, obj: &automerge::ObjId) -> Result<Self, HydrateError> {
+        let value = {
+            let text = doc.text(obj)?;
+            serde_json::Value::String(text)
+        };
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+
+    fn hydrate_none() -> Result<Self, HydrateError> {
+        let value = serde_json::Value::Null;
+        let value = from_value(value)?;
+        Ok(Self(value))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(
+        Debug,
+        Clone,
+        Serialize,
+        Deserialize,
+        PartialEq,
+        autosurgeon::Hydrate,
+        autosurgeon::Reconcile,
+    )]
+    struct Scalars {
+        null: Option<bool>,
+        bool: bool,
+        int_1: i64,
+        int_2: i32,
+        uint_1: u64,
+        uint_2: u32,
+        float_1: f64,
+        float_2: f32,
+        string: String,
+    }
+    #[derive(
+        Debug,
+        Clone,
+        Serialize,
+        Deserialize,
+        PartialEq,
+        autosurgeon::Hydrate,
+        autosurgeon::Reconcile,
+    )]
+    struct Objects {
+        map: HashMap<String, Foo>,
+        arr: Vec<Foo>,
+    }
+    #[derive(
+        Debug,
+        Clone,
+        Serialize,
+        Deserialize,
+        PartialEq,
+        autosurgeon::Hydrate,
+        autosurgeon::Reconcile,
+    )]
+    struct Foo {
+        scalars: Scalars,
+        obj: Objects,
+    }
+
+    fn test_val() -> Foo {
+        let scalars = Scalars {
+            null: None,
+            bool: true,
+            int_1: -123,
+            int_2: -456,
+            uint_1: 789,
+            uint_2: 145,
+            float_1: 256.,
+            float_2: 357.,
+            string: "Magic Alive!".into(),
+        };
+        Foo {
+            scalars: scalars.clone(),
+            obj: Objects {
+                map: [
+                    (
+                        "first".into(),
+                        Foo {
+                            scalars: scalars.clone(),
+                            obj: Objects {
+                                arr: vec![Foo {
+                                    scalars: scalars.clone(),
+                                    obj: Objects {
+                                        map: default(),
+                                        arr: default(),
+                                    },
+                                }],
+                                map: [(
+                                    "nested".into(),
+                                    Foo {
+                                        scalars: scalars.clone(),
+                                        obj: Objects {
+                                            map: default(),
+                                            arr: default(),
+                                        },
+                                    },
+                                )]
+                                .into(),
+                            },
+                        },
+                    ),
+                    (
+                        "second".into(),
+                        Foo {
+                            scalars: scalars.clone(),
+                            obj: Objects {
+                                arr: vec![Foo {
+                                    scalars: scalars.clone(),
+                                    obj: Objects {
+                                        map: default(),
+                                        arr: default(),
+                                    },
+                                }],
+                                map: [(
+                                    "nested".into(),
+                                    Foo {
+                                        scalars: scalars.clone(),
+                                        obj: Objects {
+                                            map: default(),
+                                            arr: default(),
+                                        },
+                                    },
+                                )]
+                                .into(),
+                            },
+                        },
+                    ),
+                ]
+                .into(),
+                arr: vec![
+                    Foo {
+                        scalars: scalars.clone(),
+                        obj: Objects {
+                            arr: vec![Foo {
+                                scalars: scalars.clone(),
+                                obj: Objects {
+                                    map: default(),
+                                    arr: default(),
+                                },
+                            }],
+                            map: [(
+                                "nested".into(),
+                                Foo {
+                                    scalars: scalars.clone(),
+                                    obj: Objects {
+                                        map: default(),
+                                        arr: default(),
+                                    },
+                                },
+                            )]
+                            .into(),
+                        },
+                    },
+                    Foo {
+                        scalars: scalars.clone(),
+                        obj: Objects {
+                            arr: vec![Foo {
+                                scalars: scalars.clone(),
+                                obj: Objects {
+                                    map: default(),
+                                    arr: default(),
+                                },
+                            }],
+                            map: [(
+                                "nested".into(),
+                                Foo {
+                                    scalars: scalars.clone(),
+                                    obj: Objects {
+                                        map: default(),
+                                        arr: default(),
+                                    },
+                                },
+                            )]
+                            .into(),
+                        },
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn smoke() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let mut doc = automerge::AutoCommit::new();
+
+        let val = test_val();
+
+        // NOTE: if this comes third, it removes the other keys
+        // since our hydrate_map impl eliminates keys
+        autosurgeon::reconcile(&mut doc, ThroughJson(val.clone()))?;
+        autosurgeon::reconcile_prop(&mut doc, automerge::ROOT, "serde", ThroughJson(val.clone()))?;
+        autosurgeon::reconcile_prop(&mut doc, automerge::ROOT, "normal", val.clone())?;
+        doc.commit();
+
+        let _raw: ThroughJson<serde_json::Value> = autosurgeon::hydrate(&doc)?;
+
+        let commited1: ThroughJson<Foo> = autosurgeon::hydrate(&doc)?;
+        let commited2: ThroughJson<Foo> =
+            autosurgeon::hydrate_prop(&doc, automerge::ROOT, "serde")?;
+        let commited3: ThroughJson<Foo> =
+            autosurgeon::hydrate_prop(&doc, automerge::ROOT, "normal")?;
+
+        assert_eq!(commited1.0, val);
+        assert_eq!(commited2.0, val);
+        assert_eq!(commited3.0, val);
+
+        Ok(())
+    }
+
+    #[test]
+    fn on_a_map() -> Res<()> {
+        #[derive(Debug, autosurgeon::Hydrate, autosurgeon::Reconcile)]
+        struct OnAMap {
+            pub map: HashMap<String, ThroughJson<Arc<Foo>>>,
+        }
+
+        utils_rs::testing::setup_tracing_once();
+        let mut doc = automerge::AutoCommit::new();
+
+        let mut val = {
+            let val = OnAMap { map: default() };
+            autosurgeon::reconcile(&mut doc, val)?;
+            doc.commit();
+            let commited: OnAMap = autosurgeon::hydrate(&doc)?;
+            assert_eq!(commited.map.len(), 0);
+            commited
+        };
+        let mut val = {
+            val.map.insert("one".into(), ThroughJson(test_val().into()));
+            autosurgeon::reconcile(&mut doc, val)?;
+            doc.commit();
+            let commited: OnAMap = autosurgeon::hydrate(&doc)?;
+            assert_eq!(commited.map.len(), 1);
+            commited
+        };
+        let _val = {
+            val.map.insert("two".into(), ThroughJson(test_val().into()));
+            autosurgeon::reconcile(&mut doc, val)?;
+            doc.commit();
+            let commited: OnAMap = autosurgeon::hydrate(&doc)?;
+            assert_eq!(commited.map.len(), 2);
+            commited
+        };
+
+        Ok(())
+    }
+
+    #[test]
+    fn base64_suffix_round_trips_as_automerge_bytes() -> Res<()> {
+        let mut doc = automerge::AutoCommit::new();
+        let payload = serde_json::json!({
+            "vectorBase64": "AQIDBA=="
+        });

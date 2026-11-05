@@ -176,6 +176,51 @@ async fn counter_activates_and_mount_dispatch_unmount_complete_on_first_poll() {
     host.close();
 }
 
+/// H1: the spike micro, composed (`wac plug`) with the wrapper component around Pierre's
+/// unmodified `highlights.wasm`, renders the line count, record count, record-stream digest and
+/// token histogram that the direct path (`bench/highlight/pierre-wasmtime`, `PIERRE_GOLDEN_OUT`)
+/// produced for the same text: the records the guest got through the canonical ABI equal the
+/// records the core module wrote.
+#[tokio::test]
+async fn highlight_spike_records_equal_the_direct_path_golden() {
+    use clay_guest_session::capabilities::DeclaredPublication;
+    use clay_guest_session::capabilities::PublicationKind;
+    use clay_guest_session::capabilities::presentation_component;
+    let package = WcmpPackage::from_env("highlight-spike")
+        .await
+        .expect("prepared highlight-spike component is valid");
+    let host = Host::new();
+    let owner = host.start("highlight-spike");
+    let (runtime, _driver) = WcmpRuntime::initialize(
+        &host,
+        owner,
+        package.as_shared(),
+        InitialContext {
+            publications: std::collections::BTreeMap::from([(
+                "view".to_owned(),
+                DeclaredPublication {
+                    kind: PublicationKind::Presentation,
+                    contract: presentation_component(),
+                },
+            )]),
+            ..InitialContext::default()
+        },
+    )
+    .await
+    .unwrap();
+    let sink = Arc::new(RecordingSink::new());
+    let _session = runtime.mount("view", sink.clone() as _).unwrap();
+    let rendered = sink.tree(SurfaceTree::text_content);
+    // The view prints the golden's four lines, then the guest-side timing.
+    let golden = include_str!("../micro_highlight_spike/snippet.golden.txt");
+    let expected = golden.lines().collect::<String>();
+    assert!(
+        rendered.starts_with(&expected),
+        "rendered {rendered:?}, golden {expected:?}"
+    );
+    host.close();
+}
+
 /// The wcmp counterpart of the wasmtime spike: a guest whose sync-typed `dispatch` blocks via
 /// `std::thread::sleep` (lifted to the async `monotonic-clock.wait-until` import) must be handled
 /// as a trap — default response, surface withdrawn,

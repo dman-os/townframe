@@ -62,6 +62,7 @@ members = [
   "./src/micro_sample",
   "./src/micro_counter",
   "./src/micro_collection_probe",
+  "./src/micro_highlight_spike",
   "./src/micro_counter_manifest",
   "./src/ui",
   "./src/clay_dioxus_kit",
