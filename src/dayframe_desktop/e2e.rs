@@ -28,6 +28,7 @@ use dioxus_html::SerializedHtmlEventConverter;
 use dioxus_html::SerializedMouseData;
 use dioxus_native_dom::DioxusState;
 
+mod blitz_limits;
 mod layout;
 
 /// Host widths on either side of the compact breakpoint.
