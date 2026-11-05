@@ -3,19 +3,29 @@ import { $ } from "./utils.ts";
 // Builds the Wasm guests and lays out the package directory the desktop shell scans. Shared by
 // `check-dayframe.ts` and `dayframe.ts`; callers run `useDotenvTargetDir()` first. Prints the
 // `DAYFRAME_*` lines and returns them, with the package directory under `DAYFRAME_PACKAGE_DIR`.
-export async function prepareDayframePackages(): Promise<
+//
+// `testFixtures` also builds the guests only tests load (the collection probe and the
+// `clay_mdk` example fixtures). The shells need just the packages; building the fixtures for
+// them doubled the cold build that the web e2e server waits on.
+export async function prepareDayframePackages(
+  { testFixtures }: { testFixtures: boolean },
+): Promise<
   Record<string, string>
 > {
   // Guests are wasm-only configurations: resolve their features in isolation. See
   // CONTRIBUTING.md on `resolver.feature-unification`.
   const isolated = ["--config", 'resolver.feature-unification="selected"'];
 
-  await $`cargo build --locked ${isolated} -p micro_counter --target wasm32-wasip3`;
-  await $`cargo build --locked ${isolated} -p micro_layout --target wasm32-wasip3`;
-  await $`cargo build --locked ${isolated} -p micro_collection_probe --target wasm32-wasip3`;
-  await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --target wasm32-wasip3`;
-  await $`cargo build --locked ${isolated} -p clay_mdk --example lifecycle --target wasm32-wasip3`;
-  await $`cargo build --locked ${isolated} -p clay_mdk --example context --target wasm32-wasip3`;
+  // One cargo invocation per artifact kind, so cargo schedules the guests together.
+  const guests = testFixtures
+    ? ["micro_counter", "micro_layout", "micro_collection_probe"]
+    : ["micro_counter", "micro_layout"];
+  await $`cargo build --locked ${isolated} ${
+    guests.flatMap((guest) => ["-p", guest])
+  } --target wasm32-wasip3`;
+  if (testFixtures) {
+    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example lifecycle --example context --target wasm32-wasip3`;
+  }
   const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
     .json<{ target_directory: string; packages: { name: string }[] }>();
   const target = $.path(metadata.target_directory);
@@ -26,13 +36,20 @@ export async function prepareDayframePackages(): Promise<
   const components: Record<string, [string, string]> = {
     counter: ["wasm32-wasip3/debug/micro_counter.wasm", "counter"],
     layout: ["wasm32-wasip3/debug/micro_layout.wasm", "layout"],
-    collectionProbe: [
-      "wasm32-wasip3/debug/micro_collection_probe.wasm",
-      "collection-probe",
-    ],
-    sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
-    lifecycle: ["wasm32-wasip3/debug/examples/lifecycle.wasm", "lifecycle"],
-    context: ["wasm32-wasip3/debug/examples/context.wasm", "context"],
+    ...(testFixtures
+      ? {
+        collectionProbe: [
+          "wasm32-wasip3/debug/micro_collection_probe.wasm",
+          "collection-probe",
+        ],
+        sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
+        lifecycle: [
+          "wasm32-wasip3/debug/examples/lifecycle.wasm",
+          "lifecycle",
+        ],
+        context: ["wasm32-wasip3/debug/examples/context.wasm", "context"],
+      }
+      : {}),
   };
   const componentEnv: Record<string, string> = {};
   for (const name in components) {

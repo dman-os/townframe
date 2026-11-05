@@ -44,7 +44,7 @@ for (const resolved of await Promise.all(resolutions)) {
   }
 }
 
-const componentEnv = await prepareDayframePackages();
+const componentEnv = await prepareDayframePackages({ testFixtures: true });
 
 if (!prepareOnly) {
   const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
