@@ -81,8 +81,14 @@ impl<C: PartialEq> PartialEq for SurfaceTree<C> {
 }
 
 impl<C: Clone> SurfaceTree<C> {
-    pub const MAX_BATCH_MUTATIONS: usize = 4096;
-    pub const MAX_BATCH_BYTES: usize = 256 * 1024;
+    // SPIKE VALUES (P1 style): the committed caps are 4096 mutations, 256 KiB of batch bytes and
+    // 128K of batch work. One batch of the 217 rows real Pierre 1.5.2 emits for a unified diff
+    // is 16,972 mutations and needs between 1 and 2 MiB of batch bytes and between 2M and 4M of
+    // batch work (measured by lifting one cap at a time; docs/scratch/pierre-spikes.md). The caps
+    // are the retained-tree budget blocker's (lane 3) to set; these let the style spike's rows
+    // through one atomic revision.
+    pub const MAX_BATCH_MUTATIONS: usize = 32 * 1024;
+    pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
     pub const MAX_STRING_BYTES: usize = 64 * 1024;
     pub const MAX_NODE_SLOTS: usize = 8192;
     pub const MAX_ELEMENT_ID: NodeId = 8191;
@@ -91,7 +97,7 @@ impl<C: Clone> SurfaceTree<C> {
     pub const MAX_RETAINED_BYTES: usize = 1024 * 1024;
     pub const MAX_ATTRIBUTES_PER_NODE: usize = 64;
     pub const MAX_LISTENERS_PER_NODE: usize = 32;
-    pub const MAX_BATCH_WORK: usize = 128 * 1024;
+    pub const MAX_BATCH_WORK: usize = 4 * 1024 * 1024;
 
     pub fn new() -> Self {
         Self {

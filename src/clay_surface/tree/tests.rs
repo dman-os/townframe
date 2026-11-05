@@ -353,15 +353,16 @@ fn ingress_limits_reject_sparse_ids_oversized_batches_strings_and_stacks() {
         true,
     );
     let mut batch = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..SurfaceTree::MAX_BATCH_BYTES / SurfaceTree::MAX_STRING_BYTES + 1 {
         batch.push(Mutation::CreateText(
             "x".repeat(SurfaceTree::MAX_STRING_BYTES),
         ));
         batch.push(Mutation::Pop);
     }
+    // The retained-byte cap is below the batch-byte cap, so a batch of large strings meets it first.
     assert_eq!(
         assert_terminal(&batch, true),
-        PresentationError::Unsupported("batch byte limit".into())
+        PresentationError::Unsupported("retained byte limit".into())
     );
 }
 
@@ -700,7 +701,8 @@ fn batch_work_limits_cover_cloned_bytes_and_repeated_sibling_scans() {
         Mutation::Pop,
     ])
     .unwrap();
-    let batch: Vec<_> = (0..256)
+    // Each clone of the 64 KiB text charges about a thousand units of work.
+    let batch: Vec<_> = (0..SurfaceTree::MAX_BATCH_WORK / 1000)
         .flat_map(|_| [Mutation::PushId(1), Mutation::CloneNode, Mutation::Remove])
         .collect();
     assert_eq!(
@@ -716,7 +718,10 @@ fn batch_work_limits_cover_cloned_bytes_and_repeated_sibling_scans() {
         Mutation::AppendChildren(1),
     ])
     .unwrap();
-    let batch: Vec<_> = (0..1024)
+    // Inserting after the anchor scans the growing sibling list, so the work is quadratic in the
+    // count: twice the square root of twice the cap is past it, within the node-slot cap.
+    let inserts = 2 * (2 * SurfaceTree::MAX_BATCH_WORK).isqrt();
+    let batch: Vec<_> = (0..inserts)
         .flat_map(|_| {
             [
                 Mutation::PushId(1),
