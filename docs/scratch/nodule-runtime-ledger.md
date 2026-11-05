@@ -375,6 +375,19 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
     - Keyed-frontier stores (datum_set, facet_set, big_blobs projection, automerge frontier, doc_revision/doc_delta) share `big_sync` keyed frontier + `notify_changed`; no polling there. `big_sync_core::live_revision_watch` is used only by tests.
     - `native.rs:2407` calls `refresh_cache()` every 2 s on every node, a loop copied from upstream (subduction_keyhive runtime.rs / subduction_cli server.rs `cache_refresh_interval`). `refresh_cache` is just `ensure_cache_current`: generation-checked, and every cache reader (`initiate_sync_with_request`, `notification_targets`) already calls it on demand, and remote ingest bumps the hive generation like local mutation does. So the loop only pre-warms the rebuild off the sync path. Idle cost: `nested_store_generation_sum` locks every group and doc mutex every 2 s, O(groups + docs). Candidate: drop the loop, or rebuild only on a generation-change signal. Low priority.
     - `big_sync/worker.rs:467` waits for idle with a 50 ms poll; check whether anything outside tests uses it.
+  - Landed 2026-11-05: admission readers wake on append (`d4d33097`; note create 767 -> 276 ms p50, reconcile wait 224 -> 38 ms). Blob roster writes re-reconcile only the named member (`6bd49930`; allocations per note 100k -> 125k across 30 notes instead of 460k -> 1M).
+  - big_cabinet wrong turn: a `PollDatums` page is not a delta. Every page re-delivers the polled doc as `enter` with its whole selected state, so each roster write costs every poller O(roster), and the blob worker has to diff pages against the previous one to find what changed. A delta feed would remove both.
+  - Pinned flake: `big_blobs sync::transfer_tests::completion_releases_capacity_for_the_ninth_eligible_transfer` timed out at 120 s twice at `-j 6` under load from other builds; passes alone (3.3 s) and at `-j 2`. Uses iroh routers plus Notify. Not instrumented yet.
+  - Remaining note-create cost after the poll fix: CPU-bound, ~370 ms CPU for 276 ms wall; 38 ms reconcile per grant, three grants per note.
+  - Landed: commits store change bytes, not snapshots (drawer stored/saved 205:1 -> 8.4:1; node dir per note 147 KB -> 33 KB). The remaining ~33 KB per note is SQLite rows, WAL, indexes and keyhive events, not blobs: needs a per-table breakdown.
+  - big_repo wrong turns flagged by the change-bytes agent (not fixed):
+    - `persist_local_commits` (native.rs ~398): one transaction per change, each a full `mutate_tree_in_tx` with minimization; an `InsertBatch` mutation exists.
+    - `load_doc_snapshot` re-walks and re-decrypts the whole history on every call, including every `ReattemptMaterialization` while pending: likely O(n^2) in history.
+    - `register_bundle_lease` (doc_worker.rs ~708) swallows a send error and `registered_rx.await.ok()`: AGENTS channel rule.
+    - hub `put_doc` saves the whole doc twice to detect a content mismatch; heads would do.
+    - `process_pending_fragment_requests` keeps pending fragment work in memory only; after a crash those boundaries never get fragments (bounded growth).
+    - Deletes in `mutate_tree_in_tx` rehydrate the tree from SQLite (rare, O(tree)).
+    - Existing stores keep old snapshot blobs until a fragment covers them; nothing repacks.
 - **D28. Follow-ups to D24** (operator, 2026-11-05):
   - Blob retention targets only inventories the node can write.
   - A write keyhive refuses for access becomes a typed error that the docs service maps to `Denied`.
