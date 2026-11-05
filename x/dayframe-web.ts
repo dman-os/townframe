@@ -10,6 +10,7 @@
 //   deno run --allow-all x/dayframe-web.ts --build    build only
 
 import { crypto } from "jsr:@std/crypto@1.0.5";
+import { prepareDayframePackages } from "./dayframe-packages.ts";
 import { $, useDotenvTargetDir } from "./utils.ts";
 
 const buildOnly = Deno.args.includes("--build");
@@ -32,19 +33,11 @@ function matchesAt(
 // renderer's native-tls into wasm32. See CONTRIBUTING.md on `resolver.feature-unification`.
 const isolated = ["--config", 'resolver.feature-unification="selected"'];
 
-const prepared = await $`deno run --allow-all ${
-  root.join("x/check-dayframe.ts")
-} --prepare-only`.lines();
-const packageDirectory = prepared
-  .map((line) => line.match(/^DAYFRAME_PACKAGE_DIR=(.+)$/)?.[1])
-  .find((path) => path !== undefined);
-if (!packageDirectory) {
-  throw new Error(
-    `check-dayframe.ts printed no DAYFRAME_PACKAGE_DIR:\n${
-      prepared.join("\n")
-    }`,
-  );
-}
+// Only the shells' packages: the test-only guest fixtures are not served.
+const packageDirectory =
+  (await prepareDayframePackages({ testFixtures: false }))[
+    "DAYFRAME_PACKAGE_DIR"
+  ];
 
 // BLAKE3, the digest big_blobs uses and `clay_mdk::package::Package::digest` computes (Deno's
 // Deno's own WebCrypto lacks it; `@std/crypto` adds it).

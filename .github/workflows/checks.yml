@@ -165,7 +165,9 @@ jobs:
 
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Preparing the Dayframe Wasm guest fixtures takes about 35 minutes on a cold runner before
+    # nextest starts, and the suite itself about 40; 90 cut the run off at the last test.
+    timeout-minutes: 120
     steps:
       - name: Setup tmate session
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}

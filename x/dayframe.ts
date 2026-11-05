@@ -36,7 +36,7 @@ function dx(...args: string[]) {
 switch (command) {
   case "desktop": {
     await useDotenvTargetDir();
-    const env = await prepareDayframePackages();
+    const env = await prepareDayframePackages({ testFixtures: false });
     const storeFlag = rest.indexOf("--store");
     if (flag("--fresh") && storeFlag >= 0) {
       throw new Error("--fresh and --store are mutually exclusive");
@@ -72,7 +72,7 @@ switch (command) {
     break;
   case "packages":
     await useDotenvTargetDir();
-    await prepareDayframePackages();
+    await prepareDayframePackages({ testFixtures: true });
     break;
   case "test":
     await $`deno run --allow-all ${root.join("x/check-dayframe.ts")}`;
