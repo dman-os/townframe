@@ -43,24 +43,6 @@ pub async fn list_dispatches(db: &impl crate::sqlite_rs_alias::QueryExecutor) ->
     set.all()
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct ListWflowPartFrontiersRow {
-    pub wflow_partition_id: String,
-    pub frontier: i64,
-}
-impl crate::sqlite_rs_alias::FromRow for ListWflowPartFrontiersRow {
-    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
-        row.require_width(2)?;
-        Ok(ListWflowPartFrontiersRow { wflow_partition_id: row.get::<String>("wflow_partition_id")?, frontier: row.get::<i64>("frontier")? })
-    }
-}
-
-pub const LIST_WFLOW_PART_FRONTIERS_SQL: &str = include_str!("queries/list_wflow_part_frontiers.sql");
-pub async fn list_wflow_part_frontiers(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<ListWflowPartFrontiersRow>> {
-    let set = db.query(LIST_WFLOW_PART_FRONTIERS_SQL, &[]).await?;
-    set.all()
-}
-
 pub const MARK_DISPATCH_CANCELLED_SQL: &str = include_str!("queries/mark_dispatch_cancelled.sql");
 pub async fn mark_dispatch_cancelled(db: &impl crate::sqlite_rs_alias::Executor, dispatch_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(MARK_DISPATCH_CANCELLED_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(dispatch_id)]).await
@@ -69,11 +51,6 @@ pub async fn mark_dispatch_cancelled(db: &impl crate::sqlite_rs_alias::Executor,
 pub const MARK_INIT_DONE_SQL: &str = include_str!("queries/mark_init_done.sql");
 pub async fn mark_init_done(db: &impl crate::sqlite_rs_alias::Executor, init_id: String, completed_at: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(MARK_INIT_DONE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(init_id), crate::sqlite_rs_alias::IntoValue::into_value(completed_at)]).await
-}
-
-pub const SET_WFLOW_PART_FRONTIER_SQL: &str = include_str!("queries/set_wflow_part_frontier.sql");
-pub async fn set_wflow_part_frontier(db: &impl crate::sqlite_rs_alias::Executor, wflow_partition_id: String, frontier: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(SET_WFLOW_PART_FRONTIER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(wflow_partition_id), crate::sqlite_rs_alias::IntoValue::into_value(frontier)]).await
 }
 
 pub const UPSERT_DISPATCH_SQL: &str = include_str!("queries/upsert_dispatch.sql");
