@@ -564,11 +564,9 @@ null_writer!(
     remove()
 );
 
-/// What the guest's own VirtualDom costs with no wire in the loop (P4): a 50-row window shift
-/// diffed into a writer that drops every edit, median of 20, and the cost of one host call
-/// (`Instant::now` is a `wasi:clocks` import). Run in the guest, this separates the diff's
-/// compute from the bridge.
-fn bench(tokens: usize) -> String {
+/// `reps` window shifts of 50 rows, each diffed into a writer that drops every edit; the diff
+/// times in ms.
+fn bench_diff(tokens: usize, reps: usize) -> Vec<f64> {
     use dioxus_core::ScopeId;
     use dioxus_core::VirtualDom;
     thread_local! {
@@ -579,7 +577,7 @@ fn bench(tokens: usize) -> String {
         rsx! { Window { start, count: 140, tokens, offset: 0.0, source: 0, keyed: true } }
     }
     let mut diffs = Vec::new();
-    for rep in 0..20 {
+    for rep in 0..reps {
         BENCH_PROPS.set((100 + rep * 100, tokens));
         let mut dom = VirtualDom::new(bench_app);
         dom.rebuild(&mut Null);
@@ -589,6 +587,15 @@ fn bench(tokens: usize) -> String {
         dom.render_immediate(&mut Null);
         diffs.push(started.elapsed().as_secs_f64() * 1000.0);
     }
+    diffs
+}
+
+/// What the guest's own VirtualDom costs with no wire in the loop (P4): a 50-row window shift
+/// diffed into a writer that drops every edit, median of 20, and the cost of one host call
+/// (`Instant::now` is a `wasi:clocks` import). Run in the guest, this separates the diff's
+/// compute from the bridge.
+fn bench(tokens: usize) -> String {
+    let mut diffs = bench_diff(tokens, 20);
     diffs.sort_by(f64::total_cmp);
     let started = std::time::Instant::now();
     for _ in 0..200 {
@@ -667,6 +674,46 @@ fn bench(tokens: usize) -> String {
         "diff-no-writer-median-ms {:.2} host-call-ms {:.4} int-loop-20M-ms {compute:.1} alloc-100k-strings-ms {alloc:.1}",
         diffs[10], per_call
     )
+}
+
+/// P5 control: the same `bench` as a plain core export, so the unbundled core module can run it
+/// in V8 with no wcmp. `p5_init` installs a TLS block the way `clay_mdk` does at its first task
+/// hook (`__wasm_init_tls` copies `.tdata` and calls the imported `__wasm_set_tls_base`);
+/// `p5_bench` leaks its report, `p5_len` is that report's length.
+#[cfg(all(target_os = "wasi", feature = "p5-direct"))]
+mod p5_direct {
+    use core::sync::atomic::AtomicUsize;
+    use core::sync::atomic::Ordering;
+    static LEN: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" {
+        fn __wasm_init_tls(base: *mut u8);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn p5_init() {
+        let block = Box::leak(vec![0_u8; 4096].into_boxed_slice());
+        unsafe { __wasm_init_tls(block.as_mut_ptr().add(8 - (block.as_ptr() as usize % 8))) };
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn p5_bench(tokens: u32) -> *const u8 {
+        let report = super::bench(tokens as usize).into_boxed_str();
+        LEN.store(report.len(), Ordering::Relaxed);
+        Box::leak(report).as_ptr()
+    }
+
+    /// One 50-row window shift diffed into the null writer, the same work as one rep of
+    /// `bench`'s diff; the harness counts stack-pointer imports around this call.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn p5_diff(tokens: u32) {
+        super::bench_diff(tokens as usize, 1);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn p5_len() -> usize {
+        LEN.load(Ordering::Relaxed)
+    }
 }
 
 /// What one window commit costs against the surface tree's budgets (`clay_surface` `tree.rs`),

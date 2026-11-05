@@ -8,6 +8,11 @@ rust-version.workspace = true
 path = "lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# P5: also export `p5_init`/`p5_bench`/`p5_len` as plain core functions so the unbundled core
+# module can be instantiated and timed in V8 outside wcmp (`src/micro_pierre_spike_scroll/p5/`).
+p5-direct = []
+
 [dependencies]
 micro_layout_manifest = { workspace = true }
 serde_json.workspace = true
