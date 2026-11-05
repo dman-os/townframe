@@ -21,3 +21,6 @@ clay_mdk = { workspace = true, features = ["guest"] }
 
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
+
+[dev-dependencies]
+clay_surface = { workspace = true }

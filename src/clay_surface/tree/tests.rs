@@ -1114,3 +1114,26 @@ fn short_adversarial_instruction_sequences_preserve_invariants_without_unwinding
         }
     }
 }
+
+// Characterization (P1 style): the plain `style` attribute is in the attribute vocabulary, and a
+// host applies it as text (`setAttribute("style", ..)`), so what the `style:<property>` list admits
+// does not bound what a guest's CSS can do. This pins that a batch carrying arbitrary CSS in `style`
+// is accepted; a change that narrows `style` flips it deliberately.
+#[test]
+fn the_plain_style_attribute_is_accepted_with_any_css() {
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        Mutation::PushId(0),
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetAttribute((
+            "style".into(),
+            None,
+            AttributeValue::Text(
+                "position:fixed;inset:0;--x:1;background:url(http://example.invalid/x)".into(),
+            ),
+        )),
+        Mutation::AppendChildren(1),
+        Mutation::Pop,
+    ])
+    .unwrap();
+}

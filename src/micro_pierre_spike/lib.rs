@@ -42,7 +42,17 @@ struct Mode {
     host_class: Option<&'static str>,
 }
 
-const MODES: &[Mode] = &[];
+/// A hostile guest's probe of what the wire already lets through: one element whose raw `style`
+/// attribute (allowed, see `clay_surface::render::static_attribute`) covers the viewport and
+/// fetches a URL. Nothing in the style-property list is involved.
+const PROBE: &str = r#"{"t":"div","a":{"id":"probe","style":"position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;background:url(http://127.0.0.1:9/pierre-probe-beacon)"},"c":["raw style probe"]}"#;
+
+const MODES: &[Mode] = &[Mode {
+    publication: "probe-raw-style",
+    title: "Pierre probe (raw style)",
+    rows: PROBE,
+    host_class: None,
+}];
 
 pub fn manifest() -> clay_mdk::MicroManifest {
     use clay_mdk::Access;
@@ -167,6 +177,130 @@ fn element(node: &Hast, key: usize) -> Element {
                 "span" => rsx! { span { key: "{key}", ..attrs, {children} } },
                 other => panic!("the rows fixture names an unexpected tag {other}"),
             }
+        }
+    }
+}
+
+/// What one initial render of each presentation costs on the wire: the `WriteMutations` calls the
+/// guest adapter turns one-to-one into a batch, recorded as `clay_surface` mutations and offered
+/// to a fresh `SurfaceTree`, which applies its own limits and vocabulary to them.
+#[cfg(all(test, not(target_os = "wasi")))]
+mod tests {
+    use super::*;
+    use clay_surface::AttributeValue as Wire;
+    use clay_surface::Mutation;
+    use clay_surface::SurfaceTree;
+    use dioxus::core::BorrowedAttributeValue;
+    use dioxus::core::ElementId;
+    use dioxus::core::VirtualDom;
+    use dioxus::core::WriteMutations;
+
+    #[derive(Default)]
+    struct Record(Vec<Mutation<()>>);
+
+    impl WriteMutations for Record {
+        fn push_id(&mut self, id: ElementId) {
+            self.0.push(Mutation::PushId(id.raw() as u32));
+        }
+        fn set_id(&mut self, id: ElementId) {
+            self.0.push(Mutation::SetId(id.raw() as u32));
+        }
+        fn child(&mut self, index: usize) {
+            self.0.push(Mutation::Child(index as u32));
+        }
+        fn pop(&mut self) {
+            self.0.push(Mutation::Pop);
+        }
+        fn create_element(&mut self, tag: &str, ns: Option<&str>) {
+            self.0
+                .push(Mutation::CreateElement((tag.into(), ns.map(Into::into))));
+        }
+        fn create_text(&mut self, value: &str) {
+            self.0.push(Mutation::CreateText(value.into()));
+        }
+        fn clone(&mut self) {
+            self.0.push(Mutation::CloneNode);
+        }
+        fn append_children(&mut self, m: usize) {
+            self.0.push(Mutation::AppendChildren(m as u32));
+        }
+        fn replace_with(&mut self, m: usize) {
+            self.0.push(Mutation::ReplaceWith(m as u32));
+        }
+        fn insert_after(&mut self, m: usize) {
+            self.0.push(Mutation::InsertAfter(m as u32));
+        }
+        fn insert_before(&mut self, m: usize) {
+            self.0.push(Mutation::InsertBefore(m as u32));
+        }
+        fn set_attribute(
+            &mut self,
+            name: &str,
+            ns: Option<&str>,
+            value: BorrowedAttributeValue<'_>,
+        ) {
+            let BorrowedAttributeValue::Text(text) = value else {
+                panic!("the rows set only text attributes");
+            };
+            self.0.push(Mutation::SetAttribute((
+                name.into(),
+                ns.map(Into::into),
+                Wire::Text(text.into()),
+            )));
+        }
+        fn set_text(&mut self, value: &str) {
+            self.0.push(Mutation::SetText(value.into()));
+        }
+        fn add_event_listener(&mut self, name: &str) {
+            self.0.push(Mutation::AddEventListener(name.into()));
+        }
+        fn remove_event_listener(&mut self, name: &str) {
+            self.0.push(Mutation::RemoveEventListener(name.into()));
+        }
+        fn remove(&mut self) {
+            self.0.push(Mutation::Remove);
+        }
+    }
+
+    fn batch(mode: &Mode) -> Vec<Mutation<()>> {
+        let rows: Rc<Hast> = Rc::new(serde_json::from_str(mode.rows).unwrap());
+        let mut dom = VirtualDom::new_with_props(
+            |(rows, host_class): (Rc<Hast>, Option<&'static str>)| view(rows, host_class),
+            (rows, mode.host_class),
+        );
+        let mut record = Record::default();
+        dom.rebuild(&mut record);
+        record.0
+    }
+
+    #[test]
+    fn the_rows_cost_what_the_report_says() {
+        for mode in MODES {
+            let batch = batch(mode);
+            let (mut elements, mut texts, mut attributes, mut bytes) = (0, 0, 0, 0);
+            for mutation in &batch {
+                match mutation {
+                    Mutation::CreateElement((tag, _)) => {
+                        elements += 1;
+                        bytes += tag.len();
+                    }
+                    Mutation::CreateText(text) => {
+                        texts += 1;
+                        bytes += text.len();
+                    }
+                    Mutation::SetAttribute((name, ns, Wire::Text(text))) => {
+                        attributes += 1;
+                        bytes += name.len() + ns.as_deref().map_or(0, str::len) + text.len();
+                    }
+                    _ => {}
+                }
+            }
+            let applied = SurfaceTree::<()>::new().apply(&batch);
+            eprintln!(
+                "{}: mutations={} elements={elements} texts={texts} attributes={attributes} string_bytes={bytes} apply={applied:?}",
+                mode.publication,
+                batch.len(),
+            );
         }
     }
 }
