@@ -62,13 +62,16 @@ pub(super) fn deliver(
     };
     // A suspension (Suspended) or a guest trap both withdraw the incarnation: document
     // callbacks are the same class of contract violation as a presentation call that fails.
-    let trapped = match trapped {
-        Ok(outcome) => outcome.is_err(),
-        Err(super::Suspended) => true,
+    let cause = match trapped {
+        Ok(Ok(())) => None,
+        Ok(Err(trap)) => Some(format!("guest trapped in a document delivery: {trap}")),
+        Err(super::Suspended) => {
+            Some("a document delivery suspended on its first poll".to_owned())
+        }
     };
-    if trapped {
+    if let Some(cause) = cause {
         guard.take();
-        return DeliveryOutcome::Trapped;
+        return DeliveryOutcome::Trapped(cause);
     }
     DeliveryOutcome::Delivered
 }

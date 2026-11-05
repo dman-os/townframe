@@ -807,7 +807,11 @@ impl<P: Clone + 'static> Supervisor<P> {
         if let NodeState::Active { instance, .. } = &node.state
             && self.host.lifecycle(instance) == Lifecycle::Closed
         {
-            return MicroState::Faulted("incarnation ended outside supervision".into());
+            return MicroState::Faulted(
+                self.host
+                    .fault(instance)
+                    .unwrap_or_else(|| "incarnation ended outside supervision".into()),
+            );
         }
         node.micro_state()
     }
