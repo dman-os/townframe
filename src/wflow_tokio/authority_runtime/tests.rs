@@ -96,10 +96,10 @@ async fn fully_reclaimed(
     commits: &mut watch::Receiver<u64>,
 ) -> JournalSnapshot {
     loop {
-        if let Some(snapshot) = runtime.reader.snapshot().await.unwrap() {
-            if snapshot.compacted_through == snapshot.cut {
-                return snapshot;
-            }
+        if let Some(snapshot) = runtime.reader.snapshot().await.unwrap()
+            && snapshot.compacted_through == snapshot.cut
+        {
+            return snapshot;
         }
         commits.changed().await.unwrap();
     }

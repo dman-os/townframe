@@ -303,23 +303,50 @@ async fn host_spawn_panic_propagates_without_spending_restart_budget() {
         .await
         .unwrap();
 
-    let actor = runtime
+    let panic = runtime
         .actor
-        .lock()
+        .clone()
         .await
-        .take()
-        .expect("actor should be running");
-    let panic = actor
-        .await
-        .expect_err("a Host::spawn panic must fail the actor")
-        .into_panic();
-    assert!(panic
-        .downcast_ref::<&str>()
-        .is_some_and(|message| *message == "host spawn panic"));
+        .expect_err("a Host::spawn panic must fail the actor");
+    assert!(panic.is_panic());
+    assert!(panic.to_string().contains("host spawn panic"));
     let history = transitions(&runtime, "job").await;
-    assert!(history
-        .iter()
-        .all(|event| !matches!(event, authority::Transition::Revoked { .. })));
+    assert!(
+        history
+            .iter()
+            .all(|event| !matches!(event, authority::Transition::Revoked { .. }))
+    );
+}
+
+#[tokio::test]
+async fn concurrent_stop_survives_cancellation_of_first_waiter() {
+    let host = ScriptHost::registered();
+    let gate = Arc::new(Gate::default());
+    gate.close();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "blocked",
+        SpawnPlan::Blocked {
+            gate: Arc::clone(&gate),
+            session: Box::new(
+                ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped)),
+            ),
+        },
+    );
+    let runtime = start_script(host).await;
+    runtime
+        .submit(Submission::new("job", "blocked", "null"))
+        .await
+        .unwrap();
+    gate.entered.notified().await;
+
+    {
+        let mut first_stop = Box::pin(runtime.stop());
+        assert!(futures::poll!(first_stop.as_mut()).is_pending());
+    }
+    tokio::join!(runtime.stop(), runtime.stop());
+    dropped.wait_for(1).await;
+    assert!(runtime.reader.snapshot().await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -332,7 +359,9 @@ async fn stop_aborts_a_pending_host_spawn_before_completing() {
         "blocked",
         SpawnPlan::Blocked {
             gate: Arc::clone(&spawn_gate),
-            session: Box::new(ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped))),
+            session: Box::new(
+                ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped)),
+            ),
         },
     );
     let runtime = start_script(Arc::clone(&host)).await;

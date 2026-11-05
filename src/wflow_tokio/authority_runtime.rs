@@ -47,6 +47,7 @@ use futures::StreamExt;
 use futures::future::AbortHandle;
 use futures::future::Abortable;
 use futures::future::BoxFuture;
+use futures::future::Shared;
 use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -260,10 +261,16 @@ impl Default for AuthorityRuntimeConfig {
     }
 }
 
+type ActorCompletion = Shared<BoxFuture<'static, Result<(), Arc<tokio::task::JoinError>>>>;
+
 pub struct AuthorityRuntime {
     commands: mpsc::Sender<Command>,
     reader: JournalReader,
-    actor: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Every stop caller polls the same shutdown operation, including when an
+    /// earlier caller is cancelled. No caller can take and lose the actor join.
+    shutdown: ActorCompletion,
+    #[cfg(test)]
+    actor: ActorCompletion,
 }
 
 enum WatchState {
@@ -292,9 +299,7 @@ enum Command {
         reason: String,
         reply: oneshot::Sender<Result<authority::Ack, CancelError>>,
     },
-    Shutdown {
-        reply: oneshot::Sender<()>,
-    },
+    Shutdown,
 }
 
 impl AuthorityRuntime {
@@ -379,10 +384,28 @@ impl AuthorityRuntime {
             waiters: HashMap::new(),
             pending_spawns: FuturesUnordered::new(),
         };
+        let actor = tokio::spawn(actor.run(commands_rx))
+            .map(|result| result.map_err(Arc::new))
+            .boxed()
+            .shared();
+        let shutdown = {
+            let commands = commands.clone();
+            let actor = actor.clone();
+            async move {
+                // A closed mailbox means the actor already exited. Its join,
+                // not the send result, is the authoritative failure report.
+                let _already_exited = commands.send(Command::Shutdown).await;
+                actor.await
+            }
+            .boxed()
+            .shared()
+        };
         Ok(Self {
             commands,
             reader,
-            actor: tokio::sync::Mutex::new(Some(tokio::spawn(actor.run(commands_rx)))),
+            shutdown,
+            #[cfg(test)]
+            actor,
         })
     }
 
@@ -480,17 +503,7 @@ impl AuthorityRuntime {
     /// Stops the actor through an explicit command, forcing its final snapshot
     /// before the shared runtime owner is released. Panics if the actor failed.
     pub async fn stop(&self) {
-        let mut actor = self.actor.lock().await;
-        let Some(actor_handle) = actor.take() else {
-            return;
-        };
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(Command::Shutdown { reply })
-            .await
-            .expect(ERROR_ACTOR);
-        response.await.expect(ERROR_ACTOR);
-        actor_handle.await.unwrap();
+        self.shutdown.clone().await.expect(ERROR_ACTOR);
     }
 
     async fn send(&self, command: Command) {
@@ -613,10 +626,9 @@ impl<W: Writer> Actor<W> {
             let maintenance_deadline = self.dirty_since.map(|since| since + SNAPSHOT_INTERVAL);
             tokio::select! {
                 command = commands.recv() => match command {
-                    Some(Command::Shutdown { reply }) => {
+                    Some(Command::Shutdown) => {
                         self.stop_pending_spawns().await;
                         self.final_snapshot().await;
-                        let _cancelled = reply.send(());
                         break;
                     }
                     Some(command) => self.handle_command(command).await,
@@ -766,7 +778,7 @@ impl<W: Writer> Actor<W> {
                 self.settle_intents(intents);
                 let _cancelled = reply.send(Ok(ack));
             }
-            Command::Shutdown { .. } => unreachable!("shutdown is handled by the actor loop"),
+            Command::Shutdown => unreachable!("shutdown is handled by the actor loop"),
         }
     }
 
