@@ -121,8 +121,11 @@ impl Core {
         doc: &DocId,
         access: Access,
     ) -> Result<WriteReceipt, DrawersError> {
+        let instr_start = std::time::Instant::now(); // INSTR
         let (_meta, docs_group, _sensitive) = self.groups(drawer).await?;
+        let instr_groups = instr_start.elapsed(); // INSTR
         let current = self.docs_group_level(&docs_group, doc).await?;
+        let instr_level = instr_start.elapsed(); // INSTR
         let docs_group = &docs_group;
         let regrant = |access: Access| async move {
             self.big_repo
@@ -145,9 +148,12 @@ impl Core {
             }
             _ => {
                 regrant(access).await?;
+                let instr_granted = instr_start.elapsed(); // INSTR
                 #[cfg(test)]
                 self.crash_at(super::CrashPoint::DocGranted)?;
-                self.publish_entry(context, drawer, doc, access).await?
+                let written = self.publish_entry(context, drawer, doc, access).await?;
+                tracing::debug!(?instr_groups, ?instr_level, ?instr_granted, published = ?instr_start.elapsed(), "INSTR enter timing"); // INSTR
+                written
             }
         };
         match written {

@@ -13,6 +13,7 @@ impl DocsService {
         context: &RequestContext,
         params: CreateDoc,
     ) -> Result<WriteReceipt, DocsError> {
+        let instr_start = std::time::Instant::now(); // INSTR
         let caller = self.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         self.authorize(
@@ -23,6 +24,7 @@ impl DocsService {
             },
         )
         .await?;
+        let instr_authorized = instr_start.elapsed(); // INSTR
         let owner_id = caller.originating_actor;
         let request_digest = digest(&(
             "create",
@@ -75,11 +77,13 @@ impl DocsService {
                 return Err(error);
             }
         };
+        let instr_staged = instr_start.elapsed(); // INSTR
         let document = self
             .big_repo
             .commit_id(doc_id.clone(), initial, Vec::new(), &[])
             .await
             .map_err(repository)?;
+        let instr_committed = instr_start.elapsed(); // INSTR
         let heads = sorted(document.with_document_read(|doc| doc.get_heads()).await);
         self.settle_create(
             context,
@@ -90,6 +94,7 @@ impl DocsService {
             &heads,
         )
         .await?;
+        tracing::debug!(?instr_authorized, ?instr_staged, ?instr_committed, total = ?instr_start.elapsed(), "INSTR create timing"); // INSTR
         Ok(WriteReceipt { doc_id, heads })
     }
 
