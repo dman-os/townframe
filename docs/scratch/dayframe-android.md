@@ -230,3 +230,69 @@ little about a phone. Release and arm64 sizes were not re-measured (host memory)
 - Release build, arm64 build and size, startup on real hardware, real GPU (finding 1).
 - IME (NativeActivity delivers no composition text), AccessKit/TalkBack, gesture-exclusion for edge drawers: as in the S3 table.
 - Host memory: a debug APK build plus an emulator exceeded the host's RAM and the OOM killer took the session once.
+
+## A2: phone checklist (ZTE 8050, Android 13 / API 33, arm64, Mali, 1080x2408 @ 480 dpi)
+
+A2 had the user's phone for a short window and lost it before an APK existed: the arm64 build did not finish
+(disk fell under the 15 GB floor mid-build, twice; see "Build notes"), so **nothing below has run on a device**. This is
+the checklist for the next session. Only touch our package (`com.example.mobile`); no `settings`, `pm disable`, `setprop`,
+`adb root`. Keep captures in the session scratchpad, not the repo.
+
+```sh
+D=LZ0V50ETDC6009467; A="adb -s $D"; P=com.example.mobile; ACT=$P/dev.dioxus.main.MainActivity
+OUT=<scratchpad>/a2; mkdir -p $OUT
+deno run --allow-all x/dayframe.ts android        # via ./x/agent-build.ts --; prints "apk: <path>"
+APK=<path printed>; ls -l $APK                    # APK size
+unzip -l $APK | grep libmain.so                   # libmain.so size (uncompressed column)
+$A install -r $APK
+# 1. launch + Mali render (no emulator debug-label crash expected): cold start to first frame
+$A shell am force-stop $P; $A logcat -c
+$A shell am start -W -n $ACT | grep -E "TotalTime|Status"      # to first frame (splash)
+# shell visibly up: poll screencap until the home renders (app bg is dark, splash is #fafafa)
+t0=$(date +%s.%N); until [ "$($A exec-out screencap | dd bs=1 skip=$((16+(1500*1080+500)*4)) count=1 2>/dev/null | od -An -tu1 | tr -d ' ')" -lt 100 ]; do :; done; echo "to shell: $(echo "$(date +%s.%N) - $t0" | bc)s"
+$A exec-out screencap -p > $OUT/01-home.png
+$A logcat -d --pid=$($A shell pidof $P) | grep -E "RustStd|panicked|F libc|FATAL" | tail    # crash / wgpu errors
+# 2. flows (coordinates are for 1080x2408; home: hamburger ~(78,207), Settings row ~(160,512))
+$A shell input tap 160 512;  sleep 2; $A exec-out screencap -p > $OUT/02-settings.png
+$A shell input tap 214 586;  sleep 2; $A exec-out screencap -p > $OUT/03-section.png   # a section
+$A shell input keyevent KEYCODE_BACK; sleep 2; $A exec-out screencap -p > $OUT/04-back-to-settings.png
+$A shell input keyevent KEYCODE_BACK; sleep 2; $A exec-out screencap -p > $OUT/05-back-to-home.png
+$A shell input keyevent KEYCODE_BACK; sleep 2; $A shell dumpsys activity activities | grep -m1 topResumedActivity   # expect launcher; process alive:
+$A shell pidof $P
+# API 33: predictive back is opt-in (not enabled by the manifest), so KEYCODE_BACK should reach winit as BrowserBack
+# (the OnBackInvokedCallback in MainActivity.kt also registers at API >= 33 and takes over: check BOTH paths reach the shell).
+# Gesture back: swipe in from the left edge:
+$A shell input swipe 2 1200 600 1200 150
+# sidebar: button, then edge swipe from the left edge
+$A shell input tap 78 207; sleep 2; $A exec-out screencap -p > $OUT/06-sidebar-button.png
+$A shell input swipe 2 1200 600 1200 200; sleep 2; $A exec-out screencap -p > $OUT/07-sidebar-edge.png
+# 3. Wasm guest: Settings -> "Choose settings sections" (~(340,403)) -> enable Counter (Wasm), then open the section
+$A shell input tap 160 512; sleep 2; $A shell input tap 340 403; sleep 2; $A exec-out screencap -p > $OUT/08-choose.png
+#    tap the Counter toggle (read its position from 08-choose.png), back, open "Counter (Wasm)" (~(214,586)), tap increment
+$A exec-out screencap -p > $OUT/09-counter.png    # expect the guest's value, not "Section unavailable"; tap increment, re-capture
+$A logcat -d --pid=$($A shell pidof $P) | grep -iE "wasmtime|mmap|jit|trap|panicked" | tail   # JIT/SELinux errors
+#    Layout: enable it the same way, open Layout, show/hide the Sample panel (desktop wcmp hang should NOT occur on Wasmtime)
+# 4. text input: Sample micro section -> tap the Greeting field, then
+$A shell input text hello; $A exec-out screencap -p > $OUT/10-text.png
+$A shell dumpsys input_method | grep -m3 -iE "mInputShown|isInputViewShown"   # was the soft keyboard shown? (read-only)
+#    Expected (S3): keyboard may show, but NativeActivity delivers key events only (no composition text): record what arrives.
+# 5. memory after reaching Settings
+$A shell dumpsys meminfo $P | sed -n 1,30p
+# cleanup: leave the app installed; or `$A uninstall $P`
+```
+
+If the render is blank or the process dies at startup on the Mali GPU, read the first `F libc` / `panicked` line:
+the emulator crash was wgpu debug labels on gfxstream Vulkan (`vk_common_SetDebugUtilsObjectNameEXT`); on a device
+without that driver it should not occur. A `LimitsExceeded` from `vello_hybrid` means the GLES fallback was taken
+(no Vulkan), which the Mali should not need.
+
+### Build notes (A2)
+
+- `x/dayframe.ts android` had been broken by the shell rebase (`prepareDayframePackages` now requires `{ testFixtures }`);
+  fixed in the branch.
+- A cold arm64 debug build needs roughly 12 GB of target space beyond the host debug artifacts; the shared volume sat at
+  13 to 24 GB free, so the build was stopped by hand at the 15 GB floor (by PID, mid-compile, at ~560/1925 crates). The
+  release build was not started. `--release` already reaches `dx build --release`; guests are still built in the debug
+  profile by `x/dayframe-packages.ts` regardless (so the release APK still carries 15 to 16 MB debug guests), and release
+  needs a signing config for an installable APK (Dioxus.toml) or `apksigner` with a debug key.
+- Disk freed on the way: the emulator SDK (9.6 GB, no longer needed with a phone) and the worktree's host `debug/` target dir.

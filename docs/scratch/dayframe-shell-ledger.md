@@ -498,3 +498,14 @@ the system bars once guests can learn insets; (4) a kit icon button for trailing
 - Tests: `dayframe_native::tests::system_back_is_claimed_only_while_the_shell_can_go_back`; clippy clean for dayframe_desktop
   (all targets) and dayframe_native/dayframe_mobile on x86_64-linux-android.
 
+
+## A2 notes (Android on the user's phone)
+
+- The phone (ZTE 8050, API 33, Mali) was attached and then taken away before an APK existed; no device step ran. The arm64 debug
+  build was stopped twice at the 15 GB disk floor (about 560 of 1925 crates compiled) and the release build was not started.
+- Fixed: `x/dayframe.ts android` called `prepareDayframePackages()` without its new `{ testFixtures }` argument after the shell
+  rebase, so it crashed before building anything.
+- The exact adb checklist for the next phone session (Mali render, back key and gesture on API 33, sidebar edge swipe, Counter
+  Wasm guest, Layout show/hide, IME, cold start, meminfo) is in `docs/scratch/dayframe-android.md` (A2 section).
+- Disk: removed the emulator SDK and the worktree's host `debug/` target dir; the volume still sits near the floor, so an arm64
+  build wants a quiet host and about 12 GB free.
