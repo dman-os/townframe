@@ -106,9 +106,6 @@ pub fn spawn_group_part_worker(
 
             let source = keyhive_admission::Store {
                 store: store.clone(),
-                // The loop below sleeps on the same timer the admission reader
-                // polls with, so both cadences are driven by one seam.
-                timer: Arc::clone(&timer),
             };
             let durable = state.progress().await?.upstream_revision;
             let reader = source.open((), durable).await?;
@@ -942,17 +939,12 @@ mod tests {
     use crate::keyhive::BigKeyhiveAgent;
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
-    use big_sync_core::BuckId;
-    use big_sync_core::revisioned_store::RevisionRead;
-    use big_sync_core::revisioned_store::RevisionReadLimits;
-    use big_sync_core::revisioned_store::RevisionedStoreReader;
     use keyhive_core::access::Access;
     use keyhive_core::event::Event;
     use keyhive_core::principal::group::id::GroupId as KhGroupId;
     use keyhive_core::principal::identifier::Identifier;
     use keyhive_core::principal::membered::Membered;
     use std::collections::BTreeMap;
-    use subduction_keyhive::storage::StorageHash;
 
     #[test]
     fn group_part_id_uses_sedimentree_namespace() {
@@ -1027,66 +1019,6 @@ mod tests {
         assert!(
             affected.docs.is_empty(),
             "the group holds no documents, so no document is affected"
-        );
-    }
-
-    /// The machine loop's wait is the injected timer, and this drives the
-    /// admission read that loop is built on to say so: the read parks until the
-    /// timer's `IDLE_POLL` sleep completes, so a row admitted while it is parked
-    /// becomes visible exactly when time moves. If the loop went back to
-    /// `tokio::time::sleep`, `wait_until_armed` would never resolve and the hard
-    /// test timeout would be the only signal.
-    #[tokio::test]
-    async fn the_admission_read_waits_on_the_injected_timer_not_wall_clock() {
-        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
-            .ephemeral(&[])
-            .expect("create sqlite database");
-        let store = SqliteBigRepoStore::new(sql, "group-part-manual-time", BuckId::MAX_LEVEL)
-            .await
-            .expect("create sqlite big repo store");
-        let manual = crate::runtime2::tasks::manual_time::ManualTime::new();
-        // Binding the concrete handle first is required: `Arc::clone(&manual)` does not
-        // coerce, because the expected `Arc<dyn Timer<_>>` propagates into the call's
-        // argument and demands `&Arc<dyn Timer<_>>`. An unsized coercion applies at a
-        // binding, so the cast belongs on this second line.
-        let manual_timer: Arc<crate::runtime2::tasks::manual_time::ManualTime> =
-            Arc::clone(&manual);
-        let timer: Arc<dyn crate::runtime2::Timer<Sendable>> = manual_timer;
-        let source = keyhive_admission::Store {
-            store: store.clone(),
-            timer,
-        };
-        let mut reader = source.open((), 0).await.expect("open admission reader");
-        let limits = RevisionReadLimits::default();
-        assert!(
-            matches!(
-                reader.next(limits).await.expect("read replay boundary"),
-                RevisionRead::ReplayComplete { .. }
-            ),
-            "an empty log replays nothing"
-        );
-
-        // The next read finds nothing and parks in `timer.sleep(IDLE_POLL)`.
-        let parked = tokio::spawn(async move { reader.next(limits).await });
-        manual.wait_until_armed(1).await;
-
-        store
-            .save_keyhive_event(StorageHash::new([41; 32]), vec![41u8], None)
-            .await
-            .expect("save keyhive event");
-        store
-            .append_admitted_events(vec![StorageHash::new([41; 32])], None)
-            .await
-            .expect("append admitted event");
-        manual.advance(keyhive_admission::IDLE_POLL);
-
-        let read = parked
-            .await
-            .expect("reader task must not panic")
-            .expect("read the admitted row");
-        assert!(
-            matches!(read, RevisionRead::Entries { revision: 1, .. }),
-            "the row admitted during the wait is delivered once the timer's sleep completes: {read:?}"
         );
     }
 }

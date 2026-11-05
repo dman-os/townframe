@@ -108,17 +108,25 @@ pub struct SqliteBigRepoStore {
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
     local_revision_wakeups: Arc<Notify>,
-    /// Last admission-log seq committed to this scope's store, bumped inside
+    /// Last admission-log seq committed to this scope's store, raised inside
     /// [`append_admitted_events`](Self::append_admitted_events) — the single
-    /// durable admission choke point. A keyhive sync completion stamps this
-    /// into its event so the hub can enforce, without a DB round-trip, that the
-    /// round's admissions are reflected in its own `admitted_head` before it
-    /// resolves waiters.
+    /// durable admission choke point — strictly after the append's transaction
+    /// commits. It serves two readers:
+    ///
+    /// - A keyhive sync completion stamps the value into its event so the hub
+    ///   can enforce, without a DB round-trip, that the round's admissions are
+    ///   reflected in its own `admitted_head` before it resolves waiters.
+    /// - Every admission-log tailer ([`keyhive_admission::Reader`]) parks on
+    ///   `changed()` once it has caught up, so an append wakes the tailers
+    ///   instead of them polling the table.
     ///
     /// Zero until the first append in this process, matching the hub's
     /// `admitted_head` initialization, so a completion that admitted nothing
-    /// new still resolves immediately.
-    admission_watermark: Arc<std::sync::atomic::AtomicU64>,
+    /// new still resolves immediately. Rows admitted before boot are not
+    /// announced here; tailers pick them up from their replay at `open`.
+    ///
+    /// [`keyhive_admission::Reader`]: crate::runtime2::keyhive_admission::Reader
+    admission_watermark: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -268,21 +276,16 @@ pub(crate) struct AdmissionEventRow {
 pub(crate) struct KeyhiveIncorporationSink {
     store: SqliteBigRepoStore,
     runtime_events: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-    /// Dispatcher wake-up signal. The durable admission log is the source
-    /// of truth; this signal only wakes the dispatcher to tail it.
-    dispatcher_notify: std::sync::Weak<tokio::sync::Notify>,
 }
 
 impl KeyhiveIncorporationSink {
     pub(crate) fn new(
         store: SqliteBigRepoStore,
         runtime_events: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-        dispatcher_notify: std::sync::Weak<tokio::sync::Notify>,
     ) -> Self {
         Self {
             store,
             runtime_events,
-            dispatcher_notify,
         }
     }
 
@@ -330,9 +333,9 @@ impl subduction_keyhive::DurableIncorporationSink<Sendable> for KeyhiveIncorpora
             self.append(hashes.clone(), source.clone())
                 .await
                 .map_err(|error| subduction_keyhive::StorageError::Save(error.to_string()))?;
-            if let Some(notify) = self.dispatcher_notify.upgrade() {
-                notify.notify_one();
-            }
+            // Admission-log tailers (the dispatcher and the projection
+            // workers) are woken by the append itself, through the store's
+            // admission watermark; nothing further to signal here.
             Ok(())
         })
     }
@@ -402,7 +405,7 @@ impl SqliteBigRepoStore {
                 TREE_CACHE_METADATA_CAPACITY,
             ))),
             local_revision_wakeups: Arc::new(Notify::new()),
-            admission_watermark: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            admission_watermark: Arc::new(tokio::sync::watch::Sender::new(0)),
         };
         store.init_subduction_schema().await?;
         Ok(store)

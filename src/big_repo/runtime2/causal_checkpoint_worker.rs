@@ -87,9 +87,6 @@ pub fn spawn_causal_checkpoint_worker(
 
             let source = keyhive_admission::Store {
                 store: store.clone(),
-                // The loop below sleeps on the same timer the admission reader
-                // polls with, so both cadences are driven by one seam.
-                timer: Arc::clone(&timer),
             };
             let durable = state.progress().await?.upstream_revision;
             let reader = source.open((), durable).await?;

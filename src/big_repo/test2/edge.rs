@@ -931,6 +931,12 @@ async fn tier9_r2_keyhive_admission_publishes_rematerialized_frontier() -> crate
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     pair.right().repo.wait_for_keyhive_reconciliation().await?;
+    // The Read grant's causal checkpoint is a document commit the owner writes
+    // inside `grant_doc_access`, carrying the pre-grant content keys into the
+    // new epoch; Keyhive sync does not move it. Pull it explicitly, as the
+    // Relay stanza above does, rather than leaning on the owner's live push
+    // happening to land before the reader goes quiescent.
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
     let reader_doc = pair

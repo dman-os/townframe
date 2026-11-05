@@ -4,8 +4,9 @@
 //! subscribed peers. Its truth source is the durable admission log
 //! ([`SqliteBigRepoStore::admission_events_after`]), tailed with an in-memory
 //! cursor: every incorporated event is classified and fanned out exactly
-//! once, in order, regardless of channel races or restarts. The live change
-//! wake-up notifier; the shared reader bounds recovery by its polling interval.
+//! once, in order, regardless of channel races or restarts. The shared reader
+//! parks on the store's admission watermark, so an append wakes the
+//! dispatcher directly; there is no separate wake-up notifier to miss.
 //!
 //! Each admitted batch is classified once against the published visibility
 //! cache and enqueued per destination peer in a [`KeyedBatcher`] with a
@@ -144,15 +145,14 @@ fn dispatch_diag() -> bool {
 /// Spawn the dispatcher task.
 ///
 /// The caller creates the events channel and passes both ends. The protocol's
-/// durable-incorporation hook feeds it for both local and remote events;
-/// The caller supplies a wake-up notifier. The durable admission log is the
-/// source of truth; notification payloads are never carried in memory.
+/// durable-incorporation hook feeds it for both local and remote events by
+/// appending to the durable admission log, which is the source of truth;
+/// notification payloads are never carried in memory.
 pub(crate) fn spawn_keyhive_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
     timer: Arc<dyn Timer<Sendable>>,
     clock: Arc<dyn crate::runtime2::Clock>,
-    notify: Arc<tokio::sync::Notify>,
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
 ) -> (KeyhiveChangeDispatcher, SpawnedKeyhiveDispatcher<Sendable>) {
@@ -161,7 +161,7 @@ pub(crate) fn spawn_keyhive_dispatcher(
     };
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
-        let fut = run_dispatcher(notify, protocol, store, timer, clock, subscriptions, policy);
+        let fut = run_dispatcher(protocol, store, timer, clock, subscriptions, policy);
         match futures::future::Abortable::new(fut, abort_registration).await {
             Ok(result) => result,
             Err(_) => Ok(()),
@@ -179,7 +179,6 @@ pub(crate) fn spawn_keyhive_dispatcher(
 }
 
 async fn run_dispatcher(
-    notify: Arc<tokio::sync::Notify>,
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
     timer: Arc<dyn Timer<Sendable>>,
@@ -195,9 +194,6 @@ async fn run_dispatcher(
     // peer delivery.
     let source = keyhive_admission::Store {
         store: store.clone(),
-        // The loop below waits on the same timer the admission reader polls
-        // with, so both cadences are driven by one seam.
-        timer: Arc::clone(&timer),
     };
     let mut reader = source.open((), store.admission_head().await?).await?;
     loop {
@@ -214,10 +210,6 @@ async fn run_dispatcher(
                         classify_rows(&mut batcher, &protocol, &subscriptions, &entries).await?;
                     }
                 }
-            }
-            _ = notify.notified() => {
-                let due = batcher.take_due(clock.instant());
-                deliver(&subscriptions, due).await;
             }
             _ = async {
                 if let Some(deadline) = deadline {
