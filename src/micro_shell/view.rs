@@ -168,6 +168,64 @@ fn open_panel(shell: &Shell, panel: String, mut failure: Signal<Option<String>>)
     });
 }
 
+/// Wire the frame to the host (ADR 032 §3): the platform back gesture lands on the stack, and the
+/// host is told whether back has somewhere to go.
+fn use_host_wiring(shell: &Shell, host: HostInputs, can_go_back: bool) {
+    // `seen` is what this frame has already acted on, so remounting the frame does not replay
+    // old presses.
+    let seen = use_hook(|| Rc::new(Cell::new(*host.platform_back.peek())));
+    let shell = shell.clone();
+    use_effect(move || {
+        let presses = (host.platform_back)();
+        if presses != seen.get() {
+            seen.set(presses);
+            shell.back();
+        }
+    });
+    let mut can_back = host.can_back;
+    use_effect(use_reactive!(|(can_go_back,)| can_back.set(can_go_back)));
+}
+
+/// What sits over the arrangement: a sheet, or the sidebar drawer of a compact host.
+fn overlay_element(
+    shell: &Shell,
+    width: WidthClass,
+    overlay: Option<Overlay<'_>>,
+    panels: &[Row<String, Panel>],
+) -> Option<Element> {
+    match overlay {
+        Some(Overlay::Sheet(key)) => panels.iter().find(|row| row.key == key).map(|row| {
+            let shell = shell.clone();
+            rsx! {
+                Sheet {
+                    width,
+                    name: row.value.title.clone(),
+                    on_dismiss: move |()| {
+                        shell.close_sheet();
+                    },
+                    {panel_slot(row, row.value.content)}
+                }
+            }
+        }),
+        // A drawer is for a host with no room for the sidebar beside the content; a window that
+        // grew wide while it was open shows the sidebar instead.
+        Some(Overlay::Sidebar) if !width.fits_side_by_side() => {
+            let dismissing = shell.clone();
+            Some(rsx! {
+                Sheet {
+                    width,
+                    name: "Sidebar",
+                    on_dismiss: move |()| {
+                        dismissing.back();
+                    },
+                    Sidebar { shell: shell.clone() }
+                }
+            })
+        }
+        Some(Overlay::Sidebar) | None => None,
+    }
+}
+
 #[component]
 fn Frame(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
@@ -178,20 +236,7 @@ fn Frame(shell: Shell) -> Element {
     let config = arrangement(&use_facet(&shell.config));
     let failure = use_signal(|| None::<String>);
 
-    // The platform back gesture lands on the stack (ADR 032 §3). `seen` is what this frame has
-    // already acted on, so remounting the frame does not replay old presses.
-    let seen = use_hook(|| Rc::new(Cell::new(*host.platform_back.peek())));
-    let back = shell.clone();
-    use_effect(move || {
-        let presses = (host.platform_back)();
-        if presses != seen.get() {
-            seen.set(presses);
-            back.back();
-        }
-    });
-    let mut can_back = host.can_back;
-    let can_go_back = state.navigation.can_back();
-    use_effect(use_reactive!(|(can_go_back,)| can_back.set(can_go_back)));
+    use_host_wiring(&shell, host, state.navigation.can_back());
 
     let frame = state.navigation.frame();
     let find = |key: &str| panels.iter().find(|row| row.key == key);
@@ -304,39 +349,7 @@ fn Frame(shell: Shell) -> Element {
             on_back,
         }
     };
-    let overlay = match frame.overlay {
-        Some(Overlay::Sheet(key)) => find(key).map(|row| {
-            rsx! {
-                Sheet {
-                    width,
-                    name: row.value.title.clone(),
-                    on_dismiss: {
-                        let shell = shell.clone();
-                        move |()| {
-                            shell.close_sheet();
-                        }
-                    },
-                    {panel_slot(row, row.value.content)}
-                }
-            }
-        }),
-        // A drawer is for a host with no room for the sidebar beside the content; a window that
-        // grew wide while it was open shows the sidebar instead.
-        Some(Overlay::Sidebar) if !width.fits_side_by_side() => Some(rsx! {
-            Sheet {
-                width,
-                name: "Sidebar",
-                on_dismiss: {
-                    let shell = shell.clone();
-                    move |()| {
-                        shell.back();
-                    }
-                },
-                Sidebar { shell: shell.clone() }
-            }
-        }),
-        Some(Overlay::Sidebar) | None => None,
-    };
+    let overlay = overlay_element(&shell, width, frame.overlay, &panels);
 
     rsx! {
         div {
