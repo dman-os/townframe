@@ -317,3 +317,86 @@ bench/highlight/build-matrix.sh $BIN irosashi irosashi-min syntect arborium     
 node bench/highlight/fidelity.mjs <shiki.tokens.json> <candidate.tokens.json>
 node bench/highlight/table.mjs $OUT
 ```
+
+## H1 highlights component
+
+Lane: wrap Pierre's unmodified `highlights.wasm` (@pierre/highlights 0.4.0, sha256 2fca61b6...1290) as a component
+and compose it into a guest micro. Branch `spike/pierre-highlight`. STATUS: wrapper and composition done and measured
+under wasmtime 49 (host harness); the guest-engine runs (clay_rt_wasmtime, wasmi, wcmp/Chromium) are written but NOT
+run: the disk fell under 8 GB free and then the coordinator froze builds. Everything marked unverified below is that.
+
+### What was built
+
+- `bench/highlight/component/wit/highlights.wit`: `highlight: func(text: string, lang: u8) -> list<u32>` (mode 3
+  records), plus `ident` (`is-id-start/continue: func(c: char) -> bool`). Language is the numeric id (Rust = 120), not
+  a name: the name table lives in Pierre's `languages.js`, not in the wasm, so a string would mean generating a lookup
+  into the adapter. Design question below.
+- `wrapper.wat.in` + `build.ts`: component WAT = three core modules. `$Pierre` is `wasm-tools print` of the input
+  embedded as text (WAT components have no binary-module form); `wasm-tools print|parse` round-trips it byte-identical
+  and `build.ts` asserts the output contains the input bytes verbatim. `$Table` owns the two `env.is_id_*` functions
+  (call_indirect through a 2-slot table), `$Glue` fills the table with functions that decode the code point from
+  Pierre's memory and call the lowered `ident` import. Core instances cannot import their own exports, hence the table.
+  `$Glue` also exports `cabi_realloc`, which returns Pierre's input address (81920) after growing memory, and
+  `highlight`, which writes the control block, calls Pierre, and puts the (ptr, len) result pair just past the records.
+  The canonical ABI lifts `text` straight into Pierre's memory (`memory` option = Pierre's) and lowers the records
+  from Pierre's output buffer: the text is copied once and the records once.
+- `ident/`: tiny Rust cdylib over `unicode-ident` (same tables as the P3 replay), built for wasm32-unknown-unknown and
+  `wasm-tools component new`. wasm32-wasip3 does not work for it: its std emits `context.get`, which a plain wasmtime
+  engine rejects ("requires the component model async feature", main.rs component load).
+  `wac plug` composes it into the wrapper (`highlighter.component.wasm`, imports nothing).
+- `src/micro_highlight_spike`: Dioxus micro (workspace member, wasm32 only) that highlights the committed 1k-line
+  snippet (`snippet.rs.txt`, identical to P3 `rust-1k.rs`, sha256 4fa7ec1e...) and renders lines, records, FNV-1a digest of
+  the record bytes, token histogram and per-rep guest microseconds. `HIGHLIGHT_SPIKE_CORPUS` / `HIGHLIGHT_SPIKE_REPS`
+  env at build time swap the text. `x/dayframe-packages.ts` (test fixtures only) builds the wrapper, builds the
+  micro and `wac plug`s them into `highlight-spike.component.wasm` (`DAYFRAME_HIGHLIGHT_SPIKE_COMPONENT`).
+- Golden: `snippet.golden.txt`, written by `PIERRE_GOLDEN_OUT=... pierre-wasmtime` from the DIRECT path's records.
+  Tests `highlight_spike_records_equal_the_direct_path_golden` in `src/clay_rt_wasmtime/tests.rs` and
+  `src/clay_rt_wcmp_wasmi/tests.rs` mount the view and compare. Both unrun (unverified).
+- `pierre-wasmtime` takes an optional 5th arg (the component) and compares record bytes.
+
+Commands: `deno run -A bench/highlight/component/build.ts <highlights.wasm> <outdir>` (via `./x/agent-build.ts --`);
+`pierre-wasmtime <wasm> 120 <file> <reps> <highlighter.component.wasm>`. Upstream update = new wasm + rerun; the
+adapter depends only on the control block layout (lang@0, mode@1, len@2, out ptr@6, out len@10, input 81920).
+
+### Measurements (all from commands run)
+
+Q4 byte identity (host harness, wasmtime 49, component API vs direct core module, full record streams compared):
+`identical: true` for rust-1k, rust-10k, rust-100k (same corpus hashes as P3), a Rust snippet with non-ASCII idents, and
+ts-100k (`results/h1-component.wasmtime.jsonl` has the Rust rows). `is_id_*` was called 0 times for Rust and
+9 times on a small TypeScript file with non-ASCII identifiers (identical there too), so the lowered `ident` path was
+exercised only by that small file.
+
+Q2 time, host harness, 21 reps, median excluding rep 0, same process, machine at loadavg 36-43 (P3 ran near 4.5, so
+absolute ms are ~3x P3's; trust only the ratio):
+
+| file | direct ms | via wrapper ms | first call direct / wrapper |
+|---|---|---|---|
+| rust-1k | 0.615 | 0.73 | 0.91 / 1.0 |
+| rust-10k | 9.19 | 7.47 | 12.1 / 10.4 |
+| rust-100k | 65.25 | 69.1 | 100.4 / 101.8 |
+
+The wrapper adds the two copies (text in, records out) and no measurable cost beyond noise. In-guest times (the micro's
+own `Instant`) were not measured (unverified). Note the guest's per-call fuel is 50,000,000 (`FUEL_PER_CALL`,
+`src/clay_rt_wasmtime/lib.rs:730`); the 100k run would need `fuel_budget()` raised (unverified whether 1k fits).
+
+Q3 size: highlights.wasm 332,924 B (147,526 gz) -> highlighter component 365,101 B (158,412 gz): +32,177 raw
+(ident 30,531 of it, std-linked; glue ~1.6 KB) / +10,886 gz. Debug micro 14,596,460 B (2,875,574 gz) ->
+composed 14,966,046 B (3,036,524 gz): +369,586 raw / +160,950 gz. (Debug profile, the packaging default.)
+
+Q1 engines:
+- Host wasmtime 49 component API: instantiates and runs (above).
+- `wasmtime compile -W component-model-async=y` of the composed micro: succeeds (compile only).
+- wasmtime in clay_rt_wasmtime, wasmi, wcmp in Chromium: NOT RUN (unverified). Risks to check first: nested core instances
+  and a funcref table imported across modules (wcmp), `memory`+`realloc` canon options pointing at a non-first
+  instance's memory, SIMD + bulk memory in the wasmi config.
+- Web needs the micro published as a package (manifest sidecar) in x/dayframe-web.ts; no Playwright spec written.
+
+### Findings and options
+
+- Ident cost: the 30 KB `ident` component only exists because Pierre wants Unicode ID classes for non-ASCII. Option:
+  an ASCII-only/approximate WAT table (-30 KB, behaviour differs from Pierre on exotic identifiers, would show up as a
+  record diff) versus keeping unicode-ident.
+- Language by name: option to generate a name->id table from `languages.js` into the adapter (string API, adapter
+  changes each upstream update) versus numeric id (current).
+- Debug builds of the spike micro used for size; release sizes unverified.
+- Strict component WAT syntax in wasm-tools 1.261 needs nested `(core memory $i "x")` forms.

@@ -14,6 +14,9 @@ use wasmtime::Linker;
 use wasmtime::Module;
 use wasmtime::Store;
 
+/// How many times Pierre asked the host for an identifier class (only non-ASCII code points).
+static ID_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 const INPUT_PTR: usize = 81920;
 const PAGE: usize = 65536;
 
@@ -42,6 +45,7 @@ fn main() {
                 "env",
                 name,
                 move |mut c: Caller<'_, ()>, ptr: i32, len: i32| -> i32 {
+                    ID_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let mem = c.get_export("memory").unwrap().into_memory().unwrap();
                     let d = mem.data(&c);
                     let s = std::str::from_utf8(&d[ptr as usize..(ptr + len) as usize]).unwrap();
@@ -151,7 +155,7 @@ fn main() {
         )
     });
     println!(
-        "{{\"engine\":\"highlights-wasmtime\",\"file\":\"{}\",\"bytes\":{},\"lines\":{lines},\"recordBytes\":{out_len},\"compileMs\":{compile_ms:.1},\"initMs\":{init_ms:.2},\"ms\":[{}],\"wasmMemMiB\":{:.1}{}}}",
+        "{{\"engine\":\"highlights-wasmtime\",\"file\":\"{}\",\"bytes\":{},\"lines\":{lines},\"recordBytes\":{out_len},\"compileMs\":{compile_ms:.1},\"initMs\":{init_ms:.2},\"ms\":[{}],\"wasmMemMiB\":{:.1},\"idCalls\":{}{}}}",
         file.rsplit('/').next().unwrap(),
         text.len(),
         ms.iter()
@@ -159,6 +163,7 @@ fn main() {
             .collect::<Vec<_>>()
             .join(","),
         mem.data_size(&store) as f64 / 1048576.0,
+        ID_CALLS.load(std::sync::atomic::Ordering::Relaxed),
         component.unwrap_or_default()
     );
 }
