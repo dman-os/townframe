@@ -4,8 +4,9 @@
 //! mounts other micros' presentations through capabilities it redeems itself, so what that
 //! scenario proved (interactive children, one child's withdrawal not touching the others) is
 //! proven here on the capability path.
-use super::HeadlessDom;
 use super::composed;
+use super::HeadlessDom;
+use super::Launch;
 use crate::composition::desktop_runtime;
 use crate::composition::CompositionRuntime;
 use clay_docs::FacetRoute;
@@ -62,7 +63,7 @@ impl Layout {
             arrangement_route(),
             serde_json::json!({ "visible": visible }),
         );
-        let mut ui = HeadlessDom::new(composed, (runtime.clone(), super::WIDE_PX));
+        let mut ui = HeadlessDom::new(composed, Launch::new(runtime.clone(), super::WIDE_PX));
         // The toggles list the installed panels, which the guest reads from its mirror of the
         // collection: they appear once the layout is running and bootstrapped.
         ui.wait_until("the layout lists the installed panels", |ui| {

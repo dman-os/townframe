@@ -10,9 +10,9 @@ use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use std::rc::Rc;
-use wasm_bindgen::closure::Closure;
 use ui::ThemeMode;
 use ui::ThemeRoot;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
@@ -292,6 +292,7 @@ fn use_host_inputs() -> HostInputs {
         width: width.into(),
         platform_back,
         can_back,
+        keyboard: true,
     }
 }
 

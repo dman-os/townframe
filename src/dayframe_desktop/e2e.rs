@@ -1,6 +1,5 @@
 use crate::composition::desktop_runtime;
 use crate::composition::Application;
-use dayframe_composition::HostInputs;
 use crate::composition::CompositionRuntime;
 use blitz_dom::ns;
 use blitz_dom::BaseDocument;
@@ -10,6 +9,7 @@ use blitz_dom::NodeId;
 use blitz_dom::QualName;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
+use dayframe_composition::HostInputs;
 use dioxus::prelude::*;
 use dioxus_core::ElementId;
 use dioxus_core::RenderTargetId;
@@ -33,17 +33,38 @@ mod layout;
 const COMPACT_PX: f64 = 400.0;
 pub(crate) const WIDE_PX: f64 = 1200.0;
 
-/// `Application` as a launcher mounts it, in a window `width` logical px wide.
-pub(crate) fn composed((runtime, width): (CompositionRuntime, f64)) -> Element {
-    let runtime = use_signal(move || runtime);
-    let width = use_signal(move || width);
+/// What a launcher hands `Application`: the runtime and its window's width. `host` is filled
+/// with the inputs `Application` was given, so a scenario can press the platform back.
+#[derive(Clone)]
+pub(crate) struct Launch {
+    runtime: CompositionRuntime,
+    width: f64,
+    host: std::rc::Rc<std::cell::Cell<Option<HostInputs>>>,
+}
+
+impl Launch {
+    pub(crate) fn new(runtime: CompositionRuntime, width: f64) -> Self {
+        Self {
+            runtime,
+            width,
+            host: Default::default(),
+        }
+    }
+}
+
+/// `Application` as a launcher mounts it, in a window `launch.width` logical px wide.
+pub(crate) fn composed(launch: Launch) -> Element {
+    let runtime = use_signal(|| launch.runtime.clone());
+    let width = use_signal(|| launch.width);
     let platform_back = use_signal(|| 0_u64);
     let can_back = use_signal(|| false);
     let host = HostInputs {
         width: width.into(),
         platform_back,
         can_back,
+        keyboard: false,
     };
+    launch.host.set(Some(host));
     rsx! { Application { runtime, host } }
 }
 
@@ -213,19 +234,30 @@ impl HeadlessDom {
     }
 }
 
-const HOME: &str = "section[aria-label=\"Home\"]";
+const HOME: &str = "[role=\"region\"][aria-label=\"Home\"]";
 const OPEN_SETTINGS: &str = "button[aria-label=\"Open Settings\"]";
-const SETTINGS: &str = "section[aria-label=\"Settings\"]";
+const SETTINGS: &str = "[role=\"region\"][aria-label=\"Settings\"]";
 const BACK: &str = "button[aria-label=\"Back\"]";
+/// On a compact host the list stays mounted (covered) under the details, so each carries a back
+/// button of its own; the covered one is out of assistive technology's reach, not out of the DOM.
+const DETAILS_BACK: &str =
+    "[role=\"region\"][aria-label=\"Settings details\"] button[aria-label=\"Back\"]";
 const SAMPLE: &str = "button[aria-label=\"Open Sample micro settings\"]";
 const COUNTER: &str = "button[aria-label=\"Open Counter (Wasm) settings\"]";
 const COUNTER_VALUE: &str = "button[aria-label=\"Increment Wasm counter\"]";
 const TOOLBAR_INCREMENT: &str = "[role=\"toolbar\"] button[aria-label=\"Increment\"]";
 
+/// The platform back gesture, as a launcher reports it.
+fn press_platform_back(host: &std::cell::Cell<Option<HostInputs>>) {
+    let mut presses = host.get().expect("the application mounted").platform_back;
+    presses += 1;
+}
+
 struct Shell {
     runtime: CompositionRuntime,
     ui: HeadlessDom,
     counter: MicroId,
+    host: std::rc::Rc<std::cell::Cell<Option<HostInputs>>>,
 }
 
 impl Shell {
@@ -239,7 +271,9 @@ impl Shell {
         // datum when the shell starts serving.
         // Before serving, nothing drives the persister, so the acknowledgement is dropped.
         drop(runtime.set_enabled(&MicroId::local(micro_counter_manifest::ID), true));
-        let mut ui = HeadlessDom::new(composed, (runtime.clone(), width));
+        let launch = Launch::new(runtime.clone(), width);
+        let host = std::rc::Rc::clone(&launch.host);
+        let mut ui = HeadlessDom::new(composed, launch);
         ui.wait_until("home lists Settings", |ui| {
             ui.find(HOME).is_some() && ui.find(OPEN_SETTINGS).is_some()
         })
@@ -248,6 +282,7 @@ impl Shell {
             runtime,
             ui,
             counter: MicroId::local(micro_counter_manifest::ID),
+            host,
         }
     }
 
@@ -275,15 +310,18 @@ impl Shell {
 #[tokio::test(flavor = "current_thread")]
 async fn home_to_settings_to_a_section_and_back_at_a_compact_width() {
     let settings = MicroId::local(micro_settings_manifest::ID);
+    let shell = Shell::start(COMPACT_PX).await;
+    let host = std::rc::Rc::clone(&shell.host);
     let Shell {
         runtime,
         mut ui,
         counter,
-    } = Shell::start(COMPACT_PX).await;
+        ..
+    } = shell;
     assert_eq!(runtime.state(&settings), MicroState::Idle);
     ui.click(OPEN_SETTINGS);
     ui.wait_until("Settings list over home", |ui| {
-        ui.find(COUNTER).is_some() && ui.find(HOME).is_none()
+        ui.find(COUNTER).is_some() && ui.find(HOME).is_none() && ui.find(SETTINGS).is_some()
     })
     .await;
     assert_eq!(runtime.state(&settings), MicroState::Active);
@@ -301,7 +339,7 @@ async fn home_to_settings_to_a_section_and_back_at_a_compact_width() {
 
     // Back dismisses the details: the guest is released and the list is still there, mounted
     // beneath, so Settings never stopped.
-    ui.click(BACK);
+    ui.click(DETAILS_BACK);
     ui.wait_until("details gone, list showing", |ui| {
         ui.find(COUNTER_VALUE).is_none() && ui.find(COUNTER).is_some()
     })
@@ -312,8 +350,10 @@ async fn home_to_settings_to_a_section_and_back_at_a_compact_width() {
     .await;
     assert_eq!(runtime.state(&settings), MicroState::Active);
 
-    ui.click(BACK);
-    ui.wait_until("home again", |ui| ui.find(HOME).is_some()).await;
+    // The platform's back gesture lands on the same stack as the button.
+    press_platform_back(&host);
+    ui.wait_until("home again", |ui| ui.find(HOME).is_some())
+        .await;
     ui.wait_until("leaving Settings released it", |_| {
         runtime.state(&settings) == MicroState::Idle
     })
@@ -329,6 +369,7 @@ async fn home_to_settings_to_a_section_and_back_at_a_wide_width() {
         runtime,
         mut ui,
         counter,
+        ..
     } = Shell::start(WIDE_PX).await;
     ui.click(OPEN_SETTINGS);
     ui.wait_until("Settings listed beside the sidebar", |ui| {
@@ -353,7 +394,8 @@ async fn home_to_settings_to_a_section_and_back_at_a_wide_width() {
     .await;
     ui.click(BACK);
     ui.wait_until("details gone", |ui| {
-        ui.find("button[aria-label=\"Disable sample configuration flag\"]").is_none()
+        ui.find("button[aria-label=\"Disable sample configuration flag\"]")
+            .is_none()
             && ui.find(COUNTER).is_some()
     })
     .await;
@@ -371,11 +413,13 @@ async fn opening_the_counter_section_starts_the_guest_and_leaving_it_idles_the_g
         runtime,
         mut ui,
         counter,
+        ..
     } = Shell::start_in_settings().await;
     // Open the sample's section first, with the counter's section unmounted and its guest idle.
     ui.click(SAMPLE);
     ui.wait_until("sample section opened, counter idle", |ui| {
-        ui.find("button[aria-label=\"Disable sample configuration flag\"]").is_some()
+        ui.find("button[aria-label=\"Disable sample configuration flag\"]")
+            .is_some()
             && runtime.state(&counter) == MicroState::Idle
     })
     .await;
@@ -475,6 +519,7 @@ async fn disabling_the_counter_withdraws_its_section_until_it_is_enabled() {
         runtime,
         mut ui,
         counter,
+        ..
     } = Shell::start_in_settings().await;
     ui.click(COUNTER);
     ui.wait_until("counter section mounted", |ui| {
@@ -541,6 +586,7 @@ async fn the_toolbar_button_increments_a_stopped_wasm_counter() {
         runtime,
         mut ui,
         counter,
+        ..
     } = Shell::start(WIDE_PX).await;
     // Home is showing, so nothing mounts the counter's section and the guest idles; the pinned
     // toolbar is on screen.

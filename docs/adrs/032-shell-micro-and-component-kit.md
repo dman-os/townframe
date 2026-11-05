@@ -103,6 +103,32 @@ details. Settings stops arranging its own sections and becomes a list panel.
   belongs to a visible panel"). Desktop keeps its in-crate e2e tests for engine parity; platform
   features (camera) get platform tests.
 
+## First slice as built
+
+Recorded here because the contract in `micro_shell_manifest` carries it and a later shell must
+match it.
+
+- **Opening a row.** A list panel's row names the panel's `details` attachment, and the shell
+  mounts it in the details position keyed by the open row. A presentation takes no parameters
+  and the shell, not the list, owns the stack, so the details presentation asks the shell which
+  row is open (`opened` call) when it mounts; a different row is a fresh mount and a fresh
+  question. Rejected: the list passing a capability to the shell (a call carries data, not
+  authority); the shell reading the list's collection (it has no binding to it); a Dioxus
+  context for in-process mounts (not available to guests).
+- **Stack semantics.** History-like (back, forward, a push discards the forward entries) with
+  two exceptions: an overlay (a sheet, the compact sidebar drawer) exists only on top and is
+  discarded for good when anything leaves it, so forward never resurrects a dismissed sheet; and
+  opening another row of the list whose row is already open replaces that row's entry, so one
+  back leaves the list rather than stepping through every row glanced at. The base is implicit
+  (nothing pushed shows home); going home is an ordinary push.
+- **Sheets are panels.** A sheet is a panel row whose sockets include `sheet`; `open_sheet`
+  names it. A sheet goes with its panel: entries naming a retracted panel are pruned.
+- **Host inputs.** The native shell receives the width available to its frame and the platform
+  back gesture from the composition as a Dioxus context (`micro_shell::HostInputs`); it never
+  measures the DOM.
+- **Sidebar.** Wide hosts keep it beside the content (a user can hide it, and the button then
+  offers to show it); compact hosts show it as a sheet because the kit has no left drawer yet.
+
 ## Component kit conventions
 
 To be settled in the kit's first commit and enforced by review:

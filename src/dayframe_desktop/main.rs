@@ -110,5 +110,7 @@ fn use_host_inputs() -> HostInputs {
         width: width.into(),
         platform_back,
         can_back,
+        // Blitz cannot take keyboard focus (`tabindex` panics it).
+        keyboard: false,
     }
 }

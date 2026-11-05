@@ -50,6 +50,11 @@ pub struct HostInputs {
     /// Written by the shell: whether back has somewhere to go, so a host that must decide
     /// whether to claim the platform gesture (the browser's history) can.
     pub can_back: Signal<bool>,
+    /// Whether the renderer takes keyboard focus. `tabindex` panics Blitz, so the kit's
+    /// keyboard-resizable handles are opt-in (`Split::keyboard`) and the browser build turns
+    /// them on. This reaches the shell's own layout; a guest micro's components cannot read it
+    /// yet (see ADR 032, open items).
+    pub keyboard: bool,
 }
 
 /// The device-local part of the shell: the stack, and whether a wide host's sidebar is folded.
@@ -170,7 +175,10 @@ impl Shell {
 
     /// Drop stack entries whose panel is gone (a sheet goes with its panel, ADR 032 §6).
     fn prune(&self) {
-        let rows = self.panels.rows().expect("the panels mirror outlives the shell");
+        let rows = self
+            .panels
+            .rows()
+            .expect("the panels mirror outlives the shell");
         self.edit(|state| {
             let before = state.navigation.clone();
             state

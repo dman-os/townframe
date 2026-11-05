@@ -13,11 +13,11 @@ test("the wcmp layout shows only the arranged panels and keeps the others mounte
   });
 
   await page.goto("/");
-  // Settings would mount a second view of the counter, and hold its guest live.
+  // Home is showing: Settings is not open, so nothing else mounts a second view of the counter
+  // and holds its guest live.
   await expect(
-    page.getByRole("button", { name: "Close Settings" }),
+    page.getByRole("button", { name: "Open Settings", exact: true }),
   ).toBeVisible({ timeout: 60_000 });
-  await page.getByRole("button", { name: "Close Settings" }).click();
 
   // Packages are admitted disabled: enable the layout and the counter like a user does.
   await page.getByText("Micro lifecycle controls").click();

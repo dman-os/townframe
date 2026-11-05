@@ -271,7 +271,10 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
             .await
             .unwrap();
         assert!(view.component().is_ok());
-        assert_eq!(runtime.state(&id(micro_settings_manifest::ID)), MicroState::Idle);
+        assert_eq!(
+            runtime.state(&id(micro_settings_manifest::ID)),
+            MicroState::Idle
+        );
 
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
@@ -1609,6 +1612,7 @@ fn frame_app(props: FrameApp) -> Element {
         width,
         platform_back,
         can_back,
+        keyboard: false,
     });
     rsx! { PresentationSlot { reference: props.reference } }
 }
@@ -1664,12 +1668,16 @@ fn sheet_micro() -> InstalledMicro {
         .with_authority("org.example.test");
     InstalledMicro {
         enabled_on_admission: true,
-        ..InstalledMicro::new(id("tests.sheet"), sidecar, move |id, resources, bindings| {
-            factory(resources, id, manifest, bindings, |context| async move {
-                context.publish_component("page", || rsx! { p { "sheet body" } })?;
-                Ok(())
-            })
-        })
+        ..InstalledMicro::new(
+            id("tests.sheet"),
+            sidecar,
+            move |id, resources, bindings| {
+                factory(resources, id, manifest, bindings, |context| async move {
+                    context.publish_component("page", || rsx! { p { "sheet body" } })?;
+                    Ok(())
+                })
+            },
+        )
     }
 }
 
@@ -1771,8 +1779,7 @@ async fn home_opens_settings_then_a_section_and_back_unwinds_to_home() {
         slot_lacks(&mut dom, &mut tree, "sheet body").await;
         assert!(tree.text_content().contains("stub counter"));
         assert!(
-            !call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::FORWARD, &())
-                .await,
+            !call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::FORWARD, &()).await,
             "a dismissed sheet is not a forward entry"
         );
 
@@ -1792,7 +1799,11 @@ async fn home_opens_settings_then_a_section_and_back_unwinds_to_home() {
             "home is the base of the stack"
         );
         settle(&runtime, || runtime.state(&settings) == MicroState::Idle).await;
-        assert_eq!(activations.get(), 1, "Settings started once for the whole visit");
+        assert_eq!(
+            activations.get(),
+            1,
+            "Settings started once for the whole visit"
+        );
 
         drop(dom);
     })

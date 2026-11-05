@@ -74,9 +74,13 @@ impl Navigation {
             self.entries.pop();
         }
         match (self.entries.last_mut(), &entry) {
-            (Some(Entry::Details { panel, row }), Entry::Details { panel: next, row: next_row })
-                if panel == next && row.is_some() && next_row.is_some() =>
-            {
+            (
+                Some(Entry::Details { panel, row }),
+                Entry::Details {
+                    panel: next,
+                    row: next_row,
+                },
+            ) if panel == next && row.is_some() && next_row.is_some() => {
                 row.clone_from(next_row);
             }
             _ => self.entries.push(entry),

@@ -47,6 +47,24 @@ const DETAILS_RULE: SizeRule = SizeRule {
 
 const BUTTON: &str = "rounded-md border border-border px-4 py-2 text-left focus-visible:outline";
 
+/// Where in the arrangement a mounted panel sits. The sidebar/back button reads it: a details
+/// panel beside its list has no use for a second back button, but one over a compact list is the
+/// only way back that is not covered.
+#[derive(Clone, Copy, PartialEq)]
+enum Placement {
+    Main,
+    Details,
+}
+
+/// Mounts a panel's presentation and provides its [`Placement`] to whatever the panel's tree
+/// puts the button in. It takes the reference, not children: a component that only forwards an
+/// `Element` prop does not re-render when the element inside it changes.
+#[component]
+fn PlacedSlot(placement: Placement, reference: clay_mdk::Capability) -> Element {
+    use_context_provider(|| placement);
+    rsx! { PresentationSlot { reference } }
+}
+
 pub(crate) fn frame(shell: Shell) -> Element {
     rsx! { Frame { shell } }
 }
@@ -145,9 +163,7 @@ fn destinations(panels: &[Row<String, Panel>]) -> Vec<&Row<String, Panel>> {
 fn open_panel(shell: &Shell, panel: String, mut failure: Signal<Option<String>>) {
     let shell = shell.clone();
     spawn(async move {
-        let result = shell
-            .navigate(NavigateRequest { panel, row: None })
-            .await;
+        let result = shell.navigate(NavigateRequest { panel, row: None }).await;
         failure.set(result.err().map(|problem| problem.to_string()));
     });
 }
@@ -228,7 +244,8 @@ fn Frame(shell: Shell) -> Element {
 
     let sidebar_visible = width.fits_side_by_side() && !state.sidebar_hidden;
     let outer = Split::new(vec![config.sidebar, config.list + config.details], width_px)
-        .rule(0, SIDEBAR_RULE);
+        .rule(0, SIDEBAR_RULE)
+        .keyboard(host.keyboard);
     // The list/details split lays out inside the content pane, so its extent is that pane's.
     let content_px = if sidebar_visible {
         outer.sizes()[1]
@@ -237,18 +254,21 @@ fn Frame(shell: Shell) -> Element {
     };
     let inner = Split::new(vec![config.list, config.details], content_px)
         .rule(0, LIST_RULE)
-        .rule(1, DETAILS_RULE);
+        .rule(1, DETAILS_RULE)
+        .keyboard(host.keyboard);
 
     let main_slot = rsx! {
-        PresentationSlot {
+        PlacedSlot {
             key: "{main.key}",
+            placement: Placement::Main,
             reference: main.attachments[main.value.content.index()].clone(),
         }
     };
     let details_slot = details.map(|(row_panel, row, attachment)| {
         rsx! {
-            PresentationSlot {
+            PlacedSlot {
                 key: "{row_panel.key}/{row:?}",
+                placement: Placement::Details,
                 reference: row_panel.attachments[attachment.index()].clone(),
             }
         }
@@ -419,9 +439,9 @@ fn Home(shell: Shell) -> Element {
     let panels = use_rows(&shell.panels);
     let failure = use_signal(|| None::<String>);
     rsx! {
-        section {
+        // The frame's region already carries the panel's title as its accessible name.
+        div {
             class: "flex flex-col gap-4 p-4",
-            "aria-label": "Home",
             header { class: "flex items-center gap-2",
                 NavigationButton { shell: shell.clone() }
                 h2 { class: "text-xl font-semibold", "Home" }
@@ -452,12 +472,18 @@ fn Home(shell: Shell) -> Element {
 /// The sidebar/back button (ADR 032 §5). **Back** while the current context can go back,
 /// **open the sidebar** otherwise. On a host wide enough to keep the sidebar beside the content
 /// there is nothing to open until the user hides it, so the button is absent rather than
-/// offering a no-op.
+/// offering a no-op, and a details panel beside its list leaves the button to the list.
 #[component]
 fn NavigationButton(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
     let state = use_state(&shell);
     let wide = WidthClass::from_px(*host.width.read()).fits_side_by_side();
+    // Outside a frame's mount (a button mounted somewhere the shell did not place) the button
+    // belongs to the main position.
+    let placement = try_use_context::<Placement>().unwrap_or(Placement::Main);
+    if placement == Placement::Details && wide {
+        return rsx! {};
+    }
     let mode = if state.navigation.can_back() {
         NavButtonMode::Back
     } else {

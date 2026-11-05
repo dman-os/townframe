@@ -61,7 +61,8 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
         .collect();
     let mut opening = use_signal(|| None::<String>);
     rsx! {
-        section { class: "flex flex-col gap-4 p-4", "aria-label": "Settings",
+        // The frame's region already carries the panel's title as its accessible name.
+        div { class: "flex flex-col gap-4 p-4",
             header { class: "flex items-center gap-2",
                 PresentationSlot { reference: props.micro.shell.nav_button.clone() }
                 h2 { class: "text-xl font-semibold", "Settings" }
@@ -162,8 +163,11 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
         return rsx! { p { role: "alert", "The {key} section is not available." } };
     };
     rsx! {
-        section { class: "p-4", "aria-label": "{row.value.title}",
-            h3 { class: "mb-4 text-lg font-semibold", "{row.value.title}" }
+        section { class: "flex flex-col gap-4 p-4", "aria-label": "{row.value.title}",
+            header { class: "flex items-center gap-2",
+                PresentationSlot { reference: props.micro.shell.nav_button.clone() }
+                h3 { class: "text-lg font-semibold", "{row.value.title}" }
+            }
             PresentationSlot {
                 reference: row.attachments[row.value.detail.index()].clone(),
             }

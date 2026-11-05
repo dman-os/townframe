@@ -337,10 +337,16 @@ mod tests {
         let text = |text: &str| Value::Text(text.into());
         let row = Value::Map(vec![
             (text("title"), text("Files")),
-            (text("sockets"), Value::Array(vec![text("sidebar"), text("list")])),
+            (
+                text("sockets"),
+                Value::Array(vec![text("sidebar"), text("list")]),
+            ),
             (
                 text("content"),
-                Value::Tag(CAPABILITY_ATTACHMENT_TAG, Box::new(Value::Integer(0.into()))),
+                Value::Tag(
+                    CAPABILITY_ATTACHMENT_TAG,
+                    Box::new(Value::Integer(0.into())),
+                ),
             ),
         ]);
         let mut bytes = Vec::new();
