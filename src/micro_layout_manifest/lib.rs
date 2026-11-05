@@ -28,7 +28,6 @@ use clay_mdk::Nsid;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
-use clay_mdk::SHELL_ROOTS;
 use clay_mdk::Sidecar;
 use serde::Deserialize;
 use serde::Serialize;
@@ -41,15 +40,21 @@ pub const AUTHORITY: &str = "org.example.dayframe.layout";
 pub const CONFIG_NAME: &str = "layout";
 pub const CONFIG_TAG: &str = "org.example.dayframe.layout.config";
 pub const CONFIG_KEY: &str = "main";
-/// The Layout presentation, which the shell mounts as a root.
+/// The Layout presentation, which the shell mounts as a list panel.
 pub const VIEW: &str = "view";
 /// The contract NSID, and so the declared collection's id, of the panels collection.
 pub const PANELS: &str = "org.example.dayframe.layout.panels";
 /// The local binding name under which the layout reads its panels collection, and under which
 /// a contributor requests write access to it.
 pub const PANELS_BINDING: &str = "panels";
-/// The local binding name under which the layout registers its root into `shell.roots`.
-pub const ROOTS_BINDING: &str = "roots";
+/// The local binding name under which the layout contributes its panel to the shell's panels
+/// (the layout's own `layout.panels` collection, bound as [`PANELS_BINDING`], is the panels it
+/// arranges inside itself).
+pub const SHELL_PANELS_BINDING: &str = "shell-panels";
+/// The local binding name under which the layout requires the shell's sidebar/back button for
+/// its app bar: the name of the shell publication it binds, so a catalog satisfies it from the
+/// shell (`InstalledMicro::satisfied_by`).
+pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
 /// Schema NSIDs of [`PANELS`] keys (the contributor's registration id, text) and values
 /// ([`Panel`]), and of its selector (the whole collection).
 pub const PANEL_KEY_SCHEMA: &str = "org.example.dayframe.layout.panelKey";
@@ -77,8 +82,8 @@ pub struct LayoutConfig {
 }
 
 /// The Layout micro's package declaration: it declares the panels collection, publishes its
-/// view, and registers that view as a pinned shell root (the arrangement shows whether or not
-/// Settings is open).
+/// view, requires the shell's sidebar/back button, and contributes the view as a list panel the
+/// shell's home offers.
 pub fn manifest() -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
@@ -87,7 +92,14 @@ pub fn manifest() -> MicroManifest {
             kind: PublicationKind::Presentation,
             contract: None,
         }],
-        requires: vec![],
+        requires: vec![Request {
+            binding: SHELL_NAV_BUTTON.into(),
+            contract: Nsid::literal(micro_shell_manifest::NAV_BUTTON_CONTRACT),
+            access: None,
+            necessity: Necessity::Required,
+            resolution: BindingResolution::Configured,
+            min_revision: None,
+        }],
         configuration_requests: vec![ConfigurationRequest {
             binding: CONFIG_NAME.into(),
             facets: vec![FacetAccess {
@@ -108,8 +120,8 @@ pub fn manifest() -> MicroManifest {
             offered: vec![CollectionCapability::Read, CollectionCapability::Register],
         }],
         // The layout reads panels through a binding configuration resolves; with one declared
-        // panels collection the default binds it. It also registers its root row into the
-        // runtime-defined `shell.roots` collection, which the runtime satisfies.
+        // panels collection the default binds it. It also writes its panel row into the shell's
+        // panels collection.
         collection_requests: vec![
             Request {
                 binding: PANELS_BINDING.into(),
@@ -120,8 +132,8 @@ pub fn manifest() -> MicroManifest {
                 min_revision: None,
             },
             Request {
-                binding: ROOTS_BINDING.into(),
-                contract: Nsid::literal(SHELL_ROOTS),
+                binding: SHELL_PANELS_BINDING.into(),
+                contract: Nsid::literal(micro_shell_manifest::PANELS),
                 access: Some(Access::Write),
                 necessity: Necessity::Required,
                 resolution: BindingResolution::Configured,
@@ -129,13 +141,13 @@ pub fn manifest() -> MicroManifest {
             },
         ],
         contributions: vec![ContributionDeclaration {
-            id: "root".into(),
-            binding: ROOTS_BINDING.into(),
+            id: "panel".into(),
+            binding: SHELL_PANELS_BINDING.into(),
             key: ID.into(),
             payload: serde_json::json!({
                 "title": "Layout",
+                "sockets": ["list"],
                 "content": { "$attachment": 0 },
-                "pinned": true,
             }),
             attachments: vec![clay_mdk::AttachmentDeclaration {
                 index: 0,
@@ -179,10 +191,10 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_declares_a_pinned_layout_root_row() {
+    fn the_manifest_declares_a_shell_panel_row() {
         sidecar().validate().unwrap();
         let rows = declared_rows(&clay_mdk::MicroId::local(ID), &sidecar()).unwrap();
-        assert_eq!(rows.keys().collect::<Vec<_>>(), [ROOTS_BINDING]);
+        assert_eq!(rows.keys().collect::<Vec<_>>(), [SHELL_PANELS_BINDING]);
     }
 
     // The arrangement is a stored datum: a document written by an older or newer layout may

@@ -41,12 +41,11 @@ impl SettingsConfig {
     }
 }
 
-/// What the shell lets Settings do, each required under the name of the shell publication it
-/// binds.
+/// What the shell lets Settings use, each required under the name of the shell publication it
+/// binds. Opening a section is not among them: a row opens itself through the list scaffold
+/// (`clay_dioxus_kit::ListRow`).
 #[derive(Clone)]
 pub struct ShellHandles {
-    /// Open a row of the Settings list in the details position (`NavigateRequest` in).
-    pub navigate: Capability,
     /// Which row of the Settings list the shell has open (`String` panel key in, `Option<String>`
     /// out). The section presentation takes no parameters, so it asks.
     pub opened: Capability,
@@ -109,7 +108,6 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             .expect("manifest declares Settings configuration")
             .facet::<SettingsConfig>(contract::CONFIG_TAG, contract::CONFIG_KEY)?,
         shell: ShellHandles {
-            navigate: required(contract::SHELL_NAVIGATE),
             opened: required(contract::SHELL_OPENED),
             nav_button: required(contract::SHELL_NAV_BUTTON),
         },
@@ -161,7 +159,7 @@ mod tests {
         assert!(config.rank("a") < config.rank("unlisted"));
     }
 
-    /// Stands in for the shell: the three publications Settings requires, with the shell's real
+    /// Stands in for the shell: the publications Settings requires, with the shell's real
     /// contracts, answering "nothing is open".
     fn shell_stub(resources: Resources) -> ConfiguredMicro<CapabilityPublication> {
         use clay_mdk::PublicationDeclaration;
@@ -179,10 +177,6 @@ mod tests {
                     kind: PublicationKind::Presentation,
                     contract: None,
                 },
-                call(
-                    micro_shell_manifest::NAVIGATE,
-                    micro_shell_manifest::NAVIGATE_CONTRACT,
-                ),
                 call(
                     micro_shell_manifest::OPENED,
                     micro_shell_manifest::OPENED_CONTRACT,
@@ -212,10 +206,6 @@ mod tests {
                     context.publish_component(micro_shell_manifest::NAV_BUTTON, || {
                         rsx! { button { "back" } }
                     })?;
-                    context.publish_call(
-                        micro_shell_manifest::NAVIGATE,
-                        |_: micro_shell_manifest::NavigateRequest| async { Ok(()) },
-                    )?;
                     context.publish_call(micro_shell_manifest::OPENED, |_: String| async {
                         Ok(None::<String>)
                     })?;
@@ -257,11 +247,7 @@ mod tests {
                     identity: MicroId::from(&clay_mdk::MicroId::local(contract::ID)),
                     eager: false,
                     enabled: true,
-                    requirements: [
-                        contract::SHELL_NAVIGATE,
-                        contract::SHELL_OPENED,
-                        contract::SHELL_NAV_BUTTON,
-                    ]
+                    requirements: [contract::SHELL_OPENED, contract::SHELL_NAV_BUTTON]
                     .map(|publication| {
                         (
                             publication.to_owned(),

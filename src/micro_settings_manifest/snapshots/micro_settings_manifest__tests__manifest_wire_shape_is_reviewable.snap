@@ -17,8 +17,6 @@ publications:
     kind: presentation
     contract: ~
 requires:
-  - binding: navigate
-    contract: org.example.dayframe.shell.navigate
   - binding: opened
     contract: org.example.dayframe.shell.opened
   - binding: nav-button

@@ -2,6 +2,8 @@
 //! by the viewer's preferences) and the section panel (the presentation the shell has open,
 //! mounted from its row attachment). The shell owns which one is shown and where.
 use crate::SettingsMicro;
+use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::ListRow;
 use clay_mdk::Error;
 use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
@@ -12,7 +14,6 @@ use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
 use micro_settings_manifest::ID;
 use micro_settings_manifest::Section;
-use micro_shell_manifest::NavigateRequest;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct SettingsListProps {
@@ -59,15 +60,14 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                 .is_some_and(|config| !config.hidden.contains(&row.key))
         })
         .collect();
-    let mut opening = use_signal(|| None::<String>);
     rsx! {
         // The frame's region already carries the panel's title as its accessible name.
-        div { class: "flex flex-col gap-4 p-4",
-            header { class: "flex items-center gap-2",
-                PresentationSlot { reference: props.micro.shell.nav_button.clone() }
-                h2 { class: "text-xl font-semibold", "Settings" }
+        div { class: "flex flex-col gap-4",
+            AppBar {
+                title: "Settings",
+                leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
             }
-            details { class: "rounded-md border border-border p-4",
+            details { class: "mx-4 rounded-md border border-border p-4",
                 summary { "Choose settings sections" }
                 if preferences.is_none() { p { role: "status", "Settings preferences are loading." } }
                 for row in &available {
@@ -107,32 +107,17 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                 if let Some(problem) = error() { p { role: "alert", "{problem}" } }
                 if let Some(receipt) = receipt() { p { role: "status", "Settings operation {receipt.id}: {receipt.status:?}" } }
             }
-            nav { class: "flex flex-col gap-2", "aria-label": "Settings sections",
+            nav { class: "flex flex-col gap-1 px-2", "aria-label": "Settings sections",
                 for row in &shown {
-                    {
-                        let key = row.key.clone();
-                        let navigate = props.micro.shell.navigate.clone();
-                        rsx! {
-                            button {
-                                key: "{row.key}",
-                                class: "rounded-md border border-border px-4 py-2 text-left focus-visible:outline",
-                                "aria-label": "Open {row.value.title} settings",
-                                onclick: move |_| {
-                                    let key = key.clone();
-                                    let navigate = navigate.clone();
-                                    spawn(async move {
-                                        let request = NavigateRequest { panel: ID.to_owned(), row: Some(key) };
-                                        opening.set(navigate.call::<_, ()>(&request).await.err().map(|problem| problem.to_string()));
-                                    });
-                                },
-                                "{row.value.title}"
-                            }
-                        }
+                    ListRow {
+                        key: "{row.key}",
+                        id: row.key.clone(),
+                        name: "Open {row.value.title} settings",
+                        "{row.value.title}"
                     }
                 }
-                if shown.is_empty() { p { "No settings sections are available." } }
+                if shown.is_empty() { p { class: "px-2", "No settings sections are available." } }
             }
-            if let Some(problem) = opening() { p { role: "alert", "{problem}" } }
         }
     }
 }
@@ -163,13 +148,15 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
         return rsx! { p { role: "alert", "The {key} section is not available." } };
     };
     rsx! {
-        section { class: "flex flex-col gap-4 p-4", "aria-label": "{row.value.title}",
-            header { class: "flex items-center gap-2",
-                PresentationSlot { reference: props.micro.shell.nav_button.clone() }
-                h3 { class: "text-lg font-semibold", "{row.value.title}" }
+        section { class: "flex flex-col gap-4", "aria-label": "{row.value.title}",
+            AppBar {
+                title: row.value.title.clone(),
+                leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
             }
-            PresentationSlot {
-                reference: row.attachments[row.value.detail.index()].clone(),
+            div { class: "px-4 pb-4",
+                PresentationSlot {
+                    reference: row.attachments[row.value.detail.index()].clone(),
+                }
             }
         }
     }

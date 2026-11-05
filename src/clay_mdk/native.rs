@@ -153,14 +153,13 @@ impl CollectionBindings {
 }
 
 /// One [`crate::SHELL_ROOTS`] row, keyed by the registering micro's id: a title and the root
-/// presentation (an attachment of the row). A `pinned` root stays on screen however the shell
-/// folds its other roots (Settings can be closed; a toolbar cannot); an absent field is `false`.
+/// presentation (an attachment of the row). The composition mounts every root it finds, each
+/// filling the frame; arranging anything inside the frame is the root's own business (the shell
+/// micro's panels).
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RootRow {
     pub title: String,
     pub content: Attachment,
-    #[serde(default)]
-    pub pinned: bool,
 }
 
 /// Local tasks an incarnation owns. Dropping them aborts them, so a failed initialization

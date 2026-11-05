@@ -9,6 +9,8 @@
 //! redeems its reference, so a panel that is installed but not shown never activates its
 //! provider. A configured id with no row, or whose provider is unavailable, is a placeholder in
 //! its place; nothing here ever edits the configured list except the viewer's own toggles.
+use clay_dioxus_kit::AppBar;
+use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
@@ -24,9 +26,12 @@ use micro_layout_manifest::CONFIG_TAG;
 use micro_layout_manifest::LayoutConfig;
 use micro_layout_manifest::PANELS_BINDING;
 use micro_layout_manifest::Panel;
+use micro_layout_manifest::SHELL_NAV_BUTTON;
 use micro_layout_manifest::VIEW;
 
-/// Bind the panels collection and the arrangement facet, and publish the view over them.
+/// Bind the panels collection and the arrangement facet, and publish the view over them. The
+/// shell's sidebar/back button is required (the view mounts it in its app bar), so the layout can
+/// be left on a compact host.
 async fn activate(context: Context) -> Result<(), Error> {
     let panels: Collection<String, Panel> = context
         .collection(PANELS_BINDING)
@@ -35,15 +40,25 @@ async fn activate(context: Context) -> Result<(), Error> {
         .config(CONFIG_NAME)
         .expect("manifest declares the layout configuration")
         .facet::<LayoutConfig>(CONFIG_TAG, CONFIG_KEY)?;
-    context.publish_component(VIEW, move || view(panels.clone(), config.clone()))?;
+    let nav_button = context
+        .require(SHELL_NAV_BUTTON)
+        .expect("a required binding is always resolved")
+        .clone();
+    context.publish_component(VIEW, move || {
+        view(panels.clone(), config.clone(), nav_button.clone())
+    })?;
     Ok(())
 }
 
 clay_mdk::export_micro!(activate, micro_layout_manifest::manifest);
 
-/// The layout's model and view in one root-scope render. First the toggles, one per installed
-/// panel (the viewer's way to edit the arrangement), then the arrangement itself.
-fn view(panels: Collection<String, Panel>, config: Facet<LayoutConfig>) -> Element {
+/// The layout's model and view in one root-scope render. First the app bar, then the toggles, one
+/// per installed panel (the viewer's way to edit the arrangement), then the arrangement itself.
+fn view(
+    panels: Collection<String, Panel>,
+    config: Facet<LayoutConfig>,
+    nav_button: Capability,
+) -> Element {
     let rows = use_rows(&panels);
     let snapshot = use_facet(&config);
     let mut failure = use_signal(|| None::<String>);
@@ -57,7 +72,11 @@ fn view(panels: Collection<String, Panel>, config: Facet<LayoutConfig>) -> Eleme
     };
     rsx! {
         div { class: "flex flex-col gap-4",
-            div { class: "flex flex-wrap gap-2", role: "toolbar", "aria-label": "Panels",
+            AppBar {
+                title: "Layout",
+                leading: rsx! { PresentationSlot { reference: nav_button.clone() } },
+            }
+            div { class: "mx-4 flex flex-wrap gap-2", role: "toolbar", "aria-label": "Panels",
                 for row in rows.iter() {
                     {
                         let shown = arrangement.visible.contains(&row.key);
@@ -91,7 +110,7 @@ fn view(panels: Collection<String, Panel>, config: Facet<LayoutConfig>) -> Eleme
                 }
             }
             if let Some(problem) = failure() {
-                p { role: "alert", "{problem}" }
+                p { class: "mx-4", role: "alert", "{problem}" }
             }
             for id in arrangement.visible.iter() {
                 {
@@ -100,7 +119,7 @@ fn view(panels: Collection<String, Panel>, config: Facet<LayoutConfig>) -> Eleme
                     rsx! {
                         section {
                             key: "panel-{id}",
-                            class: "rounded-md border border-border p-4",
+                            class: "mx-4 rounded-md border border-border p-4",
                             "aria-label": "{title} panel",
                             match row {
                                 Some(row) => rsx! {

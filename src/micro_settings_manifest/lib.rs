@@ -11,8 +11,9 @@
 //! Settings is a **list panel** of the shell (ADR 032 §8): it contributes one `shell.panels` row
 //! whose content is the list of its sections and whose details presentation shows the section
 //! the shell has open. It arranges nothing itself; the shell owns the stack, the layout and the
-//! back button, which Settings requires from it ([`SHELL_NAVIGATE`], [`SHELL_OPENED`],
-//! [`SHELL_NAV_BUTTON`]).
+//! back button, which Settings requires from it ([`SHELL_OPENED`], [`SHELL_NAV_BUTTON`]). Opening
+//! a row is the list scaffold's `ListRow`, which reaches the shell's navigation through the
+//! scaffold, so Settings never calls `navigate` itself.
 use clay_mdk::Access;
 use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
@@ -53,7 +54,6 @@ pub const PANELS_BINDING: &str = "panels";
 /// The local binding names under which Settings requires what it uses of the shell. Each is
 /// the name of the shell publication it binds, so a catalog satisfies all of them from one
 /// provider (`InstalledMicro::satisfied_by`).
-pub const SHELL_NAVIGATE: &str = micro_shell_manifest::NAVIGATE;
 pub const SHELL_OPENED: &str = micro_shell_manifest::OPENED;
 pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
 /// Schema NSIDs of [`SECTIONS`] keys (the contributing micro's id, text) and values
@@ -91,7 +91,6 @@ pub fn manifest() -> MicroManifest {
         entrypoints: Entrypoints::micro_client(),
         publications: vec![presentation(LIST), presentation(SECTION)],
         requires: vec![
-            requires(SHELL_NAVIGATE, micro_shell_manifest::NAVIGATE_CONTRACT),
             requires(SHELL_OPENED, micro_shell_manifest::OPENED_CONTRACT),
             requires(SHELL_NAV_BUTTON, micro_shell_manifest::NAV_BUTTON_CONTRACT),
         ],

@@ -9,6 +9,7 @@ path = "lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+clay_dioxus_kit = { workspace = true }
 micro_layout_manifest = { workspace = true }
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 

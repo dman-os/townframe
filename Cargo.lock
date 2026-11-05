@@ -9390,6 +9390,7 @@ dependencies = [
 name = "micro_layout"
 version = "0.1.0"
 dependencies = [
+ "clay_dioxus_kit",
  "clay_mdk",
  "dioxus",
  "micro_layout_manifest",
@@ -9402,6 +9403,7 @@ dependencies = [
  "ciborium",
  "clay_mdk",
  "insta",
+ "micro_shell_manifest",
  "serde",
  "serde_json",
 ]
@@ -9429,6 +9431,7 @@ name = "micro_settings"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus",
+ "clay_dioxus_kit",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
@@ -9494,6 +9497,7 @@ dependencies = [
  "ciborium",
  "clay_mdk",
  "insta",
+ "micro_shell_manifest",
  "serde",
  "serde_json",
 ]

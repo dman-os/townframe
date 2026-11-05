@@ -789,7 +789,6 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
         RootRow {
             title: "Declared".into(),
             content: Attachment::at(0),
-            pinned: false,
         }
     );
     assert_eq!(

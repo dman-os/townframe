@@ -22,7 +22,6 @@ use clay_mdk::Nsid;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
-use clay_mdk::SHELL_ROOTS;
 use clay_mdk::Sidecar;
 use serde::Deserialize;
 use serde::Serialize;
@@ -37,15 +36,15 @@ pub const AUTHORITY: &str = "org.example.dayframe.toolbar";
 /// implements it; implementing is not owning (ADR 028 §5), so the contributor needs no request
 /// and the NSID is under the toolbar's authority.
 pub const ACTION_CONTRACT: &str = "org.example.dayframe.toolbar.action";
-/// The Toolbar presentation, which the shell mounts as a root.
+/// The Toolbar presentation, which the shell mounts as a panel in its sidebar socket.
 pub const VIEW: &str = "view";
 /// The contract NSID, and so the declared collection's id, of the buttons collection.
 pub const BUTTONS: &str = "org.example.dayframe.toolbar.buttons";
 /// The local binding name under which the toolbar reads its buttons collection, and under which
 /// a contributor requests write access to it.
 pub const BUTTONS_BINDING: &str = "buttons";
-/// The local binding name under which the toolbar registers its root into `shell.roots`.
-pub const ROOTS_BINDING: &str = "roots";
+/// The local binding name under which the toolbar contributes its panel to the shell's panels.
+pub const PANELS_BINDING: &str = "panels";
 /// Schema NSIDs of [`BUTTONS`] keys (the contributor's chosen id, text) and values
 /// ([`Button`]), and of its selector (the whole collection).
 pub const BUTTON_KEY_SCHEMA: &str = "org.example.dayframe.toolbar.buttonKey";
@@ -64,8 +63,8 @@ pub struct Button {
 }
 
 /// The Toolbar micro's package declaration: it declares the buttons collection, publishes its
-/// view, and registers that view as a pinned shell root (it shows whether or not Settings is
-/// open).
+/// view, and contributes that view as a panel in the shell's sidebar socket: it is on screen
+/// wherever the sidebar is, whatever the main position shows.
 pub fn manifest() -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
@@ -85,8 +84,8 @@ pub fn manifest() -> MicroManifest {
             offered: vec![CollectionCapability::Read, CollectionCapability::Register],
         }],
         // The toolbar reads buttons through a binding configuration resolves; with one declared
-        // buttons collection the default binds it. It also registers its root row into the
-        // runtime-defined `shell.roots` collection, which the runtime satisfies.
+        // buttons collection the default binds it. It also writes its panel row into the shell's
+        // panels collection.
         collection_requests: vec![
             Request {
                 binding: BUTTONS_BINDING.into(),
@@ -97,8 +96,8 @@ pub fn manifest() -> MicroManifest {
                 min_revision: None,
             },
             Request {
-                binding: ROOTS_BINDING.into(),
-                contract: Nsid::literal(SHELL_ROOTS),
+                binding: PANELS_BINDING.into(),
+                contract: Nsid::literal(micro_shell_manifest::PANELS),
                 access: Some(Access::Write),
                 necessity: Necessity::Required,
                 resolution: BindingResolution::Configured,
@@ -106,13 +105,13 @@ pub fn manifest() -> MicroManifest {
             },
         ],
         contributions: vec![ContributionDeclaration {
-            id: "root".into(),
-            binding: ROOTS_BINDING.into(),
+            id: "panel".into(),
+            binding: PANELS_BINDING.into(),
             key: ID.into(),
             payload: serde_json::json!({
                 "title": "Toolbar",
+                "sockets": ["sidebar"],
                 "content": { "$attachment": 0 },
-                "pinned": true,
             }),
             attachments: vec![clay_mdk::AttachmentDeclaration {
                 index: 0,
@@ -157,9 +156,9 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_declares_a_pinned_toolbar_root_row() {
+    fn the_manifest_declares_a_sidebar_panel_row() {
         sidecar().validate().unwrap();
         let rows = declared_rows(&clay_mdk::MicroId::local(ID), &sidecar()).unwrap();
-        assert_eq!(rows.keys().collect::<Vec<_>>(), [ROOTS_BINDING]);
+        assert_eq!(rows.keys().collect::<Vec<_>>(), [PANELS_BINDING]);
     }
 }
