@@ -171,3 +171,36 @@ The plain-core-call path is possibly a little faster at the median (V0 66.8 vs 8
 
 ### Commands run (all from the worktree root unless noted)
 `wasm-tools component unbundle` / `print` / `parse` / `validate`; builds through `./x/agent-build.ts` (`cargo build ... -p micro_pierre_spike_scroll --release --target wasm32-wasip3 --features p5-direct`; `cargo build --offline ... -p dayframe_web --bin dayframe_web --target wasm32-unknown-unknown --profile wasm-release`; `deno run --allow-all x/dayframe-web.ts --build`); the node and Playwright commands above; servers were started by me with `deno run --allow-all src/micro_pierre_spike_scroll/p5/serve.ts <site> <component>` and killed by PID after each run. Scratch artefacts (components, wat dumps, logs) are in the scratchpad `p5/` dir, not committed; `p5/runvar.sh` there ran each variant.
+
+## W1 context slots
+
+Fork branch `context-slots-as-globals` (dman-os/wasm-component-model-polyfill), rev `45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7`, off f2c7714. This worktree re-pins to it in all four manifests/locks (`cargo metadata --locked` passes in the root and in `src/wasm_utils_rs`).
+
+### Mechanism
+- A store-wide core module (`executor/context_slots.rs`) imports two host-made mutable `i32` globals and exports `get0/set0/get1/set1` (`global.get`/`global.set`). `TrampolineSpec::ContextGet/Set` link those instead of host functions, so a guest's `context.get/set` stays in wasm.
+- The globals hold the slots of one "live" thread (kept in `HandleTables.context_slots`, next to `TaskTables`); every other thread's slots stay in `Thread.context`. `context_slots::sync` saves the globals into the live thread's record and loads the current thread's record when `TaskTables::current_thread()` differs from the live one.
+- Rather than hooking the ~55 scope mutation sites, sync runs where guest code gets control: after every `host_func` body returns, and before wcmp calls into the guest (plain entry call, start fn of a prepared call, thread start `run_thread`, destructor tasks (both paths), the `task.return` caller function, `BoundaryCall::enter` for realloc/post-return, core instance `start`, stack-switching `start`/`resume`, host-suspension `start`/`start_at_rest`/`fly`). Host readers go through `slots_of`.
+- JSPI: a flight (`fly`) runs with the resumed thread's scopes on the stack, so syncing at its start is right; K5 plain call path (`start_thread_entry`, `reports_traps_late`) syncs before the plain `entry.call`.
+- Behavior change: `context.get/set` with no task on the stack used to trap; it now reads whatever the globals hold (unverified that any guest relies on the trap).
+
+### Fork tests (commands run)
+`WCMP_TEST_BACKEND=wasmi cargo nextest run -p wcmp --lib`: 839 passed. Default backend `cargo nextest run -p wcmp -p wcmp-wasm-core --lib`: 847 passed. New `baseline::context_slots` (two threads interleave with suspend/resume-later and suspend-then-resume; each sees its own slots): passes on wasmi; with the host-return sync commented out the interleave test fails (mutation check). Clippy clean: `-p wcmp -p wcmp-wasm-core --lib --profile test` (native) and `-p wcmp -p wcmp-wasm-core-web --target wasm32-unknown-unknown`. Not run (need Nix): browser lanes, root integration lanes, `tests/zena.rs`.
+
+### Measurement (Chromium headless, release guests, `DAYFRAME_RAISED_LIMITS=1 PIERRE_RAISED=1`, unmodified guest bytes: the two sites' `packages/index.json` are identical)
+Two sites built from this worktree, differing only in the pin (before f2c7714, after 45e7dff), served statically, specs run interleaved before/after. Host load average ~38 throughout, so read ratios, not absolutes.
+
+`guest-internal bench` (diff-no-writer-median-ms, 3 interleaved runs):
+| | 7 spans | 18 spans | framed 1M calls |
+|---|---|---|---|
+| before | 137.9, 139.3, 135.1 | 280.6, 345.9, 325.3 | 3645, 2969, 3688 |
+| after | 2.40, 6.80, 8.10 | 3.90, 9.10, 8.80 | 46, 87, 83 |
+
+P4 dispatch specs (`phases tokens7/18 fast`, n=60 committing dispatches each, guestDispatchMs median / p95), 2 interleaved runs:
+| | tokens7 | tokens18 |
+|---|---|---|
+| before r1 / r2 | 177.6 / 485.3 ; 192.2 / 333.0 | 307.2 / 483.3 ; 366.6 / 550.6 |
+| after r1 / r2 | 10.6 / 28.9 ; 10.8 / 27.6 | 21.2 / 36.9 ; 8.9 / 12.1 |
+Frames over 50 ms: 77/76 before vs 9/4 after (tokens7). Long tasks 60 vs 5/6.
+
+### Not yet run (blocked on disk: coordinator froze new builds)
+guest fixtures `--prepare-only`, `cargo nextest run -p clay_rt_wcmp -p clay_rt_wcmp_wasmi -p clay_guest_session -p clay_host`, dayframe_web Playwright suite, wasmi backend measurement.
