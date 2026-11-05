@@ -7,8 +7,17 @@ import { $ } from "./utils.ts";
 // `testFixtures` also builds the guests only tests load (the collection probe and the
 // `clay_mdk` example fixtures). The shells need just the packages; building the fixtures for
 // them doubled the cold build that the web e2e server waits on.
+//
+// `trapper` builds the `clay_mdk` `trapper` example (a micro whose view traps its guest on a
+// click) and adds it to the package directory beside the counter and the layout, for the web
+// e2e that pins a sync-export trap faulting only that micro. It is not part of `testFixtures`:
+// those are components tests load by environment variable, while this one is a package the
+// shell lists and so changes what every shell shows.
 export async function prepareDayframePackages(
-  { testFixtures }: { testFixtures: boolean },
+  { testFixtures, trapper = false }: {
+    testFixtures: boolean;
+    trapper?: boolean;
+  },
 ): Promise<
   Record<string, string>
 > {
@@ -25,6 +34,9 @@ export async function prepareDayframePackages(
   } --target wasm32-wasip3`;
   if (testFixtures) {
     await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example overbudget --example lifecycle --example context --target wasm32-wasip3`;
+  }
+  if (trapper) {
+    await $`cargo build --locked ${isolated} -p clay_mdk --example trapper --target wasm32-wasip3`;
   }
   const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
     .json<{ target_directory: string; packages: { name: string }[] }>();
@@ -53,6 +65,9 @@ export async function prepareDayframePackages(
         ],
         context: ["wasm32-wasip3/debug/examples/context.wasm", "context"],
       }
+      : {}),
+    ...(trapper
+      ? { trapper: ["wasm32-wasip3/debug/examples/trapper.wasm", "trapper"] }
       : {}),
   };
   const componentEnv: Record<string, string> = {};
@@ -85,6 +100,15 @@ export async function prepareDayframePackages(
     }`;
     await $`cargo run --locked -q -p ${manifestCrate} --example emit_manifest -- ${
       packagesDirectory.join(`${name}.manifest.json`)
+    }`;
+  }
+  if (trapper) {
+    await $`cp ${directory.join("trapper.component.wasm")} ${
+      packagesDirectory.join("trapper.component.wasm")
+    }`;
+    // A native example of `clay_mdk` (built for the host, not wasm32-wasip3).
+    await $`cargo run --locked -q -p clay_mdk --example emit_trapper_manifest -- ${
+      packagesDirectory.join("trapper.manifest.json")
     }`;
   }
   componentEnv["DAYFRAME_PACKAGE_DIR"] = packagesDirectory.toString();

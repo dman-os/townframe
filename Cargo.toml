@@ -317,9 +317,9 @@ wstd = "0.6.8"
 # exactly; this fork moves only that pin to the 0.2.127 the Dioxus fork needs,
 # because one lockfile serves every target. It brings its own
 # `wasmtime-environ` 50 and `wasmparser` 0.261 next to wasmtime 48's.
-wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "a5db353bd68e3014211f2f2cb5a76d41a95af377" }
-wcmp-wasm-core-wasmi = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "a5db353bd68e3014211f2f2cb5a76d41a95af377" }
-wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "a5db353bd68e3014211f2f2cb5a76d41a95af377" }
+wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "f2c771462960004d2bfe92c2a55929ba7f7b8b8c" }
+wcmp-wasm-core-wasmi = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "f2c771462960004d2bfe92c2a55929ba7f7b8b8c" }
+wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "f2c771462960004d2bfe92c2a55929ba7f7b8b8c" }
 wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "0.4.77"
 js-sys = "0.3.104"
