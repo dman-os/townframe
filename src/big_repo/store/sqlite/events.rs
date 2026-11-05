@@ -191,21 +191,36 @@ impl SqliteBigRepoStore {
         }
         tx.commit().await?;
         let seq = Self::u64_from_db(head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE));
-        // Record the committed head at the durable choke point. Read back
-        // synchronously by the keyhive sync-done observer to stamp a completion
-        // with how far admission has actually progressed. `fetch_max` keeps the
-        // watermark monotonic under concurrent appends racing their commits
-        // (a lower committed seq never regresses it).
-        self.admission_watermark
-            .fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
+        // Publish the committed head at the durable choke point, after the
+        // commit: a tailer woken by this send is guaranteed to find the rows,
+        // and one that marked the watermark seen before re-reading the table
+        // either read these rows or is woken here. The keyhive sync-done
+        // observer also reads the value back synchronously to stamp a
+        // completion with how far admission has actually progressed. Only a
+        // raise is published, keeping the watermark monotonic under
+        // concurrent appends racing their sends (a lower committed seq never
+        // regresses it, and its rows committed before the higher seq's did, so
+        // the wake that higher send delivers covers them).
+        self.admission_watermark.send_if_modified(|head| {
+            let raised = seq > *head;
+            if raised {
+                *head = seq;
+            }
+            raised
+        });
         Ok(seq)
     }
 
     /// Cheap synchronous read of the last committed admission seq (see the
     /// `admission_watermark` field docs). No DB round-trip.
     pub(crate) fn admission_watermark(&self) -> u64 {
-        self.admission_watermark
-            .load(std::sync::atomic::Ordering::SeqCst)
+        *self.admission_watermark.borrow()
+    }
+
+    /// Subscribe to admission-log appends (see the `admission_watermark`
+    /// field docs). The receiver starts with the current value marked seen.
+    pub(crate) fn admission_appends(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.admission_watermark.subscribe()
     }
 
     pub(crate) async fn admission_head(&self) -> Res<u64> {

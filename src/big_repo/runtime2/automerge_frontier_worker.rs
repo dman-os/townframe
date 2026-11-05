@@ -154,7 +154,6 @@ pub fn spawn_automerge_frontier_worker(
                 .await?;
             let admission_source = keyhive_admission::Store {
                 store: store.clone(),
-                timer: Arc::clone(&timer),
             };
             let admission_durable = admission_state.progress().await?.upstream_revision;
             let admission_reader = admission_source.open((), admission_durable).await?;

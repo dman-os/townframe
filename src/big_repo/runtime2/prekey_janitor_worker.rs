@@ -52,12 +52,11 @@ pub struct SpawnedPrekeyJanitorWorker {
 pub fn spawn_prekey_janitor_worker(
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
-    timer: std::sync::Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
 ) -> SpawnedPrekeyJanitorWorker {
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
 
     let run = future_form::Sendable::from_future(async move {
-        let fut = run_prekey_janitor_tail(store, keyhive, timer);
+        let fut = run_prekey_janitor_tail(store, keyhive);
         match futures::future::Abortable::new(fut, abort_registration).await {
             Ok(result) => result,
             Err(_) => Ok(()),
@@ -96,17 +95,12 @@ pub(crate) async fn process_admissions(
     Ok(handled_through)
 }
 
-async fn run_prekey_janitor_tail(
-    store: SqliteBigRepoStore,
-    keyhive: BigKeyhiveHandle,
-    timer: std::sync::Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
-) -> Res<()> {
+async fn run_prekey_janitor_tail(store: SqliteBigRepoStore, keyhive: BigKeyhiveHandle) -> Res<()> {
     let state = store
         .admission_consumer_state(crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR)
         .await?;
     let source = keyhive_admission::Store {
         store: store.clone(),
-        timer,
     };
     let durable = state.progress().await?.upstream_revision;
     let reader = source.open((), durable).await?;

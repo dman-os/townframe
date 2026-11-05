@@ -2133,13 +2133,8 @@ where
     // The incorporation sink is awaited inline: the exchange cannot complete
     // until the durable incorporation record commits. The same sink answers
     // boot's WAL-vs-admission diff for crash-window reconciliation.
-    let keyhive_dispatcher_notify = Arc::new(tokio::sync::Notify::new());
-    let keyhive_reporter_weak = Arc::downgrade(&keyhive_dispatcher_notify);
-    let incorporation_sink = KeyhiveIncorporationSink::new(
-        group_part_store.clone(),
-        evt_tx.clone(),
-        keyhive_reporter_weak,
-    );
+    let incorporation_sink =
+        KeyhiveIncorporationSink::new(group_part_store.clone(), evt_tx.clone());
     let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
         subduction_keyhive::KeyhiveProtocol::new(
             keyhive.clone_keyhive(),
@@ -2154,9 +2149,8 @@ where
         .ingest_from_storage()
         .await
         .map_err(|error| ferr!("failed recovering keyhive event WAL: {error}"))?;
-    // One dispatcher owns the debounced, classified fan-out of keyhive change
     // One dispatcher owns the debounced, classified fan-out of durable
-    // admission-log changes. The notifier is only a wake-up hint.
+    // admission-log changes; it wakes on the store's admission watermark.
     let keyhive_dispatcher_subscriptions: crate::runtime2::keyhive_dispatcher::SubscriptionMap =
         Arc::new(surelock::mutex::Mutex::new(std::collections::HashMap::new()));
     // One timer and one clock serve every actor in this node — the hub, the
@@ -2171,7 +2165,6 @@ where
             group_part_store.clone(),
             Arc::clone(&timer),
             Arc::clone(&clock),
-            Arc::clone(&keyhive_dispatcher_notify),
             keyhive_dispatcher_subscriptions,
             utils_rs::batching::DebouncePolicy {
                 quiet_window: std::time::Duration::from_millis(100),
@@ -2354,11 +2347,8 @@ where
     // Prekey janitor: rotates the local agent's consumed prekeys. Driven by
     // the durable admission log (own cursor) so Add ops incorporated while
     // the runtime was down are picked up on the next boot.
-    let spawned_prekey_janitor = crate::runtime2::spawn_prekey_janitor_worker(
-        group_part_store.clone(),
-        keyhive.clone(),
-        Arc::clone(&timer),
-    );
+    let spawned_prekey_janitor =
+        crate::runtime2::spawn_prekey_janitor_worker(group_part_store.clone(), keyhive.clone());
     stop_token.prekey_janitor_stop = Some(spawned_prekey_janitor.stop);
     stop_token.worker_tasks.spawn(Sendable::from_future(
         spawned_prekey_janitor
