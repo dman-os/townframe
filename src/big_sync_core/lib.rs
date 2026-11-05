@@ -1999,6 +1999,7 @@ impl BigSyncMachine {
             return refused;
         };
         let state = &mut peer_state.replay_subscription;
+        tracing::debug!(%peer_id, generation, state_generation = state.generation, pending = state.pending_additions.len(), rejected = rejected.len(), "INSTR replay update acknowledged");
         if state.generation != generation.saturating_add(1) {
             return refused;
         }
@@ -2078,6 +2079,7 @@ impl BigSyncMachine {
     /// wanted set to the same reconciler every other change uses, which queues it and sends the
     /// opening update itself.
     fn reset_replay_subscription(&mut self, peer_id: &PeerKey) {
+        tracing::debug!(%peer_id, "INSTR replay subscription reset");
         if let Some(peer_state) = self.peers.get_mut(peer_id) {
             let state = &mut peer_state.replay_subscription;
             state.generation = 0;
