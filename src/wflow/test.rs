@@ -219,6 +219,7 @@ impl WflowTestContext {
             logstore: Arc::clone(&self.logstore),
             snapstore: Arc::clone(&self.snapstore),
             factory: None,
+            authority_factory: None,
         };
 
         let host = self.pending_host.take().expect("bad builder");
