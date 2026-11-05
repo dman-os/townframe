@@ -65,6 +65,19 @@ async fn committed(commits: &mut watch::Receiver<u64>, count: u64) {
     commits.wait_for(|commits| *commits >= count).await.unwrap();
 }
 
+/// Returns the durable transition frontier, excluding metadata-only maintenance commits.
+async fn journal_frontier(runtime: &AuthorityRuntime) -> u64 {
+    if let Some(snapshot) = runtime.reader.snapshot().await.unwrap() {
+        return snapshot.frontier;
+    }
+    runtime
+        .reader
+        .read(1, RECOVERY_PAGE)
+        .await
+        .unwrap()
+        .frontier
+}
+
 /// Waits on the counting writer rather than sleeping while maintenance publishes.
 async fn published_snapshot(
     runtime: &AuthorityRuntime,
@@ -94,13 +107,16 @@ async fn fully_reclaimed(
 
 /// The job's durable transitions, in commit order.
 async fn transitions(runtime: &AuthorityRuntime, key: &str) -> Vec<authority::Transition> {
-    let frontier = runtime
-        .reader
-        .read(1, RECOVERY_PAGE)
-        .await
-        .unwrap()
-        .frontier;
-    read_transitions(&runtime.reader, 1, frontier)
+    transitions_from(runtime, key, 1).await
+}
+
+async fn transitions_from(
+    runtime: &AuthorityRuntime,
+    key: &str,
+    from: u64,
+) -> Vec<authority::Transition> {
+    let frontier = journal_frontier(runtime).await;
+    read_transitions(&runtime.reader, from, frontier)
         .await
         .unwrap()
         .into_iter()
@@ -294,15 +310,15 @@ async fn warm_job_commits_once_per_transition_and_survives_restart() {
     let probe = Arc::new(Probe::default());
     let host = host(&probe);
 
-    let (runtime, commits) = start(&store, &host).await;
+    let (runtime, _) = start(&store, &host).await;
     let ack = runtime
         .submit(Submission::new("job", "steps", "3"))
         .await
         .unwrap();
     assert_eq!(ack.disposition, authority::Disposition::Admitted);
     assert_eq!(runtime.await_result("job").await, Some(ok(6)));
-    // Epoch bump, Submitted, Granted, three steps, Completed.
-    assert_eq!(*commits.borrow(), 7);
+    // The frontier counts durable authority transitions, not metadata maintenance commits.
+    assert_eq!(journal_frontier(&runtime).await, 6);
     assert_eq!(probe.steps_runs.load(Ordering::SeqCst), 3);
     assert_eq!(runtime.result("job").await.unwrap(), Some(ok(6)));
     assert_eq!(runtime.result("never").await.unwrap(), None);
@@ -317,9 +333,10 @@ async fn warm_job_commits_once_per_transition_and_survives_restart() {
             .await,
         Err(SubmitError::UnknownWorkflow)
     );
+    let frontier_before_restart = journal_frontier(&runtime).await;
     runtime.stop().await;
 
-    let (runtime, commits) = start(&store, &host).await;
+    let (runtime, _) = start(&store, &host).await;
     assert_eq!(runtime.result("job").await.unwrap(), Some(ok(6)));
     let resubmitted = runtime
         .submit(Submission::new("job", "steps", "3"))
@@ -328,8 +345,8 @@ async fn warm_job_commits_once_per_transition_and_survives_restart() {
     assert_eq!(resubmitted.position, ack.position);
     assert_eq!(resubmitted.disposition, authority::Disposition::Completed);
     assert_eq!(runtime.await_result("job").await, Some(ok(6)));
-    // Only the epoch bump: a terminal job is neither granted nor re-run.
-    assert_eq!(*commits.borrow(), 1);
+    // Reopening advances metadata only; a terminal job adds no transitions.
+    assert_eq!(journal_frontier(&runtime).await, frontier_before_restart);
     assert_eq!(probe.steps_runs.load(Ordering::SeqCst), 3);
     runtime.stop().await;
 }
@@ -347,13 +364,17 @@ async fn restart_replays_durable_steps_and_reruns_only_the_incomplete_one() {
     // The second step only starts after the first one's commit resumed it.
     probe.gate_entered.notified().await;
     assert_eq!(runtime.result("job").await.unwrap(), None);
+    let frontier_before_restart = journal_frontier(&runtime).await;
     runtime.stop().await;
 
     probe.gate_open.store(true, Ordering::SeqCst);
-    let (runtime, commits) = start(&store, &host(&probe)).await;
+    let (runtime, _) = start(&store, &host(&probe)).await;
     assert_eq!(runtime.await_result("job").await, Some(ok(11)));
-    // Epoch bump, re-Granted, second step, Completed.
-    assert_eq!(*commits.borrow(), 4);
+    // Re-Granted, second step, Completed; the epoch bump is metadata-only.
+    assert_eq!(
+        journal_frontier(&runtime).await - frontier_before_restart,
+        3
+    );
     assert_eq!(probe.gated_first_runs.load(Ordering::SeqCst), 1);
     assert_eq!(probe.gated_second_runs.load(Ordering::SeqCst), 2);
     runtime.stop().await;
@@ -363,16 +384,15 @@ async fn restart_replays_durable_steps_and_reruns_only_the_incomplete_one() {
 async fn failures_retry_transients_and_commit_terminal_errors() {
     let store = MemoryStore::default();
     let probe = Arc::new(Probe::default());
-    let (runtime, commits) = start(&store, &host(&probe)).await;
+    let (runtime, _) = start(&store, &host(&probe)).await;
 
     runtime
         .submit(Submission::new("flaky", "flaky", "null"))
         .await
         .unwrap();
     assert_eq!(runtime.await_result("flaky").await, Some(ok(3)));
-    // Epoch bump, Submitted, Granted, first step, Revoked, re-Granted,
-    // second step, Completed.
-    assert_eq!(*commits.borrow(), 8);
+    // Seven durable transitions; the epoch bump is metadata-only.
+    assert_eq!(journal_frontier(&runtime).await, 7);
     assert_eq!(probe.flaky_first_runs.load(Ordering::SeqCst), 1);
     assert_eq!(probe.flaky_second_runs.load(Ordering::SeqCst), 2);
 
@@ -441,27 +461,29 @@ async fn restart_keeps_durable_retry_deadline() {
     // Epoch bump, Submitted, Granted, StepCommitted, RetryScheduled. A fixed
     // delay keeps the retry from firing while the runtime is still up.
     committed(&mut commits, 5).await;
+    let frontier_before_restart = journal_frontier(&runtime).await;
+    let initial_transitions = transitions(&runtime, "job").await;
+    let retries = initial_transitions
+        .iter()
+        .filter(|transition| matches!(transition, authority::Transition::RetryScheduled { .. }))
+        .count();
+    assert_eq!(retries, 1, "the durable retry is scheduled once");
     runtime.stop().await;
 
     // The deadline is durable: the restart re-arms it from the journal rather
     // than recomputing it, so the job still waits out the original delay.
-    let (runtime, commits) = start(&store, &host).await;
+    let (runtime, _) = start(&store, &host).await;
     assert_eq!(runtime.await_result("job").await, Some(ok(1)));
     assert!(started.elapsed() >= Duration::from_millis(600));
     // The effect ran once; the retry replayed its committed step.
     assert_eq!(effect_runs.load(Ordering::SeqCst), 1);
     assert_eq!(invocations.load(Ordering::SeqCst), 2);
-    // Epoch bump, Granted gen2, Completed: no second retry was scheduled.
-    assert_eq!(*commits.borrow(), 3);
-    let transitions = transitions(&runtime, "job").await;
-    let retries = transitions
-        .iter()
-        .filter(|transition| matches!(transition, authority::Transition::RetryScheduled { .. }))
-        .count();
+    // Granted gen2 and Completed; the epoch bump is metadata-only.
     assert_eq!(
-        retries, 1,
-        "the durable retry survives the restart, not doubled"
+        journal_frontier(&runtime).await - frontier_before_restart,
+        2
     );
+    // The frontier delta and single invocation above prove the retry was not duplicated.
     runtime.stop().await;
 }
 
@@ -469,7 +491,7 @@ async fn restart_keeps_durable_retry_deadline() {
 async fn sleep_parks_on_a_durable_timer_and_resumes_after_its_deadline() {
     let store = MemoryStore::default();
     let probe = Arc::new(Probe::default());
-    let (runtime, commits) = start(&store, &host(&probe)).await;
+    let (runtime, _) = start(&store, &host(&probe)).await;
 
     let started = Instant::now();
     runtime
@@ -478,9 +500,8 @@ async fn sleep_parks_on_a_durable_timer_and_resumes_after_its_deadline() {
         .unwrap();
     assert_eq!(runtime.await_result("job").await, Some(ok(3)));
     assert!(started.elapsed() >= Duration::from_millis(50));
-    // Epoch bump, Submitted, Granted, first step, WaitStarted, WaitResolved,
-    // last step, Completed.
-    assert_eq!(*commits.borrow(), 8);
+    // Seven durable transitions; the epoch bump is metadata-only.
+    assert_eq!(journal_frontier(&runtime).await, 7);
     assert_eq!(probe.sleeper_before_runs.load(Ordering::SeqCst), 1);
     assert_eq!(probe.sleeper_after_runs.load(Ordering::SeqCst), 1);
     runtime.stop().await;
@@ -504,19 +525,30 @@ async fn restart_keeps_durable_timer_deadlines() {
     // Epoch bump, then Submitted, Granted, first step and WaitStarted for
     // each job.
     committed(&mut commits, 9).await;
+    let frontier_before_restart = journal_frontier(&runtime).await;
+    let initial_pending = transitions(&runtime, "pending").await;
+    let initial_overdue = transitions(&runtime, "overdue").await;
     runtime.stop().await;
     // `overdue` comes back with a passed deadline.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let (runtime, commits) = start(&store, &host(&probe)).await;
+    let (runtime, _) = start(&store, &host(&probe)).await;
     assert_eq!(runtime.await_result("overdue").await, Some(ok(3)));
     assert_eq!(runtime.await_result("pending").await, Some(ok(3)));
     assert!(started.elapsed() >= Duration::from_millis(400));
-    // Epoch bump, then WaitResolved, re-Granted, last step and Completed for
-    // each job: neither started a second wait.
-    assert_eq!(*commits.borrow(), 9);
+    // Each job adds WaitResolved, re-Granted, last step and Completed. The
+    // restart epoch and maintenance commits do not advance the frontier.
+    assert_eq!(
+        journal_frontier(&runtime).await - frontier_before_restart,
+        8
+    );
     for key in ["pending", "overdue"] {
-        let transitions = transitions(&runtime, key).await;
+        let mut transitions = match key {
+            "pending" => initial_pending.clone(),
+            "overdue" => initial_overdue.clone(),
+            _ => unreachable!(),
+        };
+        transitions.extend(transitions_from(&runtime, key, frontier_before_restart + 1).await);
         let waits = transitions
             .iter()
             .filter(|transition| matches!(transition, authority::Transition::WaitStarted { .. }))
@@ -575,15 +607,15 @@ async fn messages_queue_resolve_waits_and_deduplicate() {
         Err(SendError::PayloadConflict)
     );
     probe.inbox_effect_gate.open();
-    // Epoch bump, Submitted, Granted, MessageAccepted, first step, the first
-    // receive consuming the queued message, WaitStarted for the second.
+    // Wait for the durable transition prefix before racing the next message.
     committed(&mut commits, 7).await;
     // An accepted message keeps its receipt after being consumed from the
     // inbox while the job is still active.
     assert_eq!(runtime.send_message("job", "m1", "1").await, Ok(first));
     runtime.send_message("job", "m2", "2").await.unwrap();
     assert_eq!(runtime.await_result("job").await, Some(ok(12)));
-    assert_eq!(*commits.borrow(), 9);
+    // Eight durable transitions; metadata maintenance is not part of this count.
+    assert_eq!(journal_frontier(&runtime).await, 8);
     assert_eq!(
         runtime.send_message("job", "m3", "3").await,
         Err(SendError::AlreadyTerminal)
@@ -624,23 +656,27 @@ async fn receive_survives_restart_and_a_message_racing_the_replay() {
         .submit(Submission::new("job", "inbox", "null"))
         .await
         .unwrap();
-    // Epoch bump, Submitted, Granted, first step, WaitStarted.
+    // Wait for the durable transition prefix before delivering the first message.
     committed(&mut commits, 5).await;
     runtime.send_message("job", "m1", "4").await.unwrap();
     // WaitResolved for the first receive, WaitStarted for the second.
     committed(&mut commits, 7).await;
+    let frontier_before_restart = journal_frontier(&runtime).await;
     runtime.stop().await;
 
     probe.inbox_replay_gate.close();
-    let (runtime, commits) = start(&store, &host(&probe)).await;
+    let (runtime, _) = start(&store, &host(&probe)).await;
     // The re-granted invocation is replaying and has not re-attached to the
     // durable wait yet when the message resolves it.
     probe.inbox_replay_gate.entered.notified().await;
     runtime.send_message("job", "m2", "5").await.unwrap();
     probe.inbox_replay_gate.open();
     assert_eq!(runtime.await_result("job").await, Some(ok(45)));
-    // Epoch bump, re-Granted, WaitResolved, Completed.
-    assert_eq!(*commits.borrow(), 4);
+    // Re-Granted, WaitResolved, Completed; the epoch bump is metadata-only.
+    assert_eq!(
+        journal_frontier(&runtime).await - frontier_before_restart,
+        3
+    );
     runtime.stop().await;
 }
 

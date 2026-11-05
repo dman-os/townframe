@@ -6,8 +6,10 @@ use sqlite_rs::SqliteRuntime;
 use sqlite_rs::test_support::TestDb;
 use std::num::NonZeroUsize;
 use wflow_core::kvstore::atomic::MemoryStore;
+use wflow_core::kvstore::journal::CompactionProgress;
 use wflow_core::kvstore::journal::Journal;
 use wflow_core::kvstore::journal::JournalEntry;
+use wflow_core::kvstore::journal::StaleReaderError;
 
 const ALL: usize = usize::MAX;
 
@@ -66,7 +68,6 @@ async fn conformance_and_writer_ownership() -> Res<()> {
     let (db, factory) = boot().await?;
     let mut writer = factory.writer("conformance").await?;
     wflow_core::kvstore::atomic::tests::conformance(&mut writer).await?;
-
     let error = factory.writer("conformance").await.err().unwrap();
     assert!(
         error.to_string().contains("already has a writer"),
@@ -360,7 +361,22 @@ async fn journal_persists_across_reopen() -> Res<()> {
             .append(2, key(b"three"), vec![put(b"idx", b"3")])
             .await?;
         assert_eq!(journal.save_snapshot(2, key(b"snap-2")).await?, 2);
-        assert_eq!(journal.compact(2).await?, 2);
+        assert_eq!(
+            journal
+                .compact_page(2, NonZeroUsize::new(1).unwrap())
+                .await?,
+            CompactionProgress::Pending {
+                compacted_through: 1,
+            }
+        );
+        assert_eq!(
+            journal
+                .compact_page(2, NonZeroUsize::new(1).unwrap())
+                .await?,
+            CompactionProgress::Complete {
+                compacted_through: 2,
+            }
+        );
     }
 
     let runtime = SqliteRuntime::new(RuntimeConfig::default());
@@ -379,7 +395,10 @@ async fn journal_persists_across_reopen() -> Res<()> {
     assert_eq!(snap.compacted_through, 2);
     assert_eq!(snap.frontier, 3);
     assert_eq!(snap.value, key(b"snap-2"));
-    assert!(journal.reader().read(2, limit).await.is_err());
+    let stale = journal.reader().read(2, limit).await.unwrap_err();
+    let stale = stale.downcast_ref::<StaleReaderError>().unwrap();
+    assert_eq!(stale.requested, 2);
+    assert_eq!(stale.compacted_through, 2);
     let suffix = journal.reader().read(3, limit).await?;
     assert_eq!(
         suffix.entries,
