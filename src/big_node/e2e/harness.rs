@@ -223,6 +223,11 @@ impl Cluster {
             .node
     }
 
+    /// The directory node `index` keeps all of its durable state in.
+    pub(super) fn home(&self, index: usize) -> &std::path::Path {
+        &self.members[index].home
+    }
+
     pub(super) fn peer(&self, index: usize) -> PeerKey {
         self.node(index).repo.local_peer_id()
     }

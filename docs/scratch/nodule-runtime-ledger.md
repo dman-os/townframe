@@ -304,7 +304,7 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 - **N6 (done, with 3 pinned failures).**
   - Blobs permissions cursor: the walker namespace is `{scope_key}:big-blobs-permissions-v1`, threaded as `big_blobs::workers::WorkerConfig.scope_key` from `BigNode::boot`. Test: `big_blobs` `permissions::repos_sharing_a_database_keep_distinct_permission_cursors` (fails with the old unscoped namespace). The on-disk namespace changed, so an existing node resumes this cursor from the log's archived floor.
   - Harness: `Cluster` tracks live links (stop drops them; a restart without `reconnect` is a partition), `admit(owner, member, drawer, access)`, `try_create_note`, `is_running`, `is_partitioned`.
-  - **Pinned: drawer placement is O(drawer size) per document** (`e2e::scale::long_test_ten_thousand_notes_replicate`, `BIG_NODE_SCALE_DOCS` overrides 10k). Creating a note costs about 3 roster writes (target, present and originated drawers). Each `WriteDatums` on a drawer doc grows linearly with its entries: `Gate::verify` of a new key walks all of the doc's history (`footprints` over `get_changes(&[])`), and `stage` hydrates the whole `Dmeta` (every datum's metadata), twice per write. Debug build: roster write 77 ms at 0 entries, 1.2 s at about 100. 200 notes took 735 s to create (quadratic) and 105 s to replicate after connecting. 10k cannot finish; the test times out. Replication after connecting looked roughly linear (about 0.4 s per 20 notes once the first batch landed). INSTR timings: `big_cabinet` `doc/create.rs`, `doc/write.rs`, `drawer/add_doc.rs`.
+  - **Pinned: drawer placement is O(drawer size) per document** (was `e2e::scale::long_test_ten_thousand_notes_replicate`; folded into `e2e::costs`, see D25 slice 1). Creating a note costs about 3 roster writes (target, present and originated drawers). Each `WriteDatums` on a drawer doc grows linearly with its entries: `Gate::verify` of a new key walks all of the doc's history (`footprints` over `get_changes(&[])`), and `stage` hydrates the whole `Dmeta` (every datum's metadata), twice per write. Debug build: roster write 77 ms at 0 entries, 1.2 s at about 100. 200 notes took 735 s to create (quadratic) and 105 s to replicate after connecting. 10k cannot finish; the test times out. Replication after connecting looked roughly linear (about 0.4 s per 20 notes once the first batch landed). INSTR timings: `big_cabinet` `doc/create.rs`, `doc/write.rs`, `drawer/add_doc.rs`.
   - **Pinned: a member admitted by an owner who does not hold a doc can never decrypt it** (`ladder::a_member_admitted_by_an_owner_who_has_not_seen_a_note_reads_it`; stress `TEST_SEED=0xb160de5eed00001`). keyhive `add_member_with_manual_content` issues CGKA adds only for docs in the adder's own `self.docs`. A doc another member created while the admitter was away never gets the new member's CGKA leaf, and nobody issues it later: the holder learns the delegation but does not act on it. The receiver logs `missing entry encryption key while materializing` forever. Control: the same story with the owner reading the note before admitting passes.
   - **Pinned (unexplained): `group member add failed: individual … has published no prekey to select from`** (stress `TEST_SEED=6`) when Alice admits Carol after Carol has been stopped and partitioned several times. Not root-caused.
   - Stress (`e2e::stress::long_test_seeded_partitions_restarts_and_grants_converge`, `TEST_SEED`, 4 nodes, 40 steps): seeds 1, 2, 3, 4, 5 and 7 converge (78–108 s); the default seed and seed 6 fail as pinned above. A member's create is refused until the drawer reaches it; the stress takes that as an unmet precondition.
@@ -333,6 +333,34 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 - No durable write per non-durable call, and no mirrors of terminal records.
 - Keep the provider behind a service boundary so the Wasm host can move out of process.
 - Guest long-poll subscriptions are an exception; host-served revisioned stores are preferred. Single-instance services come later.
+
+### D23–D26. After N6 (operator, 2026-11-05)
+- **D23. CGKA adds for unseen docs: patch the keyhive fork now.**
+  - The bug: keyhive's `add_member` issues CGKA adds only for docs in the adder's own `self.docs`, and receiving a delegation issues none. So a reader added by an owner who never saw a doc can never decrypt it.
+  - The fix: a node that holds a doc issues the missing adds when it learns of a new reader. Upstream Keyline (`design/keyline/implementation.md`, "Integration / BeeKEM") reconciles readers on every local write.
+  - We do not migrate to upstream yet, because they are still churning. Fork patches are disposable: they get reinterpreted at migration, so they may be pragmatic.
+- **D24. Installing a plug uses the caller's capability.**
+  - The caller of "install this plug" passes an object capability with read access to the doc or drawer that holds the plug. Services get no standing grants over arbitrary drawers.
+  - Install takes a plug in whatever form it arrives. Do not special-case another node's registry drawer.
+  - Open: what survives a reboot. Maybe a new class of temporary read grant scoped to one doc or drawer.
+  - The operator (the authority root) is a cabinet superuser. It controls every drawer on its node with no explicit grant, and converts its standing into whatever grant or capability it wants. Certain authority actors may convert their standing into other grants. This is a root principal, not a broker. On Bob's node, the operator mints the handle on a drawer that synced in and passes it to install. Install keeps reference semantics (the doc is entered and follows its author).
+- **D25. Scale is a benchmark, not a stress test.**
+  - Set targets from back-of-the-napkin costs (bytes per note, SQLite transactions, signatures), then measure in release.
+  - Measure memory as well (dhat; idle node; many nodes per process).
+  - Rough targets: creating a note ~5–20 ms and flat with drawer size; replicating 10k notes in tens of seconds to a couple of minutes.
+  - The stress test stays at the legacy daybook scale.
+- **D25 slice 1 (infrastructure in place; release numbers not yet taken).** `big_node::e2e::costs` (the scale test is folded into it).
+  - Mechanism: a counting `GlobalAlloc` (the dhat-rs `HeapStats` / divan `AllocProfiler` technique). It is process-wide and off unless a costs test turns it on. It needs no new dependency and no lockfile churn. dhat itself was rejected: it takes a global mutex per allocation, allows one profiler per process and has no per-interval peak. Wall time is measured over a scripted workload, not with criterion or divan, because those assume alike iterations and cannot reach the `cfg(test)` harness. Allocations are the counted work; wall time is only reported (the `BandRun` precedent).
+  - `a_note_costs_no_more_to_create_in_a_fuller_drawer` (default run, about 50 s in debug) **pins the quadratic**: the median allocations for notes 6–10 against notes 26–30 must stay within 1.25×. Measured: 215,729 against 409,535 (1.9×). It fails until the fix lands.
+  - `long_test_cost_table` (default `BIG_NODE_COSTS_NOTES=10`, about 110 s in debug) prints `COST` lines. Release: `BIG_NODE_COSTS_NOTES=N cargo nextest run --release -p big_node --no-capture -E 'test(/costs::/)'`.
+  - Debug findings (x86 laptop, 10 notes):
+    - Creating a note costs 1.4 s and allocates about 250 MiB in total (peak about 1 MiB).
+    - INSTR split per note: two drawer `enter`s of about 250–550 ms each. Of that, a keyhive `grant_doc_access` takes about 200 ms; the roster `WriteDatums` takes 87 ms at 1 entry and 300 ms at 13. `stage` accounts for about 100 ms per call at 13 entries and runs twice.
+    - Per-node footprint: a fresh node is 12 MiB of Rust heap and 73 MiB resident. Booting it takes 7 s and allocates 350 MiB.
+    - Storage: a note is 1,065 B saved and 3,368 B stored. The drawer roster grows by 383 B saved per entry but about 5.8 KB stored per change. The node directory grows by 57 KB per note (WAL included).
+    - Replication runs at 27 ms per note and is flat at 10 notes. Each dispatch `readDatums` takes about 25 ms on all three paths.
+- **D26. Drawer keyhive architecture.** Revisit against upstream `design/keyline/patterns.md` together with the Keyline migration. Topics: supply roles at Edit rather than Admin, flat vs nested child drawers, rotating roles, the steward pattern.
+- Naming: cabinet's self-doc `LocalDrawers.registry_id` is the known-drawers list, not the plug registry. Rename to `known_drawers_id` (proposed, not decided).
 
 ## In flight
 

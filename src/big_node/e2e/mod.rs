@@ -29,6 +29,7 @@ use std::collections::BTreeSet;
 
 mod blob_discovery;
 mod blobs;
+mod costs;
 mod dispatch;
 mod harness;
 mod ladder;
@@ -38,7 +39,6 @@ mod network;
 mod nodule_wasm;
 mod peers;
 mod plugs;
-mod scale;
 mod stress;
 
 const NOTE: &str = "org.example.note";

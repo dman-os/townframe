@@ -22,7 +22,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 
-const MAX_RESPONSE: usize = 1 << 20;
+pub(super) const MAX_RESPONSE: usize = 1 << 20;
 
 /// A node with the echo nodule enabled, listening as `listeners` says.
 async fn boot_listening(
@@ -59,7 +59,7 @@ pub(super) fn owner_only_directory(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-fn tcp() -> Listeners {
+pub(super) fn tcp() -> Listeners {
     Listeners {
         tcp: Some("127.0.0.1:0".parse().unwrap()),
         ..Default::default()
@@ -67,7 +67,7 @@ fn tcp() -> Listeners {
 }
 
 /// One plain XRPC procedure call: the status and the JSON body.
-async fn post(
+pub(super) async fn post(
     client: &XrpcClient,
     nsid: &str,
     authorization: Option<Authorization>,
@@ -84,7 +84,7 @@ async fn post(
     (response.status().as_u16(), response.json().await.unwrap())
 }
 
-fn tcp_client(node: &BigNode) -> XrpcClient {
+pub(super) fn tcp_client(node: &BigNode) -> XrpcClient {
     let address = node.listeners.tcp.expect("the node listens on TCP");
     XrpcClient::new(format!("http://{address}/").parse().unwrap(), MAX_RESPONSE).unwrap()
 }
