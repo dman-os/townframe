@@ -570,8 +570,8 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 ## To do (this PR)
 
 Items 2 and 4–10 of the original list are done (see Done). Left before the PR is review-ready:
-1. **Operator:** push the `../wasmCloud` `townframe-changes` bookmark, bump the `wash-runtime` rev in `Cargo.toml`, and drop the `file://` `[patch]` block. CI can't resolve it until then.
-2. Dispatch admission I/O: an in-memory actor-row cache in the authority service (see the [perf] follow-up below).
+1. Done (checked 2026-11-06): `townframe-changes` is on `dman-os/wasmCloud` origin at `e7648c6e`, `Cargo.toml` pins that rev, and no `file://` patch remains.
+2. Done (checked 2026-11-06): capabilities resolve, mint and retract in the in-memory cap ledger (`authority/cap.rs`), and actor rows are memoized in `actor_rows` (`cached_actor_row`); SQLite is only the durable store for actors and grants.
 3. Orphan dispatch authority after a crash: persist it or sweep it at boot (slice 2c follow-up).
 4. Compare the heavy `big_cabinet` drawer test timings against an origin/main baseline (our 4th boot drawer).
 5. Small cleanups: unify `owns_nsid`/`under`; a separate egress message-size constant.
@@ -637,5 +637,5 @@ Big_cabinet read/write options discussed with the operator 2026-11-06, deferred 
 - The seven questions at the end of `docs/scratch/nodule-lifecycle-review.md` (catalog role, dependency split, manifest reshape, init redesign, downgrades, retired prefixes, carried drawer-grant authority).
 - Live `SchemaRepo` registration of the nodule's own datum Lexicons. Nodules can't write their own datums without it. Is it in scope for this PR?
 
-- Commit the in-progress decisions to ADR 027 directly, or in a separate "revision" section first?
+- Resolved: ADR 027 was revised in place with D1–D6 (`01ea305b`).
 - Integer-format width: merge chose "bounds ⊆ format range; narrow formats require bounds". Confirm.
