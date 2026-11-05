@@ -124,6 +124,8 @@ pub fn ListDetails(
     }
     let covered = details.is_some();
     let raised = Layer::Raised.css();
+    let content = Layer::Content.css();
+    let list_events = if covered { "none" } else { "auto" };
     rsx! {
         div {
             class: skin.root,
@@ -134,7 +136,14 @@ pub fn ListDetails(
                 "aria-label": "{list_name}",
                 // Covered by the details, the list is out of reach of assistive technology.
                 "aria-hidden": covered.then_some("true"),
-                style: "width:100%;height:100%",
+                // A layer of its own makes the list one stacking context on `Content`, below the
+                // details on `Raised`. Without it the list's app bar (a positioned `AppBar`-layer
+                // element) took part in the root's stacking order, painted over the details and
+                // intercepted their pointer events.
+                // `pointer-events:none` while covered takes the list out of hit-testing outright
+                // (`inert` is not in the guest wire vocabulary), so nothing in it can take a
+                // click meant for the details even if it paints above them.
+                style: "position:relative;width:100%;height:100%;z-index:{content};pointer-events:{list_events}",
                 {list}
             }
             if let Some(details) = details {
@@ -220,6 +229,24 @@ mod tests {
             page.style(details, "z-index").as_deref(),
             Some(Layer::Raised.css())
         );
+    }
+
+    #[test]
+    fn compact_covered_list_is_inert_and_on_a_layer_below_the_details() {
+        let (page, _) = render(WidthClass::Compact, true);
+        let details = page.by_role("region", "Inbox settings");
+        let list = page.children(page.parent(details))[0];
+        assert_eq!(page.style(list, "pointer-events").as_deref(), Some("none"));
+        assert_eq!(page.attr(list, "aria-hidden").as_deref(), Some("true"));
+        assert_eq!(page.style(list, "position").as_deref(), Some("relative"));
+        assert_eq!(
+            page.style(list, "z-index").as_deref(),
+            Some(Layer::Content.css())
+        );
+        assert!(Layer::Content < Layer::Raised);
+        let (page, _) = render(WidthClass::Compact, false);
+        let list = page.by_role("region", "Settings");
+        assert_eq!(page.style(list, "pointer-events").as_deref(), Some("auto"));
     }
 
     #[test]
