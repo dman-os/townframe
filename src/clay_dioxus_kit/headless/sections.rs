@@ -19,6 +19,7 @@
 //!   mid-gesture, and element-relative coordinates would jump with it.
 //! * `tabindex` panics Blitz, so keyboard resizing is opt-in through [`Split::keyboard`]: the
 //!   web build turns it on, the native build leaves it off.
+use crate::Layer;
 use dioxus::prelude::*;
 use std::rc::Rc;
 
@@ -164,8 +165,10 @@ struct Drag {
 }
 
 /// Width of a handle's hit area, in px. It overlaps the neighbouring panes (negative margins), so
-/// it takes no layout space but is wide enough to grab with a finger.
-const HANDLE_HIT_PX: f64 = 16.0;
+/// it takes no layout space. It is the one pressable narrower than the 48 px touch target
+/// (`KIT-106`): a pane's own edge, with its scrollbar and first controls, lies under half of it.
+/// This is the WCAG 2.5.8 minimum.
+const HANDLE_HIT_PX: f64 = 24.0;
 
 /// What a handle announces about the pair of panes it divides.
 struct HandleView {
@@ -232,8 +235,13 @@ pub fn Sections(
         drag.write().take();
     });
     let handle_style = format!(
-        "position:relative;z-index:10;flex:none;touch-action:none;cursor:col-resize;width:{HANDLE_HIT_PX}px;margin:0 -{}px",
+        "position:relative;z-index:{};flex:none;touch-action:none;cursor:col-resize;width:{HANDLE_HIT_PX}px;margin:0 -{}px",
+        Layer::Raised.css(),
         HANDLE_HIT_PX / 2.0
+    );
+    let gesture_style = format!(
+        "position:fixed;top:0;right:0;bottom:0;left:0;z-index:{};cursor:col-resize;touch-action:none",
+        Layer::Gesture.css()
     );
     let tabindex = split.keyboard.then_some("0");
     let dragging_handle = drag().map(|drag| drag.handle);
@@ -296,7 +304,7 @@ pub fn Sections(
             if drag().is_some() {
                 div {
                     role: "presentation",
-                    style: "position:fixed;top:0;right:0;bottom:0;left:0;z-index:50;cursor:col-resize;touch-action:none",
+                    style: "{gesture_style}",
                     onpointermove: move |event| track.call(event),
                     onpointerup: move |_| release.call(()),
                     onpointerleave: move |_| release.call(()),
@@ -314,8 +322,9 @@ fn pane_style(weight: f64, rule: &SizeRule) -> String {
         String::new()
     };
     format!(
-        "flex:{weight} 1 0px;min-width:{}px;min-height:0;position:relative{max}",
-        rule.min
+        "flex:{weight} 1 0px;min-width:{}px;min-height:0;position:relative;z-index:{}{max}",
+        rule.min,
+        Layer::Content.css()
     )
 }
 
@@ -491,6 +500,24 @@ mod tests {
         assert_eq!(page.attr(handle, "data-state").as_deref(), Some("idle"));
         let sidebar = page.by_role("region", "Sidebar");
         assert_eq!(page.style(sidebar, "flex").as_deref(), Some("1 1 0px"));
+    }
+
+    #[test]
+    fn panes_handles_and_the_gesture_overlay_stack_on_the_layer_scale() {
+        let (mut page, _) = render(false);
+        let layer = |page: &Page, node| page.style(node, "z-index");
+        // A pane is a stacking context of its own, so what an app bar inside it does cannot
+        // climb over the handle that overlaps its edge.
+        let pane = page.by_role("region", "Sidebar");
+        assert_eq!(layer(&page, pane).as_deref(), Some(Layer::Content.css()));
+        let handle = page.by_role("separator", "Resize Sidebar and Content");
+        assert_eq!(layer(&page, handle).as_deref(), Some(Layer::Raised.css()));
+        // 24 px wide, centred on the seam: the one pressable under 48 px (`KIT-106`).
+        assert_eq!(page.style(handle, "width").as_deref(), Some("24px"));
+        assert_eq!(page.style(handle, "margin").as_deref(), Some("0 -12px"));
+        page.pointer(handle, "pointerdown", 200.0);
+        let overlay = page.by_role("presentation", "");
+        assert_eq!(layer(&page, overlay).as_deref(), Some(Layer::Gesture.css()));
     }
 
     #[test]

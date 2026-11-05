@@ -446,3 +446,41 @@ Blitz pins, `dayframe_desktop/e2e/blitz_limits.rs` (document level, blitz fork r
   border-built chevron are unverified on the native renderer.
 - Environment note: a fresh worktree needs the gitignored `src/*/wit/deps/` trees (copied from the main checkout here) before
   `dayframe_desktop` compiles; the first build in a new target dir took roughly 10 minutes.
+
+## K1 notes (kit design language, `feat/dayframe-kit-design`)
+
+What landed: kit rules `KIT-100` to `KIT-109` (README: width classes and what changes at each,
+one z-order scale, the scrim, sheet sizes, app-bar metrics, 48 px hit targets, the selected row,
+motion, safe areas), implemented in the kit and the foundation tokens. New tokens: `layer.*`
+(number), `motion.*` (new `duration` and `cubicBezier` types in `x/design-tokens.ts`, with
+self-tests), colour roles `scrim`, `selected`, `on-selected` (the Material adapter in `tokens.css`
+maps `selected`); `ui/styles/motion.css` (keyframes and `animate-*`); `INTERACTION-007`
+(reduced motion). Kit: `Layer` (public, mirrors `layer.*`, tested against the JSON), shared
+`SCRIM`, `Drawer { width }` (drops itself on a wide host; the shell no longer repeats the check),
+per-class `Sheet` skins (`w-96` medium, `w-128` expanded), `AppBar` (`h-14`, `data-state`
+leading/bare, `Layer::AppBar`), `NavButton` `size-12`, `ListRow` `min-h-12` and `bg-selected`,
+`Sections` handle 24 px on `Layer::Raised` with panes as `Layer::Content` contexts.
+
+Decisions and rejected alternatives:
+
+- **Layers as tokens, inline `var()`.** Headless parts write `z-index:var(--df-layer-x)` from the
+  `Layer` enum; a test reads `semantic.tokens.json` so the two cannot drift, another fails on any
+  numeric `z-index` in a headless part. Rejected: Rust constants alone (invisible to themes and
+  hosts that render a toast).
+- **No exit animations.** They need `animationend`, which Blitz and the guest wire do not deliver,
+  and timers are forbidden. Enter only; documented in `KIT-108`.
+- **Safe areas stay with the host.** A guest mounts the kit in its own tree and cannot read an
+  inset; the host pads its frame (S2b). Cost: scrims stop at the safe rectangle.
+- **Handle hit area 16 to 24 px**, not 48: it overlaps pane edges.
+- The scrim role overrides Material's opaque `--color-scrim` in the Tailwind theme (the Dayframe
+  token file loads after `material.css`), so `bg-scrim` is the 32% role, not black.
+
+Findings: the S1 review says "on compact a sheet is full height", but the committed skin was and
+remains `h-5/6` (a full-height sheet has no scrim to tap); kept 5/6, see questions. The committed
+`assets/tailwind.css` is prettier-formatted; no prettier here, so the diff was generated as a
+patch between two raw Tailwind runs (HEAD tree and this tree) and applied with whitespace
+tolerance.
+
+Product questions: (1) full-height compact sheet vs 5/6; (2) approve `INTERACTION-007` and the new
+foundation tokens (`layer`, `motion`, `scrim`, `selected`); (3) should overlay scrims bleed under
+the system bars once guests can learn insets; (4) a kit icon button for trailing app-bar actions.

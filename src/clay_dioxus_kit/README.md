@@ -44,14 +44,15 @@ the rest are enforced by review.
   that the headless part applies to its parts. The styled part is the only code that names
   classes, and it uses only Tailwind utilities that resolve to semantic tokens (`bg-surface`,
   `text-text`, `rounded-xl`, spacing steps); no palette utilities and no arbitrary values
-  (COMPOSE-001). The one `[...]` form allowed is Tailwind's `data-[state=...]` variant, which is
-  COMPOSE-003's "data attribute" variant mechanism. A second skin is a second set of strings
+  (COMPOSE-001). The only `[...]` forms allowed are Tailwind's `data-[state=...]` and
+  `group-data-[state=...]` variants (the latter styles a part from its group's state, as the
+  `Sections` grip does), which are COMPOSE-003's "data attribute" variant mechanism. A second skin is a second set of strings
   over the same headless part.
 - **KIT-012** Variants are explicit enum props (`NavButtonMode`, `WidthClass`). Styled components
   take no `class` or `style` pass-through (COMPOSE-003).
 - **KIT-013** Inline `style` in a headless part is limited to what breaks behaviour when it is
   missing: flex weights, an overlay's `position: fixed`, `touch-action`, a handle's hit area.
-  Geometry is px (FOUND-008); appearance never is.
+  Geometry is px (FOUND-008); appearance never is. A `z-index` is never a number here (`KIT-102`).
 
 ### Controlled state and callbacks
 
@@ -85,6 +86,7 @@ the rest are enforced by review.
   on that element too.
 - **KIT-042** Size limits and snap points are logical px props, not tokens: they describe a
   renderer or layout boundary. Rendering them as `rem` waits on FOUND-016 (the native root basis).
+  (Surface sizes, by contrast, are spacing steps: `KIT-104`, `KIT-105`.)
 
 ### Accessibility
 
@@ -100,6 +102,90 @@ the rest are enforced by review.
   tree may name (`clay_surface::render`'s vocabulary). Checked: the test harness mirrors the lists
   and panics on anything else. Inline `style` strings are passed whole and are not checked
   property by property.
+
+### Adaptive layout, layering and motion
+
+Rules `KIT-100` to `KIT-109` close the design-language gaps found while building the first
+components. The values live in the foundation tokens (`semantic.tokens.json`: `layer.*`,
+`motion.*`, the `scrim`, `selected` and `on-selected` colours) and the Tailwind spacing scale; the
+kit names them and never restates a number. Each rule is checked by a harness test in the module
+named after it.
+
+- **KIT-100** Three width classes, by logical px width: `Compact` below 600, `Medium` from 600,
+  `Expanded` from 840 (the Material window-size classes). The breakpoints are in `width.rs` and
+  nowhere else (`KIT-040`). Reason: one fact, classified once by the host, keeps every component's
+  arrangement consistent with every other's; three classes because phones, small tablets and
+  desktop windows want different sheet sizes while two panels side by side want only one rule
+  (`WidthClass::fits_side_by_side`, true from `Medium`).
+- **KIT-101** What changes at each class. Compact is the only class that stacks or overlays;
+  Medium and Expanded differ only in how big a surface is. Checked per component.
+
+  | Component | Compact (< 600) | Medium (600 to 839) | Expanded (>= 840) |
+  |---|---|---|---|
+  | `ListDetails` | one pane; details cover the list | list and details side by side | same |
+  | `Drawer` | left drawer over a scrim while `open` | never shown: the sidebar is a panel beside the content | same |
+  | `Sheet` | bottom sheet, 5/6 of the height | side sheet, 24rem | side sheet, 32rem |
+  | `AppBar` | 56 px bar | same | same |
+
+  The drawer takes the `width` and drops itself on a wider host, rather than leaving every owner
+  to repeat "drawer only when compact": a window that grows while the drawer is open then swaps it
+  for the side panel without the owner doing anything.
+- **KIT-102** One z-order scale, `Layer` (`layer.rs`): `Content`, `Raised`, `AppBar`, `Drawer`,
+  `Sheet`, `Toast`, `Gesture`, lowest first, mirroring the `layer.*` tokens (a test compares the
+  two). A headless part writes `z-index:{Layer::X.css()}`, which is a `var(--df-layer-x)`; a
+  numeric `z-index` in a headless part fails a test. A pane is a `Content` stacking context so an
+  app bar inside it cannot climb over the resize handle (`Raised`) overlapping its edge. Reason:
+  the previous constants (10, 20, 40, 50) were each local choices, and an app bar needing a layer
+  of its own would have collided with them.
+- **KIT-103** The scrim. An overlay (`Drawer` while open, every `Sheet`) renders one: a button
+  named `Dismiss <name>` filling the overlay, under the panel by tree order (no `z-index` of its
+  own). It is always shown, dims with the `scrim` colour role (a fixed 32% black, so it darkens a
+  light and a dark theme alike, where `text` at low opacity would lighten a dark one), and a press
+  on it calls `on_dismiss`, the same as Escape. Reason: dismissal by tapping outside is the one
+  path every renderer delivers (Escape needs a focused element, which Blitz cannot give). The
+  consequence for sizing: no panel covers its overlay (`KIT-104`), or the scrim could not be
+  reached. A skin takes the shared `SCRIM` classes and may not restyle them.
+- **KIT-104** Sheet size follows the width class (`KIT-101`): a bottom sheet is 5/6 of the host
+  height and the full width; a side sheet is 24rem (`Medium`) or 32rem (`Expanded`), at most 5/6
+  of the width. Reason: a phone sheet is a task, so it takes most of the screen, but leaves the
+  scrim strip to tap; a wide window's side sheet is a complement to the content, so it keeps a
+  fixed reading width instead of growing with the window.
+- **KIT-105** App bar metrics: 56 px (`h-14`) tall and fixed; a 48 px nav button 8 px from the
+  leading edge; the title a single `h2` line (ellipsis when it does not fit, the bar never grows)
+  8 px after the leading slot, or, with no leading slot, 16 px from the edge so it lines up with
+  page content (`data-state="bare"`); trailing actions are 48 px targets (`KIT-106`) at the end.
+  The bar is on `Layer::AppBar`. Reason: a fixed height keeps content from jumping between panels
+  and a title that wrapped would push it by an unpredictable amount.
+- **KIT-106** Every pressable is at least 48 logical px on both axes (Material's touch minimum):
+  `NavButton` is `size-12`, a `ListRow` `min-h-12`, a scrim is the whole overlay. The one
+  exception is the `Sections` resize handle, 24 px wide (the WCAG 2.5.8 minimum): it overlaps the
+  pane edges on both sides, and 48 px would put a pane's own scrollbar and first controls under
+  it. Sizes are spacing steps (`rem`), so they equal 48 px only while the root font size is 16 px
+  (FOUND-016 is open for native).
+- **KIT-107** The open row of a list is `ListRow`'s `aria-current="true"` (a button cannot be
+  `aria-selected`) plus `data-state="current"`, painted with the `selected` / `on-selected`
+  colour roles, which alias the accent container today and which a theme may change. Exactly one
+  row of a scaffold is current, because the scaffold owner supplies the one key (`KIT-022`). The
+  wire vocabulary carries `aria-current` and `data-state`, so a guest's row can say the same.
+- **KIT-108** Motion. Overlays enter, they do not exit: the drawer slides in from the leading
+  edge, a bottom sheet rises, a side sheet slides in from the trailing edge, and every scrim fades
+  in (`animate-slide-in-*`, `animate-fade-in` in `ui/styles/motion.css`; durations and easing are
+  the `motion.*` tokens: 250 ms for panels, 150 ms for the scrim, one decelerate curve). Every
+  animation class is paired with `motion-reduce:animate-none` (INTERACTION-007). Reason for no
+  exit: an exit keeps the closed surface mounted until its animation ends, which needs
+  `animationend`, and neither Blitz nor the guest wire delivers it; a timer standing in for it is
+  forbidden (`KIT-071`). A dismissed surface disappears at once. Blitz does not evaluate
+  `prefers-reduced-motion`, so natively the entry animation always plays. Checked: skin tests
+  pin the classes; whether Blitz renders the keyframes is a screenshot matter (the ledger's K1
+  notes).
+- **KIT-109** Safe areas never reach the kit. A host pads its whole frame by the system insets
+  (`dayframe_composition::Application` does) and hands the shell the size that remains, so every
+  surface, including an overlay and its scrim, lies inside the safe rectangle and the system bars
+  show the window behind. Reason: a Wasm guest mounts `AppBar` and `ListRow` in its own tree, with
+  no context to read an inset from, so a per-component inset prop would work only for the shell's
+  own panels and leave guests under the status bar. The cost: a scrim does not extend under the
+  status bar. Letting overlays bleed to the screen edge needs a way to hand insets to guests and is
+  not designed yet.
 
 ### Tests and specimens
 
@@ -132,26 +218,12 @@ the rest are enforced by review.
 
 ## Design-language gaps
 
-Found while building the first four components. Each used the nearest existing token; none were
-invented. They are filed in the format of the `dayframe-design-language` skill in the PR report.
-
-- No **breakpoint** scale: `WidthClass` defines 600 / 840 px (the Material window-size classes)
-  in `width.rs`.
-- No **scrim / overlay** role: `Sheet` dims with `bg-surface-sunken opacity-80`, the nearest token that darkens in both themes (`text` at low opacity lightens a dark theme).
-- No **layering** scale: `z-index` values (10 handle, 20 covering details, 40 sheet, 50 gesture
-  overlay) are structural constants in the headless parts.
-- No **sheet size** vocabulary: `h-5/6` (compact bottom sheet) and `w-96` (side sheet) are
-  Tailwind fraction/spacing utilities.
-- No **motion** tokens, so nothing animates (INTERACTION-004): `Drawer` appears and disappears
-  instead of sliding from the leading edge.
-- No **selected-row** role: `ListRow` marks the open row with `accent-container` /
-  `on-accent-container`, the nearest tokens.
-- No **app-bar** metrics: `AppBar` is padding around a 44 px button (`size-11`) and an `h2`.
 - No **directionality**: "leading" is the left edge; there is no right-to-left layout.
-- No **safe-area** vocabulary: hosts own insets (`micro_shell::HostInputs::insets`) and the kit
-  never reads them.
-- No **hit-target size** token: the 16 px handle hit area and the `size-11` (44 px) nav button are
-  hard-coded.
+- The `motion.*` and `layer.*` tokens are consumed by the kit but `INTERACTION-004` asks for the
+  reduced-motion rule first; `INTERACTION-007` is that rule, added with the tokens and awaiting
+  the design owner's approval.
+- No **icon button**: trailing app-bar actions are the caller's own buttons, held to `KIT-106` by
+  review only.
 
 ## Open work
 

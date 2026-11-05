@@ -7,19 +7,24 @@
 //! prop, and a closed drawer renders nothing (its content is unmounted, not hidden). It fills its
 //! nearest positioned ancestor, like the sheet, so the panel that owns it decides what it covers.
 //!
+//! It sits on [`Layer::Drawer`], scrim and panel together (see `layer.rs`); tapping the scrim
+//! dismisses it, because the scrim is the whole area the panel does not cover (`KIT-103`).
+//!
 //! "Leading" is the left edge: the kit has no right-to-left layout yet (see the README's
 //! design-language gaps).
 //!
 //! # Renderer limits
 //!
-//! There is no slide: the design language has no motion tokens (`INTERACTION-004`), so the drawer
-//! appears and disappears. Dismissal is the scrim button (every renderer), Escape (where the
+//! The drawer slides in from the leading edge (a skin animation, `KIT-108`) but does not slide
+//! out: an exit would keep the closed drawer mounted until its animation ends, and neither Blitz
+//! nor the guest wire reports that, so a closed drawer is gone at once. Dismissal is the scrim button (every renderer), Escape (where the
 //! renderer delivers key events inside the drawer: not on Blitz today) and whatever the owner
 //! wires to `on_dismiss`, such as the platform back gesture. Focus is neither trapped nor
 //! restored, for the reason documented on `Sheet`; the web build needs both before it ships
 //! (`KIT-052`). A swipe from the screen edge is not handled: Blitz touch drags become scroll pans
 //! and Android reserves the edge for the system back gesture (the Android findings in the shell
 //! ledger).
+use crate::Layer;
 use dioxus::prelude::*;
 
 /// The classes a skin gives each part of [`Drawer`]. The panel's width belongs here.
@@ -41,12 +46,13 @@ pub fn Drawer(
     if !open {
         return rsx! {};
     }
+    let layer = Layer::Drawer.css();
     rsx! {
         div {
             class: skin.root,
             "data-state": "open",
             "data-value": "leading",
-            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:40;display:flex;flex-direction:row;justify-content:flex-start",
+            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{layer};display:flex;flex-direction:row;justify-content:flex-start",
             button {
                 class: skin.scrim,
                 r#type: "button",
@@ -116,6 +122,16 @@ mod tests {
             Some("leading")
         );
         assert!(page.has_role("button", "Home"));
+    }
+
+    #[test]
+    fn the_overlay_is_on_the_drawer_layer() {
+        let (page, _) = render(true);
+        let root = page.parent(page.by_role("dialog", "Sidebar"));
+        assert_eq!(
+            page.style(root, "z-index").as_deref(),
+            Some(Layer::Drawer.css())
+        );
     }
 
     #[test]

@@ -3,7 +3,6 @@
 //! The kit never measures, so a specimen is a fixed-size frame whose width is both its CSS width
 //! and the `WidthClass` / split extent it hands the component: the same contract a real host
 //! (the shell) follows with its window.
-use clay_dioxus_kit::use_list_details;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
@@ -17,6 +16,7 @@ use clay_dioxus_kit::SizeRule;
 use clay_dioxus_kit::Snap;
 use clay_dioxus_kit::Split;
 use clay_dioxus_kit::WidthClass;
+use clay_dioxus_kit::use_list_details;
 use dioxus::prelude::*;
 
 const COMPACT_PX: f64 = 390.0;
@@ -115,10 +115,12 @@ pub fn KitSpecimens(only: Option<String>) -> Element {
                 div {
                     class: "flex flex-wrap items-start gap-8",
                     Frame { title: "Drawer", width_px: COMPACT_PX,
-                        DrawerSpecimen {}
+                        DrawerSpecimen { width_px: COMPACT_PX }
                     }
-                    Frame { title: "Drawer", width_px: EXPANDED_PX,
-                        DrawerSpecimen {}
+                    // Wide hosts show the sidebar beside the content, never a drawer: this frame
+                    // stays empty on purpose (`KIT-101`).
+                    Frame { title: "Drawer (never shown at this width)", width_px: EXPANDED_PX,
+                        DrawerSpecimen { width_px: EXPANDED_PX }
                     }
                 }
             }
@@ -282,7 +284,7 @@ fn AppBarSpecimen() -> Element {
             leading: rsx! { NavButton { mode: NavButtonMode::Sidebar, onclick: |_| {} } },
             trailing: rsx! {
                 button {
-                    class: "cursor-pointer rounded-md px-3 py-2 text-text hover:bg-surface-sunken",
+                    class: "min-h-12 cursor-pointer rounded-md px-3 text-text hover:bg-surface-sunken",
                     "Search"
                 }
             },
@@ -291,7 +293,8 @@ fn AppBarSpecimen() -> Element {
 }
 
 #[component]
-fn DrawerSpecimen() -> Element {
+fn DrawerSpecimen(width_px: f64) -> Element {
+    let width = WidthClass::from_px(width_px);
     let mut open = use_signal(|| true);
     rsx! {
         div {
@@ -302,7 +305,7 @@ fn DrawerSpecimen() -> Element {
                 "Open drawer"
             }
         }
-        Drawer { name: "Sidebar", open: open(), on_dismiss: move |()| open.set(false),
+        Drawer { width, name: "Sidebar", open: open(), on_dismiss: move |()| open.set(false),
             nav {
                 class: "flex flex-col gap-1 p-2",
                 "aria-label": "Specimen sidebar",
@@ -310,7 +313,7 @@ fn DrawerSpecimen() -> Element {
                 for title in ["Home", "Settings", "Layout"] {
                     button {
                         key: "{title}",
-                        class: "block w-full cursor-pointer rounded-md px-4 py-3 text-left text-text hover:bg-surface-sunken",
+                        class: "block min-h-12 w-full cursor-pointer rounded-md px-4 text-left text-text hover:bg-surface-sunken",
                         "{title}"
                     }
                 }

@@ -15,6 +15,7 @@ use super::sections::SectionPane;
 use super::sections::Sections;
 use super::sections::SectionsSkin;
 use super::sections::Split;
+use crate::Layer;
 use crate::WidthClass;
 use dioxus::prelude::*;
 
@@ -122,6 +123,7 @@ pub fn ListDetails(
         };
     }
     let covered = details.is_some();
+    let raised = Layer::Raised.css();
     rsx! {
         div {
             class: skin.root,
@@ -140,7 +142,7 @@ pub fn ListDetails(
                     class: skin.details,
                     role: "region",
                     "aria-label": "{details_name}",
-                    style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:20",
+                    style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{raised}",
                     {details}
                 }
             }
@@ -208,6 +210,16 @@ mod tests {
         assert!(page.has_role("region", "Inbox settings"));
         assert!(!page.has_role("region", "Settings"), "{}", page.outline());
         assert!(!page.has_role("button", "Inbox"));
+    }
+
+    #[test]
+    fn compact_details_cover_the_list_on_the_raised_layer() {
+        let (page, _) = render(WidthClass::Compact, true);
+        let details = page.by_role("region", "Inbox settings");
+        assert_eq!(
+            page.style(details, "z-index").as_deref(),
+            Some(Layer::Raised.css())
+        );
     }
 
     #[test]

@@ -5,12 +5,19 @@
 //! positioned ancestor (`position: absolute`, not `fixed`), so the panel that owns it decides
 //! what it covers and a specimen can show it inside a frame.
 //!
+//! It sits on [`Layer::Sheet`], scrim and panel together (see `layer.rs`). The scrim is whatever
+//! the panel does not cover and tapping it dismisses the sheet (`KIT-103`), so a panel must leave
+//! some of the host uncovered: the skin sizes it to.
+//!
 //! # Renderer limits
 //!
-//! Dismissal paths are the scrim button (every renderer) and Escape (where the renderer
+//! The sheet rises (bottom) or slides in (side) with a skin animation (`KIT-108`) but has no
+//! exit animation: that would keep the dismissed sheet mounted until the animation ends, and
+//! neither Blitz nor the guest wire reports it. Dismissal paths are the scrim button (every renderer) and Escape (where the renderer
 //! delivers key events to the sheet, which needs focus inside it: not on Blitz today). Focus is
 //! neither trapped nor restored, because Blitz has no focus API to build either on; the web
 //! build needs both before it ships (`KIT-052`).
+use crate::Layer;
 use crate::WidthClass;
 use dioxus::prelude::*;
 
@@ -59,12 +66,13 @@ pub fn Sheet(
         SheetPlacement::Bottom => "column",
         SheetPlacement::Side => "row",
     };
+    let layer = Layer::Sheet.css();
     rsx! {
         div {
             class: skin.root,
             "data-state": "open",
             "data-value": placement.value(),
-            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:40;display:flex;flex-direction:{direction};justify-content:flex-end",
+            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{layer};display:flex;flex-direction:{direction};justify-content:flex-end",
             button {
                 class: skin.scrim,
                 r#type: "button",
@@ -161,6 +169,17 @@ mod tests {
                 Some(value)
             );
         }
+    }
+
+    #[test]
+    fn the_overlay_is_on_the_sheet_layer_above_the_drawer() {
+        let (page, _) = render(SheetPlacement::Bottom);
+        let root = page.parent(page.by_role("dialog", "Pick a file"));
+        assert_eq!(
+            page.style(root, "z-index").as_deref(),
+            Some(Layer::Sheet.css())
+        );
+        assert!(Layer::Sheet > Layer::Drawer);
     }
 
     #[test]

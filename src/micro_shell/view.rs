@@ -385,9 +385,9 @@ fn Frame(shell: Shell) -> Element {
         }
     };
     let sheet = sheet_element(&shell, width, frame.overlay, &panels);
-    // A drawer is for a host with no room for the sidebar beside the content; a window that grew
+    // The drawer shows itself only on a compact host (`Drawer` checks `width`): a window that grew
     // wide while it was open shows the sidebar instead.
-    let drawer_open = matches!(frame.overlay, Some(Overlay::Sidebar)) && !width.fits_side_by_side();
+    let drawer_open = matches!(frame.overlay, Some(Overlay::Sidebar));
 
     rsx! {
         div {
@@ -415,6 +415,7 @@ fn Frame(shell: Shell) -> Element {
                 {list_details}
             }
             Drawer {
+                width,
                 name: "Sidebar",
                 open: drawer_open,
                 on_dismiss: {
@@ -550,13 +551,12 @@ fn NavigationButton(shell: Shell) -> Element {
     // details are open beside it; otherwise the button stays the way to bring a hidden sidebar
     // back (the platform gesture still goes back).
     let has_details = state.navigation.frame().details.is_some();
-    let mode = if state.navigation.can_back()
-        && !(wide && placement == Placement::Main && !has_details)
-    {
-        NavButtonMode::Back
-    } else {
-        NavButtonMode::Sidebar
-    };
+    let mode =
+        if state.navigation.can_back() && !(wide && placement == Placement::Main && !has_details) {
+            NavButtonMode::Back
+        } else {
+            NavButtonMode::Sidebar
+        };
     if mode == NavButtonMode::Sidebar && wide && !state.sidebar_hidden {
         return rsx! {};
     }
