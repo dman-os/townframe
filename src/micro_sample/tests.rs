@@ -16,6 +16,19 @@ use clay_mdk::host::factory;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
+// The greeting field clamps what the viewer types. A cut through a multi-byte character panicked
+// the browser build's event listener (found by Bombadil typing "🀃|Ä0RｒbE…" into the field).
+#[test]
+fn a_long_greeting_is_clamped_to_characters_not_bytes() {
+    // Byte 120 falls inside a four-byte character, where `String::truncate(120)` panics.
+    let mut greeting = format!("x{}", "🀃".repeat(200));
+    view::clamp_greeting(&mut greeting);
+    assert_eq!(greeting.chars().count(), 120);
+    let mut short = "kept".to_owned();
+    view::clamp_greeting(&mut short);
+    assert_eq!(short, "kept");
+}
+
 // The manifest is wire data (ADR 015 §9); the snapshot follows the current shape so identity,
 // publication, or ACL drift is a reviewable diff.
 #[test]
