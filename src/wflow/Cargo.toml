@@ -11,10 +11,9 @@ path = "lib.rs"
 
 [features]
 default = ["test-harness"]
-test-harness = ["wasmtime", "insta", "tempfile"]
+test-harness = []
 
 [dependencies]
-#
 # internal
 wflow_core = { workspace = true, features = ["test-harness"] }
 wflow_tokio.workspace = true
@@ -22,45 +21,13 @@ wflow_wdk.workspace = true
 wash_plugin_wflow.workspace = true
 utils_rs = { workspace = true, features = ["hash"] }
 
-#
-# encoding
-serde_json.workspace = true
-
-#
-# error
-anyhow.workspace = true
-
-#
 # async
 async-trait.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "fs", "tracing"] }
-futures.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "fs"] }
 
-#
 # db
 sqlite_rs.workspace = true
 
-#
-# wasm
-wasmtime = { workspace = true, optional = true }
-
-#
-# testing
-insta = { workspace = true, optional = true, features = ["json"] }
-tempfile = { workspace = true, optional = true }
-
-#
-# log
-tracing.workspace = true
-
 [dev-dependencies]
 serde.workspace = true
-
-#
-# testing
-insta = { workspace = true, features = ["json"] }
 tempfile.workspace = true
-
-#
-# wasm
-wasmtime.workspace = true

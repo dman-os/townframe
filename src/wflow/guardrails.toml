@@ -22,15 +22,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
 code = "ERROR_LINT_REASON"
-path = "src/wflow/kvstore.rs"
-symbol = "module"
-ceiling = 2
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_LINT_REASON"
 path = "src/wflow/test.rs"
 symbol = "module::keyvalue_plugin"
 ceiling = 1
