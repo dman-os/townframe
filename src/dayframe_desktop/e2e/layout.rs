@@ -24,6 +24,7 @@ const SAMPLE_FLAG: &str =
     "section[aria-label=\"Sample micro panel\"] button[aria-label$=\"sample configuration flag\"]";
 const SHOW_COUNTER: &str = "button[aria-label=\"Show Counter (Wasm) panel\"]";
 const HIDE_COUNTER: &str = "button[aria-label=\"Hide Counter (Wasm) panel\"]";
+const HIDE_SAMPLE: &str = "button[aria-label=\"Hide Sample micro panel\"]";
 const SHOW_SAMPLE: &str = "button[aria-label=\"Show Sample micro panel\"]";
 const OPEN_LAYOUT: &str = "button[aria-label=\"Open Layout\"]";
 
@@ -312,4 +313,32 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
     })
     .await;
     assert_eq!(ui.text(COUNTER_INCREMENT), (before + 1).to_string());
+}
+
+// Hiding a panel withdraws its section and releases its provider, which closes the provider when
+// nothing else holds it. That must leave the layout, which does not depend on the sample's
+// lifetime, mounted and interactive: the panel can be shown and hidden again, round after round.
+// Found by the Bombadil exploration of the browser build (`src/dayframe_web/bombadil/shell.ts`):
+// the layout's whole region became "Component withdrawn." when the sample's panel was hidden,
+// because a guest task of the layout was suspended in the middle of its callback when the host
+// delivered a document change, and the task hook gave both the same stack (`clay_mdk`'s
+// `task_stacks`). Whether the two overlap depends on how the host's tasks interleave, so each
+// round is another chance to see it; the unit tests of `task_stacks` pin the hook's side.
+#[tokio::test(flavor = "current_thread")]
+async fn hiding_a_native_panel_leaves_the_layout_mounted() {
+    let Layout { mut ui, .. } = Layout::start_on(wasmi_runtime().await, &["dayframe.sample"]).await;
+    ui.wait_until("the sample's panel is mounted", |ui| ui.find(SAMPLE_FLAG).is_some())
+        .await;
+    for _round in 0..6 {
+        ui.click(HIDE_SAMPLE);
+        ui.wait_until("the sample's panel is gone", |ui| ui.find(SAMPLE_PANEL).is_none())
+            .await;
+        ui.wait_until("the layout offers the panel again", |ui| ui.find(SHOW_SAMPLE).is_some())
+            .await;
+        ui.click(SHOW_SAMPLE);
+        ui.wait_until("the sample's panel is mounted again", |ui| {
+            ui.find(SAMPLE_FLAG).is_some()
+        })
+        .await;
+    }
 }
