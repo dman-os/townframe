@@ -48,10 +48,6 @@ pub enum DispatchOnSuccessHook {
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveDispatchDeets {
     Wflow {
-        #[serde(default)]
-        wflow_partition_id: Option<String>,
-        #[serde(default)]
-        entry_id: Option<u64>,
         plug_id: String,
         #[serde(default)]
         routine_name: String,
@@ -152,7 +148,6 @@ struct DispatchState {
     active_dispatches: HashMap<String, Arc<ActiveDispatch>>,
     wflow_to_dispatch: HashMap<String, String>,
     cancelled_dispatches: HashSet<String>,
-    wflow_partition_frontier: HashMap<String, u64>,
     dispatch_head_index: HashMap<automerge::ChangeHash, String>,
 }
 
@@ -297,30 +292,6 @@ impl DispatchRepo {
 
     pub async fn get_any(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
         self.get(id).await
-    }
-
-    pub async fn get_wflow_part_frontier(&self, wflow_part_id: &str) -> Option<u64> {
-        self.state
-            .lock()
-            .await
-            .wflow_partition_frontier
-            .get(wflow_part_id)
-            .copied()
-    }
-
-    pub async fn set_wflow_part_frontier(&self, wflow_part_id: String, frontier: u64) -> Res<()> {
-        queries::set_wflow_part_frontier(
-            &self.repo_sql,
-            wflow_part_id.clone(),
-            i64::try_from(frontier).expect("frontier exceeds sqlite INTEGER range"),
-        )
-        .await?;
-
-        let mut state = self.state.lock().await;
-        state
-            .wflow_partition_frontier
-            .insert(wflow_part_id, frontier);
-        Ok(())
     }
 
     pub async fn get_by_wflow_job(&self, job_id: &str) -> Option<Arc<ActiveDispatch>> {
@@ -866,22 +837,6 @@ async fn load_state(repo_sql: &Database) -> Res<DispatchState> {
         .into_iter()
         .collect();
 
-    for queries::ListWflowPartFrontiersRow {
-        wflow_partition_id: part_id,
-        frontier,
-    } in queries::list_wflow_part_frontiers(repo_sql).await?
-    {
-        let frontier = match u64::try_from(frontier) {
-            Ok(value) => value,
-            Err(_) => {
-                eyre::bail!(
-                    "invalid negative frontier row in sqlite: part_id={part_id} frontier={frontier}"
-                );
-            }
-        };
-        state.wflow_partition_frontier.insert(part_id, frontier);
-    }
-
     Ok(state)
 }
 
@@ -945,8 +900,6 @@ mod tests {
     fn active_dispatch(job_id: &str) -> Arc<ActiveDispatch> {
         Arc::new(ActiveDispatch {
             deets: ActiveDispatchDeets::Wflow {
-                wflow_partition_id: Some("part-a".into()),
-                entry_id: None,
                 plug_id: "@test/plug".into(),
                 routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
@@ -980,8 +933,6 @@ mod tests {
     fn waiting_dispatch(job_id: &str, waits_on: &[&str]) -> Arc<ActiveDispatch> {
         Arc::new(ActiveDispatch {
             deets: ActiveDispatchDeets::Wflow {
-                wflow_partition_id: None,
-                entry_id: None,
                 plug_id: "@test/plug".into(),
                 routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
@@ -1036,7 +987,7 @@ mod tests {
                 .await
                 .as_ref()
                 .map(|dispatch| &dispatch.deets),
-            Some(ActiveDispatchDeets::Wflow { entry_id: None, .. })
+            Some(ActiveDispatchDeets::Wflow { .. })
         ));
         assert!(repo.get_by_wflow_job("job-1").await.is_some());
 
@@ -1085,8 +1036,6 @@ mod tests {
         repo.activate_waiting(
             "wait-1",
             ActiveDispatchDeets::Wflow {
-                wflow_partition_id: Some("part-b".into()),
-                entry_id: Some(9),
                 plug_id: "@test/plug".into(),
                 routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
@@ -1101,7 +1050,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_reload_persists_dispatch_rows_and_frontier() -> Res<()> {
+    async fn sqlite_reload_persists_dispatch_rows() -> Res<()> {
         let temp = tempfile::tempdir()?;
         let sql_cfg = crate::app::SqlConfig::file(temp.path().join("dispatch.sqlite"));
         let runtime = sqlite_rs::SqliteRuntime::new(default());
@@ -1109,7 +1058,6 @@ mod tests {
         let sql = crate::app::open_database(&runtime, sql_cfg.clone()).await?;
         let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
         repo.add("disp-a".into(), active_dispatch("job-a")).await?;
-        repo.set_wflow_part_frontier("part-1".into(), 44).await?;
         assert!(repo.mark_cancelled("disp-a").await?);
         drop(repo);
         drop(sql);
@@ -1121,7 +1069,6 @@ mod tests {
             .await
             .ok_or_else(|| eyre::eyre!("missing persisted dispatch"))?;
         assert_eq!(loaded.status, DispatchStatus::Active);
-        assert_eq!(repo.get_wflow_part_frontier("part-1").await, Some(44));
         assert!(!repo.mark_cancelled("disp-a").await?);
         assert!(matches!(
             repo.events_for_init().await?.first(),

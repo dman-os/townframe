@@ -212,14 +212,10 @@ impl JobHandle {
         read_receipt(&self.reader, &self.key).await
     }
 
-    /// Resolves once this job has a durable terminal outcome; `None` if the
-    /// key is unknown.
-    ///
-    /// Race-free when the job settles before or during registration: subscribes
-    /// to completion notifications first, checks the durable terminal receipt
-    /// via [`Self::get_result`], and if still active awaits the wakeup hint
-    /// before reading the authoritative durable receipt.
-    pub async fn await_result(&self) -> Option<types::JobResult> {
+    /// Resolves once this job has a durable terminal receipt; `None` if unknown.
+    /// Registration is performed by the authority actor before the durable
+    /// receipt check, so settlement cannot race this waiter.
+    pub async fn await_receipt(&self) -> Option<authority::Receipt> {
         let (reply, response) = oneshot::channel();
         self.commands
             .upgrade()
@@ -232,15 +228,20 @@ impl JobHandle {
             .expect(ERROR_ACTOR);
         match response.await.expect(ERROR_ACTOR) {
             WatchState::Unknown => None,
-            WatchState::Settled => self.get_result().await.unwrap(),
+            WatchState::Settled => self.receipt().await.unwrap(),
             WatchState::Active { wakeup } => {
-                if let Some(result) = self.get_result().await.unwrap() {
-                    return Some(result);
+                if let Some(receipt) = self.receipt().await.unwrap() {
+                    return Some(receipt);
                 }
                 wakeup.await.ok()?;
-                self.get_result().await.unwrap()
+                self.receipt().await.unwrap()
             }
         }
+    }
+
+    /// Resolves once this job has a durable terminal outcome; `None` if unknown.
+    pub async fn await_result(&self) -> Option<types::JobResult> {
+        self.await_receipt().await.as_ref().map(decode_receipt)
     }
 }
 
@@ -262,7 +263,7 @@ impl Default for AuthorityRuntimeConfig {
 pub struct AuthorityRuntime {
     commands: mpsc::Sender<Command>,
     reader: JournalReader,
-    actor: tokio::task::JoinHandle<()>,
+    actor: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 enum WatchState {
@@ -290,6 +291,9 @@ enum Command {
         key: String,
         reason: String,
         reply: oneshot::Sender<Result<authority::Ack, CancelError>>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<()>,
     },
 }
 
@@ -380,7 +384,7 @@ impl AuthorityRuntime {
         Ok(Self {
             commands,
             reader,
-            actor: tokio::spawn(actor.run(commands_rx)),
+            actor: tokio::sync::Mutex::new(Some(tokio::spawn(actor.run(commands_rx)))),
         })
     }
 
@@ -475,11 +479,20 @@ impl AuthorityRuntime {
         self.get_result(key).await
     }
 
-    /// Stops the actor, cancelling live invocations, and releases the journal
-    /// writer. Panics if the actor failed.
-    pub async fn stop(self) {
-        drop(self.commands);
-        self.actor.await.unwrap();
+    /// Stops the actor through an explicit command, forcing its final snapshot
+    /// before the shared runtime owner is released. Panics if the actor failed.
+    pub async fn stop(&self) {
+        let mut actor = self.actor.lock().await;
+        let Some(actor_handle) = actor.take() else {
+            return;
+        };
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(Command::Shutdown { reply })
+            .await
+            .expect(ERROR_ACTOR);
+        response.await.expect(ERROR_ACTOR);
+        actor_handle.await.unwrap();
     }
 
     async fn send(&self, command: Command) {
@@ -601,6 +614,11 @@ impl<W: Writer> Actor<W> {
             let maintenance_deadline = self.dirty_since.map(|since| since + SNAPSHOT_INTERVAL);
             tokio::select! {
                 command = commands.recv() => match command {
+                    Some(Command::Shutdown { reply }) => {
+                        self.final_snapshot().await;
+                        let _cancelled = reply.send(());
+                        break;
+                    }
                     Some(command) => self.handle_command(command).await,
                     None => {
                         self.final_snapshot().await;
@@ -736,6 +754,7 @@ impl<W: Writer> Actor<W> {
                 self.settle_intents(intents);
                 let _cancelled = reply.send(Ok(ack));
             }
+            Command::Shutdown { .. } => unreachable!("shutdown is handled by the actor loop"),
         }
     }
 

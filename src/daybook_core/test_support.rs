@@ -37,79 +37,25 @@ pub struct DaybookTestCxOptions {
 impl DaybookTestContext {
     /// Wait until there are no active jobs, with a timeout
     pub async fn _wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
-        use tokio::time::Duration;
-        use tokio::time::Instant;
-
-        let start = Instant::now();
-        let timeout_duration = Duration::from_secs(timeout_secs);
-        let mut change_rx = self.rt.wflow_part_state.change_receiver();
-
-        // Get initial counts without holding a lock
-        let mut counts = *change_rx.borrow();
-        if counts.active == 0 && counts.archive > 0 {
-            // No active jobs, we're done
-            tracing::info!(
-                "done, {} active jobs, {} archived jobs",
-                counts.active,
-                counts.archive
-            );
-            return Ok(());
-        }
-
-        loop {
-            // Calculate remaining time
-            let elapsed = start.elapsed();
-            let remaining = timeout_duration.saturating_sub(elapsed);
-            if remaining.is_zero() {
-                return Err(ferr!(
-                    "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
-                    timeout_secs,
-                    elapsed,
-                    counts.active
-                ));
+        use crate::repos::Repo;
+        use crate::repos::SubscribeOpts;
+        let listener = self.dispatch_repo.subscribe(SubscribeOpts::new(128));
+        tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), async {
+            loop {
+                if self.dispatch_repo.list().await.iter().all(|(_, dispatch)| {
+                    !matches!(dispatch.status, crate::rt::dispatch::DispatchStatus::Active)
+                }) {
+                    return Ok::<(), eyre::Report>(());
+                }
+                listener
+                    .recv_async()
+                    .await
+                    .map_err(|err| eyre::eyre!("dispatch listener closed: {err:?}"))?;
             }
-
-            tracing::debug!(
-                "Waiting for count change or timeout (active jobs: {}, remaining: {:?})",
-                counts.active,
-                remaining
-            );
-
-            // Wait for the next count change or timeout
-            match tokio::time::timeout(remaining, change_rx.changed()).await {
-                Ok(Ok(())) => {
-                    // Counts changed, update our local copy
-                    counts = *change_rx.borrow();
-                    if counts.active == 0 && counts.archive > 0 {
-                        // No active jobs, we're done
-                        tracing::info!(
-                            "done, {} active jobs, {} archived jobs",
-                            counts.active,
-                            counts.archive
-                        );
-                        return Ok(());
-                    }
-                    // Continue waiting
-                    tracing::debug!("Counts changed, rechecking active jobs");
-                    continue;
-                }
-                Ok(Err(_)) => {
-                    // Channel closed, worker might be shutting down
-                    return Err(ferr!("worker state channel closed"));
-                }
-                Err(_) => {
-                    // Timeout reached
-                    let final_elapsed = start.elapsed();
-                    let final_counts = self.rt.wflow_part_state.get_job_counts().await;
-                    return Err(ferr!(
-                        "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
-                        timeout_secs,
-                        final_elapsed,
-                        final_counts.active
-                    ));
-                }
-            }
-        }
+        })
+        .await
+        .map_err(|_| ferr!("timeout waiting for no active workflow dispatches"))??;
+        Ok(())
     }
 
     pub async fn stop(self) -> Res<()> {
