@@ -94,6 +94,7 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - `../keyhive` and `../subduction` are ours to instrument. Ask before *concluding* a bug is upstream, not before adding a log line.
 - Keep instrumentation in its own commit, separate from fixes and pin bumps: the forks move and the logs must be droppable independently.
 - Diagnosis playbooks live in `.agents/skills/`: `stress-sync-investigation` (hunt loop, log triage, load-only hangs), `fork-pinning-and-upstream-sync` (patch/pin lifecycle, upstream PRs, CI), `rr-debugging` (deterministic repros only), `message-ordering-audit` (causal ordering across hub command/event/mailbox surfaces).
+- Performance and memory investigations have `.agents/skills/perf-investigation` (costs.rs harness, release wall vs CPU, census by operation, SQLite lease counters, `strace -c`, critical-path waits vs background load; `x/instr-summary.ts` summarizes INSTR samples).
 - Dayframe UI work has its own playbooks in `.agents/skills/`: `dayframe-design-language` (tokens, components, layout contract), `dayframe-native-dev-loop` (native build, screenshots, AT-SPI inspection), `blitz-dioxus-native-limits` (pinned Blitz capability bounds).
 - Cabinet datum/Lexicon work has its own playbook in `.agents/skills/`: `lexicon-authoring` (open unions, string vocabularies, empty-member convention, unknown-member carrying, admission/codec test chain).
 - Browser automation has `.agents/skills/playwright` (flake-pinned browser farm, per-package `@playwright/test` pins, the `dayframe_web` e2e).
