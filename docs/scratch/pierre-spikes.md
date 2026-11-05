@@ -50,3 +50,56 @@ Model-driven as in Pierre: logical scrollTop = page offset + DOM scrollTop; cont
 
 ### Verification
 `cargo nextest run -p clay_surface -p clay_dioxus -p clay_mdk -p clay_rt_wcmp` (guest fixtures prepared): 139 passed. Clippy clean on clay_surface, clay_dioxus, clay_mdk, clay_rt_wcmp, clay_rt_wasmtime, clay_guest_session, micro_pierre_spike_scroll (all targets). Playwright `pierre_scroll`, normal build: 12 passed; scale tests with `DAYFRAME_RAISED_LIMITS=1 PIERRE_RAISED=1`: 4 passed. Not run: `clay_rt_wasmtime`, `clay_rt_wcmp_wasmi` test suites, guardrails, Firefox/Blitz.
+
+## P4 dispatch
+
+Question: where do the 37-170 ms of a release-guest dispatch (50-row chunk, 3-38 spans/line) go, and do the three cheapest levers help. Same setup as P2 (raised budgets, release guest, Pierre profile, spec `PIERRE_RAISED=1`, tests named `p4-*` in `pierre_scroll.spec.ts`). Medians / p95, n=60 committing dispatches unless stated.
+
+### Method (cheapest honest)
+- **Guest-side timer**: the guest links `wasi:clocks`, so `std::time::Instant` works in it (the host serves `monotonic-clock` from `performance.now`, 0.1 ms resolution; one call costs 4 us, measured). `clay_mdk` feature `spike-phases` (`guest/dom.rs`, `phases`) brackets each `dispatch` into: event parse + handler, `VirtualDom::render_immediate` (diff), batch take, `surface.apply` call. The micro hands the records to the page through a hidden span. The host side already records `SurfaceTree::apply` and the whole dispatch.
+- **Controls**: the same diff run in the guest with a writer that drops every edit (no wire), natively in release, and raw wasm micro-benchmarks (button `bench`).
+- **Chromium CPU profile** (100 us sampling) of the fast scroll, self time by function; guest wasm functions are named in it.
+- Derived: bridge + host decode = guest `apply` call minus `SurfaceTree::apply`; crossing overhead = host dispatch minus the guest's total.
+
+### Self time per phase (50-row chunk, Pierre window, release guest)
+| spans/line | mutations | parse + handler | VDOM diff (render_immediate, recording writer) | batch take | `surface.apply` call | of which `SurfaceTree::apply` | bridge + decode (derived) | host dispatch total |
+|---|---|---|---|---|---|---|---|---|
+| 7 | 3,657 | 0.4 / 0.7 | **45.9 / 49.3** (94%) | 0 | 1.4 / 1.7 | 0.5 / 0.7 | ~0.9 | 48.9 / 52.9 |
+| 18 | 8,057 | 0.3 / 0.5 | **85.4 / 99.1** (96%) | 0 | 2.8 / 3.3 | 1.1 / 1.3 | ~1.7 | 90.6 / 105.1 |
+- Wire encoding (`take`), the wcmp crossing with host decode, and `SurfaceTree::apply` together are 3-4% of the dispatch. Entry/exit crossing of the dispatch itself is about 1 ms. The wire is not the bottleneck; the guest's VirtualDom diff is.
+- Inside the diff phase, the app's `Row` renders account for 11.2 ms of 44 at 7 spans (measured with a per-row timer, which itself adds 100 host calls); the rest is Dioxus diff and mutation recording.
+
+### The diff is slow only inside the wcmp web runtime
+- The same diff of a 50-row shift, natively in release: 0.36 ms (7 spans) / 0.69 ms (18), with a null writer, 0.40 / 0.76 with the recording writer (recording is about 10%). In the guest with a null writer (no wire at all): 41 / 77 ms (the guest-internal bench, medians of 20). So the guest runs the identical work **about 110x slower than native**, and wire encoding is not why.
+- Raw wasm in that guest is not slow: 20M integer-loop iterations 2.7-5 ms, 4M-word memory fill+sum 3-10 ms, 1M `#[inline(never)]` leaf calls 6.7 ms. What is slow: calls that set up a stack frame (1M framed calls 0.8-1.8 s, 0.8-1.8 us each), and the allocator (alloc+free of a `Box<u64>` 3.9 us, a 100k-`String` loop 1.2-2.4 s, about 12-24 us per string). A host import (`Instant::now`) costs 4 us, so these are not explained by one host call each.
+- CPU profile of 60 fast frames (6.0 s sampled, 0.76 s idle): guest wasm functions have about 75-330 ms of self time in total; the large self times are in the wcmp runtime: `WebStore::call_host`, `Calls::direct`/`invoke_in`, `wrapper::results`/`carry`/`from_js`, host dlmalloc/free, `wasm-to-js` and wasm-bindgen closures (about 2.9 s together, roughly equal to 60 x the guest dispatch). Some profile entries are Playwright's injected script (`visitNode`, `visitChild`) and were excluded from that sum. Mechanism not established: JSPI-run guest stack, per-call shim for calls that cross the guest's core modules, or the stack-pointer global; I did not read `wcmp-wasm-core-web` far enough to say. A decisive control not done: instantiate the same core module directly in V8 (outside wcmp) and run the same bench.
+- Consequence: guest code that allocates or makes frame-carrying calls costs about two orders of magnitude more in this runtime than natively, so the mutation count (allocations, calls) drives dispatch time: about 12.5 us per mutation at 7 spans, 10.6 us at 18, near-linear. This is why the P1 figure (1.2 ms per mutation on a debug guest) and the release figure (about 0.01 ms) differ by 100x and why the debug guest was 30x slower than release.
+
+### The three levers (fast = 1000 px/frame, one 50-row chunk per frame; slow = 200 px/frame)
+Dispatch is the committing guest dispatch as the host sees it; frames counted from rAF intervals (>17.5 ms = missed a 60 Hz frame; >25 ms). 60 commits per run unless noted.
+
+| lever | setup | commits | dispatch median / p95 | frames >17.5 / >25 ms (of) | mutations per commit |
+|---|---|---|---|---|---|
+| baseline | 7 spans, chunk 50, keyed, fast | 60 | 49.7 / 55.4 | 61 / 61 (234) | 3,657 |
+| baseline | 18 spans, chunk 50, keyed, fast | 60 | 89.9 / 98.2 | 62 / 62 (259) | 8,057 |
+| 1 merge | P3 corpus raw (rust + ts alternating lines; 6.6 / 5.9 spans per line), fast | 60 | 50.1 / 58.5 | 64 / 64 (227) | 4,354 |
+| 1 merge | same, whitespace + same-color merged | 60 | 45.5 / 54.2 | 64 / 64 (213) | 3,664 |
+| 2 chunk | 7 spans, chunk 50, slow | 30 | 49.0 / 54.6 | 30 / 30 (358) | 3,657 |
+| 2 chunk | 7 spans, chunk 25, slow | 60 | 29.5 / 33.0 | 57 / 57 (372) | 1,832 |
+| 2 chunk | 7 spans, chunk 10, slow | 150 | 16.3 / 18.6 | 1 / 1 (454) | 737 |
+| 2 chunk | 18 spans, chunk 50, slow | 30 | 87.5 / 95.7 | 30 / 30 (605) | 8,057 |
+| 2 chunk | 18 spans, chunk 25, slow | 60 | 51.4 / 56.5 | 60 / 60 (539) | 4,032 |
+| 2 chunk | 18 spans, chunk 10, slow | 150 | 25.0 / 27.4 | 24 / 24 (588) | 1,617 |
+| 3 keys | 7 spans, keyed, fast | 60 | 49.7 / 55.4 | 61 / 61 (234) | 3,657 |
+| 3 keys | 7 spans, unkeyed, fast | 60 | 95.7 / 106.5 | 63 / 63 (245) | 4,804 |
+| 3 keys | 18 spans, keyed, fast | 60 | 89.9 / 98.2 | 62 / 62 (259) | 8,057 |
+| 3 keys | 18 spans, unkeyed, fast | 60 | 181.5 / 197.5 | 61 / 61 (299) | 11,404 |
+
+1. **Merging tokens.** On P3's corpus (first 1,000 lines each of `rust-1k.rs` and `ts-1k.ts`, tokenized by Pierre's own `@pierre/highlights`, pierre-dark; generator `src/micro_pierre_spike_scroll/corpus/gen.mjs`): raw 6.62 (rust) / 5.91 (ts) spans per line; merging adjacent same-color tokens alone removes only 6.6% / 9.9% (6.18 / 5.32); also merging whitespace-only tokens into the next token (Shiki's `mergeWhitespaces`) removes 15.6% / 21.3% (5.58 / 4.65). In the browser that is 16% fewer mutations and 9% lower dispatch (50.1 -> 45.5 ms), no change in missed frames. A small win, not a fix.
+2. **Smaller chunks.** Costs scale with rows added per commit, so a chunk of 10 at 200 px/frame (10 rows per frame) cuts the dispatch to 16.3 ms at 7 spans (the frame budget; 1 frame over 25 ms of 454) and 25.0 ms at 18 spans (24 frames over 25 ms of 588). Chunks of 25 still miss every commit. Total work per scrolled row is unchanged, so a fast scroll (50 rows per frame) gets nothing from it; the smaller window (140 rows instead of 200) also holds 20-30% fewer nodes. Best of the three at normal reading speeds, but it only moves the cliff: at 18 spans, scrolling faster than about 10 rows per frame misses frames again.
+3. **Keyed rows.** The spike micro already keys rows by line number (`Row { key: "{line}" }`), and the diff already touches only the edges: a 50-row shift is 3,657 mutations at 7 spans (73 per new row) versus 4,628 to mount 200 rows; the budget test shows the same (1,257 mutations for 50 new rows at 1 span). Unkeyed (positional) is 2x worse (95.7 vs 49.7 ms, 181 vs 90 ms), so keys are necessary and already paid for; no further gain.
+
+### What this says for options (not decided)
+- The bottleneck is guest compute in the wcmp web runtime (about 110x native), driven by allocations and frame-carrying calls per mutation. Levers on the app side only trade rows per commit (chunk 10 fits the frame at 7 spans) or shave spans (10-20%).
+- Next experiments with the largest expected return: (a) find why calls with stack frames and the allocator are slow under wcmp (control outside wcmp; compare with the wasmi engine); (b) fewer mutations by construction, e.g. one text node per row instead of a span per token, or the host scroller primitive with host-side row rendering; (c) a guest build with a custom bump/arena allocator (the diff is allocation-heavy), which would test whether the allocator alone explains most of it.
+- Not measured: the unreleased `render_immediate` split between Dioxus diff and mutation recording inside the guest (native says recording is 10%), and Firefox.

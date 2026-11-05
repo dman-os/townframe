@@ -153,6 +153,10 @@ async function wheelProfile(page: Page, scroller: Locator, steps: number, delta:
     const next = data.probe.mutations.find((m) => m[0] >= r[2]);
     if (next) hostTail.push(next[0] - r[2]);
   }
+  // Dispatches that carried a commit (an apply with mutations inside the dispatch interval).
+  const committingDispatch = data.timing
+    .filter((r) => r[0] === "dispatch:scroll")
+    .filter((d) => applies.some((a) => a[3] > 0 && a[2] >= d[1] && a[2] <= d[2]));
   const frames = data.probe.frames.slice(1);
   const metric = (k: string) => Math.round((after[k] - before[k]) * 1000) / 1000;
   return {
@@ -169,6 +173,8 @@ async function wheelProfile(page: Page, scroller: Locator, steps: number, delta:
     scrollToCommitMs: stats(commitLatency),
     hostTailMs: stats(hostTail),
     frameIntervalMs: stats(frames),
+    committingDispatchMs: stats(committingDispatch.map((r) => r[2] - r[1])),
+    framesOver17ms: frames.filter((f) => f > 17.5).length,
     framesOver25ms: frames.filter((f) => f > 25).length,
     framesOver50ms: frames.filter((f) => f > 50).length,
     longTasks: data.probe.longtasks.length,
@@ -443,3 +449,100 @@ test("paged scroll: scrolling past the threshold rebases the DOM scrollTop and k
   await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(9_000_000);
   expect(failures).toEqual([]);
 });
+
+// P4 dispatch: where a guest dispatch spends its time, and the three cheapest levers. Needs the
+// raised surface budgets (a Pierre window does not commit otherwise).
+if (process.env.PIERRE_RAISED) {
+  type Setup = { tokens?: number; corpus?: "raw" | "merged"; profile?: string; keyed?: boolean };
+  async function prepare(page: Page, setup: Setup) {
+    const { scroller, window: win } = await openSpike(page, { coalesce: true });
+    if (setup.tokens) await page.getByTestId(`tokens-${setup.tokens}`).click();
+    if (setup.corpus) await page.getByTestId(`corpus-${setup.corpus}`).click();
+    if (setup.keyed === false) await page.getByTestId("keyed-toggle").click();
+    await page.getByTestId(`profile-${setup.profile ?? "pierre"}`).click();
+    await page.getByTestId("jump-500000").click();
+    await expect(win).not.toHaveAttribute("data-value", "0", { timeout: 120_000 });
+    const box = (await scroller.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    for (let i = 0; i < 5; i++) { await page.mouse.wheel(0, 1000); await frame(page); }
+    for (let i = 0; i < 10; i++) await frame(page);
+    // Drop the setup's guest phase records.
+    await page.getByTestId("phases-dump").click();
+    return { scroller, win };
+  }
+  async function phaseReport(page: Page, name: string, profile: Awaited<ReturnType<typeof wheelProfile>>) {
+    await page.getByTestId("phases-dump").click();
+    const raw = await page.getByTestId("phases").textContent();
+    const parsed = JSON.parse(raw!) as { phases: number[][]; rowRenderMsTotal: number };
+    const records = parsed.phases.filter((r) => r[4] > 0);
+    const col = (i: number) => stats(records.map((r) => r[i]));
+    report(name, {
+      profile,
+      guestPhasesMs: {
+        committingDispatches: records.length,
+        mutations: col(4),
+        parseAndHandler: col(0),
+        vdomDiff: col(1),
+        batchTake: col(2),
+        applyCallIncludingBridge: col(3),
+        total: stats(records.map((r) => r[0] + r[1] + r[2] + r[3])),
+        // Time inside the app's `Row` renders over the whole run, per committing dispatch.
+        rowRenderMsPerDispatch: Math.round((parsed.rowRenderMsTotal / Math.max(1, records.length)) * 100) / 100,
+      },
+    });
+  }
+  const run = (name: string, setup: Setup, steps: number, delta: number) =>
+    test(name, async ({ page }) => {
+      test.setTimeout(600_000);
+      const failures = watchFailures(page);
+      const { scroller } = await prepare(page, setup);
+      const profile = await wheelProfile(page, scroller, steps, delta);
+      await phaseReport(page, `p4-${name}`, profile);
+      expect(failures).toEqual([]);
+    });
+  for (const tokens of [7, 18]) run(`phases tokens${tokens} fast`, { tokens }, 60, 1000);
+  // The guest's own VirtualDom diff with no wire in the loop, and the cost of one host call.
+  test("guest-internal bench", async ({ page }) => {
+    const failures = watchFailures(page);
+    await openSpike(page, { coalesce: true });
+    for (const tokens of [7, 18]) {
+      await page.getByTestId(`bench-${tokens}`).click();
+      await expect(page.getByTestId("bench")).toContainText("diff-no-writer");
+      report(`p4-bench-tokens${tokens}`, await page.getByTestId("bench").textContent());
+    }
+    expect(failures).toEqual([]);
+  });
+  // Chromium CPU profile (100 us sampling) of the same fast scroll, self time by function.
+  test("cpu profile tokens7 fast", async ({ page }) => {
+    test.setTimeout(600_000);
+    const { scroller } = await prepare(page, { tokens: 7 });
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Profiler.enable");
+    await cdp.send("Profiler.setSamplingInterval", { interval: 100 });
+    await cdp.send("Profiler.start");
+    const box = (await scroller.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    for (let i = 0; i < 60; i++) { await page.mouse.wheel(0, 1000); await frame(page); }
+    const { profile } = await cdp.send("Profiler.stop");
+    const self = new Map<string, number>();
+    const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+    let total = 0;
+    profile.samples!.forEach((id, i) => {
+      const dt = (profile.timeDeltas![i] ?? 0) / 1000;
+      const n = byId.get(id)!;
+      const key = `${n.callFrame.functionName || "(anon)"} @ ${n.callFrame.url.split("/").pop()}`;
+      self.set(key, (self.get(key) ?? 0) + dt);
+      total += dt;
+    });
+    const top = [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, 400)
+      .map(([k, v]) => [k, Math.round(v * 10) / 10]);
+    report("p4-cpu-profile-tokens7", { totalMs: Math.round(total), top });
+  });
+  for (const corpus of ["raw", "merged"] as const) run(`lever1 corpus-${corpus} fast`, { corpus }, 60, 1000);
+  for (const tokens of [7, 18]) {
+    for (const profile of ["pierre", "pierre-c25", "pierre-c10"]) {
+      run(`lever2 tokens${tokens} ${profile} slow`, { tokens, profile }, 150, 200);
+    }
+    for (const keyed of [true, false]) run(`lever3 tokens${tokens} keyed=${keyed} fast`, { tokens, keyed }, 60, 1000);
+  }
+}

@@ -35,6 +35,56 @@ impl Slots {
     }
 }
 
+/// Spike instrumentation (feature `spike-phases`): where one guest `dispatch` spends its time,
+/// measured with the monotonic clock the host provides to the guest (`wasi:clocks`, resolution
+/// that of the host's `performance.now`). Each finished dispatch pushes
+/// `[parse + handler ms, VirtualDom diff ms, batch take ms, surface.apply call ms, mutations]`.
+pub mod phases {
+    use std::cell::RefCell;
+    use std::time::Instant;
+
+    thread_local! {
+        static CURRENT: RefCell<[f64; 5]> = const { RefCell::new([0.0; 5]) };
+        static FINISHED: RefCell<Vec<[f64; 5]>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn now() -> Option<Instant> {
+        cfg!(feature = "spike-phases").then(Instant::now)
+    }
+
+    /// Add the time since `since` to phase `slot` of the dispatch in progress.
+    pub(super) fn add(slot: usize, since: Option<Instant>) {
+        if let Some(since) = since {
+            CURRENT.with_borrow_mut(|c| c[slot] += since.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
+    pub(super) fn count(mutations: usize) {
+        if cfg!(feature = "spike-phases") {
+            CURRENT.with_borrow_mut(|c| c[4] += mutations as f64);
+        }
+    }
+
+    /// A dispatch starts: drop what non-dispatch renders accumulated.
+    pub(super) fn begin() {
+        if cfg!(feature = "spike-phases") {
+            CURRENT.with_borrow_mut(std::mem::take);
+        }
+    }
+
+    pub(super) fn finish() {
+        if cfg!(feature = "spike-phases") {
+            let done = CURRENT.with_borrow_mut(std::mem::take);
+            FINISHED.with_borrow_mut(|f| f.push(done));
+        }
+    }
+
+    /// The finished dispatches since the last call.
+    pub fn take() -> Vec<[f64; 5]> {
+        FINISHED.with_borrow_mut(std::mem::take)
+    }
+}
+
 /// The guest end of the element-command channel of one [`GuestDom`]: the requests a read sent
 /// and is still waiting on. The host answers a read with an `element-reply` event, which
 /// [`GuestDom::dispatch`] completes here.
@@ -386,7 +436,9 @@ impl GuestDom {
 
     pub fn render(&mut self) -> Result<(), presentation::PresentationError> {
         loop {
+            let started = phases::now();
             self.dom.render_immediate(&mut self.edits);
+            phases::add(1, started);
             let mut revoked = Vec::new();
             let held = self.slots.held.borrow();
             for (&identity, (target, surface)) in &self.surfaces {
@@ -395,11 +447,17 @@ impl GuestDom {
                     .get_mut(target)
                     .expect("mounted target must have a writer");
                 if !edits.is_empty() {
+                    let started = phases::now();
                     let batch = edits.take_resolving(|id| {
                         held.get(&id)
                             .unwrap_or_else(|| panic!("slot {id} was written without a reference"))
                     });
-                    match surface.apply(&batch) {
+                    phases::add(2, started);
+                    phases::count(batch.len());
+                    let started = phases::now();
+                    let applied = surface.apply(&batch);
+                    phases::add(3, started);
+                    match applied {
                         Ok(_) => {}
                         Err(presentation::PresentationError::Revoked) => revoked.push(identity),
                         Err(error) => return Err(error),
@@ -455,6 +513,8 @@ impl GuestDom {
         surface: &presentation::Surface,
         event: presentation_events::Event,
     ) -> presentation_events::EventResponse {
+        phases::begin();
+        let entered = phases::now();
         let Some((target, held)) = self.surfaces.get(&surface.identity()) else {
             return presentation_events::EventResponse {
                 prevent_default: false,
@@ -499,7 +559,9 @@ impl GuestDom {
             dioxus_event.clone(),
             dioxus_core::ElementId::from_raw(html_event.element.raw()),
         );
+        phases::add(0, entered);
         self.render().expect("guest presentation commit failed");
+        phases::finish();
         presentation_events::EventResponse {
             prevent_default: !dioxus_event.default_action_enabled(),
             stop_propagation: !dioxus_event.propagates(),

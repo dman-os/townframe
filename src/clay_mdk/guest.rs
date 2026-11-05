@@ -15,6 +15,7 @@
 //! resyncs do.
 pub use dom::GuestDom;
 pub(crate) use dom::Slots;
+pub use dom::phases;
 
 use crate::Access;
 use crate::Capability;

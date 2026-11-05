@@ -11,6 +11,9 @@ use dioxus::html::MountedData;
 use dioxus::html::ScrollBehavior;
 use dioxus::html::geometry::PixelsVector2D;
 use dioxus::prelude::*;
+use dioxus_core::BorrowedAttributeValue;
+use dioxus_core::ElementId;
+use dioxus_core::WriteMutations;
 
 pub const ID: &str = "dayframe.pierre_spike_scroll";
 pub const PACKAGE_VERSION: u32 = 1;
@@ -26,12 +29,78 @@ const LINE_HEIGHT: f64 = 20.0;
 /// overscroll 200, `constants.ts:67-70` `hunkLineCount` 1: about 51 rows). The default is
 /// `code-view`, the largest profile whose first window still fits the surface budgets with a
 /// few spans per line (see the `budgets` test).
-const PROFILES: [(&str, f64, usize); 3] = [
+const PROFILES: [(&str, f64, usize); 5] = [
     ("pierre", 1000.0, 50),
     ("mid", 500.0, 10),
     ("code-view", 200.0, 1),
+    // Pierre's overscroll with smaller update chunks (P4): the window start moves in 25 / 10
+    // line steps, so a slow scroll updates the surface in smaller, more frequent batches.
+    ("pierre-c25", 1000.0, 25),
+    ("pierre-c10", 1000.0, 10),
 ];
 const DEFAULT_PROFILE: usize = 2;
+
+/// P3's rust and ts benchmark lines tokenized by Pierre's highlighter (`corpus/gen.mjs`):
+/// `{lang: [line: [[text, color index]]]}`.
+const CORPUS: &str = include_str!("corpus/tokens.json");
+
+thread_local! {
+    static TOKENS: Vec<Vec<Vec<(String, u32)>>> = {
+        let parsed: serde_json::Value = serde_json::from_str(CORPUS).expect("corpus is JSON");
+        ["rust", "ts"]
+            .into_iter()
+            .map(|lang| {
+                parsed[lang]
+                    .as_array()
+                    .expect("corpus language")
+                    .iter()
+                    .map(|line| {
+                        line.as_array()
+                            .expect("corpus line")
+                            .iter()
+                            .map(|t| (t[0].as_str().expect("token text").to_owned(), t[1].as_u64().expect("color") as u32))
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+}
+
+/// Token runs of corpus line `line`; `merged` joins whitespace-only tokens to the next token and
+/// then adjacent runs of one color, as Shiki's `mergeWhitespaces` and same-style merge do.
+fn corpus_runs(line: usize, merged: bool) -> Vec<(String, u32)> {
+    TOKENS.with(|all| {
+        let lang = &all[line % 2];
+        let runs = &lang[(line / 2) % lang.len()];
+        if !merged {
+            return runs.clone();
+        }
+        let mut joined: Vec<(String, u32)> = Vec::new();
+        let mut pending = String::new();
+        for (text, color) in runs {
+            if text.chars().all(char::is_whitespace) {
+                pending.push_str(text);
+            } else {
+                joined.push((std::mem::take(&mut pending) + text, *color));
+            }
+        }
+        if !pending.is_empty() {
+            match joined.last_mut() {
+                Some(last) => last.0.push_str(&pending),
+                None => joined.push((pending, u32::MAX)),
+            }
+        }
+        let mut out: Vec<(String, u32)> = Vec::new();
+        for (text, color) in joined {
+            match out.last_mut() {
+                Some(last) if last.1 == color => last.0.push_str(&text),
+                _ => out.push((text, color)),
+            }
+        }
+        out
+    })
+}
 /// The fixed height of the scroller the spike renders, until the first scroll event reports the
 /// real client height.
 const SCROLLER_HEIGHT: f64 = 600.0;
@@ -178,8 +247,33 @@ fn line_text(line: usize) -> String {
     format!("let v{line} = step({}) ^ 0x{mixed:08x};", line % 97)
 }
 
+thread_local! {
+    /// Total time spent inside `Row` renders (P4): the app's share of a dispatch's diff phase.
+    static ROW_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+struct RowTimer(std::time::Instant);
+
+impl Drop for RowTimer {
+    fn drop(&mut self) {
+        ROW_MS.set(ROW_MS.get() + self.0.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
 #[component]
-fn Row(line: usize, tokens: usize) -> Element {
+fn Row(line: usize, tokens: usize, source: usize) -> Element {
+    let _timer = RowTimer(std::time::Instant::now());
+    if source != 0 {
+        let runs = corpus_runs(line, source == 2);
+        return rsx! {
+            div { style: "height:20px;line-height:20px;white-space:pre;font-family:monospace;font-size:12px",
+                span { style: "display:inline-block;width:8ch;text-align:right;opacity:0.5", "{line + 1}" }
+                for (index, (text, color)) in runs.into_iter().enumerate() {
+                    span { key: "{index}", style: "color:hsl({color * 37 % 360},60%,70%)", "{text}" }
+                }
+            }
+        };
+    }
     let text = line_text(line);
     rsx! {
         div { style: "height:20px;line-height:20px;white-space:pre;font-family:monospace;font-size:12px",
@@ -198,15 +292,29 @@ fn Row(line: usize, tokens: usize) -> Element {
 
 /// The rows of the current window, positioned by the model at `start * 20` px.
 #[component]
-fn Window(start: usize, count: usize, tokens: usize, offset: f64) -> Element {
+fn Window(
+    start: usize,
+    count: usize,
+    tokens: usize,
+    offset: f64,
+    source: usize,
+    keyed: bool,
+) -> Element {
     rsx! {
         div {
             "data-testid": "window",
             "data-value": "{start}",
             "data-state": "{count}",
             style: "position:absolute;left:0;right:0;top:{(start as f64 * LINE_HEIGHT - offset).max(0.0)}px",
-            for line in start..start + count {
-                Row { key: "{line}", line, tokens }
+            if keyed {
+                for line in start..start + count {
+                    Row { key: "{line}", line, tokens, source }
+                }
+            } else {
+                // Unkeyed (P4 comparison): rows match by position, so a shift re-renders every row.
+                for line in start..start + count {
+                    Row { line, tokens, source }
+                }
             }
         }
     }
@@ -218,6 +326,11 @@ fn view() -> Element {
     let mut viewport = use_signal(|| SCROLLER_HEIGHT);
     let mut profile = use_signal(|| DEFAULT_PROFILE);
     let mut paged = use_signal(|| true);
+    // Row content: 0 synthetic spans, 1 corpus tokens as lexed, 2 corpus tokens merged (P4).
+    let mut source = use_signal(|| 0_usize);
+    let mut keyed = use_signal(|| true);
+    let mut phases_text = use_signal(String::new);
+    let mut bench_text = use_signal(String::new);
     let mut page_offset = use_signal(|| 0.0_f64);
     // The scroller's handle, from its `mounted` event: the guest end of the element commands.
     let mut scroller = use_signal(|| None::<std::rc::Rc<MountedData>>);
@@ -255,6 +368,46 @@ fn view() -> Element {
                         "{name} window"
                     }
                 }
+                for (index, name) in [(1_usize, "corpus-raw"), (2, "corpus-merged")] {
+                    button {
+                        key: "{name}",
+                        "data-testid": "{name}",
+                        onclick: move |_| source.set(index),
+                        "{name}"
+                    }
+                }
+                button {
+                    "data-testid": "keyed-toggle",
+                    onclick: move |_| keyed.set(!keyed()),
+                    if keyed() { "keyed rows" } else { "unkeyed rows" }
+                }
+                button {
+                    "data-testid": "phases-dump",
+                    onclick: move |_| {
+                        // Only the guest build has phase timings to hand over.
+                        #[cfg(target_os = "wasi")]
+                        phases_text.set(
+                            serde_json::json!({
+                                "phases": clay_mdk::guest::phases::take(),
+                                "rowRenderMsTotal": ROW_MS.replace(0.0),
+                            })
+                            .to_string(),
+                        );
+                        #[cfg(not(target_os = "wasi"))]
+                        phases_text.set(String::new());
+                    },
+                    "phases"
+                }
+                span { "data-testid": "phases", style: "display:none", "{phases_text}" }
+                for per_line in [7_usize, 18] {
+                    button {
+                        key: "bench-{per_line}",
+                        "data-testid": "bench-{per_line}",
+                        onclick: move |_| bench_text.set(bench(per_line)),
+                        "bench {per_line}"
+                    }
+                }
+                span { "data-testid": "bench", "{bench_text}" }
                 button {
                     "data-testid": "paged-toggle",
                     onclick: move |_| {
@@ -370,11 +523,150 @@ fn view() -> Element {
                     }
                 },
                 div { style: "position:relative;height:{total_height}px",
-                    Window { start, count, tokens: tokens_now, offset: offset_now }
+                    Window { start, count, tokens: tokens_now, offset: offset_now, source: source(), keyed: keyed() }
                 }
             }
         }
     }
+}
+
+/// Writer that drops every edit: the VirtualDom's own cost without the wire encoding.
+pub(crate) struct Null;
+macro_rules! null_writer {
+    ($($f:ident($($a:ident: $t:ty),*)),* $(,)?) => {
+        impl WriteMutations for Null {
+            fn create_element(&mut self, _tag: &str, _ns: Option<&str>) {}
+            fn set_attribute(
+                &mut self,
+                _name: &str,
+                _ns: Option<&str>,
+                _value: BorrowedAttributeValue<'_>,
+            ) {
+            }
+            $(fn $f(&mut self, $($a: $t),*) {})*
+        }
+    };
+}
+null_writer!(
+    push_id(id: ElementId),
+    set_id(id: ElementId),
+    child(index: usize),
+    pop(),
+    create_text(value: &str),
+    clone(),
+    append_children(m: usize),
+    replace_with(m: usize),
+    insert_after(m: usize),
+    insert_before(m: usize),
+    set_text(value: &str),
+    add_event_listener(name: &str),
+    remove_event_listener(name: &str),
+    remove()
+);
+
+/// What the guest's own VirtualDom costs with no wire in the loop (P4): a 50-row window shift
+/// diffed into a writer that drops every edit, median of 20, and the cost of one host call
+/// (`Instant::now` is a `wasi:clocks` import). Run in the guest, this separates the diff's
+/// compute from the bridge.
+fn bench(tokens: usize) -> String {
+    use dioxus_core::ScopeId;
+    use dioxus_core::VirtualDom;
+    thread_local! {
+        static BENCH_PROPS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    }
+    fn bench_app() -> Element {
+        let (start, tokens) = BENCH_PROPS.get();
+        rsx! { Window { start, count: 140, tokens, offset: 0.0, source: 0, keyed: true } }
+    }
+    let mut diffs = Vec::new();
+    for rep in 0..20 {
+        BENCH_PROPS.set((100 + rep * 100, tokens));
+        let mut dom = VirtualDom::new(bench_app);
+        dom.rebuild(&mut Null);
+        BENCH_PROPS.set((150 + rep * 100, tokens));
+        dom.mark_dirty(ScopeId::APP);
+        let started = std::time::Instant::now();
+        dom.render_immediate(&mut Null);
+        diffs.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    diffs.sort_by(f64::total_cmp);
+    let started = std::time::Instant::now();
+    for _ in 0..200 {
+        std::hint::black_box(std::time::Instant::now());
+    }
+    let per_call = started.elapsed().as_secs_f64() * 1000.0 / 200.0;
+    // Plain integer work, then small allocations: wasm's raw speed, then the allocator's.
+    let started = std::time::Instant::now();
+    let mut acc = 0_u64;
+    for i in 0..20_000_000_u64 {
+        acc = acc.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(i);
+    }
+    std::hint::black_box(acc);
+    let compute = started.elapsed().as_secs_f64() * 1000.0;
+    let started = std::time::Instant::now();
+    let mut strings = Vec::new();
+    for i in 0..100_000 {
+        strings.push(format!("row {i}"));
+    }
+    std::hint::black_box(&strings);
+    drop(strings);
+    let alloc = started.elapsed().as_secs_f64() * 1000.0;
+    // Linear memory access without the allocator, then held boxes, then alloc/free pairs.
+    let started = std::time::Instant::now();
+    let mut words = vec![0_u32; 4_000_000];
+    for (i, w) in words.iter_mut().enumerate() {
+        *w = i as u32;
+    }
+    std::hint::black_box(words.iter().map(|w| u64::from(*w)).sum::<u64>());
+    let memory = started.elapsed().as_secs_f64() * 1000.0;
+    let started = std::time::Instant::now();
+    let held: Vec<Box<u64>> = (0..100_000_u64).map(Box::new).collect();
+    std::hint::black_box(&held);
+    let boxes = started.elapsed().as_secs_f64() * 1000.0;
+    drop(held);
+    let started = std::time::Instant::now();
+    for i in 0..100_000_u64 {
+        std::hint::black_box(Box::new(i));
+    }
+    let pairs = started.elapsed().as_secs_f64() * 1000.0;
+    // Calls with a stack frame, then thread-local access.
+    #[inline(never)]
+    fn framed(i: u64) -> u64 {
+        let mut frame = [i; 32];
+        frame[(i % 32) as usize] ^= 1;
+        std::hint::black_box(&mut frame);
+        frame.iter().sum()
+    }
+    let started = std::time::Instant::now();
+    let mut acc = 0_u64;
+    for i in 0..1_000_000_u64 {
+        acc = acc.wrapping_add(framed(i));
+    }
+    std::hint::black_box(acc);
+    let frames = started.elapsed().as_secs_f64() * 1000.0;
+    #[inline(never)]
+    fn leaf(i: u64) -> u64 {
+        i.wrapping_mul(3).wrapping_add(1)
+    }
+    let started = std::time::Instant::now();
+    let mut acc = 0_u64;
+    for i in 0..1_000_000_u64 {
+        acc = acc.wrapping_add(leaf(std::hint::black_box(i)));
+    }
+    std::hint::black_box(acc);
+    let leaves = started.elapsed().as_secs_f64() * 1000.0;
+    thread_local! { static TLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+    let started = std::time::Instant::now();
+    for _ in 0..1_000_000 {
+        TLS.set(TLS.get() + 1);
+    }
+    let tls = started.elapsed().as_secs_f64() * 1000.0;
+    format!(
+        "leaf-calls-1M-ms {leaves:.1} framed-calls-1M-ms {frames:.1} tls-1M-ms {tls:.1} mem-4M-ms {memory:.1} held-100k-boxes-ms {boxes:.1} alloc-free-pairs-100k-ms {pairs:.1} ",
+    ) + &format!(
+        "diff-no-writer-median-ms {:.2} host-call-ms {:.4} int-loop-20M-ms {compute:.1} alloc-100k-strings-ms {alloc:.1}",
+        diffs[10], per_call
+    )
 }
 
 /// What one window commit costs against the surface tree's budgets (`clay_surface` `tree.rs`),
@@ -382,6 +674,7 @@ fn view() -> Element {
 /// same validation the host runs on every `surface.apply`.
 #[cfg(all(test, not(target_os = "wasi")))]
 mod budgets {
+    use super::Null;
     use super::*;
     use clay_surface::AttributeValue;
     use clay_surface::Mutation;
@@ -472,7 +765,7 @@ mod budgets {
 
     fn app() -> Element {
         let (start, count, tokens) = PROPS.get();
-        rsx! { Window { start, count, tokens, offset: 0.0 } }
+        rsx! { Window { start, count, tokens, offset: 0.0, source: 0, keyed: true } }
     }
 
     /// One committed batch against a fresh tree, or the first window and then a move to the
@@ -508,6 +801,36 @@ mod budgets {
             .take_while(|&count| commits((0, count, tokens), None)[0].2.is_ok())
             .last()
             .unwrap_or(0)
+    }
+
+    /// Native split of one 50-row window shift (P4): the VirtualDom with no writer, then with the
+    /// recording writer. Meaningful under `--release`.
+    #[test]
+    fn print_diff_split() {
+        for tokens in [7, 18] {
+            let mut times = [Vec::new(), Vec::new()];
+            for (slot, recording) in [false, true].into_iter().enumerate() {
+                for rep in 0..20 {
+                    PROPS.set((100 + rep * 100, 140, tokens));
+                    let mut dom = VirtualDom::new(app);
+                    dom.rebuild(&mut Recorder::default());
+                    PROPS.set((150 + rep * 100, 140, tokens));
+                    dom.mark_dirty(ScopeId::APP);
+                    let started = std::time::Instant::now();
+                    if recording {
+                        dom.render_immediate(&mut Recorder::default());
+                    } else {
+                        dom.render_immediate(&mut Null);
+                    }
+                    times[slot].push(started.elapsed().as_secs_f64() * 1000.0);
+                }
+                times[slot].sort_by(f64::total_cmp);
+            }
+            println!(
+                "SPLIT tokens={tokens} native 50-row shift: no-writer median {:.2} ms, recording median {:.2} ms",
+                times[0][10], times[1][10]
+            );
+        }
     }
 
     #[test]

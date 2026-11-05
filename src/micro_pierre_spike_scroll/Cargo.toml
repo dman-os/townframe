@@ -11,14 +11,14 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 micro_layout_manifest = { workspace = true }
 serde_json.workspace = true
+dioxus-core.workspace = true
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
-clay_mdk = { workspace = true, features = ["guest"] }
+clay_mdk = { workspace = true, features = ["guest", "spike-phases"] }
 
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
 
 [dev-dependencies]
 clay_surface = { workspace = true }
-dioxus-core.workspace = true
