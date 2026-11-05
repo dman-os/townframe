@@ -24,7 +24,6 @@ use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
-use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
 use clay_host::ComponentRef;
 use clay_host::Host;
@@ -369,16 +368,13 @@ impl wit_presentation::HostSurface for WcmpStoreState {
         edits: Vec<wit_presentation::Mutation>,
     ) -> wcmp::Result<Result<u64, wit_presentation::PresentationError>> {
         let edits: Vec<_> = edits.into_iter().map(convert_mutation).collect();
-        if let Err(reason) = ingress_budget(&edits) {
-            self.table.get(&surface)?.writer().withdraw();
-            return Ok(Err(wit_presentation::PresentationError::Unsupported(
-                reason.into(),
-            )));
+        let surface = self.table.get(&surface)?.clone();
+        if let Err(error) = self.presentation.admit(&surface, &edits) {
+            return Ok(Err(convert_error(error)));
         }
         let converted = map_mutations(edits, |reference| {
             self.table.get(&reference).map(|component| component.0)
         })?;
-        let surface = self.table.get(&surface)?.clone();
         Ok(self
             .presentation
             .apply(&surface, &converted)
