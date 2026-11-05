@@ -69,7 +69,7 @@ switch (command) {
   }
   case "android": {
     await useDotenvTargetDir();
-    const env = await prepareDayframePackages();
+    const env = await prepareDayframePackages({ testFixtures: false });
     // The APK carries its packages as assets: `dayframe_mobile` bundles `packages/` with
     // `asset!`, so stage the prepared counter and layout beside the crate (gitignored).
     const staged = root.join("src/dayframe_mobile/packages");
