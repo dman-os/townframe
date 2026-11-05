@@ -59,12 +59,13 @@ const frame = extract((state): Frame => {
   const nameOf = (element: Element) =>
     element.getAttribute("aria-label") ?? (element.textContent ?? "").trim();
   // On screen: rendered, and not hidden from assistive technology (the kit marks a list that its
-  // details cover as `aria-hidden`).
+  // details cover as `aria-hidden`). Opacity is deliberately not part of it: the kit's enter
+  // motion fades a scrim in from opacity 0 (KIT-105 `kit-fade-in`), and a control that is still
+  // fading in is present, not missing; a sampled frame in that interval used to report the
+  // drawer's "Dismiss" scrim as absent.
   const onScreen = (element: Element) =>
-    element.checkVisibility({
-      visibilityProperty: true,
-      opacityProperty: true,
-    }) && element.closest('[aria-hidden="true"]') === null;
+    element.checkVisibility({ visibilityProperty: true }) &&
+    element.closest('[aria-hidden="true"]') === null;
   const all = (selector: string) =>
     [...document.querySelectorAll(selector)].filter(onScreen);
   const buttonsNamed = (...names: string[]) =>
