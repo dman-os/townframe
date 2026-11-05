@@ -93,6 +93,18 @@ switch (command) {
         `--abi must be one of ${Object.keys(androidTargets)}, got ${abi}`,
       );
     }
+    // dx parses the triple and prints it back as `x86_64-unknown-linux-android`, so it looks
+    // up its linker under that name (a cargo `target.<triple>.linker` or the matching
+    // `CARGO_TARGET_*_LINKER`) and, failing that, builds the NDK clang name from it, which
+    // does not exist (the NDK ships `x86_64-linux-android<api>-clang`). aarch64 prints back
+    // unchanged and needs nothing. Alias the NDK's own linker under dx's spelling.
+    const ndkLinker = Deno.env.get("CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER");
+    if (abi === "x86_64" && ndkLinker) {
+      Deno.env.set(
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_ANDROID_LINKER",
+        ndkLinker,
+      );
+    }
     // `dx build` assembles through Gradle into the target dir; `--release` also needs a
     // signing config in Dioxus.toml to yield a signed APK.
     await $`deno run --allow-all ${
