@@ -269,8 +269,33 @@ is inside a four-byte character; fails with the old code).
 - `wcmp`: a callback task parked in `waitable-set.wait` (via `wit_bindgen::block_on`) or `thread.yield` (blocking) on the
   Wasmi provider did not resume after the host released what it waited for, in a lifecycle-conformance probe (not
   committed). Unexplained; not needed by anything in the app today.
-- `e2e::home_to_settings_to_a_section_and_back_at_a_compact_width` fails at `HEAD` and with this change alike (a Blitz
-  panic `blitz-dom ... form.rs:38 invalid SlotMap key`). Not caused by S6; not diagnosed here.
+- `e2e::home_to_settings_to_a_section_and_back_at_a_compact_width` still fails: a Blitz defect, diagnosed and pinned in the
+  S7 notes below; it needs a `blitz-dom` patch (not made).
+
+## S7 notes (2026-11-05): `invalid SlotMap key` at `blitz-dom form.rs:38` (compact scenario)
+
+- **Root cause (Blitz, `blitz-dom 0.3.0-beta.4`).** `DocumentMutator::process_added_subtree` records every added
+  `button|input|select|textarea|fieldset|object|output` in `form_nodes`; `flush` (run when the mutator drops) calls
+  `reset_form_owner(id)` on each, which does `self.nodes[id]` (`form.rs:38`). Nothing removes an id from `form_nodes` when
+  the node is dropped (`remove_and_drop_node`, `remove_and_drop_all_children`), so a form control that is added and dropped
+  within one mutator lifetime leaves a freed slot-map key behind and `flush` panics. The autofocus step in the same `flush`
+  guards the same hazard with `get_node(id).is_some()`; the form step lacks it. (`controls_to_form` also keeps entries for
+  dropped controls, harmless but a leak.)
+- **Why our tree reaches it, only compact.** One `render_immediate` batch is applied by one mutator. In the failing batch
+  (traced with a patched copy of `blitz-dom` that logs adds and drops) Dioxus builds the Home panel's templates, one of whose
+  roots holds the app bar's `Open sidebar` hamburger button (`NodeId(24)`, in-doc), clones them into the real tree
+  (`Open sidebar`, `Open Layout`, `Open Settings` = 43, 51, 53) and then `Remove`s the original template subtree
+  (`NodeId(19)`, 10 nodes, containing 24). The hamburger exists only below the side-by-side width, which is why the wide
+  scenarios pass. This is the normal Dioxus template protocol, not a usage error in the shell or kit, so no change in our
+  code avoids it honestly.
+- **Pin.** `dayframe_desktop::e2e::blitz_flush_resets_the_form_owner_of_a_button_dropped_in_the_same_batch` (`should_panic`
+  on `invalid SlotMap key`) is the minimal Blitz-level repro: create a `button`, append it to the root, drop it, drop the
+  mutator. When a fixed Blitz lands this test starts failing, and it should be deleted together with the compact
+  scenario passing.
+- **Fix needed (not made, by brief).** In `blitz-dom` `mutator.rs` `flush`: skip ids whose node is gone
+  (`if self.doc.get_node(id).is_some()`), or drop ids from `form_nodes` and `controls_to_form` in
+  `remove_and_drop_node_with` / `remove_and_drop_all_children`. Needs a Blitz fork or an upstream PR; the decision is the
+  owner's.
 
 ## S5 notes (2026-11-05): the 30 s layout stall on `wcmp`
 
