@@ -71,6 +71,13 @@ const options = [
     row: ".pd-line",
     addition: ".pd-line.pd-line-type--change-addition",
   },
+  {
+    id: "c",
+    url: "/?pierre-css=classes",
+    title: "Pierre rows (c) class contract",
+    row: ".pd-line",
+    addition: ".pd-line.pd-line-type--change-addition",
+  },
 ];
 
 for (const option of options) {

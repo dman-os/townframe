@@ -176,7 +176,7 @@ await Deno.copyFile(
 // Style spike (docs/scratch/pierre-spikes.md, "P1 style"): Pierre's stylesheets as static host
 // assets, linked into the page only when `?pierre-css=<name>` asks for one, so each spike option
 // is styled by its own sheet and never by another option's.
-for (const name of ["pierre.verbatim.css"]) {
+for (const name of ["pierre.verbatim.css", "pierre.classes.css"]) {
   await Deno.copyFile(
     root.join(`src/micro_pierre_spike/assets/${name}`).toString(),
     site.join(name).toString(),

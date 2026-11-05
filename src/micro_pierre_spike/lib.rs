@@ -72,6 +72,13 @@ const MODES: &[Mode] = &[
         host_class: None,
         stylesheet: Some(include_str!("assets/pierre.classes.scope.css")),
     },
+    Mode {
+        publication: "rows-c",
+        title: "Pierre rows (c) class contract",
+        rows: include_str!("assets/rows.classes.json"),
+        host_class: Some("pd-host"),
+        stylesheet: None,
+    },
 ];
 
 pub fn manifest() -> clay_mdk::MicroManifest {
