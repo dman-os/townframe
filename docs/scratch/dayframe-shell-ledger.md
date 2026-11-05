@@ -484,3 +484,17 @@ tolerance.
 Product questions: (1) full-height compact sheet vs 5/6; (2) approve `INTERACTION-007` and the new
 foundation tokens (`layer`, `motion`, `scrim`, `selected`); (3) should overlay scrims bleed under
 the system bars once guests can learn insets; (4) a kit icon button for trailing app-bar actions.
+## A1 notes (Android on an emulator)
+
+- Branch `feat/dayframe-android` rebased onto `feat/dayframe-shell` (conflicts in the desktop composition and main: the shell micro,
+  `HostInputs` and the `assemble(engine)` seam moved into `dayframe_native`: `native_runtime(.., engine: impl PackageEngine)`,
+  `wasmtime_engine`, `Shell`, `use_host_inputs`). Desktop keeps `desktop_runtime` and `assemble` for the Wasmi e2e.
+- Ran the APK on an API 36 x86_64 emulator: shell, SQLite, Wasmtime load, touch, sidebar, insets, system back. Details, paths and
+  gaps in `docs/scratch/dayframe-android.md` (A1 section).
+- Fixed: insets into `HostInputs` (JNI `WindowInsets`), predictive-back system back (MainActivity callback + `SYSTEM_BACK`),
+  `x/dayframe.ts android --abi x86_64`.
+- Pinned, not fixed: debug builds SIGSEGV in the emulator's Vulkan debug-label call (workaround `wrap.<pkg>` WGPU env); Wasm guest
+  on Android still unconfirmed; arm64 and release builds not re-run after the shell rebase.
+- Tests: `dayframe_native::tests::system_back_is_claimed_only_while_the_shell_can_go_back`; clippy clean for dayframe_desktop
+  (all targets) and dayframe_native/dayframe_mobile on x86_64-linux-android.
+

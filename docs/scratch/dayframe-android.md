@@ -3,10 +3,10 @@
 Status: Findings. The build results are measured; the platform constraints are read from source and every runtime claim is marked as needing a device.
 Owner: Claude (S3 subagent); operator reviews.
 Scope: `dayframe_mobile`, `dayframe_native`, `x/dayframe.ts android`, FDR 006 / ADR 032 §9 (what Dioxus on Android allows).
-Updated: 2026-11-05
+Updated: 2026-11-05 (A1: first run, on an x86_64 emulator)
 
-No emulator binary, system image or device existed in the session that wrote this, so
-**nothing here has run on Android.** Everything below is a build result or a source reading.
+S3 wrote the sections below from builds and source reading. A1 (end of this file) ran the app on an
+API 36 x86_64 emulator; where A1 contradicts a claim above, A1 wins.
 
 ## What was done
 
@@ -175,3 +175,58 @@ are small in isolation: safe-area insets in `winit-android`, and an Android acce
   roughly 25 minutes cold.
 - A first `dx build` run was killed with SIGTERM (exit 143) at exactly 6 minutes by something outside the
   build (the cause was not identified); it succeeded when relaunched detached with `setsid`.
+
+## A1: first run on an emulator (2026-11-05)
+
+Run on `system-images;android-36-ext18;google_apis;x86_64` (API 36, matching `targetSdk` 36, `minSdk` 28), headless,
+`-gpu swiftshader_indirect`, in a 3 GB capped scope. The SDK lives at `/run/media/asdf/p3N/tmp/android-sdk` (emulator and
+image via the Nix `sdkmanager --sdk_root`; the AVD is hand-written `avd/a1.ini` + `a1.avd/config.ini` because the Nix
+`avdmanager` cannot see a foreign SDK root; `platform-tools` is a symlink to the Nix SDK's). Screenshots are in the session
+scratchpad `.../scratchpad/a1/` (`01-home.png`, `02-settings.png`, `03-section.png`, `04-after-back.png`, `05-sidebar.png`,
+`06-back-closes-sidebar.png`, `07-back-at-home.png`); they are not in the repo.
+
+Build: `deno run --allow-all x/dayframe.ts android --abi x86_64` (new `--abi arm64|x86_64` flag, default arm64). dx prints the
+x86_64 triple as `x86_64-unknown-linux-android` and looks its linker up under that name, so the script aliases the NDK's
+`CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER` under dx's spelling (needs the Nix dev shell's NDK env). The branch resolves
+the dman-os blitz fork (rev ffaf2bd0) through the root `[patch.crates-io]`; the x86_64 build links.
+
+What runs: the shell starts, Wasmtime and SQLite load, home lists Layout and Settings, touch taps open Settings and a section,
+the sidebar button responds, and the status bar and gesture bar are padded (insets reach `HostInputs`).
+
+Measured (debug, x86_64, unstripped): `app-debug.apk` 420,602,429 B (the arm64 one was 201,648,679 B; x86_64 debuginfo is larger).
+`am start -W` TotalTime (to the first frame, i.e. the splash) 2.3 to 4.4 s on an unloaded 4-core emulator and 7.0 s on the
+2-core capped one; the shell is on screen a few seconds after that. These are emulator numbers with a software GPU and say
+little about a phone. Release and arm64 sizes were not re-measured (host memory).
+
+### Findings and fixes
+
+1. **Debug builds crash on the emulator's Vulkan** (SIGSEGV in `vk_common_SetDebugUtilsObjectNameEXT`, called from wgpu's
+   `create_bind_group_layout`): wgpu labels objects when `InstanceFlags::DEBUG` is on, which `from_build_config()` sets in debug
+   builds, and the emulator's gfxstream Vulkan driver faults on it. Not fixed in code. Workaround for emulator runs
+   (userdebug image): `adb root; adb shell "setprop wrap.com.example.mobile 'WGPU_DEBUG=0 WGPU_VALIDATION=0 WGPU_DISCARD_HAL_LABELS=1'"`.
+   Disabling emulator Vulkan (`-feature -Vulkan`) instead falls to GLES, where `vello_hybrid` panics requesting a device
+   (`max_compute_workgroups_per_dimension` allowed 0). A release build, or a real GPU, is the open check.
+2. **System back closed the app** (confirmed): at `targetSdk` 36 predictive back stops delivering `KEYCODE_BACK` to the native
+   input queue, so winit never saw `BrowserBack`. Fixed: `MainActivity.kt` registers an `OnBackInvokedCallback` (API 33+) that
+   calls `requestSystemBack` (bound to Rust with `RegisterNatives`, since NativeActivity `dlopen`s the library and the JVM's
+   by-name lookup never finds it). `dayframe_native::SYSTEM_BACK` answers whether the shell can go back
+   (mirrors `HostInputs::can_back`); if so it bumps `platform_back`, otherwise the activity calls `moveTaskToBack`. Verified on
+   the emulator: back from a section returns into the shell and a further back at home sends the app to the launcher with the
+   process alive. A manifest opt-out (`enableOnBackInvokedCallback=false`) was not possible: dx's manifest template has no
+   application-attribute hook (`[android.raw.manifest]` is injected beside `<application>`, not into it).
+3. **Edge-to-edge insets** (fixed): `dayframe_mobile::system_insets` reads `WindowInsets` (`getInsets(systemBars | displayCutout)`
+   on API 30+, the deprecated accessors on 28 to 29) from the decor view over JNI and `dayframe_native::Shell` feeds it to
+   `HostInputs::insets` on every surface resize (winit-android reports neither `InsetsChanged` nor `ContentRectChanged`).
+   Verified: content sits between the bars. A null `getRootWindowInsets` (view not attached yet) reads as zero until the next resize;
+   on this emulator the first resize delivered real values.
+4. **Counter (Wasm) section shows "Section unavailable: Unavailable"**: the package is installed but not enabled (packages are
+   not `enabled_on_admission`), the same as on desktop until enabled under "Choose settings sections". Not exercised further:
+   the emulator was too slow to drive the enable flow within its memory cap, so a Wasm guest actually running on Android
+   (JIT under SELinux) is still unconfirmed.
+
+### Remaining gaps
+
+- Wasm guest execution on Android (enable the counter and press it); needs a longer, less throttled run or a phone.
+- Release build, arm64 build and size, startup on real hardware, real GPU (finding 1).
+- IME (NativeActivity delivers no composition text), AccessKit/TalkBack, gesture-exclusion for edge drawers: as in the S3 table.
+- Host memory: a debug APK build plus an emulator exceeded the host's RAM and the OOM killer took the session once.
