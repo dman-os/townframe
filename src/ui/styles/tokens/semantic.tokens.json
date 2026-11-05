@@ -17,6 +17,9 @@
     "on-accent": { "$value": "{color.on-primary}" },
     "accent-container": { "$value": "{color.blue.100}" },
     "on-accent-container": { "$value": "{color.blue.900}" },
+    "selected": { "$value": "{color.accent-container}" },
+    "on-selected": { "$value": "{color.on-accent-container}" },
+    "scrim": { "$value": "{color.overlay.black-32}" },
     "danger": { "$value": "{color.red.600}" },
     "on-danger": { "$value": "{color.neutral.0}" }
   },
@@ -38,5 +41,30 @@
     "sm": { "$value": "{shadow.sm}" },
     "md": { "$value": "{shadow.md}" },
     "raised": { "$value": "{shadow.raised}" }
+  },
+  "layer": {
+    "$type": "number",
+    "$description": "The one z-order scale. A surface takes its layer from here; no component names a z-index of its own.",
+    "content": { "$value": 0 },
+    "raised": { "$value": 10 },
+    "app-bar": { "$value": 20 },
+    "drawer": { "$value": 30 },
+    "sheet": { "$value": 40 },
+    "toast": { "$value": 50 },
+    "gesture": { "$value": 60 }
+  },
+  "motion": {
+    "duration-enter": {
+      "$type": "duration",
+      "$value": "{motion.duration.medium}"
+    },
+    "duration-fade": {
+      "$type": "duration",
+      "$value": "{motion.duration.short}"
+    },
+    "easing-enter": {
+      "$type": "cubicBezier",
+      "$value": "{motion.easing.decelerate}"
+    }
   }
 }

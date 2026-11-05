@@ -10,7 +10,9 @@
 type JsonObject = Record<string, unknown>;
 type TokenType =
   | "color"
+  | "cubicBezier"
   | "dimension"
+  | "duration"
   | "fontFamily"
   | "fontWeight"
   | "number"
@@ -30,7 +32,9 @@ const outputUrl = new URL("src/ui/styles/tokens.generated.css", root);
 const sources = ["primitives.tokens.json", "semantic.tokens.json"];
 const supportedTypes = new Set<TokenType>([
   "color",
+  "cubicBezier",
   "dimension",
+  "duration",
   "fontFamily",
   "fontWeight",
   "number",
@@ -303,6 +307,32 @@ function color(value: unknown, path: string): string {
   return `rgba(${channels.join(", ")}, ${alpha})`;
 }
 
+function duration(value: unknown, path: string): string {
+  if (
+    !isObject(value) || typeof value.value !== "number" ||
+    !Number.isFinite(value.value) || value.value < 0 || value.unit !== "ms"
+  ) {
+    fail(
+      `duration ${path} must be a DTCG object with a non-negative value in ms`,
+    );
+  }
+  return `${value.value}ms`;
+}
+
+function cubicBezier(value: unknown, path: string): string {
+  if (
+    !Array.isArray(value) || value.length !== 4 ||
+    !value.every((point) => typeof point === "number" && Number.isFinite(point))
+  ) {
+    fail(`cubicBezier ${path} must be four finite numbers`);
+  }
+  // CSS rejects a curve whose x coordinates leave [0, 1].
+  if (value[0] < 0 || value[0] > 1 || value[2] < 0 || value[2] > 1) {
+    fail(`cubicBezier ${path} has an x coordinate outside 0 through 1`);
+  }
+  return `cubic-bezier(${value.join(", ")})`;
+}
+
 function fontFamily(value: unknown, path: string): string {
   const families = typeof value === "string" ? [value] : value;
   if (
@@ -337,8 +367,12 @@ function cssValue(token: Token, value: unknown): string {
   switch (token.type) {
     case "color":
       return color(value, token.path);
+    case "cubicBezier":
+      return cubicBezier(value, token.path);
     case "dimension":
       return dimension(value, token.path);
+    case "duration":
+      return duration(value, token.path);
     case "fontFamily":
       return fontFamily(value, token.path);
     case "fontWeight":
@@ -384,6 +418,9 @@ const runtimeAliases: Record<string, string> = {
   "color.on-accent": "color-on-accent",
   "color.accent-container": "color-accent-container",
   "color.on-accent-container": "color-on-accent-container",
+  "color.selected": "color-selected",
+  "color.on-selected": "color-on-selected",
+  "color.scrim": "color-scrim",
   "color.danger": "color-danger",
   "color.on-danger": "color-on-danger",
   "font.family.sans": "font-family-sans",
@@ -551,6 +588,33 @@ function selfTest(): void {
   expectFailure(
     "unclassified dimension",
     () => dimension({ value: 1, unit: "px" }, "dimension.unknown"),
+  );
+  if (
+    duration({ value: 250, unit: "ms" }, "motion.duration.medium") !== "250ms"
+  ) {
+    fail("self-test duration serialization failed");
+  }
+  expectFailure(
+    "duration in seconds",
+    () => duration({ value: 0.25, unit: "s" }, "motion.duration.medium"),
+  );
+  expectFailure(
+    "negative duration",
+    () => duration({ value: -1, unit: "ms" }, "motion.duration.medium"),
+  );
+  if (
+    cubicBezier([0.05, 0.7, 0.1, 1], "motion.easing.decelerate") !==
+      "cubic-bezier(0.05, 0.7, 0.1, 1)"
+  ) {
+    fail("self-test cubicBezier serialization failed");
+  }
+  expectFailure(
+    "cubicBezier x outside range",
+    () => cubicBezier([1.5, 0, 0, 1], "motion.easing.decelerate"),
+  );
+  expectFailure(
+    "cubicBezier arity",
+    () => cubicBezier([0, 0, 1], "motion.easing.decelerate"),
   );
   expectFailure(
     "unknown metadata",

@@ -52,6 +52,14 @@
     --color-surface-sunken: var(--df-color-surface-sunken);
     --color-foreground-muted: var(--df-color-text-muted);
     --color-foreground-subtle: var(--df-color-text-subtle);
+    --animate-fade-in: kit-fade-in var(--df-motion-duration-fade)
+    var(--df-motion-easing-enter) both;
+    --animate-slide-in-leading: kit-slide-in-leading
+    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
+    --animate-slide-in-trailing: kit-slide-in-trailing
+    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
+    --animate-slide-in-bottom: kit-slide-in-bottom
+    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
   }
 }
 @layer base {
@@ -729,9 +737,9 @@
     width: calc(var(--df-spacing) * 6);
     height: calc(var(--df-spacing) * 6);
   }
-  .size-11 {
-    width: calc(var(--df-spacing) * 11);
-    height: calc(var(--df-spacing) * 11);
+  .size-12 {
+    width: calc(var(--df-spacing) * 12);
+    height: calc(var(--df-spacing) * 12);
   }
   .size-24 {
     width: calc(var(--df-spacing) * 24);
@@ -745,6 +753,9 @@
   }
   .h-5\/6 {
     height: calc(5 / 6 * 100%);
+  }
+  .h-14 {
+    height: calc(var(--df-spacing) * 14);
   }
   .h-full {
     height: 100%;
@@ -772,8 +783,8 @@
     min-height: calc(var(--df-spacing) * 10);
     padding-inline: calc(var(--df-spacing) * 4);
   }
-  .min-h-11 {
-    min-height: calc(var(--df-spacing) * 11);
+  .min-h-12 {
+    min-height: calc(var(--df-spacing) * 12);
   }
   .min-h-16 {
     min-height: calc(var(--df-spacing) * 16);
@@ -792,6 +803,9 @@
   }
   .w-96 {
     width: calc(var(--df-spacing) * 96);
+  }
+  .w-128 {
+    width: calc(var(--df-spacing) * 128);
   }
   .w-full {
     width: 100%;
@@ -878,6 +892,9 @@
   .shrink {
     flex-shrink: 1;
   }
+  .shrink-0 {
+    flex-shrink: 0;
+  }
   .flex-grow {
     flex-grow: 1;
   }
@@ -890,6 +907,18 @@
   .transform {
     transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,)
       var(--tw-skew-x,) var(--tw-skew-y,);
+  }
+  .animate-fade-in {
+    animation: var(--animate-fade-in);
+  }
+  .animate-slide-in-bottom {
+    animation: var(--animate-slide-in-bottom);
+  }
+  .animate-slide-in-leading {
+    animation: var(--animate-slide-in-leading);
+  }
+  .animate-slide-in-trailing {
+    animation: var(--animate-slide-in-trailing);
   }
   .cursor-col-resize {
     cursor: col-resize;
@@ -1102,6 +1131,9 @@
   }
   .bg-primary {
     background-color: var(--df-color-primary);
+  }
+  .bg-scrim {
+    background-color: var(--df-color-scrim);
   }
   .bg-surface {
     background-color: var(--df-color-surface);
@@ -1441,11 +1473,19 @@
   .focus-visible\:outline-focus:focus-visible {
     outline-color: var(--df-color-focus);
   }
-  .data-\[state\=current\]\:bg-accent-container[data-state="current"] {
-    background-color: var(--df-color-accent-container);
+  .data-\[state\=bare\]\:pl-4[data-state="bare"] {
+    padding-left: calc(var(--df-spacing) * 4);
   }
-  .data-\[state\=current\]\:text-on-accent-container[data-state="current"] {
-    color: var(--df-color-on-accent-container);
+  .data-\[state\=current\]\:bg-selected[data-state="current"] {
+    background-color: var(--df-color-selected);
+  }
+  .data-\[state\=current\]\:text-on-selected[data-state="current"] {
+    color: var(--df-color-on-selected);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .motion-reduce\:animate-none {
+      animation: none;
+    }
   }
   @media (width >= 64rem) {
     .lg\:p-12 {
@@ -1784,6 +1824,7 @@
     --df-color-neutral-600: #5c5c6b;
     --df-color-neutral-900: #1f1f29;
     --df-color-neutral-1000: #000000;
+    --df-color-overlay-black-32: rgba(0, 0, 0, 0.32);
     --df-color-blue-100: #dbe8ff;
     --df-color-blue-600: #2952c7;
     --df-color-blue-900: #0f1f61;
@@ -1798,6 +1839,9 @@
     --df-shadow-sm: 0px 1px 2px 0px #000000;
     --df-shadow-md: 0px 4px 12px 0px #000000;
     --df-shadow-raised: 0px 8px 24px 0px #000000;
+    --df-motion-duration-short: 150ms;
+    --df-motion-duration-medium: 250ms;
+    --df-motion-easing-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
     --df-color-canvas: #fafafc;
     --df-color-surface: #ffffff;
     --df-color-surface-raised: #ffffff;
@@ -1813,6 +1857,9 @@
     --df-color-on-accent: #ffffff;
     --df-color-accent-container: #dbe8ff;
     --df-color-on-accent-container: #0f1f61;
+    --df-color-selected: #dbe8ff;
+    --df-color-on-selected: #0f1f61;
+    --df-color-scrim: rgba(0, 0, 0, 0.32);
     --df-color-danger: #bd1f1f;
     --df-color-on-danger: #ffffff;
     --df-dimension-spacing: 0.25rem;
@@ -1832,6 +1879,16 @@
     --df-elevation-sm: 0px 1px 2px 0px #000000;
     --df-elevation-md: 0px 4px 12px 0px #000000;
     --df-elevation-raised: 0px 8px 24px 0px #000000;
+    --df-layer-content: 0;
+    --df-layer-raised: 10;
+    --df-layer-app-bar: 20;
+    --df-layer-drawer: 30;
+    --df-layer-sheet: 40;
+    --df-layer-toast: 50;
+    --df-layer-gesture: 60;
+    --df-motion-duration-enter: 250ms;
+    --df-motion-duration-fade: 150ms;
+    --df-motion-easing-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
     --df-font-family: var(--df-font-family-sans);
   }
 }
@@ -1866,6 +1923,8 @@
     --df-color-on-accent: var(--scheme-color-on-secondary);
     --df-color-accent-container: var(--scheme-color-secondary-container);
     --df-color-on-accent-container: var(--scheme-color-on-secondary-container);
+    --df-color-selected: var(--scheme-color-secondary-container);
+    --df-color-on-selected: var(--scheme-color-on-secondary-container);
     --df-color-danger: var(--scheme-color-error);
     --df-color-on-danger: var(--scheme-color-on-error);
     --df-color-success: var(--scheme-color-tertiary);
@@ -2327,6 +2386,38 @@
 @property --tw-drop-shadow-size {
   syntax: "*";
   inherits: false;
+}
+@keyframes kit-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes kit-slide-in-leading {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes kit-slide-in-trailing {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes kit-slide-in-bottom {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
 }
 @layer properties {
   @supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or
