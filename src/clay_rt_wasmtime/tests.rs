@@ -1884,3 +1884,38 @@ async fn precompiled_artifacts_are_reused_by_content() {
     assert!(artifact.exists());
     std::fs::remove_dir_all(directory).ok();
 }
+
+/// Compiling a package must not occupy the thread that polls it: on Android that is the UI
+/// thread, and a frozen frame hid the section's loading state for the whole compile.
+#[tokio::test(flavor = "current_thread")]
+async fn compiling_a_package_leaves_the_polling_thread_free() {
+    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
+        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let mut bytes = std::fs::read(path).unwrap();
+    // A trailing custom section (id 0, name "pad") with a unique payload gives these bytes a
+    // cache key of their own, so the compile is cold even when the artifact cache is warm.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
+    bytes.extend([0, (1 + 3 + unique.len()) as u8, 3]);
+    bytes.extend(b"pad");
+    bytes.extend(unique);
+    let mut ticks = 0u32;
+    let compile = WasmPackage::from_bytes(bytes);
+    tokio::pin!(compile);
+    loop {
+        tokio::select! {
+            package = &mut compile => {
+                package.unwrap();
+                break;
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(1)) => ticks += 1,
+        }
+    }
+    assert!(
+        ticks > 1,
+        "the polling thread ran {ticks} ticks during a cold compile; it was blocked"
+    );
+}

@@ -665,19 +665,37 @@ impl WasmPackage {
         Self::from_bytes(bytes).await
     }
 
-    pub async fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, String> {
+    /// Compile `bytes` on a thread of its own and wait for it. Cranelift runs for seconds on a
+    /// phone, and the caller is a local future the shell polls on its UI thread; compiling in the
+    /// poll froze the frame (and with it the section's loading state) for the whole compile.
+    pub async fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
         let started = std::time::Instant::now();
         let engine = engine()?;
         eprintln!("INSTR wasm engine ready in {:?}", started.elapsed());
-        let compile_started = std::time::Instant::now();
-        let component = compile_component(&engine, bytes.as_ref())?;
-        eprintln!(
-            "INSTR wasm compile_component {} bytes in {:?} on thread {:?} (cache path: {:?})",
-            bytes.as_ref().len(),
-            compile_started.elapsed(),
-            std::thread::current().name(),
-            cache_path(&engine, bytes.as_ref()).map(|path| path.exists()),
-        );
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new()
+            .name("wasm-compile".into())
+            .spawn({
+                let engine = engine.clone();
+                move || {
+                    let compile_started = std::time::Instant::now();
+                    let component = compile_component(&engine, &bytes);
+                    eprintln!(
+                        "INSTR wasm compile_component {} bytes in {:?} on thread {:?} (cache path: {:?})",
+                        bytes.len(),
+                        compile_started.elapsed(),
+                        std::thread::current().name(),
+                        cache_path(&engine, &bytes).map(|path| path.exists()),
+                    );
+                    // A closed receiver is the activation being cancelled mid-compile (the micro was
+                    // disabled); the finished artifact is already in the cache, so drop the result.
+                    sender.send(component).ok();
+                }
+            })
+            .expect("the OS can spawn a compile thread");
+        let component = receiver
+            .await
+            .expect("the compile thread reports before it exits")?;
         let linker = linker(&engine)?;
         eprintln!("INSTR wasm package ready in {:?}", started.elapsed());
         Ok(Self {
