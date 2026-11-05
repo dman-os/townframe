@@ -94,3 +94,33 @@ test("home, Settings and a section unwind with back at a compact and a wide widt
   await expect(home).toBeVisible();
   expect(failures).toEqual([]);
 });
+
+// A panel whose micro has no presentation (packages are admitted disabled, so the layout is one
+// on a fresh install) shows a placeholder, and the micro that would place the sidebar/back button
+// is the one that is absent. The shell supplies the button then, or a compact window is a dead
+// end that only the platform back leaves. Found by the Bombadil exploration (`bombadil/shell.ts`).
+test("a panel that is unavailable still offers the way back or the sidebar", async ({
+  page,
+}) => {
+  const failures = watchFailures(page);
+  const unavailable = page.getByRole("alert");
+
+  await page.setViewportSize({ width: 420, height: 800 });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Open Layout" })).toBeVisible({
+    timeout: 60_000,
+  });
+  await page.getByRole("button", { name: "Open Layout" }).click();
+  await expect(unavailable).toContainText("Section unavailable");
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Home" })).toBeVisible();
+
+  // Wide with the sidebar hidden is the same dead end one step later.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.getByRole("button", { name: "Hide sidebar" }).click();
+  await page.getByRole("button", { name: "Open Layout" }).click();
+  await expect(unavailable).toContainText("Section unavailable");
+  await page.getByRole("button", { name: "Open sidebar" }).click();
+  await expect(page.getByRole("navigation", { name: "Sidebar" })).toBeVisible();
+  expect(failures).toEqual([]);
+});

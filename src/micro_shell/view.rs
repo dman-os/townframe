@@ -62,10 +62,23 @@ enum Placement {
 /// Mounts a panel's presentation and provides its [`Placement`] to whatever the panel's tree
 /// puts the button in. It takes the reference, not children: a component that only forwards an
 /// `Element` prop does not re-render when the element inside it changes.
+///
+/// The panel's own app bar carries the sidebar/back button, so while the panel has no
+/// presentation (its micro is disabled or still starting) the shell supplies a bar with the
+/// panel's title and the button; otherwise a compact window would show a placeholder with no way
+/// out of it.
 #[component]
-fn PlacedSlot(placement: Placement, reference: clay_mdk::Capability) -> Element {
+fn PlacedSlot(
+    placement: Placement,
+    reference: clay_mdk::Capability,
+    title: String,
+    shell: Shell,
+) -> Element {
     use_context_provider(|| placement);
-    rsx! { PresentationSlot { reference } }
+    let placeholder_chrome = rsx! {
+        AppBar { title, leading: rsx! { NavigationButton { shell } } }
+    };
+    rsx! { PresentationSlot { reference, placeholder_chrome } }
 }
 
 pub(crate) fn frame(shell: Shell) -> Element {
@@ -308,6 +321,8 @@ fn Frame(shell: Shell) -> Element {
             key: "{main.key}",
             placement: Placement::Main,
             reference: main.attachments[main.value.content.index()].clone(),
+            title: main.value.title.clone(),
+            shell: shell.clone(),
         }
     };
     let details_slot = details.map(|(row_panel, row, attachment)| {
@@ -316,6 +331,8 @@ fn Frame(shell: Shell) -> Element {
                 key: "{row_panel.key}/{row:?}",
                 placement: Placement::Details,
                 reference: row_panel.attachments[attachment.index()].clone(),
+                title: row_panel.value.title.clone(),
+                shell: shell.clone(),
             }
         }
     });
