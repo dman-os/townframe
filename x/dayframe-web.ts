@@ -173,6 +173,16 @@ await Deno.copyFile(
   site.join("assets/tailwind.css").toString(),
 );
 
+// Style spike (docs/scratch/pierre-spikes.md, "P1 style"): Pierre's stylesheets as static host
+// assets, linked into the page only when `?pierre-css=<name>` asks for one, so each spike option
+// is styled by its own sheet and never by another option's.
+for (const name of ["pierre.verbatim.css"]) {
+  await Deno.copyFile(
+    root.join(`src/micro_pierre_spike/assets/${name}`).toString(),
+    site.join(name).toString(),
+  );
+}
+
 // Bundle-size tracking (ADR 018 §7): the host module carries `wasmtime-environ` and a second
 // `wasmparser` next to the Dioxus web runtime. Print raw + gzip so regressions are visible.
 const hostWasm = site.join("dayframe_web_bg.wasm");
@@ -195,6 +205,17 @@ await site.join("index.html").writeText(`<!doctype html>
     <div id="main"></div>
     <script type="module">
       import init from "./dayframe_web.js";
+      const pierreCss = new URLSearchParams(location.search).get("pierre-css");
+      if (pierreCss) {
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = "pierre." + pierreCss + ".css";
+        document.head.append(link);
+        await new Promise((resolve, reject) => {
+          link.onload = resolve;
+          link.onerror = () => reject(new Error("pierre." + pierreCss + ".css failed to load"));
+        });
+      }
       await init();
     </script>
   </body>

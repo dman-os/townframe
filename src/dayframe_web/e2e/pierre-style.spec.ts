@@ -52,3 +52,42 @@ test("a guest's raw style attribute is applied unfiltered", async ({ page }) => 
   expect(failures).toEqual([]);
 });
 
+// Each option is styled only by the sheet its page asks for (`?pierre-css=`; (b) asks for none:
+// its sheet is the host's, delivered from the manifest), so a presentation that renders without
+// its own mechanism renders unstyled. `row` selects one row of the code column in the option's
+// markup, `addition` an added one.
+const options = [
+  {
+    id: "a",
+    url: "/?pierre-css=verbatim",
+    title: "Pierre rows (a) widened vocabulary",
+    row: "[data-line]",
+    addition: "[data-line][data-line-type='change-addition']",
+  },
+];
+
+for (const option of options) {
+  test(`option ${option.id}: the guest's rows are laid out by Pierre's own stylesheet`, async ({
+    page,
+  }) => {
+    const failures = watchFailures(page);
+    // Tall enough that the settings details scroller shows every row, so one screenshot per
+    // option covers them all.
+    await page.setViewportSize({ width: 1400, height: 4800 });
+    await openSpikeSection(page, option.url, option.title);
+
+    // One revision carries every row: they all appear at once.
+    const rows = page.locator(option.row);
+    await expect(rows).toHaveCount(217, { timeout: 120_000 });
+
+    // Pierre's stylesheet decided the layout: a row is one 20px line, and an added row is
+    // tinted (an unstyled row has a transparent background).
+    expect((await rows.first().boundingBox())?.height).toBe(20);
+    const background = await page
+      .locator(option.addition)
+      .first()
+      .evaluate((row) => getComputedStyle(row).backgroundColor);
+    expect(background).not.toBe("rgba(0, 0, 0, 0)");
+    expect(failures).toEqual([]);
+  });
+}

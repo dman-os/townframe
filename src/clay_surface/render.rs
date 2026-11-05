@@ -11,6 +11,8 @@ use crate::wire::SurfaceEventHandler;
 use dioxus::prelude::*;
 use dioxus_core::ListenerCallback;
 use dioxus_html::PlatformEventData;
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 
 impl<C: Clone> SurfaceTree<C> {
     pub fn render(
@@ -104,7 +106,7 @@ pub(crate) fn static_attribute(
             }
         };
     }
-    vocabulary!(
+    let fixed = vocabulary!(
         None => None => [
             "id", "class", "style", "title", "role", "tabindex", "hidden", "lang", "dir",
             "accesskey", "contenteditable", "draggable", "spellcheck", "translate",
@@ -140,11 +142,57 @@ pub(crate) fn static_attribute(
             "font", "font-family", "font-size", "font-weight", "font-style", "line-height",
             "text-align", "text-decoration", "text-overflow", "white-space", "word-break",
             "cursor", "pointer-events", "user-select", "opacity", "visibility", "box-sizing",
-            "box-shadow", "transform", "transform-origin", "transition", "object-fit"
+            "box-shadow", "transform", "transform-origin", "transition", "object-fit",
+            "contain", "isolation", "overflow-anchor"
         ],
         Some("http://www.w3.org/1999/xlink") => Some("http://www.w3.org/1999/xlink") => ["href"]
-    )
+    );
+    fixed.or_else(|| open_vocabulary(name, namespace))
 }
+
+/// The two name families a guest may coin, because they cannot be listed: `data-*` attributes (a
+/// component library's whole DOM contract, such as Pierre's ~80 `[data-...]` selectors) and
+/// custom properties (`--x`, inline in the `style` namespace). Dioxus attribute names are
+/// `&'static str`, so a coined name is interned and leaked once; the interner is process-wide and
+/// bounded, and a name past the bound is rejected like any other name outside the vocabulary.
+fn open_vocabulary(
+    name: &str,
+    namespace: Option<&str>,
+) -> Option<(&'static str, Option<&'static str>)> {
+    let (prefix, canonical_namespace) = match namespace {
+        None => ("data-", None),
+        Some("style") => ("--", Some("style")),
+        Some(_) => return None,
+    };
+    let coinable = name.strip_prefix(prefix).is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || byte == b'-'
+                    || (prefix == "--" && (byte.is_ascii_uppercase() || byte == b'_'))
+            })
+    });
+    if !coinable || name.len() > MAX_COINED_NAME_BYTES {
+        return None;
+    }
+    static COINED: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+    let mut coined = COINED.lock().expect("the interner holds no panicking code");
+    if let Some(known) = coined.get(name) {
+        return Some((known, canonical_namespace));
+    }
+    if coined.len() >= MAX_COINED_NAMES {
+        return None;
+    }
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    coined.insert(leaked);
+    Some((leaked, canonical_namespace))
+}
+
+/// Bounds of the interner behind [`open_vocabulary`]: a hostile guest can fill it, which rejects
+/// later coined names everywhere, but cannot grow it.
+const MAX_COINED_NAMES: usize = 512;
+const MAX_COINED_NAME_BYTES: usize = 64;
 
 macro_rules! expand_surface_event_listener {
     (

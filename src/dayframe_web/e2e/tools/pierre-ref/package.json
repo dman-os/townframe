@@ -1,0 +1,10 @@
+{
+  "name": "pierre-ref",
+  "private": true,
+  "type": "module",
+  "description": "Real @pierre/diffs 1.5.2 rendering the style spike's diff; build.mjs bundles entry.js into dist/ref.js. Not a workspace package: install with npm in a scratch copy.",
+  "dependencies": {
+    "@pierre/diffs": "1.5.2",
+    "esbuild": "0.28.2"
+  }
+}

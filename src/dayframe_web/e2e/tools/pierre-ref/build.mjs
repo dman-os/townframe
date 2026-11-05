@@ -1,0 +1,2 @@
+import { build } from 'esbuild';
+await build({ entryPoints: ['entry.js'], bundle: true, format: 'esm', outfile: 'dist/ref.js', loader: { '.ts': 'text' }, plugins: [{ name: 'raw', setup(b) { b.onResolve({ filter: /\?raw$/ }, a => ({ path: new URL(a.path.replace('?raw',''), 'file://' + a.resolveDir + '/').pathname, namespace: 'raw' })); b.onLoad({ filter: /.*/, namespace: 'raw' }, async a => ({ contents: 'export default ' + JSON.stringify(await (await import('node:fs/promises')).readFile(a.path, 'utf8')), loader: 'js' })); } }], logLevel: 'info' });

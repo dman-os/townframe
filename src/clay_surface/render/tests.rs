@@ -197,6 +197,8 @@ fn supported_attributes_are_reviewable() {
         "data-testid",
         "data-state",
         "data-value",
+        "data-line",
+        "data-diff-type",
         "aria-label",
         "aria-labelledby",
         "aria-describedby",
@@ -330,6 +332,10 @@ fn supported_attributes_are_reviewable() {
         "transform-origin",
         "transition",
         "object-fit",
+        "contain",
+        "isolation",
+        "overflow-anchor",
+        "--diffs-token-dark",
     ];
     let probes: Vec<(String, Option<String>)> = plain
         .iter()
@@ -575,4 +581,40 @@ fn listener_events_carry_guest_identity_revision_and_serialized_data() {
         "keydown_data_json",
         serde_json::from_str::<serde_json::Value>(&keydown.data_json).unwrap()
     );
+}
+
+// Two name families are open (they cannot be listed): `data-*` attributes and `--*` custom
+// properties in the `style` namespace. They are coined once as `&'static str` (Dioxus names are
+// static), so the family's shape and the interner's bound are the contract.
+#[test]
+fn coined_names_are_shaped_and_the_interner_is_bounded() {
+    assert!(static_attribute("data-line-type", None).is_some());
+    assert!(static_attribute("--diffs-token-dark", Some("style")).is_some());
+    for rejected in [
+        ("data-", None),
+        ("data-Line", None),
+        ("data-a b", None),
+        ("data-a\"b", None),
+        ("--x", None),
+        ("data-x", Some("style")),
+        ("--x", Some("other")),
+        ("--", Some("style")),
+        ("--x y", Some("style")),
+    ] {
+        assert!(
+            static_attribute(rejected.0, rejected.1).is_none(),
+            "{rejected:?} was coined"
+        );
+    }
+    let too_long = format!("data-{}", "a".repeat(MAX_COINED_NAME_BYTES));
+    assert!(static_attribute(&too_long, None).is_none());
+    // The interner is process-wide: a run of distinct names is accepted only up to the bound, and
+    // a name already coined stays accepted after it. (Names coined by other tests in this process
+    // count toward the bound; under nextest each test has its own process.)
+    let accepted = (0..MAX_COINED_NAMES + 8)
+        .filter(|index| static_attribute(&format!("data-bound-{index}"), None).is_some())
+        .count();
+    assert!(accepted <= MAX_COINED_NAMES);
+    assert!(static_attribute("data-line-type", None).is_some());
+    assert!(static_attribute("data-bound-one-too-many", None).is_none());
 }

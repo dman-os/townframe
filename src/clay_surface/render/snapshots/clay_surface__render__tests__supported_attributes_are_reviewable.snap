@@ -75,6 +75,8 @@ expression: supported
 - data-testid
 - data-state
 - data-value
+- data-line
+- data-diff-type
 - aria-label
 - aria-labelledby
 - aria-describedby
@@ -206,4 +208,8 @@ expression: supported
 - "style:transform-origin"
 - "style:transition"
 - "style:object-fit"
+- "style:contain"
+- "style:isolation"
+- "style:overflow-anchor"
+- "style:--diffs-token-dark"
 - "http://www.w3.org/1999/xlink:href"

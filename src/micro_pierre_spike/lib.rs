@@ -47,12 +47,20 @@ struct Mode {
 /// fetches a URL. Nothing in the style-property list is involved.
 const PROBE: &str = r#"{"t":"div","a":{"id":"probe","style":"position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;background:url(http://127.0.0.1:9/pierre-probe-beacon)"},"c":["raw style probe"]}"#;
 
-const MODES: &[Mode] = &[Mode {
-    publication: "probe-raw-style",
-    title: "Pierre probe (raw style)",
-    rows: PROBE,
-    host_class: None,
-}];
+const MODES: &[Mode] = &[
+    Mode {
+        publication: "probe-raw-style",
+        title: "Pierre probe (raw style)",
+        rows: PROBE,
+        host_class: None,
+    },
+    Mode {
+        publication: "rows-a",
+        title: "Pierre rows (a) widened vocabulary",
+        rows: include_str!("assets/rows.verbatim.json"),
+        host_class: Some("pd-host"),
+    },
+];
 
 pub fn manifest() -> clay_mdk::MicroManifest {
     use clay_mdk::Access;
