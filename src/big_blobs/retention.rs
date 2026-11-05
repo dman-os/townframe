@@ -22,6 +22,7 @@ use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::drawer::DrawerMetaDoc;
 use big_cabinet_core::drawer::MetaRoot;
 use big_repo::SharedPartStore;
+use futures::future::BoxFuture;
 use service_utils_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
@@ -32,11 +33,19 @@ use std::sync::Arc;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::eyre;
 
+/// Whether this node can commit to an inventory doc: its own keyhive standing on it, the
+/// predicate big_repo's commit gate enforces. The metadata capability cannot answer this: it is
+/// minted by the operator, a cabinet superuser on every drawer the node knows, including a
+/// drawer synced in from a peer where the node holds only keyhive Read.
+pub(crate) type InventoryWriteAccess =
+    Arc<dyn Fn(DocId) -> BoxFuture<'static, Res<bool>> + Send + Sync>;
+
 pub(crate) struct Retention {
     sql: Database,
     service: Arc<BlobService>,
     docs: Client<DocsProtocol>,
     metadata: MetadataCapabilities,
+    writable: InventoryWriteAccess,
     parts: SharedPartStore,
 }
 
@@ -63,6 +72,7 @@ impl Retention {
         service: Arc<BlobService>,
         docs: Client<DocsProtocol>,
         metadata: MetadataCapabilities,
+        writable: InventoryWriteAccess,
         parts: SharedPartStore,
     ) -> Res<Self> {
         Self::migrate(&sql).await?;
@@ -71,6 +81,7 @@ impl Retention {
             service,
             docs,
             metadata,
+            writable,
             parts,
         };
         let service = Arc::clone(&retention.service);
@@ -205,6 +216,17 @@ impl Retention {
         });
         let descriptor_key = DatumKey::from_text(Drawer::ID, "main")?;
         for target in &targets {
+            // A doc is a candidate for the inventory of every drawer that contains it, and a
+            // drawer synced in from a peer may grant this node only Read: its inventory is that
+            // peer's to pin into, not ours. Such a target is left exactly as it stands, like a
+            // denied read below: never newly claimed, and claims made while the node could
+            // write are kept until it can write again (ADR 026 §5: an unreadable or unwritable
+            // inventory must not shrink retention). Asking first keeps retention from staging
+            // pins that keyhive refuses at commit; a grant arriving later rearms the work queue
+            // through the permissions ingress, which reruns this.
+            if !(self.writable)(target.inventory.clone()).await? {
+                continue;
+            }
             if !snapshots.contains_key(&target.drawer) {
                 let mut keys = Self::reference_keys(&targets, &target.drawer, MetaRoot::Public)?;
                 keys.extend(member_keys.clone());

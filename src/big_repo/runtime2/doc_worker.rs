@@ -23,7 +23,8 @@ use crate::runtime2::types::DocLookup;
 use crate::runtime2::types::LiveDocBundle;
 use crate::runtime2::types::LiveDocHandle;
 use crate::runtime2::types::handle_validity;
-use crate::runtime2::types::invalid_handle_message;
+use crate::runtime2::types::NoWriteAccess;
+use crate::runtime2::types::invalid_handle_error;
 use big_sync_core::PeerKey;
 use futures::future::AbortRegistration;
 use sedimentree_core::loose_commit::id::CommitId;
@@ -1027,8 +1028,8 @@ impl<F: FutureForm> DocWorker2<F> {
             bundle_id,
             current.as_ref().and_then(|bundle| bundle.broken_reason()),
         );
-        if let Some(message) = invalid_handle_message(validity) {
-            resp.send(Err(ferr!("{message}")))
+        if let Some(refusal) = invalid_handle_error(validity) {
+            resp.send(Err(refusal))
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             return Ok(());
@@ -1041,11 +1042,9 @@ impl<F: FutureForm> DocWorker2<F> {
                     .as_ref()
                     .expect("live bundle present for a valid commit")
                     .mark_broken(BrokenReason::CommitRejectedNoWriteAccess);
-                resp.send(Err(ferr!(
-                    "document write rejected: local access is not writable (revoked or read-only)"
-                )))
-                .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                .ok();
+                resp.send(Err(NoWriteAccess.into()))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
                 return Ok(());
             }
             Err(error) => {

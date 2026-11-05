@@ -79,6 +79,7 @@ pub use runtime2::types::GetDocError;
 pub use runtime2::types::GroupScopeController;
 pub use runtime2::types::GroupScopeHandle;
 pub use runtime2::types::KeyhiveSyncCancelled;
+pub use runtime2::types::NoWriteAccess;
 pub use runtime2::types::PutDocError;
 pub use runtime2::types::SyncDocError;
 pub use runtime2::types::SyncDocOutcome;
@@ -1517,6 +1518,9 @@ impl BigDocHandle {
         self.with_document_read(|doc| doc.save()).await
     }
 
+    /// Run `operation` against the document and commit whatever it changed. A commit
+    /// refused because this node's keyhive access is not writable fails with a report
+    /// carrying [`NoWriteAccess`]; the change never persisted.
     pub async fn with_document<F, R>(&self, operation: F) -> Res<R>
     where
         F: FnOnce(&mut automerge::Automerge) -> R,
@@ -1539,14 +1543,14 @@ impl BigDocHandle {
         // The refusal is rendered by the same function the worker's commit gate
         // uses, so it names the recorded reason: reporting a worker teardown as
         // an earlier rejected commit is what made that failure unattributable.
-        if let Some(message) = self
+        if let Some(refusal) = self
             .handle
             .bundle
             .broken_reason()
             .map(runtime2::types::HandleValidity::Broken)
-            .and_then(runtime2::types::invalid_handle_message)
+            .and_then(runtime2::types::invalid_handle_error)
         {
-            return Err(ferr!("{message}"));
+            return Err(refusal);
         }
 
         // All automerge work happens under a short sync lock; nothing is held

@@ -166,11 +166,24 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
         Arc::clone(&config.metadata_capability),
         config.policy.clone(),
     );
+    let repo = Arc::clone(&config.repo);
     let retention = Retention::new(
         config.sql.clone(),
         Arc::clone(&config.service),
         config.docs.clone(),
         metadata.clone(),
+        Arc::new(move |inventory: DocId| {
+            let repo = Arc::clone(&repo);
+            Box::pin(async move {
+                let local =
+                    ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32()?)?;
+                let inventory = ed25519_dalek::VerifyingKey::from_bytes(&inventory.to_bytes32()?)?;
+                Ok(repo
+                    .keyhive()
+                    .can_write(&local.into(), inventory.into())
+                    .await)
+            })
+        }),
         Arc::clone(&config.parts),
     )
     .await?;

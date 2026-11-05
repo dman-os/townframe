@@ -1076,10 +1076,13 @@ async fn run_concurrent_frontier_task(
             // This scope carries documents only: non-document derived state
             // lives in its own scope (see `BigRepo::derived_part_store`). Tests
             // assert that boundary so a new non-document producer is surfaced
-            // here instead of quietly consuming a document worker.
+            // here instead of quietly consuming a document worker. The check is
+            // id shape (an Ed25519 verifying key), which is not a classifier:
+            // blake3-derived object ids pass it about half the time, so it only
+            // catches the boundary being broken, it does not enforce it.
             #[cfg(any(test, feature = "test-support"))]
             assert!(
-                crate::keyhive::BigKeyhiveHandle::is_valid_keyhive_document_id(doc_id.clone()),
+                crate::keyhive::keyhive_doc_id(doc_id.clone()).is_ok(),
                 "non-document object reached the automerge frontier source: obj_id={doc_id}. \
                  State that is not a document belongs in the derived scope, not the document scope"
             );

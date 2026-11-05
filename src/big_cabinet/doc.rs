@@ -269,6 +269,18 @@ fn repository(error: impl std::fmt::Display) -> DocsError {
     DocsError::Repository(error.to_string())
 }
 
+/// The refusal for a document commit big_repo rejected. A capability can authorize a write
+/// this node cannot make: the operator is a cabinet superuser on every drawer it knows, but
+/// keyhive enforces the node's own standing at commit time, and a drawer synced in from a peer
+/// may hold only Read. That rejection ([`big_repo::NoWriteAccess`]) is the caller's write being
+/// denied, and it never persisted, so it is `Some(Denied)`, a definite refusal. `None` for any
+/// other failure: a repository fault whose outcome the caller cannot know.
+fn commit_refusal(error: &utils_rs::prelude::eyre::Report) -> Option<DocsError> {
+    error
+        .downcast_ref::<big_repo::NoWriteAccess>()
+        .map(|_| DocsError::Denied)
+}
+
 fn sorted(mut heads: Vec<ChangeHash>) -> Vec<ChangeHash> {
     heads.sort();
     heads.dedup();
