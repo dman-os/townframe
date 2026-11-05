@@ -45,8 +45,40 @@ mod android {
                     .expect("the activity has an internal data path"),
             )
             .expect("android_main runs once");
+        register_back_callback(&app);
         dioxus_native::set_android_app(app);
         dioxus::launch(App);
+    }
+
+    /// `MainActivity.requestSystemBack`, which the activity's `OnBackInvokedCallback` calls on the
+    /// UI thread: whether the shell took the back gesture.
+    extern "system" fn request_system_back(_env: JNIEnv, _activity: JObject) -> jni::sys::jboolean {
+        dayframe_native::SYSTEM_BACK.request().into()
+    }
+
+    /// Bind `MainActivity.requestSystemBack` to [`request_system_back`]. NativeActivity loads
+    /// `libmain.so` through `dlopen` rather than `System.loadLibrary`, so the JVM's by-name
+    /// symbol lookup never finds the export and the method has to be registered explicitly.
+    fn register_back_callback(app: &dioxus_native::AndroidApp) {
+        // SAFETY: see `system_insets`.
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }
+            .expect("android-activity hands over a valid JavaVM");
+        let mut env = vm
+            .attach_current_thread()
+            .expect("android_main can attach to the JVM");
+        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        let class = env
+            .get_object_class(&activity)
+            .expect("the activity has a class");
+        env.register_native_methods(
+            &class,
+            &[jni::NativeMethod {
+                name: "requestSystemBack".into(),
+                sig: "()Z".into(),
+                fn_ptr: request_system_back as *mut std::ffi::c_void,
+            }],
+        )
+        .expect("MainActivity declares requestSystemBack");
     }
 
     async fn read_package(name: &str) -> Result<PackageFiles, String> {

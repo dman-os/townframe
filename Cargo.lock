@@ -4330,6 +4330,7 @@ dependencies = [
  "micro_toolbar_manifest",
  "serde_json",
  "sqlite_rs",
+ "tokio",
  "ui",
 ]
 

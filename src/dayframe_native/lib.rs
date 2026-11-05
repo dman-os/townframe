@@ -267,6 +267,35 @@ where
     )
 }
 
+/// The Android system back gesture, as the activity reports it. With `targetSdk` 36 the
+/// platform's predictive back never delivers `KEYCODE_BACK` to the native activity: the system
+/// either invokes an `OnBackInvokedCallback` the activity registered or, with none, closes the
+/// app. `MainActivity` registers one and asks [`SystemBack::request`] from the UI thread
+/// whether the shell will take the gesture; when it will not (the shell is on its home), the
+/// activity moves the task to the background, which is what the system would have done.
+pub struct SystemBack {
+    requested: tokio::sync::Notify,
+    can_back: std::sync::atomic::AtomicBool,
+}
+
+impl SystemBack {
+    /// Claim the gesture for the shell if it has somewhere to go back to; whether it did.
+    pub fn request(&self) -> bool {
+        let claimed = self.can_back.load(std::sync::atomic::Ordering::Acquire);
+        if claimed {
+            self.requested.notify_one();
+        }
+        claimed
+    }
+}
+
+/// The one system back of the process, read by the shell's `HostInputs` and driven by the
+/// activity (see [`SystemBack`]).
+pub static SYSTEM_BACK: SystemBack = SystemBack {
+    requested: tokio::sync::Notify::const_new(),
+    can_back: std::sync::atomic::AtomicBool::new(false),
+};
+
 /// Reads the system chrome currently covering the window, in logical px, given the window's
 /// scale factor. Only a shell whose window has such chrome (Android) supplies one.
 pub type InsetsSource = Callback<f64, Insets>;
@@ -342,6 +371,20 @@ fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
         let window = window.clone();
         move || read_insets(&window)
     });
+    #[cfg(target_os = "android")]
+    {
+        use_future(move || async move {
+            loop {
+                SYSTEM_BACK.requested.notified().await;
+                platform_back += 1;
+            }
+        });
+        use_effect(move || {
+            SYSTEM_BACK
+                .can_back
+                .store(can_back(), std::sync::atomic::Ordering::Release);
+        });
+    }
     dioxus_native::use_window_event(move |event, _| match event {
         WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
             let (w, h) = logical_size(&window);
@@ -373,5 +416,27 @@ fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
         keyboard: false,
         // The development seed: see `HostInputs::start`.
         start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn system_back_is_claimed_only_while_the_shell_can_go_back() {
+        let back = SystemBack {
+            requested: tokio::sync::Notify::const_new(),
+            can_back: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert!(
+            !back.request(),
+            "the shell on its home leaves back to the system"
+        );
+        back.can_back.store(true, Ordering::Release);
+        assert!(back.request());
+        // The permit is stored, so a request made before the shell's task waits is not lost.
+        back.requested.notified().await;
     }
 }
