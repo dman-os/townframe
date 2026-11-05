@@ -510,7 +510,7 @@ impl Rt {
         .await?;
 
         let mut bundles_to_load: HashSet<(String, String)> = default();
-        for (_dispatch_id, dispach) in dispatch_repo.list().await {
+        for (_dispatch_id, dispach) in dispatch_repo.list_inflight().await {
             match &dispach.deets {
                 ActiveDispatchDeets::Wflow {
                     plug_id,
@@ -582,6 +582,11 @@ impl Rt {
             waiter_jobs,
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
+
+        // Admission is a durable outbox transition: reconcile intents before
+        // installing receipt waiters, so a crash between submit and the active
+        // transition cannot leave a waiter for a job that was never admitted.
+        rt.reconcile_pending_admissions().await?;
 
         let plugs_config_sql = sqlite_local_state_repo
             .ensure_sqlite_db(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
@@ -995,6 +1000,46 @@ impl Rt {
             plug_manifest,
             view_manifest,
         })
+    }
+
+    async fn submit_pending_dispatch(
+        self: &Arc<Self>,
+        dispatch_id: &str,
+        dispatch: &Arc<ActiveDispatch>,
+    ) -> Res<()> {
+        let ActiveDispatchDeets::Wflow {
+            wflow_key,
+            wflow_job_id: Some(job_id),
+            ..
+        } = &dispatch.deets
+        else {
+            eyre::bail!("pending dispatch missing workflow job identity: {dispatch_id}");
+        };
+        let args_json = match &dispatch.args {
+            ActiveDispatchArgs::FacetRoutine(args) => args
+                .wflow_args_json
+                .clone()
+                .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON)),
+        };
+        self.authority
+            .submit(wflow::Submission::new(
+                job_id.clone(),
+                wflow_key.clone(),
+                args_json,
+            ))
+            .await
+            .map_err(|err| ferr!("error scheduling job for dispatch {dispatch_id}: {err:?}"))?;
+        self.dispatch_repo.mark_admitted(dispatch_id).await?;
+        self.install_wflow_waiter(dispatch_id.to_string(), job_id.clone());
+        Ok(())
+    }
+
+    async fn reconcile_pending_admissions(self: &Arc<Self>) -> Res<()> {
+        for (dispatch_id, dispatch) in self.dispatch_repo.list_pending_admissions().await {
+            self.submit_pending_dispatch(&dispatch_id, &dispatch)
+                .await?;
+        }
+        Ok(())
     }
 
     fn install_wflow_waiter(self: &Arc<Self>, dispatch_id: String, job_id: String) {
@@ -1414,13 +1459,8 @@ impl Rt {
         let ActiveDispatchDeets::Wflow {
             plug_id,
             bundle_name,
-            wflow_key,
-            wflow_job_id,
             ..
         } = &waiting_dispatch.deets;
-        let Some(job_id) = wflow_job_id.as_ref() else {
-            eyre::bail!("waiting dispatch missing job id: {dispatch_id}");
-        };
         let plug_man = self
             .plugs_repo
             .get(plug_id)
@@ -1441,22 +1481,12 @@ impl Rt {
             bundle_man,
         )
         .await?;
-        self.dispatch_repo
+        let pending_dispatch = self
+            .dispatch_repo
             .activate_waiting(&dispatch_id, waiting_dispatch.deets.clone())
             .await?;
-        let args_json = match &waiting_dispatch.args {
-            ActiveDispatchArgs::FacetRoutine(args) => args
-                .wflow_args_json
-                .clone()
-                .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON)),
-        };
         if let Err(err) = self
-            .authority
-            .submit(wflow::Submission::new(
-                job_id.clone(),
-                wflow_key.clone(),
-                args_json,
-            ))
+            .submit_pending_dispatch(&dispatch_id, &pending_dispatch)
             .await
         {
             self.dispatch_repo
@@ -1466,7 +1496,6 @@ impl Rt {
                 "error scheduling deferred job for dispatch {dispatch_id}: {err:?}"
             ));
         }
-        self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
         self.progress_repo
             .add_update(
                 &dispatch_id,
@@ -1862,7 +1891,9 @@ impl Rt {
                 && existing.waiting_on_dispatch_ids == waiting_on_dispatch_ids;
             let reuse_status_ok = matches!(
                 existing.status,
-                dispatch::DispatchStatus::Waiting | dispatch::DispatchStatus::Active
+                dispatch::DispatchStatus::Waiting
+                    | dispatch::DispatchStatus::AdmissionPending
+                    | dispatch::DispatchStatus::Active
             );
             if can_reuse && reuse_status_ok {
                 warn!(?dispatch_id, "dispatch already exists with same identity");
@@ -1886,7 +1917,7 @@ impl Rt {
                 bundle: bundle_name,
             } => {
                 // let fqk = format!("{workload_id}/{key}");
-                let job_id = format!("{dispatch_id}-{id}", id = Uuid::new_v4().bs58());
+                let job_id = format!("{dispatch_id}-job");
                 let staging_branch_path =
                     daybook_types::doc::BranchPathBuf::from(format!("/tmp/{}", job_id));
 
@@ -1916,7 +1947,7 @@ impl Rt {
             status: if is_waiting {
                 dispatch::DispatchStatus::Waiting
             } else {
-                dispatch::DispatchStatus::Active
+                dispatch::DispatchStatus::AdmissionPending
             },
             waiting_on_dispatch_ids,
             on_success_hooks,
@@ -1950,48 +1981,17 @@ impl Rt {
                 bundle_man,
             )
             .await?;
-            let wflow_args_json = match &active_dispatch.args {
-                ActiveDispatchArgs::FacetRoutine(args) => args
-                    .wflow_args_json
-                    .clone()
-                    .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON)),
-            };
-            self.authority
-                .submit(wflow::Submission::new(
-                    job_id.clone(),
-                    wflow_key.clone(),
-                    wflow_args_json,
-                ))
+            // Record the complete intent before admission.  If the process dies
+            // after authority accepts the job, boot can submit the same job id
+            // and complete the pending transition.
+            self.dispatch_repo
+                .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
+                .await?;
+            self.submit_pending_dispatch(&dispatch_id, &active_dispatch)
                 .await
                 .map_err(|err| {
                     ferr!("error scheduling job for {plug_id}/{routine_name}: {err:?}")
                 })?;
-            if let Err(add_err) = self
-                .dispatch_repo
-                .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
-                .await
-            {
-                match self
-                    .authority
-                    .cancel(
-                        job_id.clone(),
-                        format!("rollback scheduling for dispatch {dispatch_id}"),
-                    )
-                    .await
-                {
-                    Ok(_) | Err(wflow::CancelError::AlreadyTerminal) => {
-                        self.authority.receipt(&job_id).await?.ok_or_else(|| {
-                            ferr!("authority cancellation settled without receipt for {job_id}")
-                        })?;
-                    }
-                    Err(err) => {
-                        return Err(ferr!("failed to cancel admitted job {job_id}: {err:?}")
-                            .wrap_err(add_err));
-                    }
-                }
-                return Err(add_err);
-            }
-            self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
         }
         let mut tags = vec![
             "/type/dispatch".to_string(),
@@ -2503,6 +2503,128 @@ mod tests {
             big_sync::SqlitePartStore::new(sql, "rt-test", big_sync_core::BuckId::MAX_LEVEL)
                 .await?;
         Ok((std::sync::Arc::new(store), part_id))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_reconciles_admitted_submission_intent() -> Res<()> {
+        let test_cx = crate::test_support::test_cx(utils_rs::function_full!()).await?;
+        crate::test_support::import_test_plug_oci(&test_cx).await?;
+
+        let doc_id = test_cx
+            .drawer_repo
+            .add(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                facets: [(
+                    daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::Note),
+                    daybook_types::doc::WellKnownFacet::Note("reconcile".into()).into(),
+                )]
+                .into(),
+                user_path: None,
+                idempotency_key: None,
+            })
+            .await?;
+        let branch_path = daybook_types::doc::BranchPathBuf::from("main");
+        let heads = test_cx
+            .drawer_repo
+            .get_branch_heads_for_path(&doc_id, &branch_path)
+            .await?
+            .ok_or_eyre("missing test document branch")?;
+        let plug = test_cx
+            .rt
+            .plugs_repo
+            .get("@daybook/test")
+            .await
+            .ok_or_eyre("test plug was not imported")?;
+        let routine = plug
+            .routines
+            .get("test-label")
+            .ok_or_eyre("test-label routine was not imported")?;
+        let bundle = plug
+            .wflow_bundles
+            .get("plug_test")
+            .ok_or_eyre("plug_test workflow bundle was not imported")?;
+        ensure_bundle_workload_running(
+            &test_cx.rt.wash_host,
+            &test_cx.rt.wflow_plugin,
+            &test_cx.rt.blobs_repo,
+            "@daybook/test".to_string(),
+            "plug_test".to_string(),
+            bundle,
+        )
+        .await?;
+
+        let dispatch_id = "runtime-reconcile-dispatch";
+        let job_id = format!("{dispatch_id}-job");
+        let staging_branch_path = daybook_types::doc::BranchPathBuf::from("/tmp/runtime-reconcile");
+        let tokens = dispatch::DocFacetTokens {
+            doc_id: doc_id.clone(),
+            branch_path: branch_path.clone(),
+            staging_branch_path: staging_branch_path.clone(),
+            heads: heads.clone(),
+            facet_acl: routine.facet_acl().to_vec(),
+        };
+        let dispatch = Arc::new(dispatch::ActiveDispatch {
+            deets: dispatch::ActiveDispatchDeets::Wflow {
+                plug_id: "@daybook/test".into(),
+                routine_name: "test-label".into(),
+                bundle_name: "plug_test".into(),
+                wflow_key: "test-label".into(),
+                wflow_job_id: Some(job_id.clone()),
+            },
+            args: dispatch::ActiveDispatchArgs::FacetRoutine(dispatch::FacetRoutineArgs {
+                doc_id,
+                branch_path,
+                staging_branch_path,
+                heads,
+                invocation: dispatch::RoutineInvocation::Command,
+                primary_doc: tokens,
+                config_docs: vec![],
+                local_state_acl: vec![],
+                command_invoke_acl_snapshot: vec![],
+                wflow_args_json: None,
+            }),
+            status: dispatch::DispatchStatus::AdmissionPending,
+            waiting_on_dispatch_ids: vec![],
+            on_success_hooks: vec![],
+        });
+        test_cx
+            .dispatch_repo
+            .add(dispatch_id.into(), Arc::clone(&dispatch))
+            .await?;
+
+        // Simulate the crash boundary: authority accepted the deterministic job,
+        // but the durable dispatch transition was not committed yet.
+        test_cx
+            .rt
+            .authority
+            .submit(wflow::Submission::new(
+                job_id,
+                "test-label".into(),
+                "null".into(),
+            ))
+            .await?;
+        assert!(
+            test_cx
+                .dispatch_repo
+                .get_active(dispatch_id)
+                .await
+                .is_none()
+        );
+
+        test_cx.rt.reconcile_pending_admissions().await?;
+        assert!(
+            test_cx
+                .dispatch_repo
+                .get_active(dispatch_id)
+                .await
+                .is_some()
+        );
+        test_cx
+            .rt
+            .wait_for_dispatch_end(dispatch_id, std::time::Duration::from_secs(90))
+            .await?;
+        test_cx.stop().await?;
+        Ok(())
     }
 
     #[tokio::test]

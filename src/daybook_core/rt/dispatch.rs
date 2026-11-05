@@ -22,6 +22,9 @@ fn dispatch_status_active() -> DispatchStatus {
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum DispatchStatus {
     Waiting,
+    /// The dispatch intent is durable, but authority admission has not been acknowledged yet.
+    /// Boot reconciles this state before installing receipt waiters.
+    AdmissionPending,
     Active,
     Succeeded,
     Failed,
@@ -461,6 +464,23 @@ impl DispatchRepo {
         Ok(old)
     }
 
+    /// Returns dispatches that can still submit or receive authority receipts.
+    pub async fn list_inflight(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
+        self.state
+            .lock()
+            .await
+            .dispatches
+            .iter()
+            .filter(|(_, dispatch)| {
+                matches!(
+                    dispatch.status,
+                    DispatchStatus::AdmissionPending | DispatchStatus::Active
+                )
+            })
+            .map(|(id, dispatch)| (id.clone(), Arc::clone(dispatch)))
+            .collect()
+    }
+
     pub async fn list(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
         self.state
             .lock()
@@ -579,6 +599,18 @@ impl DispatchRepo {
         if ready { Ok(Some(updated)) } else { Ok(None) }
     }
 
+    /// Returns durable submissions that still need authority admission.
+    pub async fn list_pending_admissions(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
+        self.state
+            .lock()
+            .await
+            .dispatches
+            .iter()
+            .filter(|(_, dispatch)| dispatch.status == DispatchStatus::AdmissionPending)
+            .map(|(id, dispatch)| (id.clone(), Arc::clone(dispatch)))
+            .collect()
+    }
+
     pub async fn activate_waiting(
         &self,
         dispatch_id: &str,
@@ -601,7 +633,7 @@ impl DispatchRepo {
         }
 
         let mut updated = (*cur).clone();
-        updated.status = DispatchStatus::Active;
+        updated.status = DispatchStatus::AdmissionPending;
         updated.deets = deets;
         let updated = Arc::new(updated);
 
@@ -617,6 +649,59 @@ impl DispatchRepo {
         {
             state.wflow_to_dispatch.remove(job);
         }
+        state
+            .dispatches
+            .insert(dispatch_id.to_string(), Arc::clone(&updated));
+        if let ActiveDispatchDeets::Wflow {
+            wflow_job_id: Some(job),
+            ..
+        } = &updated.deets
+        {
+            state
+                .wflow_to_dispatch
+                .insert(job.clone(), dispatch_id.to_string());
+        }
+        state
+            .dispatch_head_index
+            .entry(dispatch_head_for_dispatch(dispatch_id, &updated))
+            .or_insert_with(|| dispatch_id.to_string());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
+        drop(state);
+
+        self.registry.notify([DispatchEvent::DispatchUpdated {
+            id: dispatch_id.to_string(),
+            heads,
+            origin: self.local_origin(),
+        }]);
+
+        Ok(updated)
+    }
+
+    /// Marks a durably recorded submission intent as admitted.  This is the
+    /// commit after authority submission; a crash before it leaves the intent
+    /// for the boot reconciler to submit idempotently.
+    pub async fn mark_admitted(&self, dispatch_id: &str) -> Res<Arc<ActiveDispatch>> {
+        let _transition_guard = self.transition_mutex.lock().await;
+        let cur = self
+            .state
+            .lock()
+            .await
+            .dispatches
+            .get(dispatch_id)
+            .map(Arc::clone)
+            .ok_or_else(|| eyre::eyre!("dispatch not found under {dispatch_id}"))?;
+        if cur.status != DispatchStatus::AdmissionPending {
+            eyre::bail!("dispatch is not pending admission: {dispatch_id}");
+        }
+
+        let mut updated = (*cur).clone();
+        updated.status = DispatchStatus::Active;
+        let updated = Arc::new(updated);
+        let tx = self.repo_sql.begin_write().await?;
+        persist_dispatch_tx(&tx, dispatch_id, &updated).await?;
+        tx.commit().await?;
+
+        let mut state = self.state.lock().await;
         state
             .dispatches
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
@@ -644,7 +729,6 @@ impl DispatchRepo {
             heads,
             origin: self.local_origin(),
         }]);
-
         Ok(updated)
     }
 
@@ -1044,6 +1128,15 @@ mod tests {
             },
         )
         .await?;
+        assert!(repo.get_active("wait-1").await.is_none());
+        assert_eq!(
+            repo.get_any("wait-1")
+                .await
+                .as_ref()
+                .map(|dispatch| &dispatch.status),
+            Some(&DispatchStatus::AdmissionPending),
+        );
+        repo.mark_admitted("wait-1").await?;
         assert!(repo.get_active("wait-1").await.is_some());
         assert!(repo.get_by_wflow_job("job-wait-1").await.is_some());
         Ok(())
@@ -1076,6 +1169,29 @@ mod tests {
                 if id == "disp-a"
                     && matches!(origin, crate::event_origin::EventOrigin::Local { .. })
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_admission_survives_reload_until_admitted() -> Res<()> {
+        let temp = tempfile::tempdir()?;
+        let sql_cfg = crate::app::SqlConfig::file(temp.path().join("dispatch.sqlite"));
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+
+        let sql = crate::app::open_database(&runtime, sql_cfg.clone()).await?;
+        let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
+        let mut pending = (*active_dispatch("job-pending")).clone();
+        pending.status = DispatchStatus::AdmissionPending;
+        repo.add("disp-pending".into(), Arc::new(pending)).await?;
+        drop(repo);
+        drop(sql);
+
+        let sql = crate::app::open_database(&runtime, sql_cfg).await?;
+        let (repo, _) = setup_repo_with_sql(sql).await?;
+        assert_eq!(repo.list_pending_admissions().await.len(), 1);
+        assert!(repo.get_active("disp-pending").await.is_none());
+        repo.mark_admitted("disp-pending").await?;
+        assert!(repo.get_active("disp-pending").await.is_some());
         Ok(())
     }
 
