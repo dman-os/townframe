@@ -733,7 +733,7 @@ impl<F: FutureForm> DocWorker2<F> {
     #[tracing::instrument(skip_all)]
     async fn load_doc_snapshot(&self) -> eyre::Result<LoadedDocSnapshot> {
         let instr_start = std::time::Instant::now(); // INSTR
-        let (mut instr_cached, mut instr_causal, mut instr_causal_complete, mut instr_bytes) = (0usize, 0usize, 0usize, 0usize); // INSTR
+        let (mut instr_cached, mut instr_causal, mut instr_causal_complete, mut instr_bytes, mut instr_covered) = (0usize, 0usize, 0usize, 0usize, 0usize); // INSTR
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
             return Ok(LoadedDocSnapshot::Missing);
         };
@@ -800,6 +800,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 kind == BigRepoCiphertextKind::LooseCommit && is_causal_checkpoint_id(head);
             // Already decrypted as part of a descendant's closure walk.
             if !is_checkpoint && plaintexts.contains_key(head.as_bytes().as_slice()) {
+                instr_covered += 1; // INSTR
                 continue;
             }
             let cached_key = if is_checkpoint {
@@ -914,7 +915,7 @@ impl<F: FutureForm> DocWorker2<F> {
             blockers,
             blocked_refs,
         );
-        tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_causal, instr_causal_complete, instr_bytes, instr_am_alloc = utils_rs::instr_tl_bytes() - instr_tl_before, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
+        tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_covered, instr_causal, instr_causal_complete, instr_bytes, instr_am_alloc = utils_rs::instr_tl_bytes() - instr_tl_before, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
         instr_result
     }
 
