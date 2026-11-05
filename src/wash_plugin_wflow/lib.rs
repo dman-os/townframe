@@ -20,48 +20,21 @@ use wasmtime::component::HasSelf;
 use wflow_core::r#gen::metastore::WasmcloudWflowServiceMeta;
 use wflow_core::r#gen::metastore::WflowServiceMeta;
 use wflow_core::metastore::MetdataStore;
-use wflow_core::partition::effects;
-use wflow_core::partition::job_events;
-use wflow_core::partition::state;
-use wflow_tokio::partition::service;
 use wflow_wdk::session::ReplayStep;
 use wflow_wdk::session::SessionYield;
 use wflow_wdk::session::WaitYield;
 
 mod authority_session;
 
-pub mod binds_partition_host {
-    wash_runtime::wasmtime::component::bindgen!({
-        world: "rt-partition-host",
-        imports: { default: async | trappable | tracing },
-        exports: { default: async | trappable | tracing },
-        additional_derives: [serde::Serialize, serde::Deserialize],
-        anyhow: false
-    });
-}
-use binds_partition_host::townframe::wflow::partition_host;
-
-pub mod binds_metastore {
-    wash_runtime::wasmtime::component::bindgen!({
-        world: "rt-metastore",
-        imports: { default: async | trappable | tracing },
-        exports: { default: async | trappable | tracing },
-        additional_derives: [serde::Serialize, serde::Deserialize],
-    });
-}
-use binds_metastore::townframe::wflow::metastore;
-
 mod binds_service {
     wash_runtime::wasmtime::component::bindgen!({
         world: "service",
-        path: "../wash_plugin_wflow/wit",
+        path: "../wash_plugin_wflow/wit/main.wit",
         imports: { default: async | trappable | tracing },
         exports: { default: async | trappable | tracing },
         additional_derives: [PartialEq, Eq],
     });
 }
-pub use crate::binds_metastore::townframe::wflow::metastore as service_metastore;
-pub use crate::binds_partition_host::townframe::wflow::partition_host as service_partition_host;
 use binds_service::exports::townframe::wflow::bundle;
 use binds_service::townframe::wflow::host;
 pub use binds_service::townframe::wflow::host as service_host;
@@ -79,13 +52,12 @@ struct ActiveJobCtx {
     pause_cancel: CancellationToken,
     cur_step: AtomicU64,
     active_step: std::sync::Mutex<Option<ActiveStepCtx>>,
-    replay: std::sync::Mutex<SessionReplay>,
+    replay: std::sync::Mutex<Vec<ReplayStep>>,
     ctx_id: Arc<str>,
 }
 
 #[derive(Debug)]
 struct ActiveStepCtx {
-    attempt_id: u64,
     step_id: u64,
     start_at: Timestamp,
     /// The boundary the guest declared for this step, carried to the trap so
@@ -99,12 +71,10 @@ enum JobTrap {
         start_at: Timestamp,
         end_at: Timestamp,
         value_json: Arc<str>,
-        attempt_id: u64,
         meta: host::StepMeta,
     },
     WaitStep {
         step_id: u64,
-        attempt_id: u64,
         start_at: Timestamp,
         deets: WaitTrapDeets,
         meta: host::StepMeta,
@@ -122,71 +92,6 @@ enum WaitTrapDeets {
 enum SessionResume {
     Continue,
     Deliver(Arc<str>),
-    Stop,
-}
-
-fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
-    wasmtime::Error::msg(msg.to_string())
-}
-
-fn wait_id_for(step_id: u64, attempt_id: u64) -> u64 {
-    let lo = step_id & 0xFFFF_FFFF;
-    let hi = (attempt_id & 0xFFFF_FFFF) << 32;
-    hi | lo
-}
-
-#[derive(Debug, Default)]
-struct SessionReplay {
-    steps: Vec<ReplayStep>,
-    // The replacement protocol has no step attempts. This private sidecar is
-    // populated only from the legacy partition journal so run_job can retain
-    // its attempt identities until that engine is deleted.
-    legacy_failed_attempts: Vec<u64>,
-}
-
-impl From<Vec<ReplayStep>> for SessionReplay {
-    fn from(steps: Vec<ReplayStep>) -> Self {
-        let legacy_failed_attempts = vec![0; steps.len()];
-        Self {
-            steps,
-            legacy_failed_attempts,
-        }
-    }
-}
-
-fn replay_from_job_state(journal: &state::JobState) -> SessionReplay {
-    let mut legacy_failed_attempts = Vec::with_capacity(journal.steps.len());
-    let mut steps: Vec<_> = journal
-        .steps
-        .iter()
-        .map(|step| {
-            let state::JobStepState::Effect { attempts } = step;
-            legacy_failed_attempts.push(attempts.len() as u64);
-            match attempts.last().map(|attempt| &attempt.deets) {
-                Some(job_events::JobEffectResultDeets::Success { value_json }) => {
-                    ReplayStep::completed(Arc::clone(value_json))
-                }
-                _ => ReplayStep::default(),
-            }
-        })
-        .collect();
-    for run in &journal.runs {
-        if let job_events::JobRunResult::StepWait(wait) = &run.result {
-            let index = wait.step_id as usize;
-            if steps.len() <= index {
-                steps.resize_with(index + 1, default);
-                legacy_failed_attempts.resize(index + 1, 0);
-            }
-            steps[index].kind = Some(match wait.deets {
-                job_events::JobWaitResultDeets::Timer { .. } => wflow_wdk::StepKind::Sleep,
-                job_events::JobWaitResultDeets::Message { .. } => wflow_wdk::StepKind::Recv,
-            });
-        }
-    }
-    SessionReplay {
-        steps,
-        legacy_failed_attempts,
-    }
 }
 
 fn lookup_active_job<T>(
@@ -234,37 +139,19 @@ impl ActiveJobCtx {
             cmd = resume_rx.recv() => cmd
         };
         match cmd {
-            Some(SessionResume::Stop) | None => {
-                Err(host::HostError::Protocol("session stopped".into()))
-            }
             Some(cmd) => Ok(cmd),
+            None => Err(host::HostError::Protocol("session stopped".into())),
         }
     }
 }
 
 struct SessionHandle {
-    job_id: Arc<str>,
     ctx_id: Arc<str>,
-    workload_id: Arc<str>,
-    component_id: String,
-    next_run_id: u64,
-    last_effect_id: effects::EffectId,
-    active_job: Arc<ActiveJobCtx>,
     resume_tx: mpsc::UnboundedSender<SessionResume>,
     yield_rx: mpsc::UnboundedReceiver<JobTrap>,
     cancel_token: CancellationToken,
     join_handle: tokio::task::JoinHandle<()>,
     jobs: Arc<RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>>,
-}
-
-impl SessionHandle {
-    fn request_cancel(&self) {
-        self.resume_tx
-            .send(SessionResume::Stop)
-            .inspect_err(|err| warn_loc!(ERROR_CHANNEL, ?err))
-            .ok();
-        self.cancel_token.cancel();
-    }
 }
 
 /// The spawned run task watches `cancel_token` and panics if its yield channel
@@ -280,25 +167,15 @@ impl Drop for SessionHandle {
     }
 }
 
-struct WasmRunSession {
-    session: Option<SessionHandle>,
-}
-
-impl service::WflowServiceSession for WasmRunSession {
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-}
-
 impl host::Host for SharedWashCtx {}
 
 impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
     async fn next_step(
         accessor: &Accessor<T, Self>,
-        job_id: partition_host::JobId,
+        job_id: host::JobId,
         meta: host::StepMeta,
     ) -> wasmtime::Result<Result<host::StepState, host::HostError>> {
-        let (plugin, job) = match lookup_active_job(accessor, &job_id) {
+        let (_plugin, job) = match lookup_active_job(accessor, &job_id) {
             Ok(pair) => pair,
             Err(err) => return Ok(Err(err)),
         };
@@ -310,7 +187,6 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             let stale_step_id = stale_active.step_id;
             let replay = job.replay.lock().expect(ERROR_MUTEX);
             let stale_completed = replay
-                .steps
                 .get(stale_step_id as usize)
                 .is_some_and(|step| step.value_json.is_some());
             drop(replay);
@@ -332,32 +208,25 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
         }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);
         let replay = job.replay.lock().expect(ERROR_MUTEX);
-        let step = replay.steps.get(step_id as usize);
-        if let Err(err) = plugin.validate_and_record_meta(&job, step, step_id, &meta) {
+        let step = replay.get(step_id as usize);
+        if let Err(err) = WflowPlugin::validate_replay_meta(step, step_id, &meta) {
             return Ok(Err(err));
         }
-        let attempt_id = match step {
-            Some(ReplayStep {
-                value_json: Some(value),
-                ..
-            }) => {
-                job.cur_step
-                    .store(step_id + 1, std::sync::atomic::Ordering::SeqCst);
-                return Ok(Ok(host::StepState::Completed(host::CompletedStepState {
-                    id: step_id,
-                    value_json: value.to_string(),
-                })));
-            }
-            Some(_) | None => replay
-                .legacy_failed_attempts
-                .get(step_id as usize)
-                .copied()
-                .unwrap_or(0),
-        };
+        if let Some(ReplayStep {
+            value_json: Some(value),
+            ..
+        }) = step
+        {
+            job.cur_step
+                .store(step_id + 1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(Ok(host::StepState::Completed(host::CompletedStepState {
+                id: step_id,
+                value_json: value.to_string(),
+            })));
+        }
         drop(replay);
         let start_at = Timestamp::now();
         active_step.replace(ActiveStepCtx {
-            attempt_id,
             step_id,
             start_at,
             meta,
@@ -369,7 +238,7 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
 
     async fn persist_step(
         accessor: &Accessor<T, Self>,
-        job_id: partition_host::JobId,
+        job_id: host::JobId,
         step_id: host::StepId,
         value_json: String,
     ) -> wasmtime::Result<Result<(), host::HostError>> {
@@ -391,7 +260,6 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             JobTrap::PersistStep {
                 step_id,
                 value_json: value_json.into(),
-                attempt_id: active_step.attempt_id,
                 start_at: active_step.start_at,
                 end_at,
                 meta: active_step.meta,
@@ -412,14 +280,13 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             Ok(SessionResume::Deliver(_)) => Err(host::HostError::Protocol(
                 "persisted step resumed with a delivered value".into(),
             )),
-            Ok(SessionResume::Stop) => unreachable!(),
             Err(err) => Err(err),
         })
     }
 
     async fn sleep(
         accessor: &Accessor<T, Self>,
-        job_id: partition_host::JobId,
+        job_id: host::JobId,
         step_id: host::StepId,
         duration_ms: u64,
     ) -> wasmtime::Result<Result<(), host::HostError>> {
@@ -427,7 +294,7 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             Ok(pair) => pair,
             Err(err) => return Ok(Err(err)),
         };
-        let (attempt_id, start_at, meta) = {
+        let (start_at, meta) = {
             let active_step = job.active_step.lock().expect(ERROR_MUTEX);
             let Some(active_step) = active_step.as_ref() else {
                 return Ok(Err(host::HostError::Protocol("step not active".into())));
@@ -437,11 +304,7 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
                     "given step_id is not active".into(),
                 )));
             }
-            (
-                active_step.attempt_id,
-                active_step.start_at,
-                active_step.meta.clone(),
-            )
+            (active_step.start_at, active_step.meta.clone())
         };
 
         let fire_at = start_at
@@ -449,10 +312,9 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             .expect("ts overflow");
         let trap = JobTrap::WaitStep {
             step_id,
-            attempt_id,
             start_at,
             deets: WaitTrapDeets::Timer {
-                wait_id: wait_id_for(step_id, attempt_id),
+                wait_id: step_id,
                 fire_at,
             },
             meta,
@@ -470,7 +332,6 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
                     "sleep resumed with a delivered value".into(),
                 )));
             }
-            SessionResume::Stop => unreachable!(),
         }
         job.active_step.lock().expect(ERROR_MUTEX).take();
         job.cur_step
@@ -480,14 +341,14 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
 
     async fn recv_message(
         accessor: &Accessor<T, Self>,
-        job_id: partition_host::JobId,
+        job_id: host::JobId,
         step_id: host::StepId,
     ) -> wasmtime::Result<Result<String, host::HostError>> {
         let (_plugin, job) = match lookup_active_job(accessor, &job_id) {
             Ok(pair) => pair,
             Err(err) => return Ok(Err(err)),
         };
-        let (attempt_id, start_at, meta) = {
+        let (start_at, meta) = {
             let active_step = job.active_step.lock().expect(ERROR_MUTEX);
             let Some(active_step) = active_step.as_ref() else {
                 return Ok(Err(host::HostError::Protocol("step not active".into())));
@@ -497,20 +358,13 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
                     "given step_id is not active".into(),
                 )));
             }
-            (
-                active_step.attempt_id,
-                active_step.start_at,
-                active_step.meta.clone(),
-            )
+            (active_step.start_at, active_step.meta.clone())
         };
 
         let trap = JobTrap::WaitStep {
             step_id,
-            attempt_id,
             start_at,
-            deets: WaitTrapDeets::Message {
-                wait_id: wait_id_for(step_id, attempt_id),
-            },
+            deets: WaitTrapDeets::Message { wait_id: step_id },
             meta,
         };
 
@@ -520,16 +374,12 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
         };
         let delivered = match resumed {
             SessionResume::Deliver(value) => Some(value),
-            // The legacy partition worker delivers by rewriting the replay
-            // before a plain resume.
             SessionResume::Continue => job
                 .replay
                 .lock()
                 .expect(ERROR_MUTEX)
-                .steps
                 .get(step_id as usize)
                 .and_then(|step| step.value_json.clone()),
-            SessionResume::Stop => unreachable!(),
         };
         let Some(value) = delivered else {
             return Ok(Err(host::HostError::Protocol(
@@ -543,66 +393,6 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
     }
 }
 
-impl partition_host::Host for SharedWashCtx {
-    async fn add_job(
-        &mut self,
-        _id: partition_host::PartitionId,
-        _args: partition_host::AddJobArgs,
-    ) -> wasmtime::Result<()> {
-        todo!()
-    }
-
-    async fn send_message(
-        &mut self,
-        _id: partition_host::PartitionId,
-        _job_id: partition_host::JobId,
-        _payload_json: String,
-    ) -> wasmtime::Result<()> {
-        todo!()
-    }
-}
-
-impl metastore::Host for SharedWashCtx {
-    async fn get_wflow(&mut self, key: String) -> wasmtime::Result<Option<metastore::WflowMeta>> {
-        let plugin = WflowPlugin::from_ctx(self);
-        let meta = plugin
-            .metastore
-            .get_wflow(&key)
-            .await
-            .map_err(wasmtime_err)?;
-        Ok(meta.map(|meta| metastore::WflowMeta {
-            key: meta.key,
-            service: match meta.service {
-                WflowServiceMeta::Wasmcloud(wflow) => {
-                    metastore::WflowServiceMeta::Wasmcloud(metastore::WasmcloudWflowServiceMeta {
-                        workload_id: wflow.workload_id,
-                    })
-                }
-                WflowServiceMeta::LocalNative => metastore::WflowServiceMeta::LocalNative,
-            },
-        }))
-    }
-
-    async fn get_partitions(&mut self) -> wasmtime::Result<metastore::PartitionsMeta> {
-        let plugin = WflowPlugin::from_ctx(self);
-        let meta = plugin
-            .metastore
-            .get_partitions()
-            .await
-            .map_err(wasmtime_err)?;
-        Ok(metastore::PartitionsMeta {
-            version: meta.version,
-            partition_count: meta.partition_count,
-        })
-    }
-}
-
-#[derive(Default)]
-struct JobStepMetas {
-    ctx_id: Arc<str>,
-    steps: Vec<host::StepMeta>,
-}
-
 pub struct WflowPlugin {
     pending_workloads: DHashMap<Arc<str>, HashSet<Arc<str>>>,
 
@@ -612,7 +402,6 @@ pub struct WflowPlugin {
     active_keys: DHashMap<Arc<str>, Arc<str>>,
     // ctx id -> active job
     active_jobs: Arc<RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>>,
-    job_step_metas: std::sync::Mutex<HashMap<Arc<str>, JobStepMetas>>,
     metastore: Arc<dyn MetdataStore>,
 }
 
@@ -623,7 +412,6 @@ impl WflowPlugin {
             pending_workloads: default(),
             active_keys: default(),
             active_jobs: default(),
-            job_step_metas: default(),
             metastore,
         }
     }
@@ -646,121 +434,38 @@ impl WflowPlugin {
             .map(|job| Arc::clone(&job.job_id))
     }
 
-    fn validate_and_record_meta(
-        &self,
-        job: &ActiveJobCtx,
+    fn validate_replay_meta(
         replay: Option<&ReplayStep>,
         step_id: u64,
         meta: &host::StepMeta,
     ) -> Result<(), host::HostError> {
-        let expected_kind = replay.and_then(|step| step.kind).map(|kind| match kind {
+        let Some(replay) = replay else { return Ok(()) };
+        let expected_kind = replay.kind.map(|kind| match kind {
             wflow_wdk::StepKind::Effect => host::StepKind::Effect,
             wflow_wdk::StepKind::Sleep => host::StepKind::Sleep,
             wflow_wdk::StepKind::Recv => host::StepKind::Recv,
         });
-        if let Some(kind) = expected_kind
-            && kind != meta.kind
+        let expected_name = replay
+            .name
+            .as_ref()
+            .map(|name| name.as_ref().map(|name| name.to_string()));
+        if expected_kind.is_some_and(|kind| kind != meta.kind)
+            || expected_name
+                .as_ref()
+                .is_some_and(|name| name != &meta.name)
         {
             return Err(host::HostError::NondeterministicReplay(
                 host::NondeterministicReplayError {
                     step_id,
                     expected: host::StepMeta {
-                        kind,
-                        name: meta.name.clone(),
+                        kind: expected_kind.unwrap_or(meta.kind),
+                        name: expected_name.unwrap_or_else(|| meta.name.clone()),
                     },
                     found: meta.clone(),
                 },
             ));
         }
-        let mut all_metas = self.job_step_metas.lock().expect(ERROR_MUTEX);
-        let Some(metas) = all_metas.get_mut(&job.job_id) else {
-            return Ok(());
-        };
-        if let Some(expected) = metas.steps.get(step_id as usize) {
-            if expected != meta {
-                return Err(host::HostError::NondeterministicReplay(
-                    host::NondeterministicReplayError {
-                        step_id,
-                        expected: expected.clone(),
-                        found: meta.clone(),
-                    },
-                ));
-            }
-        } else if metas.ctx_id == job.ctx_id && metas.steps.len() == step_id as usize {
-            metas.steps.push(meta.clone());
-        }
         Ok(())
-    }
-
-    fn drop_session_handle(&self, session: SessionHandle) {
-        drop(session);
-    }
-
-    fn trap_to_result(trap: JobTrap) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
-        match trap {
-            JobTrap::RunComplete(Err(err)) => match err {
-                types::JobError::Transient(err) => Err(job_events::JobError::Transient {
-                    error_json: err.error_json.into(),
-                    retry_policy: err.retry_policy.map(|policy| match policy {
-                        types::RetryPolicy::Immediate => wflow_wdk::types::RetryPolicy::Immediate,
-                        types::RetryPolicy::Fixed(fixed) => wflow_wdk::types::RetryPolicy::Fixed {
-                            delay_ms: fixed.delay_ms,
-                        },
-                        types::RetryPolicy::CappedExponential(exp) => {
-                            wflow_wdk::types::RetryPolicy::CappedExponential {
-                                base_ms: exp.base_ms,
-                                cap_ms: exp.cap_ms,
-                            }
-                        }
-                    }),
-                }
-                .into()),
-                types::JobError::Terminal(err_json) => Err(job_events::JobError::Terminal {
-                    error_json: err_json.into(),
-                }
-                .into()),
-            },
-            JobTrap::PersistStep {
-                step_id,
-                value_json,
-                start_at,
-                end_at,
-                attempt_id,
-                ..
-            } => Ok(job_events::JobRunResult::StepEffect(
-                job_events::JobEffectResult {
-                    step_id,
-                    attempt_id,
-                    start_at,
-                    end_at,
-                    deets: job_events::JobEffectResultDeets::Success { value_json },
-                },
-            )),
-            JobTrap::WaitStep {
-                step_id,
-                attempt_id,
-                start_at,
-                deets,
-                ..
-            } => Ok(job_events::JobRunResult::StepWait(
-                job_events::JobWaitResult {
-                    step_id,
-                    attempt_id,
-                    start_at,
-                    deets: match deets {
-                        WaitTrapDeets::Timer { wait_id, fire_at } => {
-                            job_events::JobWaitResultDeets::Timer { wait_id, fire_at }
-                        }
-                        WaitTrapDeets::Message { wait_id } => {
-                            job_events::JobWaitResultDeets::Message { wait_id }
-                        }
-                    },
-                },
-            )),
-            JobTrap::RunComplete(Ok(value_json)) => Ok(job_events::JobRunResult::Success {
-                value_json: value_json.into(),
-            }),
-        }
     }
 
     /// Instantiates the workload and starts `wflow_key` as `job_id`, replaying
@@ -771,22 +476,20 @@ impl WflowPlugin {
         job_id: Arc<str>,
         wflow_key: &str,
         args_json: String,
-        replay: SessionReplay,
-    ) -> Result<SessionHandle, job_events::JobRunResult> {
+        replay: Vec<ReplayStep>,
+    ) -> Res<SessionHandle> {
         let mut store = workload
             .resolved_handle
             .new_store(&workload.component_id)
             .await
             .map_err(|err| eyre::eyre!("{err}"))
-            .wrap_err("error creating component store")
-            .map_err(Into::<job_events::JobRunResult>::into)?;
+            .wrap_err("error creating component store")?;
         let instance = workload
             .instance_pre
             .instantiate_async(&mut store)
             .await
             .map_err(|err| eyre::eyre!("{err}"))
-            .wrap_err("error creating component store")
-            .map_err(Into::<job_events::JobRunResult>::into)?;
+            .wrap_err("error creating component store")?;
         let bundle_args = bundle::RunArgs {
             ctx: types::JobCtx {
                 job_id: job_id.to_string(),
@@ -795,12 +498,6 @@ impl WflowPlugin {
             args_json,
         };
         let ctx_id = Arc::clone(&store.data().active_ctx.id);
-        {
-            let mut all_metas = self.job_step_metas.lock().expect(ERROR_MUTEX);
-            let metas = all_metas.entry(Arc::clone(&job_id)).or_default();
-            metas.ctx_id = Arc::clone(&ctx_id);
-            metas.steps.truncate(replay.steps.len());
-        }
         let (yield_tx, yield_rx) = mpsc::unbounded_channel();
         let (resume_tx, resume_rx) = mpsc::unbounded_channel();
         let pause_cancel = CancellationToken::new();
@@ -853,48 +550,13 @@ impl WflowPlugin {
         });
 
         Ok(SessionHandle {
-            job_id: Arc::clone(&job_id),
             ctx_id,
-            workload_id: Arc::from(workload.resolved_handle.id()),
-            component_id: workload.component_id.clone(),
-            next_run_id: 0,
-            last_effect_id: effects::EffectId {
-                entry_id: 0,
-                effect_idx: 0,
-            },
-            active_job,
             resume_tx,
             yield_rx,
             cancel_token: pause_cancel,
             join_handle,
             jobs: Arc::clone(&self.active_jobs),
         })
-    }
-
-    async fn wait_for_session_yield(
-        &self,
-        session: &mut SessionHandle,
-        cancel_token: &CancellationToken,
-    ) -> Result<job_events::JobRunResult, job_events::JobRunResult> {
-        loop {
-            let trap = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
-                    debug!("cancel token lit");
-                    session.request_cancel();
-                    return Ok(job_events::JobRunResult::Aborted);
-                }
-                trap = session.yield_rx.recv() => trap
-            };
-            let Some(trap) = trap else {
-                return Err(job_events::JobRunResult::WorkerErr(
-                    job_events::JobRunWorkerError::Other {
-                        msg: "session loop closed without yielding".into(),
-                    },
-                ));
-            };
-            return Self::trap_to_result(trap);
-        }
     }
 }
 
@@ -922,7 +584,7 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             ]),
             imports: std::collections::HashSet::from([
                 //
-                WitInterface::from("townframe:wflow/host,partition-host,metadata-store"),
+                WitInterface::from("townframe:wflow/host"),
             ]),
         }
     }
@@ -990,17 +652,6 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             if iface.namespace == "townframe" && iface.package == "wflow" {
                 if iface.interfaces.contains("host") {
                     host::add_to_linker::<_, HasSelf<SharedWashCtx>>(item.linker(), |ctx| ctx)?;
-                }
-                if iface.interfaces.contains("partition-host") {
-                    partition_host::add_to_linker::<_, HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
-                }
-                if iface.interfaces.contains("metadata-store") {
-                    metastore::add_to_linker::<_, HasSelf<SharedWashCtx>>(item.linker(), |ctx| {
-                        ctx
-                    })?;
                 }
             }
         }
@@ -1079,133 +730,5 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
 
     async fn stop(&self) -> anyhow::Result<()> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl service::WflowServiceHost for WflowPlugin {
-    type ExtraArgs = WasmcloudWflowServiceMeta;
-    async fn run(
-        &self,
-        run_ctx: &service::RunJobCtx,
-        job_id: Arc<str>,
-        journal: state::JobState,
-        mut session: Option<Box<dyn service::WflowServiceSession>>,
-        cancel_token: CancellationToken,
-        args: &Self::ExtraArgs,
-    ) -> service::RunJobReply {
-        let Some(workload) = self
-            .active_workloads
-            .read()
-            .expect(ERROR_MUTEX)
-            .get(&args.workload_id[..])
-            .cloned()
-        else {
-            return service::RunJobReply {
-                result: Err(job_events::JobRunResult::WorkerErr(
-                    job_events::JobRunWorkerError::WflowNotFound,
-                )),
-                session: None,
-            };
-        };
-        let start_session = |journal: state::JobState| {
-            let workload = &workload;
-            let job_id = Arc::clone(&job_id);
-            async move {
-                self.start_session(
-                    workload,
-                    job_id,
-                    &journal.wflow.key,
-                    journal.init_args_json.to_string(),
-                    replay_from_job_state(&journal),
-                )
-                .await
-            }
-        };
-        let mut session = if let Some(mut session_box) = session.take() {
-            let session = session_box
-                .as_any_mut()
-                .downcast_mut::<WasmRunSession>()
-                .expect("invalid session type for wasm host")
-                .session
-                .take()
-                .expect("wasm session already taken");
-            let session_valid = session.next_run_id == run_ctx.run_id
-                && session.job_id == job_id
-                && session.last_effect_id != run_ctx.effect_id
-                && session.workload_id.as_ref() == args.workload_id
-                && session.component_id == workload.component_id
-                && self
-                    .active_jobs
-                    .read()
-                    .expect(ERROR_MUTEX)
-                    .contains_key(&session.ctx_id);
-            if !session_valid {
-                self.drop_session_handle(session);
-                match start_session(journal.clone()).await {
-                    Ok(session) => session,
-                    Err(result) => {
-                        return service::RunJobReply {
-                            result: Err(result),
-                            session: None,
-                        };
-                    }
-                }
-            } else {
-                *session.active_job.replay.lock().expect(ERROR_MUTEX) =
-                    replay_from_job_state(&journal);
-                if session.resume_tx.send(SessionResume::Continue).is_err() {
-                    self.drop_session_handle(session);
-                    match start_session(journal.clone()).await {
-                        Ok(session) => session,
-                        Err(result) => {
-                            return service::RunJobReply {
-                                result: Err(result),
-                                session: None,
-                            };
-                        }
-                    }
-                } else {
-                    session
-                }
-            }
-        } else {
-            match start_session(journal.clone()).await {
-                Ok(session) => session,
-                Err(result) => {
-                    return service::RunJobReply {
-                        result: Err(result),
-                        session: None,
-                    };
-                }
-            }
-        };
-
-        let result = self
-            .wait_for_session_yield(&mut session, &cancel_token)
-            .await;
-        match &result {
-            Ok(_) | Err(_) => {
-                session.next_run_id = run_ctx.run_id + 1;
-                session.last_effect_id = run_ctx.effect_id.clone();
-            }
-        }
-        service::RunJobReply {
-            result,
-            session: Some(Box::new(WasmRunSession {
-                session: Some(session),
-            })),
-        }
-    }
-
-    fn drop_session(&self, mut session: Box<dyn service::WflowServiceSession>) {
-        let session = session
-            .as_any_mut()
-            .downcast_mut::<WasmRunSession>()
-            .expect("invalid session type for wasm host")
-            .session
-            .take()
-            .expect("wasm session already taken");
-        self.drop_session_handle(session);
     }
 }

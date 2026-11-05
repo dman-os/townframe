@@ -126,16 +126,11 @@ impl Host for WflowPlugin {
             .cloned()
             .ok_or_else(|| ferr!("workflow workload stopped: {workload_id}"))?;
         let session = self
-            .start_session(&workload, job_id, wflow_key, args_json, replay.into())
+            .start_session(&workload, job_id, wflow_key, args_json, replay)
             .await
             .map_err(|err| ferr!("wasm session could not start: {err:?}"))?;
         Ok(Box::new(WasmSession(session)))
     }
 
-    fn forget_job(&self, job_id: &str) {
-        self.job_step_metas
-            .lock()
-            .expect(ERROR_MUTEX)
-            .remove(job_id);
-    }
+    fn forget_job(&self, _job_id: &str) {}
 }
