@@ -1,9 +1,10 @@
 //! ListDetails: the list/details scaffold.
 //!
 //! Compact hosts show one pane at a time: the details come on top of the list, which stays
-//! mounted underneath (its scroll position survives) but is hidden from assistive technology
-//! while covered. Wider hosts show both side by side inside [`Sections`]. With no details the
-//! list fills the space either way.
+//! mounted underneath (its scroll position and state survive) but is hidden from assistive
+//! technology while covered. Wider hosts show both side by side inside [`Sections`]. With no
+//! details the list fills the space either way. The list stays mounted as details open and
+//! close (see the comment in [`ListDetails`]).
 //!
 //! The scaffold owns no navigation state. Whether details are open is the `details` prop;
 //! opening and going back are requests made through [`use_list_details`] by whatever the
@@ -70,37 +71,36 @@ pub fn ListDetails(
     let back = use_callback(move |()| on_back.call(()));
     use_context_provider(|| ListDetailsActions { open, back });
 
-    let Some(details) = details else {
-        return rsx! {
-            div {
-                class: skin.root,
-                role: "region",
-                "aria-label": "{list_name}",
-                style: "width:100%;height:100%;min-width:0;min-height:0",
-                div { class: skin.list, style: "width:100%;height:100%", {list} }
-            }
-        };
-    };
+    // The list is the same element in every arrangement (the first pane of a `Sections` on a
+    // wide host, the first child of one container on a compact host), keyed so opening and
+    // closing the details never remounts it: a list that owns state or a mounted presentation
+    // (a provider that would otherwise be released and started again) keeps both. Only a change
+    // of arrangement, which is a different host width, rebuilds it.
     if width.fits_side_by_side() {
-        return rsx! {
-            Sections {
-                label: "{list_name} and {details_name}",
-                panes: vec![
-                    SectionPane {
-                        name: list_name,
-                        content: rsx! { div { class: skin.list, style: "width:100%;height:100%", {list} } },
-                    },
-                    SectionPane {
-                        name: details_name,
-                        content: rsx! { div { class: skin.details, style: "width:100%;height:100%", {details} } },
-                    },
-                ],
-                split,
-                on_resize,
-                skin: skin.sections,
+        let single = Split {
+            weights: split.weights[..1].to_vec(),
+            rules: split.rules[..1].to_vec(),
+            ..split.clone()
+        };
+        let mut panes = vec![SectionPane {
+            name: list_name.clone(),
+            content: rsx! { div { class: skin.list, style: "width:100%;height:100%", {list} } },
+        }];
+        let (label, split) = match details {
+            Some(details) => {
+                panes.push(SectionPane {
+                    name: details_name.clone(),
+                    content: rsx! { div { class: skin.details, style: "width:100%;height:100%", {details} } },
+                });
+                (format!("{list_name} and {details_name}"), split)
             }
+            None => (list_name, single),
+        };
+        return rsx! {
+            Sections { label, panes, split, on_resize, skin: skin.sections }
         };
     }
+    let covered = details.is_some();
     rsx! {
         div {
             class: skin.root,
@@ -109,16 +109,19 @@ pub fn ListDetails(
                 class: skin.list,
                 role: "region",
                 "aria-label": "{list_name}",
-                "aria-hidden": "true",
+                // Covered by the details, the list is out of reach of assistive technology.
+                "aria-hidden": covered.then_some("true"),
                 style: "width:100%;height:100%",
                 {list}
             }
-            div {
-                class: skin.details,
-                role: "region",
-                "aria-label": "{details_name}",
-                style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:20",
-                {details}
+            if let Some(details) = details {
+                div {
+                    class: skin.details,
+                    role: "region",
+                    "aria-label": "{details_name}",
+                    style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:20",
+                    {details}
+                }
             }
         }
     }
@@ -211,5 +214,49 @@ mod tests {
         let close = page.by_role("button", "Close");
         page.click(close);
         assert_eq!(*calls.borrow(), ["open inbox", "back"]);
+    }
+
+    #[component]
+    fn Counter() -> Element {
+        let mut count = use_signal(|| 0);
+        rsx! { button { onclick: move |_| count += 1, "count {count}" } }
+    }
+
+    fn stateful(width: WidthClass) -> Element {
+        let mut open = use_signal(|| false);
+        rsx! {
+            ListDetails {
+                width,
+                list_name: "Settings",
+                list: rsx! {
+                    Counter {}
+                    button { onclick: move |_| open.set(true), "Open" }
+                },
+                details_name: "Inbox settings",
+                details: open().then(|| rsx! { button { onclick: move |_| open.set(false), "Close" } }),
+                split: Split::new(vec![1.0, 2.0], 900.0),
+                on_resize: |_| {},
+                on_open: |_| {},
+                on_back: |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn opening_and_closing_the_details_never_remounts_the_list() {
+        for width in [WidthClass::Compact, WidthClass::Expanded] {
+            let mut page = Page::with_props(stateful, width);
+            let count = page.by_role("button", "count 0");
+            page.click(count);
+            let open = page.by_role("button", "Open");
+            page.click(open);
+            let close = page.by_role("button", "Close");
+            page.click(close);
+            assert!(
+                page.has_role("button", "count 1"),
+                "{width:?}: the list lost its state\n{}",
+                page.outline()
+            );
+        }
     }
 }
