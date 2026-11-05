@@ -361,6 +361,8 @@ pub use big_cabinet_core::dmeta::native :: NativeReadBudget
 pub use big_cabinet_core::dmeta::native :: NativeReadError
 pub use big_cabinet_core::dmeta::native :: NativeValue
 pub use big_cabinet_core::dmeta::native :: encode_native
+pub use big_cabinet_core::dmeta::storage :: DmetaSchema
+pub use big_cabinet_core::dmeta::storage :: DmetaWrite
 pub use big_cabinet_core::dmeta::storage :: StorageError
 pub use big_cabinet_core::dmeta::verification :: DatumValue
 pub use big_cabinet_core::dmeta::verification :: Evidence

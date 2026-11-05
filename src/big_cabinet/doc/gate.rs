@@ -7,20 +7,16 @@
 //! 1. **The current signatures verify.** Each claim, reconstructed at its introduction, matches the
 //!    signed bytes, and the actor's attribution certificate verifies against the node that made
 //!    the change. A proven-invalid current entry rejects that datum.
-//! 2. **Nothing touched X outside them.** Every change in H's history that touched X and is not
-//!    already beneath the datum heads must itself introduce a valid signature on X. A change that
-//!    touched X without signing it — even one whose value lost an Automerge conflict and is not
-//!    visible at H — is a forgery and rejects the datum.
-//! 3. **The value is what they signed.** The value at H equals the value at the datum heads, i.e.
-//!    the signed values merged by Automerge's own rules. This stops signature entries from being
-//!    deleted out from under a value.
+//! 2. **The value is what they signed.** The value at H equals the value at the datum heads, i.e.
+//!    the signed values merged by Automerge's own rules. An unsigned change that is visible at H
+//!    makes the two differ, and deleting signature entries out from under a value shrinks the
+//!    datum heads until they no longer produce it. A slot with no signatures has no datum heads,
+//!    so it is accepted only when it is absent at H.
 //!
-//! Changes beneath the datum heads are not re-examined: whoever signed on top of them passed this
-//! same gate for their base first. That is why a hidden unsigned contribution cannot be laundered.
-//! An honest writer's base check sees it (it is not beneath the signatures that existed then) and
-//! refuses to sign; only a writer bypassing the gate could sign over it, and their signature is
-//! then theirs to answer for. It is also what keeps a slot recoverable: an explicit repair signs a
-//! new value and the old forgery falls beneath it.
+//! The gate reads the datum at two sets of heads, never the document's history. It does not look
+//! for unsigned operations that lost an Automerge conflict and are invisible at H: the docs service
+//! offers no read of conflicted values, so such an operation cannot reach a reader or a writer's
+//! base. If a read of conflicted values is ever added, forgery checking belongs on that path.
 //!
 //! Pending means verification could not complete; it never means part of an applied change may
 //! arrive later. Missing document metadata or attribution certificates are malformed, not pending.
@@ -30,7 +26,6 @@ use super::claim_history::ClaimHistoryError;
 use super::claim_history::ClaimHistoryResult;
 use super::claim_history::HistoryBudget;
 use super::claim_history::ReconstructedClaim;
-use super::claim_history::reconstruct_claim;
 use super::claim_history::reconstruct_current_claims;
 use automerge::ActorId;
 use automerge::Automerge;
@@ -38,10 +33,6 @@ use automerge::ChangeHash;
 use automerge::ObjType;
 use automerge::ReadDoc;
 use automerge::Value;
-use automerge::legacy::Key;
-use automerge::legacy::ObjectId;
-use automerge::legacy::OpId;
-use automerge::legacy::OpType;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::ActorMetadata;
@@ -56,10 +47,7 @@ use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::dmeta::encode_native;
 use big_cabinet_core::doc::DatumVersion;
-use std::cell::OnceCell;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
 
 pub(super) const DMETA_KEY: &str = "org.example.daybook.dmeta/main";
 
@@ -78,34 +66,10 @@ pub(crate) enum Verdict {
     },
 }
 
-#[derive(Default)]
-struct Footprint {
-    touched: Vec<usize>,
-    signed: HashSet<usize>,
-}
-
-struct Footprints {
-    hashes: Vec<ChangeHash>,
-    index_of: HashMap<ChangeHash, usize>,
-    deps: Vec<Vec<usize>>,
-    by_slot: HashMap<String, Footprint>,
-    envelope_changes: Vec<usize>,
-}
-
 pub(crate) struct Gate<'a> {
     doc: &'a Automerge,
     heads: &'a [ChangeHash],
-    footprints: OnceCell<Footprints>,
     budget: HistoryBudget,
-}
-
-enum Role {
-    Datums,
-    Slot(String),
-    Dmeta,
-    DmetaDatums,
-    DatumMeta(String),
-    Signatures(String),
 }
 
 impl<'a> Gate<'a> {
@@ -113,135 +77,42 @@ impl<'a> Gate<'a> {
         Self {
             doc,
             heads,
-            footprints: OnceCell::new(),
             budget: HistoryBudget::default(),
         }
     }
 
-    /// One pass over H's history records, per datum key, which changes touched the datum's
-    /// content and which introduced a signature on it. Computed lazily: a datum whose signature
-    /// heads already cover `self.heads` has no uncovered history to inspect.
-    fn footprints(&self) -> &Footprints {
-        self.footprints.get_or_init(|| {
-            let ancestry = ancestry(self.doc, self.heads.iter().copied());
-            let mut hashes = Vec::new();
-            let mut index_of = HashMap::new();
-            let mut deps = Vec::new();
-            let mut roles: HashMap<OpId, Role> = HashMap::new();
-            let mut by_slot: HashMap<String, Footprint> = HashMap::new();
-            let mut envelope_changes = Vec::new();
-            for change in self.doc.get_changes(&[]) {
-                let hash = change.hash();
-                if !ancestry.contains(&hash) {
-                    continue;
-                }
-                let change_idx = hashes.len();
-                hashes.push(hash);
-                index_of.insert(hash, change_idx);
-                deps.push(
-                    change
-                        .deps()
-                        .iter()
-                        .filter_map(|dep| index_of.get(dep).copied())
-                        .collect(),
-                );
-                let decoded = change.decode();
-                for (index, op) in decoded.operations.iter().enumerate() {
-                    let id = OpId(
-                        decoded.start_op.get() + index as u64,
-                        decoded.actor_id.clone(),
-                    );
-                    let made = matches!(op.action, OpType::Make(_));
-                    let key = match &op.key {
-                        Key::Map(key) => Some(key.as_str()),
-                        Key::Seq(_) => None,
-                    };
-                    let shared = match (&op.obj, key) {
-                        (ObjectId::Root, Some("datums")) => true,
-                        (ObjectId::Id(parent), Some(key)) => matches!(
-                            (roles.get(parent), key),
-                            (Some(Role::Datums), DMETA_KEY) | (Some(Role::Dmeta), "datums")
-                        ),
-                        _ => false,
-                    };
-                    if shared && envelope_changes.last() != Some(&change_idx) {
-                        envelope_changes.push(change_idx);
-                    }
-                    let role = match &op.obj {
-                        ObjectId::Root => match (key, &op.action) {
-                            (Some("datums"), OpType::Make(ObjType::Map)) => Some(Role::Datums),
-                            _ => None,
-                        },
-                        ObjectId::Id(parent) => match roles.get(parent) {
-                            None => None,
-                            Some(Role::Datums) => match key {
-                                Some(DMETA_KEY) => matches!(op.action, OpType::Make(ObjType::Map))
-                                    .then_some(Role::Dmeta),
-                                Some(slot) => {
-                                    touch(&mut by_slot, slot, change_idx);
-                                    made.then(|| Role::Slot(slot.to_owned()))
-                                }
-                                None => None,
-                            },
-                            Some(Role::Slot(slot)) => {
-                                let slot = slot.clone();
-                                touch(&mut by_slot, &slot, change_idx);
-                                made.then_some(Role::Slot(slot))
-                            }
-                            Some(Role::Dmeta) => (key == Some("datums")
-                                && matches!(op.action, OpType::Make(ObjType::Map)))
-                            .then_some(Role::DmetaDatums),
-                            Some(Role::DmetaDatums) => match key {
-                                Some(slot) => {
-                                    touch(&mut by_slot, slot, change_idx);
-                                    matches!(op.action, OpType::Make(ObjType::Map))
-                                        .then(|| Role::DatumMeta(slot.to_owned()))
-                                }
-                                None => None,
-                            },
-                            Some(Role::DatumMeta(slot)) => {
-                                if key == Some("signatures") {
-                                    touch(&mut by_slot, slot, change_idx);
-                                    matches!(op.action, OpType::Make(ObjType::List))
-                                        .then(|| Role::Signatures(slot.clone()))
-                                } else {
-                                    None
-                                }
-                            }
-                            Some(Role::Signatures(slot)) => {
-                                touch(&mut by_slot, slot, change_idx);
-                                if op.insert && matches!(op.action, OpType::Make(ObjType::Map)) {
-                                    by_slot
-                                        .entry(slot.clone())
-                                        .or_default()
-                                        .signed
-                                        .insert(change_idx);
-                                }
-                                None
-                            }
-                        },
-                    };
-                    if let Some(role) = role {
-                        roles.insert(id, role);
-                    }
+    /// Every datum key the gate has a verdict to give on at `heads`: slots with content, and slots
+    /// whose metadata is still recorded (a signed removal leaves no content but keeps its
+    /// signatures). A key in neither has no signatures and no content, which is always accepted
+    /// as absent, so it needs no check. Conflicting envelopes are all read, as
+    /// [`signature_heads`] does, because the gate reads every signature on a slot.
+    pub(super) fn keys(&self) -> BTreeSet<DatumKey> {
+        let maps = |object: &automerge::ObjId, prop: &str| -> Vec<automerge::ObjId> {
+            self.doc
+                .get_all_at(object, prop, self.heads)
+                .expect("the gate runs on heads the caller checked are known")
+                .into_iter()
+                .filter(|(value, _)| matches!(value, Value::Object(ObjType::Map)))
+                .map(|(_, id)| id)
+                .collect()
+        };
+        let keys = |object: &automerge::ObjId| {
+            self.doc
+                .map_range_at(object, .., self.heads)
+                .filter(|item| item.key != DMETA_KEY)
+                .filter_map(|item| item.key.parse::<DatumKey>().ok())
+                .collect::<Vec<_>>()
+        };
+        let mut found = BTreeSet::new();
+        for datums in maps(&automerge::ROOT, "datums") {
+            found.extend(keys(&datums));
+            for dmeta in maps(&datums, DMETA_KEY) {
+                for metadata in maps(&dmeta, "datums") {
+                    found.extend(keys(&metadata));
                 }
             }
-            Footprints {
-                hashes,
-                index_of,
-                deps,
-                by_slot,
-                envelope_changes,
-            }
-        })
-    }
-
-    /// Every datum key touched in `heads`'s history, including slots later deleted.
-    pub(super) fn keys(&self) -> impl Iterator<Item = DatumKey> + '_ {
-        self.footprints()
-            .by_slot
-            .keys()
-            .filter_map(|key| key.parse().ok())
+        }
+        found
     }
 
     pub(crate) fn verify(&self, key: &DatumKey) -> Verdict {
@@ -276,51 +147,10 @@ impl<'a> Gate<'a> {
                 Status::Invalid(reason) => return Verdict::Rejected { reason },
             }
         }
-        let heads_all_covered = self.heads.iter().all(|head| datum_heads.contains(head));
-        if !heads_all_covered {
-            let footprints = self.footprints();
-            if let Some(footprint) = footprints.by_slot.get(&key.to_string()) {
-                let mut covered = vec![false; footprints.hashes.len()];
-                let mut stack: Vec<usize> = datum_heads
-                    .iter()
-                    .filter_map(|head| footprints.index_of.get(head).copied())
-                    .collect();
-                while let Some(idx) = stack.pop() {
-                    if !covered[idx] {
-                        covered[idx] = true;
-                        stack.extend(footprints.deps[idx].iter().copied());
-                    }
-                }
-                for &change_idx in footprint
-                    .touched
-                    .iter()
-                    .chain(&footprints.envelope_changes)
-                    .filter(|&&change_idx| !covered[change_idx])
-                {
-                    let change = footprints.hashes[change_idx];
-                    if !footprint.signed.contains(&change_idx) {
-                        return Verdict::Rejected {
-                            reason: format!(
-                                "change {change} modified the datum without signing it"
-                            ),
-                        };
-                    }
-                    match self.claim_status(reconstruct_claim(self.doc, key, change, self.budget)) {
-                        Status::Valid => {}
-                        Status::Pending(reason) => {
-                            pending.get_or_insert(reason);
-                        }
-                        Status::Invalid(reason) => {
-                            return Verdict::Rejected {
-                                reason: format!(
-                                    "change {change} carries an invalid signature: {reason}"
-                                ),
-                            };
-                        }
-                    }
-                }
-            }
-        }
+        // The signed value is the datum read at the datum heads: Automerge merges concurrent
+        // signed values there by its own rules. Anything that changed the visible value without
+        // signing it — an unsigned edit, or a signature entry deleted out from under its value —
+        // leaves the value at `self.heads` different from it.
         let datum_heads: Vec<_> = datum_heads.into_iter().collect();
         let signed = if datum_heads.is_empty() {
             None
@@ -428,28 +258,6 @@ enum Status {
     Valid,
     Pending(String),
     Invalid(String),
-}
-
-/// The given changes and everything they depend on.
-fn ancestry(doc: &Automerge, heads: impl IntoIterator<Item = ChangeHash>) -> HashSet<ChangeHash> {
-    let mut seen = HashSet::new();
-    let mut pending: Vec<ChangeHash> = heads.into_iter().collect();
-    while let Some(hash) = pending.pop() {
-        if seen.insert(hash) {
-            let change = doc
-                .get_change_by_hash(&hash)
-                .expect("the gate runs on heads the caller checked are known");
-            pending.extend(change.deps().iter().copied());
-        }
-    }
-    seen
-}
-
-fn touch(footprints: &mut HashMap<String, Footprint>, slot: &str, change_idx: usize) {
-    let touched = &mut footprints.entry(slot.to_owned()).or_default().touched;
-    if touched.last() != Some(&change_idx) {
-        touched.push(change_idx);
-    }
 }
 
 /// Check certificate consistency with the node key claimed by the introducing change's actor.

@@ -363,6 +363,14 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - Verification is: each signature verifies against X at its introducing change, and X at the combined signature heads equals X now. A new key must be absent.
   - Hidden losing-conflict operations are not checked, because the docs service offers no way to read conflicted values. If a conflicted-values read is ever added, forgery verification belongs on that path, not the default one.
   - This removes `Gate::footprints` (a full-history decode per write). ADR 020 needs amending.
+  - Done (2026-11-05): `Gate::footprints` and the coverage branch are gone; `Gate::keys` (MergeDoc) now lists slots with content or metadata at the merged heads. ADR 020 §6 and the edge-case section are amended. Accepted cost recorded there: an unsigned erasure of a value together with all its signatures reads as Absent.
+  - Cost 2 done alongside: a write validates and reconciles only the dmeta parts it names (`Dmeta::write_atomic`, `DmetaWrite`, member schemas from `CompiledSchema::member`). `a_note_costs_no_more_to_create_in_a_fuller_drawer` now passes: 183,219 allocations at drawer size 10 against 203,380 at 30 (1.11x; was 234,389 against 463,475).
+  - Found alongside: `drawer::e2e::model` failed on `[AddChild 1<-0 Relay, AddChild 2<-1 Relay, RemoveChild 2/0]` (regression seed saved). `group_level` used the transitive `agent_access_on`, so unlink found a 2→0 delegation that only existed through 1. Fixed: it reads direct access.
+- **D28. Follow-ups to D24** (operator, 2026-11-05):
+  - Blob retention targets only inventories the node can write.
+  - A write keyhive refuses for access becomes a typed error that the docs service maps to `Denied`.
+  - The operator superuser is not capped at the node's keyhive level: keyhive enforces at write time.
+  - The e2e harness keeps reading through the drawers actor's capability for now.
 - **D26. Drawer keyhive architecture.** Revisit against upstream `design/keyline/patterns.md` together with the Keyline migration. Topics: supply roles at Edit rather than Admin, flat vs nested child drawers, rotating roles, the steward pattern.
 - Naming: cabinet's self-doc `LocalDrawers.registry_id` is the known-drawers list, not the plug registry. Rename to `known_drawers_id` (proposed, not decided).
 
