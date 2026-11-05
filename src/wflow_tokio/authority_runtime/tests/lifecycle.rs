@@ -102,6 +102,7 @@ enum SpawnPlan {
         session: Box<dyn Session>,
     },
     Fail,
+    Panic,
 }
 
 #[derive(Default)]
@@ -172,6 +173,7 @@ impl Host for ScriptHost {
                 Ok(session)
             }
             SpawnPlan::Fail => Err(ferr!("host unavailable")),
+            SpawnPlan::Panic => panic!("host spawn panic"),
         }
     }
 
@@ -289,6 +291,35 @@ async fn slow_spawn_does_not_block_unrelated_work_and_late_session_is_dropped() 
         "a terminal late spawn must not consume restart budget"
     );
     runtime.stop().await;
+}
+
+#[tokio::test]
+async fn host_spawn_panic_propagates_without_spending_restart_budget() {
+    let host = ScriptHost::registered();
+    host.push("panics", SpawnPlan::Panic);
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "panics", "null"))
+        .await
+        .unwrap();
+
+    let actor = runtime
+        .actor
+        .lock()
+        .await
+        .take()
+        .expect("actor should be running");
+    let panic = actor
+        .await
+        .expect_err("a Host::spawn panic must fail the actor")
+        .into_panic();
+    assert!(panic
+        .downcast_ref::<&str>()
+        .is_some_and(|message| *message == "host spawn panic"));
+    let history = transitions(&runtime, "job").await;
+    assert!(history
+        .iter()
+        .all(|event| !matches!(event, authority::Transition::Revoked { .. })));
 }
 
 #[tokio::test]
