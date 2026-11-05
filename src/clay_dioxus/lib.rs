@@ -25,6 +25,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::watch;
 
+mod timing;
+
 type Renderer = Rc<dyn Fn(&Arc<Mount>) -> Element>;
 
 /// Handle through which a mounted surface commits wire batches into its retained [`SurfaceTree`].
@@ -82,7 +84,14 @@ impl SurfaceWriter {
             }
             return Err(PresentationError::Revoked);
         }
+        let started = timing::now();
         let result = tree.apply(edits);
+        timing::record(
+            "apply",
+            started,
+            edits.len() as f64,
+            tree.node_count() as f64,
+        );
         if result.is_err() {
             self.revoked.store(true, Ordering::Release);
         }
@@ -416,17 +425,30 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
             rev.set(current_revision);
             return EventResponse::default();
         }
+        let started = timing::now();
+        let kind = timing::ENABLED.then(|| format!("dispatch:{}", event.name));
         let response = dispatch(event);
+        if let Some(kind) = kind {
+            timing::record(&kind, started, 0.0, 0.0);
+        }
         let mut rev = revision;
         rev.set(writer_for_event.revision());
         response
     });
     let tree = writer.tree.lock().unwrap();
-    tree.render(&handler, &|reference| {
+    let started = timing::now();
+    let projected = tree.render(&handler, &|reference| {
         rsx! {
             ComponentMount { owner: owner.clone(), reference: *reference }
         }
-    })
+    });
+    timing::record(
+        "render",
+        started,
+        tree.node_count() as f64,
+        tree.revision() as f64,
+    );
+    projected
 }
 
 #[cfg(test)]

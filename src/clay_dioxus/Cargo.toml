@@ -17,3 +17,13 @@ tokio = { workspace = true, features = ["sync"] }
 dioxus-core.workspace = true
 dioxus-html.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+# Pierre scroll spike: `window.__clayTiming` records of the host's per-revision phases, read by
+# the Playwright spec. Browser builds only; off everywhere else.
+[features]
+spike-timing = ["dep:web-sys", "dep:js-sys", "dep:wasm-bindgen"]
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+web-sys = { workspace = true, optional = true, features = ["Window", "Performance"] }
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }

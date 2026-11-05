@@ -192,6 +192,11 @@ impl<C: Clone> SurfaceTree<C> {
         self.revision
     }
 
+    /// Live nodes in the arena, root included.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len() - self.vacant_slots.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.node(SurfaceNodeId::ROOT).children.is_empty()
     }

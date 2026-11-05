@@ -7,7 +7,7 @@ edition = "2021"
 dioxus = { workspace = true }
 ui = { workspace = true }
 dayframe_composition = { workspace = true }
-clay_dioxus = { workspace = true }
+clay_dioxus = { workspace = true, features = ["spike-timing"] }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wcmp", "package"] }
 clay_rt_wcmp = { workspace = true }
 clay_store = { workspace = true }
