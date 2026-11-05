@@ -758,7 +758,17 @@ impl<F: FutureForm> DocWorker2<F> {
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
-        for item in &order {
+        // Walk descendants first (reverse of the ancestors-first topological
+        // order). `try_causal_decrypt` returns the plaintext and key of the
+        // item *and its whole ancestor closure*, so the first walk from a
+        // descendant covers every item below it. Visiting ancestors first
+        // made each item's walk re-decrypt its entire closure (N(N+1)/2
+        // decrypts for a linear history of N); descendants first, a linear
+        // history needs one walk and the rest are served from `plaintexts`.
+        // Blockers lose nothing: a descendant's closure is a superset of any
+        // ancestor's, so its walk already reported every blocker the ancestor's
+        // own walk would.
+        for item in order.iter().rev() {
             let (kind, head) = match item {
                 SedimentreeItem::Fragment(index) => {
                     (BigRepoCiphertextKind::Fragment, fragments[*index].head())
@@ -786,6 +796,10 @@ impl<F: FutureForm> DocWorker2<F> {
             // (one per grant), so always take the full walk for them.
             let is_checkpoint =
                 kind == BigRepoCiphertextKind::LooseCommit && is_causal_checkpoint_id(head);
+            // Already decrypted as part of a descendant's closure walk.
+            if !is_checkpoint && plaintexts.contains_key(head.as_bytes().as_slice()) {
+                continue;
+            }
             let cached_key = if is_checkpoint {
                 None
             } else {

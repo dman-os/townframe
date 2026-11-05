@@ -60,15 +60,15 @@ fn decrypted_child_is_retried_after_its_parent() {
 
 #[test]
 fn non_automerge_shadow_node_contracts_out_of_materialized_history() {
-    use automerge::ReadDoc;
     use automerge::transaction::Transactable;
+    use automerge::ReadDoc;
     use sedimentree_core::blob::Blob;
     use sedimentree_core::blob::BlobMeta;
     use sedimentree_core::depth::CountLeadingZeroBytes;
     use sedimentree_core::id::SedimentreeId;
     use sedimentree_core::loose_commit::LooseCommit;
-    use sedimentree_core::sedimentree::Sedimentree;
     use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
+    use sedimentree_core::sedimentree::Sedimentree;
 
     let mut base = automerge::Automerge::new();
     base.transact(|tx| tx.put(automerge::ROOT, "base", 1))
@@ -434,11 +434,291 @@ impl crate::runtime2::DocIo<Sendable> for FakeRecoveryDocIo {
     }
 }
 
+// ── cold-load decrypt cost ─────────────────────────────────────────
+//
+// `load_doc_snapshot` visits the topologically ordered items descendants
+// first. A causal walk from an item returns the plaintext and key of its
+// whole ancestor closure, so on a linear history of N commits the walk
+// from the newest head covers every other item and a cold load needs
+// exactly one walk. Walking ancestors first costs N(N+1)/2 decrypts.
+
+struct FakeChainDocIo {
+    sed_id: sedimentree_core::id::SedimentreeId,
+    refs: Vec<CommitId>,
+    plaintexts: Vec<Vec<u8>>,
+    walks: std::sync::atomic::AtomicUsize,
+    decrypted_by_walks: std::sync::atomic::AtomicUsize,
+    cached_key_decrypts: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::runtime2::DocIo<Sendable> for FakeChainDocIo {
+    fn hydrate_tree(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> <Sendable as FutureForm>::Future<
+        '_,
+        eyre::Result<Option<sedimentree_core::sedimentree::minimized::MinimizedSedimentree>>,
+    > {
+        use sedimentree_core::blob::Blob;
+        use sedimentree_core::blob::BlobMeta;
+        use sedimentree_core::loose_commit::LooseCommit;
+        use sedimentree_core::sedimentree::Sedimentree;
+        let mut tree = Sedimentree::new(Vec::new(), Vec::new());
+        let blob_meta = BlobMeta::new(&Blob::new(Vec::new()));
+        for (index, head) in self.refs.iter().enumerate() {
+            let parents = index
+                .checked_sub(1)
+                .map(|prev| BTreeSet::from([self.refs[prev]]))
+                .unwrap_or_default();
+            tree.add_commit(LooseCommit::new(self.sed_id, *head, parents, blob_meta));
+        }
+        let tree = sedimentree_core::sedimentree::minimized::MinimizedSedimentree::new(tree);
+        Sendable::from_future(async move { Ok(Some(tree)) })
+    }
+
+    fn try_causal_decrypt(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        locator: BigRepoCiphertextLocator,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<CausalDecryptResult>> {
+        use keyhive_crypto::symmetric_key::SymmetricKey;
+        self.walks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let entry = self
+            .refs
+            .iter()
+            .position(|head| *head == locator.commit_id)
+            .expect("walk requested for an unknown commit");
+        // The entrypoint first, then its ancestor closure, like the native walk.
+        let order: Vec<usize> = std::iter::once(entry).chain((0..entry).rev()).collect();
+        self.decrypted_by_walks
+            .fetch_add(order.len(), std::sync::atomic::Ordering::Relaxed);
+        let complete = order
+            .iter()
+            .map(|&i| (self.refs[i].as_bytes().to_vec(), self.plaintexts[i].clone()))
+            .collect();
+        let keys = order
+            .iter()
+            .map(|&i| {
+                (
+                    self.refs[i].as_bytes().to_vec(),
+                    SymmetricKey::from([i as u8; 32]),
+                )
+            })
+            .collect();
+        Sendable::from_future(async move {
+            Ok(CausalDecryptResult {
+                complete,
+                blockers: Vec::new(),
+                keys,
+            })
+        })
+    }
+
+    fn decrypt_with_cached_key(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        locator: BigRepoCiphertextLocator,
+        _key: keyhive_crypto::symmetric_key::SymmetricKey,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
+        self.cached_key_decrypts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let plaintext = self
+            .refs
+            .iter()
+            .position(|head| *head == locator.commit_id)
+            .map(|i| self.plaintexts[i].clone());
+        Sendable::from_future(async move { Ok(plaintext) })
+    }
+
+    fn sedimentree_heads(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> <Sendable as FutureForm>::Future<
+        '_,
+        eyre::Result<Vec<sedimentree_core::loose_commit::id::CommitId>>,
+    > {
+        unreachable!("not exercised by this test")
+    }
+    fn durable_sedimentree_heads(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> <Sendable as FutureForm>::Future<
+        '_,
+        eyre::Result<Vec<sedimentree_core::loose_commit::id::CommitId>>,
+    > {
+        unreachable!("not exercised by this test")
+    }
+
+    fn persist_initial_document(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        _staged: crate::runtime2::support::StagedAutomergeIngest,
+        _initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        unreachable!("not exercised by this test")
+    }
+    fn persist_local_commits(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        _commits: Vec<(
+            sedimentree_core::loose_commit::id::CommitId,
+            BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+            Vec<u8>,
+        )>,
+    ) -> <Sendable as FutureForm>::Future<
+        '_,
+        eyre::Result<BTreeSet<subduction_core::subduction::request::FragmentRequested>>,
+    > {
+        unreachable!("not exercised by this test")
+    }
+    fn current_causal_epoch(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<[u8; 32]>>> {
+        Sendable::from_future(async move { Ok(None) })
+    }
+    fn current_cgka_ops_count(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<usize>> {
+        Sendable::from_future(async move { Ok(0) })
+    }
+
+    fn ciphertext_epoch(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        _head: sedimentree_core::loose_commit::id::CommitId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<[u8; 32]>>> {
+        unreachable!("not exercised by this test")
+    }
+    fn persist_causal_checkpoint(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        _covered_frontier: BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+    ) -> <Sendable as FutureForm>::Future<
+        '_,
+        eyre::Result<
+            Option<(
+                sedimentree_core::loose_commit::id::CommitId,
+                crate::runtime2::support::CausalCheckpoint,
+                Vec<sedimentree_core::loose_commit::id::CommitId>,
+            )>,
+        >,
+    > {
+        unreachable!("not exercised by this test")
+    }
+    fn has_doc_write_access(
+        &self,
+        _doc_id: crate::DocumentId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
+        unreachable!("not exercised by this test")
+    }
+    fn has_doc_fetch_access(
+        &self,
+        _doc_id: crate::DocumentId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
+        unreachable!("not exercised by this test")
+    }
+    fn store_fragment(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        _head: sedimentree_core::loose_commit::id::CommitId,
+        _boundary: BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+        _checkpoints: Vec<sedimentree_core::loose_commit::id::CommitId>,
+        _raw_blob: Vec<u8>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        unreachable!("not exercised by this test")
+    }
+    fn try_decrypt_content_keyed(
+        &self,
+        _sed_id: sedimentree_core::id::SedimentreeId,
+        _locator: BigRepoCiphertextLocator,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
+        unreachable!("not exercised by this test")
+    }
+}
+
+#[tokio::test]
+async fn cold_load_of_a_linear_history_takes_one_causal_walk() -> Res<()> {
+    use automerge::transaction::Transactable;
+
+    const COMMITS: usize = 40;
+    let mut source = automerge::AutoCommit::new();
+    let mut plaintexts = Vec::new();
+    let mut prev_heads = Vec::new();
+    for index in 0..COMMITS {
+        source
+            .put(automerge::ROOT, format!("k{index}"), index as i64)
+            .expect("failed seeding doc");
+        plaintexts.push(source.save_after(&prev_heads));
+        prev_heads = source.get_heads();
+    }
+    let doc_id = DocumentId::new([0x5c; 32]);
+    let sed_id =
+        sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
+    let io = Arc::new(FakeChainDocIo {
+        sed_id,
+        refs: (0..COMMITS)
+            .map(|i| CommitId::new([i as u8 + 1; 32]))
+            .collect(),
+        plaintexts,
+        walks: Default::default(),
+        decrypted_by_walks: Default::default(),
+        cached_key_decrypts: Default::default(),
+    });
+
+    let (evt_tx, _evt_rx) = async_channel::unbounded::<Runtime2Evt>();
+    let (runtime_cmd_tx, _runtime_cmd_rx) =
+        async_channel::unbounded::<crate::runtime2::Runtime2Cmd>();
+    let (change_manager, _stop) = crate::changes::ChangeListenerManager::boot();
+    let worker = DocWorker2 {
+        doc_id,
+        sed_id,
+        generation: 0,
+        state: DocState::Unloaded,
+        interests: crate::interest::SyncInterests::new(Arc::new(
+            subduction_ephemeral::clock::std_clock::StdClock,
+        )),
+        usable: tokio::sync::watch::channel(false).0,
+        caller_handles: Vec::new(),
+        partially_decrypted: false,
+        causal_epoch: None,
+        cgka_ops_count: 0,
+        recovered_keys: std::sync::Mutex::new(HashMap::new()),
+        blocked_refs: HashSet::new(),
+        causal_checkpoints: HashMap::new(),
+        io: std::sync::Arc::<FakeChainDocIo>::clone(&io),
+        change_manager,
+        runtime_cmd_tx,
+        evt_tx,
+        pending_fragment_requests: BTreeSet::new(),
+        quiescence_waiters: Vec::new(),
+    };
+
+    let LoadedDocSnapshot::Ready { doc, .. } = worker.load_doc_snapshot().await? else {
+        panic!("a fully delivered chain must materialize");
+    };
+    assert_eq!(doc.get_heads(), source.get_heads());
+    assert_eq!(io.walks.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        io.decrypted_by_walks
+            .load(std::sync::atomic::Ordering::Relaxed),
+        COMMITS
+    );
+    assert_eq!(
+        io.cached_key_decrypts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn late_content_ciphertext_is_recovered_through_checkpoint_envelope() -> Res<()> {
     use crate::changes::ChangeListenerManager;
-    use automerge::ReadDoc;
     use automerge::transaction::Transactable;
+    use automerge::ReadDoc;
     use keyhive_crypto::symmetric_key::SymmetricKey;
 
     let mut source = automerge::AutoCommit::new();
