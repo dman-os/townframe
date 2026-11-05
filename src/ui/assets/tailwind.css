@@ -20,8 +20,6 @@
     --text-base--line-height: calc(1.5 / 1);
     --text-lg: 1.125rem;
     --text-lg--line-height: calc(1.75 / 1.125);
-    --text-xl: 1.25rem;
-    --text-xl--line-height: calc(1.75 / 1.25);
     --text-2xl: 1.5rem;
     --text-2xl--line-height: calc(2 / 1.5);
     --text-4xl: 2.25rem;
@@ -379,6 +377,12 @@
     max-width: var(--container-7xl);
     align-items: flex-start;
     gap: calc(var(--df-spacing) * 6);
+  }
+  .mx-2 {
+    margin-inline: calc(var(--df-spacing) * 2);
+  }
+  .mx-4 {
+    margin-inline: calc(var(--df-spacing) * 4);
   }
   .df-separator {
     margin-block: calc(var(--df-spacing) * 4);
@@ -780,6 +784,9 @@
   .w-5 {
     width: calc(var(--df-spacing) * 5);
   }
+  .w-80 {
+    width: calc(var(--df-spacing) * 80);
+  }
   .w-96 {
     width: calc(var(--df-spacing) * 96);
   }
@@ -791,6 +798,9 @@
   }
   .max-w-3xl {
     max-width: var(--container-3xl);
+  }
+  .max-w-5\/6 {
+    max-width: calc(5 / 6 * 100%);
   }
   .max-w-full {
     max-width: 100%;
@@ -941,9 +951,6 @@
   .gap-4 {
     gap: calc(var(--df-spacing) * 4);
   }
-  .gap-6 {
-    gap: calc(var(--df-spacing) * 6);
-  }
   .gap-8 {
     gap: calc(var(--df-spacing) * 8);
   }
@@ -1020,10 +1027,6 @@
     border-style: var(--tw-border-style);
     border-width: 1px;
   }
-  .border-0 {
-    border-style: var(--tw-border-style);
-    border-width: 0px;
-  }
   .border-hairline {
     border-style: var(--tw-border-style);
     border-width: var(--df-border-width-hairline);
@@ -1035,10 +1038,6 @@
   .border-thin {
     border-style: var(--tw-border-style);
     border-width: var(--df-border-width-thin);
-  }
-  .border-b {
-    border-bottom-style: var(--tw-border-style);
-    border-bottom-width: 1px;
   }
   .border-b-2 {
     border-bottom-style: var(--tw-border-style);
@@ -1110,9 +1109,6 @@
   .bg-surface-sunken {
     background-color: var(--df-color-surface-sunken);
   }
-  .bg-transparent {
-    background-color: transparent;
-  }
   .p-1 {
     padding: var(--df-spacing);
   }
@@ -1162,6 +1158,12 @@
     padding-top: calc(var(--df-spacing) * 4);
     padding-bottom: calc(var(--df-spacing) * 2);
   }
+  .px-2 {
+    padding-inline: calc(var(--df-spacing) * 2);
+  }
+  .px-3 {
+    padding-inline: calc(var(--df-spacing) * 3);
+  }
   .px-4 {
     padding-inline: calc(var(--df-spacing) * 4);
   }
@@ -1173,6 +1175,9 @@
   }
   .py-8 {
     padding-block: calc(var(--df-spacing) * 8);
+  }
+  .pb-4 {
+    padding-bottom: calc(var(--df-spacing) * 4);
   }
   .text-center {
     text-align: center;
@@ -1233,10 +1238,6 @@
   .text-sm {
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
-  }
-  .text-xl {
-    font-size: var(--text-xl);
-    line-height: var(--tw-leading, var(--text-xl--line-height));
   }
   .leading-normal {
     --tw-leading: var(--leading-normal);
@@ -1436,6 +1437,12 @@
   }
   .focus-visible\:outline-focus:focus-visible {
     outline-color: var(--df-color-focus);
+  }
+  .data-\[state\=current\]\:bg-accent-container[data-state="current"] {
+    background-color: var(--df-color-accent-container);
+  }
+  .data-\[state\=current\]\:text-on-accent-container[data-state="current"] {
+    color: var(--df-color-on-accent-container);
   }
   @media (width >= 64rem) {
     .lg\:p-12 {
