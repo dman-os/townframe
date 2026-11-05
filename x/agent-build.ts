@@ -10,7 +10,7 @@
 
 import { $ } from "./utils.ts";
 
-const DEFAULT_SLOTS = Number(Deno.env.get("TOWNFRAME_JOBSERVER_SLOTS") ?? "12");
+const DEFAULT_SLOTS = Number(Deno.env.get("TOWNFRAME_JOBSERVER_SLOTS") ?? "16");
 const DEFAULT_MEM_HIGH = Deno.env.get("TOWNFRAME_CGROUP_MEMORY_HIGH") ?? "6G";
 const DEFAULT_MEM_MAX = Deno.env.get("TOWNFRAME_CGROUP_MEMORY_MAX") ?? "10G";
 // Every build scope, from every worktree and every checkout on the host, runs inside this one
