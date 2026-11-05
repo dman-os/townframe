@@ -1,4 +1,10 @@
 //! The sidebar/back button (FDR 006): one control with two meanings.
+//!
+//! # Renderer limits
+//!
+//! * Blitz has no keyboard focus today, so the button is reachable by pointer only there. It is a
+//!   native `<button>` and sets no `tabindex`, which would panic Blitz (`KIT-052`); a renderer
+//!   that has focus makes it keyboard-activatable with no change here.
 use dioxus::prelude::*;
 
 /// What the button does, which decides its accessible name.

@@ -161,3 +161,31 @@ invented. They are filed in the format of the `dayframe-design-language` skill i
   micro cannot know which renderer mounts it. The shell has to decide how `Split::keyboard`
   reaches guests.
 - The tile list lands with home (ADR 032 section 7).
+
+## Mechanical enforcement
+
+What fails, and where, when a rule is broken. `src/conventions.rs` reads this crate's sources as
+text (comments stripped, test modules excluded where the rule is about production code) and runs
+under `cargo nextest run -p clay_dioxus_kit`, so it gates CI with the rest of the tests; its
+component list is derived from `headless/`, so a new component needs no edit there. Rules not
+listed are review-only: KIT-003, 013, 020 to 023, 041, 042, 050 and 051. KIT-053 and
+KIT-070 are enforced by the harness itself (`src/testing.rs`).
+
+| Rule | Enforced by |
+|---|---|
+| KIT-001 | `guardrails.toml` (`allowed_dependencies = []` refuses any workspace crate, so no micro, host or renderer crate; `[builds.*]` compiles all three targets in `cargo x guardrails check-matrix`); `conventions::the_only_runtime_dependency_is_dioxus_without_default_features` refuses any other dependency |
+| KIT-002 | `cargo x guardrails lint` (module item budgets); `conventions::a_component_is_a_public_headless_module_and_a_private_styled_one` (both modules exist and are declared, styled one private and re-exported, README table row) |
+| KIT-010, KIT-011 | `conventions::headless_parts_hold_no_styling` (no `class: "..."` literal, no utility strings, no import of a styled part in `headless/`) |
+| KIT-011 | `conventions::styled_parts_use_semantic_tokens_only` (no palette or `white`/`black` utilities, no `[...]` except the `data-[state=...]` variant and its `group-` form) |
+| KIT-012 | `conventions::styled_components_take_no_class_or_style` |
+| KIT-040 | `conventions::breakpoints_live_in_width_rs_and_nothing_measures_the_dom` (no `600.0`/`840.0` outside `width.rs`; no `get_client_rect`, `onmounted`, `use_window`, `web_sys`, ...) |
+| KIT-052 | `conventions::tabindex_is_only_the_keyboard_opt_in` (`tabindex` only in `headless/sections.rs`, gated on `.keyboard`; no `autofocus`/`set_focus`/`.focus(`) |
+| KIT-053 | the harness panics on a tag, attribute or style property outside the guest vocabulary |
+| KIT-071 | `conventions::tests_neither_sleep_nor_wait` (no sleeps, timers, clocks, threads, async runtimes) |
+| KIT-072 | `conventions::a_component_is_a_public_headless_module_and_a_private_styled_one` (every `headless/<name>.rs` has a `#[test]`) |
+| KIT-080 | `conventions::every_component_has_a_specimen_at_both_widths` (the showcase names the component; a framed specimen has a `COMPACT_PX` and an `EXPANDED_PX` frame; `NavButton` and `ListRow` are the two unframed ones) |
+| KIT-090 | `conventions::a_module_that_mentions_blitz_documents_it_under_renderer_limits` |
+| every cited `KIT-nnn` | `conventions::cited_rules_exist_in_the_readme` |
+
+The Blitz limits several rules route around are pinned, as defects, in
+`dayframe_desktop/e2e/blitz_limits.rs` (see the dayframe ledger, "K2 notes").

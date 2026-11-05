@@ -31,3 +31,6 @@ pub use width::WidthClass;
 
 #[cfg(test)]
 mod testing;
+
+#[cfg(test)]
+mod conventions;
