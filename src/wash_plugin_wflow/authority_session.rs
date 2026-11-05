@@ -103,7 +103,7 @@ impl Session for WasmSession {
 #[async_trait]
 impl Host for WflowPlugin {
     fn contains_wflow(&self, key: &str) -> bool {
-        self.active_keys.contains_key(key)
+        self.contains_workflow(key)
     }
 
     async fn spawn(
@@ -113,18 +113,10 @@ impl Host for WflowPlugin {
         args_json: String,
         replay: Vec<ReplayStep>,
     ) -> Res<Box<dyn Session>> {
-        let workload_id = self
-            .active_keys
-            .get(wflow_key)
-            .map(|id| Arc::clone(id.value()))
-            .ok_or_else(|| ferr!("workflow not registered: {wflow_key}"))?;
         let workload = self
-            .active_workloads
-            .read()
-            .expect(ERROR_MUTEX)
-            .get(&workload_id)
-            .cloned()
-            .ok_or_else(|| ferr!("workflow workload stopped: {workload_id}"))?;
+            .registry
+            .lookup(wflow_key)
+            .ok_or_else(|| ferr!("workflow not registered: {wflow_key}"))?;
         let session = self
             .start_session(&workload, job_id, wflow_key, args_json, replay)
             .await

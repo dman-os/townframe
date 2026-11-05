@@ -22,6 +22,7 @@ use wflow_wdk::session::SessionYield;
 use wflow_wdk::session::WaitYield;
 
 mod authority_session;
+mod workload_registry;
 
 mod binds_service {
     wash_runtime::wasmtime::component::bindgen!({
@@ -392,14 +393,7 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
 
 #[derive(Default)]
 pub struct WflowPlugin {
-    pending_workloads: DHashMap<Arc<str>, HashSet<Arc<str>>>,
-    /// Serializes ownership transitions across pending and active key maps.
-    key_registry: RwLock<()>,
-
-    // workload_id -> workload
-    active_workloads: RwLock<HashMap<Arc<str>, Arc<WflowWorkload>>>,
-    // wflow key -> workload_id
-    active_keys: DHashMap<Arc<str>, Arc<str>>,
+    registry: workload_registry::WorkloadRegistry<WflowWorkload>,
     // ctx id -> active job
     active_jobs: Arc<RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>>,
 }
@@ -407,10 +401,7 @@ pub struct WflowPlugin {
 impl WflowPlugin {
     pub fn new() -> Self {
         Self {
-            active_workloads: default(),
-            pending_workloads: default(),
-            key_registry: RwLock::new(()),
-            active_keys: default(),
+            registry: default(),
             active_jobs: default(),
         }
     }
@@ -425,89 +416,9 @@ impl WflowPlugin {
         wcx.active_ctx.get_plugin::<Self>(Self::ID)
     }
 
-    /// Reserve a workload's keys before the runtime resolves its component.
-    /// Both pending and active registrations participate in collision checks so
-    /// a second workload can never temporarily claim an already-owned key.
-    fn bind_pending(&self, workload_id: Arc<str>, keys: HashSet<Arc<str>>) -> anyhow::Result<()> {
-        let _registry = self.key_registry.write().expect(ERROR_MUTEX);
-        if self.pending_workloads.contains_key(&workload_id) {
-            anyhow::bail!("workload '{workload_id}' was bound more than once");
-        }
-        for key in &keys {
-            if let Some(owner) = self.active_keys.get(key)
-                && owner.value() != &workload_id
-            {
-                anyhow::bail!(
-                    "wflow key '{key}' already mapped to workload '{}', cannot bind to '{workload_id}'",
-                    owner.value()
-                );
-            }
-            if let Some(owner) = self.pending_workloads.iter().find(|entry| {
-                entry.key().as_ref() != workload_id.as_ref() && entry.value().contains(key)
-            }) {
-                anyhow::bail!(
-                    "wflow key '{key}' is pending for workload '{}', cannot bind to '{workload_id}'",
-                    owner.key()
-                );
-            }
-        }
-        self.pending_workloads
-            .insert(Arc::clone(&workload_id), keys);
-        Ok(())
-    }
-
-    /// Move a pending registration into the active registry after resolution.
-    fn resolve_keys(&self, workload_id: &str) -> anyhow::Result<HashSet<Arc<str>>> {
-        let _registry = self.key_registry.write().expect(ERROR_MUTEX);
-        let keys = self
-            .pending_workloads
-            .get(workload_id)
-            .map(|entry| entry.value().clone())
-            .ok_or_else(|| anyhow::anyhow!("unrecognized workload was resolved"))?;
-        for key in &keys {
-            if let Some(owner) = self.active_keys.get(key)
-                && owner.value().as_ref() != workload_id
-            {
-                anyhow::bail!(
-                    "wflow key '{key}' already mapped to workload '{}', cannot resolve workload '{workload_id}'",
-                    owner.value()
-                );
-            }
-        }
-        self.pending_workloads.remove(workload_id);
-        for key in &keys {
-            self.active_keys.insert(Arc::clone(key), workload_id.into());
-        }
-        Ok(keys)
-    }
-
-    fn remove_active_keys(&self, workload_id: &str) {
-        let keys: Vec<_> = self
-            .active_keys
-            .iter()
-            .filter(|entry| entry.value().as_ref() == workload_id)
-            .map(|entry| Arc::clone(entry.key()))
-            .collect();
-        for key in keys {
-            self.active_keys.remove(&key);
-        }
-    }
-
-    fn unbind_keys(&self, workload_id: &str) {
-        let _registry = self.key_registry.write().expect(ERROR_MUTEX);
-        self.pending_workloads.remove(workload_id);
-        self.remove_active_keys(workload_id);
-    }
-
-    fn unbind_active_keys(&self, workload_id: &str) {
-        let _registry = self.key_registry.write().expect(ERROR_MUTEX);
-        self.remove_active_keys(workload_id);
-    }
-
     /// Whether the authority can resolve a submitted key to a live workload.
     pub fn contains_workflow(&self, key: &str) -> bool {
-        let _registry = self.key_registry.read().expect(ERROR_MUTEX);
-        self.active_keys.contains_key(key)
+        self.registry.lookup(key).is_some()
     }
 
     pub fn job_id_of_ctx(&self, wcx: &SharedWashCtx) -> Option<Arc<str>> {
@@ -647,7 +558,6 @@ impl WflowPlugin {
 #[derive(educe::Educe)]
 #[educe(Debug)]
 struct WflowWorkload {
-    wflow_keys: HashSet<Arc<str>>,
     resolved_handle: wash_runtime::engine::workload::ResolvedWorkload,
     component_id: String,
     #[educe(Debug(ignore))]
@@ -703,7 +613,7 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             anyhow::bail!("wflow_keys is empty: \"{wflow_keys_raw}\"");
         }
         let workload_id: Arc<str> = workload.id().into();
-        self.bind_pending(workload_id, wflow_keys)?;
+        self.registry.bind_pending(workload_id, wflow_keys)?;
         Ok(())
     }
 
@@ -734,30 +644,12 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             .map_err(|err| anyhow::anyhow!("error pre instantiating service component: {err}"))?;
         let workload_id: Arc<str> = resolved.id().into();
 
-        // Handle workload restarts/re-resolves deterministically by clearing any
-        // prior active registration for this workload ID before resolving fresh keys.
-        if self
-            .active_workloads
-            .write()
-            .expect(ERROR_MUTEX)
-            .remove(&workload_id)
-            .is_some()
-        {
-            self.unbind_active_keys(workload_id.as_ref());
-        }
-        let wflow_keys = self.resolve_keys(resolved.id())?;
-        let wflow = WflowWorkload {
-            wflow_keys,
+        let wflow = Arc::new(WflowWorkload {
             instance_pre,
             resolved_handle: resolved.clone(),
             component_id: component_id.into(),
-        };
-        let wflow = Arc::new(wflow);
-        self.active_workloads
-            .write()
-            .expect(ERROR_MUTEX)
-            .insert(workload_id, wflow);
-        Ok(())
+        });
+        self.registry.publish(workload_id, wflow)
     }
 
     async fn on_workload_unbind(
@@ -765,11 +657,7 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         workload_id: &str,
         _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
-        self.active_workloads
-            .write()
-            .expect(ERROR_MUTEX)
-            .remove(workload_id);
-        self.unbind_keys(workload_id);
+        self.registry.unbind(workload_id);
         Ok(())
     }
 
