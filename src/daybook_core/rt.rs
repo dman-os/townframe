@@ -1002,18 +1002,23 @@ impl Rt {
     }
 
     fn install_wflow_waiter(self: &Arc<Self>, dispatch_id: String, job_id: String) {
-        self.waiter_jobs
-            .lock()
-            .expect(ERROR_MUTEX)
-            .insert(job_id.clone());
+        assert!(
+            self.waiter_jobs
+                .lock()
+                .expect(ERROR_MUTEX)
+                .insert(job_id.clone()),
+            "workflow waiter registered twice for job {job_id}"
+        );
         let rt = Arc::clone(self);
-        self.result_watchers.track(async move {
+        self.result_watchers.spawn(async move {
             tokio::select! {
-                _ = rt.cancel_token.cancelled() => {}
+                _ = rt.cancel_token.cancelled() => {
+                    assert!(rt.waiter_jobs.lock().expect(ERROR_MUTEX).remove(&job_id));
+                }
                 receipt = rt.authority.handle(job_id.clone()).await_receipt() => {
-                    if let Some(receipt) = receipt {
-                        rt.handle_wflow_receipt(dispatch_id, job_id, receipt).await.unwrap();
-                    }
+                    let receipt = receipt.expect("active persisted workflow dispatch lost its authority receipt");
+                    rt.handle_wflow_receipt(dispatch_id, job_id.clone(), receipt).await.unwrap();
+                    assert!(rt.waiter_jobs.lock().expect(ERROR_MUTEX).remove(&job_id));
                 }
             }
         });
@@ -1043,10 +1048,23 @@ impl Rt {
         }
         let result = match &receipt.outcome {
             wflow::wflow_core::partition::authority::Outcome::Completed(terminal) => {
-                serde_json::from_str::<wflow::wflow_core::partition::job_events::JobRunResult>(
-                    &terminal.value,
-                )
-                .wrap_err("authority completed receipt contained invalid JobResult")?
+                match serde_json::from_str::<wflow::wflow_wdk::types::JobResult>(&terminal.value)
+                    .wrap_err("authority completed receipt contained invalid JobResult")?
+                {
+                    Ok(value_json) => JobRunResult::Success {
+                        value_json: value_json.into(),
+                    },
+                    Err(wflow::wflow_wdk::types::JobError::Terminal(error_json)) => {
+                        JobRunResult::WflowErr(JobError::Terminal {
+                            error_json: error_json.into(),
+                        })
+                    }
+                    Err(wflow::wflow_wdk::types::JobError::Transient(_)) => {
+                        unreachable!(
+                            "authority completed receipt contained a transient workflow result"
+                        )
+                    }
+                }
             }
             wflow::wflow_core::partition::authority::Outcome::Faulted(fault) => {
                 match &fault.failure {

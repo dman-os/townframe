@@ -28,6 +28,7 @@ pub use wflow_tokio::authority_runtime::JobHandle;
 pub use wflow_tokio::authority_runtime::SendError;
 pub use wflow_tokio::authority_runtime::Submission;
 pub use wflow_tokio::authority_runtime::SubmitError;
+pub use wflow_wdk;
 
 use crate::interlude::*;
 

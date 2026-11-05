@@ -18,6 +18,7 @@ test-harness = ["wasmtime", "insta", "tempfile"]
 # internal
 wflow_core = { workspace = true, features = ["test-harness"] }
 wflow_tokio.workspace = true
+wflow_wdk.workspace = true
 wash_plugin_wflow.workspace = true
 utils_rs = { workspace = true, features = ["hash"] }
 
@@ -54,7 +55,6 @@ tempfile = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
-wflow_wdk.workspace = true
 serde.workspace = true
 
 #
