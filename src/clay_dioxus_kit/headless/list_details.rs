@@ -9,7 +9,8 @@
 //! The scaffold owns no navigation state. Whether details are open is the `details` prop;
 //! opening and going back are requests made through [`use_list_details`] by whatever the
 //! scaffold renders, and forwarded to `on_open` / `on_back`, so the owner of the navigation
-//! stack hears of every push through one path.
+//! stack hears of every push through one path. Which row is open is the owner's too (`current`);
+//! rows read it through the same context to mark themselves (see [`ListRow`](super::list_row)).
 use super::sections::SectionPane;
 use super::sections::Sections;
 use super::sections::SectionsSkin;
@@ -22,6 +23,7 @@ use dioxus::prelude::*;
 pub struct ListDetailsActions {
     open: Callback<String>,
     back: Callback<()>,
+    current: Signal<Option<String>>,
 }
 
 impl ListDetailsActions {
@@ -33,6 +35,12 @@ impl ListDetailsActions {
     /// Ask to leave the details.
     pub fn back(&self) {
         self.back.call(());
+    }
+
+    /// Whether the row named `key` is the one open. Reading it subscribes the calling component,
+    /// so a row re-renders when the owner opens another.
+    pub fn is_current(&self, key: &str) -> bool {
+        self.current.read().as_deref() == Some(key)
     }
 }
 
@@ -59,6 +67,9 @@ pub fn ListDetails(
     list: Element,
     details_name: String,
     details: Option<Element>,
+    /// The key of the row that is open in the details, if the owner knows one. Independent of
+    /// `details` being present: a wide host shows a placeholder as details while no row is open.
+    current: Option<String>,
     split: Split,
     on_resize: EventHandler<Vec<f64>>,
     on_open: EventHandler<String>,
@@ -69,7 +80,17 @@ pub fn ListDetails(
     // created once, never calls a stale `on_open`.
     let open = use_callback(move |key: String| on_open.call(key));
     let back = use_callback(move |()| on_back.call(()));
-    use_context_provider(|| ListDetailsActions { open, back });
+    // The context value is created once, so what changes lives behind a signal that is written
+    // when the prop differs (a plain write in render: this component never reads it).
+    let mut open_row = use_signal(|| current.clone());
+    if *open_row.peek() != current {
+        open_row.set(current);
+    }
+    use_context_provider(|| ListDetailsActions {
+        open,
+        back,
+        current: open_row,
+    });
 
     // The list is the same element in every arrangement (the first pane of a `Sections` on a
     // wide host, the first child of one container on a compact host), keyed so opening and
@@ -162,6 +183,7 @@ mod tests {
                 list: rsx! { Row {} },
                 details_name: "Inbox settings",
                 details: probe.has_details.then(|| rsx! { Close {} }),
+                current: None,
                 split: Split::new(vec![1.0, 2.0], 900.0),
                 on_resize: |_| {},
                 on_open: move |key| open_calls.borrow_mut().push(format!("open {key}")),
@@ -234,6 +256,7 @@ mod tests {
                 },
                 details_name: "Inbox settings",
                 details: open().then(|| rsx! { button { onclick: move |_| open.set(false), "Close" } }),
+                current: None,
                 split: Split::new(vec![1.0, 2.0], 900.0),
                 on_resize: |_| {},
                 on_open: |_| {},

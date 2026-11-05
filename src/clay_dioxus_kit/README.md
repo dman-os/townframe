@@ -13,6 +13,9 @@ here, so the rules below are binding; a change to a rule is a change to this fil
 | `ListDetails` (list/details scaffold) | `headless::list_details` | `ListDetails` | same |
 | `Sheet` (bottom/side sheet) | `headless::sheet` | `Sheet` | same |
 | `NavButton` (back / open sidebar) | `headless::nav_button` | `NavButton` | same |
+| `AppBar` (leading slot, title, trailing actions) | `headless::app_bar` | `AppBar` | same |
+| `Drawer` (left drawer of a compact host) | `headless::drawer` | `Drawer` | same |
+| `ListRow` (openable, highlighted-when-open list row) | `headless::list_row` | `ListRow` | same |
 
 ## Conventions
 
@@ -62,7 +65,10 @@ the rest are enforced by review.
 - **KIT-022** No component reads global or application state. The one context allowed is an
   action channel a scaffold provides to what it renders (`use_list_details`), so a row deep in a
   list can ask to open itself without prop drilling; it holds callbacks that track the latest
-  props (`use_callback`), never values.
+  props (`use_callback`), never values. `ListDetails` also carries which row is open
+  (`current`, owned by the caller like everything else) so a `ListRow` can mark itself with
+  `aria-current` without the list keeping a second copy of the selection. This context exists
+  only inside one Dioxus tree: a list in a Wasm guest cannot use it (see `headless/list_row.rs`).
 - **KIT-023** A prop that breaks an invariant (weights and panes of different lengths, a
   non-positive weight or extent, a NaN width) panics. It is a programming error, not an input.
 
@@ -136,7 +142,14 @@ invented. They are filed in the format of the `dayframe-design-language` skill i
   overlay) are structural constants in the headless parts.
 - No **sheet size** vocabulary: `h-5/6` (compact bottom sheet) and `w-96` (side sheet) are
   Tailwind fraction/spacing utilities.
-- No **motion** tokens, so nothing animates (INTERACTION-004).
+- No **motion** tokens, so nothing animates (INTERACTION-004): `Drawer` appears and disappears
+  instead of sliding from the leading edge.
+- No **selected-row** role: `ListRow` marks the open row with `accent-container` /
+  `on-accent-container`, the nearest tokens.
+- No **app-bar** metrics: `AppBar` is padding around a 44 px button (`size-11`) and an `h2`.
+- No **directionality**: "leading" is the left edge; there is no right-to-left layout.
+- No **safe-area** vocabulary: hosts own insets (`micro_shell::HostInputs::insets`) and the kit
+  never reads them.
 - No **hit-target size** token: the 16 px handle hit area and the `size-11` (44 px) nav button are
   hard-coded.
 

@@ -4,7 +4,10 @@
 //! and the `WidthClass` / split extent it hands the component: the same contract a real host
 //! (the shell) follows with its window.
 use clay_dioxus_kit::use_list_details;
+use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
+use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonMode;
 use clay_dioxus_kit::SectionPane;
@@ -45,7 +48,7 @@ fn Frame(title: String, width_px: f64, children: Element) -> Element {
 }
 
 /// Which specimen groups to show: all of them, or the one a screenshot run names through
-/// `DAYFRAME_SHOWCASE_KIT` (`nav`, `sections`, `list`, `sheet`). The native window cannot scroll
+/// `DAYFRAME_SHOWCASE_KIT` (`nav`, `appbar`, `sections`, `list`, `sheet`, `drawer`). The native window cannot scroll
 /// under automation, so a group per run is how every specimen gets captured.
 #[component]
 pub fn KitSpecimens(only: Option<String>) -> Element {
@@ -59,6 +62,17 @@ pub fn KitSpecimens(only: Option<String>) -> Element {
                     NavButton { mode: NavButtonMode::Back, onclick: |_| {} }
                     NavButton { mode: NavButtonMode::Sidebar, onclick: |_| {} }
                     span { class: "text-sm text-foreground-muted", "NavButton: back, then sidebar" }
+                }
+            }
+            if shows("appbar") {
+                div {
+                    class: "flex flex-wrap items-start gap-8",
+                    Frame { title: "AppBar", width_px: COMPACT_PX,
+                        AppBarSpecimen {}
+                    }
+                    Frame { title: "AppBar", width_px: EXPANDED_PX,
+                        AppBarSpecimen {}
+                    }
                 }
             }
             if shows("sections") {
@@ -94,6 +108,17 @@ pub fn KitSpecimens(only: Option<String>) -> Element {
                     }
                     Frame { title: "Sheet", width_px: EXPANDED_PX,
                         SheetSpecimen { width_px: EXPANDED_PX }
+                    }
+                }
+            }
+            if shows("drawer") {
+                div {
+                    class: "flex flex-wrap items-start gap-8",
+                    Frame { title: "Drawer", width_px: COMPACT_PX,
+                        DrawerSpecimen {}
+                    }
+                    Frame { title: "Drawer", width_px: EXPANDED_PX,
+                        DrawerSpecimen {}
                     }
                 }
             }
@@ -168,14 +193,8 @@ const SETTINGS: [&str; 4] = ["Appearance", "Sync", "Micros", "About"];
 
 #[component]
 fn SettingsRow(title: String) -> Element {
-    let actions = use_list_details();
-    let key = title.clone();
     rsx! {
-        button {
-            class: "block w-full cursor-pointer border-0 border-b border-border bg-transparent px-4 py-3 text-left text-text hover:bg-surface-sunken",
-            onclick: move |_| actions.open(key.clone()),
-            "{title}"
-        }
+        ListRow { id: title.clone(), name: "Open {title}", "{title}" }
     }
 }
 
@@ -183,12 +202,11 @@ fn SettingsRow(title: String) -> Element {
 fn SettingsDetails(title: String, with_back: bool) -> Element {
     let actions = use_list_details();
     rsx! {
-        div {
-            class: "flex items-center gap-2 border-b border-border p-1",
-            if with_back {
+        AppBar {
+            title: title.clone(),
+            leading: with_back.then(|| rsx! {
                 NavButton { mode: NavButtonMode::Back, onclick: move |_| actions.back() }
-            }
-            h3 { class: "m-0 text-lg font-semibold", "{title}" }
+            }),
         }
         p { class: "p-4 text-foreground-muted", "Settings for {title}." }
     }
@@ -204,6 +222,7 @@ fn ListDetailsSpecimen(width_px: f64, initially_open: Option<&'static str>) -> E
             SettingsRow { key: "{title}", title }
         }
     };
+    let current = open();
     let details = match open() {
         Some(title) => {
             Some(rsx! { SettingsDetails { title, with_back: !width.fits_side_by_side() } })
@@ -221,6 +240,7 @@ fn ListDetailsSpecimen(width_px: f64, initially_open: Option<&'static str>) -> E
             list,
             details_name: "Section",
             details,
+            current,
             split: Split::new(weights(), width_px).rule(0, SizeRule { min: 160.0, ..SizeRule::default() }),
             on_resize: move |next| weights.set(next),
             on_open: move |key| open.set(Some(key)),
@@ -248,6 +268,51 @@ fn SheetSpecimen(width_px: f64) -> Element {
                     class: "p-4",
                     h3 { class: "m-0 mb-2 text-lg font-semibold", "Choose a theme" }
                     p { class: "text-text-muted", "A sheet belongs to its panel and is dismissed by its scrim or Escape." }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AppBarSpecimen() -> Element {
+    rsx! {
+        AppBar {
+            title: "Settings",
+            leading: rsx! { NavButton { mode: NavButtonMode::Sidebar, onclick: |_| {} } },
+            trailing: rsx! {
+                button {
+                    class: "cursor-pointer rounded-md px-3 py-2 text-text hover:bg-surface-sunken",
+                    "Search"
+                }
+            },
+        }
+    }
+}
+
+#[component]
+fn DrawerSpecimen() -> Element {
+    let mut open = use_signal(|| true);
+    rsx! {
+        div {
+            class: "p-4",
+            button {
+                class: "cursor-pointer rounded-md border border-border bg-card px-4 py-2 text-foreground",
+                onclick: move |_| open.set(true),
+                "Open drawer"
+            }
+        }
+        Drawer { name: "Sidebar", open: open(), on_dismiss: move |()| open.set(false),
+            nav {
+                class: "flex flex-col gap-1 p-2",
+                "aria-label": "Specimen sidebar",
+                AppBar { title: "Dayframe" }
+                for title in ["Home", "Settings", "Layout"] {
+                    button {
+                        key: "{title}",
+                        class: "block w-full cursor-pointer rounded-md px-4 py-3 text-left text-text hover:bg-surface-sunken",
+                        "{title}"
+                    }
                 }
             }
         }
