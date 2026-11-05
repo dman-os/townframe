@@ -189,8 +189,9 @@ test("scroll offsets reach the guest and its window follows the DOM scroll posit
   const failures = watchFailures(page);
   const { scroller, window: win } = await openSpike(page);
 
-  // 1M lines at 20 px: the guest's content box is 20,000,000 px tall and the DOM agrees.
-  expect(await scroller.evaluate((el) => el.scrollHeight)).toBe(1_000_000 * LINE);
+  // 1M lines at 20 px is 20,000,000 px, over the paged-scroll threshold (11M): the guest renders
+  // a 12,000,000 px box and keeps the page offset in the model.
+  expect(await scroller.evaluate((el) => el.scrollHeight)).toBe(12_000_000);
   expect(await windowOf(win)).toEqual({ start: 0, count: 41 });
 
   // The user (here: the test, writing the DOM) scrolls to line 500,000. The scroll event's
@@ -209,9 +210,11 @@ test("scroll offsets reach the guest and its window follows the DOM scroll posit
   expect(failures).toEqual([]);
 });
 
-test("the browser clamps a 3M line (60M px) content box below the file height", async ({ page }) => {
+test("without paged scroll the browser clamps a 3M line (60M px) content box below the file height", async ({ page }) => {
   const failures = watchFailures(page);
   const { scroller, window: win } = await openSpike(page);
+  // Paged scroll off: the content box is the whole file, as before the rebase.
+  await page.getByTestId("paged-toggle").click();
   await page.getByTestId("lines-3000000").click();
   await expect(scroller).toBeVisible();
   const geometry = await scroller.evaluate((el) => ({ scrollHeight: el.scrollHeight, client: el.clientHeight }));
@@ -219,6 +222,7 @@ test("the browser clamps a 3M line (60M px) content box below the file height", 
   expect(geometry.scrollHeight).toBeLessThan(3_000_000 * LINE);
   // The last reachable line is therefore far short of line 3,000,000.
   await scroller.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  await expect(win).not.toHaveAttribute("data-value", "0");
   const reached = (await windowOf(win)).start + (await windowOf(win)).count;
   report("clamp-last-line", { reached });
   expect(reached).toBeLessThan(3_000_000);
@@ -391,8 +395,11 @@ if (process.env.PIERRE_RAISED) {
       await expect(win).toHaveAttribute("data-state", "200", { timeout: 120_000 });
       for (const incremental of [false, true]) {
         await page.evaluate((off) => { (window as any).__clayNoIncremental = off; }, !incremental);
-        // One quiet frame so the projection switch itself is not in the measurement.
-        await frame(page);
+        // Switching projection re-mounts the surface's DOM on the next host render: take that
+        // render (one wheel step and a few frames) before the probe attaches to the scroller.
+        await page.mouse.move(...(await scroller.boundingBox().then((b) => [b!.x + b!.width / 2, b!.y + b!.height / 2] as const)));
+        await page.mouse.wheel(0, 1000);
+        for (let i = 0; i < 20; i++) await frame(page);
         const profile = await wheelProfile(page, scroller, 60, 1000);
         report(`scale-spans${spans}-${incremental ? "incremental" : "whole-tree"}`, profile);
       }
@@ -400,3 +407,39 @@ if (process.env.PIERRE_RAISED) {
     });
   }
 }
+
+test("paged scroll: a 3M line (60M px) file is fully reachable through a 12M px box", async ({ page }) => {
+  const failures = watchFailures(page);
+  const { scroller, window: win } = await openSpike(page);
+  await page.getByTestId("lines-3000000").click();
+  expect(await scroller.evaluate((el) => el.scrollHeight)).toBe(12_000_000);
+  // The last line: logical 59,999,400 px is far outside the 12M box, so the model rebases.
+  await page.getByTestId("jump-last").click();
+  await expect(win.getByText("let v2999999 = step(")).toBeVisible();
+  const top = await scroller.evaluate((el) => el.scrollTop);
+  expect(top).toBeGreaterThan(2_000_000);
+  expect(top).toBeLessThanOrEqual(12_000_000);
+  // Back to the top: the offset returns to zero and the DOM position is the logical one.
+  await page.getByTestId("jump-top").click();
+  await expect(win.getByText("let v0 = step(")).toBeVisible();
+  expect(await scroller.evaluate((el) => el.scrollTop)).toBe(0);
+  expect(failures).toEqual([]);
+});
+
+test("paged scroll: scrolling past the threshold rebases the DOM scrollTop and keeps the logical position", async ({ page }) => {
+  const failures = watchFailures(page);
+  const { scroller, window: win } = await openSpike(page);
+  await page.getByTestId("lines-3000000").click();
+  // The user drags the scrollbar to 11.5M px, past the 11M threshold: the model moves the page
+  // offset (9.5M) and commands the DOM back to 2M px; the logical position stays 11.5M.
+  await scroller.evaluate((el) => { el.scrollTop = 11_500_000; });
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBe(2_000_000);
+  await expect(win.getByText("let v575000 = step(")).toBeVisible();
+  // Scrolling on moves the logical position by the same amount.
+  await scroller.evaluate((el) => { el.scrollTop += 2_000; });
+  await expect(win.getByText("let v575100 = step(")).toBeVisible();
+  // Scrolling up past the trigger (1M) rebases the other way.
+  await scroller.evaluate((el) => { el.scrollTop = 500_000; });
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(9_000_000);
+  expect(failures).toEqual([]);
+});

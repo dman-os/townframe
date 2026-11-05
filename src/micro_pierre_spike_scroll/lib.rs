@@ -36,6 +36,62 @@ const DEFAULT_PROFILE: usize = 2;
 /// real client height.
 const SCROLLER_HEIGHT: f64 = 600.0;
 
+/// Paged-scroll rebase, after `CodeView.ts:649-690, 2983-3097`: a browser caps how tall an element
+/// can be, so content taller than `REBASE_THRESHOLD` scrolls inside a box of at most
+/// `REBASE_CONTAINER` px, and the model keeps `page_offset`, the logical px above that box's top.
+/// Logical scrollTop is `page_offset + DOM scrollTop`. Scrolling past `REBASE_THRESHOLD` of the
+/// box (or under `REBASE_TRIGGER`) moves the offset and jumps the DOM scrollTop back toward the
+/// middle (`REBASE_TARGET_TOP` / its mirror), so there is always room to keep scrolling.
+const REBASE_CONTAINER: f64 = 12_000_000.0;
+const REBASE_TRIGGER: f64 = 1_000_000.0;
+const REBASE_TARGET_TOP: f64 = 2_000_000.0;
+const REBASE_TARGET_BOTTOM: f64 = REBASE_CONTAINER - REBASE_TARGET_TOP;
+const REBASE_THRESHOLD: f64 = REBASE_CONTAINER - REBASE_TRIGGER;
+
+/// Where a logical scrollTop lands in the paged box: `(DOM scrollTop, page offset)`, moving the
+/// offset only when the DOM position would leave the safe band (`resolvePagedScrollPosition`,
+/// `CodeView.ts:3045-3088`). `paged: false` is the unpaged layout, where the DOM is the position.
+fn resolve_scroll(
+    logical: f64,
+    page_offset: f64,
+    total_px: f64,
+    viewport: f64,
+    paged: bool,
+) -> (f64, f64) {
+    let max_total = (total_px - viewport).max(0.0);
+    if !paged || max_total <= REBASE_THRESHOLD {
+        return (logical.clamp(0.0, max_total), 0.0);
+    }
+    let max_paged = (total_px.min(REBASE_CONTAINER) - viewport).max(0.0);
+    let max_offset = (max_total - max_paged).max(0.0);
+    let offset = page_offset.clamp(0.0, max_offset);
+    let paged_top = logical - offset;
+    let down = paged_top > REBASE_THRESHOLD && offset < max_offset;
+    let up = paged_top < REBASE_TRIGGER && offset > 0.0;
+    if paged_top < 0.0 || paged_top > max_paged || down || up {
+        let preferred = if up {
+            REBASE_TARGET_BOTTOM.min(max_paged)
+        } else {
+            REBASE_TARGET_TOP
+        };
+        let mut top = preferred.clamp(0.0, max_paged);
+        let mut offset = (logical - top).clamp(0.0, max_offset);
+        top = (logical - offset).clamp(0.0, max_paged);
+        offset = (logical - top).clamp(0.0, max_offset);
+        return (top, offset);
+    }
+    (paged_top.clamp(0.0, max_paged), offset)
+}
+
+/// Height of the content box: the whole file, or the paged box when it is taller than the cap.
+fn content_height(total_px: f64, viewport: f64, paged: bool) -> f64 {
+    if paged && total_px - viewport > REBASE_THRESHOLD {
+        total_px.min(REBASE_CONTAINER)
+    } else {
+        total_px
+    }
+}
+
 pub fn manifest() -> clay_mdk::MicroManifest {
     use clay_mdk::Access;
     use clay_mdk::AttachmentDeclaration;
@@ -142,13 +198,13 @@ fn Row(line: usize, tokens: usize) -> Element {
 
 /// The rows of the current window, positioned by the model at `start * 20` px.
 #[component]
-fn Window(start: usize, count: usize, tokens: usize) -> Element {
+fn Window(start: usize, count: usize, tokens: usize, offset: f64) -> Element {
     rsx! {
         div {
             "data-testid": "window",
             "data-value": "{start}",
             "data-state": "{count}",
-            style: "position:absolute;left:0;right:0;top:{start as f64 * LINE_HEIGHT}px",
+            style: "position:absolute;left:0;right:0;top:{(start as f64 * LINE_HEIGHT - offset).max(0.0)}px",
             for line in start..start + count {
                 Row { key: "{line}", line, tokens }
             }
@@ -161,13 +217,17 @@ fn view() -> Element {
     let mut tokens = use_signal(|| 1_usize);
     let mut viewport = use_signal(|| SCROLLER_HEIGHT);
     let mut profile = use_signal(|| DEFAULT_PROFILE);
+    let mut paged = use_signal(|| true);
+    let mut page_offset = use_signal(|| 0.0_f64);
     // The scroller's handle, from its `mounted` event: the guest end of the element commands.
     let mut scroller = use_signal(|| None::<std::rc::Rc<MountedData>>);
     let mut measured = use_signal(String::new);
     let mut range = use_signal(|| window(0.0, SCROLLER_HEIGHT, 1_000_000, DEFAULT_PROFILE));
 
     let (start, count) = range();
-    let total_height = total_lines() as f64 * LINE_HEIGHT;
+    let total_px = total_lines() as f64 * LINE_HEIGHT;
+    let total_height = content_height(total_px, viewport(), paged());
+    let offset_now = page_offset();
     let tokens_now = tokens();
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:8px",
@@ -178,6 +238,7 @@ fn view() -> Element {
                         "data-testid": "lines-{lines}",
                         onclick: move |_| {
                             total_lines.set(lines);
+                            page_offset.set(0.0);
                             range.set(window(0.0, viewport(), lines, profile()));
                         },
                         "{lines} lines"
@@ -194,6 +255,14 @@ fn view() -> Element {
                         "{name} window"
                     }
                 }
+                button {
+                    "data-testid": "paged-toggle",
+                    onclick: move |_| {
+                        paged.set(!paged());
+                        page_offset.set(0.0);
+                    },
+                    if paged() { "paged scroll: on" } else { "paged scroll: off" }
+                }
                 for per_line in [1_usize, 3, 7, 18, 38] {
                     button {
                         key: "{per_line}",
@@ -204,7 +273,7 @@ fn view() -> Element {
                 }
             }
             div { style: "display:flex;gap:8px;flex-wrap:wrap",
-                for (name, line) in [("top", 0_usize), ("500000", 500_000)] {
+                for (name, line) in [("top", 0_usize), ("500000", 500_000), ("last", usize::MAX)] {
                     button {
                         key: "{name}",
                         "data-testid": "jump-{name}",
@@ -215,10 +284,23 @@ fn view() -> Element {
                                 measured.set("the scroller has not announced mounted".into());
                                 return;
                             };
+                            // The target is a logical position: the model places it in the paged
+                            // box (moving the page offset if it must) and scrolls the DOM there.
+                            let total = *total_lines.peek();
+                            let logical = line.min(total.saturating_sub(1)) as f64 * LINE_HEIGHT;
+                            let (dom_top, offset) = resolve_scroll(
+                                logical,
+                                *page_offset.peek(),
+                                total as f64 * LINE_HEIGHT,
+                                *viewport.peek(),
+                                *paged.peek(),
+                            );
+                            page_offset.set(offset);
+                            range.set(window(logical, *viewport.peek(), total, *profile.peek()));
                             spawn(async move {
                                 let scrolled = handle
                                     .scroll(
-                                        PixelsVector2D::new(0.0, line as f64 * LINE_HEIGHT),
+                                        PixelsVector2D::new(0.0, dom_top),
                                         ScrollBehavior::Instant,
                                     )
                                     .await;
@@ -259,13 +341,36 @@ fn view() -> Element {
                     if client != *viewport.peek() {
                         viewport.set(client);
                     }
-                    let next = window(data.scroll_top(), client, *total_lines.peek(), *profile.peek());
+                    // Logical position = page offset + where the DOM is; the model alone decides
+                    // when to rebase, and a rebase is a command back to the DOM.
+                    let offset = *page_offset.peek();
+                    let logical = offset + data.scroll_top();
+                    let total = *total_lines.peek();
+                    let (dom_top, next_offset) = resolve_scroll(
+                        logical,
+                        offset,
+                        total as f64 * LINE_HEIGHT,
+                        client,
+                        *paged.peek(),
+                    );
+                    if next_offset != offset {
+                        page_offset.set(next_offset);
+                        if let Some(handle) = scroller.peek().clone() {
+                            spawn(async move {
+                                handle
+                                    .scroll(PixelsVector2D::new(0.0, dom_top), ScrollBehavior::Instant)
+                                    .await
+                                    .expect("the host rebased the scroller");
+                            });
+                        }
+                    }
+                    let next = window(logical, client, total, *profile.peek());
                     if next != *range.peek() {
                         range.set(next);
                     }
                 },
                 div { style: "position:relative;height:{total_height}px",
-                    Window { start, count, tokens: tokens_now }
+                    Window { start, count, tokens: tokens_now, offset: offset_now }
                 }
             }
         }
@@ -367,7 +472,7 @@ mod budgets {
 
     fn app() -> Element {
         let (start, count, tokens) = PROPS.get();
-        rsx! { Window { start, count, tokens } }
+        rsx! { Window { start, count, tokens, offset: 0.0 } }
     }
 
     /// One committed batch against a fresh tree, or the first window and then a move to the
@@ -423,5 +528,40 @@ mod budgets {
                 pierre.0, pierre.2, shift[1].0, shift[1].1, shift[1].2,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod paged {
+    use super::*;
+
+    #[test]
+    fn unpaged_and_short_files_are_the_identity() {
+        assert_eq!(
+            resolve_scroll(500.0, 0.0, 1_000_000.0, 600.0, true),
+            (500.0, 0.0)
+        );
+        assert_eq!(resolve_scroll(15e6, 0.0, 20e6, 600.0, false), (15e6, 0.0));
+    }
+
+    #[test]
+    fn crossing_the_threshold_moves_the_offset_and_keeps_the_logical_position() {
+        let total = 60e6;
+        let (top, offset) = resolve_scroll(11.5e6, 0.0, total, 598.0, true);
+        assert_eq!((top, offset), (2e6, 9.5e6));
+        assert_eq!(top + offset, 11.5e6);
+        // Up past the trigger rebases the other way, landing at the mirrored target.
+        let (top, offset) = resolve_scroll(offset + 500_000.0, offset, total, 598.0, true);
+        assert_eq!(top + offset, 10_000_000.0);
+        assert_eq!(top, 10e6 - 0.0 - offset);
+        assert!(top > 9e6);
+    }
+
+    #[test]
+    fn the_end_of_the_file_is_reachable() {
+        let total = 60e6;
+        let (top, offset) = resolve_scroll(total - 598.0, 0.0, total, 598.0, true);
+        assert_eq!(top + offset, total - 598.0);
+        assert!(top <= REBASE_CONTAINER - 598.0);
     }
 }
