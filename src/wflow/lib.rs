@@ -11,7 +11,6 @@ pub use wflow_tokio::authority_runtime::Submission;
 pub use wflow_tokio::authority_runtime::SubmitError;
 pub use wflow_wdk;
 
-#[allow(dead_code)]
 mod kvstore {
     pub mod atomic;
 }
