@@ -52,7 +52,6 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
             "recv_message" => |cx, args: RecvMessageArgs| recv_message(cx, args),
             "recv_message_then_effect" => |cx, args: RecvMessageThenEffectArgs| recv_message_then_effect(cx, args),
             "sleep_then_effect" => |cx, args: SleepThenEffectArgs| sleep_then_effect(cx, args),
-            "defer_on_terminal" => |cx, args: DeferOnTerminalArgs| defer_on_terminal(cx, args),
             "nondeterministic_replay" => |cx, args: NondeterministicReplayArgs| nondeterministic_replay(cx, args),
         })
         .await
@@ -235,74 +234,6 @@ async fn sleep_then_effect(cx: &mut WflowCtx, args: SleepThenEffectArgs) -> Resu
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct DeferOnTerminalArgs {
-    key: String,
-    fail: bool,
-    /// Park on a message after the effect, so a cancel can land on the wait.
-    #[serde(default)]
-    wait: bool,
-    /// Fail transiently in a second effect on every run, so the forward
-    /// retry budget runs out.
-    #[serde(default)]
-    flake: bool,
-}
-
-async fn defer_on_terminal(
-    cx: &mut WflowCtx,
-    args: DeferOnTerminalArgs,
-) -> Result<String, JobErrorX> {
-    use wasm_utils_rs::wit::wasi::keyvalue::store;
-
-    let key_a = args.key.clone();
-    cx.defer("cleanup-a", async move || {
-        let bucket = store::open("default")
-            .map_err(|err| JobErrorX::Terminal(ferr!("error opening bucket: {err:?}")))?;
-        let mut bytes = bucket
-            .get(&key_a)
-            .map_err(|err| JobErrorX::Terminal(ferr!("error getting keyvalue: {err:?}")))?
-            .unwrap_or_default();
-        bytes.push(b'A');
-        bucket
-            .set(&key_a, &bytes)
-            .map_err(|err| JobErrorX::Terminal(ferr!("error setting keyvalue: {err:?}")))?;
-        Ok(())
-    })?;
-
-    let key_b = args.key.clone();
-    cx.defer("cleanup-b", async move || {
-        let bucket = store::open("default")
-            .map_err(|err| JobErrorX::Terminal(ferr!("error opening bucket: {err:?}")))?;
-        let mut bytes = bucket
-            .get(&key_b)
-            .map_err(|err| JobErrorX::Terminal(ferr!("error getting keyvalue: {err:?}")))?
-            .unwrap_or_default();
-        bytes.push(b'B');
-        bucket
-            .set(&key_b, &bytes)
-            .map_err(|err| JobErrorX::Terminal(ferr!("error setting keyvalue: {err:?}")))?;
-        Ok(())
-    })?;
-
-    let step1: String = cx
-        .named_effect("step-1", async || Ok(Json("prepared".to_owned())))
-        .await?;
-
-    if args.wait {
-        let Json(_message) = cx.recv::<Json<String>>().await?;
-    }
-    if args.flake {
-        cx.named_effect::<_, (), _>("step-2", async || {
-            Err(JobErrorX::Transient(ferr!("flaky after {step1}")))
-        })
-        .await?;
-    }
-    if args.fail {
-        return Err(JobErrorX::Terminal(ferr!("boom after {step1}")));
-    }
-
-    Ok(step1)
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct NondeterministicReplayArgs {
