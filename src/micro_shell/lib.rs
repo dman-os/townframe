@@ -15,7 +15,7 @@
 //! when the shell restarts; persisting it through a store that never syncs is future work.
 //!
 //! The host tells the shell what only it knows through [`HostInputs`], a Dioxus context the
-//! composition provides around the frame: the width available to the frame (the shell never
+//! composition provides around the frame: the size available to the frame (the shell never
 //! measures the DOM, `KIT-040`) and the platform back gesture.
 pub use micro_shell_manifest as contract;
 mod navigation;
@@ -33,17 +33,38 @@ use contract::Socket;
 use dioxus::prelude::*;
 use navigation::Entry;
 use navigation::Navigation;
+use std::cell::Cell;
 use std::rc::Rc;
 use tokio::sync::watch;
 
+/// The system chrome that overlaps the window, in logical px (a status bar, a gesture bar, a
+/// display cutout). The composition pads the frame by it, so neither the shell nor any kit
+/// component ever sees an inset. Every launcher reports zero today; the Android launcher is the
+/// one that fills it in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Insets {
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+    pub left: f64,
+}
+
 /// What the host tells the native shell. The composition provides it as a Dioxus context around
 /// every presentation of the shell, which are all mounted in-process.
-#[derive(Clone, Copy, PartialEq)]
+///
+/// A launcher hands the composition the whole window: `width` and `height` are the viewport and
+/// `insets` the part of it the system covers. The composition pads the frame by the insets and
+/// provides this same struct to the shell with `width` and `height` reduced to the frame's own
+/// size, so inside the shell they are the frame, edge to edge, and `insets` is not read.
+#[derive(Clone, PartialEq)]
 pub struct HostInputs {
-    /// The logical px width available to the frame. The host owns the window, so it classifies
-    /// nothing: the shell derives the width class from this and passes the px down as the
+    /// The logical px width of the window. The host owns the window, so it classifies nothing:
+    /// the shell derives the width class from the frame's width and passes the px down as the
     /// extent a drag converts pointer travel with.
     pub width: ReadSignal<f64>,
+    /// The logical px height of the window.
+    pub height: ReadSignal<f64>,
+    pub insets: ReadSignal<Insets>,
     /// Incremented by the host for every platform back gesture (Android `KEYCODE_BACK`, which
     /// winit reports as `BrowserBack`, a mouse back button, a browser's back).
     pub platform_back: Signal<u64>,
@@ -55,6 +76,13 @@ pub struct HostInputs {
     /// them on. This reaches the shell's own layout; a guest micro's components cannot read it
     /// yet (see ADR 032, open items).
     pub keyboard: bool,
+    /// A development seed: the navigation stack the shell starts on instead of home, so a state
+    /// that needs clicks can be captured (the native window takes no injected pointer input).
+    /// Comma-separated entries opened in order: `panel` opens a panel, `panel/row` opens one of
+    /// its rows, `@sidebar` opens the compact sidebar. A name without a dot is shorthand for
+    /// `dayframe.<name>`, so `settings,settings/counter` starts on the counter's Settings
+    /// section. The desktop launcher fills it from `DAYFRAME_SHELL_OPEN`.
+    pub start: Option<String>,
 }
 
 /// The device-local part of the shell: the stack, and whether a wide host's sidebar is folded.
@@ -71,6 +99,41 @@ struct Shell {
     state: Rc<watch::Sender<State>>,
     panels: Collection<String, Panel>,
     config: Facet<ShellConfig>,
+    /// Whether the development seed ([`HostInputs::start`]) has been applied: the frame remounts
+    /// when the window crosses a breakpoint, and that must not reset the user's place.
+    started: Rc<Cell<bool>>,
+}
+
+/// The entries a [`HostInputs::start`] spec opens, in order: a request to navigate, or `None`
+/// for the compact sidebar.
+fn parse_start(spec: &str) -> Vec<Option<NavigateRequest>> {
+    // Keys are plug ids (`dayframe.settings`); a bare name is shorthand for the common prefix.
+    let full = |name: &str| {
+        if name.contains('.') {
+            name.to_owned()
+        } else {
+            format!("dayframe.{name}")
+        }
+    };
+    spec.split(',')
+        .map(str::trim)
+        .filter(|step| !step.is_empty())
+        .map(|step| {
+            if step == "@sidebar" {
+                return None;
+            }
+            Some(match step.split_once('/') {
+                Some((panel, row)) => NavigateRequest {
+                    panel: full(panel),
+                    row: Some(full(row)),
+                },
+                None => NavigateRequest {
+                    panel: full(step),
+                    row: None,
+                },
+            })
+        })
+        .collect()
 }
 
 impl PartialEq for Shell {
@@ -153,6 +216,26 @@ impl Shell {
         Ok(())
     }
 
+    /// Open the stack `spec` names (see [`HostInputs::start`]), once. A step the shell refuses
+    /// (a typo in a development seed) is returned for the frame to show.
+    async fn start_on(&self, spec: &str) -> Result<(), Error> {
+        if self.started.replace(true) {
+            return Ok(());
+        }
+        for step in parse_start(spec) {
+            match step {
+                Some(request) => self.navigate(request).await?,
+                None => {
+                    self.edit(|state| {
+                        state.navigation.push(Entry::Sidebar);
+                        true
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn back(&self) -> bool {
         self.edit(|state| state.navigation.back())
     }
@@ -205,6 +288,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         state: Rc::new(state),
         panels,
         config,
+        started: Rc::default(),
     };
 
     for (name, view) in [
@@ -258,4 +342,32 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_start_spec_opens_panels_rows_and_the_sidebar_in_order() {
+        let request = |panel: &str, row: Option<&str>| {
+            Some(NavigateRequest {
+                panel: panel.to_owned(),
+                row: row.map(str::to_owned),
+            })
+        };
+        assert_eq!(
+            parse_start("settings, settings/counter,@sidebar"),
+            [
+                request("dayframe.settings", None),
+                request("dayframe.settings", Some("dayframe.counter")),
+                None,
+            ]
+        );
+        // A name with a dot is a full key and is left alone; empty steps are skipped.
+        assert_eq!(
+            parse_start("org.other.panel/org.other.row,,"),
+            [request("org.other.panel", Some("org.other.row"))]
+        );
+    }
 }

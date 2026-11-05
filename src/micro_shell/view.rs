@@ -1,10 +1,13 @@
 //! The shell's presentations: the frame that arranges the panels, the home panel and the
-//! sidebar/back button.
+//! sidebar/back button. The frame is the whole app: sidebar, list and details edge to edge, with
+//! sheets and (on a compact host) the sidebar drawer over them.
 use crate::HostInputs;
 use crate::Shell;
 use crate::State;
 use crate::navigation::Entry;
 use crate::navigation::Overlay;
+use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonMode;
@@ -170,13 +173,14 @@ fn open_panel(shell: &Shell, panel: String, mut failure: Signal<Option<String>>)
 
 /// Wire the frame to the host (ADR 032 §3): the platform back gesture lands on the stack, and the
 /// host is told whether back has somewhere to go.
-fn use_host_wiring(shell: &Shell, host: HostInputs, can_go_back: bool) {
+fn use_host_wiring(shell: &Shell, host: &HostInputs, can_go_back: bool) {
     // `seen` is what this frame has already acted on, so remounting the frame does not replay
     // old presses.
     let seen = use_hook(|| Rc::new(Cell::new(*host.platform_back.peek())));
     let shell = shell.clone();
+    let platform_back = host.platform_back;
     use_effect(move || {
-        let presses = (host.platform_back)();
+        let presses = platform_back();
         if presses != seen.get() {
             seen.set(presses);
             shell.back();
@@ -186,44 +190,29 @@ fn use_host_wiring(shell: &Shell, host: HostInputs, can_go_back: bool) {
     use_effect(use_reactive!(|(can_go_back,)| can_back.set(can_go_back)));
 }
 
-/// What sits over the arrangement: a sheet, or the sidebar drawer of a compact host.
-fn overlay_element(
+/// The sheet over the arrangement, if one is open.
+fn sheet_element(
     shell: &Shell,
     width: WidthClass,
     overlay: Option<Overlay<'_>>,
     panels: &[Row<String, Panel>],
 ) -> Option<Element> {
-    match overlay {
-        Some(Overlay::Sheet(key)) => panels.iter().find(|row| row.key == key).map(|row| {
-            let shell = shell.clone();
-            rsx! {
-                Sheet {
-                    width,
-                    name: row.value.title.clone(),
-                    on_dismiss: move |()| {
-                        shell.close_sheet();
-                    },
-                    {panel_slot(row, row.value.content)}
-                }
+    let Some(Overlay::Sheet(key)) = overlay else {
+        return None;
+    };
+    panels.iter().find(|row| row.key == key).map(|row| {
+        let shell = shell.clone();
+        rsx! {
+            Sheet {
+                width,
+                name: row.value.title.clone(),
+                on_dismiss: move |()| {
+                    shell.close_sheet();
+                },
+                {panel_slot(row, row.value.content)}
             }
-        }),
-        // A drawer is for a host with no room for the sidebar beside the content; a window that
-        // grew wide while it was open shows the sidebar instead.
-        Some(Overlay::Sidebar) if !width.fits_side_by_side() => {
-            let dismissing = shell.clone();
-            Some(rsx! {
-                Sheet {
-                    width,
-                    name: "Sidebar",
-                    on_dismiss: move |()| {
-                        dismissing.back();
-                    },
-                    Sidebar { shell: shell.clone() }
-                }
-            })
         }
-        Some(Overlay::Sidebar) | None => None,
-    }
+    })
 }
 
 #[component]
@@ -236,7 +225,24 @@ fn Frame(shell: Shell) -> Element {
     let config = arrangement(&use_facet(&shell.config));
     let failure = use_signal(|| None::<String>);
 
-    use_host_wiring(&shell, host, state.navigation.can_back());
+    use_host_wiring(&shell, &host, state.navigation.can_back());
+    // A development seed (`HostInputs::start`) opens its stack once the panels have loaded.
+    use_future({
+        let shell = shell.clone();
+        let start = host.start.clone();
+        let mut failure = failure;
+        move || {
+            let shell = shell.clone();
+            let start = start.clone();
+            async move {
+                if let Some(spec) = start
+                    && let Err(problem) = shell.start_on(&spec).await
+                {
+                    failure.set(Some(format!("DAYFRAME_SHELL_OPEN: {problem}")));
+                }
+            }
+        }
+    });
 
     let frame = state.navigation.frame();
     let find = |key: &str| panels.iter().find(|row| row.key == key);
@@ -336,6 +342,7 @@ fn Frame(shell: Shell) -> Element {
     };
     let on_resize_outer = move |weights: Vec<f64>| write(with_outer_weights(config, &weights));
 
+    let current = state.navigation.opened(&main.key).map(str::to_owned);
     let list_details = rsx! {
         ListDetails {
             width,
@@ -343,13 +350,17 @@ fn Frame(shell: Shell) -> Element {
             list: main_slot,
             details_name,
             details: details_slot,
+            current,
             split: inner,
             on_resize: on_resize_inner,
             on_open,
             on_back,
         }
     };
-    let overlay = overlay_element(&shell, width, frame.overlay, &panels);
+    let sheet = sheet_element(&shell, width, frame.overlay, &panels);
+    // A drawer is for a host with no room for the sidebar beside the content; a window that grew
+    // wide while it was open shows the sidebar instead.
+    let drawer_open = matches!(frame.overlay, Some(Overlay::Sidebar)) && !width.fits_side_by_side();
 
     rsx! {
         div {
@@ -376,7 +387,18 @@ fn Frame(shell: Shell) -> Element {
             } else {
                 {list_details}
             }
-            {overlay}
+            Drawer {
+                name: "Sidebar",
+                open: drawer_open,
+                on_dismiss: {
+                    let shell = shell.clone();
+                    move |()| {
+                        shell.back();
+                    }
+                },
+                Sidebar { shell: shell.clone() }
+            }
+            {sheet}
         }
     }
 }
@@ -402,28 +424,31 @@ fn Sidebar(shell: Shell) -> Element {
                 .map(|row| row.key.clone())
         });
     rsx! {
-        nav { class: "flex flex-col gap-2 p-4", "aria-label": "Sidebar",
-            if wide {
-                button {
-                    class: BUTTON,
-                    r#type: "button",
-                    "aria-label": "Hide sidebar",
-                    onclick: {
-                        let shell = shell.clone();
-                        move |_| {
-                            shell.edit(|state| {
-                                state.sidebar_hidden = true;
-                                true
-                            });
-                        }
-                    },
-                    "Hide sidebar"
-                }
+        nav { class: "flex flex-col gap-2", "aria-label": "Sidebar",
+            AppBar {
+                title: "Dayframe",
+                trailing: wide.then(|| rsx! {
+                    button {
+                        class: BUTTON,
+                        r#type: "button",
+                        "aria-label": "Hide sidebar",
+                        onclick: {
+                            let shell = shell.clone();
+                            move |_| {
+                                shell.edit(|state| {
+                                    state.sidebar_hidden = true;
+                                    true
+                                });
+                            }
+                        },
+                        "Hide sidebar"
+                    }
+                }),
             }
             for row in destinations(&panels) {
                 button {
                     key: "{row.key}",
-                    class: BUTTON,
+                    class: "{BUTTON} mx-2",
                     r#type: "button",
                     "aria-label": "Show {row.value.title}",
                     "aria-current": (current.as_deref() == Some(row.key.as_str())).then_some("page"),
@@ -436,10 +461,10 @@ fn Sidebar(shell: Shell) -> Element {
                 }
             }
             if let Some(problem) = failure() {
-                p { role: "alert", "{problem}" }
+                p { class: "px-2", role: "alert", "{problem}" }
             }
             for row in panels.iter().filter(|row| row.value.sockets.contains(&Socket::Sidebar)) {
-                div { key: "sidebar-{row.key}", {panel_slot(row, row.value.content)} }
+                div { key: "sidebar-{row.key}", class: "px-2", {panel_slot(row, row.value.content)} }
             }
         }
     }
@@ -453,13 +478,12 @@ fn Home(shell: Shell) -> Element {
     let failure = use_signal(|| None::<String>);
     rsx! {
         // The frame's region already carries the panel's title as its accessible name.
-        div {
-            class: "flex flex-col gap-4 p-4",
-            header { class: "flex items-center gap-2",
-                NavigationButton { shell: shell.clone() }
-                h2 { class: "text-xl font-semibold", "Home" }
+        div { class: "flex flex-col gap-4",
+            AppBar {
+                title: "Home",
+                leading: rsx! { NavigationButton { shell: shell.clone() } },
             }
-            nav { class: "flex flex-col gap-2", "aria-label": "Entry points",
+            nav { class: "flex flex-col gap-2 px-4", "aria-label": "Entry points",
                 for row in destinations(&panels).into_iter().filter(|row| !row.value.home) {
                     button {
                         key: "{row.key}",
@@ -476,7 +500,7 @@ fn Home(shell: Shell) -> Element {
                 }
             }
             if let Some(problem) = failure() {
-                p { role: "alert", "{problem}" }
+                p { class: "px-4", role: "alert", "{problem}" }
             }
         }
     }
