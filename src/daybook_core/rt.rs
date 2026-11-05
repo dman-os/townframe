@@ -583,10 +583,6 @@ impl Rt {
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
-        // Admission is a durable outbox transition: reconcile intents before
-        // installing receipt waiters, so a crash between submit and the active
-        // transition cannot leave a waiter for a job that was never admitted.
-        rt.reconcile_pending_admissions().await?;
 
         let plugs_config_sql = sqlite_local_state_repo
             .ensure_sqlite_db(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
@@ -646,6 +642,10 @@ impl Rt {
         )
         .await?;
 
+        // Admission is a durable outbox transition: reconcile intents before
+        // installing receipt waiters, so a crash between submit and the active
+        // transition cannot leave a waiter for a job that was never admitted.
+        rt.reconcile_pending_admissions().await?;
         for (dispatch_id, dispatch) in rt.dispatch_repo.list().await {
             if dispatch.status == dispatch::DispatchStatus::Active
                 && let ActiveDispatchDeets::Wflow {
@@ -1030,7 +1030,6 @@ impl Rt {
             .await
             .map_err(|err| ferr!("error scheduling job for dispatch {dispatch_id}: {err:?}"))?;
         self.dispatch_repo.mark_admitted(dispatch_id).await?;
-        self.install_wflow_waiter(dispatch_id.to_string(), job_id.clone());
         Ok(())
     }
 
@@ -1043,13 +1042,16 @@ impl Rt {
     }
 
     fn install_wflow_waiter(self: &Arc<Self>, dispatch_id: String, job_id: String) {
-        assert!(
-            self.waiter_jobs
-                .lock()
-                .expect(ERROR_MUTEX)
-                .insert(job_id.clone()),
-            "workflow waiter registered twice for job {job_id}"
-        );
+        // Boot reconciliation and live scheduling may discover the same
+        // permanent job identity. They share one tracked receipt waiter.
+        if !self
+            .waiter_jobs
+            .lock()
+            .expect(ERROR_MUTEX)
+            .insert(job_id.clone())
+        {
+            return;
+        }
         let rt = Arc::clone(self);
         self.result_watchers.spawn(async move {
             tokio::select! {
@@ -1485,17 +1487,18 @@ impl Rt {
             .dispatch_repo
             .activate_waiting(&dispatch_id, waiting_dispatch.deets.clone())
             .await?;
-        if let Err(err) = self
-            .submit_pending_dispatch(&dispatch_id, &pending_dispatch)
-            .await
-        {
-            self.dispatch_repo
-                .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                .await?;
-            return Err(ferr!(
-                "error scheduling deferred job for dispatch {dispatch_id}: {err:?}"
-            ));
-        }
+        // Keep the intent pending on an admission error, including an unknown
+        // commit outcome. Boot can safely retry the same permanent job key.
+        self.submit_pending_dispatch(&dispatch_id, &pending_dispatch)
+            .await?;
+        let ActiveDispatchDeets::Wflow {
+            wflow_job_id: Some(job_id),
+            ..
+        } = &pending_dispatch.deets
+        else {
+            unreachable!("admitted dispatch has a workflow job identity");
+        };
+        self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
         self.progress_repo
             .add_update(
                 &dispatch_id,
@@ -1992,6 +1995,7 @@ impl Rt {
                 .map_err(|err| {
                     ferr!("error scheduling job for {plug_id}/{routine_name}: {err:?}")
                 })?;
+            self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
         }
         let mut tags = vec![
             "/type/dispatch".to_string(),
@@ -2555,7 +2559,8 @@ mod tests {
 
         let dispatch_id = "runtime-reconcile-dispatch";
         let job_id = format!("{dispatch_id}-job");
-        let staging_branch_path = daybook_types::doc::BranchPathBuf::from("/tmp/runtime-reconcile");
+        let staging_branch_path =
+            daybook_types::doc::BranchPathBuf::from(format!("/tmp/{job_id}"));
         let tokens = dispatch::DocFacetTokens {
             doc_id: doc_id.clone(),
             branch_path: branch_path.clone(),
@@ -2612,6 +2617,9 @@ mod tests {
         );
 
         test_cx.rt.reconcile_pending_admissions().await?;
+        test_cx
+            .rt
+            .install_wflow_waiter(dispatch_id.into(), job_id.clone());
         assert!(
             test_cx
                 .dispatch_repo
