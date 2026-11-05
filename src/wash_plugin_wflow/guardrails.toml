@@ -3,7 +3,6 @@ role = "runtime"
 dependency_reason = "initial guardrail baseline"
 allowed_dependencies = [
     "utils_rs",
-    "wflow_core",
     "wflow_tokio",
     "wflow_wdk",
 ]

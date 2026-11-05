@@ -1,6 +1,4 @@
 use crate::interlude::*;
-use wflow::wflow_core::partition::job_events::JobError;
-use wflow::wflow_core::partition::job_events::JobRunResult;
 
 use crate::config::ConfigRepo;
 use crate::index::DocFacetRefIndexRepo;
@@ -476,9 +474,7 @@ impl Rt {
         )
         .await?;
 
-        let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
-            &wcx.metastore,
-        )));
+        let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new());
         let daybook_plugin = Arc::new(wash_plugin::DaybookPlugin::new(
             Arc::clone(&drawer),
             Arc::clone(&dispatch_repo),
@@ -489,7 +485,7 @@ impl Rt {
         ));
         let stateless_view_plugin = Arc::new(wash_plugin::StatelessViewPlugin::new());
         let sqlite_plugin = Arc::new(wash_plugin_sqlite::SqlPlugin::new());
-        let wash_host = wflow::build_wash_host(vec![
+        let wash_host = build_wash_host(vec![
             #[expect(clippy::clone_on_ref_ptr)]
             wflow_plugin.clone(),
             #[expect(clippy::clone_on_ref_ptr)]
@@ -536,8 +532,8 @@ impl Rt {
             })?;
 
             let _workload_id = ensure_bundle_workload_running(
-                &wcx,
                 &wash_host,
+                &wflow_plugin,
                 &blobs_repo,
                 plug_id,
                 bundle_name,
@@ -555,7 +551,7 @@ impl Rt {
         }
 
         let authority_host: Arc<dyn wflow::wflow_tokio::authority_runtime::session::Host> =
-            Arc::clone(&wflow_plugin);
+            wflow_plugin.clone();
         let authority = Arc::new(wcx.start_authority_runtime(0, authority_host).await?);
         let result_watchers = Arc::new(tokio_util::task::TaskTracker::new());
         let waiter_jobs = Arc::new(std::sync::Mutex::new(HashSet::new()));
@@ -1051,13 +1047,13 @@ impl Rt {
                 match serde_json::from_str::<wflow::wflow_wdk::types::JobResult>(&terminal.value)
                     .wrap_err("authority completed receipt contained invalid JobResult")?
                 {
-                    Ok(value_json) => JobRunResult::Success {
+                    Ok(value_json) => DaybookWflowOutcome::Success {
                         value_json: value_json.into(),
                     },
                     Err(wflow::wflow_wdk::types::JobError::Terminal(error_json)) => {
-                        JobRunResult::WflowErr(JobError::Terminal {
+                        DaybookWflowOutcome::WorkflowTerminal {
                             error_json: error_json.into(),
-                        })
+                        }
                     }
                     Err(wflow::wflow_wdk::types::JobError::Transient(_)) => {
                         unreachable!(
@@ -1069,40 +1065,31 @@ impl Rt {
             wflow::wflow_core::partition::authority::Outcome::Faulted(fault) => {
                 match &fault.failure {
                     wflow::wflow_core::partition::JobFailure::Cancelled { .. } => {
-                        JobRunResult::Aborted
+                        DaybookWflowOutcome::Cancelled
                     }
-                    failure => JobRunResult::WorkerErr(
-                        wflow::wflow_core::partition::job_events::JobRunWorkerError::Other {
-                            msg: format!("authority fault: {failure:?}"),
-                        },
-                    ),
+                    failure => DaybookWflowOutcome::AuthorityFailure {
+                        message: format!("{failure:?}"),
+                    },
                 }
             }
         };
         let (severity, message) = match &result {
-            JobRunResult::Success { .. } => (
+            DaybookWflowOutcome::Success { .. } => (
                 crate::progress::ProgressSeverity::Info,
                 "dispatch completed successfully".to_string(),
             ),
-            JobRunResult::Aborted => (
+            DaybookWflowOutcome::Cancelled => (
                 crate::progress::ProgressSeverity::Warn,
                 "dispatch aborted".to_string(),
             ),
-            JobRunResult::WorkerErr(err) => (
+            DaybookWflowOutcome::AuthorityFailure { message } => (
                 crate::progress::ProgressSeverity::Error,
-                format!("worker error: {err:?}"),
+                format!("authority fault: {message}"),
             ),
-            JobRunResult::WflowErr(JobError::Terminal { error_json }) => (
+            DaybookWflowOutcome::WorkflowTerminal { error_json } => (
                 crate::progress::ProgressSeverity::Error,
                 format!("terminal error: {error_json}"),
             ),
-            JobRunResult::WflowErr(JobError::Transient { error_json, .. }) => (
-                crate::progress::ProgressSeverity::Error,
-                format!("transient error exhausted: {error_json}"),
-            ),
-            JobRunResult::StepEffect(_) | JobRunResult::StepWait(_) => {
-                unreachable!("authority receipt contained non-terminal workflow result")
-            }
         };
         self.progress_repo
             .add_update(
@@ -1124,7 +1111,7 @@ impl Rt {
                 ..
             }) = &dispatch.args;
 
-            let merged_successfully = matches!(&result, JobRunResult::Success { .. });
+            let merged_successfully = matches!(&result, DaybookWflowOutcome::Success { .. });
 
             if merged_successfully {
                 // Merge staging branch into target branch
@@ -1293,7 +1280,7 @@ impl Rt {
 
             let final_status = if merged_successfully {
                 dispatch::DispatchStatus::Succeeded
-            } else if matches!(&result, JobRunResult::Aborted) {
+            } else if matches!(&result, DaybookWflowOutcome::Cancelled) {
                 dispatch::DispatchStatus::Cancelled
             } else {
                 dispatch::DispatchStatus::Failed
@@ -1446,8 +1433,8 @@ impl Rt {
                 ferr!("bundle not found in plug manifest: plug={plug_id} bundle={bundle_name}")
             })?;
         ensure_bundle_workload_running(
-            &self.wcx,
             &self.wash_host,
+            &self.wflow_plugin,
             &self.blobs_repo,
             plug_id.clone(),
             bundle_name.clone(),
@@ -1955,8 +1942,8 @@ impl Rt {
                 ));
             };
             ensure_bundle_workload_running(
-                &self.wcx,
                 &self.wash_host,
+                &self.wflow_plugin,
                 &self.blobs_repo,
                 plug_id.clone(),
                 bundle_name.clone(),
@@ -2240,8 +2227,16 @@ fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
     }
 }
 
+#[derive(Debug)]
+enum DaybookWflowOutcome {
+    Success { value_json: Arc<str> },
+    WorkflowTerminal { error_json: Arc<str> },
+    Cancelled,
+    AuthorityFailure { message: String },
+}
+
 fn command_invoke_reply_from_result(
-    result: &JobRunResult,
+    result: &DaybookWflowOutcome,
     dispatch_id: &str,
     merged_successfully: bool,
 ) -> (
@@ -2262,43 +2257,28 @@ fn command_invoke_reply_from_result(
         );
     }
     match result {
-        JobRunResult::Success { value_json } => (
+        DaybookWflowOutcome::Success { value_json } => (
             daybook_pdk::InvokeCommandStatus::Succeeded,
             Some(value_json.to_string()),
             None,
         ),
-        JobRunResult::Aborted => (daybook_pdk::InvokeCommandStatus::Cancelled, None, None),
-        JobRunResult::WflowErr(JobError::Terminal { error_json }) => (
+        DaybookWflowOutcome::Cancelled => (daybook_pdk::InvokeCommandStatus::Cancelled, None, None),
+        DaybookWflowOutcome::WorkflowTerminal { error_json } => (
             daybook_pdk::InvokeCommandStatus::Failed,
             None,
             Some(error_json.to_string()),
         ),
-        JobRunResult::WorkerErr(err) => {
+        DaybookWflowOutcome::AuthorityFailure { message } => {
             let error_json = serde_json::json!({
-                "kind": "worker-error",
+                "kind": "authority-error",
                 "dispatch_id": dispatch_id,
-                "error": format!("{err:?}"),
+                "error": message,
             });
             (
                 daybook_pdk::InvokeCommandStatus::Failed,
                 None,
                 Some(error_json.to_string()),
             )
-        }
-        JobRunResult::WflowErr(JobError::Transient { error_json, .. }) => {
-            let wrapped = serde_json::json!({
-                "kind": "transient-exhausted",
-                "dispatch_id": dispatch_id,
-                "error_json": error_json,
-            });
-            (
-                daybook_pdk::InvokeCommandStatus::Failed,
-                None,
-                Some(wrapped.to_string()),
-            )
-        }
-        JobRunResult::StepEffect(_) | JobRunResult::StepWait(_) => {
-            unreachable!("non-terminal result reached terminal invoke reply")
         }
     }
 }
@@ -2346,6 +2326,15 @@ async fn load_bundle_components(
     Ok(components)
 }
 
+async fn build_wash_host(plugins: Vec<Arc<dyn wash_runtime::plugin::HostPlugin>>) -> Res<WashHost> {
+    let engine = wash_runtime::engine::Engine::builder().build().to_eyre()?;
+    let mut host = wash_runtime::host::HostBuilder::new().with_engine(engine);
+    for plugin in plugins {
+        host = host.with_plugin(plugin).to_eyre()?;
+    }
+    host.build().to_eyre()
+}
+
 fn stateless_view_host_interfaces() -> Vec<WitInterface> {
     vec![
         WitInterface::from("townframe:wflow/host"),
@@ -2362,65 +2351,16 @@ fn stateless_view_host_interfaces() -> Vec<WitInterface> {
 }
 
 async fn ensure_bundle_workload_running(
-    wcx: &wflow::Ctx,
     wash_host: &WashHost,
+    wflow_plugin: &Arc<wash_plugin_wflow::WflowPlugin>,
     blobs_repo: &BlobsRepo,
     plug_id: String,
     bundle_name: String,
     bundle_man: &manifest::WflowBundleManifest,
 ) -> Res<String> {
     let workload_id = format!("{plug_id}/{bundle_name}");
-    for key in &bundle_man.keys {
-        use wflow::wflow_core::metastore::*;
-        match wcx.metastore.get_wflow(key).await? {
-            Some(meta) => {
-                if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
-                    workload_id: meta_workload_id,
-                }) = &meta.service
-                {
-                    if meta_workload_id != &workload_id {
-                        eyre::bail!(
-                            "wflow under key '{key}' in metatstore '{meta:?}' doesn't match workload id '{workload_id}'",
-                        );
-                    }
-                } else {
-                    eyre::bail!(
-                        "wflow under key '{key}' in metatstore '{meta:?}' doesn't match workload type for workload '{workload_id}'",
-                    );
-                }
-            }
-            None => {
-                if let Err(err) = wcx
-                    .metastore
-                    .set_wflow(
-                        &key[..],
-                        &WflowMeta {
-                            key: key.0.clone(),
-                            service: WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
-                                workload_id: workload_id.clone(),
-                            }),
-                        },
-                    )
-                    .await
-                {
-                    if let Some(meta) = wcx.metastore.get_wflow(key).await? {
-                        if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
-                            workload_id: meta_workload_id,
-                        }) = &meta.service
-                        {
-                            if meta_workload_id != &workload_id {
-                                return Err(err);
-                            }
-                        } else {
-                            return Err(err);
-                        }
-                    } else {
-                        return Err(err);
-                    }
-                }
-            }
-        }
-    }
+    // Workload startup invokes the plugin's bind/resolve path, which owns key
+    // collision detection. Never recreate that ownership in a metadata adapter.
     loop {
         let status = wash_host
             .workload_status(wash_runtime::types::WorkloadStatusRequest {
@@ -2452,6 +2392,12 @@ async fn ensure_bundle_workload_running(
                 eyre::bail!("unexpected workload status for {workload_id}: {status:?}");
             }
         }
+    }
+    for key in &bundle_man.keys {
+        eyre::ensure!(
+            wflow_plugin.contains_workflow(key),
+            "wflow key '{key}' was not registered by workload '{workload_id}'"
+        );
     }
     Ok(workload_id)
 }

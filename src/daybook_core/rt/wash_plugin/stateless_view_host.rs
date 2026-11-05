@@ -7,8 +7,6 @@ use wash_runtime::wit::WitInterface;
 use wash_runtime::wit::WitWorld;
 
 use wash_plugin_wflow::service_host;
-use wash_plugin_wflow::service_metastore;
-use wash_plugin_wflow::service_partition_host;
 
 #[derive(Default)]
 pub struct StatelessViewPlugin;
@@ -30,9 +28,7 @@ impl HostPlugin for StatelessViewPlugin {
     fn world(&self) -> WitWorld {
         WitWorld {
             exports: std::collections::HashSet::new(),
-            imports: std::collections::HashSet::from([WitInterface::from(
-                "townframe:wflow/host,partition-host,metadata-store",
-            )]),
+            imports: std::collections::HashSet::from([WitInterface::from("townframe:wflow/host")]),
         }
     }
 
@@ -61,18 +57,6 @@ impl HostPlugin for StatelessViewPlugin {
                         item.linker(),
                         |ctx| ctx,
                     )?;
-                }
-                if iface.interfaces.contains("partition-host") {
-                    service_partition_host::add_to_linker::<
-                        _,
-                        wasmtime::component::HasSelf<SharedWashCtx>,
-                    >(item.linker(), |ctx| ctx)?;
-                }
-                if iface.interfaces.contains("metadata-store") {
-                    service_metastore::add_to_linker::<
-                        _,
-                        wasmtime::component::HasSelf<SharedWashCtx>,
-                    >(item.linker(), |ctx| ctx)?;
                 }
             }
         }

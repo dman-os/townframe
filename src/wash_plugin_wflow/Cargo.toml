@@ -19,7 +19,6 @@ path = "lib.rs"
 [dependencies]
 #
 # internal
-wflow_core.workspace = true
 wflow_wdk.workspace = true
 wflow_tokio.workspace = true
 utils_rs.workspace = true
