@@ -103,3 +103,71 @@ Dispatch is the committing guest dispatch as the host sees it; frames counted fr
 - The bottleneck is guest compute in the wcmp web runtime (about 110x native), driven by allocations and frame-carrying calls per mutation. Levers on the app side only trade rows per commit (chunk 10 fits the frame at 7 spans) or shave spans (10-20%).
 - Next experiments with the largest expected return: (a) find why calls with stack frames and the allocator are slow under wcmp (control outside wcmp; compare with the wasmi engine); (b) fewer mutations by construction, e.g. one text node per row instead of a span per token, or the host scroller primitive with host-side row rendering; (c) a guest build with a custom bump/arena allocator (the diff is allocation-heavy), which would test whether the allocator alone explains most of it.
 - Not measured: the unreleased `render_immediate` split between Dioxus diff and mutation recording inside the guest (native says recording is 10%), and Firefox.
+
+## P5 wasm speed
+
+Question: why does the guest run about 110x slower than native under the wcmp web runtime (P4)? **Answer, measured: the guest's stack pointer is not a wasm global. Every frame-carrying function calls two imported functions, `env.__wasm_get_stack_pointer` / `__wasm_set_stack_pointer`, which the component backs with `canon context.get/set i32 0`, and wcmp implements each as a full host-function call.** Swapping just those two functions for a wasm global brings the in-wcmp guest from ~60-95 ms to ~2-3 ms per diff, with everything else (wcmp, JSPI, allocator, shims) unchanged.
+
+### Mechanism (file:line)
+- The guest core module imports four `env` functions (`wasm-tools print`, `m0.wat`:68-71 in the scratchpad dump): `__wasm_{set,get}_tls_base` and `__wasm_{get,set}_stack_pointer`. `framed` in the bench compiles to `call $__wasm_get_stack_pointer; i32.const 272; i32.sub; local.tee; call $__wasm_set_stack_pointer; ... ` and restores with another set. Static call sites in the release module: 1,413 get + 2,528 set (`grep -cF 'call $__wasm_get_stack_pointer'` over `wasm-tools print` of the unbundled module). Leaf functions and loops carry no frame, so they are fast (P4).
+- wit-component wires those imports in the component as `(core func (canon context.get i32 0))` / `(canon context.set i32 0)` (`wasm-tools print` of the component, `$env` core instance, near the end of the text).
+- wcmp lowers them to ordinary host functions: `rust/wcmp/src/executor/instantiate.rs:759-764` (`TrampolineSpec::ContextGet/ContextSet` -> `build_context_get/set`), `executor/intrinsics.rs:81-139`: each call goes through `runtime_layer::host_func` (`runtime_layer.rs:270-289`, a `Func::new` closure that takes the store `Caller`, bumps `host_frames`), locks the `HandleTables` mutex, finds the current thread and reads/writes `record.context[slot]`. On the web backend that wasm -> JS -> wasm-bindgen -> Rust -> JS round trip is the `wasm-to-js`, `WebStore::call_host`, `Calls::direct/invoke_in`, `wrapper::params/results/from_js`, dlmalloc self time of the P4 CPU profile (the `GenericShunt<Map<Iter<ValType>, wrapper::params>>` entry is the per-call param `Vec` build).
+- Our side: why the guest is built this way (the `wasm32-wasip3` target links with `wasm-component-ld`; `rustc --print target-spec-json` shows `linker: wasm-component-ld`, `--stack-first`, stack 1 MiB). Which toolchain component decides "stack pointer lives in context slot 0" instead of a `__stack_pointer` global I did not trace: unverified. `src/clay_mdk/lib.rs:75-120` (S6 task-stack hook) reads `__init_stack_pointer`, not the context slot; it is not the cause (see ruled out).
+
+### Measurements
+All guest-side numbers are the guest's own timers (`bench`, P4's button `bench-7` / `bench-18` -> `diff-no-writer-median-ms`, medians of 20 diffs inside each run; framed = 1M `#[inline(never)]` calls with a 256 B frame). Host load average was 14-24 during these runs (other agents), so compare within an interleaved set, not across sets.
+
+**M1. Control outside wcmp** (Node 24 / V8, same machine; core module of the same release component, built with `--features p5-direct`, which adds the exports `p5_init`, `p5_bench`, `p5_diff`, `p5_len`; imports stubbed by `src/micro_pierre_spike_scroll/p5/direct.mjs`):
+```
+cargo build (via ./x/agent-build.ts --) --locked --config 'resolver.feature-unification="selected"' -p micro_pierre_spike_scroll --release --target wasm32-wasip3 --features p5-direct
+wasm-tools component unbundle <component> --module-dir <dir> -o <dir>/out.wasm
+node src/micro_pierre_spike_scroll/p5/direct.mjs <dir>/unbundled-module0.wasm js 3 7     # and 18
+node src/micro_pierre_spike_scroll/p5/patch-sp.mjs m1.wat m1-global.wat; wasm-tools parse m1-global.wat -o m1-global.wasm
+node src/micro_pierre_spike_scroll/p5/direct.mjs m1-global.wasm global 5 7              # and 18
+```
+| config | diff 7 spans (ms) | diff 18 spans (ms) | 1M framed calls (ms) | 100k alloc+free (ms) | 100k strings (ms) |
+|---|---|---|---|---|---|
+| native release (P4, not rerun) | 0.36 | 0.69 | | | |
+| V8 direct, SP = JS closure imports | 2.07, 2.40, 2.64 | 4.84, 5.27 | 52-71 | 13-17 | 45-75 |
+| V8 direct, SP = wasm global | 0.58-1.23 (5 runs) | 2.31, 2.40 | 24-36 | 1.6-3.5 | 10-19 |
+| wcmp web, Chromium (below, V0) | 62-95 | 105-166 | 1,340-2,060 | 420-870 | 2,700-3,600 |
+So outside wcmp the same bytes run 2-4x native with a JS-closure SP and 1.7-3.5x with a global; wcmp is 20-40x slower than even the JS-closure case.
+SP imports per `p5_diff` call (rebuild of 140 rows plus one shift diff, counted with wrapped imports): 7 spans 192,953 gets + 268,526 sets; 18 spans 382,189 + 531,466. (The count covers the untimed rebuild too, so it is an upper bound for the timed diff.)
+
+**M2. Toggle inside wcmp** (the decisive one). Same host site, same Chromium, same Playwright bench test; only the guest bytes change (`src/micro_pierre_spike_scroll/p5/serve.ts` serves the built `dayframe_web` site with the pierre component swapped and its BLAKE3 digest recomputed):
+```
+cd src/dayframe_web && PIERRE_RAISED=1 ../../x/agent-build.ts -- pnpm exec playwright test pierre_scroll.spec.ts -g "guest-internal bench" --workers=1 --reporter=line
+```
+- V0 = the p5-direct component unmodified. V0r = V0 printed and reparsed with wasm-tools (rules out the print/parse round trip). V1 = V0r with the two `canon context.get/set 0` core funcs replaced by two exported funcs of a tiny extra core module over a mutable global initialised to 1048576 (`__init_stack_pointer`); nothing else touched. Cross-module wasm-to-wasm calls (guest -> that module) cost nothing visible, so wcmp's linking of core modules is not slow.
+- Pin a5db353 (the P4 pin), 3 runs each, interleaved (diff-no-writer-median-ms, tokens 7 / 18; framed-calls-1M-ms, tokens 7):
+
+| variant | diff 7 spans | diff 18 spans | framed 1M | alloc+free 100k | 100k strings |
+|---|---|---|---|---|---|
+| V0 | 92.5, 83.8, 61.8 (+95.4 first run) | 105.5, 162.3, 143.1 (+166.3) | 1620, 1612, 1368 | 752, 727, 500 | 3,629 (run 1) |
+| V0r | 94.3, 72.5, 80.5 | 211.8, 172.0, 137.7 | 2062, 2208, 1585 | 866, 602, 763 | |
+| V1 (SP global) | 2.70, 2.00, 3.80 (+2.10) | 3.80, 3.00, 4.40 (+3.30) | 58, 47, 61 (+55) | 11, 10, 12 | 39 (run 1) |
+- Per context op: framed does 1 get + 2 sets; (V0 1,368-1,620 ms - V1 ~58 ms) / 1M / 3 = 0.44-0.52 us per `context.get/set` (derived, not directly timed). `Instant::now` (one host import) measured 6-10 us here under load.
+- V1 vs V0: diff 7 spans 24-40x lower, 18 spans 35-50x lower, framed calls 25-30x lower, alloc+free 60-70x lower. V1 is 5.5-10x the native 0.36 ms for 7 spans and 4.3-6.4x native 0.69 for 18 (wasm + load).
+
+**M3. JSPI bisection with the newer pin** (coordinator request). Re-pinned on this branch in its own commit (`bbaec72d`: `Cargo.toml`, `Cargo.lock`, `src/wasm_utils_rs/Cargo.{toml,lock}` a5db353 -> f2c7714, which runs sync-typed exports as a plain core call instead of through `WebAssembly.promising`); rebuilt the host (`x/dayframe-web.ts --build`, `DAYFRAME_GUEST_PROFILE=release DAYFRAME_RAISED_LIMITS=1`), same bench, 3 interleaved runs:
+| variant (pin f2c7714) | diff 7 spans | diff 18 spans | framed 1M |
+|---|---|---|---|
+| V0 | 55.1, 76.2, 66.8 | 116.7, 134.3, 64.9 | 1209, 1380, 898 |
+| V1 | 2.40, 3.30, 1.60 | 4.10, 4.20, 2.20 | 57, 69, 36 |
+The plain-core-call path is possibly a little faster at the median (V0 66.8 vs 83.8 on 7 spans) but the 3-run spreads overlap under a load average of 14-24, so I do not claim an improvement. It does not remove the slowness: the context slot access remains the cost. JSPI-run stacks are not what makes the guest slow.
+
+### Ruled out (each by measurement above)
+- Direct-V8 run of the same module is fast (M1): not the guest build profile, not debug assertions (it is the release module), not the allocator itself (alloc+free 100k: 1.6-3.5 ms with a global SP, 7-12 ms in wcmp V1).
+- Cross-core-module calls (V1 adds a module hop for every SP access and is fast).
+- JSPI (M3), print/parse round trip (V0r), the S6 task-stack hook (V1 runs the same hooks and is fast; the hook uses `global.get __init_stack_pointer`, not the context slot).
+- The allocator is slow only because every `malloc`/`free` has a frame.
+
+### Fix options (not applied; wcmp is read-only here)
+1. **wcmp: make `context.get/set` for core wasm free.** Cheapest for us. Options inside wcmp: (a) lower `canon context.get/set N` to an in-module wasm global pair (one global per slot, saved/restored at task switch by the runtime), so the hot path is a V8 inlined global access; this is what V1 emulates; (b) failing that, a fast path in `build_context_get/set` that avoids `host_func`/`Caller`/mutex/param `Vec` (but a JS boundary crossing per access, ~0.1-0.3 us in V8 even with the best host function, M1 JS-closure row: 20-40x slower than global but 25x faster than today). Cost: wcmp runtime change on the web backend; the slot must be saved and restored at every task switch and suspension (the V1 hack is only safe because only one stack is in flight during the bench; with interleaved tasks on distinct stacks it would corrupt), so this needs per-task save/restore at the points wcmp already switches thread. Expected gain: diff ~2-4 ms instead of ~60-170 ms (M2 V1; the dispatch's 37-170 ms from P4 should fall about 25-50x, unmeasured end to end).
+2. **Guest build: stop using a context slot for the stack pointer.** If the toolchain can emit a plain `__stack_pointer` global for components that do not use shared-everything threads (a linker flag or target option on `wasm32-wasip3`, e.g. whatever makes wasm-ld emit the `__wasm_{get,set}_stack_pointer` imports in `wasm-component-ld`), the guest is fast under any runtime including wcmp's other backends, with no wcmp change. Cost: unverified: I did not find the flag; needs a toolchain/wasm-component-ld source dive, and a plain global breaks any design where each task has its own stack (S6 `task_stacks.rs` swaps a state pointer by stack address, so it needs a check). Also a tradeoff to check with the user for ADR 015 semantics: it is a guest-build change, not a guest-controlled surface widening.
+3. **Post-link rewrite of the guest component** (what V1 did): replace the two `context.*` funcs with a stack-pointer global in an extra core module, done by a build step (`wasm-tools print | edit | parse`, ~30 s on this 1.8 MB component; or a wasm-tools/`wit-component` API). Cost: build-pipeline hack; correctness limited to the one-active-stack case unless tasks are serialized per instance; the print/parse also drops about 90 KB of custom sections (size 1,785,395 -> 1,695,656 B, effect unknown).
+4. **App-side levers (P4)** stay available but only trade rows per commit; none removes a 25-50x factor.
+5. Not measured: Firefox (JSPI) and the wasmi backend; both would still lower `context.get/set` through wcmp's host_func, so they should show the same ratio (unverified).
+
+### Commands run (all from the worktree root unless noted)
+`wasm-tools component unbundle` / `print` / `parse` / `validate`; builds through `./x/agent-build.ts` (`cargo build ... -p micro_pierre_spike_scroll --release --target wasm32-wasip3 --features p5-direct`; `cargo build --offline ... -p dayframe_web --bin dayframe_web --target wasm32-unknown-unknown --profile wasm-release`; `deno run --allow-all x/dayframe-web.ts --build`); the node and Playwright commands above; servers were started by me with `deno run --allow-all src/micro_pierre_spike_scroll/p5/serve.ts <site> <component>` and killed by PID after each run. Scratch artefacts (components, wat dumps, logs) are in the scratchpad `p5/` dir, not committed; `p5/runvar.sh` there ran each variant.
