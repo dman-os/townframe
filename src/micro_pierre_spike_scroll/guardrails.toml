@@ -1,0 +1,13 @@
+version = 1
+role = "plugin"
+dependency_reason = "pierre scroll spike (docs/scratch/pierre-spikes.md): a micro that virtualizes a 1M-line file over the presentation wire"
+allowed_dependencies = [
+    "clay_surface",
+    "clay_mdk",
+    "micro_layout_manifest",
+]
+allow_external_api_types = false
+
+[builds.native]
+
+[builds.wasm32-wasip3]

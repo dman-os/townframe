@@ -1,0 +1,242 @@
+import { expect, type Locator, type Page, test } from "@playwright/test";
+import { openLifecycle, watchFailures } from "./shell";
+
+// Pierre scroll spike (docs/scratch/pierre-spikes.md, "P2 scroll"): the spike micro
+// `dayframe.pierre_spike_scroll` virtualizes a synthetic 1M-line file at Pierre's geometry
+// (20 px rows, a ~200 line window quantized to 50-line chunks). Every assertion here is on
+// behaviour (what the guest rendered for the scroll position the DOM reported, where the DOM
+// ended up after a command), and the profile tests print the measured numbers as
+// `PIERRE_SPIKE <name> <json>` lines.
+
+const LINE = 20;
+
+// A scroller of 600 px. The default window profile is the code view's (overscroll 200 px, chunk
+// 1 line: `CodeView.ts:763`, `constants.ts:67-70`): ceil((600 + 400) / 20) + 1 = 51 rows, centred
+// on the viewport (the scroller's clientHeight is 598: its border is inside the 600 px) and
+// clamped at the top of the file to 41.
+test.describe.configure({ timeout: 240_000 });
+
+function stats(values: number[]) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const at = (q: number) =>
+    sorted.length === 0
+      ? null
+      : sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+  const round = (v: number | null) => v === null ? null : Math.round(v * 100) / 100;
+  return { n: sorted.length, median: round(at(0.5)), p95: round(at(0.95)), max: round(at(1)) };
+}
+
+async function openSpike(page: Page) {
+  await page.goto("/");
+  await expect(
+    page.getByRole("button", { name: "Open Settings", exact: true }),
+  ).toBeVisible({ timeout: 60_000 });
+  await openLifecycle(page);
+  await page
+    .getByRole("button", { name: "Enable dayframe.layout micro" })
+    .click();
+  await page
+    .getByRole("button", { name: "Enable dayframe.pierre_spike_scroll micro" })
+    .click();
+  await expect(
+    page.getByRole("button", {
+      name: "Disable dayframe.pierre_spike_scroll micro",
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Show Layout" }).click();
+  await page
+    .getByRole("button", { name: "Show Pierre scroll spike panel" })
+    .click({ timeout: 60_000 });
+  const scroller = page.getByTestId("scroller");
+  await expect(scroller).toBeVisible({ timeout: 60_000 });
+  await scroller.scrollIntoViewIfNeeded();
+  return {
+    scroller,
+    window: page.getByTestId("window"),
+  };
+}
+
+/// The first line and the line count of the window the guest last committed.
+async function windowOf(win: Locator) {
+  return {
+    start: Number(await win.getAttribute("data-value")),
+    count: Number(await win.getAttribute("data-state")),
+  };
+}
+
+/// Installs the in-page probe: scroll events, DOM mutation batches, animation-frame intervals
+/// and long tasks, all stamped with `performance.now()`. The host's own phase records are in
+/// `window.__clayTiming` (feature `spike-timing` of `clay_dioxus`).
+async function installProbe(page: Page) {
+  await page.evaluate(() => {
+    // deno-lint-ignore no-explicit-any
+    const w = window as any;
+    const scroller = document.querySelector('[data-testid="scroller"]')!;
+    const probe = { scrolls: [] as number[][], mutations: [] as number[][], frames: [] as number[], longtasks: [] as number[], running: true };
+    w.__probe = probe;
+    w.__clayTiming = [];
+    scroller.addEventListener("scroll", () => {
+      probe.scrolls.push([performance.now(), (scroller as HTMLElement).scrollTop]);
+    }, { capture: true, passive: true });
+    new MutationObserver((records) => {
+      let added = 0, removed = 0;
+      for (const r of records) { added += r.addedNodes.length; removed += r.removedNodes.length; }
+      probe.mutations.push([performance.now(), records.length, added, removed]);
+    }).observe(scroller, { subtree: true, childList: true, attributes: true, characterData: true });
+    let last = performance.now();
+    const tick = (now: number) => {
+      if (!probe.running) return;
+      probe.frames.push(now - last);
+      last = now;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) probe.longtasks.push(e.duration);
+    }).observe({ entryTypes: ["longtask"] });
+  });
+}
+
+async function frame(page: Page) {
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+}
+
+/// Wheels `steps` times by `delta` px, one wheel event per animation frame, then reports what the
+/// probe and the host's phase records saw.
+async function wheelProfile(page: Page, scroller: Locator, steps: number, delta: number) {
+  const box = (await scroller.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await installProbe(page);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Performance.enable");
+  const metrics = async () =>
+    Object.fromEntries(
+      (await cdp.send("Performance.getMetrics")).metrics.map((m) => [m.name, m.value]),
+    ) as Record<string, number>;
+  const before = await metrics();
+  for (let i = 0; i < steps; i++) {
+    await page.mouse.wheel(0, delta);
+    await frame(page);
+  }
+  // Let the last event's commit land before stopping the probe.
+  await frame(page);
+  await frame(page);
+  const after = await metrics();
+  const data = await page.evaluate(() => {
+    // deno-lint-ignore no-explicit-any
+    const w = window as any;
+    w.__probe.running = false;
+    return { probe: w.__probe, timing: w.__clayTiming as [string, number, number, number, number][] };
+  });
+  const duration = (kind: string) =>
+    data.timing.filter((r) => r[0] === kind).map((r) => r[2] - r[1]);
+  const applies = data.timing.filter((r) => r[0] === "apply");
+  const renders = data.timing.filter((r) => r[0] === "render");
+  // The window changed in a revision when the apply carried mutations.
+  const committing = applies.filter((r) => r[3] > 0);
+  // Scroll event to the DOM mutation batch that follows it (the committed window).
+  const commitLatency: number[] = [];
+  for (const [t] of data.probe.scrolls) {
+    const next = data.probe.mutations.find((m) => m[0] >= t);
+    const nextScroll = data.probe.scrolls.find((s) => s[0] > t);
+    if (next && (!nextScroll || next[0] < nextScroll[0])) commitLatency.push(next[0] - t);
+  }
+  const frames = data.probe.frames.slice(1);
+  const metric = (k: string) => Math.round((after[k] - before[k]) * 1000) / 1000;
+  return {
+    steps,
+    delta,
+    scrollEvents: data.probe.scrolls.length,
+    guestDispatchMs: stats(duration("dispatch:scroll")),
+    hostRenderMs: stats(renders.map((r) => r[2] - r[1])),
+    treeApplyMs: stats(applies.map((r) => r[2] - r[1])),
+    mutationsPerCommit: stats(committing.map((r) => r[3])),
+    retainedNodes: applies.length ? applies[applies.length - 1][4] : null,
+    commitsWithMutations: committing.length,
+    domMutationBatches: data.probe.mutations.length,
+    scrollToCommitMs: stats(commitLatency),
+    frameIntervalMs: stats(frames),
+    framesOver25ms: frames.filter((f) => f > 25).length,
+    framesOver50ms: frames.filter((f) => f > 50).length,
+    longTasks: data.probe.longtasks.length,
+    chromium: {
+      scriptMs: metric("ScriptDuration") * 1000,
+      layoutMs: metric("LayoutDuration") * 1000,
+      recalcStyleMs: metric("RecalcStyleDuration") * 1000,
+      taskMs: metric("TaskDuration") * 1000,
+    },
+  };
+}
+
+function report(name: string, value: unknown) {
+  console.log(`PIERRE_SPIKE ${name} ${JSON.stringify(value)}`);
+}
+
+test("scroll offsets reach the guest and its window follows the DOM scroll position", async ({ page }) => {
+  const failures = watchFailures(page);
+  const { scroller, window: win } = await openSpike(page);
+
+  // 1M lines at 20 px: the guest's content box is 20,000,000 px tall and the DOM agrees.
+  expect(await scroller.evaluate((el) => el.scrollHeight)).toBe(1_000_000 * LINE);
+  expect(await windowOf(win)).toEqual({ start: 0, count: 41 });
+
+  // The user (here: the test, writing the DOM) scrolls to line 500,000. The scroll event's
+  // payload is the only thing the guest learns it from.
+  await scroller.evaluate((el, top) => { el.scrollTop = top; }, 500_000 * LINE);
+  await expect(win).toHaveAttribute("data-value", "499989");
+  expect(await windowOf(win)).toEqual({ start: 499_989, count: 51 });
+  await expect(win.getByText("let v500000 = step(")).toBeVisible();
+  // The window is positioned by the model: its first row's top is `start * 20`.
+  expect(await win.evaluate((el) => (el as HTMLElement).offsetTop)).toBe(499_989 * LINE);
+
+  // And back to the top.
+  await scroller.evaluate((el) => { el.scrollTop = 0; });
+  await expect(win).toHaveAttribute("data-value", "0");
+  await expect(win.getByText("let v0 = step(")).toBeVisible();
+  expect(failures).toEqual([]);
+});
+
+test("the browser clamps a 3M line (60M px) content box below the file height", async ({ page }) => {
+  const failures = watchFailures(page);
+  const { scroller, window: win } = await openSpike(page);
+  await page.getByTestId("lines-3000000").click();
+  await expect(scroller).toBeVisible();
+  const geometry = await scroller.evaluate((el) => ({ scrollHeight: el.scrollHeight, client: el.clientHeight }));
+  report("clamp", geometry);
+  expect(geometry.scrollHeight).toBeLessThan(3_000_000 * LINE);
+  // The last reachable line is therefore far short of line 3,000,000.
+  await scroller.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  const reached = (await windowOf(win)).start + (await windowOf(win)).count;
+  report("clamp-last-line", { reached });
+  expect(reached).toBeLessThan(3_000_000);
+  expect(failures).toEqual([]);
+});
+
+test("KNOWN BREAK: Pierre's own window profile (about 200 rows) overruns the batch budget and takes the shell's guest dispatch down with host panics", async ({ page }) => {
+  const failures = watchFailures(page);
+  const { scroller, window: win } = await openSpike(page);
+  await page.getByTestId("profile-pierre").click();
+  // The 100 row window at the top of the file still commits: it is a diff from 41 rows, 59 new.
+  await expect(win).toHaveAttribute("data-state", "100");
+  // A jump replaces all of it with a 200 row window: about 4,600 mutations in one batch, over the
+  // 4,096 cap. The surface is withdrawn, and the guest's `expect("guest presentation commit
+  // failed")` in `dispatch` aborts the guest inside a synchronous export, which the wcmp engine
+  // reports as a host panic (`clay_rt_wcmp/lib.rs:208`) followed by a re-borrow panic (`:655`).
+  await scroller.evaluate((el, top) => { el.scrollTop = top; }, 500_000 * LINE);
+  const panel = page.getByRole("region", { name: "Pierre scroll spike panel" });
+  await expect(panel).toHaveText("Component withdrawn.");
+  expect(failures.some((f) => f.includes("suspended on its first poll"))).toBe(true);
+  expect(failures.some((f) => f.includes("RefCell already borrowed"))).toBe(true);
+});
+
+for (const [name, steps, delta] of [["continuous-100px", 200, 100], ["chunk-per-frame-1000px", 200, 1000]] as const) {
+  test(`baseline wheel profile ${name}`, async ({ page }) => {
+    const failures = watchFailures(page);
+    const { scroller, window: win } = await openSpike(page);
+    const profile = await wheelProfile(page, scroller, steps, delta);
+    report(`baseline-${name}`, profile);
+    // The guest followed the wheel: the window left the top of the file.
+    expect((await windowOf(win)).start).toBeGreaterThan(0);
+    expect(failures).toEqual([]);
+  });
+}
