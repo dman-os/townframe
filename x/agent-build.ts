@@ -13,6 +13,14 @@ import { $ } from "./utils.ts";
 const DEFAULT_SLOTS = Number(Deno.env.get("TOWNFRAME_JOBSERVER_SLOTS") ?? "12");
 const DEFAULT_MEM_HIGH = Deno.env.get("TOWNFRAME_CGROUP_MEMORY_HIGH") ?? "6G";
 const DEFAULT_MEM_MAX = Deno.env.get("TOWNFRAME_CGROUP_MEMORY_MAX") ?? "10G";
+// Every build scope, from every worktree and every checkout on the host, runs inside this one
+// slice, and the slice carries the host-wide memory cap. A per-scope MemoryMax alone does not
+// bound the sum: four agents each under 10G overran the 14G host and the kernel OOM killer took
+// the agent sessions instead of a build. The slice is the shared budget; a scope that pushes it
+// past MemoryHigh is throttled, past MemoryMax its biggest process is killed inside the slice.
+const BUILD_SLICE = "townframe-builds.slice";
+const SLICE_MEM_HIGH = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_HIGH") ?? "7G";
+const SLICE_MEM_MAX = Deno.env.get("TOWNFRAME_BUILDS_MEMORY_MAX") ?? "9G";
 const DEFAULT_SCCACHE_SIZE = Deno.env.get("SCCACHE_CACHE_SIZE") ?? "8G";
 
 function runtimeFifoPath(): string {
@@ -234,11 +242,15 @@ async function main(): Promise<void> {
       /[^a-zA-Z0-9_-]/g,
       "-",
     );
+    // Idempotent: the last writer's numbers win, so every checkout must agree on the defaults.
+    await $`systemctl --user set-property --runtime ${BUILD_SLICE} MemoryHigh=${SLICE_MEM_HIGH} MemoryMax=${SLICE_MEM_MAX}`
+      .printCommand(false);
     fullCmd = [
       "systemd-run",
       "--user",
       "--scope",
       "--quiet",
+      `--slice=${BUILD_SLICE}`,
       `--unit=townframe-${worktreeName}-${Deno.pid}`,
       `-p`,
       `MemoryHigh=${DEFAULT_MEM_HIGH}`,
