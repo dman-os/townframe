@@ -1553,6 +1553,7 @@ impl<F: FutureForm> DocWorker2<F> {
         }
 
         debug!(%self.doc_id, ?current_epoch, ?covered_frontier, "persisting causal coverage checkpoint");
+        tracing::info!(doc_id = %self.doc_id, cur = ?current_epoch.map(|e| format!("{:02x?}", &e[..4])), heads = covered_frontier.len(), known = self.causal_checkpoints.len(), known_epochs = ?self.causal_checkpoints.values().map(|c| format!("{:02x?}", &c.epoch[..4])).collect::<Vec<_>>(), "INSTR causal checkpoint persisting"); // INSTR
         let Some((head, checkpoint, _heads_observed)) = self
             .io
             .persist_causal_checkpoint(self.sed_id, covered_frontier)
