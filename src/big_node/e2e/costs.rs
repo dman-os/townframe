@@ -287,10 +287,19 @@ async fn a_note_costs_no_more_to_create_in_a_fuller_drawer() {
     let drawer = cluster.share_drawer(0, &[]).await;
     COUNTING.store(true, Relaxed);
     let mut created = Vec::new();
+    // INSTR: process CPU (utime+stime, all threads, dead ones included) in clock ticks of 10 ms.
+    let instr_cpu = || -> u64 { let stat = std::fs::read_to_string("/proc/self/stat").unwrap(); let fields: Vec<&str> = stat.rsplit_once(')').unwrap().1.split_whitespace().collect(); fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap() }; // INSTR
+    *sqlite_rs::INSTR_SQL_CALLERS.lock().unwrap() = None; // INSTR
     for ordinal in 0..NOTES {
+        let instr_cpu_before = instr_cpu(); // INSTR
+        let instr_sql_before: Vec<u64> = sqlite_rs::INSTR_SQL.iter().map(|count| count.load(Relaxed)).collect(); // INSTR
+        tracing::info!(ordinal, "INSTR create note begin"); // INSTR
         let (_, usage) = measure(cluster.create_note(0, &drawer, &text(ordinal))).await;
+        let instr_sql: Vec<u64> = sqlite_rs::INSTR_SQL.iter().zip(&instr_sql_before).map(|(count, before)| count.load(Relaxed) - before).collect(); // INSTR
+        eprintln!("INSTR create note {ordinal}: wall {:.1?} cpu {} ms allocations {} sql write_leases {} read_leases {} write_gate_wait {:.1}ms jobs {} job_busy {:.1}ms", usage.wall, (instr_cpu() - instr_cpu_before) * 10, usage.allocations, instr_sql[0], instr_sql[1], instr_sql[2] as f64 / 1e6, instr_sql[3], instr_sql[4] as f64 / 1e6); // INSTR
         created.push(usage);
     }
+    { let mut instr_callers: Vec<(String, u64)> = sqlite_rs::INSTR_SQL_CALLERS.lock().unwrap().take().unwrap_or_default().into_iter().collect(); instr_callers.sort_by_key(|(_, count)| std::cmp::Reverse(*count)); for (caller, count) in instr_callers.iter().take(40) { eprintln!("INSTR sql caller x16 {count}: {caller}"); } } // INSTR
     COUNTING.store(false, Relaxed);
     let window = |end: usize| {
         let mut window: Vec<_> = created[end - WINDOW..end]

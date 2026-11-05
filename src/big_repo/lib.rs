@@ -1199,6 +1199,7 @@ impl BigRepo {
         principal: impl Into<BigKeyhiveAuthority>,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
+        let instr_start = std::time::Instant::now(); // INSTR
         let heads = match self.doc_head_state(doc_id.clone()).await {
             Ok(state) => state.sedimentree_heads,
             Err(err) => {
@@ -1207,6 +1208,7 @@ impl BigRepo {
             }
         };
         let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
+        let instr_heads = instr_start.elapsed(); // INSTR
 
         let _hashes = self
             .keyhive
@@ -1218,12 +1220,15 @@ impl BigRepo {
                 &self.keyhive_protocol,
             )
             .await?;
+        let instr_granted = instr_start.elapsed(); // INSTR
 
         if access.is_reader() && !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
             tracing::debug!(%doc_id, "document grant causal checkpoint deferred to durable event reconciliation");
         }
+        let instr_covered = instr_start.elapsed(); // INSTR
 
         self.wait_for_keyhive_reconciliation().await?;
+        tracing::info!(?instr_heads, ?instr_granted, ?instr_covered, reconciled = ?instr_start.elapsed(), "INSTR grant_doc_access timing"); // INSTR
         Ok(())
     }
 

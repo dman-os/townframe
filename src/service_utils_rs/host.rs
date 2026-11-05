@@ -43,7 +43,7 @@ impl<H: Send + Sync + 'static> Host<H> {
     }
 
     fn request_span<P: Operation>(request: &Envelope<P>) -> tracing::Span {
-        let span = tracing::info_span!("service.call", nsid = P::XRPC.nsid, request_id = %request.context.request_id);
+        let span = tracing::info_span!("service.call", nsid = P::XRPC.nsid, request_id = %request.context.request_id, worker = P::XRPC.nsid); // INSTR worker=nsid so the census keys service calls by operation
         if let Some(parent) = request.context.trace.parent() {
             match span.set_parent(parent) {
                 Ok(())

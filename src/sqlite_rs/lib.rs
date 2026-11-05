@@ -19,6 +19,10 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::Database;
 #[cfg(not(target_arch = "wasm32"))]
+pub use native::INSTR_SQL; // INSTR
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::INSTR_SQL_CALLERS; // INSTR
+#[cfg(not(target_arch = "wasm32"))]
 pub use native::Migration;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::MigrationState;

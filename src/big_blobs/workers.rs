@@ -363,6 +363,7 @@ fn spawn_worker(
                         }
                         Err(error) => return Err(error.into()),
                     };
+                    tracing::info!(%document, inventory_doc, waiting, "INSTR blob worker processed"); // INSTR
                     retention.replace(&document, &pairs, pins.clone(), waiting).await?;
                     poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
                     for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
@@ -393,6 +394,7 @@ fn spawn_worker(
                     }
                     changed = policy.changed() => {
                         changed.expect("drawer policy outlives blob workers");
+                        tracing::info!("INSTR blob worker policy changed: rearm all"); // INSTR
                          queue.rearm().await?;
                          projection.rearm();
                          config.mirrors.refresh_policy().await?;
@@ -486,6 +488,7 @@ async fn poll_drawer(
             }
             big_cabinet_core::doc::DatumEvent::Leave { .. } => false,
         });
+        tracing::info!(%drawer, events = page.events.len(), enters = page.events.iter().filter(|event| matches!(event, big_cabinet_core::doc::DatumEvent::Enter { .. })).count(), documents = documents.len(), rearm, after, through = page.through, "INSTR blob poll_drawer page"); // INSTR
         queue
             .ingest(&source, page.through, documents, rearm)
             .await?;
