@@ -35,8 +35,8 @@ rust-version = "1.91"
 [workspace.dependencies]
 wasm_utils_rs = { path = "." }
 clay_rt_wcmp = { path = "../clay_rt_wcmp" }
-wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }
-wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }
+wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "a5db353bd68e3014211f2f2cb5a76d41a95af377" }
+wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "a5db353bd68e3014211f2f2cb5a76d41a95af377" }
 plug_test_manifest = { path = "../plug_test_manifest" }
 plug_plabels_manifest = { path = "../plug_plabels_manifest" }
 plug_dayledger_manifest = { path = "../plug_dayledger_manifest" }
