@@ -443,7 +443,8 @@ impl BigKeyhiveHandle {
     }
 
     /// All docs reachable by `agent`, with the [`Access`] level for each.
-    /// O(all_docs × transitive_members) — only for boot full reindex.
+    /// O(all_docs × transitive_members): boot full reindex, and reader reconciliation per
+    /// admitted delegation or prekey expansion.
     pub async fn docs_for_agent(&self, agent: &Identifier) -> BTreeMap<DocumentId, Access> {
         let keyhive = self.keyhive.as_ref();
         let mut caps = BTreeMap::new();
@@ -1293,7 +1294,9 @@ impl BigKeyhiveHandle {
     }
 }
 
-fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
+pub(crate) fn keyhive_doc_id(
+    doc_id: DocumentId,
+) -> Res<keyhive_core::principal::document::id::DocumentId> {
     // A document key is a BigSync object key, which ADR 012 decision 1 makes arbitrary
     // bytes: the keyhive identifier is a fixed-width consumer, so a wrong-width key is an
     // error here rather than a panicking assertion.

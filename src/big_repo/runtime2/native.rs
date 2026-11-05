@@ -2345,10 +2345,10 @@ where
     let spawned_causal_checkpoint = crate::runtime2::spawn_causal_checkpoint_worker(
         group_part_store.clone(),
         keyhive.clone(),
+        Arc::clone(&keyhive_protocol),
         handle.clone(),
         Arc::clone(&timer),
         Arc::clone(&clock),
-        evt_tx.clone(),
         causal_checkpoint_group_scope,
     );
     stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
