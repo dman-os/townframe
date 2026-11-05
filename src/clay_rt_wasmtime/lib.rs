@@ -656,9 +656,10 @@ impl WasmPackage {
         let compile_started = std::time::Instant::now();
         let component = compile_component(&engine, bytes.as_ref())?;
         eprintln!(
-            "INSTR wasm compile_component {} bytes in {:?} (cache path: {:?})",
+            "INSTR wasm compile_component {} bytes in {:?} on thread {:?} (cache path: {:?})",
             bytes.as_ref().len(),
             compile_started.elapsed(),
+            std::thread::current().name(),
             cache_path(&engine, bytes.as_ref()).map(|path| path.exists()),
         );
         let linker = linker(&engine)?;
