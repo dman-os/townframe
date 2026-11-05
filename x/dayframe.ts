@@ -14,7 +14,9 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 --webview        webview renderer (AT-SPI interaction checks)
                 --fresh          start from an empty store in a new temp file
                 --store <path>   use this store file (DAYFRAME_STORE_PATH)
-  android     build the Android APK (dayframe_mobile, aarch64-linux-android)
+  android     build the Android APK (dayframe_mobile)
+                --abi <arm64|x86_64>  target ABI, default arm64 (aarch64-linux-android);
+                                 x86_64 is what an emulator on this host runs
                 --release        release profile (unsigned unless Dioxus.toml configures signing)
                 --install        adb install the APK on the attached device
   web         build and serve dayframe_web (--build: build only)
@@ -79,11 +81,23 @@ switch (command) {
         } ${staged.join(`${name}.${suffix}`)}`;
       }
     }
+    const abiFlag = rest.indexOf("--abi");
+    const abi = abiFlag >= 0 ? rest[abiFlag + 1] : "arm64";
+    const androidTargets: Record<string, string> = {
+      arm64: "aarch64-linux-android",
+      x86_64: "x86_64-linux-android",
+    };
+    const androidTarget = androidTargets[abi];
+    if (!androidTarget) {
+      throw new Error(
+        `--abi must be one of ${Object.keys(androidTargets)}, got ${abi}`,
+      );
+    }
     // `dx build` assembles through Gradle into the target dir; `--release` also needs a
     // signing config in Dioxus.toml to yield a signed APK.
     await $`deno run --allow-all ${
       root.join("x/dx.ts")
-    } build --platform android --target aarch64-linux-android --renderer native -p dayframe_mobile ${
+    } build --platform android --target ${androidTarget} --renderer native -p dayframe_mobile ${
       flag("--release") ? ["--release"] : []
     }`.cwd(root);
     const metadata =
