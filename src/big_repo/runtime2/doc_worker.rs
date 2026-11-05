@@ -732,6 +732,8 @@ impl<F: FutureForm> DocWorker2<F> {
     /// walk is the remaining materialization hot path.
     #[tracing::instrument(skip_all)]
     async fn load_doc_snapshot(&self) -> eyre::Result<LoadedDocSnapshot> {
+        let instr_start = std::time::Instant::now(); // INSTR
+        let (mut instr_cached, mut instr_causal, mut instr_causal_complete, mut instr_bytes) = (0usize, 0usize, 0usize, 0usize); // INSTR
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
             return Ok(LoadedDocSnapshot::Missing);
         };
@@ -802,6 +804,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     .await?
                 {
                     Some(plaintext) => {
+                        instr_cached += 1; instr_bytes += plaintext.len(); // INSTR
                         plaintexts.insert(head.as_bytes().to_vec(), plaintext);
                         continue;
                     }
@@ -820,6 +823,7 @@ impl<F: FutureForm> DocWorker2<F> {
             }
 
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
+            instr_causal += 1; instr_causal_complete += result.complete.len(); instr_bytes += result.complete.iter().map(|(_, plain)| plain.len()).sum::<usize>(); // INSTR
             {
                 let mut cache = self
                     .recovered_keys
@@ -887,13 +891,17 @@ impl<F: FutureForm> DocWorker2<F> {
             partially_decrypted,
             "load_doc_snapshot: walk outcome"
         );
-        LoadedDocSnapshot::from_decrypted_plaintexts(
+        let instr_walk = instr_start.elapsed(); // INSTR
+        let instr_tl_before = utils_rs::instr_tl_bytes(); // INSTR
+        let instr_result = LoadedDocSnapshot::from_decrypted_plaintexts(
             pending,
             partially_decrypted,
             self.doc_id.clone(),
             blockers,
             blocked_refs,
-        )
+        );
+        tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_causal, instr_causal_complete, instr_bytes, instr_am_alloc = utils_rs::instr_tl_bytes() - instr_tl_before, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
+        instr_result
     }
 
     async fn take_or_load_transient_doc(
@@ -919,6 +927,7 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Unloaded | DocState::PendingMaterialization => {
                 let materialization_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
                 self.cgka_ops_count = materialization_ops_count;
+                tracing::info!(doc_id = %self.doc_id, was_pending, "INSTR load_doc_snapshot caller=take_or_load_transient_doc"); // INSTR
                 match self.load_doc_snapshot().await? {
                     LoadedDocSnapshot::Ready {
                         doc,
@@ -2170,6 +2179,7 @@ impl<F: FutureForm> DocWorker2<F> {
             pre_load_ops_count = self.cgka_ops_count,
             "retry_materialization: loading snapshot"
         );
+        tracing::info!(doc_id = %self.doc_id, was_pending, origin = ?origin, "INSTR load_doc_snapshot caller=retry_materialization"); // INSTR
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
                 doc,

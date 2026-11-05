@@ -948,3 +948,7 @@ impl<'de> serde::Deserialize<'de> for SerReport {
         Ok(Self(ferr!("{str}")))
     }
 }
+static INSTR_ALLOC_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
+pub fn instr_tl_alloc(bytes: usize) { INSTR_ALLOC_BYTES.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed); } // INSTR
+/// Process-wide bytes allocated since a test's counting allocator turned on (the name is historical). Differences across a section attribute bytes to it only when nothing else is busy.
+pub fn instr_tl_bytes() -> u64 { INSTR_ALLOC_BYTES.load(std::sync::atomic::Ordering::Relaxed) } // INSTR

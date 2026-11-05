@@ -75,6 +75,39 @@ static LIVE: AtomicI64 = AtomicI64::new(0);
 /// The highest [`LIVE`] since [`measure`] last reset it to the then-current value.
 static PEAK: AtomicI64 = AtomicI64::new(0);
 
+
+// INSTR: byte-weighted allocation-site sampler, on only around the reboot (see instr_dump).
+static INSTR_ON: AtomicBool = AtomicBool::new(false); // INSTR
+static INSTR_ACC: AtomicU64 = AtomicU64::new(0); // INSTR
+const INSTR_STRIDE: u64 = 64 << 20; // only allocations >= 64 KiB are sampled: ld.so mallocs under its loader lock, and a backtrace there deadlocks // INSTR
+static INSTR_SAMPLES: std::sync::Mutex<Vec<(u64, std::backtrace::Backtrace)>> = std::sync::Mutex::new(Vec::new()); // INSTR
+std::thread_local! { static INSTR_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; } // INSTR
+fn instr_sample(size: usize) { // INSTR
+    if !INSTR_ON.load(Relaxed) { return; } // INSTR
+    let prev = INSTR_ACC.fetch_add(size as u64, Relaxed); // INSTR
+    let crossed = (prev + size as u64) / INSTR_STRIDE - prev / INSTR_STRIDE; // INSTR
+    if size < (64 << 10) || crossed == 0 || INSTR_GUARD.with(|guard| guard.replace(true)) { return; } // INSTR
+    let backtrace = std::backtrace::Backtrace::force_capture(); // INSTR
+    if let Ok(mut samples) = INSTR_SAMPLES.try_lock() { samples.push((crossed * INSTR_STRIDE, backtrace)); } // INSTR
+    INSTR_GUARD.with(|guard| guard.set(false)); // INSTR
+} // INSTR
+fn instr_dump() { // INSTR
+    INSTR_ON.store(false, Relaxed); // INSTR
+    let samples = std::mem::take(&mut *INSTR_SAMPLES.lock().unwrap()); // INSTR
+    eprintln!("INSTR alloc-site samples {}", samples.len()); // INSTR
+    let mut sites: std::collections::HashMap<String, u64> = Default::default(); // INSTR
+    for (weight, backtrace) in samples { // INSTR
+        let text = backtrace.to_string(); // INSTR
+        let skip = ["std::", "core::", "alloc::", "hashbrown", "<alloc::", "__rust", "tokio::", "futures", "<core::", "<std::", "<futures", "<tokio", "<hashbrown", "<&", "<T as", "<F as", "<I as", "<[", "<bytes", "bytes::", "<Vec", "<(", "_start", "start_thread", "clone", "<fn", "<unknown>", "big_node::e2e::costs::", "<big_node::e2e::costs::"]; // INSTR
+        let frames: Vec<&str> = text.lines().filter(|line| !line.trim_start().starts_with("at ")).map(|line| line.trim().split_once(": ").map_or(line.trim(), |(_, symbol)| symbol)).filter(|symbol| !skip.iter().any(|prefix| symbol.starts_with(prefix))).collect(); // INSTR
+        let key = frames.iter().take(7).map(|symbol| symbol.split("::h").next().unwrap().to_owned()).collect::<Vec<_>>().join(" <- "); // INSTR
+        *sites.entry(key).or_default() += weight; // INSTR
+    } // INSTR
+    let mut sites: Vec<_> = sites.into_iter().collect(); // INSTR
+    sites.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes)); // INSTR
+    for (key, bytes) in sites.iter().take(60) { eprintln!("INSTR alloc-site MiB={} {key}", bytes >> 20); } // INSTR
+} // INSTR
+
 /// [`System`], counting: a `realloc` is one allocation of its new size, as dhat-rs counts it.
 struct CountingAllocator;
 
@@ -83,6 +116,8 @@ impl CountingAllocator {
         if !COUNTING.load(Relaxed) {
             return;
         }
+        utils_rs::instr_tl_alloc(allocated); // INSTR
+        instr_sample(allocated); // INSTR
         ALLOCATIONS.fetch_add(1, Relaxed);
         ALLOCATED.fetch_add(allocated as u64, Relaxed);
         let live = LIVE.fetch_add(live_delta, Relaxed) + live_delta;
@@ -431,9 +466,12 @@ async fn long_test_cost_table() {
     }
 
     let (live, rss) = (LIVE.load(Relaxed), resident());
+    tracing::info!("INSTR phase connect begin"); // INSTR
+    INSTR_ON.store(std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok(), Relaxed); // INSTR
     table
         .run("connect two nodes", cluster.connect(Topology::Pair))
         .await;
+    tracing::info!("INSTR phase connect end"); // INSTR
     // Read in order from the first note Bob could not yet read, so each wake re-reads only what is
     // still outstanding; each tenth is a sample, so a rate that degrades with the count shows.
     let next = std::cell::Cell::new(0);
@@ -479,13 +517,20 @@ async fn long_test_cost_table() {
         .await;
     assert_eq!(received, bytes);
 
+    tracing::info!("INSTR phase replicate end"); // INSTR
+    eprintln!("INSTR dump for connect+replicate"); // INSTR
+    instr_dump(); // INSTR
     table.run("stop node", cluster.stop(1)).await;
+    tracing::info!("INSTR phase reboot begin"); // INSTR
+    INSTR_ON.store(std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok(), Relaxed); // INSTR
     table
         .run(
             &format!("reboot node holding {count} notes"),
             cluster.restart(1),
         )
         .await;
+    tracing::info!("INSTR phase reboot end"); // INSTR
+    instr_dump(); // INSTR
     cluster.stop_all().await;
 
     // D19: many nodes per process. What each one adds, booted side by side.
