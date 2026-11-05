@@ -126,7 +126,11 @@ pub(super) struct Cluster {
     _directory: tempfile::TempDir,
     runtime: Arc<SqliteRuntime>,
     members: Vec<Member>,
+    /// The topology's edges: the links [`Cluster::reconnect`] restores.
     edges: Vec<(usize, usize)>,
+    /// The edges that are linked now. Stopping a node drops its links, and a restarted node is
+    /// linked to no one until [`Cluster::reconnect`], so a restart without one partitions it.
+    links: BTreeSet<(usize, usize)>,
     nicknames: Nicknames,
     commands: AtomicU64,
     /// Rung by every node's pumps. One waiter, so a ring that finds nobody waiting is kept as a
@@ -143,6 +147,7 @@ impl Cluster {
         let mut cluster = Self {
             members: Vec::new(),
             edges: Vec::new(),
+            links: BTreeSet::new(),
             nicknames: Nicknames::default(),
             commands: AtomicU64::new(0),
             wake: Arc::default(),
@@ -231,13 +236,44 @@ impl Cluster {
         }
     }
 
-    async fn link(&self, from: usize, to: usize) {
+    async fn link(&mut self, from: usize, to: usize) {
         let link = network::link(self.node(from), self.node(to)).await;
         link.sync_keyhive(self.node(from), self.node(to)).await;
+        self.links.insert((from, to));
+    }
+
+    /// Runs a keyhive round across every live link, so a membership change made on one node is
+    /// held by every node it can reach in one hop.
+    async fn sync_keyhive(&self) {
+        for (from, to) in &self.links {
+            let link = network::Link {
+                source: self.peer(*from),
+                puller: self.peer(*to),
+            };
+            link.sync_keyhive(self.node(*from), self.node(*to)).await;
+        }
+    }
+
+    pub(super) fn is_running(&self, index: usize) -> bool {
+        self.members[index].running.is_some()
+    }
+
+    /// Whether node `index` is missing a link of the topology to a running node.
+    pub(super) fn is_partitioned(&self, index: usize) -> bool {
+        self.edges.iter().any(|edge| {
+            let other = match *edge {
+                (from, to) if from == index => to,
+                (from, to) if to == index => from,
+                _ => return false,
+            };
+            self.is_running(other) && !self.links.contains(edge)
+        })
     }
 
     /// Stops node `index`. Its data stays in its directory.
     pub(super) async fn stop(&mut self, index: usize) {
+        self.links
+            .retain(|(from, to)| *from != index && *to != index);
         let Running { node, stop, pumps } = self.members[index].running.take().unwrap();
         for pump in pumps {
             pump.abort();
@@ -256,11 +292,12 @@ impl Cluster {
         self.start(index).await;
     }
 
-    /// Links the edges node `index` is on to the nodes that are running.
-    pub(super) async fn reconnect(&self, index: usize) {
+    /// Links the edges node `index` is on to the nodes that are running, where they are not
+    /// linked already.
+    pub(super) async fn reconnect(&mut self, index: usize) {
         for (from, to) in self.edges.clone() {
-            if (from == index && self.members[to].running.is_some())
-                || (to == index && self.members[from].running.is_some())
+            if ((from == index && self.is_running(to)) || (to == index && self.is_running(from)))
+                && !self.links.contains(&(from, to))
             {
                 self.link(from, to).await;
             }
@@ -269,7 +306,7 @@ impl Cluster {
 
     pub(super) async fn stop_all(&mut self) {
         for index in (0..self.members.len()).rev() {
-            if self.members[index].running.is_some() {
+            if self.is_running(index) {
                 self.stop(index).await;
             }
         }
@@ -281,24 +318,21 @@ impl Cluster {
         let node = self.node(owner);
         let id = collection(node, "shared").await;
         let inventory = inventory(node, &id, MetaRoot::Sensitive, BLOBS).await;
+        self.remember(owner, &id).await;
         for member in members.iter().filter(|member| **member != owner) {
             invite(node, self.node(*member), &id, Access::Write).await;
-        }
-        let mut everyone = vec![owner];
-        everyone.extend(members.iter().filter(|member| **member != owner));
-        for member in &everyone {
             self.remember(*member, &id).await;
         }
-        for (from, to) in &self.edges {
-            if everyone.contains(from) && everyone.contains(to) {
-                let link = network::Link {
-                    source: self.peer(*from),
-                    puller: self.peer(*to),
-                };
-                link.sync_keyhive(self.node(*from), self.node(*to)).await;
-            }
-        }
+        self.sync_keyhive().await;
         SharedDrawer { id, inventory }
+    }
+
+    /// `owner` gives `member` `access` to `drawer`, which `member` then mirrors. Nodes that are
+    /// not linked to the grant now learn it when they are next linked.
+    pub(super) async fn admit(&self, owner: usize, member: usize, drawer: &DocId, access: Access) {
+        invite(self.node(owner), self.node(member), drawer, access).await;
+        self.remember(member, drawer).await;
+        self.sync_keyhive().await;
     }
 
     async fn remember(&self, index: usize, drawer: &DocId) {
@@ -349,6 +383,24 @@ impl Cluster {
         drawer: &SharedDrawer,
         text: &str,
     ) -> DocId {
+        self.try_create_note(index, drawer, text)
+            .await
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} was refused a note in {}",
+                    self.members[index].nickname, drawer.id
+                )
+            })
+    }
+
+    /// [`Cluster::create_note`], or `None` when node `index` is refused: a node admitted to a
+    /// drawer is refused creating in it until the drawer's records have reached it.
+    pub(super) async fn try_create_note(
+        &self,
+        index: usize,
+        drawer: &SharedDrawer,
+        text: &str,
+    ) -> Option<DocId> {
         let node = self.node(index);
         let placement = format!("drawer {}", drawer.id);
         let capability = capability(
@@ -359,7 +411,8 @@ impl Cluster {
             },
         )
         .await;
-        node.docs
+        match node
+            .docs
             .client
             .call(
                 RequestContext::root(),
@@ -374,8 +427,14 @@ impl Cluster {
                 },
             )
             .await
-            .unwrap()
-            .doc_id
+        {
+            Ok(receipt) => Some(receipt.doc_id),
+            Err(ClientError::Operation(big_cabinet_core::doc::DocsError::Denied)) => None,
+            Err(error) => panic!(
+                "creating a note on {}: {error:?}",
+                self.members[index].nickname
+            ),
+        }
     }
 
     /// `None` while the node cannot read the document yet: it does not have it, or has it but has
@@ -615,12 +674,12 @@ impl Cluster {
     }
 
     /// Node `index` takes part in the drawer's blob inventory: it asks to mirror it.
-    pub(super) async fn mirror_blobs(&self, index: usize, drawer: &SharedDrawer) {
+    pub(super) async fn mirror_blobs(&self, index: usize, drawer: &DocId) {
         self.node(index)
             .blob_workers
             .mirrors
             .select_drawer(
-                drawer.id.clone(),
+                drawer.clone(),
                 Some(InventorySelection {
                     root: MetaRoot::Sensitive,
                     name: BLOBS.into(),
@@ -701,9 +760,9 @@ impl Cluster {
         notes
     }
 
-    fn running(&self) -> Vec<usize> {
+    pub(super) fn running(&self) -> Vec<usize> {
         (0..self.members.len())
-            .filter(|index| self.members[*index].running.is_some())
+            .filter(|index| self.is_running(*index))
             .collect()
     }
 
@@ -729,7 +788,7 @@ impl Cluster {
         blob: BlobId,
     ) -> Vec<u8> {
         tracing::info!(node = self.members[index].nickname, %blob, "STEP awaiting blob");
-        self.mirror_blobs(index, drawer).await;
+        self.mirror_blobs(index, &drawer.id).await;
         self.wait_blob_published(index, drawer, blob).await;
         tracing::info!(node = self.members[index].nickname, %blob, "STEP blob part present; awaiting coverage");
         let mirrors = &self.node(index).blob_workers.mirrors;

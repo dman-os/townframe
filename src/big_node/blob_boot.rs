@@ -22,6 +22,7 @@ pub(super) async fn boot(
     plugs_actor: &Actor,
     access: &Arc<DrawerAccess>,
     repo: &SharedBigRepo,
+    scope_key: Arc<str>,
     datum_set: Arc<big_cabinet::index::DatumSetStore>,
     stop: &mut StopToken,
 ) -> Res<(big_blobs::workers::BlobWorkers, DrawerId)> {
@@ -78,6 +79,7 @@ pub(super) async fn boot(
         datum_set,
         parts,
         repo: Arc::clone(repo),
+        scope_key,
         policy: access
             .subscribe_changes()
             .expect("drawer access publishes changes"),

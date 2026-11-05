@@ -38,6 +38,8 @@ mod network;
 mod nodule_wasm;
 mod peers;
 mod plugs;
+mod scale;
+mod stress;
 
 const NOTE: &str = "org.example.note";
 

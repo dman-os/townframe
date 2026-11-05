@@ -41,4 +41,5 @@ big_plugs_core = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
+rand.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

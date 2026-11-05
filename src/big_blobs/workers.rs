@@ -128,6 +128,9 @@ pub struct WorkerConfig {
     pub datum_set: Arc<DatumSetStore>,
     pub parts: SharedPartStore,
     pub repo: big_repo::SharedBigRepo,
+    /// The repo's `scope_key`: the permissions ingress keeps its cursor in the repo's database,
+    /// which repos with distinct scope keys may share.
+    pub scope_key: Arc<str>,
     pub policy: watch::Receiver<u64>,
     pub metadata_observer: big_cabinet::drawer::DrawerService,
 }
@@ -208,10 +211,12 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
     let permissions_parts = Arc::clone(&config.parts);
     let permissions_sql = config.sql.clone();
     let permissions_mirrors = mirrors.clone();
+    let permissions_scope = Arc::clone(&config.scope_key);
     tasks
         .spawn(async move {
             crate::permissions::run(
                 permissions_repo,
+                &permissions_scope,
                 permissions_parts,
                 permissions_sql,
                 permissions_queue,

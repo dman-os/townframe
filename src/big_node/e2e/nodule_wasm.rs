@@ -517,3 +517,93 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     );
     shutdown(node, stop).await;
 }
+
+/// A plug published on one node is installed and invoked on another (ADR 032 section 9). Alice
+/// publishes the nodule's plug in her registry and lets Bob read her registry drawer; the plug
+/// document and, through Bob's mirror of the drawer's blob inventory, the handler bytes sync to
+/// Bob. Bob admits the nodule from the version the synced document carries and invokes it through
+/// his dispatch once the synced bytes make it ready.
+///
+/// Bob does not import the document into his own registry (`ImportPlugDocument`): that needs his
+/// registry actor granted Alice's drawer, granting a drawer takes Admin on it, and Bob's drawers
+/// actor is refused an Admin capability on a drawer he joined from a peer (it holds no local grant
+/// there), even when Alice invited him at Admin.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plug_published_on_one_node_is_installed_and_invoked_on_another() {
+    use super::blobs::all_datums;
+    use super::harness::Cluster;
+    use super::harness::Topology;
+    use super::plugs::operator;
+    use super::plugs::publish;
+    use big_cabinet_core::doc::DatumRead;
+    use big_cabinet_core::drawer::DrawerAccess;
+    use big_plugs_core::protocol::GetPlug;
+    use big_plugs_core::registry::version_key;
+    use big_plugs_core::test_support::sign_as_example;
+
+    let bytes = guest_bytes();
+    let spec = caller();
+    let mut cluster = Cluster::boot(&["alice", "bob"]).await;
+    cluster.connect(Topology::Pair).await;
+    let (alice, bob) = (0, 1);
+
+    let publisher = cluster.node(alice);
+    put(publisher, &bytes).await;
+    let envelope = sign_as_example(plug(&spec, &bytes, &[]));
+    publish(publisher, operator(publisher), envelope.clone())
+        .await
+        .unwrap();
+    let document = publisher
+        .plugs
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(publisher).metadata(),
+            GetPlug {
+                id: spec.plug.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        .doc_id;
+    let registry = publisher.registry_drawer.clone();
+    cluster
+        .admit(alice, bob, &registry, DrawerAccess::Read)
+        .await;
+    cluster.mirror_blobs(bob, &registry).await;
+    cluster
+        .until(async |cluster| cluster.read_note(bob, &document).await.is_some())
+        .await;
+
+    let node = cluster.node(bob);
+    let synced = match all_datums(node, &document)
+        .await
+        .datums
+        .remove(&version_key(&envelope.version))
+    {
+        Some(DatumRead::Accepted { value, .. }) => serde_json::from_value(value).unwrap(),
+        other => panic!("the version synced unsettled: {other:?}"),
+    };
+    assert_eq!(synced, envelope);
+
+    admit(node, synced).await;
+    set_enabled(node, &spec, true).await;
+    // There is no signal for "reconciled" to subscribe to (see the late-bytes test above): the
+    // record is looked at until the synced handler bytes have made the nodule ready.
+    while record(node, &spec).await.readiness != Readiness::Ready {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(node.wasm.hosts(&spec.plug));
+    assert_eq!(
+        invoke(
+            node,
+            &spec.echo(),
+            json!({ "from": "bob" }),
+            Default::default()
+        )
+        .await
+        .unwrap()["input"],
+        json!({ "from": "bob" })
+    );
+    cluster.stop_all().await;
+}

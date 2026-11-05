@@ -37,7 +37,7 @@ use std::time::Duration;
 
 const PHOTOS: &str = example_plug!("photos");
 
-fn operator(node: &BigNode) -> Authorization {
+pub(super) fn operator(node: &BigNode) -> Authorization {
     Authorization::identity(node.authority.root)
 }
 
@@ -129,7 +129,7 @@ async fn get_version(
         .map_err(operation)
 }
 
-async fn publish(
+pub(super) async fn publish(
     node: &BigNode,
     authorization: Authorization,
     envelope: Plug,

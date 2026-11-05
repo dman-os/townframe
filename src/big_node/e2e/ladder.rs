@@ -77,7 +77,7 @@ async fn a_blob_added_while_connected_replicates() {
     let mut cluster = alice_and_bob().await;
     cluster.connect(Topology::Pair).await;
     let drawer = cluster.share_drawer(0, &[1]).await;
-    cluster.mirror_blobs(1, &drawer).await;
+    cluster.mirror_blobs(1, &drawer.id).await;
     let blob = cluster.add_blob(0, &drawer, b"a blob added live").await;
     assert_eq!(
         cluster.blob_arrives(1, &drawer, blob).await,
@@ -259,6 +259,43 @@ async fn three_nodes_in_a_mesh_converge() {
         .await;
     cluster.note_is(0, &note, "main", "edited by carol").await;
     cluster.note_is(1, &note, "main", "edited by carol").await;
+    cluster.converged(&note).await;
+    cluster.stop_all().await;
+}
+
+/// Bob writes a note while Alice, the drawer's owner, is away; Alice then admits Dave before she
+/// has seen the note; once everyone is linked, Dave must read it. Found by the seeded stress
+/// (`TEST_SEED=0xb160de5eed00001`, Bob's notes created during his partition, Dave admitted by
+/// Alice before she held them).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_admitted_by_an_owner_who_has_not_seen_a_note_reads_it() {
+    use big_cabinet_core::drawer::DrawerAccess;
+    let mut cluster = Cluster::boot(&["alice", "bob", "dave"]).await;
+    let (alice, bob, dave) = (0, 1, 2);
+    cluster.connect(Topology::Mesh).await;
+    let drawer = cluster.share_drawer(alice, &[bob]).await;
+    // Bob holds the drawer before he writes into it alone.
+    let first = cluster
+        .create_note(alice, &drawer, "written by alice")
+        .await;
+    cluster
+        .note_is(bob, &first, "main", "written by alice")
+        .await;
+
+    // Alice away: Bob writes, and Dave (not a member yet) is linked to Bob only.
+    cluster.stop(alice).await;
+    let note = cluster.create_note(bob, &drawer, "written by bob").await;
+    cluster.restart(alice).await;
+    cluster.reconnect(dave).await;
+    cluster
+        .admit(alice, dave, &drawer.id, DrawerAccess::Write)
+        .await;
+
+    cluster.reconnect(alice).await;
+    cluster
+        .note_is(alice, &note, "main", "written by bob")
+        .await;
+    cluster.note_is(dave, &note, "main", "written by bob").await;
     cluster.converged(&note).await;
     cluster.stop_all().await;
 }

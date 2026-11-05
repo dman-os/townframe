@@ -1600,6 +1600,7 @@ dependencies = [
  "iroh",
  "iroh-blobs",
  "keyring-core",
+ "rand 0.9.5",
  "secrets_rs",
  "serde_json",
  "service_utils_rs",

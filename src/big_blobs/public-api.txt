@@ -75,7 +75,7 @@ pub struct big_blobs::service::ImportedBlob  { info: BlobInfo }
 pub struct big_blobs::service::Storage  {  }
 pub struct big_blobs::sync::BlobSyncBackend  {  }
 pub struct big_blobs::workers::BlobWorkers  { projection: Arc < BlobProjection >, parts: SharedPartStore, mirrors: crate :: admission :: InventoryMirrors }
-pub struct big_blobs::workers::WorkerConfig  { sql: Database, service: Arc < BlobService >, docs: Client < DocsProtocol >, capability: CapId, metadata_capability: MetadataCapability, drawers: Vec < DocId >, datum_set: Arc < DatumSetStore >, parts: SharedPartStore, repo: big_repo :: SharedBigRepo, policy: watch :: Receiver < u64 >, metadata_observer: big_cabinet :: drawer :: DrawerService }
+pub struct big_blobs::workers::WorkerConfig  { sql: Database, service: Arc < BlobService >, docs: Client < DocsProtocol >, capability: CapId, metadata_capability: MetadataCapability, drawers: Vec < DocId >, datum_set: Arc < DatumSetStore >, parts: SharedPartStore, repo: big_repo :: SharedBigRepo, scope_key: Arc < str >, policy: watch :: Receiver < u64 >, metadata_observer: big_cabinet :: drawer :: DrawerService }
 pub type big_blobs::encrypt::Res< T > = eyre :: Result < T >
 pub type big_blobs::workers::MetadataCapability = Arc < dyn Fn (big_cabinet_core :: doc :: DocScope ,) -> BoxFuture < 'static , Result < CapId , ClientError < DocsError > > > + Send + Sync , >
 pub use big_blobs::admission :: Coverage

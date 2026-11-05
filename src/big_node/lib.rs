@@ -226,8 +226,7 @@ impl BigNode {
             let (dispatch_actor, dispatch_namespace) = open_actor(&authority, "dispatch").await?;
             let (blobs_actor, blobs_namespace) = open_actor(&authority, "blobs").await?;
 
-            let (repo, repo_stop) = BigRepo::boot(config.repo).await?;
-            stop.stages.push(Stage::Repo(repo_stop));
+            let repo = boot_repo(config.repo, &mut stop).await?;
             let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
                 storage: config.blob_storage,
                 sql: config.sql.clone(),
@@ -280,6 +279,7 @@ impl BigNode {
                 &plugs_actor,
                 &drawer_access,
                 &repo,
+                Arc::clone(&attachments.scope_key),
                 Arc::clone(&indexes.datum_set),
                 &mut stop,
             )
@@ -411,6 +411,13 @@ impl BigNode {
             provider_ids,
         }
     }
+}
+
+/// Boots the repo and stages its stop.
+async fn boot_repo(config: big_repo::Config, stop: &mut StopToken) -> Res<SharedBigRepo> {
+    let (repo, repo_stop) = BigRepo::boot(config).await?;
+    stop.stages.push(Stage::Repo(repo_stop));
+    Ok(repo)
 }
 
 #[expect(
