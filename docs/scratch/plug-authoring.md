@@ -20,7 +20,6 @@ Scope: How an author writes a plug with micros, nodules, or both. Drafted by the
 
 Items marked **(proposal)** await the operator's decision; the Clay session has raised them too.
 
-
 1. **Every name is a Rust type** carrying its NSID, declared once by a macro, never a string constant. This is T1's rule, applied to nodule operations too.
 2. **(proposal) One typed-call model on both sides.** A call is an `Operation` request type. Serving it means implementing `Handler<Op>`; calling it means `ctx.call(op)` or a typed `Client<Proto>`. Micro calls align on `Operation` (X3's recommendation).
 3. **No ambient authority in guests.** Every outgoing call carries the guest's own capability through a host-mediated path:
@@ -28,6 +27,8 @@ Items marked **(proposal)** await the operator's decision; the Clay session has 
    - for micros, **(proposal)** a Clay host import carrying the micro's capability. Micros never get raw wasi:http.
 4. **One plug manifest, generated from typed declarations.** There is no hand-written JSON, and the manifest carries its schemas (`Declaration::of` / `Universe::collect`).
 5. **Authors write the same code in native and guest form.** The kits hide WIT, streams, headers and envelopes.
+6. **Native backends are for tests and native resources, never a privileged path** (operator, 2026-11-06). Built-in micros must not bypass composition boundaries, and anything a built-in can do, a runtime-loaded package must be able to do. The same holds for the NDK's native backend: it exists to test nodule logic without wasm, never as a production shortcut.
+7. **Authority is per contract, not per guest.** A micro's grants are bound per requirement (capability bank and lazy capabilities, ADR 029/031). Collection read authority per micro will become query-scoped. The host import resolves the grant for the specific operation's contract, not one guest-wide capability. Nodules should follow the same rule: a nodule's outgoing call presents the grant for that operation, not a single nodule-wide capability.
 
 ## Crate layout per plug
 
@@ -45,7 +46,11 @@ The declarations crate replaces both `plug_<x>_manifest` and `micro_<x>_manifest
 // plug_tasks_decls
 clay_mdk::package!(Tasks { id: "org.example.tasks", version: 1, authority: AUTHORITY });
 
-#[macros::datum(authority = AUTHORITY)] pub struct Task { pub title: String, pub done: bool, /* extra */ }
+// Decls crates must build for wasm, so the datum macro has to target `datum_core`
+// (`#[macros::datum(runtime = ::datum_core, ..)]`); its default path, `::big_cabinet_core::datum`,
+// is not wasm-buildable. The kits' own declaration macros (`ndk::operation`, `clay_mdk::package!`, ...)
+// set that path, so authors never write it.
+#[clay_mdk::datum(authority = AUTHORITY)] pub struct Task { pub title: String, pub done: bool, /* extra */ }
 
 // A nodule operation: the request type is the contract.
 #[ndk::operation(authority = AUTHORITY, name = "complete", output = CompleteReceipt, error = TasksError)]
@@ -54,7 +59,13 @@ pub struct Complete { pub doc_id: DocId }
 pub fn manifest() -> big_plugs_core::Plug {
     PlugBuilder::<Tasks>::new()
         .nodule(|n| n.implements::<Complete>().requires::<docs::WriteDatums>())   // nodule contribution
-        .micro(|m| m.publishes::<TaskListView>().config::<TasksConfig>())          // micro contribution (T1 builder)
+        .micro(|m| m                                                                // micro contribution (T1 builder)
+            .declares::<TaskRows>()                              // a collection it owns: key, value and selector schemas
+            .requires::<settings::Sections>(Access::Write)       // another micro's contract, with access (read, write, call)
+            .contributes::<settings::Sections>("tasks", Section { /* row with attachments to its own endpoints */ })
+            .serves::<Complete>()                                // calls it serves
+            .publishes::<TaskListView>()                         // PLACEHOLDER: becomes the element-contract type (presentation redesign)
+            .config::<TasksConfig>())
         .datum::<Task>()
         .build()   // validates; carries Lexicons for every declared type
 }
@@ -88,16 +99,21 @@ ndk::export_nodule!(Tasks => [Complete]);
 - A native backend serves the same `Handler<Op>` impls in-process for tests: a nodule's logic can be unit-tested without wasm, as micros are tested on the native MDK backend.
 - Dispatch validates input and output against the operation's Lexicon (D31), so the NDK's typing is checked at the boundary too.
 
+A micro contribution is more than a view. It declares the collections it owns, requires other micros' contracts with an access level, contributes rows (with attachments, lazy endpoints to its own publications or calls) to other micros' collections, serves calls, publishes presentation, and takes config. `publishes::<View>()` above is a placeholder: the operator is redesigning the presentation boundary into per-mount instances with a web-component-shaped element contract (typed properties, events, slots and methods), and `View` will be that contract type.
+
 ## Shared service surface for micros (proposal)
 
-The same `Client<Proto>` calls should work in micro code, with the transport swapped for a Clay host import that carries the micro's capability: `ctx.docs().call(ReadDatums { .. })` is then identical in a micro and a nodule. The MDK's reactive layer (`Facet`, mirrors, `use_document_changes`, collections) stays micro-specific and sits on top. Whether micros keep the facet-based documents WIT, or move it onto these calls plus a reactive cache, is a Clay decision.
+The same `Client<Proto>` calls should work in micro code, with the transport swapped for a Clay host import that resolves the grant for the call's contract (principle 7): `ctx.docs().call(ReadDatums { .. })` is then identical in a micro and a nodule. Whether micros keep the facet-based documents WIT, or move it onto these calls plus a reactive layer, is a Clay decision. Two micro-specific constraints apply:
+
+- **Calls are async-only, and only in async contexts.** A micro's presentation exports (mount, dispatch) are synchronous and must never suspend; a synchronous export cannot await an async import, and the host faults a guest that tries (Clay lane E2). Typed calls therefore run only in activation, spawned tasks, and event handlers that spawn. `ctx.docs().call(..)` is async by type, and nothing offers a blocking form.
+- **Reactivity is subscription, not polling.** Micros render from push-based change streams (document events, collection mirrors). Request/response calls serve reads and writes; the reactive layer sits on top as a subscription over typed operations (a streaming operation or the existing event exports), never as a polling loop.
 
 ## Sequencing
 
 1. The Clay session lands the `datum_core` extraction (the pure move, re-exports from big_cabinet_core, and the macro's `runtime =` path) as its own small PR off main. The node session then rebases its datum and macros commits onto it (D32 `f7f1f89c`, `F64` `9e6ec666`, `DmetaRead` `87c25501`, `DatumEvent` `6d7c60f6`), relying on rename detection. The node session holds off further big_cabinet_core datum and macros edits until then.
 2. NDK v0: `Operation` declarations for nodules, `export_nodule!`, `Cx`, the wasi:http client transport, a native test backend, and `test_nodule_guest` ported to it as the first consumer.
 3. The plug manifest builder over typed declarations, plus `day plug build | publish | install | enable` porcelain.
-4. Micro typed calls over a capability-carrying host import (Clay).
+4. Micro typed calls over a capability-carrying host import (Clay). Depends on T1 steps 2-6 (typed declarations in clay_mdk).
 
 ## Open questions for the operator
 
