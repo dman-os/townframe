@@ -914,52 +914,66 @@ fn sdk_click(dom: &mut crate::GuestDom, target: dioxus_core::RenderTargetId) {
 }
 
 #[test]
-fn sdk_one_root_shares_state_across_targets_and_survives_all_mounts_closing() {
+fn sdk_each_mount_runs_its_own_render_scope_and_mounting_one_does_not_rerun_another() {
     use dioxus::prelude::*;
     use std::cell::Cell;
     use std::rc::Rc;
 
-    fn counter(initializations: Rc<Cell<usize>>) -> Element {
-        use_hook(move || initializations.set(initializations.get() + 1));
+    /// Runs once per render of a mount's scope, so it counts how often any mount re-rendered.
+    fn counter(renders: Rc<Cell<usize>>) -> Element {
+        renders.set(renders.get() + 1);
         let mut count = use_signal(|| 0_u64);
         rsx! { button { onclick: move |_| count += 1, "{count}" } }
     }
 
-    let initializations = Rc::new(Cell::new(0));
-    let mut dom = crate::GuestDom::new_with_props(counter, initializations.clone());
-    assert_eq!(initializations.get(), 1);
+    let renders = Rc::new(Cell::new(0));
+    let mut dom = crate::GuestDom::new_with_props(counter, renders.clone());
+    // No mount, no render: a presentation is rendered only for the surfaces that show it.
+    assert_eq!(renders.get(), 0);
     let first = dom.mount_target(100);
     dom.render().unwrap();
     assert_eq!(sdk_text_edits(&mut dom, first), ["0"]);
+    assert_eq!(renders.get(), 1);
     let second = dom.mount_target(101);
     dom.render().unwrap();
     assert!(sdk_text_edits(&mut dom, first).is_empty());
     assert_eq!(sdk_text_edits(&mut dom, second), ["0"]);
+    assert_eq!(renders.get(), 2, "mounting a surface renders only that surface");
 
+    // A hook in the render closure is the mount's own: a click moves only its mount.
     sdk_click(&mut dom, second);
-    assert_eq!(sdk_text_edits(&mut dom, first), ["1"]);
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
     assert_eq!(sdk_text_edits(&mut dom, second), ["1"]);
-    dom.unmount_target(100);
-    assert!(sdk_text_edits(&mut dom, second).is_empty());
-    assert!(!dom.edits.contains_key(&first));
-    let third = dom.mount_target(102);
-    dom.render().unwrap();
-    assert_eq!(sdk_text_edits(&mut dom, third), ["1"]);
-    sdk_click(&mut dom, third);
+    assert_eq!(renders.get(), 3);
+    sdk_click(&mut dom, second);
     assert_eq!(sdk_text_edits(&mut dom, second), ["2"]);
-    assert_eq!(sdk_text_edits(&mut dom, third), ["2"]);
+    sdk_click(&mut dom, first);
+    assert_eq!(sdk_text_edits(&mut dom, first), ["1"]);
+    assert!(sdk_text_edits(&mut dom, second).is_empty());
+    assert_eq!(renders.get(), 5);
 
     dom.unmount_target(101);
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
+    assert_eq!(renders.get(), 5, "unmounting a surface does not re-render its siblings");
+    assert!(!dom.edits.contains_key(&second));
+
+    // A fresh mount starts from fresh hook state, not the state a sibling or a predecessor left.
+    let third = dom.mount_target(102);
+    dom.render().unwrap();
+    assert_eq!(sdk_text_edits(&mut dom, third), ["0"]);
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
+    assert_eq!(renders.get(), 6);
+
+    dom.unmount_target(100);
     dom.unmount_target(102);
     assert!(dom.edits.is_empty());
     for identity in 103..111 {
         let target = dom.mount_target(identity);
         dom.render().unwrap();
-        assert_eq!(sdk_text_edits(&mut dom, target), ["2"]);
+        assert_eq!(sdk_text_edits(&mut dom, target), ["0"]);
         dom.unmount_target(identity);
         assert!(dom.edits.is_empty());
     }
-    assert_eq!(initializations.get(), 1);
 }
 
 #[test]
