@@ -7,3 +7,13 @@ pierre/test/trimPatchContext.test.ts|trims trim.patch fixture and matches snapsh
 pierre/test/createFileHeaderElement.test.ts|renders default renamed file header AST|prevName is not a FileContents field, so the input is the default case; asserted as equality with it
 pierre/test/createFileHeaderElement.test.ts|all four tests|toMatchSnapshot replaced by exact comparison with the dist output for the same input
 pierre/test/renderTokenLines.test.ts|crossing decorations / markers join the following range|JSDOM queries (querySelector, textContent, parentElement) became walks over the hast tree
+pierre/test/DiffHunksRender.test.ts|row-digest snapshots (buffers prepended to additions/deletions, unified, only additions, only deletions)|toMatchSnapshot of row digests pinned jsdiff's hunk boundaries; replaced by: every rendered line equals its source line, indexes strictly increase, buffer sizes equal the change-block surpluses
+pierre/test/DiffHunksRender.test.ts|renderFullHTML assertions (data-container-size, 'More unchanged context may be available', data-expand-index)|asserted on the hast (property presence, text content, `data-expand-index`) because hastToHtml is deferred
+pierre/test/DiffHunksRender.test.ts|mockDiffs.diffRowBufferTest.options|the field is absent from the corpus excerpt; default options apply
+pierre/test/annotations.test.ts|annotation placement snapshots (unified, split additions, split deletions)|replaced by the invariants asserted around them: each annotation row follows its own line and every annotation is found once
+pierre/test/annotations.test.ts|hard-coded demo line numbers (5, 8, 44, 15, 600)|fileOld/fileNew are absent; remapped to lines of the stand-in with the same roles (context 5, added 8, deleted old 302, collapsed 60, trailing 600)
+pierre/test/DiffHunksRendererVirtualization.test.ts|517/490 rows, 267/431 column lines, indices 3/184/57-106, window sizes 37/50|numbers of the demo geometry; derived from the stand-in diff (declared rows + auto-expanded gaps, the widest collapsed gap as hunk 3)
+pierre/test/DiffHunksRendererVirtualization.test.ts|expandHunk(3, 'both', Infinity)|a large finite count (usize has no infinity)
+pierre/test/patchFileRender.test.ts|patch digest and rendered-row snapshots|replaced by: one hunk, column line counts equal the hunk's counts, every rendered line is a patch line
+pierre/test/InjectedRowHooks.test.ts|UnresolvedFileHunksRenderer emits merge conflict action rows inline|deferred with the merge-conflict renderer
+pierre/test/renderTokenLines.test.ts|undecorated editor lines retain whitespace positions and empty-line placeholders|drives useTokenTransformer (editor token transformer), not ported

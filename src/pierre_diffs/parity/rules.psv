@@ -104,7 +104,7 @@ pierre/src/react/utils/useForceUpdate.ts|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useNextRenderData.ts|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useStableCallback.ts|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useUnresolvedFileInstance.ts|DEFER|-||DEFER (not needed for PR review v1)
-pierre/src/renderers/DiffHunksRenderer.ts|PENDING|S6||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/renderers/DiffHunksRenderer.ts|PORTED|S6|renderers/diff_hunks_renderer.rs;renderers/diff_hunks_renderer/process.rs|unified and split in one `process_diff_result`; protected hooks are the `DiffHunksRendererHooks` trait; caches, worker pool, edit session and async highlighting are dropped (see Dropped branches); oracle: hast JSON of processDiffResult/renderFullAST over the stub highlighter (render_s6.json)
 pierre/src/renderers/FileRenderer.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/renderers/UnresolvedFileHunksRenderer.ts|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/shiki-stream/index.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
@@ -120,7 +120,7 @@ pierre/src/ssr/renderHTML.ts|OUT|-||OUT (framework adapter)
 pierre/src/string-import.d.ts|OUT|-||OUT
 pierre/src/style.css|PENDING|S8||PORT as stylesheet adapted to Blitz capabilities
 pierre/src/types.ts|PORTED|S1|types/patch.rs;types/options.rs;types/view.rs;types/conflict.rs;types/lines.rs;types/layout.rs|pure-data types; callbacks, DOM-element and hast-bearing types listed in the file header as deferred or out
-pierre/src/utils/annotationHelpers.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/annotationHelpers.ts|OUT|S6||type guards that tell `LineAnnotation` from `DiffLineAnnotation` by a `side` key; the port has two typed structs (and `AnnotationName`), so there is nothing to discriminate
 pierre/src/utils/appendItems.ts|OUT|-||engine argument-count workaround for push(...items); Vec::extend (noted in trim_patch_context.rs)
 pierre/src/utils/applyLineTextWithNewline.ts|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areDiffLineAnnotationsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
@@ -199,7 +199,7 @@ pierre/src/utils/hostTheme.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/hydratePartialDiff.ts|PORTED|S4|utils/hydrate_partial_diff.rs|exact oracle parity (layout.json) plus ported upstream tests
 pierre/src/utils/includesFileAnnotations.ts|PORTED|S5|utils/render/includes_file_annotations.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/isDefaultRenderRange.ts|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/isDiffPlainText.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/isDiffPlainText.ts|PORTED|S6|utils/is_diff_plain_text.rs|none beyond the language
 pierre/src/utils/isFilePlainText.ts|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/isGutterUtilityPath.ts|PENDING|-||port or replace per slice notes (DOM helper)
 pierre/src/utils/isStyleNode.ts|PENDING|-||port or replace per slice notes (DOM helper)
@@ -263,7 +263,7 @@ pierre/test/e2e/*|OUT|-||Playwright browser e2e against upstream's demo app; rep
 pierre/test/__snapshots__/*|PENDING|-||snapshot follows the test file it is named after; ported with it
 pierre/test/README.md|OUT|-||upstream test instructions (bun)
 pierre/test/domHarness.ts|PENDING|S10||jsdom harness; oracle-side only, replaced by Rust state assertions
-pierre/test/testUtils.ts|PORTED|S3|test_utils.rs|hunk-verification and digest helpers ported; hast helpers arrive with the renderer (S6)
+pierre/test/testUtils.ts|PORTED|S6|test_utils.rs;test_utils/hast.rs|hunk-verification and digest helpers (S3); hast helpers (`projectColumn`, `rowDigests`, `annotationProjection`, ...) and the fixture stand-ins (S6)
 pierre/test/mocks.ts|PORTED|S0|oracle/corpus/mocks.mjs|fixtures excerpted into the oracle corpus (filesystem-backed fixtures dropped)
 pierre/test/file.patch|PORTED|S0|oracle/corpus/file.patch|verbatim oracle corpus file
 pierre/test/trim.patch|PORTED|S0|oracle/corpus/trim.patch|verbatim oracle corpus file
@@ -278,10 +278,14 @@ pierre/test/Unresolved*|DEFER|-||merge-conflict UI
 pierre/test/*MergeConflict*|DEFER|-||merge-conflict UI
 pierre/test/diffAcceptRejectHunk*|DEFER|-||merge-conflict / edit flow
 pierre/test/hastToHtml*|DEFER|S5||tests compare hastToHtml with hast-util-to-html over rendered files (FileRenderer, Shiki); deferred with the module
-pierre/test/DiffHunksRender*|PENDING|S6||
-pierre/test/annotation*|PENDING|S6||
-pierre/test/patchFileRender*|PENDING|S6||
-pierre/test/InjectedRowHooks*|PENDING|S6||
+pierre/test/DiffHunksRender.test.ts|PORTED|S6|renderers/diff_hunks_renderer_test.rs|all sixteen cases; row-digest snapshots became source-text invariants, renderFullHTML assertions became hast assertions
+pierre/test/DiffHunksRendererVirtualization.test.ts|PORTED|S6|renderers/virtualization_test.rs|demo-geometry numbers derived from the stand-in fixture; windowed renders are differential against the full render; 4.5/4.6/5.x are one table of windows
+pierre/test/DiffHunksRendererLanguages.test.ts|DEFER|S7||language loading is the highlighter's (Shiki/@pierre/highlights); no language loader exists behind the stub
+pierre/test/DiffHunksRendererRecompute.test.ts|OUT|-||edit-session hunk recompute (edit mode is out of scope for v1)
+pierre/test/annotationHelpers.test.ts|OUT|S6||see utils/annotationHelpers.ts: typed annotation structs
+pierre/test/annotations.test.ts|PORTED|S6|renderers/annotations_test.rs|all eleven cases; demo-fixture line numbers remapped to the stand-in; placement snapshots became invariants
+pierre/test/InjectedRowHooks.test.ts|PORTED|S6|renderers/injected_row_hooks_test.rs|two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer
+pierre/test/patchFileRender.test.ts|PORTED|S6|renderers/patch_file_render_test.rs|digest snapshots became invariants over the parsed patch and the rendered rows
 pierre/test/FileRenderer*|PENDING|S6||
 pierre/test/CodeView*|PENDING|S12||
 pierre/test/FileDiff*|PENDING|S9||

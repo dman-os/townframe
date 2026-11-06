@@ -118,6 +118,15 @@ for (const [testFile, title, conversion] of divergences) {
   markdown += `| \`${testFile}\` | ${title} | ${conversion} |\n`;
 }
 
+// Upstream members and branches the port leaves out on purpose (caches, the
+// worker pool, the edit session, ...), kept by hand in parity/dropped.psv as
+// `upstream file|dropped member|reason`.
+const dropped = readPsv("parity/dropped.psv");
+markdown += `\n## Dropped branches (${dropped.length})\n\n| upstream file | dropped | reason |\n|---|---|---|\n`;
+for (const [file, member, reason] of dropped) {
+  markdown += `| \`${file}\` | ${member.replaceAll("|", "\\|")} | ${reason.replaceAll("|", "\\|")} |\n`;
+}
+
 const outputs = { "parity/matrix.psv": psv, "PARITY.md": markdown };
 for (const [name, text] of Object.entries(outputs)) {
   const path = join(crateDir, name);

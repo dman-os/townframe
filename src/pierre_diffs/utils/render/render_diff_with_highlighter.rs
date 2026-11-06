@@ -69,6 +69,10 @@ pub fn render_diff_with_highlighter(
     options: &RenderDiffOptions,
     plain_text: &ForceDiffPlainTextOptions,
 ) -> ThemedDiffResult {
+    assert!(
+        !options.use_token_transformer,
+        "useTokenTransformer (the editor token transformer) is not ported"
+    );
     let force_plain_text = plain_text.force_plain_text;
     let (starting_line, total_lines) = if force_plain_text {
         (

@@ -15,6 +15,7 @@ pub mod get_line_ending_type;
 pub mod get_singular_patch;
 pub mod get_total_line_count_from_hunks;
 pub mod hydrate_partial_diff;
+pub mod is_diff_plain_text;
 pub mod iterate_over_diff;
 pub mod parse_diff_decorations;
 pub mod parse_diff_from_file;
