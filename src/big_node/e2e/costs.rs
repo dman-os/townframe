@@ -98,13 +98,13 @@ extern "C" fn instr_frame(context: *mut std::ffi::c_void, arg: *mut std::ffi::c_
 fn instr_sample(_size: usize) { // INSTR
     let phase = INSTR_PHASE.load(Relaxed); // INSTR
     if phase == 0 { return; } // INSTR
-    if INSTR_ACC.fetch_add(1, Relaxed) % INSTR_STRIDE.load(Relaxed) != 0 { return; } // INSTR
+    if !INSTR_ACC.fetch_add(1, Relaxed).is_multiple_of(INSTR_STRIDE.load(Relaxed)) { return; } // INSTR
     if INSTR_GUARD.try_with(|guard| guard.replace(true)).unwrap_or(true) { return; } // INSTR
     // Raw libgcc unwind: no std backtrace lock, so a thread holding the ld.so loader lock cannot deadlock against us. // INSTR
     let mut frames = ([0usize; 40], 0usize); // INSTR
     unsafe { _Unwind_Backtrace(instr_frame, &mut frames as *mut _ as *mut std::ffi::c_void) }; // INSTR
     if let Ok(mut samples) = INSTR_SAMPLES.try_lock() { samples.push((phase, frames.0)); } // INSTR
-    let _ = INSTR_GUARD.try_with(|guard| guard.set(false)); // INSTR
+    INSTR_GUARD.try_with(|guard| guard.set(false)).ok(); // INSTR (fails only during TLS teardown)
 } // INSTR
 fn instr_dump() { // INSTR
     INSTR_PHASE.store(0, Relaxed); // INSTR
