@@ -4061,6 +4061,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "day_cli"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_dispatch",
+ "big_dispatch_core",
+ "big_node",
+ "big_nodule_core",
+ "big_repo",
+ "clap",
+ "clap_complete",
+ "data-encoding",
+ "directories",
+ "ed25519-dalek 2.2.0",
+ "http",
+ "libc",
+ "rand 0.9.5",
+ "secrets_rs",
+ "serde",
+ "serde_json",
+ "service_utils_rs",
+ "sqlite_rs",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "trycmd",
+ "utils_rs",
+]
+
+[[package]]
 name = "daybook_cli"
 version = "0.1.0"
 dependencies = [
