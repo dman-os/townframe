@@ -222,6 +222,21 @@ async fn tier3_relay_replication() -> crate::Res<()> {
     .await?;
     assert_eq!(read_title(&b_doc).await, "relay-doc");
 
+    // Materialising on the reader mints a fresh CGKA op on the reader (and prekey
+    // events); it only reaches the owner by travelling reader -> middle -> owner.
+    // Without these explicit hops the comparison below races that background
+    // propagation (INSTR run: the middle node ingested the op after the assertion
+    // had already compared and the owner hop never started).
+    topo.topo_conn(2, 1).sync_keyhive_with_peer().await?;
+    topo.topo_conn(1, 0).sync_keyhive_with_peer().await?;
+    // The owner admitting the reader's new CGKA op makes its causal-checkpoint
+    // worker mint a checkpoint commit for the new epoch (a second sedimentree
+    // head). Let that settle, then carry the checkpoint down the line again;
+    // the one-shot pulls above ran before it existed.
+    topo.topo_node(0).repo.wait_for_quiescence(None).await?;
+    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id.clone()).await?;
+    topo.topo_conn(2, 1).sync_doc_with_peer(doc_id.clone()).await?;
+
     // Tier 0: sedimentree parity across all three nodes.
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
     kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
@@ -388,6 +403,21 @@ async fn tier3_line_replication() -> crate::Res<()> {
     )
     .await?;
     assert_eq!(read_title(&c_doc).await, "line-doc");
+
+    // Materialising on the reader mints a fresh CGKA op on the reader (and prekey
+    // events); it only reaches the owner by travelling reader -> middle -> owner.
+    // Without these explicit hops the comparison below races that background
+    // propagation (INSTR run: the middle node ingested the op after the assertion
+    // had already compared and the owner hop never started).
+    topo.topo_conn(2, 1).sync_keyhive_with_peer().await?;
+    topo.topo_conn(1, 0).sync_keyhive_with_peer().await?;
+    // The owner admitting the reader's new CGKA op makes its causal-checkpoint
+    // worker mint a checkpoint commit for the new epoch (a second sedimentree
+    // head). Let that settle, then carry the checkpoint down the line again;
+    // the one-shot pulls above ran before it existed.
+    topo.topo_node(0).repo.wait_for_quiescence(None).await?;
+    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id.clone()).await?;
+    topo.topo_conn(2, 1).sync_doc_with_peer(doc_id.clone()).await?;
 
     // Tier 0: sedimentree parity across all three nodes.
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
