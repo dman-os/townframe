@@ -1,9 +1,20 @@
 # Wflow replacement design ledger
 
-Status: Replacement integrated; admission/receipt corrections and focused verification in progress. No release approval yet.
+Status: Replacement implementation, behavioral acceptance, source checks, and optimized benchmark complete. Formal proof remains blocked; no proof or unrestricted crash-safety approval claimed.
 Owner: operator + wflow replacement track
 Updated: 2026-11-06
 Scope: Full replacement of the main-branch wflow engine. The current `daybook_core` consumer and the old partition reducer/effect-worker path are legacy and may be broken or deleted rather than preserved through compatibility shims.
+
+## Current checkpoint — read this before resuming
+
+- **Phase:** implementation/behavioral closeout complete; formal-tooling limitation remains explicitly open.
+- **Code:** b6b38804; production behavior last changed at 37588da3 (Wasm timer-delivery correction).
+- **Passed:** 39 storage/plugin/runtime tests; 15 Daybook dispatch/receipt tests; real OCI-backed admission recovery; real native/Wasm effect/sleep/receive, permanent cancellation, and external-counter replay conformance; affected all-target clippy; both declared Wasm SDK contracts; rustfmt, source guardrails, API contracts, doctor, and SQL generation checks.
+- **Next action:** operator disposition of the documented Apalache tooling limit if formal model-checker approval is required. Do not restart implementation or repeat passed suites without a new requirement or invalidating change.
+- **Runs:** none active. Final benchmark at b6b38804 exited 0: mothership `/tmp/wflow-final-bench.log` and `/tmp/wflow-final-bench.exit`. Behavioral acceptance at 37588da3 exited 0: `/tmp/wflow-remote-accept.log`.
+- **Remaining limitation:** Apalache 0.62.1 rejects the approximately 22.5 MB compiled IR at its strict-JSON string limit. Bounded simulation/Rust conformance are evidence, not an Apalache proof. Application dependency-release/reply outbox follow-ups remain explicitly outside the engine's crash-safety claim.
+- **Resources:** builds on the authorized mothership checkout/external target, eight jobs. Local Cargo only through `./x/agent-build.ts`; avoid local large builds. Never run `nix flake check` for this task. Subagents, if authorized, only `openai-codex/gpt-5.6-luna:high`.
+- **Sequencing:** follow AGENTS.md's implementation/review-first, consolidated-verification methodology. Audit sections and fleet events below preserve design history; this checkpoint and the lane table carry the current next action.
 
 ## 0. Purpose
 
@@ -35,16 +46,16 @@ Passing tests or a matching Quint model prove consistency with the encoded behav
 
 ### 3.1 Surfaces to compare with main
 
-- [ ] Workflow programming model: effects, replay, waits, messages, defers, and error classification.
-- [ ] Commit and publication ordering: durable transition, indexes, authority publication, and execution intents.
-- [ ] Persistence contract: log frontier, snapshots, compaction, range reads, and recovery failures.
-- [ ] Execution lifecycle: warm sessions, cold replay, worker loss, lease fencing, and host failures.
-- [ ] Cancellation: cooperative cleanup, in-flight effects, hard termination, and saturation behavior.
-- [ ] Retry and restart policy: defaults, progress definition, deadlines, jitter, and exhaustion.
-- [ ] Terminal state: receipts, idempotency, result lookup, retention, expiry, and key reuse.
-- [ ] Native/Wasm parity and the common host/session abstraction.
-- [ ] Formal model boundary: properties worth modeling versus accidental implementation policy.
-- [ ] Production integration and deletion of the legacy engine.
+- [x] Workflow programming model: effects, replay, waits, messages, defers, and error classification.
+- [x] Commit and publication ordering: durable transition, indexes, authority publication, and execution intents.
+- [x] Persistence contract: log frontier, snapshots, compaction, range reads, and recovery failures.
+- [x] Execution lifecycle: warm sessions, cold replay, worker loss, lease fencing, and host failures.
+- [x] Cancellation: cooperative cleanup, in-flight effects, hard termination, and saturation behavior.
+- [x] Retry and restart policy: defaults, progress definition, deadlines, jitter, and exhaustion.
+- [x] Terminal state: receipts, idempotency, result lookup, retention, expiry, and key reuse.
+- [x] Native/Wasm parity and the common host/session abstraction.
+- [x] Formal model boundary: properties worth modeling versus accidental implementation policy.
+- [x] Production integration and deletion of the legacy engine.
 
 ### 3.2 Main-branch baseline and branch disposition
 
@@ -371,9 +382,9 @@ Verification policy for the implementation waves: workers run only narrow compil
 | D-storage | Bounded journal plus automatic runtime snapshot/compaction | journal `0887fb98`; cadence `0f88e366` | merged | D1/D2 accepted | production facade and integrated verification |
 | E-formal | Remove rejected actions and align model vocabulary with accepted authority | Quint authority model | merged as `5351dbc0` | Handoff accepted with Apalache blocker | run Rust conformance in verification wave |
 | F-cutover | Integrate facade/caller, remove dual hosts, legacy engine, and harness | F1-F4 `03607105`..`7bf296d0`; F5 `adb348a8` | merged | production replacement/deletion complete | fresh integrated review |
-| V-review | Fresh-context review of integrated diff | reports `e52999ad`, `a6f2d4b3` | read-only Luna 5.6 high | Source gate accepted with documented application-bookkeeping follow-ups | `86a10b87`: OK with follow-up notes; verification still required |
-| V-verify | Clippy, focused tests, fault/recovery matrix, native/Wasm conformance, formal checks, guardrails | integrated tree | parent; long runs on mothership | Behavioral gates pass: 39 storage/plugin/runtime, 15 Daybook, real admission recovery, real native/Wasm conformance, declared SDK Wasm contracts; Apalache proof blocked by transport limit | Final source checks after benchmark addition |
-| V-bench | Phase-5 benchmark and closeout | integrated tree | parent on mothership | Native memory-store lifecycle benchmark implemented after behavioral acceptance | Optimized benchmark, final source checks, evidence closeout |
+| V-review | Fresh-context review of integrated diff | reports `e52999ad`, `a6f2d4b3` | read-only Luna 5.6 high | Source gate accepted with documented application-bookkeeping follow-ups | `86a10b87`: OK with follow-up notes; behavioral verification subsequently passed |
+| V-verify | Clippy, focused tests, fault/recovery matrix, native/Wasm conformance, formal checks, guardrails | integrated tree | parent; long runs on mothership | Behavioral gates, affected clippy, SDK target contracts, formatting, guardrails/API/doctor, and SQL generation pass | Complete except explicitly blocked Apalache proof |
+| V-bench | Phase-5 benchmark and closeout | integrated tree | parent on mothership | Optimized benchmark passes at b6b38804; native memory lifecycle 32.9k / 26.0k / 12.4k jobs/s for 0/1/8 effects | Complete; scope and hardware recorded below |
 
 ### Fleet events
 
@@ -423,3 +434,4 @@ Verification policy for the implementation waves: workers run only narrow compil
 - 2026-11-06: At 94160c76, Daybook all-target/all-feature clippy and the real OCI-backed admission/recovery regression pass (21.17s); the actual test_wflows component builds for wasm32-wasip3. Conformance then failed deterministically on Wasm sleep: the authority delivers a durable timer value, while the Wasm host incorrectly accepted only Continue. Native sleep already ignores the unobserved wait value. Corrected the Wasm host to accept successful wait resolution without exposing its value; persist-step continuation validation remains strict. The conformance failure is the negative regression evidence. Resume only affected plugin/workflow clippy, conformance, and outstanding SDK target checks.
 - 2026-11-06: At 37588da3 the consolidated remaining acceptance run exits 0: affected plugin/workflow all-target clippy, real native/Wasm conformance including permanent cancellation and external-counter lost-continuation recovery, and both declared wasm32-wasip3 SDK checks pass. Behavioral acceptance is complete. Added a dependency-free Cargo benchmark for native memory-store lifecycle batches (64 jobs, 0/1/8 effects, 16 measured batches after warmup), including default maintenance, receipt validation, and graceful snapshot. It explicitly makes no SQLite, Wasm-instantiation, or old-engine comparison claim. Formal diagnosis: compiled Quint IR is about 22.5 MB with largest individual IR string only 51 characters; this points to transport encoding of the whole IR rather than a giant model identifier; no workaround has been validated. Apalache proof remains unclaimed; bounded simulations and Rust conformance remain the available formal evidence.
 - 2026-11-06: Final batched source checks pass (rustfmt, zero guardrail diagnostics, all API contracts, doctor, all SQL generation checks). Isolated benchmark-package all-target clippy exposed that the lifecycle test's paused clock relied on another package enabling Tokio test-util. Declared test-util explicitly as a wflow_tokio dev-dependency; production features and package versions are unchanged. Resume that isolated check and optimized benchmark, not completed behavioral suites.
+- 2026-11-06: Benchmark/closeout complete at b6b38804, exit 0. Isolated wflow_tokio all-target/all-feature clippy passes. Optimized native memory-store benchmark on mothership (aarch64, 8 Neoverse-N1 CPUs), 64 jobs/batch ×16 measured batches after warmup: 0 effects/job = 31.116 ms / 32,909.3 jobs/s; 1 effect/job = 39.317 ms / 26,044.5 jobs/s; 8 effects/job = 82.363 ms / 12,432.8 jobs/s / 99,462.6 effects/s. Measurements include runtime/journal lifecycle, default maintenance, validated receipts/results, and graceful snapshot; no SQLite, Wasm-instantiation, comparative speedup, percentile, or power-loss durability claim. All planned behavioral/source acceptance gates are complete; Apalache proof remains blocked as documented. No build remains active.
