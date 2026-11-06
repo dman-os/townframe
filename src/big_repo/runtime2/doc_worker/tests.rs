@@ -1102,3 +1102,26 @@ async fn no_commit_attempted_means_only_drop_can_break_a_bundle() -> Res<()> {
     hub_ack.abort();
     Ok(())
 }
+
+/// A keyed task that is replaced or cancelled upstream drops its reply
+/// receiver while its `AcquireHandle` is still queued. The worker must notice
+/// before the hydrate-and-decrypt load: pre-fix a failing stress run did 8k
+/// such loads whose results nobody received.
+#[tokio::test]
+async fn acquire_handle_for_a_departed_caller_skips_the_load() -> Res<()> {
+    let (mut worker, hub_ack) = ready_recovery_worker();
+    let (resp, rx) = futures::channel::oneshot::channel();
+    drop(rx);
+    worker
+        .acquire_handle(resp, crate::runtime2::DocLeaseKind::Internal)
+        .await?;
+    assert!(
+        matches!(worker.state, DocState::Unloaded),
+        "a departed caller must not trigger the load"
+    );
+    // The skipped request lost nothing: the next requester performs the load.
+    let _handle = acquire_ready(&mut worker).await?;
+    assert!(matches!(worker.state, DocState::Live(_)));
+    hub_ack.abort();
+    Ok(())
+}

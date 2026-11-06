@@ -605,6 +605,14 @@ impl<F: FutureForm> DocWorker2<F> {
         resp: futures::channel::oneshot::Sender<eyre::Result<DocLookup<LiveDocHandle>>>,
         lease_kind: crate::runtime2::DocLeaseKind,
     ) -> eyre::Result<()> {
+        // The requester may have given up while this message sat in the mailbox (a
+        // keyed task replaced or cancelled upstream drops its reply receiver). The
+        // load below is a full hydrate and decrypt walk that nobody would receive,
+        // and skipping it loses nothing: the state stays as it was and the next
+        // requester performs the load.
+        if resp.is_canceled() {
+            return Ok(());
+        }
         let result = match &self.state {
             // - `Live(bundle)` → return `Ready` with a fresh caller lease. A
             //   broken bundle — teardown, eviction, or a rejected commit; the bundle

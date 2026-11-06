@@ -216,6 +216,8 @@ pub fn spawn_automerge_frontier_worker(
                 pending_part_sources: HashMap::new(),
                 outbox: Outbox::default(),
                 wake_docs: HashSet::new(),
+                publishing: HashSet::new(),
+                dirty_docs: HashSet::new(),
                 timer,
                 clock,
             };
@@ -544,6 +546,17 @@ struct Worker<'a> {
     /// effect they cover.
     outbox: Outbox<Cmd, Option<SourceCursor>>,
     wake_docs: HashSet<crate::DocumentId>,
+    /// Documents whose publish task has been handed to the scheduler and has not
+    /// completed (or been parked behind a deferral backoff). While a document is
+    /// here a new event for it must not `replace` its task: that aborts the
+    /// in-flight publish after the doc worker has already queued (or started) its
+    /// load-and-decrypt, which the abort cannot recall, so a burst of rows paid one
+    /// full load per row for results nobody received.
+    publishing: HashSet<crate::DocumentId>,
+    /// Documents that saw a newer event while `publishing`. Their completion
+    /// re-wakes them, so a burst coalesces into the running publish plus exactly
+    /// one follow-up, and that follow-up reads the newest state.
+    dirty_docs: HashSet<crate::DocumentId>,
     /// The loop's wait and its notion of "now" are both injected so a test can
     /// own them and drive the timer arm without wall clock (see
     /// [`crate::runtime2::tasks::manual_time`]). They must be injected together:
@@ -747,6 +760,13 @@ impl<'a> Worker<'a> {
             pending_part_count = self.pending_parts.get(&doc_id).map_or(0, |parts| parts.len()),
             "AFW preparing frontier publish"
         );
+        // Coalesce into the running publish instead of replacing it; its completion
+        // re-wakes the doc (see `dirty_docs`). The pending cursors were already
+        // recorded by the caller, so the follow-up's task carries the newest ones.
+        if !self.publishing.insert(doc_id.clone()) {
+            self.dirty_docs.insert(doc_id);
+            return Ok(());
+        }
         let task = self.publish_task(doc_id.clone());
         self.start_task(FrontierKey::Document(doc_id), task)
     }
@@ -852,6 +872,8 @@ impl<'a> Worker<'a> {
                     self.pending_parts.remove(&doc_id);
                     self.pending_part_sources.remove(&doc_id);
                     if !self.pending_admission.contains_key(&doc_id) {
+                        self.publishing.remove(&doc_id);
+                        self.dirty_docs.remove(&doc_id);
                         self.tasks.cancel(FrontierKey::Document(doc_id.clone()));
                     }
                 }
@@ -897,6 +919,15 @@ impl<'a> Worker<'a> {
         // completion the retry bookkeeping of the attempt it just ran, which is
         // what a re-arm needs to advance its backoff.
         let retry = completion.retry;
+        let FrontierTask::Publish { doc_id, .. } = &completion.command;
+        self.publishing.remove(doc_id);
+        // A deferral re-arms with the newest pending cursors (`retry_publish`), so
+        // it already covers whatever made the doc dirty; every other completion
+        // leaves newer work unpublished and must re-run.
+        let deferred = matches!(completion.result, Ok(ConcurrentTaskOutput::Deferred));
+        if self.dirty_docs.remove(doc_id) && !deferred {
+            self.wake_docs.insert(doc_id.clone());
+        }
         match (completion.command, completion.result) {
             (
                 FrontierTask::Publish {

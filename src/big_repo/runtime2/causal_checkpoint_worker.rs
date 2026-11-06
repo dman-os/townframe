@@ -27,6 +27,7 @@ use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::identifier::Identifier;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const CONCURRENT_TASK_BUDGET: usize = 64;
@@ -133,6 +134,8 @@ pub fn spawn_causal_checkpoint_worker(
                 timer,
                 clock,
                 pending_admission: HashMap::new(),
+                covering: HashSet::new(),
+                dirty_docs: HashSet::new(),
                 reach,
             };
             worker.machine_loop().await
@@ -215,6 +218,13 @@ struct Worker<'a> {
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
     clock: Arc<dyn crate::runtime2::Clock>,
     pending_admission: HashMap<crate::DocumentId, SourceCursor>,
+    /// Documents with an `EnsureCoverage` task in flight. A newer row for one of them
+    /// must not `replace` the task: the abort cannot recall the doc worker's queued
+    /// load, so every row used to cost a full load whose result was discarded.
+    covering: HashSet<crate::DocumentId>,
+    /// Documents that saw a newer row while `covering`; completion re-runs them once
+    /// with the newest pending source, so a burst is the running task plus one follow-up.
+    dirty_docs: HashSet<crate::DocumentId>,
     /// Reverse membership, seeded from the hive when the worker starts and extended by
     /// every admitted delegation, so a row's affected documents come from walking up from
     /// its entry point instead of scanning every document in the hive.
@@ -328,6 +338,11 @@ impl<'a> Worker<'a> {
                         }
                     })
                     .or_insert(source.clone());
+                if !self.covering.insert(doc_id.clone()) {
+                    // Coalesce into the running task; its completion starts the follow-up.
+                    self.dirty_docs.insert(doc_id);
+                    return Ok(());
+                }
                 self.start_task(
                     FrontierKey::Document(doc_id.clone()),
                     Task::EnsureCoverage { doc_id, source },
@@ -414,6 +429,23 @@ impl<'a> Worker<'a> {
                     pending.key == source.key && pending.cursor == source.cursor
                 }) {
                     self.pending_admission.remove(&doc_id);
+                }
+                self.covering.remove(&doc_id);
+                // Rows admitted while the task ran: coverage reads the keyhive's state at
+                // run time, so one follow-up under the newest pending source covers all
+                // of them. A row whose cursor the finished task already acknowledged
+                // leaves no pending source, and then nothing newer is outstanding.
+                if self.dirty_docs.remove(&doc_id)
+                    && let Some(source) = self.pending_admission.get(&doc_id).cloned()
+                {
+                    self.start_task(
+                        FrontierKey::Document(doc_id.clone()),
+                        Task::EnsureCoverage {
+                            doc_id: doc_id.clone(),
+                            source,
+                        },
+                    )?;
+                    self.covering.insert(doc_id);
                 }
             }
             (Task::ReconcileReaders { source, .. }, Ok(TaskOutput::Reconciled)) => {
