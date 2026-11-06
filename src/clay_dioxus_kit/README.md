@@ -95,9 +95,11 @@ the rest are enforced by review.
 - **KIT-051** Decorative graphics are `aria-hidden`. A covered pane (the list under compact
   details) is `aria-hidden` too.
 - **KIT-052** Activation uses native `<button>`s. A widget that needs `tabindex` takes an opt-in
-  prop (`Split::keyboard`), because setting `tabindex` panics Blitz; the web build opts in and
-  carries the keyboard tests. Focus is neither trapped nor restored anywhere yet (Blitz has no
-  focus API to build on); `Sheet` is not web-shippable until it is.
+  prop (`Split::keyboard`); the web build opts in and carries the keyboard tests. (The Blitz
+  `tabindex` panic that motivated the gate is fixed in the pinned dioxus fork; K7 ledger notes.)
+  Focus is neither trapped nor restored anywhere yet; Blitz has `set_focus` and Tab traversal but
+  no `inert` and no focus events for programmatic focus (K7 ledger notes); `Sheet` is not
+  web-shippable until it is.
 - **KIT-053** A headless part uses only the tags, attributes and style properties a Wasm guest's
   tree may name (`clay_surface::render`'s vocabulary). Checked: the test harness mirrors the lists
   and panics on anything else. Inline `style` strings are passed whole and are not checked
@@ -142,7 +144,7 @@ named after it.
   own). It is always shown, dims with the `scrim` colour role (a fixed 32% black, so it darkens a
   light and a dark theme alike, where `text` at low opacity would lighten a dark one), and a press
   on it calls `on_dismiss`, the same as Escape. Reason: dismissal by tapping outside is the one
-  path every renderer delivers (Escape needs a focused element, which Blitz cannot give). The
+  path every renderer delivers (Escape needs a focused element; Blitz can focus one via `set_focus`, but nothing focuses a freshly opened sheet yet). The
   consequence for sizing: no panel covers its overlay (`KIT-104`), or the scrim could not be
   reached. A skin takes the shared `SCRIM` classes and may not restyle them.
 - **KIT-104** Sheet size follows the width class (`KIT-101`): a bottom sheet is 5/6 of the host
