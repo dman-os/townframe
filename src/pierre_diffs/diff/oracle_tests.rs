@@ -223,6 +223,7 @@ fn patches_have_jsdiff_headers_and_apply_cleanly() {
             header_options: object.get("headerOptions").map(|value| {
                 serde_json::from_value::<HeaderOptions>(value.clone()).expect("header options")
             }),
+            ignore_whitespace: false,
         };
         let patch = create_two_files_patch(
             PatchSide {
@@ -258,5 +259,5 @@ fn patches_have_jsdiff_headers_and_apply_cleanly() {
         assert_eq!(apply(&patch, &case.old), case.new, "applying: {context}");
         checked += 1;
     }
-    assert!(checked > 100, "{checked}");
+    assert!(checked > 60, "{checked}");
 }

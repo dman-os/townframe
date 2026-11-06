@@ -21,8 +21,10 @@ use similar::ChangeTag;
 use similar::DiffTag;
 use similar::TextDiff;
 use similar::capture_diff_slices;
+use similar::capture_diff_slices_by_key;
 use similar::group_diff_ops;
 
+use crate::js_text;
 use crate::scanners::split_with_newlines;
 
 /// One run of a diff result, with jsdiff's `ChangeObject` field names and JSON
@@ -149,6 +151,9 @@ pub const INCLUDE_HEADERS: HeaderOptions = HeaderOptions {
 pub struct PatchOptions {
     pub context: Option<usize>,
     pub header_options: Option<HeaderOptions>,
+    /// jsdiff's `ignoreWhitespace` for the line diff: lines are compared
+    /// trimmed (JavaScript `trim`), and unchanged lines print their new text.
+    pub ignore_whitespace: bool,
 }
 
 /// One side of a patch: the name, contents and optional header (the text after
@@ -231,7 +236,13 @@ pub fn create_two_files_patch(
 
     let old_lines = line_tokens(old_side.contents);
     let new_lines = line_tokens(new_side.contents);
-    let ops = capture_diff_slices(Algorithm::Myers, &old_lines, &new_lines);
+    let ops = if options.ignore_whitespace {
+        capture_diff_slices_by_key(Algorithm::Myers, &old_lines, &new_lines, |line| {
+            js_text::trim(line)
+        })
+    } else {
+        capture_diff_slices(Algorithm::Myers, &old_lines, &new_lines)
+    };
     for hunk in group_diff_ops(ops, options.context.unwrap_or(4)) {
         let (first, last) = (hunk[0], hunk[hunk.len() - 1]);
         lines.push(format!(
@@ -242,7 +253,8 @@ pub fn create_two_files_patch(
         for op in &hunk {
             let (tag, old_range, new_range) = op.as_tag_tuple();
             let sides: [(char, &[&str]); 2] = match tag {
-                DiffTag::Equal => [(' ', &old_lines[old_range]), ('+', &[])],
+                // jsdiff prints the new text of unchanged lines.
+                DiffTag::Equal => [(' ', &new_lines[new_range]), ('+', &[])],
                 DiffTag::Delete => [('-', &old_lines[old_range]), ('+', &[])],
                 DiffTag::Insert => [('+', &new_lines[new_range]), ('+', &[])],
                 DiffTag::Replace => [('-', &old_lines[old_range]), ('+', &new_lines[new_range])],
@@ -327,6 +339,7 @@ mod tests {
                     include_underline: false,
                     include_file_headers: false,
                 }),
+                ..PatchOptions::default()
             },
         );
         assert_eq!(patch, "@@ -0,0 +1,1 @@\n+x\n\\ No newline at end of file\n");

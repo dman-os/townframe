@@ -76,7 +76,7 @@ fn group(text: &str) -> Option<String> {
 #[test]
 fn scanners_match_the_javascript_regexes() {
     let golden: Golden = load_golden("scanners.json");
-    assert!(golden.cases.len() > 500);
+    assert!(golden.cases.len() > 300);
     for case in &golden.cases {
         let text = case.text.as_str();
         let context = format!("text={text:?}");

@@ -142,7 +142,7 @@ pierre/src/utils/appendItems.ts|10|PENDING|S4||PORT (Rust, oracle-tested)
 pierre/src/utils/applyLineTextWithNewline.ts|20|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areDiffLineAnnotationsEqual.ts|13|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areDiffRenderOptionsEqual.ts|16|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/areDiffTargetsEqual.ts|14|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areDiffTargetsEqual.ts|14|PORTED|S3|utils/are_diff_targets_equal.rs|identity is std::ptr::eq
 pierre/src/utils/areFileRenderOptionsEqual.ts|14|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areFileTargetsEqual.ts|15|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areFilesEqual.ts|14|PENDING|-||PORT (Rust, oracle-tested)
@@ -161,9 +161,9 @@ pierre/src/utils/areVirtualWindowSpecsEqual.ts|15|PENDING|-||PORT (Rust, oracle-
 pierre/src/utils/areWorkerStatsEqual.ts|22|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/awaitWithTimeout.ts|19|OUT|-||OUT (Clay guest + wasm component replaces)
 pierre/src/utils/canUseWASM.ts|36|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/utils/cleanLastNewline.ts|11|PENDING|S3||PORT (Rust, oracle-tested)
-pierre/src/utils/cloneFileDiffMetadata.ts|20|PENDING|S3||PORT (Rust, oracle-tested)
-pierre/src/utils/composeCacheKey.ts|10|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/cleanLastNewline.ts|11|PORTED|S3|utils/clean_last_newline.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/cloneFileDiffMetadata.ts|20|PORTED|S3|utils/clone_file_diff_metadata.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/composeCacheKey.ts|10|PORTED|S3|utils/compose_cache_key.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/computeEstimatedDiffHeights.ts|175|PENDING|S4||PORT (Rust, oracle-tested)
 pierre/src/utils/computeFileOffsets.ts|100|PENDING|S4||PORT (Rust, oracle-tested)
 pierre/src/utils/computeVirtualFileMetrics.ts|56|PENDING|S4||PORT (Rust, oracle-tested)
@@ -184,7 +184,7 @@ pierre/src/utils/createStyleElement.ts|38|PENDING|-||PORT (Rust, oracle-tested o
 pierre/src/utils/createUnsafeCSSStyleNode.ts|8|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/createWindowFromScrollPosition.ts|50|PENDING|S4||PORT (Rust, oracle-tested)
 pierre/src/utils/cssWrappers.ts|81|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/detachString.ts|42|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/detachString.ts|42|OUT|-||V8 substring-retention workaround; Rust strings own their data
 pierre/src/utils/diffAcceptRejectHunk.ts|41|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
 pierre/src/utils/editSessionAnnotations.ts|121|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
 pierre/src/utils/editSessionHunks.ts|884|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
@@ -193,22 +193,22 @@ pierre/src/utils/getCodeViewItemRenderData.ts|37|PENDING|-||PORT (Rust, oracle-t
 pierre/src/utils/getDiffFileInput.ts|31|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/getDiffHunksRendererOptions.ts|41|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/getFileRendererOptions.ts|29|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/getFiletypeFromFileName.ts|460|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/getFiletypeFromFileName.ts|460|PORTED|S3|utils/get_filetype_from_file_name.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/getHighlighterOptions.ts|31|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/getHighlighterThemeStyles.ts|83|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/getHunkSeparatorSlotName.ts|9|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/getHunkSideBoundaries.ts|9|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/getHunkSideBoundaries.ts|9|PORTED|S3|utils/get_hunk_side_boundaries.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/getIconForType.ts|28|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/getLineAnnotationName.ts|8|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/getLineEndingType.ts|19|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/getLineEndingType.ts|19|PORTED|S3|utils/get_line_ending_type.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/getLineNodes.ts|18|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/getMergeConflictActionSlotName.ts|14|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/utils/getMergeConflictLineTypes.ts|117|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/utils/getOrCreateCodeNode.ts|36|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/getSingularPatch.ts|21|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/getSingularPatch.ts|21|PORTED|S3|utils/get_singular_patch.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/getThemes.ts|16|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/getTokenOptions.ts|24|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/getTotalLineCountFromHunks.ts|14|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/getTotalLineCountFromHunks.ts|14|PORTED|S3|utils/get_total_line_count_from_hunks.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/guardWebKitScrollDuringRebuild.ts|33|PENDING|-||port or replace per slice notes (DOM helper)
 pierre/src/utils/hastToHtml.ts|182|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/hast_utils.ts|142|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
@@ -225,16 +225,16 @@ pierre/src/utils/iterateOverDiff.ts|1045|PENDING|S4||PORT (Rust, oracle-tested)
 pierre/src/utils/lineAnnotationIdentity.ts|37|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/normalizeDiffResolution.ts|25|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/parseDiffDecorations.ts|61|PENDING|S4||PORT (Rust, oracle-tested)
-pierre/src/utils/parseDiffFromFile.ts|85|PENDING|S3||PORT (Rust, oracle-tested)
-pierre/src/utils/parseLineType.ts|39|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/parseDiffFromFile.ts|85|PORTED|S3|utils/parse_diff_from_file.rs|diff text from similar: invariants, not byte parity (see PARITY.md notes)
+pierre/src/utils/parseLineType.ts|39|PORTED|S3|utils/parse_line_type.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/parseMergeConflictDiffFromFile.ts|1228|DEFER|-||DEFER (not needed for PR review v1)
-pierre/src/utils/parsePatchFiles.ts|1108|PENDING|S3||PORT (Rust, oracle-tested)
-pierre/src/utils/parseQuotedDiffFileName.ts|79|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/parsePatchFiles.ts|1108|PORTED|S3|utils/parse_patch_files.rs;utils/parse_patch_files/hunk_split.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/parseQuotedDiffFileName.ts|79|PORTED|S3|utils/parse_quoted_diff_file_name.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/platform.ts|48|PENDING|-||port or replace per slice notes (DOM helper)
 pierre/src/utils/prefersReducedMotion.ts|10|PENDING|-||port or replace per slice notes (DOM helper)
 pierre/src/utils/prerenderHTMLIfNecessary.ts|12|PENDING|-||port or replace per slice notes (DOM helper)
 pierre/src/utils/processLine.ts|36|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/realignChangeContent.ts|308|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/realignChangeContent.ts|308|PORTED|S3|utils/realign_change_content.rs|realignChangeContentBySimilarity only; slideBlankBoundaryBlocksUp is editor-only (OUT)
 pierre/src/utils/renderDiffWithHighlighter.ts|512|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/renderFileWithHighlighter.ts|104|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/renderTokenLines.ts|385|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
@@ -247,7 +247,7 @@ pierre/src/utils/setDeferredArrayItem.ts|56|PENDING|S4||PORT (Rust, oracle-teste
 pierre/src/utils/setLanguageOverride.ts|21|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/setWrapperNodeProps.ts|65|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/shouldUseTokenTransformer.ts|25|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/splitFileContents.ts|13|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/splitFileContents.ts|13|PORTED|S3|utils/split_file_contents.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/tokenStyle.ts|39|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/tokensToHtml.ts|72|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/trimPatchContext.ts|165|PENDING|S4||PORT (Rust, oracle-tested)
@@ -414,7 +414,7 @@ pierre/test/editorWorkerPool.test.ts|2130|OUT|-||edit mode is out of scope for v
 pierre/test/editorWrapCaretPosition.test.ts|1086|OUT|-||edit mode is out of scope for v1
 pierre/test/file.patch|37|PORTED|S0|oracle/corpus/file.patch|verbatim oracle corpus file
 pierre/test/getChangedDocumentLines.test.ts|119|OUT|-||edit session helper
-pierre/test/getFiletypeFromFileName.test.ts|64|PENDING|S3||
+pierre/test/getFiletypeFromFileName.test.ts|64|PORTED|S3|utils/get_filetype_from_file_name_test.rs|custom-extension map is an owned CustomExtensions value
 pierre/test/getHighlighterThemeStyles.test.ts|128|PENDING|S5||
 pierre/test/getHunkSideBoundaries.test.ts|36|PENDING|S4||
 pierre/test/getMergeConflictLineTypes.test.ts|70|DEFER|-||merge-conflict UI
@@ -436,10 +436,10 @@ pierre/test/lazyLineAST.test.ts|239|PENDING|-||not yet assigned to a slice; tria
 pierre/test/mainThreadHighlighting.workerRendering.test.ts|516|OUT|-||worker pool
 pierre/test/mocks.ts|225|PORTED|S0|oracle/corpus/mocks.mjs|fixtures excerpted into the oracle corpus (filesystem-backed fixtures dropped)
 pierre/test/onPostRenderPhase.test.ts|330|PENDING|-||not yet assigned to a slice; triage in the owning slice
-pierre/test/parseDiffFromFile.test.ts|369|PENDING|S3||
+pierre/test/parseDiffFromFile.test.ts|369|PORTED|S3|utils/parse_diff_from_file_test.rs|digest snapshot test becomes property assertions on the diffRowBufferTest pair (fileOld/fileNew live in apps/demo, absent); ignoreWhitespace/context kept via PatchOptions; both-null throw unrepresentable (DiffFileInput)
 pierre/test/parseMergeConflictDiffFromFile.test.ts|250|DEFER|-||merge-conflict UI
-pierre/test/parsePatchFiles.test.ts|1009|PENDING|S3||
-pierre/test/parseQuotedDiffFileName.test.ts|87|PENDING|S3||
+pierre/test/parsePatchFiles.test.ts|1009|PORTED|S3|utils/parse_patch_files_test.rs;utils/parse_patch_files_test/headers.rs;utils/parse_patch_files_test/repairs.rs|ported under upstream titles; digest snapshot (diff.patch absent from the extracted tree), lone-surrogate and renderer-count tests listed in the file header
+pierre/test/parseQuotedDiffFileName.test.ts|87|PORTED|S3|utils/parse_quoted_diff_file_name_test.rs|all upstream cases
 pierre/test/patchFileRender.test.ts|54|PENDING|S6||
 pierre/test/preloadAnnotations.test.ts|51|OUT|-||SSR preload
 pierre/test/preloadDiffs.optionalSides.test.ts|86|OUT|-||SSR preload
@@ -457,7 +457,7 @@ pierre/test/scrollbarGutter.test.ts|41|PENDING|-||not yet assigned to a slice; t
 pierre/test/setDeferredArrayItem.test.ts|86|PENDING|S4||
 pierre/test/sharedHighlighter.test.ts|348|OUT|-||Shiki highlighter registry
 pierre/test/sparseLayoutCheckpoints.test.ts|539|PENDING|-||not yet assigned to a slice; triage in the owning slice
-pierre/test/testUtils.ts|633|PENDING|S3||test helpers, ported with the first test that needs each
+pierre/test/testUtils.ts|633|PORTED|S3|test_utils.rs|hunk-verification and digest helpers ported; hast helpers arrive with the renderer (S6)
 pierre/test/themeTypeUpdates.test.ts|323|PENDING|S7||
 pierre/test/trim.patch|137|PORTED|S0|oracle/corpus/trim.patch|verbatim oracle corpus file
 pierre/test/trimPatchContext.test.ts|120|PENDING|S4||
