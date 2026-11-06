@@ -45,6 +45,7 @@ use sqlite_rs::Tx;
 use std::ops::Bound;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
+#[cfg(test)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tokio::sync::OwnedSemaphorePermit;
@@ -80,18 +81,21 @@ const MAX_BOUND_ROWS: usize = 256;
 pub struct SqliteFactory {
     db: Database,
     namespaces: StdMutex<HashMap<String, Arc<Namespace>>>,
+    #[cfg(test)]
     stats: Arc<Stats>,
     requests: mpsc::Sender<CommitRequest>,
 }
 
 /// Physical transactions committed by the group committer, and the requests
 /// those transactions carried.
+#[cfg(test)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CommitStats {
     pub transactions: u64,
     pub requests: u64,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct Stats {
     transactions: AtomicU64,
@@ -110,10 +114,12 @@ impl SqliteFactory {
         db.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
             .await?;
         let (requests, receiver) = mpsc::channel(REQUEST_QUEUE);
+        #[cfg(test)]
         let stats = Arc::new(Stats::default());
         tokio::spawn(
             Committer {
                 db: db.clone(),
+                #[cfg(test)]
                 stats: Arc::clone(&stats),
                 requests: receiver,
             }
@@ -122,11 +128,13 @@ impl SqliteFactory {
         Ok(Self {
             db,
             namespaces: default(),
+            #[cfg(test)]
             stats,
             requests,
         })
     }
 
+    #[cfg(test)]
     pub fn commit_stats(&self) -> CommitStats {
         CommitStats {
             transactions: self.stats.transactions.load(Ordering::Acquire),
@@ -134,6 +142,7 @@ impl SqliteFactory {
         }
     }
 
+    #[cfg(test)]
     pub fn store(&self, namespace: &str) -> SqliteStore {
         SqliteStore {
             db: self.db.clone(),
@@ -427,6 +436,7 @@ enum GroupError {
 
 struct Committer {
     db: Database,
+    #[cfg(test)]
     stats: Arc<Stats>,
     requests: mpsc::Receiver<CommitRequest>,
 }
@@ -485,10 +495,13 @@ impl Committer {
             .commit()
             .await
             .map_err(|error| GroupError::Commit(error.into()))?;
-        self.stats.transactions.fetch_add(1, Ordering::AcqRel);
-        self.stats
-            .requests
-            .fetch_add(group.len() as u64, Ordering::AcqRel);
+        #[cfg(test)]
+        {
+            self.stats.transactions.fetch_add(1, Ordering::AcqRel);
+            self.stats
+                .requests
+                .fetch_add(group.len() as u64, Ordering::AcqRel);
+        }
         Ok(staged)
     }
 }
