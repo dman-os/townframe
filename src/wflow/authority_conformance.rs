@@ -42,6 +42,43 @@ struct RecvMessageThenEffectArgs {}
 struct ConformanceHost {
     wasm: Arc<WflowPlugin>,
     native: Arc<LocalNativeHost>,
+    replay_gates: HashMap<&'static str, Arc<CommitReplyGate>>,
+}
+
+#[derive(Default)]
+struct CommitReplyGate {
+    held: std::sync::atomic::AtomicBool,
+    committed: tokio::sync::Notify,
+}
+
+struct LostCommitReply {
+    session: Box<dyn Session>,
+    gate: Arc<CommitReplyGate>,
+}
+
+#[async_trait]
+impl Session for LostCommitReply {
+    async fn next_yield(&mut self) -> Option<wflow_wdk::session::SessionYield> {
+        self.session.next_yield().await
+    }
+
+    fn resume(&self) -> bool {
+        if self
+            .gate
+            .held
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return self.session.resume();
+        }
+        // Resume is invoked only after the step commits. Lose that first reply
+        // while keeping the transport live until the runtime stops this activation.
+        self.gate.committed.notify_one();
+        true
+    }
+
+    fn deliver(&self, value_json: Arc<str>) -> bool {
+        self.session.deliver(value_json)
+    }
 }
 
 #[async_trait]
@@ -57,11 +94,16 @@ impl Host for ConformanceHost {
         args_json: String,
         replay: Vec<wflow_wdk::session::ReplayStep>,
     ) -> Res<Box<dyn Session>> {
-        if self.wasm.contains_workflow(wflow_key) {
-            <WflowPlugin as Host>::spawn(&*self.wasm, job_id, wflow_key, args_json, replay).await
+        let gate = self.replay_gates.get(job_id.as_ref()).map(Arc::clone);
+        let session = if self.wasm.contains_workflow(wflow_key) {
+            <WflowPlugin as Host>::spawn(&*self.wasm, job_id, wflow_key, args_json, replay).await?
         } else {
             <LocalNativeHost as Host>::spawn(&*self.native, job_id, wflow_key, args_json, replay)
-                .await
+                .await?
+        };
+        match gate {
+            Some(gate) => Ok(Box::new(LostCommitReply { session, gate })),
+            None => Ok(session),
         }
     }
 
@@ -74,7 +116,9 @@ impl Host for ConformanceHost {
 struct ConformanceHarness {
     runtime: AuthorityRuntime,
     // The Wash host owns the real resolved component workload and its engine.
-    _wasm_host: Arc<WashHost>,
+    wasm_host: Arc<WashHost>,
+    store: MemoryStore,
+    host: Arc<ConformanceHost>,
 }
 
 fn wasm_path() -> Res<PathBuf> {
@@ -116,8 +160,6 @@ async fn register_wasm_workload(host: &WashHost, path: PathBuf, keys: &[&str]) -
                     config: [("wflow_keys".to_owned(), keys.join(","))].into(),
                     ..WitInterface::from("townframe:wflow/bundle")
                 },
-                WitInterface::from("townframe:daybook/drawer"),
-                WitInterface::from("townframe:utils/llm-chat"),
                 WitInterface::from("wasi:keyvalue/store"),
             ],
             volumes: vec![],
@@ -138,19 +180,23 @@ async fn setup() -> Res<ConformanceHarness> {
     let engine = Engine::builder().build().to_eyre()?;
     let builder = HostBuilder::new()
         .with_engine(engine)
-        .with_plugin(Arc::clone(&wasm) as Arc<dyn HostPlugin>)?
-        .with_plugin(Arc::new(DynamicConfig::default()))?
-        .with_plugin(keyvalue as Arc<dyn HostPlugin>)?;
+        .with_plugin(Arc::clone(&wasm) as Arc<dyn HostPlugin>)
+        .to_eyre()?
+        .with_plugin(Arc::new(DynamicConfig::default()))
+        .to_eyre()?
+        .with_plugin(keyvalue as Arc<dyn HostPlugin>)
+        .to_eyre()?;
     let wasm_host = builder.build().to_eyre()?.start().await.to_eyre()?;
     register_wasm_workload(&wasm_host, wasm_path()?, &wasm_keys).await?;
 
     let native = Arc::new(LocalNativeHost::new());
     native.register_typed("native_effect_chain", |cx, args: EffectChainArgs| {
         Box::pin(async move {
+            let mut values = Vec::new();
             for step in 0..args.steps {
-                cx.effect(async || Ok(Json(step))).await?;
+                values.push(cx.effect(async || Ok(Json(step))).await?);
             }
-            Ok(())
+            Ok(values)
         })
     });
     native.register_typed(
@@ -169,20 +215,30 @@ async fn setup() -> Res<ConformanceHarness> {
         "native_recv_message_then_effect",
         |cx, _args: RecvMessageThenEffectArgs| {
             Box::pin(async move {
-                let Json(_message) = cx.recv::<Json<serde_json::Value>>().await?;
+                let Json(message) = cx.recv::<Json<serde_json::Value>>().await?;
                 cx.effect(async || Ok(Json(serde_json::json!({"ok": true}))))
                     .await?;
-                Ok(())
+                Ok(message)
             })
         },
     );
 
-    let host: Arc<dyn Host> = Arc::new(ConformanceHost { wasm, native });
+    let host = Arc::new(ConformanceHost {
+        wasm,
+        native,
+        replay_gates: ["wasm-replay", "native-replay"]
+            .into_iter()
+            .map(|key| (key, Arc::new(CommitReplyGate::default())))
+            .collect(),
+    });
     let store = MemoryStore::default();
-    let runtime = AuthorityRuntime::start(store.writer()?, 0, host).await?;
+    let runtime =
+        AuthorityRuntime::start(store.writer()?, 0, Arc::clone(&host) as Arc<dyn Host>).await?;
     Ok(ConformanceHarness {
         runtime,
-        _wasm_host: wasm_host,
+        wasm_host,
+        store,
+        host,
     })
 }
 
@@ -190,6 +246,16 @@ async fn setup() -> Res<ConformanceHarness> {
 struct ReceiptProjection {
     steps: u64,
     value: String,
+}
+
+impl ReceiptProjection {
+    fn success(steps: u64, value_json: &str) -> Self {
+        let result: wflow_wdk::types::JobResult = Ok(value_json.to_owned());
+        Self {
+            steps,
+            value: serde_json::to_string(&result).unwrap(),
+        }
+    }
 }
 
 fn project(receipt: &wflow_core::partition::authority::Receipt) -> ReceiptProjection {
@@ -212,14 +278,16 @@ async fn assert_pair(
     wasm_workflow: &str,
     native_workflow: &str,
     args: &str,
-    expected_steps: u64,
+    expected: ReceiptProjection,
 ) -> Res<()> {
     let (_, wasm) = runtime
         .submit_handle(Submission::new(wasm_key, wasm_workflow, args))
-        .await?;
+        .await
+        .unwrap();
     let (_, native) = runtime
         .submit_handle(Submission::new(native_key, native_workflow, args))
-        .await?;
+        .await
+        .unwrap();
     let wasm_receipt = wasm
         .await_receipt()
         .await
@@ -228,10 +296,51 @@ async fn assert_pair(
         .await_receipt()
         .await
         .ok_or_else(|| ferr!("missing durable receipt for {native_key}"))?;
-    assert_eq!(wasm.get_result().await?, native.get_result().await?);
-    assert_eq!(project(&wasm_receipt), project(&native_receipt));
-    assert_eq!(wasm_receipt.steps, expected_steps);
-    assert_eq!(native_receipt.steps, expected_steps);
+    let expected_result = serde_json::from_str::<wflow_wdk::types::JobResult>(&expected.value)?;
+    assert_eq!(wasm.get_result().await?.as_ref(), Some(&expected_result));
+    assert_eq!(native.get_result().await?.as_ref(), Some(&expected_result));
+    assert_eq!(project(&wasm_receipt), expected);
+    assert_eq!(project(&native_receipt), expected);
+    Ok(())
+}
+
+async fn assert_cold_replay(harness: &ConformanceHarness) -> Res<()> {
+    for (key, workflow) in [
+        ("wasm-replay", "effect_chain"),
+        ("native-replay", "native_effect_chain"),
+    ] {
+        harness
+            .runtime
+            .submit(Submission::new(key, workflow, r#"{"steps":3}"#))
+            .await
+            .unwrap();
+    }
+    for gate in harness.host.replay_gates.values() {
+        gate.committed.notified().await;
+    }
+    for key in ["wasm-replay", "native-replay"] {
+        assert!(harness.runtime.get_result(key).await?.is_none());
+    }
+    // Both first steps are durable, but neither workflow received its reply.
+    // Reopening must reconstruct fresh activations from that committed prefix.
+    harness.runtime.stop().await;
+    let runtime = AuthorityRuntime::start(
+        harness.store.writer()?,
+        0,
+        Arc::clone(&harness.host) as Arc<dyn Host>,
+    )
+    .await?;
+    assert_pair(
+        &runtime,
+        "wasm-replay",
+        "native-replay",
+        "effect_chain",
+        "native_effect_chain",
+        r#"{"steps":3}"#,
+        ReceiptProjection::success(3, "[0,1,2]"),
+    )
+    .await?;
+    runtime.stop().await;
     Ok(())
 }
 
@@ -247,7 +356,7 @@ async fn authority_native_and_wasm_conformance() -> Res<()> {
         "effect_chain",
         "native_effect_chain",
         r#"{"steps":3}"#,
-        3,
+        ReceiptProjection::success(3, "[0,1,2]"),
     )
     .await?;
     assert_pair(
@@ -257,7 +366,7 @@ async fn authority_native_and_wasm_conformance() -> Res<()> {
         "sleep_then_effect",
         "native_sleep_then_effect",
         r#"{"millis":1}"#,
-        2,
+        ReceiptProjection::success(2, "null"),
     )
     .await?;
 
@@ -267,46 +376,56 @@ async fn authority_native_and_wasm_conformance() -> Res<()> {
             "recv_message_then_effect",
             "{}",
         ))
-        .await?;
+        .await
+        .unwrap();
     let (_, native_recv) = runtime
         .submit_handle(Submission::new(
             "native-receive-effect",
             "native_recv_message_then_effect",
             "{}",
         ))
-        .await?;
+        .await
+        .unwrap();
     runtime
         .send_message("wasm-receive-effect", "wasm-message", r#"{"value":1}"#)
-        .await?;
+        .await
+        .unwrap();
     runtime
         .send_message("native-receive-effect", "native-message", r#"{"value":1}"#)
-        .await?;
+        .await
+        .unwrap();
     let wasm_receipt = wasm_recv.await_receipt().await.unwrap();
     let native_receipt = native_recv.await_receipt().await.unwrap();
     assert_eq!(
         wasm_recv.get_result().await?,
+        Some(Ok(r#"{"value":1}"#.to_owned()))
+    );
+    assert_eq!(
+        wasm_recv.get_result().await?,
         native_recv.get_result().await?
     );
-    assert_eq!(project(&wasm_receipt), project(&native_receipt));
-    assert_eq!(wasm_receipt.steps, 2);
-    assert_eq!(native_receipt.steps, 2);
+    let expected = ReceiptProjection::success(2, r#"{"value":1}"#);
+    assert_eq!(project(&wasm_receipt), expected);
+    assert_eq!(project(&native_receipt), expected);
 
-    // Cancellation is permanent and aborts the in-flight session; the long
-    // timer ensures this is not a completed sleep/effect invocation.
+    // A receive with no delivered message cannot complete before cancellation;
+    // this exercises permanent abort without relying on a long timer.
     let (_, wasm_cancel) = runtime
         .submit_handle(Submission::new(
             "wasm-abort",
-            "sleep_then_effect",
-            r#"{"millis":60000}"#,
+            "recv_message_then_effect",
+            "{}",
         ))
-        .await?;
+        .await
+        .unwrap();
     let (_, native_cancel) = runtime
         .submit_handle(Submission::new(
             "native-abort",
-            "native_sleep_then_effect",
-            r#"{"millis":60000}"#,
+            "native_recv_message_then_effect",
+            "{}",
         ))
-        .await?;
+        .await
+        .unwrap();
     runtime
         .cancel("wasm-abort", "conformance abort")
         .await
@@ -326,6 +445,27 @@ async fn authority_native_and_wasm_conformance() -> Res<()> {
         project(&native_cancel_receipt)
     );
 
-    runtime.stop().await;
+    assert!(matches!(wasm_cancel.get_result().await?, Some(Err(_))));
+    for receipt in [&wasm_cancel_receipt, &native_cancel_receipt] {
+        assert!(matches!(
+            &receipt.outcome,
+            wflow_core::partition::authority::Outcome::Faulted(fault)
+                if matches!(&fault.failure, wflow_core::partition::JobFailure::Cancelled { reason }
+                    if reason == "conformance abort")
+        ));
+    }
+    for key in ["wasm-abort", "native-abort"] {
+        assert_eq!(
+            runtime.cancel(key, "late cancellation").await.unwrap_err(),
+            wflow_tokio::authority_runtime::CancelError::AlreadyTerminal
+        );
+        assert_eq!(
+            runtime.send_message(key, "late", "null").await.unwrap_err(),
+            wflow_tokio::authority_runtime::SendError::AlreadyTerminal
+        );
+    }
+
+    assert_cold_replay(&harness).await?;
+    Arc::clone(&harness.wasm_host).stop().await.to_eyre()?;
     Ok(())
 }

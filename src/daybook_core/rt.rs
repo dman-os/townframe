@@ -2774,12 +2774,9 @@ mod tests {
         test_cx
             .rt
             .authority
-            .submit(wflow::Submission::new(
-                job_id,
-                "test-label".into(),
-                "null".into(),
-            ))
-            .await?;
+            .submit(wflow::Submission::new(job_id.clone(), "test-label", "null"))
+            .await
+            .unwrap();
         assert!(
             test_cx
                 .dispatch_repo
@@ -2789,9 +2786,6 @@ mod tests {
         );
 
         test_cx.rt.reconcile_workflow_intents().await?;
-        test_cx
-            .rt
-            .install_wflow_waiter(dispatch_id.into(), job_id.clone());
         assert!(
             test_cx
                 .dispatch_repo
@@ -2801,8 +2795,25 @@ mod tests {
         );
         test_cx
             .rt
+            .install_wflow_waiter(dispatch_id.into(), job_id.clone());
+        test_cx
+            .rt
             .wait_for_dispatch_end(dispatch_id, std::time::Duration::from_secs(90))
             .await?;
+        let result = test_cx.rt.authority.get_result(&job_id).await?;
+        assert!(
+            matches!(&result, Some(Ok(_))),
+            "workflow result: {result:?}"
+        );
+        assert_eq!(
+            test_cx
+                .dispatch_repo
+                .get_any(dispatch_id)
+                .await
+                .unwrap()
+                .status,
+            dispatch::DispatchStatus::Succeeded
+        );
         test_cx.stop().await?;
         Ok(())
     }

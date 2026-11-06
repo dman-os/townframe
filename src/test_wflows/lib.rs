@@ -181,11 +181,12 @@ struct EffectChainArgs {
     steps: u64,
 }
 
-async fn effect_chain(cx: &mut WflowCtx, args: EffectChainArgs) -> Result<(), JobErrorX> {
+async fn effect_chain(cx: &mut WflowCtx, args: EffectChainArgs) -> Result<Vec<u64>, JobErrorX> {
+    let mut values = Vec::new();
     for ii in 0..args.steps {
-        cx.effect(async || Ok(Json(ii))).await?;
+        values.push(cx.effect(async || Ok(Json(ii))).await?);
     }
-    Ok(())
+    Ok(values)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -215,11 +216,11 @@ struct RecvMessageThenEffectArgs {}
 async fn recv_message_then_effect(
     cx: &mut WflowCtx,
     _args: RecvMessageThenEffectArgs,
-) -> Result<(), JobErrorX> {
-    let Json(_value) = cx.recv::<Json<serde_json::Value>>().await?;
+) -> Result<serde_json::Value, JobErrorX> {
+    let Json(value) = cx.recv::<Json<serde_json::Value>>().await?;
     cx.effect(async || Ok(Json(serde_json::json!({"ok": true}))))
         .await?;
-    Ok(())
+    Ok(value)
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -18810,13 +18810,17 @@ dependencies = [
 name = "wflow"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "serde",
+ "serde_json",
  "sqlite_rs",
  "tempfile",
  "tokio",
  "utils_rs",
+ "wash-runtime",
  "wash_plugin_wflow",
+ "wasmtime",
  "wflow_core",
  "wflow_tokio",
  "wflow_wdk",

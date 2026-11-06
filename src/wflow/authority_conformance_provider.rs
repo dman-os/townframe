@@ -4,10 +4,11 @@
 //! provider local to the test makes workload binding real without bringing the
 //! old partition-worker test harness back into the crate.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::engine::workload::WorkloadItem;
 use wash_runtime::plugin::HostPlugin;
@@ -24,6 +25,12 @@ pub(crate) type BucketHandle = String;
 mod bindings {
     wash_runtime::wasmtime::component::bindgen!({
         path: "../wash_plugin_wflow/wit",
+        inline: r#"
+            package townframe:authority-conformance;
+            world keyvalue {
+                import wasi:keyvalue/store@0.2.0-draft;
+            }
+        "#,
         world: "keyvalue",
         imports: { default: async | trappable | tracing },
         with: {
@@ -35,9 +42,12 @@ mod bindings {
 use bindings::wasi::keyvalue::store::Error as StoreError;
 use bindings::wasi::keyvalue::store::KeyResponse;
 
+type Storage = HashMap<Arc<str>, HashMap<String, BTreeMap<String, Vec<u8>>>>;
+
 #[derive(Clone, Default)]
 pub(crate) struct WasiKeyvalue {
-    storage: Arc<RwLock<HashMap<Arc<str>, HashMap<String, HashMap<String, Vec<u8>>>>>>,
+    // These in-memory critical sections contain no awaits or I/O.
+    storage: Arc<RwLock<Storage>>,
 }
 
 impl WasiKeyvalue {
@@ -55,7 +65,7 @@ impl bindings::wasi::keyvalue::store::Host for SharedWashCtx {
         plugin
             .storage
             .write()
-            .await
+            .expect("keyvalue state poisoned")
             .entry(Arc::clone(&self.active_ctx.workload_id))
             .or_default()
             .entry(identifier.clone())
@@ -72,7 +82,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<Option<Vec<u8>>, StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
         let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
-        let storage = plugin.storage.read().await;
+        let storage = plugin.storage.read().expect("keyvalue state poisoned");
         let value = storage
             .get(&self.active_ctx.workload_id)
             .and_then(|buckets| buckets.get(bucket_name))
@@ -89,7 +99,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<(), StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
         let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
-        let mut storage = plugin.storage.write().await;
+        let mut storage = plugin.storage.write().expect("keyvalue state poisoned");
         let Some(bucket) = storage
             .entry(Arc::clone(&self.active_ctx.workload_id))
             .or_default()
@@ -110,7 +120,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<(), StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
         let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
-        let mut storage = plugin.storage.write().await;
+        let mut storage = plugin.storage.write().expect("keyvalue state poisoned");
         let Some(bucket) = storage
             .entry(Arc::clone(&self.active_ctx.workload_id))
             .or_default()
@@ -131,7 +141,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<bool, StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
         let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
-        let storage = plugin.storage.read().await;
+        let storage = plugin.storage.read().expect("keyvalue state poisoned");
         let exists = storage
             .get(&self.active_ctx.workload_id)
             .and_then(|buckets| buckets.get(bucket_name))
@@ -146,7 +156,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<KeyResponse, StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
         let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
-        let storage = plugin.storage.read().await;
+        let storage = plugin.storage.read().expect("keyvalue state poisoned");
         let Some(bucket) = storage
             .get(&self.active_ctx.workload_id)
             .and_then(|buckets| buckets.get(bucket_name))
@@ -155,13 +165,15 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
                 "bucket '{bucket_name}' does not exist"
             ))));
         };
-        let mut keys: Vec<_> = bucket.keys().cloned().collect();
-        keys.sort();
-        let start = cursor.unwrap_or(0) as usize;
-        let end = (start + 100).min(keys.len());
+        let start = usize::try_from(cursor.unwrap_or(0))
+            .unwrap_or(usize::MAX)
+            .min(bucket.len());
+        let keys: Vec<_> = bucket.keys().skip(start).take(100).cloned().collect();
+        let end = start + keys.len();
         Ok(Ok(KeyResponse {
-            keys: keys[start..end].to_vec(),
-            cursor: (end < keys.len()).then_some(end as u64),
+            keys,
+            cursor: (end < bucket.len())
+                .then(|| u64::try_from(end).expect("bucket length fits WASI cursor")),
         }))
     }
 
