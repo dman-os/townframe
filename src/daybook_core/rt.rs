@@ -1308,25 +1308,7 @@ impl Rt {
                         value_json,
                         error_json,
                     };
-                    match self
-                        .authority
-                        .send_message(
-                            parent_wflow_job_id,
-                            request_id,
-                            serde_json::to_string(&reply).expect(ERROR_JSON),
-                        )
-                        .await
-                    {
-                        // A replay may follow the parent's consumption of this
-                        // reply and terminal receipt. That destination no longer
-                        // has a waiter, so child post-processing is settled too.
-                        Ok(_) | Err(SendError::AlreadyTerminal) => {}
-                        Err(err) => {
-                            return Err(ferr!(
-                                "error sending command invoke reply to parent job {parent_wflow_job_id}: {err:?}"
-                            ));
-                        }
-                    }
+                    send_command_invoke_reply(&self.authority, parent_wflow_job_id, reply).await?;
                 }
             }
         }
@@ -1384,12 +1366,8 @@ impl Rt {
                                 value_json: None,
                                 error_json: Some(error_json.to_string()),
                             };
-                            self.authority.send_message(parent_wflow_job_id, request_id, serde_json::to_string(&reply).expect(ERROR_JSON)).await
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "error sending failed command invoke reply to parent job {parent_wflow_job_id}"
-                                    )
-                                })?;
+                            send_command_invoke_reply(&self.authority, parent_wflow_job_id, reply)
+                                .await?;
                         }
                     }
                 }
@@ -2200,6 +2178,29 @@ fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
             branch_path.as_str(),
             serde_json::to_string(heads).expect(ERROR_JSON)
         ),
+    }
+}
+
+async fn send_command_invoke_reply(
+    authority: &wflow::AuthorityRuntime,
+    parent_job: &str,
+    reply: daybook_pdk::InvokeCommandReply,
+) -> Res<()> {
+    match authority
+        .send_message(
+            parent_job,
+            &reply.request_id,
+            serde_json::to_string(&reply).expect(ERROR_JSON),
+        )
+        .await
+    {
+        // Receipt replay can follow the parent's consumption of this reply and
+        // terminal outcome. It no longer has a waiter, so delivery is settled.
+        Ok(_) | Err(SendError::AlreadyTerminal) => Ok(()),
+        Err(err) => Err(ferr!(
+            "error sending command invoke reply {} to parent job {parent_job}: {err:?}",
+            reply.request_id
+        )),
     }
 }
 

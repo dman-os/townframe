@@ -117,3 +117,65 @@ async fn staging_merge_error_preserves_source_for_receipt_replay() -> Res<()> {
     cx.stop().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn command_replies_settle_terminal_parents_but_reject_invalid_messages() -> Res<()> {
+    use wflow::wflow_tokio::local_native_host::LocalNativeHost;
+
+    let directory = tempfile::tempdir()?;
+    let database = sqlite_rs::SqliteRuntime::new(default()).database(
+        directory.path().join("replies.sqlite"),
+        &[],
+        "_unused",
+    );
+    let context = wflow::Ctx::init(database).await?;
+    let host = LocalNativeHost::new();
+    host.register_typed("terminal", |_cx, (): ()| {
+        Box::pin(async { Ok::<(), _>(()) })
+    });
+    host.register_typed("live", |cx, (): ()| {
+        Box::pin(async move {
+            cx.recv::<wflow::wflow_wdk::Json<serde_json::Value>>()
+                .await?;
+            cx.recv::<wflow::wflow_wdk::Json<serde_json::Value>>()
+                .await?;
+            Ok::<(), _>(())
+        })
+    });
+    let authority = context.start_authority_runtime(0, Arc::new(host)).await?;
+    authority
+        .submit(wflow::Submission::new("terminal", "terminal", "null"))
+        .await
+        .unwrap();
+    authority
+        .handle("terminal")
+        .await_receipt()
+        .await
+        .expect("parent completed");
+    let reply = |value: &str| daybook_pdk::InvokeCommandReply {
+        request_id: "request".into(),
+        status: daybook_pdk::InvokeCommandStatus::Failed,
+        value_json: None,
+        error_json: Some(value.into()),
+    };
+    send_command_invoke_reply(&authority, "terminal", reply("dependency-failed")).await?;
+    assert!(
+        send_command_invoke_reply(&authority, "unknown", reply("failure"))
+            .await
+            .is_err()
+    );
+
+    authority
+        .submit(wflow::Submission::new("live", "live", "null"))
+        .await
+        .unwrap();
+    send_command_invoke_reply(&authority, "live", reply("first")).await?;
+    send_command_invoke_reply(&authority, "live", reply("first")).await?;
+    assert!(
+        send_command_invoke_reply(&authority, "live", reply("different"))
+            .await
+            .is_err()
+    );
+    authority.stop().await;
+    Ok(())
+}
