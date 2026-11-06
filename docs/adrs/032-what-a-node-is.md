@@ -3,7 +3,7 @@
 **Status:** Accepted (operator, 2026-11-04). Drafted from the operator design session of 2026-11-04 (decisions D14–D21 of the
 [runtime ledger](../scratch/nodule-runtime-ledger.md)).
 
-**Updated:** 2026-11-04
+**Updated:** 2026-11-06 (see [Revision 2026-11-06](#revision-2026-11-06))
 
 **Related:**
 - [ADR 019: cabinet drawers and selective mirroring](019-cabinet-drawers-and-selective-mirroring.md)
@@ -86,7 +86,7 @@ Two parts of the code are not routed:
 |---|---|---|
 | In process | `Direct` / `Irpc` client | Whatever capability the holder was given |
 | Unix socket | XRPC over UDS | The kernel's peer credentials. A connection from the node owner's uid acts as the operator; any other uid is refused. A client may present a node-issued token to narrow itself to that token's capability. |
-| Network | XRPC over TCP or Iroh | A capability presented per call, as dispatch admits today |
+| Network | XRPC over HTTP/WebSocket on Iroh (a TCP listener also exists, see the revision) | A capability presented per call, as dispatch admits today |
 
 The Unix socket follows the standard local-daemon pattern (PostgreSQL `peer` auth, D-Bus `EXTERNAL`, systemd, ssh-agent, Docker):
 - **Location.** The socket lives in a directory only the owner can enter (mode `0700`, under `$XDG_RUNTIME_DIR`).
@@ -169,6 +169,55 @@ The `big_repo` topology and log-nickname helpers are reused rather than rewritte
 - Node configuration moves from paths to resource bindings, which changes the config of `big_repo` and `big_node`.
 - Networking moves from test helpers into `big_node`: the Iroh endpoint attachment and the peers service, with an embedder-supplied peer policy (§6). Today no production code calls `set_peer`; only test helpers do, with empty partition sets.
 - The old repo's lock-file model is gone. Other processes reach the node through a client; they don't open its storage.
+
+## Revision 2026-11-06
+
+The sections above are the design. This section records what was built on `feat/big-node` where it differs from or adds to them.
+
+### Credential header
+
+The caller's credential is no longer a body field. It is `Authorization: Bearer <authority>.<signer>`, carried in `Envelope.metadata.authorization` (`Authorization::{header_value, from_header_value, metadata, from_metadata}` in `big_cabinet_core`; `BearerToken` is gone).
+- Dispatch admits the caller with that credential and passes the admitted `Caller.authorization` to `ServiceProvider`, which sets it as the service request's metadata. One credential therefore satisfies both dispatch and the service.
+- Resource capabilities (`capability: CapId` on doc, drawer and blob data operations) stay in the body, because they designate what is acted on, not who acts.
+- A missing or malformed credential is `ContextError::Unauthenticated`, which every service error carries. The XRPC edge maps it to 401.
+- A dispatch-scoped handle is not understood by a service domain, so a caller holding only one can reach only operations whose body capability it already holds. See [ADR 022](022-authority-actors-capabilities-and-grants.md).
+
+### Listeners
+
+- **UDS.** The acceptor reports `PeerCredentials` (tokio `peer_cred`). `big_node`'s `OwnerOnly` wrapper refuses any other uid before a request is read, and a token-less request over UDS is the operator. The socket directory is mode `0700`; a `0755` parent is refused, a stale socket is replaced, a live one is refused, and stop removes the socket. Peer credentials are behind `cfg(unix)`.
+- **TCP.** The listener exists, and a token-less request over it gets 401. Remote clients do not use it by default: they reach the node with HTTP and WebSocket over Iroh (D31). A future TCP need is narrow and terminates TLS at a reverse proxy, so there is no TLS work on this listener.
+- `/xrpc/<nsid>` is a fallback in front of dispatch on the existing XRPC server. Dispatch refusals map to 401, 403, 404 and 503. `XrpcClient::unix` is the client.
+
+### Peers
+
+`big_node::peers` is the peers service of §6. `node_identity_seed` was already the Iroh secret key bytes, so the one-key rule is a derivation (`SecretKey::from_bytes(seed)`) plus an assertion at boot.
+- The default policy is `Drawers::mirrored` (mirror intent only) bounded by `big_repo::groups_with_member` (keyhive access).
+- Keyhive access drives wakeups: `big_node::peers::access` reads `KeyhiveAccessRevisionStore` through a `ConcurrentDeltaWalker` (walker state `{scope_key}:big-node-peers-v1`). A delta recomputes the parts of the peers it touches. The sweep tick only redials.
+- A replay subscription reset re-opens under a fresh subscription id (`big_sync_core`), which fixed a stall where a peer's replay of a document created while it was offline never resumed.
+
+### Node-scoped secrets and the socket
+
+Every keyring secret is named by node id (`wrapping.<node-id>`), and `big_node::delete_secrets` lists every entry a node keeps. The socket is `$XDG_RUNTIME_DIR/day/<node-id>.sock`, falling back to a `0700` `/tmp/day-<euid>` directory (`default_socket_dir` in `day_cli/context.rs`). It is not configurable yet. An old unscoped `wrapping` entry is never read, so a node directory booted before this change refuses to boot instead of re-keying; nothing migrates because no release has shipped.
+
+### Built-in `getNodeInfo`
+
+`org.example.daybook.node.getNodeInfo` (built-in provider `builtin:node`) reports the node id, the node's own endpoint ticket and the connected peers. It sits under the retiring `org.example.daybook` prefix.
+
+### The `day` CLI
+
+`day_cli` is the node's first client. It drives a node in-process or over the daemon's socket, through the same router. `day init` is idempotent: on an existing node it prints `node <id> already initialized` and exits 0, and a `node.json` that is not a valid node is an error. `day status` and `day peers ls` read `getNodeInfo`.
+
+### Bootstrap peers
+
+`node.json` has an optional `peers` section (`bootstrap` endpoint tickets, `loopbackOnly`). When it is present the daemon attaches the peers service and dials the list at start. Which peers connect automatically beyond that is composition policy (§6). `day peers add <ticket>` edits `node.json` and takes effect at the next daemon start.
+
+### Still open
+
+- **Windows.** No local transport or admission rule. Collected in [windows-todo.md](../scratch/windows-todo.md) and to land as one PR on a Windows machine.
+- **GET/query operations** through the `/xrpc` fallback are not served yet (for example docs `getDocAvailability`). This is to-do work, not a design question (D31).
+- **Dispatch Lexicon validation.** Dispatch does not yet validate operation input and output against the operation's Lexicon, as atproto's XRPC servers do (D31).
+- **Narrowing tokens over the wire.** Dispatch `mintCapability` is not served through the router, and client-side token storage is undecided (D22).
+- **Node SQL scoping.** The node's own tables (authority, blobs, cabinet, plugs, nodules) are one database per node. Hosting many nodes in one database needs scoping them and namespacing the authority wrapping key.
 
 ## Deferred
 
