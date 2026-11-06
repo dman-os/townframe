@@ -57,8 +57,8 @@ pierre/src/editor/tokenizer.ts|298|OUT|-||OUT for v1 (edit mode; later with CM6 
 pierre/src/editor/types.ts|337|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
 pierre/src/editor/utils.ts|183|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
 pierre/src/highlighter/DiffsEditorTokenizer.ts|27|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/DiffsHighlighter.ts|96|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/backends/highlights.ts|106|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/DiffsHighlighter.ts|96|PORTED|S7|highlights/backend.rs|the base-class members the highlights backend uses (name, getTheme, codeToTokens, dispose) as the `DiffsHighlighter` trait (highlighter_types.rs) and `HighlightsHighlighter`; codeToHtml, tokenizers and the type refcount are not ported
+pierre/src/highlighter/backends/highlights.ts|106|PORTED|S7|highlights/backend.rs|oracle: dist HighlightsHighlighter tokens over the unmodified wasm records (highlights.json); editor/stream tokenizers not ported
 pierre/src/highlighter/backends/shiki.ts|172|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/highlighterType.ts|46|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/highlights-editor.ts|249|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
@@ -89,8 +89,8 @@ pierre/src/highlighter/themes/registerCustomCSSVariableTheme.ts|18|OUT|-||OUT (u
 pierre/src/highlighter/themes/registerCustomTheme.ts|46|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/themes/resolveTheme.ts|12|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/themes/resolveThemes.ts|12|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/themes/themeResolver.ts|221|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/themes/types.ts|22|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/themeResolver.ts|221|PORTED|S7|highlights/themes.rs|highlights backend only (Zed themes; createHighlightsTheme exact against the dist); TextMate/Shiki branch dropped
+pierre/src/highlighter/themes/types.ts|22|PORTED|S7|highlights/themes.rs|`DiffsTheme` (zed palette only; the textmate/cssVariables members belong to Shiki)
 pierre/src/highlighter/tokenizer-types.ts|41|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/types.ts|52|PORTED|S5|highlighter_types.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/index.ts|115|OUT|-||OUT
@@ -282,7 +282,7 @@ pierre/test/CodeView.workerPoolReady.test.ts|363|OUT|-||worker pool
 pierre/test/CodeView.workerRendering.test.ts|1018|OUT|-||worker pool
 pierre/test/DiffHunksRender.test.ts|490|PORTED|S6|renderers/diff_hunks_renderer_test.rs|all sixteen cases; row-digest snapshots became source-text invariants, renderFullHTML assertions became hast assertions
 pierre/test/DiffHunksRenderer.editHighlightCache.test.ts|284|OUT|-||edit mode is out of scope for v1
-pierre/test/DiffHunksRendererLanguages.test.ts|183|DEFER|S7||language loading is the highlighter's (Shiki/@pierre/highlights); no language loader exists behind the stub
+pierre/test/DiffHunksRendererLanguages.test.ts|183|PORTED|S7|renderers/languages_test.rs|Shiki grammar-loading assertions became the languages each side is tokenised with (recorded at the wasm boundary); hydrate/renderDiff background-loading cases are dropped with the async paths
 pierre/test/DiffHunksRendererRecompute.test.ts|1068|OUT|-||edit-session hunk recompute (edit mode is out of scope for v1)
 pierre/test/DiffHunksRendererVirtualization.test.ts|969|PORTED|S6|renderers/virtualization_test.rs|demo-geometry numbers derived from the stand-in fixture; windowed renders are differential against the full render; 4.5/4.6/5.x are one table of windows
 pierre/test/File.editSessionOwnership.test.ts|1588|OUT|-||edit mode is out of scope for v1
@@ -473,3 +473,12 @@ pierre/test/virtualizedFileLayout.test.ts|89|PENDING|S10||
 pierre/test/workerPoolHarness.ts|308|OUT|-||worker pool harness
 pierre/test/workerPoolHighlights.test.ts|264|OUT|-||worker pool
 pierre/test/workerPoolTransport.test.ts|148|OUT|-||worker pool
+highlights/dist/highlighter.js|437|PORTED|S7|highlights/highlighter.rs|langIdOf, isSupportedLanguage, codeToTokens over a `HighlightRecords` source (the wasm stays unmodified behind it); instance/memory management, HTML modes, StreamTokenizer and ansi not ported
+highlights/dist/theme.js|338|PORTED|S7|highlights/theme.rs|style resolution (resolveThemeStyle, resolveThemeSyntax, prepareTheme); wasm HTML packing and ansi colors not ported
+highlights/dist/tokens.js|361|PORTED|S7|highlights/tokens.rs|resolveOptionThemes, lineRecordsToTokens, rangeToToken, themeHtmlStyle, themeMeta; multi-theme HTML blobs not ported
+highlights/dist/languages.js|355|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json) by oracle/generate.mjs
+highlights/dist/token-types.js|80|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json) by oracle/generate.mjs
+highlights/dist/themes/pierre-dark.js|0|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json); the other bundled Zed themes are not embedded
+highlights/dist/themes/pierre-light.js|0|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json); the other bundled Zed themes are not embedded
+highlights/dist/highlights.wasm|0|OUT|S7||unmodified; run by the host behind `HighlightRecords` (pure crate, no engine). Fuel and per-call slicing are the host's concern
+theming/dist/modules/createThemeResolver.js|116|PORTED|S7|highlights/theming.rs|synchronous resolver (no inflight/generation); the rest of @pierre/theming is not needed

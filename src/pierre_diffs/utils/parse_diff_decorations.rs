@@ -1,31 +1,17 @@
 // Ported from @pierre/diffs 1.6.4 (tag diffs-v1.6.4, commit
 // 75e00805b44e193c0fb235c1bd9d7fadfa06acf6): packages/diffs/src/utils/parseDiffDecorations.ts.
 // Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
-// Changes: `DecorationItem` is declared in `highlighter/types.ts` upstream
-// (the highlighter adapter, S7); the subset used here is defined in this file
-// and will move with the adapter. `character` offsets are UTF-16 code units
+// Changes: `DecorationItem` is declared in `highlighter/types.ts` upstream and
+// lives in `highlighter_types.rs`. `character` offsets are UTF-16 code units
 // (`crate::utf16`), as upstream's `value.length`; `ChangeObject` is
 // `crate::diff::ChangeObject`.
 
 use std::collections::BTreeMap;
 
 use crate::diff::ChangeObject;
+use crate::highlighter_types::DecorationItem;
+use crate::highlighter_types::DecorationPosition;
 use crate::utf16;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecorationPosition {
-    pub line: usize,
-    pub character: usize,
-}
-
-/// The `DecorationItem` fields `createDiffSpanDecoration` sets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecorationItem {
-    pub start: DecorationPosition,
-    pub end: DecorationPosition,
-    pub properties: BTreeMap<String, String>,
-    pub always_wrap: bool,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CreateDiffSpanDecorationProps {

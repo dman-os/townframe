@@ -16,6 +16,7 @@ pub mod constants;
 pub mod diff;
 pub mod hast;
 pub mod highlighter_types;
+pub mod highlights;
 pub mod js_text;
 pub mod renderers;
 pub mod scanners;

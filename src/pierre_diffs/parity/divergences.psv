@@ -17,3 +17,6 @@ pierre/test/DiffHunksRendererVirtualization.test.ts|expandHunk(3, 'both', Infini
 pierre/test/patchFileRender.test.ts|patch digest and rendered-row snapshots|replaced by: one hunk, column line counts equal the hunk's counts, every rendered line is a patch line
 pierre/test/InjectedRowHooks.test.ts|UnresolvedFileHunksRenderer emits merge conflict action rows inline|deferred with the merge-conflict renderer
 pierre/test/renderTokenLines.test.ts|undecorated editor lines retain whitespace positions and empty-line placeholders|drives useTokenTransformer (editor token transformer), not ported
+pierre/test/DiffHunksRendererLanguages.test.ts|the bundled Terraform loader renders an ordinary .tf edit and provides its aliases|hasLoadedLanguages is `not disposed` for the bundled lexers; the aliases are checked against the highlights language table
+pierre/test/DiffHunksRendererLanguages.test.ts|asyncRender <lang> -> <lang>, cold/destination loaded (8 cases)|lazy grammar loading does not exist for the highlights backend; the four language pairs are one test each, asserting the grammars used by both sides
+pierre/test/DiffHunksRendererLanguages.test.ts|renderDiff loads the missing source grammar / hydrate preloads both grammars (4 cases)|async background loading, hydrate and onRenderUpdate are dropped (PARITY.md dropped branches)

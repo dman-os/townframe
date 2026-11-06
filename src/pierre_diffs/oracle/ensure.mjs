@@ -38,7 +38,12 @@ function cacheRoot() {
 }
 
 function checkLockAgainstPins(lock) {
-  for (const name of ["@pierre/diffs", "diff"]) {
+  for (const name of [
+    "@pierre/diffs",
+    "diff",
+    "@pierre/highlights",
+    "@pierre/theming",
+  ]) {
     const locked = lock.packages[`node_modules/${name}`];
     if (
       locked?.version !== pins[name].version ||

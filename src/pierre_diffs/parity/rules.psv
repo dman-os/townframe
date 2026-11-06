@@ -2,6 +2,15 @@
 # Columns: pattern|status|slice|rust location(s) (relative to src/pierre_diffs, `;` separated)|note
 # status: PORTED (Rust exists and is tested), PENDING (in scope, later slice), OUT (never), DEFER (maybe later).
 # Regenerate PARITY.md and parity/matrix.psv with `node oracle/parity.mjs`; CI-style check: `node oracle/parity.mjs --check`.
+highlights/dist/highlighter.js|PORTED|S7|highlights/highlighter.rs|langIdOf, isSupportedLanguage, codeToTokens over a `HighlightRecords` source (the wasm stays unmodified behind it); instance/memory management, HTML modes, StreamTokenizer and ansi not ported
+highlights/dist/theme.js|PORTED|S7|highlights/theme.rs|style resolution (resolveThemeStyle, resolveThemeSyntax, prepareTheme); wasm HTML packing and ansi colors not ported
+highlights/dist/tokens.js|PORTED|S7|highlights/tokens.rs|resolveOptionThemes, lineRecordsToTokens, rangeToToken, themeHtmlStyle, themeMeta; multi-theme HTML blobs not ported
+highlights/dist/languages.js|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json) by oracle/generate.mjs
+highlights/dist/token-types.js|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json) by oracle/generate.mjs
+highlights/dist/themes/pierre-dark.js|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json); the other bundled Zed themes are not embedded
+highlights/dist/themes/pierre-light.js|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json); the other bundled Zed themes are not embedded
+highlights/dist/highlights.wasm|OUT|S7||unmodified; run by the host behind `HighlightRecords` (pure crate, no engine). Fuel and per-call slicing are the host's concern
+theming/dist/modules/createThemeResolver.js|PORTED|S7|highlights/theming.rs|synchronous resolver (no inflight/generation); the rest of @pierre/theming is not needed
 pierre/src/components/CodeView.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
 pierre/src/components/File.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
 pierre/src/components/FileDiff.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
@@ -40,8 +49,8 @@ pierre/src/editor/tokenizer.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane
 pierre/src/editor/types.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
 pierre/src/editor/utils.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
 pierre/src/highlighter/DiffsEditorTokenizer.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/DiffsHighlighter.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/backends/highlights.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/DiffsHighlighter.ts|PORTED|S7|highlights/backend.rs|the base-class members the highlights backend uses (name, getTheme, codeToTokens, dispose) as the `DiffsHighlighter` trait (highlighter_types.rs) and `HighlightsHighlighter`; codeToHtml, tokenizers and the type refcount are not ported
+pierre/src/highlighter/backends/highlights.ts|PORTED|S7|highlights/backend.rs|oracle: dist HighlightsHighlighter tokens over the unmodified wasm records (highlights.json); editor/stream tokenizers not ported
 pierre/src/highlighter/backends/shiki.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/highlighterType.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/highlights-editor.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
@@ -72,8 +81,8 @@ pierre/src/highlighter/themes/registerCustomCSSVariableTheme.ts|OUT|-||OUT (use 
 pierre/src/highlighter/themes/registerCustomTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/themes/resolveTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/themes/resolveThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/themes/themeResolver.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/themes/types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/themeResolver.ts|PORTED|S7|highlights/themes.rs|highlights backend only (Zed themes; createHighlightsTheme exact against the dist); TextMate/Shiki branch dropped
+pierre/src/highlighter/themes/types.ts|PORTED|S7|highlights/themes.rs|`DiffsTheme` (zed palette only; the textmate/cssVariables members belong to Shiki)
 pierre/src/highlighter/tokenizer-types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/types.ts|PORTED|S5|highlighter_types.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/index.ts|OUT|-||OUT
@@ -280,7 +289,7 @@ pierre/test/diffAcceptRejectHunk*|DEFER|-||merge-conflict / edit flow
 pierre/test/hastToHtml*|DEFER|S5||tests compare hastToHtml with hast-util-to-html over rendered files (FileRenderer, Shiki); deferred with the module
 pierre/test/DiffHunksRender.test.ts|PORTED|S6|renderers/diff_hunks_renderer_test.rs|all sixteen cases; row-digest snapshots became source-text invariants, renderFullHTML assertions became hast assertions
 pierre/test/DiffHunksRendererVirtualization.test.ts|PORTED|S6|renderers/virtualization_test.rs|demo-geometry numbers derived from the stand-in fixture; windowed renders are differential against the full render; 4.5/4.6/5.x are one table of windows
-pierre/test/DiffHunksRendererLanguages.test.ts|DEFER|S7||language loading is the highlighter's (Shiki/@pierre/highlights); no language loader exists behind the stub
+pierre/test/DiffHunksRendererLanguages.test.ts|PORTED|S7|renderers/languages_test.rs|Shiki grammar-loading assertions became the languages each side is tokenised with (recorded at the wasm boundary); hydrate/renderDiff background-loading cases are dropped with the async paths
 pierre/test/DiffHunksRendererRecompute.test.ts|OUT|-||edit-session hunk recompute (edit mode is out of scope for v1)
 pierre/test/annotationHelpers.test.ts|OUT|S6||see utils/annotationHelpers.ts: typed annotation structs
 pierre/test/annotations.test.ts|PORTED|S6|renderers/annotations_test.rs|all eleven cases; demo-fixture line numbers remapped to the stand-in; placement snapshots became invariants
