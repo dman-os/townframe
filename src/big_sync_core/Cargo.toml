@@ -17,6 +17,7 @@ test-support = []
 
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
+datum_core = { workspace = true }
 
 rand.workspace = true
 

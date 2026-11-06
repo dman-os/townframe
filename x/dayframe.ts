@@ -19,6 +19,9 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
   packages    only (re)build the Wasm packages and print the DAYFRAME_* env lines
   test        x/check-dayframe.ts, then the dayframe_web Playwright e2e
                 --no-e2e         skip the browser part
+  bombadil    explore dayframe_web with Bombadil and check the shell invariants
+                (src/dayframe_web/bombadil/shell.ts); BOMBADIL_TIME_LIMIT=<n>s sets
+                the exploration time per width, default 60s
 `;
 
 function flag(name: string): boolean {
@@ -76,6 +79,9 @@ switch (command) {
     if (!flag("--no-e2e")) {
       await $`pnpm -C src/dayframe_web run e2e`.cwd(root);
     }
+    break;
+  case "bombadil":
+    await $`pnpm -C src/dayframe_web run bombadil`.cwd(root);
     break;
   case "--help":
   case "-h":

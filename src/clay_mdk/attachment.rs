@@ -13,9 +13,39 @@ pub const CAPABILITY_ATTACHMENT_TAG: u64 = 43000;
 /// A value's reference to one of its row's attachments, written under the reserved CBOR tag.
 /// The body alone conveys no authority: the index names an entry of the row's attachment list,
 /// which the host mints into a recipient-local capability on read.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
+///
+/// On the wire a row is CBOR and the attachment is the tagged index. In a human-readable
+/// format (the JSON payload of a manifest's declared row) there are no tags, so it is written
+/// as the one-member object `{"$attachment": n}`, which `declared_rows` turns back into the tag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Attachment(ciborium::tag::Required<u64, CAPABILITY_ATTACHMENT_TAG>);
+
+/// The human-readable form of an [`Attachment`].
+#[derive(Serialize, Deserialize)]
+struct HumanForm {
+    #[serde(rename = "$attachment")]
+    index: u64,
+}
+
+impl Serialize for Attachment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            HumanForm { index: self.0.0 }.serialize(serializer)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Attachment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            Ok(Self::at(HumanForm::deserialize(deserializer)?.index))
+        } else {
+            Ok(Self(Deserialize::deserialize(deserializer)?))
+        }
+    }
+}
 
 impl Attachment {
     pub fn at(index: u64) -> Self {

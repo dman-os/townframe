@@ -135,7 +135,7 @@ fn modules(
                             item.span(),
                             lines,
                             300,
-                            "move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict",
+                            "move large inline #[cfg(test)] modules into the module directory: `foo.rs` declares `#[cfg(test)] mod tests;` and the body lives in `foo/tests.rs` (topic splits in `foo/tests/<topic>.rs`); never use #[path]",
                         );
                     }
                     modules(
@@ -357,6 +357,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        if attr.path().is_ident("path") {
+            self.flag(
+                "ERROR_PATH_ATTRIBUTE",
+                attr.span(),
+                "#[path] is banned: split a module into its directory (`foo.rs` + `foo/child.rs`, `foo/tests.rs` + `foo/tests/<topic>.rs`)",
+            );
+        }
         if attr.path().is_ident("allow") {
             self.flag(
                 "ERROR_ALLOW_ATTRIBUTE",

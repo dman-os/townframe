@@ -44,6 +44,8 @@ use clay_mdk::BindingResolution;
 use clay_mdk::CallBinding;
 use clay_mdk::Capability;
 use clay_mdk::Collection;
+use clay_mdk::CollectionDecl;
+use clay_mdk::ComponentDecl;
 use clay_mdk::Context;
 use clay_mdk::Entrypoints;
 use clay_mdk::Error;
@@ -277,9 +279,30 @@ fn publish_retention(
     Ok(())
 }
 
+/// The feed collection the test micro registers into.
+struct Feed;
+
+impl CollectionDecl for Feed {
+    const NSID: &'static str = "org.example.clay.test.context.feed";
+    type Key = String;
+    type Value = String;
+}
+
+struct Detail;
+
+impl ComponentDecl for Detail {
+    const NAME: &'static str = "detail";
+}
+
+struct Slot;
+
+impl ComponentDecl for Slot {
+    const NAME: &'static str = "slot";
+}
+
 pub async fn activate(context: Context) -> Result<(), Error> {
     let feed = context
-        .registration::<String, String>("feed")
+        .registration::<Feed>()
         .expect("the feed collection is bound");
     feed.collection().bootstrapped().await;
     let rows = feed.collection().rows()?;
@@ -339,11 +362,11 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             Ok(format!("relay:{answer}"))
         }
     })?;
-    context.publish_component("detail", move || {
+    context.publish::<Detail>(move || {
         let _ = &shown;
         dioxus_core::VNode::empty()
     })?;
-    context.publish_component("slot", {
+    context.publish::<Slot>({
         let collection = collection.clone();
         move || {
             let rows = use_rows(&collection);
@@ -363,7 +386,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             feed.put(
                 &"late".to_owned(),
                 &"late".to_owned(),
-                vec![RowAttachment::own(publication)],
+                vec![RowAttachment::by_name(publication)],
             )
             .await?;
             Ok(())

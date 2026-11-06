@@ -5,11 +5,15 @@
 //! engine (`wcmp`) ever sees them.
 use clay_mdk::host::factory;
 use dayframe_composition::CompositionRuntime;
+use dayframe_composition::HostInputs;
+use dayframe_composition::Insets;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
 use serde::Deserialize;
+use std::rc::Rc;
 use ui::ThemeMode;
 use ui::ThemeRoot;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
@@ -61,16 +65,34 @@ async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpP
     clay_rt_wcmp_web::load(package.bytes()).await
 }
 
-/// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
-/// is unusable without it. Toolbar is on-demand: its pinned root row starts it when the shell
-/// mounts it. Sample is eager so its section is written at boot. Collection access
-/// is resolved by the composition from each manifest's requests and configuration, not
-/// hand-written here.
+/// The shell's native built-ins. The shell micro is the frame: eager, and locked because nothing
+/// is usable without it. Settings is an on-demand panel: home lists its declared row, and
+/// opening it starts it. Toolbar is on-demand: its sidebar panel row starts it when the sidebar
+/// mounts it. Sample is eager so its section is written at boot. The lifecycle controls are the
+/// composition's own Settings section. Collection access is resolved
+/// by the composition from each manifest's requests and configuration, not hand-written here.
 fn native_micros() -> Vec<InstalledMicro> {
+    let shell = clay_mdk::MicroId::local(micro_shell_manifest::ID);
     vec![
         InstalledMicro {
             eager: true,
             locked: true,
+            ..InstalledMicro::new(
+                shell.clone(),
+                micro_shell_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_shell_manifest::manifest(),
+                        bindings,
+                        micro_shell::activate,
+                    )
+                },
+            )
+        },
+        InstalledMicro {
+            enabled_on_admission: true,
             ..InstalledMicro::new(
                 clay_mdk::MicroId::local(micro_settings_manifest::ID),
                 micro_settings_manifest::sidecar(),
@@ -84,6 +106,8 @@ fn native_micros() -> Vec<InstalledMicro> {
                     )
                 },
             )
+            .satisfied_by(&shell, &micro_shell_manifest::sidecar())
+            .expect("the shell publishes what Settings requires")
         },
         InstalledMicro {
             enabled_on_admission: true,
@@ -118,6 +142,7 @@ fn native_micros() -> Vec<InstalledMicro> {
                 },
             )
         },
+        dayframe_composition::lifecycle::micro(),
     ]
 }
 
@@ -149,10 +174,9 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                         }
                     };
                     let sidecar = entry.sidecar.clone();
-                    installed.push(InstalledMicro::new(
-                        id,
-                        sidecar.clone(),
-                        move |id, resources, bindings| {
+                    let location = entry.location.clone();
+                    let micro =
+                        InstalledMicro::new(id, sidecar.clone(), move |id, resources, bindings| {
                             clay_mdk::host::wcmp_factory(
                                 resources,
                                 id,
@@ -160,8 +184,17 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                                 bindings,
                                 move || indexed_package(entry.clone()),
                             )
-                        },
-                    ));
+                        })
+                        // A package may require the shell's publications (the layout's app bar
+                        // button); the shell is the only provider a package can name today.
+                        .satisfied_by(
+                            &clay_mdk::MicroId::local(micro_shell_manifest::ID),
+                            &micro_shell_manifest::sidecar(),
+                        );
+                    match micro {
+                        Ok(micro) => installed.push(micro),
+                        Err(error) => errors.push(format!("{location}: {error}")),
+                    }
                 }
             }
             Err(error) => errors.push(format!("package index is not an index: {error}")),
@@ -199,7 +232,91 @@ fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
         .clone()
         .expect("ReadyApp mounts only with a built runtime");
     let runtime = use_signal(|| initial);
-    rsx! { dayframe_composition::Application { runtime } }
+    let host = use_host_inputs();
+    rsx! { dayframe_composition::Application { runtime, host } }
+}
+
+fn inner_size() -> (f64, f64) {
+    let window = web_sys::window().expect("the shell runs in a window");
+    let dimension = |value: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| {
+        value
+            .expect("a window has a size")
+            .as_f64()
+            .expect("a window size is a number")
+    };
+    (
+        dimension(window.inner_width()),
+        dimension(window.inner_height()),
+    )
+}
+
+/// What the page tells the shell: its size (the shell never measures the DOM), and the
+/// browser's back button.
+///
+/// The browser has no event for "back was pressed" that can be cancelled, only `popstate` after
+/// the history already moved. So while the shell has somewhere to go back to, the page keeps one
+/// extra history entry in front of the user: back consumes it and the shell goes back instead of
+/// the page leaving, and the entry is pushed again while the shell can still go back. The push
+/// is decided from the shell's state as it was when the entry was consumed, so the last back to
+/// home leaves one spare entry, and the press after that is a no-op before the next leaves the
+/// page.
+fn use_host_inputs() -> HostInputs {
+    let initial = inner_size();
+    let mut width = use_signal(|| initial.0);
+    let mut height = use_signal(|| initial.1);
+    let mut platform_back = use_signal(|| 0_u64);
+    let can_back = use_signal(|| false);
+    let mut guarded = use_signal(|| false);
+    // A browser viewport has no system chrome over it.
+    let insets = use_signal(Insets::default);
+    let listeners = use_hook(|| {
+        let window = web_sys::window().expect("the shell runs in a window");
+        let on_resize = Closure::<dyn FnMut()>::new(move || {
+            let (w, h) = inner_size();
+            width.set(w);
+            height.set(h);
+        });
+        let on_pop = Closure::<dyn FnMut()>::new(move || {
+            guarded.set(false);
+            platform_back += 1;
+        });
+        window
+            .add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref())
+            .expect("a window takes listeners");
+        window
+            .add_event_listener_with_callback("popstate", on_pop.as_ref().unchecked_ref())
+            .expect("a window takes listeners");
+        Rc::new((on_resize, on_pop))
+    });
+    use_drop(move || {
+        let window = web_sys::window().expect("the shell runs in a window");
+        window
+            .remove_event_listener_with_callback("resize", listeners.0.as_ref().unchecked_ref())
+            .expect("a window takes listeners");
+        window
+            .remove_event_listener_with_callback("popstate", listeners.1.as_ref().unchecked_ref())
+            .expect("a window takes listeners");
+    });
+    use_effect(move || {
+        if can_back() && !guarded() {
+            web_sys::window()
+                .expect("the shell runs in a window")
+                .history()
+                .expect("a window has a history")
+                .push_state(&wasm_bindgen::JsValue::NULL, "")
+                .expect("the page may push its own history");
+            guarded.set(true);
+        }
+    });
+    HostInputs {
+        width: width.into(),
+        height: height.into(),
+        insets: insets.into(),
+        platform_back,
+        can_back,
+        keyboard: true,
+        start: None,
+    }
 }
 
 #[component]
@@ -217,7 +334,7 @@ fn App() -> Element {
             family: "material".to_string(),
             mode: ThemeMode::Dark,
             main {
-                class: "min-h-screen box-border bg-background p-6 font-sans text-foreground",
+                class: "bg-background font-sans text-foreground",
                 if let Some(error) = failure() {
                     p { role: "alert", "Dayframe cannot start: {error}" }
                 } else if runtime.read().is_some() {

@@ -135,6 +135,22 @@ guessing at them. The protocol is:
 3. Add an env-var seed (e.g. `DAYFRAME_OPEN="0:0,2;1:2"`) to render the state that needs a click to
    reach, so a screenshot can stand in for the interaction.
 
+### Shell seed: `DAYFRAME_SHELL_OPEN`
+
+The desktop launcher reads `DAYFRAME_SHELL_OPEN` into `HostInputs::start` and the shell opens that
+stack instead of home: comma-separated entries, each `panel`, `panel/row` or `@sidebar` (the
+compact drawer). A name without a dot is shorthand for `dayframe.<name>`.
+
+```sh
+DAYFRAME_SHELL_OPEN=settings deno run --allow-all x/dayframe.ts desktop            # Settings list
+DAYFRAME_SHELL_OPEN=settings,settings/counter deno run --allow-all x/dayframe.ts desktop  # a section
+DAYFRAME_SHELL_OPEN=@sidebar deno run --allow-all x/dayframe.ts desktop            # drawer (narrow window)
+```
+
+Panel keys are plug ids (`dayframe.settings`, `dayframe.layout`); a Settings row key is the
+contributing micro's id (`dayframe.counter`, `dayframe.sample`, `dayframe.lifecycle`). A step the
+shell refuses shows as an alert at the top of the frame.
+
 ## False signals
 
 These have each caused a wrong conclusion. Check them before reporting a build failure.

@@ -14,6 +14,8 @@ clay_store = { workspace = true }
 clay_rt_wcmp_web = { workspace = true }
 micro_settings = { workspace = true }
 micro_settings_manifest = { workspace = true }
+micro_shell = { workspace = true }
+micro_shell_manifest = { workspace = true }
 micro_toolbar = { workspace = true }
 micro_toolbar_manifest = { workspace = true }
 micro_sample = { workspace = true }
@@ -24,7 +26,7 @@ serde_json.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
-web-sys = { workspace = true, features = ["Window", "Response", "Document", "Element"] }
+web-sys = { workspace = true, features = ["Window", "Response", "Document", "Element", "History", "Event", "EventTarget", "PopStateEvent"] }
 console_error_panic_hook = "0.1.7"
 
 [features]
