@@ -749,6 +749,13 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
     // Tier 0: sedimentree parity.
     let a_state = a.repo.doc_head_state(doc_id.clone()).await?;
     let b_state = b.repo.doc_head_state(doc_id).await?;
+    tracing::warn!(
+        a = %crate::test2::harness::heads::state_summary(a.label, &a_state),
+        b = %crate::test2::harness::heads::state_summary(b.label, &b_state),
+        a_ledger = %kh_snap::describe_ledger(&a.repo).await?,
+        b_ledger = %kh_snap::describe_ledger(&b.repo).await?,
+        "INSTR partition_then_heal state"
+    ); // INSTR
     let (mut a_heads, mut b_heads) = (
         a_state.sedimentree_heads.to_vec(),
         b_state.sedimentree_heads.to_vec(),
@@ -1295,6 +1302,16 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
         &[doc_id.clone()],
     )
     .await?;
+    // INSTR: every node's head state and keyhive ledger before the content asserts.
+    for idx in 0..4 {
+        let node = guard.node(idx);
+        let state = node.repo.doc_head_state(doc_id.clone()).await?;
+        tracing::warn!(
+            state = %crate::test2::harness::heads::state_summary(node.label, &state),
+            ledger = %kh_snap::describe_ledger(&node.repo).await?,
+            "INSTR partial_mesh heal state"
+        ); // INSTR
+    }
     // Both independent branches must survive the heal.
     for handle in [&owner_doc, &c_doc] {
         assert_eq!(

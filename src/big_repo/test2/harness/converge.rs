@@ -55,7 +55,7 @@ pub(crate) async fn converge(
         previous.push(fingerprint(node, docs).await?);
     }
     history.push(previous.clone());
-    for _ in 1..=MAX_ROUNDS {
+    for round in 1..=MAX_ROUNDS {
         for link in links {
             link.sync_keyhive_with_peer().await?;
             for doc_id in docs {
@@ -72,6 +72,7 @@ pub(crate) async fn converge(
         let settled = current == previous;
         history.push(current.clone());
         if settled {
+            tracing::warn!(rounds = round, "INSTR converge rounds"); // INSTR
             return Ok(());
         }
         previous = current;
