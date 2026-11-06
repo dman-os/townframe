@@ -76,36 +76,46 @@ static LIVE: AtomicI64 = AtomicI64::new(0);
 static PEAK: AtomicI64 = AtomicI64::new(0);
 
 
-// INSTR: byte-weighted allocation-site sampler, on only around the reboot (see instr_dump).
-static INSTR_ON: AtomicBool = AtomicBool::new(false); // INSTR
+// INSTR: count-weighted allocation-site sampler (BIG_NODE_COSTS_SAMPLE=<stride>): every stride-th allocation of any size
+// records a backtrace, tagged by INSTR_PHASE (1 = early window, 2 = late window, 0 = off). A thread-local guard stops reentry.
+static INSTR_PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // INSTR
 static INSTR_ACC: AtomicU64 = AtomicU64::new(0); // INSTR
-const INSTR_STRIDE: u64 = 64 << 20; // only allocations >= 64 KiB are sampled: ld.so mallocs under its loader lock, and a backtrace there deadlocks // INSTR
-static INSTR_SAMPLES: std::sync::Mutex<Vec<(u64, std::backtrace::Backtrace)>> = std::sync::Mutex::new(Vec::new()); // INSTR
+static INSTR_STRIDE: AtomicU64 = AtomicU64::new(64); // INSTR
+static INSTR_SAMPLES: std::sync::Mutex<Vec<(u8, [usize; 40])>> = std::sync::Mutex::new(Vec::new()); // INSTR
 std::thread_local! { static INSTR_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; } // INSTR
-fn instr_sample(size: usize) { // INSTR
-    if !INSTR_ON.load(Relaxed) { return; } // INSTR
-    let prev = INSTR_ACC.fetch_add(size as u64, Relaxed); // INSTR
-    let crossed = (prev + size as u64) / INSTR_STRIDE - prev / INSTR_STRIDE; // INSTR
-    if size < (64 << 10) || crossed == 0 || INSTR_GUARD.with(|guard| guard.replace(true)) { return; } // INSTR
-    let backtrace = std::backtrace::Backtrace::force_capture(); // INSTR
-    if let Ok(mut samples) = INSTR_SAMPLES.try_lock() { samples.push((crossed * INSTR_STRIDE, backtrace)); } // INSTR
-    INSTR_GUARD.with(|guard| guard.set(false)); // INSTR
+unsafe extern "C" { // INSTR
+    fn _Unwind_Backtrace(trace: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> i32, arg: *mut std::ffi::c_void) -> i32; // INSTR
+    fn _Unwind_GetIP(context: *mut std::ffi::c_void) -> usize; // INSTR
+} // INSTR
+extern "C" fn instr_frame(context: *mut std::ffi::c_void, arg: *mut std::ffi::c_void) -> i32 { // INSTR
+    // SAFETY: arg is the (array, depth) pair instr_sample passed; context is live for the callback. // INSTR
+    let (ips, depth) = unsafe { &mut *(arg as *mut ([usize; 40], usize)) }; // INSTR
+    if *depth == 40 { return 5; } // INSTR
+    ips[*depth] = unsafe { _Unwind_GetIP(context) }; // INSTR
+    *depth += 1; // INSTR
+    0 // INSTR
+} // INSTR
+fn instr_sample(_size: usize) { // INSTR
+    let phase = INSTR_PHASE.load(Relaxed); // INSTR
+    if phase == 0 { return; } // INSTR
+    if INSTR_ACC.fetch_add(1, Relaxed) % INSTR_STRIDE.load(Relaxed) != 0 { return; } // INSTR
+    if INSTR_GUARD.try_with(|guard| guard.replace(true)).unwrap_or(true) { return; } // INSTR
+    // Raw libgcc unwind: no std backtrace lock, so a thread holding the ld.so loader lock cannot deadlock against us. // INSTR
+    let mut frames = ([0usize; 40], 0usize); // INSTR
+    unsafe { _Unwind_Backtrace(instr_frame, &mut frames as *mut _ as *mut std::ffi::c_void) }; // INSTR
+    if let Ok(mut samples) = INSTR_SAMPLES.try_lock() { samples.push((phase, frames.0)); } // INSTR
+    let _ = INSTR_GUARD.try_with(|guard| guard.set(false)); // INSTR
 } // INSTR
 fn instr_dump() { // INSTR
-    INSTR_ON.store(false, Relaxed); // INSTR
+    INSTR_PHASE.store(0, Relaxed); // INSTR
     let samples = std::mem::take(&mut *INSTR_SAMPLES.lock().unwrap()); // INSTR
-    eprintln!("INSTR alloc-site samples {}", samples.len()); // INSTR
-    let mut sites: std::collections::HashMap<String, u64> = Default::default(); // INSTR
-    for (weight, backtrace) in samples { // INSTR
-        let text = backtrace.to_string(); // INSTR
-        let skip = ["std::", "core::", "alloc::", "hashbrown", "<alloc::", "__rust", "tokio::", "futures", "<core::", "<std::", "<futures", "<tokio", "<hashbrown", "<&", "<T as", "<F as", "<I as", "<[", "<bytes", "bytes::", "<Vec", "<(", "_start", "start_thread", "clone", "<fn", "<unknown>", "big_node::e2e::costs::", "<big_node::e2e::costs::"]; // INSTR
-        let frames: Vec<&str> = text.lines().filter(|line| !line.trim_start().starts_with("at ")).map(|line| line.trim().split_once(": ").map_or(line.trim(), |(_, symbol)| symbol)).filter(|symbol| !skip.iter().any(|prefix| symbol.starts_with(prefix))).collect(); // INSTR
-        let key = frames.iter().take(7).map(|symbol| symbol.split("::h").next().unwrap().to_owned()).collect::<Vec<_>>().join(" <- "); // INSTR
-        *sites.entry(key).or_default() += weight; // INSTR
+    let stride = INSTR_STRIDE.load(Relaxed); // INSTR
+    eprintln!("INSTR alloc-site samples {} stride {stride} exe {:?}", samples.len(), std::env::current_exe().unwrap()); // INSTR
+    for line in std::fs::read_to_string("/proc/self/maps").unwrap().lines().filter(|line| line.contains("big_node-")).take(1) { eprintln!("INSTR maps {line}"); } // INSTR
+    for (phase, ips) in samples { // INSTR
+        let ips: Vec<String> = ips.into_iter().take_while(|ip| *ip != 0).map(|ip| format!("{ip:x}")).collect(); // INSTR
+        eprintln!("INSTR sample {phase} {}", ips.join(" ")); // INSTR
     } // INSTR
-    let mut sites: Vec<_> = sites.into_iter().collect(); // INSTR
-    sites.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes)); // INSTR
-    for (key, bytes) in sites.iter().take(60) { eprintln!("INSTR alloc-site MiB={} {key}", bytes >> 20); } // INSTR
 } // INSTR
 
 /// [`System`], counting: a `realloc` is one allocation of its new size, as dhat-rs counts it.
@@ -319,6 +329,7 @@ async fn a_note_costs_no_more_to_create_in_a_fuller_drawer() {
     const WINDOW: usize = 5;
     let mut cluster = Cluster::boot(&["alice"]).await;
     let drawer = cluster.share_drawer(0, &[]).await;
+    if let Ok(stride) = std::env::var("BIG_NODE_COSTS_SAMPLE") { INSTR_STRIDE.store(stride.parse().unwrap(), Relaxed); } // INSTR
     COUNTING.store(true, Relaxed);
     let mut created = Vec::new();
     // INSTR: process CPU (utime+stime, all threads, dead ones included) in clock ticks of 10 ms.
@@ -326,6 +337,7 @@ async fn a_note_costs_no_more_to_create_in_a_fuller_drawer() {
     *sqlite_rs::INSTR_SQL_CALLERS.lock().unwrap() = None; // INSTR
     for ordinal in 0..NOTES {
         let instr_cpu_before = instr_cpu(); // INSTR
+        INSTR_PHASE.store(if std::env::var("BIG_NODE_COSTS_SAMPLE").is_err() { 0 } else if (5..10).contains(&ordinal) { 1 } else if (25..30).contains(&ordinal) { 2 } else { 0 }, Relaxed); // INSTR
         let instr_sql_before: Vec<u64> = sqlite_rs::INSTR_SQL.iter().map(|count| count.load(Relaxed)).collect(); // INSTR
         tracing::info!(ordinal, "INSTR create note begin"); // INSTR
         let (_, usage) = measure(cluster.create_note(0, &drawer, &text(ordinal))).await;
@@ -334,6 +346,8 @@ async fn a_note_costs_no_more_to_create_in_a_fuller_drawer() {
         created.push(usage);
     }
     { let mut instr_callers: Vec<(String, u64)> = sqlite_rs::INSTR_SQL_CALLERS.lock().unwrap().take().unwrap_or_default().into_iter().collect(); instr_callers.sort_by_key(|(_, count)| std::cmp::Reverse(*count)); for (caller, count) in instr_callers.iter().take(40) { eprintln!("INSTR sql caller x16 {count}: {caller}"); } } // INSTR
+    INSTR_PHASE.store(0, Relaxed); // INSTR
+    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() { instr_dump(); } // INSTR
     COUNTING.store(false, Relaxed);
     let window = |end: usize| {
         let mut window: Vec<_> = created[end - WINDOW..end]
@@ -466,7 +480,6 @@ async fn long_test_cost_table() {
 
     let (live, rss) = (LIVE.load(Relaxed), resident());
     tracing::info!("INSTR phase connect begin"); // INSTR
-    INSTR_ON.store(std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok(), Relaxed); // INSTR
     table
         .run("connect two nodes", cluster.connect(Topology::Pair))
         .await;
@@ -518,10 +531,8 @@ async fn long_test_cost_table() {
 
     tracing::info!("INSTR phase replicate end"); // INSTR
     eprintln!("INSTR dump for connect+replicate"); // INSTR
-    instr_dump(); // INSTR
     table.run("stop node", cluster.stop(1)).await;
     tracing::info!("INSTR phase reboot begin"); // INSTR
-    INSTR_ON.store(std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok(), Relaxed); // INSTR
     table
         .run(
             &format!("reboot node holding {count} notes"),
@@ -529,7 +540,6 @@ async fn long_test_cost_table() {
         )
         .await;
     tracing::info!("INSTR phase reboot end"); // INSTR
-    instr_dump(); // INSTR
     cluster.stop_all().await;
 
     // D19: many nodes per process. What each one adds, booted side by side.
