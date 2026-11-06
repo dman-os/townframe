@@ -140,7 +140,7 @@ These are not implemented.
 2. **Plain vocabulary.** Identity proof becomes *identity*, domain capability becomes *capability*, standing grant becomes *grant*, and gate becomes *revocation dependency*. The mechanism terms stay inside this ADR's Mechanism section.
 3. **Later, only if remote clients need it:** offline-narrowable tokens (macaroons, biscuit or UCAN) layered on `CapId`, so an iroh client can narrow without a round trip.
 
-Considered and not adopted for now: making the docs service accept a drawer capability for that drawer's documents, or a mint that returns both. Most callers need only a docs capability; only admin callers (the CLI, settings) hold both. Revisit if those callers find two mints a burden.
+Decided (operator, 2026-11-06): drawers and documents stay separate domains with separate capabilities. The docs service does not accept a drawer capability, and there is no combined mint. Most callers need only a docs capability; `Narrow` covers handing out less.
 
 ## Implementation and evidence
 

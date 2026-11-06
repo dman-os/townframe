@@ -651,6 +651,16 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - Keep (operator, 2026-11-06): Automerge `uint` storage for unsigned values (signalled by `minimum >= 0` once widths go), and the union setup (adjacent/external tagging records, wrapper members, `empty: true`): an accommodation of Rust inside the Lexicon model, not a divergence.
   - Keep (justified by Automerge or Lexicon): text, counter, bytes, ms timestamps, string-keyed typed maps over `unknown`, `$type` unions, `knownValues`, `nullable`, open-union carrying.
 
+- **D33. Operator answers on the `day` CLI and loose ends** (2026-11-06):
+  - Every keyring secret is scoped by node id. Sockets are node-scoped in a standard per-user runtime location; making them configurable comes later.
+  - `day init` on an existing node: the manager's pick is idempotent (exit 0, unchanged), with a refusal only when the directory holds something that is not a node.
+  - Which peers auto-connect is user-node vs relay-node policy, but either way a node has a set of peers to dial at start: a bootstrap list.
+  - Mother and sister nodes: only ADR 032 §2 names them (user-node composition, Dayframe); no design exists yet. They belong to the user-node composition ADR.
+  - Drawers and documents stay separate authority domains (ADR 022 updated).
+  - PollDatums gets no marker event for matching docs with no selected rows: the datum selection is a filter too.
+  - Datum value newtypes use Automerge's scalar names (`F64`, not `Float64`); integers carry no widths, as in Lexicon.
+  - Renames are pre-approved: "feel free to rename anything".
+
 ## Deferred
 
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
