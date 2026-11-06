@@ -177,7 +177,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_FN_LENGTH"
 path = "src/daybook_core/rt.rs"
 symbol = "module::Rt::boot"
-ceiling = 388
+ceiling = 385
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
@@ -186,19 +186,11 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_FN_LENGTH"
 path = "src/daybook_core/rt.rs"
 symbol = "module::Rt::dispatch_no_gate_internal"
-ceiling = 458
+ceiling = 339
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
 
-[[exemptions]]
-code = "ERROR_FN_LENGTH"
-path = "src/daybook_core/rt.rs"
-symbol = "module::Rt::handle_wflow_entry"
-ceiling = 360
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
-reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
 code = "ERROR_FN_LENGTH"

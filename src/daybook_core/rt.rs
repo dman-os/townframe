@@ -583,7 +583,6 @@ impl Rt {
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
-
         let plugs_config_sql = sqlite_local_state_repo
             .ensure_sqlite_db(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
             .await?;
@@ -1149,216 +1148,149 @@ impl Rt {
             )
             .await?;
 
-        {
-            // Handle staging branch cleanup based on success/failure
-            let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
-                doc_id,
-                branch_path: target_branch_path,
-                staging_branch_path,
-                ..
-            }) = &dispatch.args;
-
-            let merged_successfully = matches!(&result, DaybookWflowOutcome::Success { .. });
-
-            if merged_successfully {
-                // Merge staging branch into target branch
-                info!(
-                    %dispatch_id,
-                    ?doc_id,
-                    ?staging_branch_path,
-                    ?target_branch_path,
-                    "merging staging branch into target"
-                );
-                match self
-                    .drawer
-                    .merge_from_branch(doc_id, target_branch_path, staging_branch_path, None)
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
-                        debug!(
-                            %dispatch_id,
-                            ?doc_id,
-                            ?name,
-                            ?staging_branch_path,
-                            ?target_branch_path,
-                            "staging branch missing during merge; wflow made no facet changes"
-                        );
-                    }
-                    Err(err) => {
-                        error!(
-                            %dispatch_id,
-                            ?doc_id,
-                            ?staging_branch_path,
-                            ?target_branch_path,
-                            ?err,
-                            "staging merge returned error"
-                        );
-                        return Err(eyre::eyre!(err).wrap_err("error merging staging branch"));
-                    }
-                }
-
-                if merged_successfully {
-                    // Delete the staging branch after successful merge
-                    info!(
-                        %dispatch_id,
-                        ?doc_id,
-                        ?staging_branch_path,
-                        "deleting staging branch after successful merge"
-                    );
-                    self.drawer
-                        .delete_branch(doc_id, staging_branch_path, None)
-                        .await
-                        .or_else(|err| match err {
-                            crate::drawer::types::DrawerError::BranchNotFound { .. } => {
-                                debug!(
-                                    %dispatch_id,
-                                    ?doc_id,
-                                    ?staging_branch_path,
-                                    "staging branch already removed after successful merge"
-                                );
-                                Ok(false)
-                            }
-                            other => Err(other),
-                        })
-                        .wrap_err("error deleting staging branch after merge")?;
-                }
-            }
-            if !merged_successfully {
-                // Delete staging branch on failure if it exists.
-                info!(
-                    %dispatch_id,
-                    ?doc_id,
-                    ?staging_branch_path,
-                    "deleting staging branch due to failure"
-                );
-                self.drawer
-                    .delete_branch(doc_id, staging_branch_path, None)
-                    .await
-                    .or_else(|err| match err {
-                        crate::drawer::types::DrawerError::BranchNotFound { .. } => Ok(false),
-                        other => Err(other),
-                    })
-                    .wrap_err("error deleting staging branch")?;
-                for hook in &dispatch.on_success_hooks {
-                    match hook {
-                        DispatchOnSuccessHook::InitMarkDone { init_id, .. } => {
-                            self.init_repo
-                                .clear_running_dispatch(init_id, dispatch_id)
-                                .await?;
-                        }
-                        DispatchOnSuccessHook::ProcessorRunLog { .. } => {}
-                        DispatchOnSuccessHook::CommandInvokeReply {
-                            parent_wflow_job_id,
-                            request_id,
-                        } => {
-                            let reply = {
-                                let (status, value_json, error_json) =
-                                    command_invoke_reply_from_result(
-                                        &result,
-                                        dispatch_id,
-                                        merged_successfully,
-                                    );
-                                daybook_pdk::InvokeCommandReply {
-                                    request_id: request_id.clone(),
-                                    status,
-                                    value_json,
-                                    error_json,
-                                }
-                            };
-                            self.authority.send_message(parent_wflow_job_id, request_id, serde_json::to_string(&reply).expect(ERROR_JSON)).await
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
-                                    )
-                                })?;
-                        }
-                    }
-                }
-            } else {
-                for hook in &dispatch.on_success_hooks {
-                    match hook {
-                        DispatchOnSuccessHook::InitMarkDone { init_id, run_mode } => {
-                            self.init_repo.mark_done(run_mode, init_id).await?;
-                            self.init_repo
-                                .clear_running_dispatch(init_id, dispatch_id)
-                                .await?;
-                        }
-                        DispatchOnSuccessHook::ProcessorRunLog {
-                            doc_id,
-                            processor_full_id,
-                            done_token,
-                        } => {
-                            self.record_processor_runlog_done(
-                                doc_id,
-                                processor_full_id,
-                                done_token,
-                            )
-                            .await?;
-                        }
-                        DispatchOnSuccessHook::CommandInvokeReply {
-                            parent_wflow_job_id,
-                            request_id,
-                        } => {
-                            let reply = {
-                                let (status, value_json, error_json) =
-                                    command_invoke_reply_from_result(
-                                        &result,
-                                        dispatch_id,
-                                        merged_successfully,
-                                    );
-                                daybook_pdk::InvokeCommandReply {
-                                    request_id: request_id.clone(),
-                                    status,
-                                    value_json,
-                                    error_json,
-                                }
-                            };
-                            self.authority.send_message(parent_wflow_job_id, request_id, serde_json::to_string(&reply).expect(ERROR_JSON)).await
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
-                                    )
-                                })?;
-                        }
-                    }
-                }
-            }
-
-            let final_status = if merged_successfully {
-                dispatch::DispatchStatus::Succeeded
-            } else if matches!(&result, DaybookWflowOutcome::Cancelled) {
-                dispatch::DispatchStatus::Cancelled
-            } else {
-                dispatch::DispatchStatus::Failed
-            };
-            self.progress_repo
-                .add_update(
-                    &dispatch_id,
-                    crate::progress::ProgressUpdate {
-                        at: jiff::Timestamp::now(),
-                        title: None,
-                        deets: crate::progress::ProgressUpdateDeets::Completed {
-                            state: if matches!(final_status, dispatch::DispatchStatus::Succeeded) {
-                                crate::progress::ProgressFinalState::Succeeded
-                            } else if matches!(final_status, dispatch::DispatchStatus::Cancelled) {
-                                crate::progress::ProgressFinalState::Cancelled
-                            } else {
-                                crate::progress::ProgressFinalState::Failed
-                            },
-                            message: None,
-                        },
-                    },
-                )
-                .await?;
-            self.dispatch_repo
-                .complete(dispatch_id.clone(), final_status.clone())
-                .await?;
-            self.release_waiting_dispatches(
+        let succeeded = matches!(&result, DaybookWflowOutcome::Success { .. });
+        // The active dispatch and permanent receipt remain durable until every
+        // post-processing operation succeeds. Boot replays this sequence after
+        // a crash or merge error; merge/delete and hooks must be idempotent.
+        self.settle_dispatch_staging(&dispatch_id, &dispatch, succeeded)
+            .await?;
+        self.run_dispatch_completion_hooks(&dispatch_id, &dispatch, &result, succeeded)
+            .await?;
+        let final_status = if succeeded {
+            dispatch::DispatchStatus::Succeeded
+        } else if matches!(&result, DaybookWflowOutcome::Cancelled) {
+            dispatch::DispatchStatus::Cancelled
+        } else {
+            dispatch::DispatchStatus::Failed
+        };
+        self.progress_repo
+            .add_update(
                 &dispatch_id,
-                matches!(final_status, dispatch::DispatchStatus::Succeeded),
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: None,
+                    deets: crate::progress::ProgressUpdateDeets::Completed {
+                        state: if matches!(final_status, dispatch::DispatchStatus::Succeeded) {
+                            crate::progress::ProgressFinalState::Succeeded
+                        } else if matches!(final_status, dispatch::DispatchStatus::Cancelled) {
+                            crate::progress::ProgressFinalState::Cancelled
+                        } else {
+                            crate::progress::ProgressFinalState::Failed
+                        },
+                        message: None,
+                    },
+                },
             )
             .await?;
+        self.dispatch_repo
+            .complete(dispatch_id.clone(), final_status.clone())
+            .await?;
+        self.release_waiting_dispatches(
+            &dispatch_id,
+            matches!(final_status, dispatch::DispatchStatus::Succeeded),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn settle_dispatch_staging(
+        &self,
+        dispatch_id: &str,
+        dispatch: &ActiveDispatch,
+        succeeded: bool,
+    ) -> Res<()> {
+        let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            doc_id,
+            branch_path: target_branch_path,
+            staging_branch_path,
+            ..
+        }) = &dispatch.args;
+        if succeeded {
+            // Merge staging into the target before deleting it. A missing
+            // staging branch means no facet changes, or a replay after deletion.
+            info!(%dispatch_id, ?doc_id, ?staging_branch_path, ?target_branch_path,
+                "merging staging branch into target");
+            match self
+                .drawer
+                .merge_from_branch(doc_id, target_branch_path, staging_branch_path, None)
+                .await
+            {
+                Ok(()) => {}
+                Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
+                    debug!(%dispatch_id, ?doc_id, ?name, ?staging_branch_path,
+                        "staging branch missing during merge");
+                }
+                Err(err) => {
+                    return Err(eyre::eyre!(err).wrap_err("error merging staging branch"));
+                }
+            }
+        }
+        // Delete staging after a successful merge or on workflow failure. This
+        // is idempotent so an active dispatch can replay receipt post-processing.
+        info!(%dispatch_id, ?doc_id, ?staging_branch_path, succeeded,
+            "deleting staging branch after workflow settlement");
+        self.drawer
+            .delete_branch(doc_id, staging_branch_path, None)
+            .await
+            .or_else(|err| match err {
+                crate::drawer::types::DrawerError::BranchNotFound { .. } => Ok(false),
+                other => Err(other),
+            })
+            .wrap_err("error deleting staging branch")?;
+        Ok(())
+    }
+
+    async fn run_dispatch_completion_hooks(
+        &self,
+        dispatch_id: &str,
+        dispatch: &ActiveDispatch,
+        result: &DaybookWflowOutcome,
+        succeeded: bool,
+    ) -> Res<()> {
+        for hook in &dispatch.on_success_hooks {
+            match hook {
+                DispatchOnSuccessHook::InitMarkDone { init_id, run_mode } => {
+                    if succeeded {
+                        self.init_repo.mark_done(run_mode, init_id).await?;
+                    }
+                    self.init_repo
+                        .clear_running_dispatch(init_id, dispatch_id)
+                        .await?;
+                }
+                DispatchOnSuccessHook::ProcessorRunLog {
+                    doc_id,
+                    processor_full_id,
+                    done_token,
+                } => {
+                    if succeeded {
+                        self.record_processor_runlog_done(doc_id, processor_full_id, done_token)
+                            .await?;
+                    }
+                }
+                DispatchOnSuccessHook::CommandInvokeReply {
+                    parent_wflow_job_id,
+                    request_id,
+                } => {
+                    let (status, value_json, error_json) =
+                        command_invoke_reply_from_result(result, dispatch_id, succeeded);
+                    let reply = daybook_pdk::InvokeCommandReply {
+                        request_id: request_id.clone(),
+                        status,
+                        value_json,
+                        error_json,
+                    };
+                    self.authority
+                        .send_message(
+                            parent_wflow_job_id,
+                            request_id,
+                            serde_json::to_string(&reply).expect(ERROR_JSON),
+                        )
+                        .await
+                        .wrap_err_with(|| {
+                            format!("error sending command invoke reply to parent job {parent_wflow_job_id}")
+                        })?;
+                }
+            }
         }
         Ok(())
     }
@@ -2559,8 +2491,7 @@ mod tests {
 
         let dispatch_id = "runtime-reconcile-dispatch";
         let job_id = format!("{dispatch_id}-job");
-        let staging_branch_path =
-            daybook_types::doc::BranchPathBuf::from(format!("/tmp/{job_id}"));
+        let staging_branch_path = daybook_types::doc::BranchPathBuf::from(format!("/tmp/{job_id}"));
         let tokens = dispatch::DocFacetTokens {
             doc_id: doc_id.clone(),
             branch_path: branch_path.clone(),
