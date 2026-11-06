@@ -4,30 +4,21 @@
 mod tests;
 mod view;
 
-use clay_mdk::Access;
 use clay_mdk::Attachment;
-use clay_mdk::AttachmentDeclaration;
-use clay_mdk::BindingResolution;
 use clay_mdk::ComponentDecl;
 use clay_mdk::ConfigDecl;
-use clay_mdk::ConfigurationRequest;
 use clay_mdk::Context;
-use clay_mdk::ContributionDeclaration;
-use clay_mdk::Entrypoints;
 use clay_mdk::Error;
-use clay_mdk::FacetAccess;
+use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
-use clay_mdk::Request;
+use clay_mdk::PackageDecl;
 use clay_mdk::RowAttachment;
 use clay_mdk::Sidecar;
 use clay_mdk::host::DocumentService;
 use dioxus::prelude::*;
-use micro_layout_manifest::PANELS;
-use micro_settings_manifest::SECTIONS;
+use micro_layout_manifest::LayoutPanels;
+use micro_layout_manifest::Panel;
 use micro_settings_manifest::Section;
 use micro_settings_manifest::SettingsSections;
 use serde::Deserialize;
@@ -53,6 +44,15 @@ pub struct SampleConfig {
     pub greeting: String,
 }
 
+/// The Sample package's identity.
+pub struct Sample;
+
+impl PackageDecl for Sample {
+    const ID: &'static str = ID;
+    const VERSION: u32 = PACKAGE_VERSION;
+    const AUTHORITY: &'static str = AUTHORITY;
+}
+
 /// The sample's configuration facet.
 pub struct SampleFacet;
 
@@ -74,66 +74,23 @@ impl ComponentDecl for SampleDetailView {
 /// declares read/write access to its own configuration facet. Its Settings section is written
 /// at runtime, so it exists only while the micro runs.
 pub fn manifest() -> MicroManifest {
-    MicroManifest {
-        entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: DETAIL.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
-        requires: vec![],
-        configuration_requests: vec![ConfigurationRequest {
-            binding: CONFIG_NAME.into(),
-            facets: vec![FacetAccess {
-                tag: Nsid::literal(CONFIG_TAG),
-                key_id: Some(CONFIG_KEY.into()),
-                read: true,
-                write: true,
-                create: false,
-                delete: false,
-            }],
-        }],
-        collection_contracts: vec![],
-        collection_requests: vec![
-            Request {
-                binding: SECTIONS_BINDING.into(),
-                contract: Nsid::literal(SECTIONS),
-                access: Some(Access::Write),
-                necessity: Necessity::Required,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-            Request {
-                binding: PANELS_BINDING.into(),
-                contract: Nsid::literal(PANELS),
-                access: Some(Access::Write),
-                necessity: Necessity::Optional,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-        ],
+    ManifestBuilder::new()
+        .component::<SampleDetailView>()
+        .config::<SampleFacet>()
+        .writes::<SettingsSections>(SECTIONS_BINDING, Necessity::Required)
+        .writes::<LayoutPanels>(PANELS_BINDING, Necessity::Optional)
         // The layout panel is declared, not written at runtime: it is listed while the sample is
         // stopped, and showing it starts the sample.
-        contributions: vec![ContributionDeclaration {
-            id: "layout-panel".into(),
-            binding: PANELS_BINDING.into(),
-            key: ID.into(),
-            payload: serde_json::json!({
-                "title": "Sample micro",
-                "content": { "$attachment": 0 },
-            }),
-            attachments: vec![AttachmentDeclaration {
-                index: 0,
-                publication: DETAIL.into(),
-            }],
-        }],
-        extra: Default::default(),
-    }
+        .contributes::<LayoutPanels>("layout-panel", ID, |at| Panel {
+            title: "Sample micro".into(),
+            content: at.own::<SampleDetailView>(),
+        })
+        .build()
 }
 
 /// The Sample package as its sidecar carries it: identity, authority and manifest.
 pub fn sidecar() -> Sidecar {
-    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
+    Sidecar::of::<Sample>(manifest())
 }
 
 /// Activation receives already-bound dependencies through the context; it cannot mint grants or

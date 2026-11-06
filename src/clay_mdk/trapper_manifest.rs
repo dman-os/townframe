@@ -1,18 +1,14 @@
 //! The `trapper` fixture's declarations, shared by the guest (`trapper_fixture.rs`) and the native
 //! emitter of its sidecar (`emit_trapper_manifest.rs`), which each declare it as a plain `mod trapper_manifest;` (it sits beside their roots).
 //! The Settings section row mirrors the counter's, so the shell lists it and mounts its `view`.
-use clay_mdk::Access;
-use clay_mdk::AttachmentDeclaration;
-use clay_mdk::BindingResolution;
-use clay_mdk::ContributionDeclaration;
-use clay_mdk::Entrypoints;
+use clay_mdk::Attachment;
+use clay_mdk::CollectionDecl;
+use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
-use clay_mdk::Request;
 use clay_mdk::Sidecar;
+use serde::Deserialize;
+use serde::Serialize;
 
 pub const ID: &str = "dayframe.trapper";
 pub const VIEW: &str = "view";
@@ -27,40 +23,31 @@ impl clay_mdk::ComponentDecl for TrapperView {
     const NAME: &'static str = VIEW;
 }
 
+/// The settings sections collection as this crate can name it (it sits below the settings
+/// micro): a section row is a title and its detail presentation.
+struct Sections;
+
+impl CollectionDecl for Sections {
+    const NSID: &'static str = SECTIONS;
+    type Key = String;
+    type Value = Section;
+}
+
+#[derive(Serialize, Deserialize)]
+struct Section {
+    title: String,
+    detail: Attachment,
+}
+
 pub fn manifest() -> MicroManifest {
-    MicroManifest {
-        entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: VIEW.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
-        requires: vec![],
-        configuration_requests: vec![],
-        collection_contracts: vec![],
-        collection_requests: vec![Request {
-            binding: "sections".into(),
-            contract: Nsid::literal(SECTIONS),
-            access: Some(Access::Write),
-            necessity: Necessity::Optional,
-            resolution: BindingResolution::Configured,
-            min_revision: None,
-        }],
-        contributions: vec![ContributionDeclaration {
-            id: "settings-section".into(),
-            binding: "sections".into(),
-            key: ID.into(),
-            payload: serde_json::json!({
-                "title": "Trapper (fixture)",
-                "detail": { "$attachment": 0 },
-            }),
-            attachments: vec![AttachmentDeclaration {
-                index: 0,
-                publication: VIEW.into(),
-            }],
-        }],
-        extra: Default::default(),
-    }
+    ManifestBuilder::new()
+        .component::<TrapperView>()
+        .writes::<Sections>("sections", Necessity::Optional)
+        .contributes::<Sections>("settings-section", ID, |at| Section {
+            title: "Trapper (fixture)".into(),
+            detail: at.own::<TrapperView>(),
+        })
+        .build()
 }
 
 /// Only the sidecar emitter reads it; the guest (the wasm32 build of this file) links `manifest` alone.

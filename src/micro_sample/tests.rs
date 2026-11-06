@@ -7,12 +7,14 @@ use clay_host::ConfiguredMicro;
 use clay_host::Host;
 use clay_host::MicroState;
 use clay_host::Supervisor;
+use clay_mdk::Nsid;
 use clay_mdk::host::BoundCollection;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::CollectionRegistry;
 use clay_mdk::host::ReplicaId;
 use clay_mdk::host::Resources;
 use clay_mdk::host::factory;
+use micro_settings_manifest::SECTIONS;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
