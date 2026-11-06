@@ -230,6 +230,10 @@ struct Compiler {
     model: Model,
     ids: BTreeMap<NodeId, usize>,
     stack: Vec<usize>,
+    /// Parallel to `stack`: the `ElementId` each entry was last addressed by (`PushId`/`SetId`),
+    /// or the node's own id after `Child`. `AddEventListener` registers under this id, which
+    /// rebinds the node's canonical id when it was reached through an alias.
+    entry_ids: Vec<Option<NodeId>>,
     batch: Vec<Mutation>,
 }
 
@@ -239,6 +243,7 @@ impl Compiler {
             model: Model::new(),
             ids: BTreeMap::from([(0, 0)]),
             stack: vec![0],
+            entry_ids: vec![Some(0)],
             batch: Vec::new(),
         }
     }
@@ -346,6 +351,7 @@ impl Compiler {
                 if !live.is_empty() {
                     let (id, node) = live[index % live.len()];
                     self.stack.push(node);
+                    self.entry_ids.push(Some(id));
                     self.batch.push(Mutation::PushId(id));
                 }
             }
@@ -354,6 +360,7 @@ impl Compiler {
                 let id = id as NodeId;
                 if (id == 0) == (top == 0) {
                     self.set_element_id(top, id);
+                    *self.entry_ids.last_mut().unwrap() = Some(id);
                     self.batch.push(Mutation::SetId(id));
                 }
             }
@@ -362,13 +369,19 @@ impl Compiler {
                 let children = &self.model.nodes[top].children;
                 if self.stack.len() > 1 && !children.is_empty() {
                     let index = index % children.len();
-                    *self.stack.last_mut().unwrap() = children[index];
+                    let child = children[index];
+                    *self.stack.last_mut().unwrap() = child;
+                    *self.entry_ids.last_mut().unwrap() = match &self.model.nodes[child].kind {
+                        ModelKind::Element { element_id, .. } => *element_id,
+                        _ => None,
+                    };
                     self.batch.push(Mutation::Child(index as u32));
                 }
             }
             Op::Pop => {
                 if self.stack.len() > 1 {
                     self.stack.pop();
+                    self.entry_ids.pop();
                     self.batch.push(Mutation::Pop);
                 }
             }
@@ -383,6 +396,7 @@ impl Compiler {
                         element_id: None,
                     });
                     self.stack.push(node);
+                    self.entry_ids.push(None);
                     self.batch.push(Mutation::CreateElement((tag.into(), None)));
                 }
             }
@@ -391,6 +405,7 @@ impl Compiler {
                     let text = TEXTS[index % TEXTS.len()];
                     let node = self.model.alloc(ModelKind::Text(text.into()));
                     self.stack.push(node);
+                    self.entry_ids.push(None);
                     self.batch.push(Mutation::CreateText(text.into()));
                 }
             }
@@ -399,6 +414,7 @@ impl Compiler {
                 if top != 0 && self.stack.len() > 1 && self.stack.len() < STACK_CAP {
                     let cloned = self.model.deep_clone(top);
                     *self.stack.last_mut().unwrap() = cloned;
+                    *self.entry_ids.last_mut().unwrap() = None;
                     self.batch.push(Mutation::CloneNode);
                 }
             }
@@ -406,6 +422,7 @@ impl Compiler {
                 if let Some(parent) = self.attachment_parent(attach, count) {
                     let split = self.stack.len() - count;
                     let selected: Vec<usize> = self.stack.split_off(split);
+                    self.entry_ids.truncate(split);
                     for &node in &selected {
                         self.model.detach(node);
                         self.model.nodes[node].parent = Some(parent);
@@ -417,6 +434,7 @@ impl Compiler {
                         }
                         Attach::Replace => {
                             let target = self.stack.pop().unwrap();
+                            self.entry_ids.pop();
                             let siblings = &mut self.model.nodes[parent].children;
                             let position = siblings
                                 .iter()
@@ -517,11 +535,24 @@ impl Compiler {
             Op::AddListener(index) => {
                 let top = self.top();
                 if let ModelKind::Element {
-                    listeners,
-                    element_id: Some(_),
+                    element_id: Some(canonical),
                     ..
-                } = &mut self.model.nodes[top].kind
+                } = self.model.nodes[top].kind
                 {
+                    // The listener registers under the id the entry was addressed by while that
+                    // alias still maps to this node, and the node's canonical id follows it.
+                    let entry_id = self
+                        .entry_ids
+                        .last()
+                        .copied()
+                        .flatten()
+                        .filter(|id| self.ids.get(id) == Some(&top))
+                        .unwrap_or(canonical);
+                    self.set_element_id(top, entry_id);
+                    let ModelKind::Element { listeners, .. } = &mut self.model.nodes[top].kind
+                    else {
+                        unreachable!("matched as an element above")
+                    };
                     let name = LISTENERS[index % LISTENERS.len()];
                     listeners.insert(name.into());
                     self.batch.push(Mutation::AddEventListener(name.into()));
@@ -542,6 +573,7 @@ impl Compiler {
                     .any(|&entry| self.model.within(top, entry));
                 if top != 0 && self.stack.len() > 1 && !stale {
                     self.stack.pop();
+                    self.entry_ids.pop();
                     self.model.detach(top);
                     self.drop_subtree(top);
                     self.batch.push(Mutation::Remove);
@@ -554,6 +586,7 @@ impl Compiler {
     fn balance(&mut self) {
         while self.stack.len() > 1 {
             self.stack.pop();
+            self.entry_ids.pop();
             self.batch.push(Mutation::Pop);
         }
     }
@@ -665,6 +698,44 @@ fn op() -> impl Strategy<Value = Op> {
 
 fn stream() -> impl Strategy<Value = Vec<Vec<Op>>> {
     prop::collection::vec(prop::collection::vec(op(), 0..30), 1..5)
+}
+
+/// Pinned regression (shrunk from `proptest-regressions`): an element carries two aliases, `1`
+/// from an earlier batch and `2` from `SetId`, and a listener added after `PushId(1)` registers
+/// under the alias the entry was addressed by, so the node's canonical id becomes `1` again.
+#[test]
+fn listener_registers_under_the_alias_the_entry_was_pushed_by() {
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetId(1),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    tree.apply(&[
+        Mutation::PushId(1),
+        Mutation::SetId(2),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    assert_eq!(tree.listener_id("div", "click"), None);
+    tree.apply(&[
+        Mutation::PushId(0),
+        Mutation::PushId(1),
+        Mutation::AddEventListener("click".into()),
+        Mutation::Pop,
+        Mutation::Pop,
+    ])
+    .unwrap();
+    assert_eq!(tree.listener_id("div", "click").map(|id| id.raw()), Some(1));
+    // Addressed by the other alias, the same node's listener now reports that alias.
+    tree.apply(&[
+        Mutation::PushId(2),
+        Mutation::AddEventListener("input".into()),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    assert_eq!(tree.listener_id("div", "input").map(|id| id.raw()), Some(2));
 }
 
 proptest! {

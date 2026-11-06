@@ -1,10 +1,12 @@
 use super::ActivationError;
 use super::WasmIncarnation;
 use super::WasmStoreState;
+use super::bindings::exports::townframe::dayframe::micro_lifecycle as lifecycle_wit;
+use super::bindings::townframe::dayframe::collection_registration as registration_wit;
+use super::bindings::townframe::dayframe::collections as collection_wit;
 use super::bindings::townframe::dayframe::documents as wit;
 use super::first_poll;
 use super::wasmtime;
-use clay_docs::DocumentRef;
 use clay_docs::DocumentSnapshot;
 use clay_docs::FacetMutation;
 use clay_docs::FacetRoute;
@@ -16,14 +18,19 @@ use clay_docs::OperationStatus;
 use clay_docs::WatchSelection;
 pub use clay_guest_session::Access as WasmDocumentAccess;
 use clay_guest_session::Delivery;
+use clay_guest_session::InitialContext;
+use clay_guest_session::InitializationFailure;
 pub use clay_guest_session::Operation as WasmOperation;
 pub use clay_guest_session::Watch as WasmDocumentWatch;
 use clay_guest_session::Work;
+use clay_guest_session::capabilities::PublishedCapability;
+use clay_guest_session::capabilities::admit_publications;
 use clay_host::AccessError;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use wasmtime::component::Resource;
+use wasmtime::component::ResourceAny;
 
 pub(super) fn deliver(
     incarnation: &Arc<Mutex<Option<WasmIncarnation>>>,
@@ -40,26 +47,59 @@ pub(super) fn deliver(
     };
     active.refuel();
     let events = active.client.townframe_dayframe_document_events();
-    let result = match delivery {
-        Delivery::Changed { id, snapshot } => {
-            first_poll(events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot)))
+    let trapped = match delivery {
+        Delivery::Changed { id, snapshot } => first_poll(
+            events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot)),
+            &active.waker,
+        ),
+        Delivery::Lagged(id) => {
+            first_poll(events.call_lagged(&mut active.store, id), &active.waker)
         }
-        Delivery::Lagged(id) => first_poll(events.call_lagged(&mut active.store, id)),
-        Delivery::Completed(receipt) => {
-            first_poll(events.call_completed(&mut active.store, &receipt_to_wire(receipt)))
-        }
+        Delivery::Completed(receipt) => first_poll(
+            events.call_completed(&mut active.store, &receipt_to_wire(receipt)),
+            &active.waker,
+        ),
     };
-    if result.is_err() {
+    // A suspension (Suspended) or a guest trap both withdraw the incarnation: document
+    // callbacks are the same class of contract violation as a presentation call that fails.
+    let trapped = match trapped {
+        Ok(outcome) => outcome.is_err(),
+        Err(super::Suspended) => true,
+    };
+    if trapped {
         guard.take();
         return DeliveryOutcome::Trapped;
     }
     DeliveryOutcome::Delivered
 }
 
-pub(super) async fn activate(
+/// Grant `context` into the guest's resource table, run `micro-lifecycle.initialize`, and take
+/// over what it answered: the guest's `instance-root` and the publication lease of every
+/// returned publication, keyed by name and admitted against what the manifest declares.
+pub(super) async fn initialize(
     active: &mut WasmIncarnation,
-    configs: BTreeMap<String, DocumentRef>,
-) -> Result<(), ActivationError> {
+    context: InitialContext,
+) -> Result<(ResourceAny, BTreeMap<String, PublishedCapability>), ActivationError> {
+    let InitialContext {
+        arguments,
+        configs,
+        collections,
+        registrations,
+        requirements,
+        publications: declared,
+        micro,
+        activator,
+    } = context;
+    if let Some(activator) = activator {
+        active.store.data().capabilities.attach_activator(activator);
+    }
+    if let Some(micro) = &micro {
+        active
+            .store
+            .data()
+            .capabilities
+            .attach_own(micro, &declared);
+    }
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {
         let access = active.store.data().documents.grant(document.access())?;
@@ -78,16 +118,96 @@ pub(super) async fn activate(
             access,
         });
     }
+    let mut collection_bindings = Vec::with_capacity(collections.len());
+    for (name, projection) in collections {
+        let reader = active.store.data().collections.grant(projection)?;
+        let reader = active
+            .store
+            .data_mut()
+            .table
+            .push(reader)
+            .map_err(|error| {
+                ActivationError::Initialization(format!("granting collection {name}: {error}"))
+            })?;
+        collection_bindings.push(collection_wit::CollectionBinding { name, reader });
+    }
+    let mut registration_bindings = Vec::with_capacity(registrations.len());
+    for (name, grant) in registrations {
+        let writer = active.store.data().collections.grant_writer(grant)?;
+        let writer = active
+            .store
+            .data_mut()
+            .table
+            .push(writer)
+            .map_err(|error| {
+                ActivationError::Initialization(format!("granting registration {name}: {error}"))
+            })?;
+        registration_bindings.push(registration_wit::RegistrationBinding { name, writer });
+    }
+    let mut requirement_bindings = Vec::with_capacity(requirements.len());
+    for (name, publication) in requirements {
+        let capability = active
+            .store
+            .data()
+            .capabilities
+            .mint(&publication)
+            .map_err(|failure| {
+                ActivationError::Initialization(format!("minting requirement {name}: {failure:?}"))
+            })?;
+        let capability = active
+            .store
+            .data_mut()
+            .table
+            .push(capability)
+            .map_err(|error| {
+                ActivationError::Initialization(format!("granting requirement {name}: {error}"))
+            })?;
+        requirement_bindings.push(lifecycle_wit::RequirementBinding { name, capability });
+    }
+    let context = lifecycle_wit::InitialContext {
+        arguments,
+        configs: bindings,
+        collections: collection_bindings,
+        registrations: registration_bindings,
+        requirements: requirement_bindings,
+    };
     active.refuel();
-    active
-        .client
-        .townframe_dayframe_micro_lifecycle()
-        .call_activate(&mut active.store, &bindings)
+    let lifecycle = active.client.townframe_dayframe_micro_lifecycle();
+    let initialized = active
+        .store
+        .run_concurrent(async |accessor| lifecycle.call_initialize(accessor, context).await)
         .await
+        .and_then(|trapped| trapped)
         .map_err(|trap| {
-            ActivationError::Initialization(format!("guest trapped during activation: {trap:#}"))
+            ActivationError::Initialization(format!(
+                "guest trapped during initialization: {trap:#}"
+            ))
         })?
-        .map_err(ActivationError::Initialization)
+        .map_err(|failure| {
+            ActivationError::Refused(match failure {
+                lifecycle_wit::InitializationError::InvalidConfiguration(message) => {
+                    InitializationFailure::InvalidConfiguration(message)
+                }
+                lifecycle_wit::InitializationError::Unavailable(message) => {
+                    InitializationFailure::Unavailable(message)
+                }
+                lifecycle_wit::InitializationError::Rejected(message) => {
+                    InitializationFailure::Rejected(message)
+                }
+            })
+        })?;
+    let returned = initialized.publications.into_iter().map(|publication| {
+        let lease = active
+            .store
+            .data_mut()
+            .table
+            .delete(publication.capability)
+            .expect("a published capability must be in the host resource table");
+        (publication.name, lease)
+    });
+    let publications = admit_publications(&declared, returned.collect::<Vec<_>>())
+        .map_err(ActivationError::Initialization)?;
+    Ok((initialized.root, publications))
 }
 
 fn access_error(error: AccessError) -> wit::DocumentError {
@@ -324,7 +444,7 @@ mod tests {
             )
             .unwrap();
         let (mut state, mut incoming) =
-            WasmStoreState::new(host.clone(), instance.clone(), Limits::default()).unwrap();
+            WasmStoreState::detached(host.clone(), instance.clone(), Limits::default()).unwrap();
         let access = state.documents.grant(access).unwrap();
         let access = state.table.push(access).unwrap().rep();
         let denied = HostDocumentAccess::mutate(
@@ -472,7 +592,7 @@ mod tests {
                 }],
             )
             .unwrap();
-        let (mut state, mut incoming) = WasmStoreState::new(
+        let (mut state, mut incoming) = WasmStoreState::detached(
             host.clone(),
             instance,
             Limits {

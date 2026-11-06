@@ -46,7 +46,7 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
         )
         .unwrap();
     let (mut state, mut incoming) =
-        WcmpStoreState::new(host.clone(), instance.clone(), Limits::default()).unwrap();
+        WcmpStoreState::detached(host.clone(), instance.clone(), Limits::default()).unwrap();
     let access = state.documents.grant(access).unwrap();
     let access = state.table.push(access).unwrap().rep();
     let denied = HostDocumentAccess::mutate(
@@ -194,7 +194,7 @@ async fn a_full_delivery_queue_rejects_before_creating_an_optimistic_write() {
             }],
         )
         .unwrap();
-    let (mut state, mut incoming) = WcmpStoreState::new(
+    let (mut state, mut incoming) = WcmpStoreState::detached(
         host.clone(),
         instance,
         Limits {

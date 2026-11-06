@@ -1,9 +1,11 @@
 ---
-source: src/clay_mdk/manifest.rs
+source: src/clay_mdk/manifest_tests.rs
 expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
 ---
 {
-  "provision": "dayframe.shelf",
+  "id": "toolbar-button",
+  "binding": "tally-book",
+  "key": "counter",
   "payload": {
     "badges": [
       1,
@@ -16,5 +18,11 @@ expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
     },
     "order": 2,
     "slot": "toolbar"
-  }
+  },
+  "attachments": [
+    {
+      "index": 0,
+      "publication": "view"
+    }
+  ]
 }

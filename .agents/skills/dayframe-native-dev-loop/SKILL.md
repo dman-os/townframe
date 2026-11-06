@@ -25,12 +25,14 @@ least once. Read the **False signals** section before concluding a build failed.
 ## The one command
 
 ```sh
-deno run --allow-all x/dx.ts serve --desktop -p desktop --renderer native --hot-patch false
+deno run --allow-all x/dayframe.ts desktop
 ```
 
+This builds the Wasm packages, exports `DAYFRAME_PACKAGE_DIR`, then runs `x/dx.ts serve --desktop -p dayframe_desktop --renderer native --hot-patch false`, printing the package dir and store path. `--fresh` starts from an empty temp store, `--store <path>` picks one, `--webview` switches renderer. `x/dayframe.ts --help` lists the other commands (`web`, `showcase`, `packages`, `test`).
+
 - **Native renderer always.** `--renderer native` is the default expectation for this work; wry exists only as a production fallback.
-- **Webview fallback for interaction checks.** When native/Blitz cannot dispatch accessibility actions, stop the native serve process and run the same command with `--renderer webview`. The webview build is slower on a cold target, but its AT-SPI tree exposes element titles and `accessibility-cli --click '[title="..."]'` can verify real callbacks. The native `with_window_attributes(...with_title(...))` configuration does not control the webview window title; expect `dioxus | ⛺` there.
-- **Do not pass `-p ui`.** `ui` is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `desktop`.
+- **Webview fallback for interaction checks.** When native/Blitz cannot dispatch accessibility actions, stop the native serve process and run the same command with `x/dayframe.ts desktop --webview`. The webview build is slower on a cold target, but its AT-SPI tree exposes element titles and `accessibility-cli --click '[title="..."]'` can verify real callbacks. The native `with_window_attributes(...with_title(...))` configuration does not control the webview window title; expect `dioxus | ⛺` there.
+- **Do not pass `-p ui`.** `ui` is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `dayframe_desktop` (the script does).
 - **Let the serve process own compilation.** Do not run `cargo build` alongside it. The wrapper forwards the arguments to the repository-local Dioxus CLI, and installs that CLI through `x/install-dx.ts` when needed.
 - Use the same wrapper for other Dioxus commands, for example `deno run --allow-all x/dx.ts check ...`.
 
@@ -49,15 +51,14 @@ metadata to find `dioxus-cli` in that workspace; a Git patch requires both `git`
 substitutes a registry CLI when the local fork is absent. Validate the installer with
 `nix develop --command deno test --allow-all x/install-dx.ts`; its bounded local-workspace fixture
 checks package discovery, installation, spaced paths and the `no-downloads` feature without compiling
-Dioxus. Before launching the document-backed counter, prepare its component with
-`x/check-dayframe.ts --prepare-only` and export the printed absolute `DAYFRAME_COUNTER_COMPONENT`.
+Dioxus. Before launching the document-backed counter, `x/dayframe.ts desktop` prepares the packages itself (`x/dayframe.ts packages` prints the env for hand runs).
 
 ## Run it in tmux, not in the background
 
 The operator's convention is tmux session **`townframe`**, window **4**:
 
 ```sh
-tmux send-keys -t townframe:4 'deno run --allow-all x/dx.ts serve --desktop -p desktop --renderer native --hot-patch false' Enter
+tmux send-keys -t townframe:4 'deno run --allow-all x/dayframe.ts desktop' Enter
 ```
 
 Do not launch detached background processes. The tmux pane keeps the server's own keybindings

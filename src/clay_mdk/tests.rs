@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 use wash_runtime::wasmtime;
 use wasmtime::Engine;
 use wasmtime::Store;
+use wasmtime::component::Accessor;
 use wasmtime::component::Component;
 use wasmtime::component::HasSelf;
 use wasmtime::component::Linker;
@@ -52,6 +53,7 @@ mod host_bindings {
             "townframe:dayframe/presentation.surface": super::Surface,
             "townframe:dayframe/presentation.mount-point": super::Placement,
             "townframe:dayframe/presentation.component-ref": super::ComponentRef,
+            "townframe:dayframe/capability-bank.published-capability": super::TestPublished,
         },
     });
 }
@@ -69,6 +71,9 @@ use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
 use dioxus_native_dom::DioxusState;
 use host_bindings::exports::townframe::dayframe::presentation_events::Event;
+use host_bindings::townframe::dayframe::capability_bank;
+use host_bindings::townframe::dayframe::collection_registration;
+use host_bindings::townframe::dayframe::collections;
 use host_bindings::townframe::dayframe::documents;
 use host_bindings::townframe::dayframe::presentation::*;
 use host_bindings::townframe::dayframe::presentation::{self};
@@ -276,11 +281,20 @@ impl TestHost {
     ) -> wasmtime::Result<host_bindings::MicroClient> {
         let guest =
             host_bindings::MicroClient::instantiate_async(&mut *store, component, linker).await?;
-        guest
-            .townframe_dayframe_micro_lifecycle()
-            .call_activate(store, &[])
-            .await?
-            .map_err(wasmtime::Error::msg)?;
+        let lifecycle = guest.townframe_dayframe_micro_lifecycle();
+        let context =
+            host_bindings::exports::townframe::dayframe::micro_lifecycle::InitialContext {
+                arguments: Vec::new(),
+                configs: Vec::new(),
+                collections: Vec::new(),
+                registrations: Vec::new(),
+                requirements: Vec::new(),
+            };
+        // The root is left in the store: these hosts never close an incarnation, they drop it.
+        store
+            .run_concurrent(async |accessor| lifecycle.call_initialize(accessor, context).await)
+            .await??
+            .map_err(|failure| wasmtime::Error::msg(format!("{failure:?}")))?;
         Ok(guest)
     }
 
@@ -439,6 +453,78 @@ impl TestHost {
     }
 }
 
+impl collections::Host for TestHost {}
+
+impl collections::HostCollectionReader for TestHost {
+    fn drop(&mut self, reader: Resource<collections::CollectionReader>) -> wasmtime::Result<()> {
+        self.table.delete(reader)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> collections::HostCollectionReaderWithStore<T> for HasSelf<TestHost> {
+    async fn acquire(
+        _accessor: &Accessor<T, Self>,
+        _reader: Resource<collections::CollectionReader>,
+        _selector: Vec<u8>,
+        _resume: Option<Vec<u8>>,
+    ) -> wasmtime::Result<Result<Resource<collections::ProjectionLease>, collections::AcquireError>>
+    {
+        wasmtime::bail!("test host grants no collection readers")
+    }
+}
+
+impl collections::HostProjectionLease for TestHost {
+    fn drop(&mut self, lease: Resource<collections::ProjectionLease>) -> wasmtime::Result<()> {
+        self.table.delete(lease)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> collections::HostProjectionLeaseWithStore<T> for HasSelf<TestHost> {
+    async fn read(
+        _accessor: &Accessor<T, Self>,
+        _lease: Resource<collections::ProjectionLease>,
+        _committed: Option<Vec<u8>>,
+        _limits: collections::ReadLimits,
+    ) -> wasmtime::Result<Result<collections::Page, collections::ReadError>> {
+        wasmtime::bail!("test host grants no projection leases")
+    }
+}
+
+impl collection_registration::Host for TestHost {}
+
+impl collection_registration::HostRegistrationWriter for TestHost {
+    fn drop(
+        &mut self,
+        writer: Resource<collection_registration::RegistrationWriter>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(writer)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> collection_registration::HostRegistrationWriterWithStore<T> for HasSelf<TestHost> {
+    async fn put(
+        _accessor: &Accessor<T, Self>,
+        _writer: Resource<collection_registration::RegistrationWriter>,
+        _key: Vec<u8>,
+        _basis: collection_registration::WriteBasis,
+        _value: collection_registration::WrittenValue,
+    ) -> wasmtime::Result<Result<collections::Stamp, collection_registration::MutationError>> {
+        wasmtime::bail!("test host grants no registration writers")
+    }
+
+    async fn delete(
+        _accessor: &Accessor<T, Self>,
+        _writer: Resource<collection_registration::RegistrationWriter>,
+        _key: Vec<u8>,
+        _basis: collection_registration::WriteBasis,
+    ) -> wasmtime::Result<Result<collections::Stamp, collection_registration::MutationError>> {
+        wasmtime::bail!("test host grants no registration writers")
+    }
+}
+
 impl documents::Host for TestHost {}
 
 impl documents::HostDocumentAccess for TestHost {
@@ -509,7 +595,152 @@ impl documents::HostOperation for TestHost {
     }
 }
 
+impl capability_bank::Host for TestHost {
+    fn publish_presentation(
+        &mut self,
+        _name: String,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::PublishedCapability>, capability_bank::CapabilityError>,
+    > {
+        // The rig has no capability bank; the guest only needs a lease to hand back.
+        Ok(Ok(self.table.push(TestPublished)?))
+    }
+
+    fn publish_call(
+        &mut self,
+        _name: String,
+        _contract: String,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::PublishedCapability>, capability_bank::CapabilityError>,
+    > {
+        // Like presentations: the rig serves no calls, the guest only needs a lease to hand back.
+        Ok(Ok(self.table.push(TestPublished)?))
+    }
+}
+
+impl capability_bank::HostCapabilityRef for TestHost {
+    fn status(
+        &mut self,
+        _reference: Resource<capability_bank::CapabilityRef>,
+    ) -> wasmtime::Result<capability_bank::RefStatus> {
+        Ok(capability_bank::RefStatus::Revoked)
+    }
+
+    fn drop(
+        &mut self,
+        reference: Resource<capability_bank::CapabilityRef>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(reference)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> capability_bank::HostCapabilityRefWithStore<T> for HasSelf<TestHost> {
+    async fn call(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<capability_bank::CapabilityRef>,
+        _request: Vec<u8>,
+    ) -> wasmtime::Result<Result<Vec<u8>, capability_bank::CallError>> {
+        Ok(Err(capability_bank::CallError::Capability(
+            capability_bank::CapabilityError::LimitExceeded,
+        )))
+    }
+
+    async fn retain_call(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<capability_bank::CapabilityRef>,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::CallBinding>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    async fn redeem_presentation(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<capability_bank::CapabilityRef>,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::PresentationComponent>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    async fn status_changed(
+        _accessor: &Accessor<T, Self>,
+        _reference: Resource<capability_bank::CapabilityRef>,
+        _seen: capability_bank::RefStatus,
+    ) -> wasmtime::Result<()> {
+        unreachable!("the counter fixture follows no provider");
+    }
+}
+
+impl capability_bank::HostCallBinding for TestHost {
+    fn drop(&mut self, binding: Resource<capability_bank::CallBinding>) -> wasmtime::Result<()> {
+        self.table.delete(binding)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> capability_bank::HostCallBindingWithStore<T> for HasSelf<TestHost> {
+    async fn call(
+        _accessor: &Accessor<T, Self>,
+        _binding: Resource<capability_bank::CallBinding>,
+        _request: Vec<u8>,
+    ) -> wasmtime::Result<Result<Vec<u8>, capability_bank::CallError>> {
+        Ok(Err(capability_bank::CallError::Capability(
+            capability_bank::CapabilityError::LimitExceeded,
+        )))
+    }
+}
+
+impl capability_bank::HostPresentationComponent for TestHost {
+    fn component(
+        &mut self,
+        _proxy: Resource<capability_bank::PresentationComponent>,
+    ) -> wasmtime::Result<Result<Resource<ComponentRef>, capability_bank::CapabilityError>> {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    fn drop(
+        &mut self,
+        proxy: Resource<capability_bank::PresentationComponent>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(proxy)?;
+        Ok(())
+    }
+}
+
+impl<T: 'static> capability_bank::HostPresentationComponentWithStore<T> for HasSelf<TestHost> {
+    async fn revoked(
+        _accessor: &Accessor<T, Self>,
+        _proxy: Resource<capability_bank::PresentationComponent>,
+    ) -> wasmtime::Result<()> {
+        unreachable!("the counter fixture follows no provider");
+    }
+}
+
+impl capability_bank::HostPublishedCapability for TestHost {
+    fn reference(
+        &mut self,
+        _published: Resource<capability_bank::PublishedCapability>,
+    ) -> wasmtime::Result<
+        Result<Resource<capability_bank::CapabilityRef>, capability_bank::CapabilityError>,
+    > {
+        Ok(Err(capability_bank::CapabilityError::LimitExceeded))
+    }
+
+    fn drop(
+        &mut self,
+        published: Resource<capability_bank::PublishedCapability>,
+    ) -> wasmtime::Result<()> {
+        self.table.delete(published)?;
+        Ok(())
+    }
+}
+
 pub struct ComponentRef;
+
+/// A stand-in publication lease: the rig's guests publish a presentation and never redeem it.
+pub struct TestPublished;
 
 impl presentation::Host for TestHost {}
 
@@ -985,7 +1216,7 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
         .push(Placement::synthetic(Arc::new(AtomicBool::new(false))))?;
     assert!(matches!(
         events
-            .call_mount(&mut store, Resource::new_borrow(denied.rep()), &[])
+            .call_mount(&mut store, "view", Resource::new_borrow(denied.rep()))
             .await?,
         Err(PresentationError::Revoked)
     ));
@@ -995,7 +1226,7 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
         .table
         .push(Placement::synthetic(first_lifetime.clone()))?;
     let surface = events
-        .call_mount(&mut store, Resource::new_borrow(placement.rep()), &[])
+        .call_mount(&mut store, "view", Resource::new_borrow(placement.rep()))
         .await?
         .unwrap();
     let expected_batches = expected_counter_batches(4);
@@ -1026,8 +1257,8 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
     let second_surface = second_events
         .call_mount(
             &mut store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1095,7 +1326,7 @@ async fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
             .push(Placement::synthetic(alive.clone()))?;
         let surface = guest
             .townframe_dayframe_presentation_events()
-            .call_mount(&mut store, Resource::new_borrow(placement.rep()), &[])
+            .call_mount(&mut store, "view", Resource::new_borrow(placement.rep()))
             .await?
             .unwrap();
         Ok::<_, wasmtime::Error>((store, guest, surface))
@@ -1236,7 +1467,11 @@ async fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime:
     let events = guest.townframe_dayframe_presentation_events();
     let placement = rig.grant();
     let _surface = events
-        .call_mount(&mut rig.store, Resource::new_borrow(placement.rep()), &[])
+        .call_mount(
+            &mut rig.store,
+            "view",
+            Resource::new_borrow(placement.rep()),
+        )
         .await?
         .unwrap();
 
@@ -1268,16 +1503,16 @@ async fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::R
     let _first_surface = first_events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
     let _second_surface = second_events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1312,16 +1547,16 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     let first = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
     let second = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1359,8 +1594,8 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     let remounted = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1389,8 +1624,8 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     let last = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1417,16 +1652,16 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
     let first = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
     let second = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1456,8 +1691,8 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
         events
             .call_mount(
                 &mut rig.store,
+                "view",
                 Resource::new_borrow(first_placement.rep()),
-                &[]
             )
             .await?,
         Err(PresentationError::Revoked),
@@ -1466,8 +1701,8 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
     let replacement = events
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(replacement_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1502,8 +1737,8 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
         .townframe_dayframe_presentation_events()
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(first_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();
@@ -1511,8 +1746,8 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
         .townframe_dayframe_presentation_events()
         .call_mount(
             &mut rig.store,
+            "view",
             Resource::new_borrow(second_placement.rep()),
-            &[],
         )
         .await?
         .unwrap();

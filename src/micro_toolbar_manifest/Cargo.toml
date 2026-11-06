@@ -1,0 +1,19 @@
+[package]
+name = "micro_toolbar_manifest"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_mdk = { workspace = true, features = ["contract"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+# `host::declared_rows` checks the declared rows in tests; the contract itself stays backend-free
+# so a guest that contributes rows (the counter) never links the in-process backend.
+clay_mdk = { workspace = true, features = ["in_process"] }
+ciborium.workspace = true
+insta.workspace = true

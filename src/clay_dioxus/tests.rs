@@ -18,7 +18,7 @@ async fn wire_slots_mount_through_context_preserve_identity_and_revoke_nested_su
     let mounts = Rc::new(Cell::new(0));
     let drops = Rc::new(Cell::new(0));
     let child_writers = Rc::new(RefCell::new(Vec::new()));
-    let reference = components
+    let (reference, _child_surface) = components
         .publish_surface(&child, {
             let mounts = mounts.clone();
             let drops = drops.clone();
@@ -36,7 +36,7 @@ async fn wire_slots_mount_through_context_preserve_identity_and_revoke_nested_su
         })
         .unwrap();
     let parent_writer = Rc::new(RefCell::new(None));
-    let parent = components
+    let (parent, _layout_surface) = components
         .publish_surface(&layout, {
             let parent_writer = parent_writer.clone();
             move |_, writer| {
@@ -98,7 +98,7 @@ fn recursive_component_slots_are_rejected_without_recursing_into_the_factory() {
     let owner = host.start("recursive layout");
     let self_reference = Rc::new(Cell::new(None));
     let mounts = Rc::new(Cell::new(0));
-    let reference = components
+    let (reference, _surface) = components
         .publish_surface(&owner, {
             let self_reference = self_reference.clone();
             let mounts = mounts.clone();
@@ -124,6 +124,35 @@ fn recursive_component_slots_are_rejected_without_recursing_into_the_factory() {
         tree.text_content(),
         "Component unavailable: cyclic or excessively deep mount."
     );
+    host.close();
+}
+
+/// A presentation publication mints its reference when the incarnation publishes it, before
+/// any renderer knows it; attaching the engine's surface factory afterwards makes it mountable
+/// exactly like one `publish_surface` issued.
+#[test]
+fn a_surface_attached_to_an_issued_reference_mounts_like_a_published_one() {
+    let host = Host::new();
+    let components = NativeComponents::new(&host);
+    let owner = host.start("publisher");
+    let reference = host.publish_component(&owner).unwrap();
+    let mounts = Rc::new(Cell::new(0));
+    let _surface = components.attach_surface(&owner, reference, {
+        let mounts = mounts.clone();
+        move |_, writer| {
+            mounts.set(mounts.get() + 1);
+            writer.apply(&counter_initial_batch())?;
+            Ok(SurfaceSession::new(|_| EventResponse::default()))
+        }
+    });
+    fn app(props: (NativeComponents, Instance, ComponentRef)) -> Element {
+        rsx! { ComponentMount { components: props.0, owner: props.1, reference: props.2 } }
+    }
+    let mut dom = VirtualDom::new_with_props(app, (components, owner, reference));
+    let mut tree = SurfaceTree::new();
+    dom.rebuild(&mut tree);
+    assert_eq!(mounts.get(), 1);
+    assert_eq!(tree.text_content(), "0");
     host.close();
 }
 
@@ -458,7 +487,7 @@ fn surface_mount_renders_in_host_vdom_dispatches_reentrantly_and_revokes_on_inst
     let writer_slot: Rc<RefCell<Option<SurfaceWriter>>> = Rc::default();
     let writer_slot_capture = writer_slot.clone();
 
-    let reference = components
+    let (reference, _surface) = components
         .publish_surface(&micro, move |_mount, writer| {
             writer.apply(&counter_initial_batch())?;
             *writer_slot_capture.borrow_mut() = Some(writer.clone());

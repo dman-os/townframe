@@ -5,7 +5,7 @@ Status: Living map — updated as crates move; layout decisions settle in ADR
 Owner: operator + dayframe track
 Scope: Dependency graph, build targets, and naming of the
 `dayframe_*`/`clay_*`/`micro_*` workspace crates.
-Updated: 2026-10-28 (browser guest engine maps to ADR 018)
+Updated: 2026-10-31 (ADR 017 rewritten to the reader/writer waist)
 
 Companion to `dayframe-micros.md` (the design log). That file records
 _decisions_; this one records _shape_: the real dependency graph, what each
@@ -789,3 +789,20 @@ activated at all_ (pinned by the fencing tests).
   only on the three pre-existing ceilings; `nix flake check` source checks pass
   except `rust-fmt`, which cannot see the untracked `shell.rs` until it is
   added to the VCS index.
+
+### 2026-10-31 — ADR 017 rewritten; dependent docs aligned
+
+- **ADR 017** withdraws the chained-hop waist (`attach`/`demand`/`release`, eager `Batch`,
+  `DemandToken`, `Coverage`) in favor of a subscription reader (`open`/`next`/`hydrate`), a
+  separate command writer (`submit`/`outcome`), and a host-owned shared overlay plane. The
+  in-process `clay_collection` still exposes the old shapes; the record is the target, not
+  evidence the new waist exists. The 2026-10-22 entry above is the pre-rewrite record.
+- **ADR 015** follows: `clay_collection` is described by the new waist, `DemandToken` becomes a
+  source-authored selector, R5 makes `activate` and data exports `func async` while presentation
+  stays sync, and the browser engine leaves §Deferred.
+- **ADR 014** §4–§5 adopt subscription readiness (`replaying`/`complete`) and stamp-driven overlay
+  retirement; the amendment's status and provider-seam sections name the catalog-driven shared
+  composition (`dayframe_composition`) and keep per-instance configuration ownership
+  *decided, not built* (F5). **ADR 018** §3 records the async activation/data-export signatures as
+  *decided, not built*.
+- Docs-only pass; no code changed.
