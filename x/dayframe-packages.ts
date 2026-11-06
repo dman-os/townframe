@@ -33,7 +33,7 @@ export async function prepareDayframePackages(
     guests.flatMap((guest) => ["-p", guest])
   } --target wasm32-wasip3`;
   if (testFixtures) {
-    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example overbudget --example lifecycle --example context --target wasm32-wasip3`;
+    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example egress --example overbudget --example lifecycle --example context --target wasm32-wasip3`;
   }
   if (trapper) {
     await $`cargo build --locked ${isolated} -p clay_mdk --example trapper --target wasm32-wasip3`;
@@ -55,6 +55,7 @@ export async function prepareDayframePackages(
           "collection-probe",
         ],
         sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
+        egress: ["wasm32-wasip3/debug/examples/egress.wasm", "egress"],
         overbudget: [
           "wasm32-wasip3/debug/examples/overbudget.wasm",
           "overbudget",
