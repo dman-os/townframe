@@ -237,7 +237,9 @@ impl Cluster {
     pub(super) async fn connect(&mut self, topology: Topology) {
         for (from, to) in topology.edges(self.members.len()) {
             self.edges.push((from, to));
+            tracing::info!(from, to, "INSTR connect link start"); // INSTR
             self.link(from, to).await;
+            tracing::info!(from, to, "INSTR connect link done"); // INSTR
         }
     }
 
@@ -329,6 +331,7 @@ impl Cluster {
             self.remember(*member, &id).await;
         }
         self.sync_keyhive().await;
+        tracing::info!(%id, %inventory, "INSTR share_drawer done"); // INSTR
         SharedDrawer { id, inventory }
     }
 
@@ -666,6 +669,7 @@ impl Cluster {
             .await
             .unwrap()
             .unwrap();
+        tracing::info!(node = self.members[index].nickname, drawer = %drawer.id, inventory = %drawer.inventory, %blob, "INSTR wait_blob_published start"); // INSTR
         while !node
             .blob_workers
             .parts
@@ -674,8 +678,19 @@ impl Cluster {
             .unwrap()
             .contains(&big_blobs::workers::inventory_part(&drawer.inventory))
         {
-            changes.next(RevisionReadLimits::default()).await.unwrap();
+            let parts = node.blob_workers.parts.obj_parts(blob.into()).await.unwrap(); // INSTR
+            tracing::info!(node = self.members[index].nickname, %blob, parts = parts.len(), "INSTR wait_blob_published not yet"); // INSTR
+            loop { // INSTR
+                tokio::select! { // INSTR
+                    next = changes.next(RevisionReadLimits::default()) => { next.unwrap(); break; } // INSTR
+                    () = tokio::time::sleep(std::time::Duration::from_secs(15)) => { // INSTR
+                        let parts = node.blob_workers.parts.obj_parts(blob.into()).await.unwrap(); // INSTR
+                        tracing::info!(node = self.members[index].nickname, %blob, parts = ?parts, peers = ?node.peers.as_ref().unwrap().connected().await.unwrap(), "INSTR wait_blob_published still waiting"); // INSTR
+                    } // INSTR
+                } // INSTR
+            } // INSTR
         }
+        tracing::info!(node = self.members[index].nickname, %blob, "INSTR wait_blob_published done"); // INSTR
     }
 
     /// Node `index` takes part in the drawer's blob inventory: it asks to mirror it.
@@ -800,10 +815,17 @@ impl Cluster {
         let mut changes = mirrors.subscribe_changes();
         loop {
             changes.borrow_and_update();
-            if mirrors.coverage(&drawer.id).await.unwrap().is_complete() {
+            let coverage = mirrors.coverage(&drawer.id).await.unwrap();
+            if coverage.is_complete() {
                 break;
             }
-            changes.changed().await.unwrap();
+            tracing::info!(node = self.members[index].nickname, gaps = ?coverage.gaps, "INSTR blob_arrives coverage gaps"); // INSTR
+            loop { // INSTR
+                tokio::select! { // INSTR
+                    changed = changes.changed() => { changed.unwrap(); tracing::info!(node = self.members[index].nickname, "INSTR blob_arrives coverage woke"); break; } // INSTR
+                    () = tokio::time::sleep(std::time::Duration::from_secs(15)) => tracing::info!(node = self.members[index].nickname, "INSTR blob_arrives still waiting for coverage change"), // INSTR
+                } // INSTR
+            } // INSTR
         }
         self.read_blob(index, blob)
             .await

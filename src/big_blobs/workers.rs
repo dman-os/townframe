@@ -350,6 +350,7 @@ fn spawn_worker(
                             } else {
                                 let report = adapter.reconcile(&context, &document).await?;
 
+                                if !report.deferred.is_empty() { tracing::info!(%document, deferred = ?report.deferred.iter().map(|deferred| format!("{:?}", deferred.reason)).collect::<Vec<_>>(), retained = report.retained.len(), "INSTR blob worker deferred"); } // INSTR
                                 let denied = report.deferred.iter().any(|deferred| matches!(deferred.reason, DeferralReason::Document { error: DocsError::Denied, .. }));
                                 // A doc we cannot currently read must not shrink
                                 // retention (ADR 026 §5): park it and keep every row
@@ -358,14 +359,15 @@ fn spawn_worker(
                                 else { (report.retained, pins, pending || !report.deferred.is_empty()) }
                             }
                         }
-                        Err(ClientError::Operation(DocsError::Denied | DocsError::Access(_))) => (Vec::new(), BTreeMap::new(), true),
-                        Err(ClientError::Operation(DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_))) => {
+                        Err(ClientError::Operation(error @ (DocsError::Denied | DocsError::Access(_)))) => { tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read denied; parking"); /* INSTR */ (Vec::new(), BTreeMap::new(), true) }
+                        Err(ClientError::Operation(error @ (DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_)))) => {
+                            tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read not ready; parking"); // INSTR
                             queue.finish(&document, generation, true).await?;
                             continue;
                         }
                         Err(error) => return Err(error.into()),
                     };
-                    tracing::info!(%document, inventory_doc, waiting, "INSTR blob worker processed"); // INSTR
+                    tracing::info!(%document, inventory_doc, waiting, cap = ?config.capability, pins = pins.len(), retained = pairs.len(), "INSTR blob worker processed"); // INSTR
                     retention.replace(&document, &pairs, pins.clone(), waiting).await?;
                     poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
                     for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
