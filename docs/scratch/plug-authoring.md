@@ -21,7 +21,7 @@ Scope: How an author writes a plug with micros, nodules, or both. Drafted by the
 Items marked **(proposal)** await the operator's decision; the Clay session has raised them too.
 
 1. **Every name is a Rust type** carrying its NSID, declared once by a macro, never a string constant. This is T1's rule, applied to nodule operations too.
-2. **(proposal) One typed-call model on both sides.** A call is an `Operation` request type. Serving it means implementing `Handler<Op>`; calling it means `ctx.call(op)` or a typed `Client<Proto>`. Micro calls align on `Operation` (X3's recommendation).
+2. **One typed-call model on both sides (decided, operator 2026-11-06).** A call is an `Operation` request type. Serving it means implementing `Handler<Op>`; calling it means `ctx.call(op)` or a typed `Client<Proto>`. Micro calls align on `Operation` (X3's recommendation).
 3. **No ambient authority in guests.** Every outgoing call carries the guest's own capability through a host-mediated path:
    - for nodules, wasi:http to `dispatch.local`, where dispatch admits the nodule's capability;
    - for micros, **(proposal)** a Clay host import carrying the micro's capability. Micros never get raw wasi:http.
@@ -120,7 +120,7 @@ The same `Client<Proto>` calls should work in micro code, with the transport swa
 - **Why a separate declarations crate (Rust).** It holds pure types and the manifest generator, can be published, and is consumable by other packages for their types. Real code never sits behind feature flags in the crate others depend on: a crate producing several artifacts is the pain the guardrails build matrix shows. A package shares code between its micro and its nodule through the declarations crate (pure helpers) or through its own extra crates; the convention is written down. A TypeScript package can be a single package with several entry points. A static JSON/YAML manifest stays possible for packages without a Rust declarations crate.
 - **Testing is part of authoring.** The old `plug_test_manifest/e2e/` ran a real package's workflows end to end. Its successor is a real test package (a nodule and a micro exercising every host capability) with e2e tests inside the package, on the native test backend and the wasm build. `test_nodule_guest` shrinks to a low-level dispatch fixture.
 - **Workflows are coming.** The old `daybook_pdk` was only command URLs plus `invoke_command_effect`; the real kit was `wflow_sdk` / `route_wflows!` (durable bundles over the wflow host). Workflows become a third contribution kind next to micro and nodule: the same declarations, `Operation` calls and backend, with durability from the host.
-- **Naming (decided, D34): cartridge.** "Plug" reads as a plug-in, a slight enhancement of the app, while many micros are big, self-contained apps. A **cartridge** ("cart") is the single user-facing noun for the store item and the distribution unit; it bundles micros, nodules and workflows. This doc still says "plug" until the code rename lands.
+- **Naming (decided, D34): cartridge.** "Plug" reads as a plug-in, a slight enhancement of the app, while many micros are big, self-contained apps. A **cartridge** ("cart") is the single user-facing noun for the store item and the distribution unit; it bundles micros, nodules and workflows. Micros and nodules stay user-facing as the classes of thing a cartridge contains. This doc still says "plug" until the code rename lands.
 
 ## Sequencing
 
