@@ -140,6 +140,15 @@ async fn assert_sedimentree_parity_nodes(
         heads.sort_by_key(|h| h.0);
         if let Some(ref base) = baseline {
             if &heads != base {
+                // INSTR: every node's heads, checkpoint commits flagged.
+                let mut summaries = Vec::new();
+                for node in nodes {
+                    let state = node.repo.doc_head_state(doc_id.clone()).await?;
+                    summaries.push(crate::test2::harness::heads::state_summary(
+                        node.label, &state,
+                    ));
+                }
+                tracing::warn!(summaries = %summaries.join(" | "), "INSTR sedimentree parity violated"); // INSTR
                 return Err(crate::ferr!(
                     "sedimentree-heads parity violated at node {} — {:?} vs {:?}",
                     idx,
