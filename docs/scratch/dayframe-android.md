@@ -450,3 +450,26 @@ force-stops, cold-starts, opens Counter (Wasm) and prints the INSTR lines. To do
    com.example.mobile ls files/component-cache`), and screencap (cropped) during the first open to see "Loading section...".
 Build note: the link step failed three times in a row with `ld.lld: failed to open .../out/dayframe_mobile: Invalid argument`
 (ntfs3 target dir) and succeeded on the fourth identical run; `fallocate`/`ftruncate` of 2 GB in that directory work, cause unknown.
+
+### A4 measurements (phone back; ZTE 8050, cold `force-stop` + start, tap Settings then Counter (Wasm); `cold2.sh`)
+
+| build | engine | `compile_component` | thread | package ready | instantiate |
+| --- | --- | --- | --- | --- | --- |
+| debug guest (A4 first run) | 73 ms | 6.55 s (15.1 MB) | n/a | 6.69 s | 36 ms |
+| (a) release guest, no cache | 80 ms | **2.69 s** (9.9 MB) | `None` (unnamed) | 2.82 s | 36 ms |
+| (a)+(b)+(c), first start (cache miss) | 1 ms | 3.20 s | `wasm-compile` | 4.03 s | 3 ms |
+| (a)+(b)+(c), second start (cache hit) | 0.8 ms | **0.80 s** | `wasm-compile` | 1.58 s | 3 ms |
+
+- (a): release guests cut the compile from 6.55 s to 2.69 s and the component from 15.1 to 9.9 MB (`wasm-release`).
+- (b): `files/component-cache/<hash>.cwasm` (4,848,184 B) exists after the first start (`run-as ... ls`); the second start's compile is
+  0.80 s (deserialize plus the blake3 of the 9.9 MB component to find the key). A miss costs about the compile plus a write (3.20 s).
+- Thread: in (a) `compile_component` ran on an unnamed thread, i.e. not one of the named tokio/stdio threads; it is the shell's polling
+  thread (the `android_main` thread is created natively, so Rust has no name for it). Consistent with that, `a-open1.png` (1.2 s into
+  the open) still shows the Settings list, the old frame, and `a-open2.png` the finished counter. After (c), `bc1-open1.png` and
+  `bc2-open1.png` (same point, first and second start) show the section's **"Loading section..." state painted** under the Counter
+  (Wasm) header; with the compile moved to the `wasm-compile` thread the shell now shows its Loading state.
+- Not yet off the polling thread: `linker()` (WASI p3 + micro client linker, built once) takes about 0.8 s on the phone
+  (package ready minus compile: 0.83 s, 0.78 s, 0.79 s) and still runs in the poll; a candidate for the same treatment or for
+  building at startup. `instantiate` is 3 ms after (b)/(c) and was 36 ms before.
+- Open total, tap to counter on screen: roughly 1.6 s on a second start versus about 6.7 s for the debug guest.
+- The INSTR lines are removed (`revert(clay_rt_wasmtime)`, source-only, not rebuilt: the installed APK is `apk-bc` which still has them).
