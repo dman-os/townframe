@@ -16,6 +16,11 @@ serde = []
 [lib]
 path = "lib.rs"
 
+[[bench]]
+name = "authority"
+path = "bench.rs"
+harness = false
+
 [dependencies]
 #
 # internal
