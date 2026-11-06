@@ -16,6 +16,7 @@ use wash_runtime::host::Host as WashHost;
 use wash_runtime::host::HostApi;
 use wash_runtime::types::Component;
 use wash_runtime::wit::WitInterface;
+use wflow::wflow_tokio::authority_runtime::SendError;
 
 #[cfg(test)]
 mod receipt_tests;
@@ -1307,16 +1308,25 @@ impl Rt {
                         value_json,
                         error_json,
                     };
-                    self.authority
+                    match self
+                        .authority
                         .send_message(
                             parent_wflow_job_id,
                             request_id,
                             serde_json::to_string(&reply).expect(ERROR_JSON),
                         )
                         .await
-                        .wrap_err_with(|| {
-                            format!("error sending command invoke reply to parent job {parent_wflow_job_id}")
-                        })?;
+                    {
+                        // A replay may follow the parent's consumption of this
+                        // reply and terminal receipt. That destination no longer
+                        // has a waiter, so child post-processing is settled too.
+                        Ok(_) | Err(SendError::AlreadyTerminal) => {}
+                        Err(err) => {
+                            return Err(ferr!(
+                                "error sending command invoke reply to parent job {parent_wflow_job_id}: {err:?}"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -2066,19 +2076,16 @@ impl Rt {
             )
             .await
         {
-            Ok(_) => {}
-            Err(wflow::CancelError::UnknownJob) if admission_pending => {}
-            Err(wflow::CancelError::AlreadyTerminal) => {
-                let watcher_installed =
-                    self.waiter_jobs.lock().expect(ERROR_MUTEX).contains(job_id);
-                if !watcher_installed {
-                    let receipt = self.authority.receipt(job_id).await?.ok_or_else(|| {
-                        ferr!("authority reported terminal job without receipt: {job_id}")
-                    })?;
-                    self.handle_wflow_receipt(dispatch_id.to_string(), job_id.clone(), receipt)
-                        .await?;
+            Ok(_) | Err(wflow::CancelError::AlreadyTerminal) => {
+                // Cancellation and admission share the same receipt waiter.
+                // Never run post-processing directly here: that would race a
+                // concurrently installed waiter through merge and hooks.
+                let admitted = self.dispatch_repo.mark_admitted(dispatch_id).await?;
+                if admitted.status == dispatch::DispatchStatus::Active {
+                    self.install_wflow_waiter(dispatch_id.to_string(), job_id.clone());
                 }
             }
+            Err(wflow::CancelError::UnknownJob) if admission_pending => {}
             Err(err) => return Err(ferr!("error cancelling dispatch {dispatch_id}: {err:?}")),
         }
         Ok(())
