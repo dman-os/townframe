@@ -56,8 +56,11 @@ pub fn manifest() -> MicroManifest {
     }
 }
 
-/// Only the sidecar emitter reads it; the guest links `manifest` alone.
-#[allow(dead_code)]
+/// Only the sidecar emitter reads it; the guest (the wasm32 build of this file) links `manifest` alone.
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(dead_code, reason = "only the native sidecar emitter calls it")
+)]
 pub fn sidecar() -> Sidecar {
     Sidecar::new(ID, 1, manifest())
 }
