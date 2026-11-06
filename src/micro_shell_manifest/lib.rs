@@ -38,6 +38,14 @@ use clay_mdk::Sidecar;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod declarations;
+pub use declarations::Shell;
+pub use declarations::ShellArrangement;
+pub use declarations::ShellFrame;
+pub use declarations::ShellHome;
+pub use declarations::ShellNavButton;
+pub use declarations::ShellPanels;
+
 pub const ID: &str = "dayframe.shell";
 pub const PACKAGE_VERSION: u32 = 1;
 /// The NSID prefix the shell holds: every NSID it declares (its collection contract and
@@ -179,63 +187,6 @@ impl Default for ShellConfig {
             details: Self::default_details(),
         }
     }
-}
-
-/// The shell package's identity.
-pub struct Shell;
-
-impl PackageDecl for Shell {
-    const ID: &'static str = ID;
-    const VERSION: u32 = PACKAGE_VERSION;
-    const AUTHORITY: &'static str = AUTHORITY;
-}
-
-/// The shell's frame, published as [`FRAME`].
-pub struct ShellFrame;
-
-impl ComponentDecl for ShellFrame {
-    const NAME: &'static str = FRAME;
-}
-
-/// The home panel's presentation, published as [`HOME`].
-pub struct ShellHome;
-
-impl ComponentDecl for ShellHome {
-    const NAME: &'static str = HOME;
-}
-
-/// The sidebar/back button, published as [`NAV_BUTTON`].
-pub struct ShellNavButton;
-
-impl ComponentDecl for ShellNavButton {
-    const NAME: &'static str = NAV_BUTTON;
-}
-
-/// The arrangement weights facet.
-pub struct ShellArrangement;
-
-impl ConfigDecl for ShellArrangement {
-    const BINDING: &'static str = CONFIG_NAME;
-    const NSID: &'static str = CONFIG_TAG;
-    const KEY: &'static str = CONFIG_KEY;
-    type Value = ShellConfig;
-}
-
-/// The panels collection, keyed by registration id.
-pub struct ShellPanels;
-
-impl CollectionDecl for ShellPanels {
-    const NSID: &'static str = PANELS;
-    type Key = String;
-    type Value = Panel;
-}
-
-impl DeclaredCollection for ShellPanels {
-    const KEY_SCHEMA: &'static str = PANEL_KEY_SCHEMA;
-    const VALUE_SCHEMA: &'static str = PANEL_VALUE_SCHEMA;
-    const SELECTOR_SCHEMA: &'static str = PANEL_SELECTOR_SCHEMA;
-    const OFFERED: &'static [CollectionCapability] =
-        &[CollectionCapability::Read, CollectionCapability::Register];
 }
 
 /// The shell's package declaration: it declares the panels collection, publishes its frame, its
