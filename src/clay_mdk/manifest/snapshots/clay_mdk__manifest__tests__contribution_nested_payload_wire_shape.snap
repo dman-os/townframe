@@ -1,5 +1,5 @@
 ---
-source: src/clay_mdk/manifest_tests.rs
+source: src/clay_mdk/manifest/tests.rs
 expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
 ---
 {

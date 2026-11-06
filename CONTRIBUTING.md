@@ -260,7 +260,20 @@ checking remains a tracked follow-up.
 
 - Avoid crates with a `src/` directory.
   - The source files and `Cargo.toml` should reside in the same root.
-  - Avoid deeply nested directory hierarchies.
+  - Avoid gratuitous directory depth: a `src/` directory, or single-file chains
+    like `a/b/c/d.rs`.
+  - Module directories are the expected way to split a module: `foo.rs` plus
+    `foo/child.rs`, and `foo.rs` declaring `#[cfg(test)] mod tests;` with the
+    body in `foo/tests.rs` (shared fixtures, declaring its topic submodules) and
+    `foo/tests/<topic>.rs`. Name submodules by topic, not `tests_x` or `x_tests_y`.
+  - `#[path = "..."]` is banned and `cargo x guardrails lint` rejects it
+    (`ERROR_PATH_ATTRIBUTE`). If a file seems to need `#[path]`, it wants to be a
+    module of its parent directory. Files shared by several targets of one
+    package (examples) can sit beside their roots and be declared with a plain
+    `mod name;`.
+  - A crate whose root is the package root (`lib.rs` beside `Cargo.toml`) and has a
+    `tests` module needs `autotests = false`, or Cargo builds `tests/*.rs` as
+    integration tests.
 - Are you importing that type in too many files? Consider putting it in the
   `interlude` module of the crate.
   - `utils_rs` provides a prelude that exports a lot of common things expected
