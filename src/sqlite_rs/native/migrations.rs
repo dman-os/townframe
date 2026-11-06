@@ -12,7 +12,7 @@ pub fn migration_status<'sql>(
     migrations: &[Migration<'sql>],
 ) -> SqlResult<Vec<(Migration<'sql>, MigrationState)>> {
     assert!(
-        query::valid_identifier(table),
+        crate::query::valid_identifier(table),
         "invalid migration table name"
     );
     for (index, migration) in migrations.iter().enumerate() {
