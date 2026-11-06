@@ -234,7 +234,7 @@ async fn tier3_relay_replication() -> crate::Res<()> {
     // Materialising mints follow-up facts reactively (reader op and checkpoint,
     // then the owner's seating op and checkpoint, ...); a fixed sync script races
     // the next one, so drive the topology to a fixed point before comparing.
-    topo.converge(&[doc_id.clone()]).await?;
+    topo.converge(std::slice::from_ref(&doc_id)).await?;
 
     // Tier 0: sedimentree parity across all three nodes.
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
@@ -406,7 +406,7 @@ async fn tier3_line_replication() -> crate::Res<()> {
     // Materialising mints follow-up facts reactively (reader op and checkpoint,
     // then the owner's seating op and checkpoint, ...); a fixed sync script races
     // the next one, so drive the topology to a fixed point before comparing.
-    topo.converge(&[doc_id.clone()]).await?;
+    topo.converge(std::slice::from_ref(&doc_id)).await?;
 
     // Tier 0: sedimentree parity across all three nodes.
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
@@ -742,7 +742,7 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
     crate::test2::harness::converge::converge(
         &[a, b],
         &[&a_b_conn2, &b_a_conn2],
-        &[doc_id.clone()],
+        std::slice::from_ref(&doc_id),
     )
     .await?;
 
@@ -1299,7 +1299,7 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
     crate::test2::harness::converge::converge(
         &[guard.node(0), guard.node(1), guard.node(2), guard.node(3)],
         &[&a_b2, &b_a2, &c_d2, &d_c2, &b_c, &c_b, &d_a, &a_d],
-        &[doc_id.clone()],
+        std::slice::from_ref(&doc_id),
     )
     .await?;
     // INSTR: every node's head state and keyhive ledger before the content asserts.
