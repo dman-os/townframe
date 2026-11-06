@@ -187,6 +187,11 @@ console.log(
   `bundle-size dayframe_web host=${hostBytes} gzip=${gzip.length} guests=${guestBytes}`,
 );
 
+// The boot module is a file, not an inline script, so the CSP below can omit `'unsafe-inline'`
+// from `script-src`: that omission is what stops a guest `javascript:` href from running.
+await site.join("boot.js").writeText(`import init from "./dayframe_web.js";
+await init();
+`);
 await site.join("index.html").writeText(`<!doctype html>
 <html lang="en">
   <head>
@@ -195,13 +200,34 @@ await site.join("index.html").writeText(`<!doctype html>
   </head>
   <body>
     <div id="main"></div>
-    <script type="module">
-      import init from "./dayframe_web.js";
-      await init();
-    </script>
+    <script type="module" src="./boot.js"></script>
   </body>
 </html>
 `);
+
+// Backstop for the guest surface vocabulary (`clay_surface` value policy): if a URL-bearing value
+// ever slips past validation, the browser still refuses to fetch or run it. `img-src` also governs
+// CSS `url()` images, so a `style:` value that reached the DOM fetches nothing foreign.
+// `'wasm-unsafe-eval'` is what `WebAssembly.compile` of the host and every guest component needs.
+// `style-src-attr 'unsafe-inline'` is for the Dioxus interpreter writing per-property styles.
+// `form-action` and `base-uri` do not fall back to `default-src`, so they are set explicitly.
+const contentSecurityPolicy = [
+  "default-src 'none'",
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "connect-src 'self'",
+  "img-src 'self' blob: data:",
+  "font-src 'self'",
+  "style-src 'self'",
+  "style-src-elem 'self'",
+  "style-src-attr 'unsafe-inline'",
+  "form-action 'none'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "frame-ancestors 'none'",
+  "worker-src 'self' blob:",
+  "manifest-src 'self'",
+].join("; ");
 
 if (!buildOnly) {
   const types: Record<string, string> = {
@@ -229,6 +255,9 @@ if (!buildOnly) {
     return new Response((await Deno.open(file.toString())).readable, {
       headers: {
         "content-type": types[extension] ?? "application/octet-stream",
+        "content-security-policy": contentSecurityPolicy,
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
       },
     });
   });
