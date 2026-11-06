@@ -202,5 +202,9 @@ P4 dispatch specs (`phases tokens7/18 fast`, n=60 committing dispatches each, gu
 | after r1 / r2 | 10.6 / 28.9 ; 10.8 / 27.6 | 21.2 / 36.9 ; 8.9 / 12.1 |
 Frames over 50 ms: 77/76 before vs 9/4 after (tokens7). Long tasks 60 vs 5/6.
 
-### Not yet run (blocked on disk: coordinator froze new builds)
-guest fixtures `--prepare-only`, `cargo nextest run -p clay_rt_wcmp -p clay_rt_wcmp_wasmi -p clay_guest_session -p clay_host`, dayframe_web Playwright suite, wasmi backend measurement.
+### Review change: trap with no task
+The context module now also imports a `no_task` global; its `get`/`set` do `global.get $no_task; if unreachable` before touching the slot (one global read and a branch, no host call). `sync` sets it when no task is on the stack and clears it when one is. Fork rev `228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b` (this worktree is re-pinned to it; the measurements above were taken at 45e7dff, before this check, not re-measured). New fork test `executor::context_slots::tests::it_traps_a_slot_access_while_no_task_is_on_the_stack`; `cargo nextest run -p wcmp --lib` wasmi 840 passed, default backend with wcmp-wasm-core 848 passed; clippy clean native and wasm32.
+
+### Townframe validation at 228bc7b
+Fixtures prepared (`x/check-dayframe.ts --prepare-only`). `cargo nextest run -p clay_rt_wcmp -p clay_rt_wcmp_wasmi -p clay_guest_session -p clay_host`: 148 passed. dayframe_web Playwright suite (`CI=1 DAYFRAME_WEB_PORT=4562`): NOT run, killed at the start when free disk fell under the floor (3 GB, then 2.7 GB).
+Not run: wasmi-backend measurement.

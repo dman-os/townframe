@@ -18222,7 +18222,7 @@ dependencies = [
 [[package]]
 name = "wcmp"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7#45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "js-sys",
@@ -18241,7 +18241,7 @@ dependencies = [
 [[package]]
 name = "wcmp-bindgen"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7#45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "heck 0.5.0",
@@ -18254,7 +18254,7 @@ dependencies = [
 [[package]]
 name = "wcmp-macros"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7#45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -18265,7 +18265,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7#45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "thiserror 2.0.21",
@@ -18276,7 +18276,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core-wasmi"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7#45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "wasmi",
@@ -18287,7 +18287,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core-web"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7#45e7dffb82a99e7b91bf6c27dcd7ad44547c2de7"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "js-sys",
