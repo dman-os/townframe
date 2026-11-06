@@ -479,11 +479,13 @@ async fn long_test_cost_table() {
     }
 
     let (live, rss) = (LIVE.load(Relaxed), resident());
+    if let Ok(stride) = std::env::var("BIG_NODE_COSTS_SAMPLE") { INSTR_STRIDE.store(stride.parse().unwrap(), Relaxed); INSTR_PHASE.store(1, Relaxed); } // INSTR
     tracing::info!("INSTR phase connect begin"); // INSTR
     table
         .run("connect two nodes", cluster.connect(Topology::Pair))
         .await;
     tracing::info!("INSTR phase connect end"); // INSTR
+    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() { INSTR_PHASE.store(2, Relaxed); } // INSTR
     // Read in order from the first note Bob could not yet read, so each wake re-reads only what is
     // still outstanding; each tenth is a sample, so a rate that degrades with the count shows.
     let next = std::cell::Cell::new(0);
@@ -531,6 +533,7 @@ async fn long_test_cost_table() {
 
     tracing::info!("INSTR phase replicate end"); // INSTR
     eprintln!("INSTR dump for connect+replicate"); // INSTR
+    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() { instr_dump(); } // INSTR
     table.run("stop node", cluster.stop(1)).await;
     tracing::info!("INSTR phase reboot begin"); // INSTR
     table

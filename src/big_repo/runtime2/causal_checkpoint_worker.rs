@@ -403,16 +403,22 @@ async fn run_task(
             ),
         })
     };
+    let instr_start = std::time::Instant::now(); // INSTR
     match task {
         Task::EnsureCoverage { doc_id, .. } => {
             if !in_scope(&doc_id).await? {
                 return Ok(TaskOutput::OutOfScope);
             }
             runtime.ensure_causal_coverage(doc_id).await?;
+            tracing::warn!(wall = ?instr_start.elapsed(), "INSTR causal task timing kind=ensure_coverage"); // INSTR
             Ok(TaskOutput::Covered)
         }
         Task::ReconcileReaders { agent, .. } => {
-            for doc_id in keyhive.docs_for_agent(&agent).await.into_keys() {
+            let instr_docs = keyhive.docs_for_agent(&agent).await; // INSTR
+            let instr_docs_wall = instr_start.elapsed(); // INSTR
+            let instr_n = instr_docs.len(); // INSTR
+            let mut instr_seated = 0usize; // INSTR
+            for doc_id in instr_docs.into_keys() {
                 if !in_scope(&doc_id).await? {
                     continue;
                 }
@@ -425,6 +431,7 @@ async fn run_task(
                 if added.is_empty() {
                     continue;
                 }
+                instr_seated += 1; // INSTR
                 tracing::debug!(%doc_id, %agent, added = added.len(), "INSTR reader reconcile seated readers");
                 // Persisting publishes the adds to the peers and admits them locally. The
                 // task is keyed by its admission row and never replaced, so issued adds are
@@ -442,6 +449,7 @@ async fn run_task(
                 // for them now rather than when the adds' own admission rows come round.
                 runtime.ensure_causal_coverage(doc_id).await?;
             }
+            tracing::warn!(docs = instr_n, seated = instr_seated, docs_for_agent = ?instr_docs_wall, wall = ?instr_start.elapsed(), "INSTR causal task timing kind=reconcile_readers"); // INSTR
             Ok(TaskOutput::Reconciled)
         }
     }
