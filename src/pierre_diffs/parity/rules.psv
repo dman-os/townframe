@@ -75,7 +75,7 @@ pierre/src/highlighter/themes/resolveThemes.ts|OUT|-||OUT (use highlights.wasm c
 pierre/src/highlighter/themes/themeResolver.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/themes/types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/tokenizer-types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/highlighter/types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/types.ts|PORTED|S5|highlighter_types.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/index.ts|OUT|-||OUT
 pierre/src/managers/InteractionManager.ts|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
 pierre/src/managers/ResizeManager.ts|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
@@ -110,7 +110,7 @@ pierre/src/renderers/UnresolvedFileHunksRenderer.ts|DEFER|-||DEFER (not needed f
 pierre/src/shiki-stream/index.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/shiki-stream/stream.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/shiki-stream/types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
-pierre/src/sprite.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/sprite.ts|PORTED|S5|sprite.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/ssr/FileDiffReact.tsx|OUT|-||OUT (framework adapter)
 pierre/src/ssr/index.ts|OUT|-||OUT (framework adapter)
 pierre/src/ssr/preloadDiffs.ts|OUT|-||OUT (framework adapter)
@@ -150,18 +150,18 @@ pierre/src/utils/composeCacheKey.ts|PORTED|S3|utils/compose_cache_key.rs|exact o
 pierre/src/utils/computeEstimatedDiffHeights.ts|PORTED|S4|utils/compute_estimated_diff_heights.rs|exact oracle parity (layout.json) plus ported upstream tests
 pierre/src/utils/computeFileOffsets.ts|PORTED|S4|utils/compute_file_offsets.rs|exact oracle parity (layout.json) plus ported upstream tests
 pierre/src/utils/computeVirtualFileMetrics.ts|PORTED|S4|utils/compute_virtual_file_metrics.rs|exact oracle parity (layout.json) plus ported upstream tests
-pierre/src/utils/createAnnotationElement.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createAnnotationElement.ts|PORTED|S5|utils/render/create_annotation_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createAnnotationWrapperNode.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/createCodeViewHeaderFooterHostElement.ts|PENDING|-||port or replace per slice notes (DOM helper)
-pierre/src/utils/createContentColumn.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/createEmptyRowBuffer.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/createFileHeaderElement.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createContentColumn.ts|PORTED|S5|utils/render/create_content_column.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createEmptyRowBuffer.ts|PORTED|S5|utils/render/create_empty_row_buffer.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createFileHeaderElement.ts|PORTED|S5|utils/render/create_file_header_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createGutterUtilityContentNode.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/createGutterUtilityElement.ts|PENDING|-||port or replace per slice notes (DOM helper)
-pierre/src/utils/createNoNewlineElement.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/createPreElement.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createNoNewlineElement.ts|PORTED|S5|utils/render/create_no_newline_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createPreElement.ts|PORTED|S5|utils/render/create_pre_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createRowNodes.ts|PENDING|-||port or replace per slice notes (DOM helper)
-pierre/src/utils/createSeparator.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createSeparator.ts|PORTED|S5|utils/render/create_separator.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createSpanNodeFromToken.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/createStyleElement.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/createUnsafeCSSStyleNode.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
@@ -171,18 +171,18 @@ pierre/src/utils/detachString.ts|OUT|-||V8 substring-retention workaround; Rust 
 pierre/src/utils/diffAcceptRejectHunk.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
 pierre/src/utils/editSessionAnnotations.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
 pierre/src/utils/editSessionHunks.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
-pierre/src/utils/formatCSSVariablePrefix.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/formatCSSVariablePrefix.ts|PORTED|S5|utils/render/format_css_variable_prefix.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/getCodeViewItemRenderData.ts|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/getDiffFileInput.ts|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/getDiffHunksRendererOptions.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/getFileRendererOptions.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/getFiletypeFromFileName.ts|PORTED|S3|utils/get_filetype_from_file_name.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/getHighlighterOptions.ts|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/getHighlighterThemeStyles.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/getHunkSeparatorSlotName.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getHighlighterThemeStyles.ts|PORTED|S5|utils/render/get_highlighter_theme_styles.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/getHunkSeparatorSlotName.ts|PORTED|S5|utils/render/get_hunk_separator_slot_name.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/getHunkSideBoundaries.ts|PORTED|S3|utils/get_hunk_side_boundaries.rs|exact oracle parity (patches.json, utilities.json)
-pierre/src/utils/getIconForType.ts|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/getLineAnnotationName.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getIconForType.ts|PORTED|S5|utils/render/get_icon_for_type.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/getLineAnnotationName.ts|PORTED|S5|utils/render/get_line_annotation_name.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/getLineEndingType.ts|PORTED|S3|utils/get_line_ending_type.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/getLineNodes.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/getMergeConflictActionSlotName.ts|DEFER|-||DEFER (not needed for PR review v1)
@@ -190,14 +190,14 @@ pierre/src/utils/getMergeConflictLineTypes.ts|DEFER|-||DEFER (not needed for PR 
 pierre/src/utils/getOrCreateCodeNode.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/getSingularPatch.ts|PORTED|S3|utils/get_singular_patch.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/getThemes.ts|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/getTokenOptions.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getTokenOptions.ts|PORTED|S5|utils/render/get_token_options.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/getTotalLineCountFromHunks.ts|PORTED|S3|utils/get_total_line_count_from_hunks.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/guardWebKitScrollDuringRebuild.ts|PENDING|-||port or replace per slice notes (DOM helper)
-pierre/src/utils/hastToHtml.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/hast_utils.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/hastToHtml.ts|DEFER|S5||no Rust consumer: the UI renders hast directly, and the module is a speed-up equivalent of hast-util-to-html whose upstream tests need the FileRenderer and Shiki; revisit with S7 if a serializer is wanted
+pierre/src/utils/hast_utils.ts|PORTED|S5|utils/render/hast_utils.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/hostTheme.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/hydratePartialDiff.ts|PORTED|S4|utils/hydrate_partial_diff.rs|exact oracle parity (layout.json) plus ported upstream tests
-pierre/src/utils/includesFileAnnotations.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/includesFileAnnotations.ts|PORTED|S5|utils/render/includes_file_annotations.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/isDefaultRenderRange.ts|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/isDiffPlainText.ts|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/isFilePlainText.ts|PENDING|-||PORT (Rust, oracle-tested)
@@ -216,11 +216,11 @@ pierre/src/utils/parseQuotedDiffFileName.ts|PORTED|S3|utils/parse_quoted_diff_fi
 pierre/src/utils/platform.ts|PENDING|-||port or replace per slice notes (DOM helper)
 pierre/src/utils/prefersReducedMotion.ts|PENDING|-||port or replace per slice notes (DOM helper)
 pierre/src/utils/prerenderHTMLIfNecessary.ts|PENDING|-||port or replace per slice notes (DOM helper)
-pierre/src/utils/processLine.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/processLine.ts|PORTED|S5|utils/render/process_line.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/realignChangeContent.ts|PORTED|S3|utils/realign_change_content.rs|realignChangeContentBySimilarity only; slideBlankBoundaryBlocksUp is editor-only (OUT)
-pierre/src/utils/renderDiffWithHighlighter.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/renderDiffWithHighlighter.ts|PORTED|S5|utils/render/render_diff_with_highlighter.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/renderFileWithHighlighter.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
-pierre/src/utils/renderTokenLines.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/renderTokenLines.ts|PORTED|S5|utils/render/render_token_lines.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/resolveConflict.ts|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/utils/resolvePreferredHighlighter.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/utils/resolveRegion.ts|DEFER|-||DEFER (not needed for PR review v1)
@@ -231,7 +231,7 @@ pierre/src/utils/setLanguageOverride.ts|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/setWrapperNodeProps.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/shouldUseTokenTransformer.ts|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/splitFileContents.ts|PORTED|S3|utils/split_file_contents.rs|exact oracle parity (patches.json, utilities.json)
-pierre/src/utils/tokenStyle.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/tokenStyle.ts|PORTED|S5|utils/render/token_style.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/tokensToHtml.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/utils/trimPatchContext.ts|PORTED|S4|utils/trim_patch_context.rs|exact oracle parity (layout.json) plus ported upstream tests
 pierre/src/utils/updateDiffHunks.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
@@ -257,6 +257,8 @@ pierre/test/getFiletypeFromFileName.test.ts|PORTED|S3|utils/get_filetype_from_fi
 pierre/test/parseQuotedDiffFileName.test.ts|PORTED|S3|utils/parse_quoted_diff_file_name_test.rs|all upstream cases
 pierre/test/parseDiffFromFile.test.ts|PORTED|S3|utils/parse_diff_from_file_test.rs|digest snapshot test becomes property assertions on the diffRowBufferTest pair (fileOld/fileNew live in apps/demo, absent); ignoreWhitespace/context kept via PatchOptions; both-null throw unrepresentable (DiffFileInput)
 pierre/test/parsePatchFiles.test.ts|PORTED|S3|utils/parse_patch_files_test.rs;utils/parse_patch_files_test/headers.rs;utils/parse_patch_files_test/repairs.rs|ported under upstream titles; digest snapshot (diff.patch absent from the extracted tree), lone-surrogate and renderer-count tests listed in the file header
+pierre/test/createFileHeaderElement.test.ts|PORTED|S5|utils/render/create_file_header_element_test.rs|all four cases; toMatchSnapshot replaced by exact comparison with the dist output (render_s5.json)
+pierre/test/renderTokenLines.test.ts|PORTED|S5|utils/render/render_token_lines_test.rs|two of three cases, asserted on the hast tree instead of HTML+JSDOM; the useTokenTransformer case is out (editor token transformer is not ported)
 pierre/test/e2e/*|OUT|-||Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page
 pierre/test/__snapshots__/*|PENDING|-||snapshot follows the test file it is named after; ported with it
 pierre/test/README.md|OUT|-||upstream test instructions (bun)
@@ -275,9 +277,7 @@ pierre/test/*[wW]orker*|OUT|-||worker pool
 pierre/test/Unresolved*|DEFER|-||merge-conflict UI
 pierre/test/*MergeConflict*|DEFER|-||merge-conflict UI
 pierre/test/diffAcceptRejectHunk*|DEFER|-||merge-conflict / edit flow
-pierre/test/createFileHeaderElement*|PENDING|S5||
-pierre/test/renderTokenLines*|PENDING|S5||
-pierre/test/hastToHtml*|PENDING|S5||
+pierre/test/hastToHtml*|DEFER|S5||tests compare hastToHtml with hast-util-to-html over rendered files (FileRenderer, Shiki); deferred with the module
 pierre/test/DiffHunksRender*|PENDING|S6||
 pierre/test/annotation*|PENDING|S6||
 pierre/test/patchFileRender*|PENDING|S6||

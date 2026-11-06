@@ -18,7 +18,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const goldenDir = join(here, "golden");
 const check = process.argv.includes("--check");
 
-const oracle = await ensureOracle();
+const oracle = ensureOracle();
 const jsdiff = await import(oracle.jsdiff);
 const constants = await import(oracle.pierre("constants.js"));
 const { parsePatchFiles } = await import(
@@ -1275,6 +1275,377 @@ function buildS4() {
   };
 }
 
+// ---- S5/S6: hast rendering with a deterministic plain-text highlighter ---
+
+const { renderTokenLines } = await import(
+  oracle.pierre("utils/renderTokenLines.js")
+);
+const { createFileHeaderElement } = await import(
+  oracle.pierre("utils/createFileHeaderElement.js")
+);
+const { renderDiffWithHighlighter } = await import(
+  oracle.pierre("utils/renderDiffWithHighlighter.js")
+);
+
+/**
+ * The stand-in highlighter both sides use: one uncolored token per non-empty
+ * line, fixed themes. Mirrors `PlainTextHighlighter` in highlighter_types.rs.
+ * (The dist's own plain-text path still asks a highlighter for tokens, so the
+ * real Shiki is never involved and results are deterministic.)
+ */
+const stubHighlighter = {
+  name: "plain-text-stub",
+  getTheme(name) {
+    const light = name.includes("light");
+    return {
+      name,
+      type: light ? "light" : "dark",
+      fg: light ? "#070707" : "#fbfbfb",
+      bg: light ? "#ffffff" : "#0b0b0b",
+      colors: {
+        "terminal.ansiGreen": light ? "#0dbe4e" : "#5ecc71",
+        "gitDecoration.deletedResourceForeground": light
+          ? "#ff2e3f"
+          : "#ff6762",
+      },
+    };
+  },
+  codeToTokens(code) {
+    const tokens = [];
+    const terminator = /\r\n|\r|\n/g;
+    let position = 0;
+    let offset = 0;
+    for (;;) {
+      const match = terminator.exec(code);
+      const line = code.slice(position, match ? match.index : code.length);
+      tokens.push(line === "" ? [] : [{ content: line, offset }]);
+      offset += line.length + (match ? match[0].length : 0);
+      if (!match) break;
+      position = match.index + match[0].length;
+    }
+    return { tokens };
+  },
+};
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonical(value[key])]),
+    );
+  }
+  return value;
+}
+
+/** FNV-1a 64 over the canonical JSON; `JSON.stringify` writes holes as null. */
+function fnv64(value) {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of Buffer.from(JSON.stringify(canonical(value)), "utf8")) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+function textContent(node) {
+  if (node === undefined || node === null) return "";
+  if (node.type === "text") return node.value;
+  return (node.children ?? []).map(textContent).join("");
+}
+
+/** Same line element with its token/decoration children replaced by their text. */
+function flattenLine(node) {
+  if (node === undefined || node === null) return node;
+  if (node.type !== "element") return node;
+  return { ...node, children: [{ type: "text", value: textContent(node) }] };
+}
+
+function sharedDiffs() {
+  // Same construction (and seed) as buildS4, so these are the diffs of layout.json.
+  const random = makeRandom(0x5eed05);
+  const diffs = [];
+  const pairs = [
+    ...Object.values(corpusMocks.mockDiffs).map((diff) => [
+      diff.oldFile.contents,
+      diff.newFile.contents,
+    ]),
+    ...Array.from({ length: 5 }, (_, index) =>
+      syntheticPair(random, [30, 45, 60, 90, 25][index]),
+    ),
+  ];
+  for (const [oldText, newText] of pairs) {
+    diffs.push(
+      jsonClone(
+        parseDiffFromFile(
+          { name: "a.txt", contents: oldText },
+          { name: "a.txt", contents: newText },
+        ),
+      ),
+    );
+  }
+  for (const [oldText, newText] of pairs.slice(1, 4)) {
+    const patch = jsdiff.createTwoFilesPatch(
+      "p.txt",
+      "p.txt",
+      oldText,
+      newText,
+      undefined,
+      undefined,
+      {},
+    );
+    diffs.push(jsonClone(parsePatchFiles(patch)[0].files[0]));
+  }
+  return diffs;
+}
+
+function buildTokenLines() {
+  const random = makeRandom(0x5eed06);
+  const pieces = [
+    " ",
+    "  ",
+    "\t",
+    "foo",
+    "bar",
+    "é",
+    "😀",
+    "a b",
+    "x",
+    "ab",
+    "cd",
+  ];
+  const cases = [];
+  for (let count = 0; count < 140; count++) {
+    const lineCount = 1 + random.int(3);
+    const lines = [];
+    const boundaries = [];
+    for (let line = 0; line < lineCount; line++) {
+      let offset = 0;
+      const tokens = [];
+      const lineBoundaries = [0];
+      for (
+        let token = 0, tokenCount = random.int(6);
+        token < tokenCount;
+        token++
+      ) {
+        const content = random.pick(pieces);
+        const entry = { content, offset };
+        if (random.next() < 0.3) entry.color = random.pick(["#f00", "#0f0"]);
+        if (random.next() < 0.1) entry.bgColor = "#00f";
+        if (random.next() < 0.2)
+          entry.fontStyle = random.pick([1, 2, 4, 8, 5, 12, 15]);
+        if (random.next() < 0.1)
+          entry.htmlStyle = [
+            ["--a", "1"],
+            ["color", "red"],
+          ];
+        if (random.next() < 0.1) entry.htmlAttrs = [["data-k", "v"]];
+        tokens.push(entry);
+        for (const ch of content) {
+          offset += ch.length;
+          lineBoundaries.push(offset);
+        }
+      }
+      lines.push(tokens);
+      boundaries.push(lineBoundaries);
+    }
+    const decorations = [];
+    for (let index = 0, total = random.int(5); index < total; index++) {
+      const startLine = random.int(lineCount);
+      const endLine =
+        random.next() < 0.8
+          ? startLine
+          : Math.min(lineCount - 1 + random.int(2), startLine + random.int(2));
+      const startBoundary = random.pick(boundaries[startLine]);
+      const endBoundaries = boundaries[Math.min(endLine, lineCount - 1)];
+      let endCharacter = random.pick(endBoundaries);
+      if (endLine === startLine && endCharacter < startBoundary)
+        endCharacter = startBoundary;
+      decorations.push({
+        start: { line: startLine, character: startBoundary },
+        end: { line: endLine, character: endCharacter },
+        properties: { "data-range": `r${index}` },
+      });
+    }
+    const withState = random.next() < 0.6;
+    const state = withState
+      ? lines.map((_, index) => ({
+          type: random.pick([
+            "context",
+            "change-addition",
+            "change-deletion",
+            "context-expanded",
+          ]),
+          lineNumber: index + 1,
+          altLineNumber: random.next() < 0.5 ? index + 2 : undefined,
+          lineIndex: random.next() < 0.5 ? `${index},${index}` : index,
+        }))
+      : undefined;
+    const mergeWhitespaces = random.pick(["always", "never"]);
+    const jsLines = lines.map((line) =>
+      line.map((entry) => ({
+        ...entry,
+        htmlStyle: entry.htmlStyle
+          ? Object.fromEntries(entry.htmlStyle)
+          : undefined,
+        htmlAttrs: entry.htmlAttrs
+          ? Object.fromEntries(entry.htmlAttrs)
+          : undefined,
+      })),
+    );
+    const expected = renderTokenLines(jsLines, {
+      state: state === undefined ? undefined : { lineInfo: state },
+      mergeWhitespaces,
+      decorations: decorations.map((decoration) => ({ ...decoration })),
+    });
+    cases.push({
+      lines,
+      decorations,
+      state: state === undefined ? null : jsonClone(state),
+      mergeWhitespaces,
+      expected: jsonClone(expected),
+    });
+  }
+  return cases;
+}
+
+function buildHeaders() {
+  const files = {
+    old: { name: "src/a.ts", contents: "one\ntwo\n" },
+    changed: { name: "src/a.ts", contents: "one\n2\nthree\n" },
+    renamed: { name: "src/b.ts", contents: "one\ntwo\n" },
+    empty: { name: "src/e.ts", contents: "" },
+  };
+  const diffs = {
+    change: parseDiffFromFile(files.old, files.changed),
+    added: parseDiffFromFile(files.empty, {
+      ...files.changed,
+      name: "src/e.ts",
+    }),
+    deleted: parseDiffFromFile(files.old, { ...files.empty, name: "src/a.ts" }),
+    renamedChanged: parseDiffFromFile(files.old, {
+      ...files.changed,
+      name: "src/b.ts",
+    }),
+    renamedPure: parseDiffFromFile(files.old, files.renamed),
+    unchanged: parseDiffFromFile(files.old, files.old),
+  };
+  const cases = [];
+  const push = (label, input) => {
+    for (const mode of ["default", "custom"]) {
+      for (const stickyHeader of [false, true]) {
+        cases.push({
+          label,
+          input: jsonClone(input),
+          mode,
+          stickyHeader,
+          expected: jsonClone(
+            createFileHeaderElement({
+              fileOrDiff: structuredClone(input),
+              mode,
+              stickyHeader,
+            }),
+          ),
+        });
+      }
+    }
+  };
+  for (const [label, diff] of Object.entries(diffs)) push(label, diff);
+  push("file", { name: "src/index.ts", contents: "export {}\n" });
+  return cases;
+}
+
+function buildRenderDiffs(diffs) {
+  const random = makeRandom(0x5eed07);
+  const cases = [];
+  for (let diffIndex = 0; diffIndex < diffs.length; diffIndex++) {
+    const diff = diffs[diffIndex];
+    for (let count = 0; count < 20; count++) {
+      const theme =
+        random.next() < 0.5
+          ? "pierre-dark"
+          : { dark: "pierre-dark", light: "pierre-light" };
+      const lineDiffType = random.pick([
+        "none",
+        "word",
+        "word-alt",
+        "word-line",
+        "char",
+      ]);
+      const maxLineDiffLength = random.pick([1000, 1000, 12]);
+      const kind = random.int(3);
+      const plain =
+        kind === 0
+          ? undefined
+          : kind === 1
+            ? { forcePlainText: true }
+            : {
+                forcePlainText: true,
+                startingLine: random.int(8),
+                totalLines:
+                  random.next() < 0.7 ? 1 + random.int(12) : undefined,
+                expandedHunks: randomExpanded(random, diff.hunks.length),
+                collapsedContextThreshold: random.pick([1, 3]),
+              };
+      const result = renderDiffWithHighlighter(
+        structuredClone(diff),
+        stubHighlighter,
+        {
+          theme,
+          useTokenTransformer: false,
+          tokenizeMaxLineLength: 1000,
+          lineDiffType,
+          maxLineDiffLength,
+        },
+        plain === undefined ? undefined : { ...plain },
+      );
+      const lines = (code) => code;
+      cases.push({
+        diff: diffIndex,
+        theme: jsonClone(theme),
+        lineDiffType,
+        maxLineDiffLength,
+        plain:
+          plain === undefined
+            ? null
+            : {
+                forcePlainText: plain.forcePlainText,
+                startingLine: plain.startingLine ?? null,
+                totalLines: plain.totalLines ?? null,
+                expanded: encodeExpanded(plain.expandedHunks),
+                collapsedContextThreshold:
+                  plain.collapsedContextThreshold ?? null,
+              },
+        themeStyles: result.themeStyles,
+        baseThemeType: result.baseThemeType ?? null,
+        deletionCount: result.code.deletionLines.length,
+        additionCount: result.code.additionLines.length,
+        exact: [
+          fnv64(lines(result.code.deletionLines)),
+          fnv64(lines(result.code.additionLines)),
+        ],
+        flat: [
+          fnv64(result.code.deletionLines.map(flattenLine)),
+          fnv64(result.code.additionLines.map(flattenLine)),
+        ],
+      });
+    }
+  }
+  return cases;
+}
+
+function buildRenderS5() {
+  const diffs = sharedDiffs();
+  return {
+    pins: { pierre: pins["@pierre/diffs"].version },
+    diffs,
+    tokenLines: buildTokenLines(),
+    headers: buildHeaders(),
+    renderDiffs: buildRenderDiffs(diffs),
+  };
+}
+
 const outputs = {
   "jsdiff.json": buildJsdiff(),
   "scanners.json": buildScanners(),
@@ -1282,6 +1653,7 @@ const outputs = {
   "patches.json": buildPatches(),
   "utilities.json": buildUtilities(),
   "layout.json": buildS4(),
+  "render_s5.json": buildRenderS5(),
 };
 
 let drift = false;

@@ -22,6 +22,7 @@ pub mod parse_line_type;
 pub mod parse_patch_files;
 pub mod parse_quoted_diff_file_name;
 pub mod realign_change_content;
+pub mod render;
 pub mod split_file_contents;
 pub mod trim_patch_context;
 pub mod virtual_diff_layout;

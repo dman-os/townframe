@@ -14,8 +14,11 @@
 
 pub mod constants;
 pub mod diff;
+pub mod hast;
+pub mod highlighter_types;
 pub mod js_text;
 pub mod scanners;
+pub mod sprite;
 pub mod types;
 pub mod utf16;
 pub mod utils;
