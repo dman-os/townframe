@@ -329,6 +329,70 @@ pub fn is_merge_conflict_end_marker(line: &str) -> bool {
     is_conflict_marker_with_label(line, '>')
 }
 
+/// Reads a quoted token `"<prefix>..."` at the start of `text` per
+/// `"a\/(?:[^"\\]|\\.)*"` (and the `b/` twin): returns the byte length of the
+/// whole quoted token. A backslash must be followed by a non-terminator
+/// character (`.`); any other character except `"` and `\` is body.
+fn quoted_git_path_len(text: &str, prefix: &str) -> Option<usize> {
+    let body = text.strip_prefix('"')?.strip_prefix(prefix)?;
+    let mut chars = body.char_indices();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '"' => return Some(1 + prefix.len() + index + 1),
+            '\\' => {
+                let (_, escaped) = chars.next()?;
+                if is_line_terminator(escaped) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `/(?:b\/.+?)$/` tail check: `b/` then at least one character, all of them
+/// non-terminators (`.` stops at terminators and `$` must reach the end).
+fn is_unquoted_git_path(text: &str, prefix: &str) -> bool {
+    text.strip_prefix(prefix)
+        .is_some_and(|rest| !rest.is_empty() && !rest.chars().any(is_line_terminator))
+}
+
+fn is_git_destination_path(text: &str) -> bool {
+    match quoted_git_path_len(text, "b/") {
+        Some(len) => len == text.len(),
+        None => is_unquoted_git_path(text, "b/"),
+    }
+}
+
+/// `line.match(GIT_DIFF_HEADER_FILENAMES)` of upstream's `parsePatchFiles.ts`:
+/// `/^diff --git ("a\/(?:[^"\\]|\\.)*"|a\/.+?) ("b\/(?:[^"\\]|\\.)*"|b\/.+?)$/`.
+/// Returns the two raw path tokens (quotes and `a/`/`b/` prefixes kept).
+///
+/// Lazy `.+?` makes the split point the earliest space after which the rest is
+/// a valid destination path, which is what trying candidates in order does.
+pub fn match_git_diff_header_filenames(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("diff --git ")?;
+    if let Some(len) = quoted_git_path_len(rest, "a/") {
+        let after = rest[len..].strip_prefix(' ')?;
+        return is_git_destination_path(after).then(|| (&rest[..len], after));
+    }
+    let body = rest.strip_prefix("a/")?;
+    // `.+?` consumes at least one character, none of them a terminator.
+    for (offset, ch) in body.char_indices() {
+        if is_line_terminator(ch) {
+            return None;
+        }
+        let end = 2 + offset + ch.len_utf8();
+        if let Some(after) = rest[end..].strip_prefix(' ')
+            && is_git_destination_path(after)
+        {
+            return Some((&rest[..end], after));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod oracle_tests;
 

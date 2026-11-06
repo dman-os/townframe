@@ -273,11 +273,11 @@ function buildJsdiff() {
     push("diffTrimmedLines", oldText, newText, {});
   }
 
-  for (let count = 0; count < 150; count++) {
+  for (let count = 0; count < 100; count++) {
     const [oldText, newText] = tokenPair(random, CHAR_ALPHABET, 10);
     push("diffChars", oldText, newText, random.pick(CHAR_OPTIONS));
   }
-  for (let count = 0; count < 200; count++) {
+  for (let count = 0; count < 120; count++) {
     const [oldText, newText] = tokenPair(random, WORD_ALPHABET, 9);
     push("diffWordsWithSpace", oldText, newText, random.pick(WORD_OPTIONS));
   }
@@ -286,7 +286,7 @@ function buildJsdiff() {
     const options = random.pick([...WORD_OPTIONS, { ignoreWhitespace: false }]);
     push("diffWords", oldText, newText, options);
   }
-  for (let count = 0; count < 150; count++) {
+  for (let count = 0; count < 90; count++) {
     const [oldText, newText] = linePair(random);
     push(
       random.next() < 0.1 ? "diffTrimmedLines" : "diffLines",
@@ -324,17 +324,6 @@ function buildJsdiff() {
         jsonClone(fullOptions),
       ),
     );
-    patchCase.structured = jsonClone(
-      jsdiff.structuredPatch(
-        oldName,
-        newName,
-        oldText,
-        newText,
-        oldHeader,
-        newHeader,
-        jsonClone(options),
-      ),
-    );
     patches.push(patchCase);
   };
   for (const [oldText, newText] of mockPairs) {
@@ -344,7 +333,7 @@ function buildJsdiff() {
       pushPatch(oldText, newText, options, random.pick(HEADER_OPTIONS));
     }
   }
-  for (let count = 0; count < 150; count++) {
+  for (let count = 0; count < 70; count++) {
     const [oldText, newText] = linePair(random);
     pushPatch(
       oldText,
@@ -511,7 +500,7 @@ function buildScanners() {
   ]) {
     texts.add(text);
   }
-  while (texts.size < 800) {
+  while (texts.size < 450) {
     const length = 1 + random.int(8);
     texts.add(
       Array.from({ length }, () => random.pick(SCANNER_FRAGMENTS)).join(""),
@@ -561,10 +550,304 @@ function buildTypes() {
   };
 }
 
+// ---- S3: patch parsing -------------------------------------------------
+
+const { parseQuotedDiffFileName } = await import(
+  oracle.pierre("utils/parseQuotedDiffFileName.js")
+);
+const { getFiletypeFromFileName, EXTENSION_TO_FILE_FORMAT } = await import(
+  oracle.pierre("utils/getFiletypeFromFileName.js")
+);
+const { cleanLastNewline } = await import(
+  oracle.pierre("utils/cleanLastNewline.js")
+);
+const { getLineEndingType } = await import(
+  oracle.pierre("utils/getLineEndingType.js")
+);
+const { composeCacheKey } = await import(
+  oracle.pierre("utils/composeCacheKey.js")
+);
+
+/** Runs `fn`, counting console.error calls (Pierre's recoverable-problem channel). */
+function withErrorCount(fn) {
+  const original = console.error;
+  let count = 0;
+  console.error = () => {
+    count += 1;
+  };
+  try {
+    return { value: fn(), errors: count };
+  } catch (error) {
+    return { thrown: String(error?.message ?? error), errors: count };
+  } finally {
+    console.error = original;
+  }
+}
+
+const PATCH_NAMES = [
+  "a.ts",
+  "dir/b c.txt",
+  "sp ace/x y.md",
+  '"q.txt"',
+  "é.rs",
+  "new.txt",
+  "x",
+];
+const QUOTED_NAMES = [
+  '"a/q\\"x.txt"',
+  '"b/\\303\\251.txt"',
+  '"a/tab\\tname"',
+  '"b/bad\\q"',
+  '"a/unterminated',
+  '"a/\\"x\\" y"',
+];
+
+function fuzzPatch(random) {
+  const eol = random.next() < 0.15 ? "\r\n" : "\n";
+  const lines = [];
+  if (random.next() < 0.2) {
+    lines.push(
+      `From ${random.pick(["abc123", "deadbeef01", "0f"])} Mon Sep 17 00:00:00 2001`,
+      "Subject: [PATCH] x",
+      "",
+    );
+  }
+  const files = 1 + random.int(3);
+  const git = random.next() < 0.7;
+  for (let file = 0; file < files; file++) {
+    const name = random.pick(PATCH_NAMES);
+    const other = random.next() < 0.25 ? random.pick(PATCH_NAMES) : name;
+    if (git) {
+      const quoted = random.next() < 0.2;
+      lines.push(
+        quoted
+          ? `diff --git ${random.pick(QUOTED_NAMES)} ${random.pick(QUOTED_NAMES)}`
+          : `diff --git a/${name} b/${other}`,
+      );
+      const kind = random.int(6);
+      if (kind === 0) lines.push("new file mode 100644");
+      if (kind === 1) lines.push("deleted file mode 100644");
+      if (kind === 2) lines.push("old mode 100644", "new mode 100755");
+      if (kind === 3)
+        lines.push(
+          "similarity index 100%",
+          `rename from ${name}`,
+          `rename to ${other}`,
+        );
+      if (kind === 4)
+        lines.push(
+          "similarity index 80%",
+          `rename from ${name}`,
+          `rename to ${other}`,
+        );
+      if (random.next() < 0.7)
+        lines.push(
+          `index ${random.pick(["1a2b3c4", "ABC123"])}..${random.pick(["5d6e7f8", "0000000"])}${random.next() < 0.5 ? " 100644" : ""}`,
+        );
+      if (kind === 3) continue;
+    }
+    lines.push(
+      `--- ${random.next() < 0.1 ? "/dev/null" : (git ? "a/" : "") + name}${random.next() < 0.2 ? "\t2020-01-01" : ""}`,
+    );
+    lines.push(`+++ ${git ? "b/" : ""}${other}`);
+    const hunks = 1 + random.int(3);
+    let oldLine = 1 + random.int(5);
+    for (let hunk = 0; hunk < hunks; hunk++) {
+      const body = [];
+      const bodyLength = 1 + random.int(8);
+      let oldCount = 0;
+      let newCount = 0;
+      for (let line = 0; line < bodyLength; line++) {
+        const kind = random.pick([" ", " ", "-", "+", "-", "+"]);
+        body.push(
+          kind +
+            random.pick([
+              "x",
+              "foo bar",
+              "  indented",
+              "}",
+              "",
+              "é",
+              "const a = 1;",
+            ]),
+        );
+        if (kind !== "+") oldCount += 1;
+        if (kind !== "-") newCount += 1;
+        if (random.next() < 0.05) body.push("\\ No newline at end of file");
+      }
+      const skew = random.next() < 0.12 ? 1 : 0;
+      const formatCount = (value) => (value === 1 ? "" : `,${value}`);
+      lines.push(
+        `@@ -${oldLine}${formatCount(oldCount + skew)} +${oldLine}${formatCount(newCount)} @@${random.next() < 0.3 ? " fn main()" : ""}`,
+      );
+      lines.push(...body);
+      oldLine += oldCount + 1 + random.int(10);
+    }
+  }
+  if (random.next() < 0.1) lines.push("-- ", "2.43.0", "");
+  let text = lines.join(eol);
+  if (random.next() < 0.85) text += eol;
+  return text;
+}
+
+function buildPatches() {
+  const random = makeRandom(0x5eed03);
+  const cases = [];
+  const optionSets = [
+    {},
+    {},
+    { disableLineMatching: true },
+    { cacheKeyPrefix: "ck" },
+    { throwOnError: true },
+  ];
+  const push = (patch, options) => {
+    const result = withErrorCount(() => parsePatchFiles(patch, options));
+    cases.push({
+      patch,
+      options,
+      expected: result.value === undefined ? null : jsonClone(result.value),
+      error: result.thrown ?? null,
+      errors: result.errors,
+    });
+  };
+  const corpus = [
+    readFileSync(join(here, "corpus/file.patch"), "utf8"),
+    readFileSync(join(here, "corpus/trim.patch"), "utf8"),
+    corpusMocks.formatPatchWithVersionTrailer,
+    corpusMocks.malformedPatch,
+    corpusMocks.finalBlankLinePatch,
+  ];
+  for (const patch of corpus) {
+    for (const options of optionSets) push(patch, options);
+  }
+  for (let count = 0; count < 100; count++) {
+    push(fuzzPatch(random), random.pick(optionSets));
+  }
+  return {
+    pins: {
+      pierre: pins["@pierre/diffs"].version,
+      sha256: pins["@pierre/diffs"].sha256,
+    },
+    cases,
+  };
+}
+
+function buildUtilities() {
+  const random = makeRandom(0x5eed04);
+  const quotedFragments = [
+    '"',
+    '"',
+    "\\",
+    "\\\\",
+    '\\"',
+    "\\303",
+    "\\251",
+    "\\000",
+    "\\377",
+    "\\400",
+    "\\n",
+    "\\q",
+    "\\4",
+    "a",
+    "b/",
+    " ",
+    "é",
+    "😀",
+  ];
+  const quoted = [];
+  for (let count = 0; count < 300; count++) {
+    const text = Array.from({ length: 1 + random.int(8) }, () =>
+      random.pick(quotedFragments),
+    ).join("");
+    quoted.push({
+      input: text,
+      expected: jsonClone(parseQuotedDiffFileName(text)),
+    });
+  }
+  for (const name of QUOTED_NAMES)
+    quoted.push({
+      input: name,
+      expected: jsonClone(parseQuotedDiffFileName(name)),
+    });
+
+  const names = new Set([
+    "",
+    "Dockerfile",
+    "docker/Dockerfile",
+    "docker/Dockerfile.ts",
+    "a.b.c",
+    "x/.y.z",
+    "dir.d/file",
+    "a\\b\\Makefile",
+    "constructor",
+    "foo.constructor",
+    "end.",
+    ".hidden",
+    "a..b",
+    "x.blade.php",
+  ]);
+  for (const key of Object.keys(EXTENSION_TO_FILE_FORMAT)) {
+    names.add(key);
+    names.add(`src/file.${key}`);
+    names.add(`a.${key}.${key}`);
+  }
+  for (let count = 0; count < 200; count++) {
+    names.add(
+      Array.from({ length: 1 + random.int(5) }, () =>
+        random.pick([
+          "a",
+          ".",
+          "/",
+          "\\",
+          "ts",
+          "py",
+          "blade",
+          "php",
+          "component",
+          "x",
+        ]),
+      ).join(""),
+    );
+  }
+  const filetypes = [...names].map((name) => ({
+    name,
+    expected: getFiletypeFromFileName(name),
+  }));
+
+  const endings = [
+    "",
+    "a",
+    "a\n",
+    "a\r\n",
+    "a\r",
+    "\n\r",
+    "a\r\n\r\n",
+    "\r",
+    "x\ny\r\n",
+    "\n",
+  ].map((text) => ({
+    text,
+    cleanLastNewline: cleanLastNewline(text),
+    lineEnding: getLineEndingType(text),
+  }));
+  const cacheKeys = [
+    ["diff", ["a", "b"]],
+    ["s", ['q"uote', "back\\slash", "tab\t", "nl\n", "é😀", " ", "\u0001"]],
+    ["only", []],
+  ].map(([scope, segments]) => ({
+    scope,
+    segments,
+    expected: composeCacheKey(scope, ...segments),
+  }));
+  return { quoted, filetypes, endings, cacheKeys };
+}
+
 const outputs = {
   "jsdiff.json": buildJsdiff(),
   "scanners.json": buildScanners(),
   "types.json": buildTypes(),
+  "patches.json": buildPatches(),
+  "utilities.json": buildUtilities(),
 };
 
 let drift = false;

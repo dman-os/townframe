@@ -12,7 +12,6 @@ path = "lib.rs"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 similar = "3.2.1"
 
-[dev-dependencies]
-serde_json.workspace = true

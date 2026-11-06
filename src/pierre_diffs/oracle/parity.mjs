@@ -109,6 +109,15 @@ for (const row of matrix) {
   markdown += `| \`${row.path}\` | ${row.loc} | ${row.status} | ${row.slice} | ${rust} | ${row.note.replaceAll("|", "\\|")} |\n`;
 }
 
+// Upstream assertions that depend on jsdiff's exact output (or on a fixture
+// absent from the extracted tree) and were converted to invariants; kept by
+// hand in parity/divergences.psv as `test file|test title|conversion`.
+const divergences = readPsv("parity/divergences.psv");
+markdown += `\n## Assertions converted to invariants (${divergences.length})\n\n| upstream test | title | conversion |\n|---|---|---|\n`;
+for (const [testFile, title, conversion] of divergences) {
+  markdown += `| \`${testFile}\` | ${title} | ${conversion} |\n`;
+}
+
 const outputs = { "parity/matrix.psv": psv, "PARITY.md": markdown };
 for (const [name, text] of Object.entries(outputs)) {
   const path = join(crateDir, name);

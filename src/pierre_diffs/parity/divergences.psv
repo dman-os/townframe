@@ -1,0 +1,4 @@
+# test file|test title|conversion
+pierre/test/parseDiffFromFile.test.ts|should parse diff from fileOld and fileNew and match its digest|snapshot of per-hunk geometry (jsdiff hunk boundaries; fixture fileOld/fileNew is in apps/demo, absent) became property assertions on the diffRowBufferTest pair
+pierre/test/parseDiffFromFile.test.ts|should have accurate hunk line values / should correctly set oldLines and newLines|fixture swapped for the diffRowBufferTest pair (invariants unchanged)
+pierre/test/parsePatchFiles.test.ts|should parse diff.patch and match its digest snapshot|diff.patch fixture (apps/demo) absent; covered by exact oracle comparison over the corpus (patches.json), no digest

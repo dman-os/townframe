@@ -18,8 +18,11 @@ pub mod js_text;
 pub mod scanners;
 pub mod types;
 pub mod utf16;
+pub mod utils;
 
 #[cfg(test)]
 mod oracle_testing;
 #[cfg(test)]
 mod parity;
+#[cfg(test)]
+mod test_utils;
