@@ -1,0 +1,317 @@
+# Parity matrix rules. First matching rule wins; a pattern ends in `*` for a prefix match.
+# Columns: pattern|status|slice|rust location(s) (relative to src/pierre_diffs, `;` separated)|note
+# status: PORTED (Rust exists and is tested), PENDING (in scope, later slice), OUT (never), DEFER (maybe later).
+# Regenerate PARITY.md and parity/matrix.psv with `node oracle/parity.mjs`; CI-style check: `node oracle/parity.mjs --check`.
+pierre/src/components/CodeView.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/File.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/FileDiff.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/FileStream.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/UnresolvedFile.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/components/VirtualizedFile.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/VirtualizedFileDiff.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/Virtualizer.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/VirtulizerDevelopment.d.ts|OUT|-||OUT
+pierre/src/components/web-components.ts|OUT|-||OUT
+pierre/src/constants.ts|PORTED|S1|constants.rs;scanners.rs|values in constants.rs; the twelve RegExp constants are hand-written scanners in scanners.rs
+pierre/src/edit/index.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/EditStateManager.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/cloneRetainedDiffSessionSnapshot.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/command.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/editPrediction.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/editStack.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/editor.css|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/editor.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/getChangedDocumentLines.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/languages.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/lineAnnotations.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/marker.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/matchBrackets.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/pieceTable.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/platform.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/popover.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/searchPanel.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/selection.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/selectionAction.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/sprite.ts|OUT|S5||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/textDocument.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/textDocumentChangeTransaction.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/textMeasure.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/tokenizer.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/types.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/utils.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/highlighter/DiffsEditorTokenizer.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/DiffsHighlighter.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/backends/highlights.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/backends/shiki.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/highlighterType.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/highlights-editor.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/highlighter/highlights-stream.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/areLanguagesAttached.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/attachResolvedLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/cleanUpResolvedLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/constants.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/getResolvedLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/getResolvedOrResolveLanguage.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/hasResolvedLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/registerCustomLanguage.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/resolveLanguage.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/resolveLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/shared_highlighter.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/shiki-editor.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/highlighter/shiki-stream.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/stream-tokenizer.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/areThemesAttached.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/attachResolvedThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/cleanUpResolvedThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/createCSSVariablesTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/createCachedLoader.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/getResolvedOrResolveTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/getResolvedThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/hasResolvedThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/registerCustomCSSVariableTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/registerCustomTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/resolveTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/resolveThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/themeResolver.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/tokenizer-types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/index.ts|OUT|-||OUT
+pierre/src/managers/InteractionManager.ts|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
+pierre/src/managers/ResizeManager.ts|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
+pierre/src/managers/ScrollSyncManager.ts|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
+pierre/src/managers/UniversalRenderingManager.ts|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
+pierre/src/react/CodeView.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/EditContext.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/File.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/FileDiff.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/MultiFileDiff.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/PatchDiff.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/UnresolvedFile.tsx|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/react/Virtualizer.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/WorkerPoolContext.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/constants.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/index.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/jsx.d.ts|OUT|-||OUT
+pierre/src/react/types.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/assignRef.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/renderDiffChildren.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/renderFileChildren.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/templateRender.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useFileDiffInstance.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useFileInstance.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useForceUpdate.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useNextRenderData.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useStableCallback.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useUnresolvedFileInstance.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/renderers/DiffHunksRenderer.ts|PENDING|S6||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/renderers/FileRenderer.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/renderers/UnresolvedFileHunksRenderer.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/shiki-stream/index.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/shiki-stream/stream.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/shiki-stream/types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/sprite.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/ssr/FileDiffReact.tsx|OUT|-||OUT (framework adapter)
+pierre/src/ssr/index.ts|OUT|-||OUT (framework adapter)
+pierre/src/ssr/preloadDiffs.ts|OUT|-||OUT (framework adapter)
+pierre/src/ssr/preloadFile.ts|OUT|-||OUT (framework adapter)
+pierre/src/ssr/preloadPatchFile.ts|OUT|-||OUT (framework adapter)
+pierre/src/ssr/renderHTML.ts|OUT|-||OUT (framework adapter)
+pierre/src/string-import.d.ts|OUT|-||OUT
+pierre/src/style.css|PENDING|S8||PORT as stylesheet adapted to Blitz capabilities
+pierre/src/types.ts|PORTED|S1|types/patch.rs;types/options.rs;types/view.rs;types/conflict.rs;types/lines.rs;types/layout.rs|pure-data types; callbacks, DOM-element and hast-bearing types listed in the file header as deferred or out
+pierre/src/utils/annotationHelpers.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/appendItems.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/applyLineTextWithNewline.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areDiffLineAnnotationsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areDiffRenderOptionsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areDiffTargetsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areFileRenderOptionsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areFileTargetsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areFilesEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areHunkDataEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areLineAnnotationsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areManagedSnapshotsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areMergeConflictActionsEqual.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/areObjectsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areOptionsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/arePrePropertiesEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areRenderRangesEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areSelectionPointsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areSelectionsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areThemesEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areVirtualWindowSpecsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areWorkerStatsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/awaitWithTimeout.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/utils/canUseWASM.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/utils/cleanLastNewline.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/cloneFileDiffMetadata.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/composeCacheKey.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/computeEstimatedDiffHeights.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/computeFileOffsets.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/computeVirtualFileMetrics.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/createAnnotationElement.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createAnnotationWrapperNode.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createCodeViewHeaderFooterHostElement.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createContentColumn.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createEmptyRowBuffer.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createFileHeaderElement.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createGutterUtilityContentNode.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createGutterUtilityElement.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createNoNewlineElement.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createPreElement.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createRowNodes.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createSeparator.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createSpanNodeFromToken.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createStyleElement.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createUnsafeCSSStyleNode.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createWindowFromScrollPosition.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/cssWrappers.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/detachString.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/diffAcceptRejectHunk.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/editSessionAnnotations.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/editSessionHunks.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/formatCSSVariablePrefix.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getCodeViewItemRenderData.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getDiffFileInput.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getDiffHunksRendererOptions.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/getFileRendererOptions.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/getFiletypeFromFileName.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/getHighlighterOptions.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getHighlighterThemeStyles.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/getHunkSeparatorSlotName.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getHunkSideBoundaries.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/getIconForType.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getLineAnnotationName.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getLineEndingType.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/getLineNodes.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/getMergeConflictActionSlotName.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/getMergeConflictLineTypes.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/getOrCreateCodeNode.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/getSingularPatch.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/getThemes.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getTokenOptions.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getTotalLineCountFromHunks.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/guardWebKitScrollDuringRebuild.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/hastToHtml.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/hast_utils.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/hostTheme.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/hydratePartialDiff.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/includesFileAnnotations.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/isDefaultRenderRange.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/isDiffPlainText.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/isFilePlainText.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/isGutterUtilityPath.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/isStyleNode.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/isWorkerContext.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/utils/iterateOverDiff.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/lineAnnotationIdentity.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/normalizeDiffResolution.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/parseDiffDecorations.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/parseDiffFromFile.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/parseLineType.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/parseMergeConflictDiffFromFile.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/parsePatchFiles.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/parseQuotedDiffFileName.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/platform.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/prefersReducedMotion.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/prerenderHTMLIfNecessary.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/processLine.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/realignChangeContent.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/renderDiffWithHighlighter.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/renderFileWithHighlighter.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/renderTokenLines.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/resolveConflict.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/resolvePreferredHighlighter.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/utils/resolveRegion.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/roundToDevicePixel.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/scrollbarGutter.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/setDeferredArrayItem.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/setLanguageOverride.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/setWrapperNodeProps.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/shouldUseTokenTransformer.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/splitFileContents.ts|PENDING|S3||PORT (Rust, oracle-tested)
+pierre/src/utils/tokenStyle.ts|PENDING|S5||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/tokensToHtml.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/trimPatchContext.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/updateDiffHunks.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/virtualDiffLayout.ts|PENDING|S4||PORT (Rust, oracle-tested)
+pierre/src/utils/wrapTokenFragments.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/worker/WorkerPoolManager.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/errors.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/getOrCreateWorkerPoolSingleton.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/hastLinesTransport.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/index.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/types.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/worker.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/workerMessage.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/test/e2e/*|OUT|-||Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page
+pierre/test/__snapshots__/*|PENDING|-||snapshot follows the test file it is named after; ported with it
+pierre/test/README.md|OUT|-||upstream test instructions (bun)
+pierre/test/domHarness.ts|PENDING|S10||jsdom harness; oracle-side only, replaced by Rust state assertions
+pierre/test/testUtils.ts|PENDING|S3||test helpers, ported with the first test that needs each
+pierre/test/mocks.ts|PORTED|S0|oracle/corpus/mocks.mjs|fixtures excerpted into the oracle corpus (filesystem-backed fixtures dropped)
+pierre/test/file.patch|PORTED|S0|oracle/corpus/file.patch|verbatim oracle corpus file
+pierre/test/trim.patch|PORTED|S0|oracle/corpus/trim.patch|verbatim oracle corpus file
+pierre/test/workerPoolHarness.ts|OUT|-||worker pool harness
+pierre/test/editor*|OUT|-||edit mode is out of scope for v1
+pierre/test/edit*|OUT|-||edit mode is out of scope for v1
+pierre/test/*Edit*|OUT|-||edit mode is out of scope for v1
+pierre/test/*edit*|OUT|-||edit mode is out of scope for v1
+pierre/test/react*|OUT|-||React adapter
+pierre/test/*[wW]orker*|OUT|-||worker pool
+pierre/test/Unresolved*|DEFER|-||merge-conflict UI
+pierre/test/*MergeConflict*|DEFER|-||merge-conflict UI
+pierre/test/diffAcceptRejectHunk*|DEFER|-||merge-conflict / edit flow
+pierre/test/parsePatchFiles*|PENDING|S3||
+pierre/test/parseQuotedDiffFileName*|PENDING|S3||
+pierre/test/parseDiffFromFile*|PENDING|S3||
+pierre/test/iterateOverDiff*|PENDING|S4||
+pierre/test/isAdditionLineRenderable*|PENDING|S4||
+pierre/test/virtualDiffLayout*|PENDING|S4||
+pierre/test/computeEstimatedDiffHeights*|PENDING|S4||
+pierre/test/computeLineOffsets*|PENDING|S4||
+pierre/test/trimPatchContext*|PENDING|S4||
+pierre/test/hydratePartialDiff*|PENDING|S4||
+pierre/test/getHunkSideBoundaries*|PENDING|S4||
+pierre/test/createFileHeaderElement*|PENDING|S5||
+pierre/test/renderTokenLines*|PENDING|S5||
+pierre/test/hastToHtml*|PENDING|S5||
+pierre/test/DiffHunksRender*|PENDING|S6||
+pierre/test/annotation*|PENDING|S6||
+pierre/test/patchFileRender*|PENDING|S6||
+pierre/test/InjectedRowHooks*|PENDING|S6||
+pierre/test/FileRenderer*|PENDING|S6||
+pierre/test/CodeView*|PENDING|S12||
+pierre/test/FileDiff*|PENDING|S9||
+pierre/test/Virtualiz*|PENDING|S10||
+pierre/test/virtualiz*|PENDING|S10||
+pierre/test/Interaction*|PENDING|S11||
+pierre/test/getChangedDocumentLines*|OUT|-||edit session helper
+pierre/test/updateDiffHunks*|OUT|-||edit session hunk recompute
+pierre/test/getFiletypeFromFileName*|PENDING|S3||
+pierre/test/realignChangeContent*|PENDING|S3||
+pierre/test/setDeferredArrayItem*|PENDING|S4||
+pierre/test/getHighlighterThemeStyles*|PENDING|S5||
+pierre/test/registerCustomTheme*|OUT|-||Shiki theme registry
+pierre/test/sharedHighlighter*|OUT|-||Shiki highlighter registry
+pierre/test/hastLinesTransport*|OUT|-||worker transport of hast lines
+pierre/test/preload*|OUT|-||SSR preload
+pierre/test/highlighter*|PENDING|S7||adapted where the behavior exists behind the highlights adapter, else OUT
+pierre/test/resolveTheme*|PENDING|S7||
+pierre/test/themeTypeUpdates*|PENDING|S7||
+pierre/test/*|PENDING|-||not yet assigned to a slice; triage in the owning slice
+jsdiff/libesm/diff/base.js|REPLACED|S2|diff.rs|Myers is `similar`; ChangeObject shape kept. Divergence: hunk and run boundaries may differ where several minimal diffs exist; maxEditLength/timeout/callback/comparator options not offered
+jsdiff/libesm/diff/line.js|REPLACED|S2|diff.rs|diffLines -> diff::diff_lines (invariants and minimal edit totals checked against jsdiff goldens); ignoreWhitespace/newlineIsToken/stripTrailingCr/ignoreNewlineAtEof options not offered
+jsdiff/libesm/diff/word.js|REPLACED|S2|diff.rs|diffWordsWithSpace -> diff::diff_words_with_space. Divergence: tokens are similar's (whitespace runs and non-whitespace runs), not jsdiff's word/punctuation tokens, so word-diff ranges differ; invariants only
+jsdiff/libesm/diff/character.js|REPLACED|S2|diff.rs|diffChars -> diff::diff_chars
+jsdiff/libesm/util/string.js|OUT|-||helpers of jsdiff word post-processing, not needed with similar
+jsdiff/libesm/util/params.js|OUT|-||option plumbing
+jsdiff/libesm/util/distance-iterator.js|OUT|-||only jsdiff applyPatch uses it
+jsdiff/libesm/patch/create.js|REPLACED|S2|diff.rs|createTwoFilesPatch -> diff::create_two_files_patch (Index/underline/---/+++ headers, always-present hunk counts, no-newline marker, C-quoted names; hunk boundaries from similar)
+jsdiff/libesm/diff/*|OUT|-||differs @pierre/diffs never calls (array, css, json, sentence)
+jsdiff/libesm/convert/*|OUT|-||format converters
+jsdiff/libesm/patch/*|OUT|-||patch parse/apply/reverse; not called by @pierre/diffs
+jsdiff/libesm/util/array.js|OUT|-||used by diffArrays only
+jsdiff/libesm/index.js|OUT|-||barrel
+jsdiff/libesm/types.js|OUT|-||type-only module

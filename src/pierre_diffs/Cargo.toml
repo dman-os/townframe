@@ -1,0 +1,18 @@
+[package]
+name = "pierre_diffs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+similar = "3.2.1"
+
+[dev-dependencies]
+serde_json.workspace = true

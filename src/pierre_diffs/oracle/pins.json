@@ -1,0 +1,14 @@
+{
+  "@pierre/diffs": {
+    "version": "1.6.4",
+    "tarball": "https://registry.npmjs.org/@pierre/diffs/-/diffs-1.6.4.tgz",
+    "sha256": "6419ae2f0489d9619dac3b3b1348a92d44a998c11324ebfa9bfb47436179a441",
+    "npmIntegrity": "sha512-RsKoruCOp50qaDM3a7BQan5K77xMkGWT1NF01fiYP1PfT3v4CvIjwytNk5WjZG0BesBkMOP2UbrBIDigB1k0ug=="
+  },
+  "diff": {
+    "version": "9.0.0",
+    "tarball": "https://registry.npmjs.org/diff/-/diff-9.0.0.tgz",
+    "sha256": "b898bf23c95594607576e25ddd4013f1d51ed0e862aaf0732815830c87b3b58f",
+    "npmIntegrity": "sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw=="
+  }
+}
