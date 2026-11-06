@@ -56,6 +56,17 @@ What it does not defend against:
 - **Handle theft.** A handle is a bearer secret, like a session token. Anyone who learns it can use it until it is retracted. Local transports protect it (UDS 0700, peer credentials); remote clients rely on iroh's encrypted transport.
 - **Offline or cross-node verification.** A handle means nothing elsewhere. Peers authorize through keyhive membership, not through these handles.
 
+## A worked flow: reads and writes across a drawer
+
+A drawer-scoped docs capability (`DocScope { drawers: {D: Write} }`) covers every document in D. For each request, the docs service asks one question: is this `doc_id` in a drawer the capability holds at the needed level (`doc.rs`, `allowed`)? So:
+- Grouped reads and polls over D use the one capability.
+- Writing N documents in D is N write calls with the same capability. Nothing is minted per document.
+- Creating a document placed in D needs Write on D.
+
+**Narrowing is how the glue hands out less, not something a worker does per write.** The nodule runtime or the clay micro runtime turns its context into capabilities. When it gives a component less than it holds, it narrows once per hand-off. Examples: one document out of the drawer, Read instead of Write, one drawer out of several. The component then just uses what it was given.
+
+A narrow is one in-process call to the authority, which keeps capabilities in memory. The authority checks that the new rights and scope are a subset of the source's, records the source as a dependency (retracting the source kills the narrowed handle), and returns the new handle.
+
 ## What is turned around today
 
 1. **Two domains per drawer.** Acting on a drawer's documents takes a docs capability (scope `drawers: {D: Write}`), while managing the drawer takes a drawer capability. Each is minted separately from the same grant.
@@ -75,4 +86,4 @@ What it does not defend against:
 
 ## Open questions for the operator
 
-- Change 2: one handle per drawer that the docs service also accepts, or a mint that returns both?
+- Change 2 (manager's recommendation, pending): keep the domains separate. Most callers need only the docs capability; only admin callers (CLI, settings) need both. Add a combined mint only if those callers find two mints annoying in practice. The friction the operator hit, getting one document out of a drawer, is covered by `Narrow`.
