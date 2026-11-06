@@ -28,6 +28,7 @@ use crate::types::patch::Hunk;
 use crate::types::patch::HunkContent;
 use crate::types::patch::ParsePatchOptions;
 use crate::types::patch::ParsedPatch;
+use crate::types::patch::signed;
 use crate::utf16;
 use crate::utils::clean_last_newline::clean_last_newline;
 use crate::utils::compose_cache_key::compose_cache_key;
@@ -173,8 +174,8 @@ pub fn process_file(
 
 /// Indexes that run across the hunks of one file.
 struct FileCursor {
-    deletion_line_index: usize,
-    addition_line_index: usize,
+    deletion_line_index: i64,
+    addition_line_index: i64,
 }
 
 fn process_file_inner(
@@ -246,8 +247,10 @@ fn process_file_inner(
             lines.pop();
         }
         if !is_partial {
-            cursor.deletion_line_index = file_header.deletion_start.saturating_sub(1);
-            cursor.addition_line_index = file_header.addition_start.saturating_sub(1);
+            // `start - 1` stays signed: a side that starts at line 0 has index -1
+            // ("no line on this side"), exactly as upstream; see `types::patch::signed`.
+            cursor.deletion_line_index = signed(file_header.deletion_start) - 1;
+            cursor.addition_line_index = signed(file_header.addition_start) - 1;
         }
 
         let mut hunk_data = new_hunk(&file_header, first_line, &cursor);
@@ -545,32 +548,20 @@ fn repair_hunk_counts_if_needed(
     // move with repaired starts. Partial hunks index patch-built arrays.
     if !is_partial {
         let addition_start_delta =
-            repaired_addition_start as isize - hunk_data.addition_start as isize;
+            signed(repaired_addition_start) - signed(hunk_data.addition_start);
         let deletion_start_delta =
-            repaired_deletion_start as isize - hunk_data.deletion_start as isize;
-        hunk_data.addition_line_index = hunk_data
-            .addition_line_index
-            .saturating_add_signed(addition_start_delta);
-        hunk_data.deletion_line_index = hunk_data
-            .deletion_line_index
-            .saturating_add_signed(deletion_start_delta);
+            signed(repaired_deletion_start) - signed(hunk_data.deletion_start);
+        hunk_data.addition_line_index += addition_start_delta;
+        hunk_data.deletion_line_index += deletion_start_delta;
         for content in &mut hunk_data.hunk_content {
             match content {
                 HunkContent::Context(context) => {
-                    context.addition_line_index = context
-                        .addition_line_index
-                        .saturating_add_signed(addition_start_delta);
-                    context.deletion_line_index = context
-                        .deletion_line_index
-                        .saturating_add_signed(deletion_start_delta);
+                    context.addition_line_index += addition_start_delta;
+                    context.deletion_line_index += deletion_start_delta;
                 }
                 HunkContent::Change(change) => {
-                    change.addition_line_index = change
-                        .addition_line_index
-                        .saturating_add_signed(addition_start_delta);
-                    change.deletion_line_index = change
-                        .deletion_line_index
-                        .saturating_add_signed(deletion_start_delta);
+                    change.addition_line_index += addition_start_delta;
+                    change.deletion_line_index += deletion_start_delta;
                 }
             }
         }

@@ -16,6 +16,7 @@ use crate::types::patch::ChangeContent;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::Hunk;
 use crate::types::patch::HunkContent;
+use crate::types::patch::line_slot;
 use crate::utils::get_hunk_side_boundaries::get_hunk_side_start_boundary;
 use crate::utils::virtual_diff_layout::ExpandedRegionResult;
 use crate::utils::virtual_diff_layout::GetExpandedRegionProps;
@@ -434,12 +435,12 @@ impl<'diff, Callback: FnMut(DiffLineCallbackProps<'diff>) -> bool> Walker<'diff,
         let deletion_start_index = if !diff.is_partial && hunk.deletion_count == 0 {
             deletion_boundary
         } else {
-            hunk.deletion_line_index
+            line_slot(hunk.deletion_line_index)
         };
         let addition_start_index = if !diff.is_partial && hunk.addition_count == 0 {
             addition_boundary
         } else {
-            hunk.addition_line_index
+            line_slot(hunk.addition_line_index)
         };
 
         if self.walk_leading_region(

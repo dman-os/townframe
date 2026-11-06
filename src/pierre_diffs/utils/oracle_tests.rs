@@ -11,17 +11,32 @@ use serde_json::Value;
 
 use crate::oracle_testing::assert_json_eq;
 use crate::oracle_testing::load_golden;
+use crate::types::patch::DiffFileInput;
+use crate::types::patch::FileContents;
+use crate::types::patch::ParseDiffOptions;
 use crate::types::patch::ParsePatchOptions;
 use crate::utils::clean_last_newline::clean_last_newline;
 use crate::utils::compose_cache_key::compose_cache_key;
 use crate::utils::get_filetype_from_file_name::get_filetype_from_file_name;
 use crate::utils::get_line_ending_type::get_line_ending_type;
+use crate::utils::parse_diff_from_file::parse_diff_from_file;
 use crate::utils::parse_patch_files::parse_patch_files;
 use crate::utils::parse_quoted_diff_file_name::parse_quoted_diff_file_name;
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PatchGolden {
     cases: Vec<PatchCase>,
+    from_files: Vec<FromFilesCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FromFilesCase {
+    kind: String,
+    old_file: Option<FileContents>,
+    new_file: Option<FileContents>,
+    expected: Value,
 }
 
 #[derive(Deserialize)]
@@ -176,4 +191,38 @@ fn line_endings_and_cache_keys_match() {
         let segments: Vec<&str> = case.segments.iter().map(String::as_str).collect();
         assert_eq!(compose_cache_key(&case.scope, &segments), case.expected);
     }
+}
+
+/// Sides that are empty or absent carry upstream's `-1` line indexes.
+#[test]
+fn parse_diff_from_file_matches_for_empty_and_absent_sides() {
+    let golden: PatchGolden = load_golden("patches.json");
+    assert!(golden.from_files.len() >= 16);
+    let mut negative = 0;
+    for case in &golden.from_files {
+        let input = match (case.kind.as_str(), &case.old_file, &case.new_file) {
+            ("both", Some(old_file), Some(new_file)) => DiffFileInput::Both {
+                old_file: old_file.clone(),
+                new_file: new_file.clone(),
+            },
+            ("added", _, Some(new_file)) => DiffFileInput::Added {
+                new_file: new_file.clone(),
+            },
+            ("deleted", Some(old_file), _) => DiffFileInput::Deleted {
+                old_file: old_file.clone(),
+            },
+            other => panic!("unexpected case shape {other:?}"),
+        };
+        let parsed = parse_diff_from_file(&input, &ParseDiffOptions::default(), true)
+            .expect("valid input")
+            .value;
+        let actual = serde_json::to_value(&parsed).expect("serializes");
+        negative += usize::from(case.expected.to_string().contains("LineIndex\":-1"));
+        assert_json_eq(
+            &format!("{} {:?} {:?}", case.kind, case.old_file, case.new_file),
+            &case.expected,
+            &actual,
+        );
+    }
+    assert!(negative > 0, "the cases must exercise a -1 line index");
 }

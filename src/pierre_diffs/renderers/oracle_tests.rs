@@ -296,7 +296,7 @@ fn diff_hunks_renderer_matches() {
     let golden: Golden = load_golden("render_s6.json");
     assert!(golden.cases.len() >= 300);
     let mut exact = 0;
-    let mut word_diff_only = 0;
+    let mut word_diff_only: Vec<String> = Vec::new();
     for (index, case) in golden.cases.iter().enumerate() {
         let mut diff = diffs[case.diff].clone();
         if let Some(lang) = &case.lang {
@@ -376,7 +376,9 @@ fn diff_hunks_renderer_matches() {
             if let Some(full) = &case.expected.full {
                 assert_json_eq(&format!("{context}: result"), full, &result_json);
             }
-            panic!("{context}: flattened result differs from the dist's");
+            panic!(
+                "{context}: flattened result differs from the dist's\ndecoration-only differences so far: {word_diff_only:#?}"
+            );
         }
         let hashes = [fnv64(&result_json), fnv64(&full_ast)];
         if hashes == case.expected.exact {
@@ -388,13 +390,16 @@ fn diff_hunks_renderer_matches() {
                 if let Some(full) = &case.expected.full {
                     assert_json_eq(&format!("{context}: result"), full, &result_json);
                 }
-                panic!("{context}: exact hash differs without word diff");
+                panic!(
+                    "{context}: exact hash differs without word diff\ndecoration-only differences so far: {word_diff_only:#?}"
+                );
             }
-            word_diff_only += 1;
+            word_diff_only.push(context);
         }
     }
     eprintln!(
-        "DiffHunksRenderer: {exact} exact of {}; decoration-only differences: {word_diff_only}",
-        golden.cases.len()
+        "DiffHunksRenderer: {exact} exact of {}; decoration-only differences: {}",
+        golden.cases.len(),
+        word_diff_only.len()
     );
 }

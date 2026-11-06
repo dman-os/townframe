@@ -122,7 +122,7 @@ pierre/src/react/utils/useNextRenderData.ts|18|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useStableCallback.ts|14|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useUnresolvedFileInstance.ts|228|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/renderers/DiffHunksRenderer.ts|2782|PORTED|S6|renderers/diff_hunks_renderer.rs;renderers/diff_hunks_renderer/process.rs|unified and split in one `process_diff_result`; protected hooks are the `DiffHunksRendererHooks` trait; caches, worker pool, edit session and async highlighting are dropped (see Dropped branches); oracle: hast JSON of processDiffResult/renderFullAST over the stub highlighter (render_s6.json)
-pierre/src/renderers/FileRenderer.ts|1219|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/renderers/FileRenderer.ts|1219|PENDING|unassigned||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/renderers/UnresolvedFileHunksRenderer.ts|421|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/shiki-stream/index.ts|3|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/shiki-stream/stream.ts|68|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
@@ -296,8 +296,8 @@ pierre/test/FileDiff.partialRender.test.ts|207|PENDING|S9||
 pierre/test/FileDiff.rerenderInputs.test.ts|233|PENDING|S9||
 pierre/test/FileDiff.unifiedEditSeparators.test.ts|111|OUT|-||edit mode is out of scope for v1
 pierre/test/FileDiff.workerRendering.test.ts|485|OUT|-||worker pool
-pierre/test/FileRenderer.ast.test.ts|241|PENDING|S6||
-pierre/test/FileRenderer.test.ts|286|PENDING|S6||
+pierre/test/FileRenderer.ast.test.ts|241|PENDING|unassigned||
+pierre/test/FileRenderer.test.ts|286|PENDING|unassigned||
 pierre/test/FileStream.test.ts|154|PENDING|-||not yet assigned to a slice; triage in the owning slice
 pierre/test/InjectedRowHooks.test.ts|240|PORTED|S6|renderers/injected_row_hooks_test.rs|two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer
 pierre/test/InteractionManager.gutterUtility.test.ts|1072|PENDING|S11||

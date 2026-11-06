@@ -11,6 +11,8 @@ use crate::js_text;
 use crate::types::patch::ChangeContent;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::HunkContent;
+use crate::types::patch::line_slot;
+use crate::types::patch::signed;
 
 // The diff library emits one change block per replaced run, ordering every
 // deleted line before every added line. Renderers pair a block's lines
@@ -84,7 +86,8 @@ fn realign_change_block(
     // break itself) is noise for deciding which lines pair -- the rendered diff
     // still shows every whitespace change on the paired row. Strip it once per
     // line here rather than per comparison.
-    let stripped = |lines: &[String], start: usize, count: usize| -> Vec<Vec<u16>> {
+    let stripped = |lines: &[String], start: i64, count: usize| -> Vec<Vec<u16>> {
+        let start = line_slot(start);
         (0..count)
             .map(|line| strip_whitespace(lines.get(start + line).map_or("", String::as_str)))
             .collect()
@@ -119,8 +122,8 @@ fn realign_change_block(
     let mut blocks: Vec<HunkContent> = Vec::new();
     let mut push_block = |block_deletions: usize,
                           block_additions: usize,
-                          block_deletion_index: usize,
-                          block_addition_index: usize| {
+                          block_deletion_index: i64,
+                          block_addition_index: i64| {
         if block_deletions > 0 || block_additions > 0 {
             blocks.push(HunkContent::Change(ChangeContent {
                 deletions: block_deletions,
@@ -136,27 +139,27 @@ fn realign_change_block(
             pair_count,
             pair_count,
             deletion_line_index,
-            addition_line_index + best_offset,
+            addition_line_index + signed(best_offset),
         );
         push_block(
             0,
             additions - pair_count - best_offset,
-            deletion_line_index + pair_count,
-            addition_line_index + best_offset + pair_count,
+            deletion_line_index + signed(pair_count),
+            addition_line_index + signed(best_offset) + signed(pair_count),
         );
     } else {
         push_block(best_offset, 0, deletion_line_index, addition_line_index);
         push_block(
             pair_count,
             pair_count,
-            deletion_line_index + best_offset,
+            deletion_line_index + signed(best_offset),
             addition_line_index,
         );
         push_block(
             deletions - pair_count - best_offset,
             0,
-            deletion_line_index + best_offset + pair_count,
-            addition_line_index + pair_count,
+            deletion_line_index + signed(best_offset) + signed(pair_count),
+            addition_line_index + signed(pair_count),
         );
     }
     Some(blocks)

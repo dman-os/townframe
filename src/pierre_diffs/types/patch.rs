@@ -129,6 +129,22 @@ pub struct ParsedPatch {
     pub files: Vec<FileDiffMetadata>,
 }
 
+/// A count as a signed line-index delta. Line indexes are signed because
+/// upstream's `start - 1` is `-1` for a side that starts at line 0 (an added
+/// file's deletion side, a deleted file's addition side, any zero-length
+/// range at the top of a file); that "no line on this side" index is
+/// preserved rather than saturated, so parsed hunks equal upstream's.
+pub fn signed(count: usize) -> i64 {
+    i64::try_from(count).expect("line counts fit in i64")
+}
+
+/// The array index of a line index that points at a line. Panics on the
+/// `-1` of an empty side: only callers that have already established the side
+/// has lines (count > 0) may use it.
+pub fn line_slot(line_index: i64) -> usize {
+    usize::try_from(line_index).expect("a side with lines has a non-negative line index")
+}
+
 /// Represents a block of unchanged context lines within a hunk. Basically a
 /// batch of lines in a hunk that are prefixed with a space ` `. Consecutive
 /// lines prefixed with a ` ` are grouped together into a single ContextContent.
@@ -139,10 +155,10 @@ pub struct ContextContent {
     pub lines: usize,
     /// Zero-based index into `FileDiffMetadata.additionLines` where this context
     /// block starts.
-    pub addition_line_index: usize,
+    pub addition_line_index: i64,
     /// Zero-based index into `FileDiffMetadata.deletionLines` where this context
     /// block starts.
-    pub deletion_line_index: usize,
+    pub deletion_line_index: i64,
 }
 
 /// Represents a block of changes (additions and/or deletions) within a hunk.
@@ -155,12 +171,12 @@ pub struct ChangeContent {
     pub deletions: usize,
     /// Zero-based index into `FileDiffMetadata.deletionLines` where the deleted
     /// lines start.
-    pub deletion_line_index: usize,
+    pub deletion_line_index: i64,
     /// Number of lines prefixed with `+` in this change block.
     pub additions: usize,
     /// Zero-based index into `FileDiffMetadata.additionLines` where the added
     /// lines start.
-    pub addition_line_index: usize,
+    pub addition_line_index: i64,
 }
 
 /// `ContextContent | ChangeContent`, discriminated by `type`.
@@ -193,7 +209,7 @@ pub struct Hunk {
     pub addition_lines: usize,
     /// Zero-based index into `FileDiffMetadata.additionLines` where this hunk's
     /// content starts.
-    pub addition_line_index: usize,
+    pub addition_line_index: i64,
 
     /// Starting line number in the old file version, parsed from the `-X`
     /// in the hunk header.
@@ -208,7 +224,7 @@ pub struct Hunk {
     pub deletion_lines: usize,
     /// Zero-based index into `FileDiffMetadata.deletionLines` where this hunk's
     /// content starts.
-    pub deletion_line_index: usize,
+    pub deletion_line_index: i64,
 
     /// Array of content segments within this hunk, each representing either
     /// a context line group or a change group.

@@ -15,6 +15,7 @@ use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::Hunk;
 use crate::types::patch::HunkContent;
 use crate::types::patch::ParseDiffOptions;
+use crate::types::patch::signed;
 use crate::utf16;
 use crate::utils::compose_cache_key::compose_cache_key;
 use crate::utils::get_hunk_side_boundaries::get_hunk_side_end_boundary;
@@ -132,8 +133,8 @@ fn hydrate_hunks(hunks: &[Hunk], total_addition_lines: usize) -> HydratedHunksRe
     let mut hydrated_hunks: Vec<Hunk> = Vec::new();
 
     for hunk in hunks {
-        let addition_line_index = hunk.addition_start.saturating_sub(1);
-        let deletion_line_index = hunk.deletion_start.saturating_sub(1);
+        let addition_line_index = signed(hunk.addition_start) - 1;
+        let deletion_line_index = signed(hunk.deletion_start) - 1;
         let mut content_addition_line_index = addition_line_index;
         let mut content_deletion_line_index = deletion_line_index;
         let mut hunk_addition_lines = 0;
@@ -148,8 +149,8 @@ fn hydrate_hunks(hunks: &[Hunk], total_addition_lines: usize) -> HydratedHunksRe
                     let mut context = context.clone();
                     context.addition_line_index = content_addition_line_index;
                     context.deletion_line_index = content_deletion_line_index;
-                    content_addition_line_index += context.lines;
-                    content_deletion_line_index += context.lines;
+                    content_addition_line_index += signed(context.lines);
+                    content_deletion_line_index += signed(context.lines);
                     hunk_split_line_count += context.lines;
                     hunk_unified_line_count += context.lines;
                     hunk_content.push(HunkContent::Context(context));
@@ -158,8 +159,8 @@ fn hydrate_hunks(hunks: &[Hunk], total_addition_lines: usize) -> HydratedHunksRe
                     let mut change = change.clone();
                     change.addition_line_index = content_addition_line_index;
                     change.deletion_line_index = content_deletion_line_index;
-                    content_addition_line_index += change.additions;
-                    content_deletion_line_index += change.deletions;
+                    content_addition_line_index += signed(change.additions);
+                    content_deletion_line_index += signed(change.deletions);
                     hunk_addition_lines += change.additions;
                     hunk_deletion_lines += change.deletions;
                     hunk_split_line_count += change.additions.max(change.deletions);
