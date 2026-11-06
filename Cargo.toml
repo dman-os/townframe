@@ -21,6 +21,7 @@ members = [
   "./src/daybook_pdk",
   "./src/daybook_types",
   "./src/macros",
+  "./src/pierre_diffs",
   "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
