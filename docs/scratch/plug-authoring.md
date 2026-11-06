@@ -143,7 +143,7 @@ The same `Client<Proto>` calls should work in micro code, with the transport swa
 - **The developer loop.** Authors include non-programmers, so agentic, "vibe-coded" cartridge development is the target, and Rust is the wrong first language for it. A friendlier authoring language, starting with TypeScript, gets prototyped soon. CLI tooling follows once that story is clear.
 - **Open: cartridge-scoped configuration.** Micros and nodules each have bespoke config today. Some of it is probably cartridge-scoped: permissions, enablement, scopes. Which parts is undecided.
 - **Next design topic: consent, permissions and actors, aligned per cartridge.** Requests from micros and nodules, the grants a user consents to, and the cartridge's actor identities (ADR 022) should form one model at cartridge level.
-- **Open: a name for "operation".** The operator is unsure about the term. XRPC calls them *methods* (queries and procedures are method kinds).
+- **Naming (decided, operator 2026-11-06):** *commands* is the user-facing term; developers use XRPC naming: *methods*, of kind query, procedure or subscription. The `Operation` trait becomes `Method` (with `Query` and `Procedure`) when the new crate is created after #82, so micro calls build on `Method` from the start.
 
 ## Sequencing
 

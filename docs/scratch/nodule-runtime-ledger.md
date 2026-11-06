@@ -663,6 +663,8 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 
 - **D34. "Plug" becomes "cartridge"** (operator, 2026-11-06): "plugin" implies a slight enhancement of the app, but many micros are big, self-contained apps. A cartridge (everyday "cart") is the one user-facing noun for both the store item and the distribution unit: it bundles micros, nodules and (later) workflows. Micros and nodules stay user-facing too, as the classes of thing a cartridge contains; the store disambiguates by them. Deferred: micro access to node services, until feat/big-node merges and Clay runs on top of the node. Also decided: one typed-call model across micros and nodules (`Operation` plus the generated `Client<Proto>`, with host-mediated backends). The code rename (`big_plugs*`, `Plug`, `plug_*` crates, ADRs 027/028) waits for the Clay `datum_core` PR, which touches the same crates.
 
+- **D35. Commands for users, XRPC names for developers** (operator, 2026-11-06): user-facing, a cartridge offers *commands*; developer-facing, they are XRPC *methods* (query, procedure, subscription). The `Operation` trait becomes `Method` in its own wasm-buildable crate after the datum_core PR (#82) merges.
+
 ## Deferred
 
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
