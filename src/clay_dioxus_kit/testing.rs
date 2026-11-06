@@ -26,8 +26,10 @@ use dioxus_html::SerializedKeyboardData;
 use dioxus_html::SerializedMouseData;
 use dioxus_html::SerializedPointInteraction;
 use dioxus_html::SerializedPointerData;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 // The vocabulary a Wasm guest's tree may use, mirrored from `clay_surface::render` (the host
 // refuses a mutation batch naming anything else). The kit cannot depend on a `clay_*` crate, so
@@ -571,6 +573,21 @@ impl WriteMutations for Dom {
 pub(crate) struct Page {
     vdom: VirtualDom,
     dom: Dom,
+    clock: TestClock,
+}
+
+/// The test clock, in ms, provided to the component under test as a root context. A gesture
+/// component that needs time (velocity estimation) reads it where production reads a platform
+/// clock; [`Page::pointer`] sets it to the event's time before dispatching. No test sleeps: the
+/// time is whatever the test says (`KIT-071`).
+#[derive(Clone, Default)]
+pub(crate) struct TestClock(Rc<Cell<f64>>);
+
+impl TestClock {
+    /// The time of the latest [`Page::pointer`], `0` before any.
+    pub(crate) fn now_ms(&self) -> f64 {
+        self.0.get()
+    }
 }
 
 impl Page {
@@ -585,9 +602,11 @@ impl Page {
     fn from_vdom(mut vdom: VirtualDom) -> Self {
         // Event payloads are the serialized forms; without a converter `event.data()` panics.
         dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+        let clock = TestClock::default();
+        vdom.insert_any_root_context(Box::new(clock.clone()));
         let mut dom = Dom::new();
         vdom.rebuild(&mut dom);
-        Self { vdom, dom }
+        Self { vdom, dom, clock }
     }
 
     /// Flush pending state changes into the DOM, as the renderer's event loop would.
@@ -743,12 +762,27 @@ impl Page {
     }
 
     /// A pointer event (`pointerdown`, `pointermove`, `pointerup`, `pointerleave`,
-    /// `pointercancel`) at document x `page_x`. The page coordinate is the only one the kit reads
-    /// during a gesture (Blitz skill: the target changes mid-gesture, the page space does not).
-    pub(crate) fn pointer(&mut self, node: Node, name: &str, page_x: f64) {
+    /// `pointercancel`) at document point (`page_x`, `page_y`) and time `time_stamp_ms`. The page
+    /// coordinates are the only ones the kit reads during a gesture (Blitz skill: the target
+    /// changes mid-gesture, the page space does not).
+    ///
+    /// Dioxus's pointer payload carries no timestamp (`SerializedPointInteraction` has none), so
+    /// the time cannot ride in the event. It is set on the [`TestClock`] root context before the
+    /// event is dispatched instead.
+    pub(crate) fn pointer(
+        &mut self,
+        node: Node,
+        name: &str,
+        page_x: f64,
+        page_y: f64,
+        time_stamp_ms: f64,
+    ) {
+        self.clock.0.set(time_stamp_ms);
         let point = SerializedPointInteraction {
             page_x,
+            page_y,
             client_x: page_x,
+            client_y: page_y,
             ..Default::default()
         };
         let mut json = serde_json::to_value(point).expect("point serializes");
@@ -794,5 +828,41 @@ impl Page {
     /// The parent element of `node`.
     pub(crate) fn parent(&self, node: Node) -> Node {
         Node(self.dom.nodes[node.0].parent.expect("node has a parent"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// What a handler sees of a pointer event: its page point and the test clock.
+    type Seen = Rc<RefCell<Vec<(f64, f64, f64)>>>;
+
+    fn probe_app(seen: Seen) -> Element {
+        let clock = consume_context::<TestClock>();
+        rsx! {
+            div {
+                role: "button",
+                "aria-label": "probe",
+                onpointermove: move |event| {
+                    let point = event.page_coordinates();
+                    seen.borrow_mut().push((point.x, point.y, clock.now_ms()));
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn a_pointer_event_carries_both_page_coordinates_and_sets_the_clock() {
+        let seen = Seen::default();
+        let mut page = Page::with_props(probe_app, Rc::clone(&seen));
+        let probe = page.by_role("button", "probe");
+        page.pointer(probe, "pointermove", 12.0, 34.0, 1016.0);
+        page.pointer(probe, "pointermove", 20.0, 30.0, 1032.0);
+        assert_eq!(
+            *seen.borrow(),
+            vec![(12.0, 34.0, 1016.0), (20.0, 30.0, 1032.0)]
+        );
     }
 }

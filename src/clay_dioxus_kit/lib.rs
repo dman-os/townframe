@@ -3,6 +3,7 @@
 //! Each component is a headless part under [`headless`] (behaviour, ARIA, events) and a styled
 //! part at the crate root (the Dayframe skin over the semantic design tokens).
 pub mod headless;
+pub mod swipe;
 
 mod app_bar;
 mod drawer;

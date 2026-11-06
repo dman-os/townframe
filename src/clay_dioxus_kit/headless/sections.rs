@@ -515,7 +515,7 @@ mod tests {
         // 24 px wide, centred on the seam: the one pressable under 48 px (`KIT-106`).
         assert_eq!(page.style(handle, "width").as_deref(), Some("24px"));
         assert_eq!(page.style(handle, "margin").as_deref(), Some("0 -12px"));
-        page.pointer(handle, "pointerdown", 200.0);
+        page.pointer(handle, "pointerdown", 200.0, 0.0, 1000.0);
         let overlay = page.by_role("presentation", "");
         assert_eq!(layer(&page, overlay).as_deref(), Some(Layer::Gesture.css()));
     }
@@ -524,15 +524,15 @@ mod tests {
     fn a_drag_previews_live_and_reports_once_on_release() {
         let (mut page, reports) = render(false);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
-        page.pointer(handle, "pointerdown", 200.0);
+        page.pointer(handle, "pointerdown", 200.0, 0.0, 1000.0);
         assert_eq!(page.attr(handle, "data-state").as_deref(), Some("dragging"));
         // The overlay now takes the moves; it is the only presentation element.
         let overlay = page.by_role("presentation", "");
-        page.pointer(overlay, "pointermove", 260.0);
+        page.pointer(overlay, "pointermove", 260.0, 0.0, 1016.0);
         let sidebar = page.by_role("region", "Sidebar");
         assert_eq!(page.style(sidebar, "flex").as_deref(), Some("1.3 1 0px"));
         assert!(reports.borrow().is_empty(), "nothing is reported mid-drag");
-        page.pointer(overlay, "pointerup", 260.0);
+        page.pointer(overlay, "pointerup", 260.0, 0.0, 1032.0);
         let reported = reports.borrow();
         assert_eq!(reported.len(), 1);
         assert_eq!(
@@ -549,10 +549,10 @@ mod tests {
     fn a_drag_honours_the_pane_minimum() {
         let (mut page, reports) = render(false);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
-        page.pointer(handle, "pointerdown", 200.0);
+        page.pointer(handle, "pointerdown", 200.0, 0.0, 1000.0);
         let overlay = page.by_role("presentation", "");
-        page.pointer(overlay, "pointermove", -500.0);
-        page.pointer(overlay, "pointerup", -500.0);
+        page.pointer(overlay, "pointermove", -500.0, 0.0, 1016.0);
+        page.pointer(overlay, "pointerup", -500.0, 0.0, 1032.0);
         let reported = reports.borrow();
         assert_eq!(
             sizes_of(&Split::new(vec![1.0, 3.0], 800.0), reported[0].clone())[0],
@@ -564,10 +564,10 @@ mod tests {
     fn leaving_the_window_ends_the_gesture_with_what_was_shown() {
         let (mut page, reports) = render(false);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
-        page.pointer(handle, "pointerdown", 200.0);
+        page.pointer(handle, "pointerdown", 200.0, 0.0, 1000.0);
         let overlay = page.by_role("presentation", "");
-        page.pointer(overlay, "pointermove", 230.0);
-        page.pointer(overlay, "pointerleave", 230.0);
+        page.pointer(overlay, "pointermove", 230.0, 0.0, 1016.0);
+        page.pointer(overlay, "pointerleave", 230.0, 0.0, 1032.0);
         assert_eq!(reports.borrow().len(), 1);
         assert!(!page.has_role("presentation", ""));
     }
@@ -576,10 +576,10 @@ mod tests {
     fn a_cancelled_gesture_reports_nothing() {
         let (mut page, reports) = render(false);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
-        page.pointer(handle, "pointerdown", 200.0);
+        page.pointer(handle, "pointerdown", 200.0, 0.0, 1000.0);
         let overlay = page.by_role("presentation", "");
-        page.pointer(overlay, "pointermove", 300.0);
-        page.pointer(overlay, "pointercancel", 300.0);
+        page.pointer(overlay, "pointermove", 300.0, 0.0, 1016.0);
+        page.pointer(overlay, "pointercancel", 300.0, 0.0, 1032.0);
         assert!(reports.borrow().is_empty());
         assert!(!page.has_role("presentation", ""));
         let sidebar = page.by_role("region", "Sidebar");
@@ -590,9 +590,9 @@ mod tests {
     fn touch_moves_that_stay_captured_by_the_handle_still_drag() {
         let (mut page, reports) = render(false);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
-        page.pointer(handle, "pointerdown", 200.0);
-        page.pointer(handle, "pointermove", 240.0);
-        page.pointer(handle, "pointerup", 240.0);
+        page.pointer(handle, "pointerdown", 200.0, 0.0, 1000.0);
+        page.pointer(handle, "pointermove", 240.0, 0.0, 1016.0);
+        page.pointer(handle, "pointerup", 240.0, 0.0, 1032.0);
         assert_eq!(reports.borrow().len(), 1);
     }
 
