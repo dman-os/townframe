@@ -94,10 +94,11 @@ const AUTHORITY: &str = "nodule.local";
 /// generous 64 MiB bounds a hostile or mistaken envelope without constraining real handlers.
 const MAX_HANDLER_OCTETS: u64 = 64 * 1024 * 1024;
 
-/// Response bodies larger than this fail the call. dispatch's output is a JSON value held in
-/// memory (several times its encoded size once parsed) and returned over a service call, so it
-/// is capped at 4 MiB; anything bigger belongs in a blob that the operation returns an id for.
-const MAX_RESPONSE_OCTETS: usize = 4 * 1024 * 1024;
+/// Message bodies larger than this fail the call, in both directions: a handler's response and a
+/// guest's outgoing request into dispatch. Either is a JSON value held in memory (several times
+/// its encoded size once parsed) and carried over a service call, so it is capped at 4 MiB;
+/// anything bigger belongs in a blob that the operation passes or returns an id for.
+const MAX_MESSAGE_OCTETS: usize = 4 * 1024 * 1024;
 
 /// The authority a guest addresses dispatch at. It resolves nowhere: [`Egress`] answers it.
 const DISPATCH_AUTHORITY: &str = "dispatch.local";
@@ -448,7 +449,7 @@ impl Provider for WasmProvider {
             .await
             .map_err(gateway_error)?;
         let status = response.status();
-        let body = Limited::new(response.into_body(), MAX_RESPONSE_OCTETS)
+        let body = Limited::new(response.into_body(), MAX_MESSAGE_OCTETS)
             .collect()
             .await
             .map_err(gateway_error)?
@@ -618,7 +619,7 @@ impl Egress {
                 "the idempotency-key header is not text",
             );
         };
-        let Ok(body) = Limited::new(body, MAX_RESPONSE_OCTETS).collect().await else {
+        let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
             return bad(
                 hyper::StatusCode::PAYLOAD_TOO_LARGE,
                 "InvalidRequest",
