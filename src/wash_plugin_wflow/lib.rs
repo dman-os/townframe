@@ -318,18 +318,10 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             meta,
         };
 
-        // A timer resolves to no value the workflow observes.
-        let resumed = match job.yield_and_wait_resume(trap).await {
-            Ok(resumed) => resumed,
-            Err(err) => return Ok(Err(err)),
-        };
-        match resumed {
-            SessionResume::Continue => {}
-            SessionResume::Deliver(_) => {
-                return Ok(Err(host::HostError::Protocol(
-                    "sleep resumed with a delivered value".into(),
-                )));
-            }
+        // The authority delivers its durable timer value just like other wait
+        // resolutions; sleep does not expose that value to the workflow.
+        if let Err(err) = job.yield_and_wait_resume(trap).await {
+            return Ok(Err(err));
         }
         job.active_step.lock().expect(ERROR_MUTEX).take();
         job.cur_step
