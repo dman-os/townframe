@@ -156,6 +156,68 @@ fn a_surface_attached_to_an_issued_reference_mounts_like_a_published_one() {
     host.close();
 }
 
+#[test]
+fn each_native_mount_renders_in_its_own_scope_and_a_sibling_leaving_does_not_rerun_it() {
+    let host = Host::new();
+    let components = NativeComponents::new(&host);
+    let owner = host.start("publisher");
+    let renders = Rc::new(Cell::new(0));
+    let counts = Rc::new(RefCell::new(Vec::<Signal<u64>>::new()));
+    let (reference, _guard) = components
+        .publish(&owner, {
+            let renders = renders.clone();
+            let counts = counts.clone();
+            move || {
+                renders.set(renders.get() + 1);
+                let count = use_signal(|| 0_u64);
+                use_hook(|| counts.borrow_mut().push(count));
+                rsx! { "{count};" }
+            }
+        })
+        .unwrap();
+    type Props = (
+        NativeComponents,
+        Instance,
+        ComponentRef,
+        Rc<Cell<Option<Signal<bool>>>>,
+    );
+    fn app(props: Props) -> Element {
+        let second = use_signal(|| true);
+        props.3.set(Some(second));
+        rsx! {
+            ComponentMount { components: props.0.clone(), owner: props.1.clone(), reference: props.2 }
+            if second() {
+                ComponentMount { components: props.0.clone(), owner: props.1.clone(), reference: props.2 }
+            }
+        }
+    }
+    let second = Rc::new(Cell::new(None));
+    let mut dom = VirtualDom::new_with_props(
+        app,
+        (components, owner, reference, second.clone()),
+    );
+    let mut tree = SurfaceTree::new();
+    dom.rebuild(&mut tree);
+    assert_eq!(tree.text_content(), "0;0;");
+    assert_eq!(renders.get(), 2);
+
+    // A hook in the render closure is the mount's own.
+    let mut first_count = counts.borrow()[0];
+    dom.in_runtime(|| first_count += 1);
+    dom.render_immediate(&mut tree);
+    assert_eq!(tree.text_content(), "1;0;");
+    assert_eq!(renders.get(), 3);
+
+    // The second mount leaving re-renders the parent, not the first mount's scope.
+    let mut second = second.get().unwrap();
+    dom.in_runtime(|| second.set(false));
+    dom.render_immediate(&mut tree);
+    assert_eq!(tree.text_content(), "1;");
+    assert_eq!(renders.get(), 3);
+    drop(dom);
+    host.close();
+}
+
 fn counter_initial_batch() -> Vec<Mutation> {
     vec![
         Mutation::PushId(0),
