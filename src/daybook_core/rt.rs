@@ -17,6 +17,9 @@ use wash_runtime::host::HostApi;
 use wash_runtime::types::Component;
 use wash_runtime::wit::WitInterface;
 
+#[cfg(test)]
+mod receipt_tests;
+
 pub mod dispatch;
 pub mod init;
 /// Repository-database tables owned by the runtime: dispatch bookkeeping
@@ -1216,7 +1219,9 @@ impl Rt {
                 .await
             {
                 Ok(()) => {}
-                Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
+                Err(crate::drawer::types::DrawerError::BranchNotFound { name })
+                    if name == staging_branch_path.as_str() =>
+                {
                     debug!(%dispatch_id, ?doc_id, ?name, ?staging_branch_path,
                         "staging branch missing during merge");
                 }

@@ -716,3 +716,38 @@ async fn graceful_stop_publishes_the_latest_snapshot() {
     let snapshot = reader.snapshot().await.unwrap().unwrap();
     assert!(snapshot.cut > 0);
 }
+
+#[tokio::test]
+async fn dropping_runtime_drains_spawns_and_publishes_final_snapshot() {
+    let host = ScriptHost::registered();
+    let gate = Arc::new(Gate::default());
+    gate.close();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "blocked",
+        SpawnPlan::Blocked {
+            gate: Arc::clone(&gate),
+            session: Box::new(
+                ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped)),
+            ),
+        },
+    );
+    let store = MemoryStore::default();
+    let mut commits = store.subscribe();
+    let (runtime, _) = start_script_counted(&store, host).await;
+    runtime
+        .submit(Submission::new("job", "blocked", "null"))
+        .await
+        .unwrap();
+    gate.entered.notified().await;
+    let reader = runtime.reader.clone();
+    drop(runtime);
+    dropped.wait_for(1).await;
+    loop {
+        if let Some(snapshot) = reader.snapshot().await.unwrap() {
+            assert!(snapshot.cut > 0);
+            break;
+        }
+        commits.changed().await.unwrap();
+    }
+}
