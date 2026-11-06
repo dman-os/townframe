@@ -122,6 +122,19 @@ The same `Client<Proto>` calls should work in micro code, with the transport swa
 - **Workflows are coming.** The old `daybook_pdk` was only command URLs plus `invoke_command_effect`; the real kit was `wflow_sdk` / `route_wflows!` (durable bundles over the wflow host). Workflows become a third contribution kind next to micro and nodule: the same declarations, `Operation` calls and backend, with durability from the host.
 - **Naming (decided, D34): cartridge.** "Plug" reads as a plug-in, a slight enhancement of the app, while many micros are big, self-contained apps. A **cartridge** ("cart") is the single user-facing noun for the store item and the distribution unit; it bundles micros, nodules and workflows. Micros and nodules stay user-facing as the classes of thing a cartridge contains. This doc still says "plug" until the code rename lands.
 
+## Agreements with the Clay session (2026-11-06)
+
+- **No typed `Context<M>`.** The operator rejected type lists for micros. Declaration types carry consts (`Type::NSID`), and APIs are generic over those types where needed (`ctx.call::<Op>()`, `ctx.collection::<C>()`).
+- **`#[clay_mdk::call]` produces an `Operation`**, not a parallel call trait.
+- **`Operation` must carry capability refs.** Micro call and collection values can carry capability handles that the receiver redeems (ADR 029; `GuestValue { body, capabilities }`). The envelope therefore needs an out-of-band capability-ref list beside the body bytes, the way WIT resources travel beside data, and Lexicon needs a "capability ref" leaf. Attachments (lazy endpoints) occur only in collection rows; they are a separate leaf, and the CBOR tag-43000 attachment has no Lexicon form yet.
+- **Collections stay a separate capability kind** (stateful streams: bootstrap and paging, cursors, resume after reset, revocation, owner-scoped compare-and-set registration). The grant model is still uniform: per contract, bound at install, one `requires::<T>(access)` where `T` is an `Operation` or a collection contract.
+- **Ownership:**
+  - (a) the node session creates a small wasm-buildable crate for `Operation` and the envelope codec, on `datum_core`, after the datum_core PR merges;
+  - (b) the micro host-import WIT is deferred with the rest of micro access to node services. When it is picked up: async-only, never callable from mount or dispatch, capability refs out-of-band, per-contract grant resolved by the host, placed in the micro-client world. The WIT is the real authoring contract (TypeScript is first-class); the Rust macros are sugar over it;
+  - (c) `requires`: the Clay session owns the micro side and the node session the nodule side; the signature is agreed here first;
+  - (d) `CartridgeBuilder` in big_plugs_core over the typed declarations: the node session.
+- **Timing.** T1 verifies the datum_core PR, then the clay_mdk declarations (package, collection, config, component), leaving `call` until the `Operation` crate exists.
+
 ## Sequencing
 
 1. The Clay session lands the `datum_core` extraction (the pure move, re-exports from big_cabinet_core, and the macro's `runtime =` path) as its own small PR off main. The node session then rebases its datum and macros commits onto it (D32 `f7f1f89c`, `F64` `9e6ec666`, `DmetaRead` `87c25501`, `DatumEvent` `6d7c60f6`), relying on rename detection. The node session holds off further big_cabinet_core datum and macros edits until then.
