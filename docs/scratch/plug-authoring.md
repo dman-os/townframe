@@ -16,13 +16,16 @@ Scope: How an author writes a plug with micros, nodules, or both. Drafted by the
   - Servers implement `service_utils_rs::Handler<Op>`.
 - **The old daybook plugs** (`plug_<x>_manifest` + `plug_<x>_routines`) used a native manifest crate plus a wflow-bundle wasm crate with bespoke WIT. They are superseded by this design.
 
-## Principles
+## Principles and proposals
+
+Items marked **(proposal)** await the operator's decision; the Clay session has raised them too.
+
 
 1. **Every name is a Rust type** carrying its NSID, declared once by a macro, never a string constant. This is T1's rule, applied to nodule operations too.
-2. **One typed-call model on both sides.** A call is an `Operation` request type. Serving it means implementing `Handler<Op>`; calling it means `ctx.call(op)` or a typed `Client<Proto>`. Micro calls align on `Operation` (X3's recommendation).
+2. **(proposal) One typed-call model on both sides.** A call is an `Operation` request type. Serving it means implementing `Handler<Op>`; calling it means `ctx.call(op)` or a typed `Client<Proto>`. Micro calls align on `Operation` (X3's recommendation).
 3. **No ambient authority in guests.** Every outgoing call carries the guest's own capability through a host-mediated path:
    - for nodules, wasi:http to `dispatch.local`, where dispatch admits the nodule's capability;
-   - for micros, a Clay host import carrying the micro's capability. Micros never get raw wasi:http.
+   - for micros, **(proposal)** a Clay host import carrying the micro's capability. Micros never get raw wasi:http.
 4. **One plug manifest, generated from typed declarations.** There is no hand-written JSON, and the manifest carries its schemas (`Declaration::of` / `Universe::collect`).
 5. **Authors write the same code in native and guest form.** The kits hide WIT, streams, headers and envelopes.
 
@@ -85,13 +88,13 @@ ndk::export_nodule!(Tasks => [Complete]);
 - A native backend serves the same `Handler<Op>` impls in-process for tests: a nodule's logic can be unit-tested without wasm, as micros are tested on the native MDK backend.
 - Dispatch validates input and output against the operation's Lexicon (D31), so the NDK's typing is checked at the boundary too.
 
-## Shared service surface for micros
+## Shared service surface for micros (proposal)
 
 The same `Client<Proto>` calls should work in micro code, with the transport swapped for a Clay host import that carries the micro's capability: `ctx.docs().call(ReadDatums { .. })` is then identical in a micro and a nodule. The MDK's reactive layer (`Facet`, mirrors, `use_document_changes`, collections) stays micro-specific and sits on top. Whether micros keep the facet-based documents WIT, or move it onto these calls plus a reactive cache, is a Clay decision.
 
 ## Sequencing
 
-1. T1 lands typed declarations and `datum_core`, extracted from big_cabinet_core. The node session holds off big_cabinet_core datum and macros edits until then (D32, `F64`, `DmetaRead` and the `DatumEvent` change are on feat/big-node).
+1. The Clay session lands the `datum_core` extraction (the pure move, re-exports from big_cabinet_core, and the macro's `runtime =` path) as its own small PR off main. The node session then rebases its datum and macros commits onto it (D32 `f7f1f89c`, `F64` `9e6ec666`, `DmetaRead` `87c25501`, `DatumEvent` `6d7c60f6`), relying on rename detection. The node session holds off further big_cabinet_core datum and macros edits until then.
 2. NDK v0: `Operation` declarations for nodules, `export_nodule!`, `Cx`, the wasi:http client transport, a native test backend, and `test_nodule_guest` ported to it as the first consumer.
 3. The plug manifest builder over typed declarations, plus `day plug build | publish | install | enable` porcelain.
 4. Micro typed calls over a capability-carrying host import (Clay).
