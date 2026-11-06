@@ -120,6 +120,7 @@ fn one() -> ReadLimits {
     }
 }
 
+mod bootstrap;
 mod cursors;
 mod lifecycle;
 mod paging;
