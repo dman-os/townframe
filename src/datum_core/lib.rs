@@ -46,3 +46,33 @@ pub use wire::MemberSchema;
 pub use wire::string_schema;
 #[cfg(feature = "schemars")]
 pub use wire::union_schema;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde::Serialize;
+
+    const AUTHORITY: &str = "org.example.runtime";
+
+    /// The declaration macro emits against whichever module `runtime =` names, so a crate that
+    /// links `datum_core` alone (a wasm guest) can declare a type without `big_cabinet_core`.
+    #[macros::datum(runtime = crate, authority = AUTHORITY)]
+    #[derive(Serialize, Deserialize)]
+    struct Declared {
+        label: String,
+        #[serde(flatten)]
+        extra: Extra,
+    }
+
+    #[test]
+    fn the_runtime_argument_routes_the_emitted_items() {
+        assert_eq!(<Declared as DatumMember>::ID, "org.example.runtime.declared");
+        assert_eq!(
+            <Declared as DatumShape>::SHAPE,
+            Shape::Object {
+                openness: Openness::Open
+            }
+        );
+    }
+}

@@ -118,8 +118,6 @@ tuples!(
     (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P),
 );
 
-#[cfg(feature = "sync-core")]
-values!(big_sync_core::ObjKey);
 #[cfg(feature = "jiff")]
 values!(jiff::Timestamp);
 #[cfg(feature = "automerge")]

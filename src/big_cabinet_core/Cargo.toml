@@ -18,7 +18,7 @@ manifest = []
 
 [dependencies]
 big_sync_core = { workspace = true, default-features = false }
-datum_core = { workspace = true, features = ["jiff", "automerge", "sync-core"] }
+datum_core = { workspace = true, features = ["jiff", "automerge"] }
 utils_rs = { workspace = true, features = ["hash"] }
 serde.workspace = true
 serde_json.workspace = true
