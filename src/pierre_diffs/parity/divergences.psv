@@ -4,3 +4,6 @@ pierre/test/parseDiffFromFile.test.ts|should have accurate hunk line values / sh
 pierre/test/parsePatchFiles.test.ts|should parse diff.patch and match its digest snapshot|diff.patch fixture (apps/demo) absent; covered by exact oracle comparison over the corpus (patches.json), no digest
 pierre/test/iterateOverDiff.test.ts|unified/split iteration produces expected sequence; windowing skips lines correctly; windowed iteration matches full iteration slices|apps/demo fixtures fileOld/fileNew absent; run on a generated 600-line pair (assertions are the upstream properties, not recorded numbers)
 pierre/test/trimPatchContext.test.ts|trims trim.patch fixture and matches snapshot|Bun snapshot replaced by snapshot facts (hunk headers, shrinkage) plus exact comparison with the published function (layout.json trims)
+pierre/test/createFileHeaderElement.test.ts|renders default renamed file header AST|prevName is not a FileContents field, so the input is the default case; asserted as equality with it
+pierre/test/createFileHeaderElement.test.ts|all four tests|toMatchSnapshot replaced by exact comparison with the dist output for the same input
+pierre/test/renderTokenLines.test.ts|crossing decorations / markers join the following range|JSDOM queries (querySelector, textContent, parentElement) became walks over the hast tree

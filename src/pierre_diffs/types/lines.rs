@@ -35,8 +35,10 @@ pub struct GapSpan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnnotationSpan {
-    pub hunk_index: usize,
-    pub line_index: usize,
+    /// Signed: file-level annotations use `-1`.
+    pub hunk_index: i64,
+    /// Signed: file-level annotations use `-1`.
+    pub line_index: i64,
     pub annotations: Vec<String>,
 }
 
@@ -189,4 +191,16 @@ pub struct ForceFilePlainTextOptions {
     pub total_lines: Option<usize>,
     // Pre-split lines for caching in windowing scenarios
     pub lines: Option<Vec<String>>,
+}
+
+impl LineTypes {
+    /// The kebab-case string used in `data-line-type` attributes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ChangeDeletion => "change-deletion",
+            Self::ChangeAddition => "change-addition",
+            Self::Context => "context",
+            Self::ContextExpanded => "context-expanded",
+        }
+    }
 }

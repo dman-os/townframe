@@ -6,11 +6,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 42 | 10832 |
+| PORTED | 65 | 12925 |
 | REPLACED | 5 | 968 |
-| PENDING | 167 | 54569 |
-| OUT | 247 | 97582 |
-| DEFER | 14 | 4790 |
+| PENDING | 143 | 52122 |
+| OUT | 246 | 97530 |
+| DEFER | 16 | 5196 |
 
 | upstream file | LOC | status | slice | Rust location | note |
 |---|---:|---|---|---|---|
@@ -108,7 +108,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/highlighter/themes/themeResolver.ts` | 221 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/themes/types.ts` | 22 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/tokenizer-types.ts` | 41 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
-| `pierre/src/highlighter/types.ts` | 52 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
+| `pierre/src/highlighter/types.ts` | 52 | PORTED | S5 | `highlighter_types.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/index.ts` | 115 | OUT | - |  | OUT |
 | `pierre/src/managers/InteractionManager.ts` | 2510 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
 | `pierre/src/managers/ResizeManager.ts` | 494 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
@@ -143,7 +143,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/shiki-stream/index.ts` | 3 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/shiki-stream/stream.ts` | 68 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/shiki-stream/types.ts` | 13 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
-| `pierre/src/sprite.ts` | 149 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/sprite.ts` | 149 | PORTED | S5 | `sprite.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/ssr/FileDiffReact.tsx` | 122 | OUT | - |  | OUT (framework adapter) |
 | `pierre/src/ssr/index.ts` | 6 | OUT | - |  | OUT (framework adapter) |
 | `pierre/src/ssr/preloadDiffs.ts` | 305 | OUT | - |  | OUT (framework adapter) |
@@ -183,18 +183,18 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/computeEstimatedDiffHeights.ts` | 175 | PORTED | S4 | `utils/compute_estimated_diff_heights.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/computeFileOffsets.ts` | 100 | PORTED | S4 | `utils/compute_file_offsets.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/computeVirtualFileMetrics.ts` | 56 | PORTED | S4 | `utils/compute_virtual_file_metrics.rs` | exact oracle parity (layout.json) plus ported upstream tests |
-| `pierre/src/utils/createAnnotationElement.ts` | 23 | PENDING | - |  | port or replace per slice notes (DOM helper) |
+| `pierre/src/utils/createAnnotationElement.ts` | 23 | PORTED | S5 | `utils/render/create_annotation_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createAnnotationWrapperNode.ts` | 8 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/createCodeViewHeaderFooterHostElement.ts` | 26 | PENDING | - |  | port or replace per slice notes (DOM helper) |
-| `pierre/src/utils/createContentColumn.ts` | 18 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/createEmptyRowBuffer.ts` | 15 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/createFileHeaderElement.ts` | 172 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/createContentColumn.ts` | 18 | PORTED | S5 | `utils/render/create_content_column.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
+| `pierre/src/utils/createEmptyRowBuffer.ts` | 15 | PORTED | S5 | `utils/render/create_empty_row_buffer.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
+| `pierre/src/utils/createFileHeaderElement.ts` | 172 | PORTED | S5 | `utils/render/create_file_header_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createGutterUtilityContentNode.ts` | 12 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/createGutterUtilityElement.ts` | 17 | PENDING | - |  | port or replace per slice notes (DOM helper) |
-| `pierre/src/utils/createNoNewlineElement.ts` | 22 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/createPreElement.ts` | 47 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/createNoNewlineElement.ts` | 22 | PORTED | S5 | `utils/render/create_no_newline_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
+| `pierre/src/utils/createPreElement.ts` | 47 | PORTED | S5 | `utils/render/create_pre_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createRowNodes.ts` | 19 | PENDING | - |  | port or replace per slice notes (DOM helper) |
-| `pierre/src/utils/createSeparator.ts` | 136 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/createSeparator.ts` | 136 | PORTED | S5 | `utils/render/create_separator.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createSpanNodeFromToken.ts` | 16 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/createStyleElement.ts` | 38 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/createUnsafeCSSStyleNode.ts` | 8 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
@@ -204,18 +204,18 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/diffAcceptRejectHunk.ts` | 41 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
 | `pierre/src/utils/editSessionAnnotations.ts` | 121 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
 | `pierre/src/utils/editSessionHunks.ts` | 884 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
-| `pierre/src/utils/formatCSSVariablePrefix.ts` | 4 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/formatCSSVariablePrefix.ts` | 4 | PORTED | S5 | `utils/render/format_css_variable_prefix.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/getCodeViewItemRenderData.ts` | 37 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/getDiffFileInput.ts` | 31 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/getDiffHunksRendererOptions.ts` | 41 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/getFileRendererOptions.ts` | 29 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/getFiletypeFromFileName.ts` | 460 | PORTED | S3 | `utils/get_filetype_from_file_name.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/getHighlighterOptions.ts` | 31 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/getHighlighterThemeStyles.ts` | 83 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/getHunkSeparatorSlotName.ts` | 9 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/getHighlighterThemeStyles.ts` | 83 | PORTED | S5 | `utils/render/get_highlighter_theme_styles.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
+| `pierre/src/utils/getHunkSeparatorSlotName.ts` | 9 | PORTED | S5 | `utils/render/get_hunk_separator_slot_name.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/getHunkSideBoundaries.ts` | 9 | PORTED | S3 | `utils/get_hunk_side_boundaries.rs` | exact oracle parity (patches.json, utilities.json) |
-| `pierre/src/utils/getIconForType.ts` | 28 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/getLineAnnotationName.ts` | 8 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/getIconForType.ts` | 28 | PORTED | S5 | `utils/render/get_icon_for_type.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
+| `pierre/src/utils/getLineAnnotationName.ts` | 8 | PORTED | S5 | `utils/render/get_line_annotation_name.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/getLineEndingType.ts` | 19 | PORTED | S3 | `utils/get_line_ending_type.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/getLineNodes.ts` | 18 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/getMergeConflictActionSlotName.ts` | 14 | DEFER | - |  | DEFER (not needed for PR review v1) |
@@ -223,14 +223,14 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/getOrCreateCodeNode.ts` | 36 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/getSingularPatch.ts` | 21 | PORTED | S3 | `utils/get_singular_patch.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/getThemes.ts` | 16 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/getTokenOptions.ts` | 24 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/getTokenOptions.ts` | 24 | PORTED | S5 | `utils/render/get_token_options.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/getTotalLineCountFromHunks.ts` | 14 | PORTED | S3 | `utils/get_total_line_count_from_hunks.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/guardWebKitScrollDuringRebuild.ts` | 33 | PENDING | - |  | port or replace per slice notes (DOM helper) |
-| `pierre/src/utils/hastToHtml.ts` | 182 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/hast_utils.ts` | 142 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/hastToHtml.ts` | 182 | DEFER | S5 |  | no Rust consumer: the UI renders hast directly, and the module is a speed-up equivalent of hast-util-to-html whose upstream tests need the FileRenderer and Shiki; revisit with S7 if a serializer is wanted |
+| `pierre/src/utils/hast_utils.ts` | 142 | PORTED | S5 | `utils/render/hast_utils.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/hostTheme.ts` | 34 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/hydratePartialDiff.ts` | 268 | PORTED | S4 | `utils/hydrate_partial_diff.rs` | exact oracle parity (layout.json) plus ported upstream tests |
-| `pierre/src/utils/includesFileAnnotations.ts` | 36 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/includesFileAnnotations.ts` | 36 | PORTED | S5 | `utils/render/includes_file_annotations.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/isDefaultRenderRange.ts` | 11 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/isDiffPlainText.ts` | 11 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/isFilePlainText.ts` | 7 | PENDING | - |  | PORT (Rust, oracle-tested) |
@@ -249,11 +249,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/platform.ts` | 48 | PENDING | - |  | port or replace per slice notes (DOM helper) |
 | `pierre/src/utils/prefersReducedMotion.ts` | 10 | PENDING | - |  | port or replace per slice notes (DOM helper) |
 | `pierre/src/utils/prerenderHTMLIfNecessary.ts` | 12 | PENDING | - |  | port or replace per slice notes (DOM helper) |
-| `pierre/src/utils/processLine.ts` | 36 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/processLine.ts` | 36 | PORTED | S5 | `utils/render/process_line.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/realignChangeContent.ts` | 308 | PORTED | S3 | `utils/realign_change_content.rs` | realignChangeContentBySimilarity only; slideBlankBoundaryBlocksUp is editor-only (OUT) |
-| `pierre/src/utils/renderDiffWithHighlighter.ts` | 512 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/renderDiffWithHighlighter.ts` | 512 | PORTED | S5 | `utils/render/render_diff_with_highlighter.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/renderFileWithHighlighter.ts` | 104 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/renderTokenLines.ts` | 385 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/renderTokenLines.ts` | 385 | PORTED | S5 | `utils/render/render_token_lines.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/resolveConflict.ts` | 35 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/utils/resolvePreferredHighlighter.ts` | 14 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/utils/resolveRegion.ts` | 419 | DEFER | - |  | DEFER (not needed for PR review v1) |
@@ -264,7 +264,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/setWrapperNodeProps.ts` | 65 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/shouldUseTokenTransformer.ts` | 25 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/splitFileContents.ts` | 13 | PORTED | S3 | `utils/split_file_contents.rs` | exact oracle parity (patches.json, utilities.json) |
-| `pierre/src/utils/tokenStyle.ts` | 39 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/tokenStyle.ts` | 39 | PORTED | S5 | `utils/render/token_style.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/tokensToHtml.ts` | 72 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/trimPatchContext.ts` | 165 | PORTED | S4 | `utils/trim_patch_context.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/updateDiffHunks.ts` | 514 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
@@ -346,7 +346,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/computeEstimatedDiffHeights.test.ts` | 383 | PORTED | S4 | `utils/compute_estimated_diff_heights_test.rs` | all upstream cases |
 | `pierre/test/computeLineOffsets.test.ts` | 102 | PORTED | S4 | `utils/compute_file_offsets_test.rs` | all upstream cases (byte offsets) |
 | `pierre/test/createCachedLoader.test.ts` | 36 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
-| `pierre/test/createFileHeaderElement.test.ts` | 60 | PENDING | S5 |  |  |
+| `pierre/test/createFileHeaderElement.test.ts` | 60 | PORTED | S5 | `utils/render/create_file_header_element_test.rs` | all four cases; toMatchSnapshot replaced by exact comparison with the dist output (render_s5.json) |
 | `pierre/test/diffAcceptRejectHunk.test.ts` | 669 | DEFER | - |  | merge-conflict / edit flow |
 | `pierre/test/domHarness.ts` | 414 | PENDING | S10 |  | jsdom harness; oracle-side only, replaced by Rust state assertions |
 | `pierre/test/e2e/annotations.pw.ts` | 43 | OUT | - |  | Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page |
@@ -435,7 +435,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/getHunkSideBoundaries.test.ts` | 36 | PORTED | S4 | `utils/get_hunk_side_boundaries_test.rs` | all upstream cases |
 | `pierre/test/getMergeConflictLineTypes.test.ts` | 70 | DEFER | - |  | merge-conflict UI |
 | `pierre/test/hastLinesTransport.test.ts` | 184 | OUT | - |  | worker transport of hast lines |
-| `pierre/test/hastToHtml.test.ts` | 224 | PENDING | S5 |  |  |
+| `pierre/test/hastToHtml.test.ts` | 224 | DEFER | S5 |  | tests compare hastToHtml with hast-util-to-html over rendered files (FileRenderer, Shiki); deferred with the module |
 | `pierre/test/highlighterLazyLoading.test.ts` | 85 | PENDING | S7 |  | adapted where the behavior exists behind the highlights adapter, else OUT |
 | `pierre/test/highlighterRendering.test.ts` | 332 | PENDING | S7 |  | adapted where the behavior exists behind the highlights adapter, else OUT |
 | `pierre/test/highlighterThemes.test.ts` | 307 | PENDING | S7 |  | adapted where the behavior exists behind the highlights adapter, else OUT |
@@ -467,7 +467,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/reactStrictMode.test.ts` | 223 | OUT | - |  | React adapter |
 | `pierre/test/realignChangeContent.test.ts` | 633 | PENDING | S3 |  |  |
 | `pierre/test/registerCustomTheme.test.ts` | 314 | OUT | - |  | Shiki theme registry |
-| `pierre/test/renderTokenLines.test.ts` | 93 | PENDING | S5 |  |  |
+| `pierre/test/renderTokenLines.test.ts` | 93 | PORTED | S5 | `utils/render/render_token_lines_test.rs` | two of three cases, asserted on the hast tree instead of HTML+JSDOM; the useTokenTransformer case is out (editor token transformer is not ported) |
 | `pierre/test/resolveTheme.test.ts` | 220 | PENDING | S7 |  |  |
 | `pierre/test/scrollbarGutter.test.ts` | 41 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/setDeferredArrayItem.test.ts` | 86 | PENDING | S4 |  |  |
@@ -490,7 +490,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/workerPoolHighlights.test.ts` | 264 | OUT | - |  | worker pool |
 | `pierre/test/workerPoolTransport.test.ts` | 148 | OUT | - |  | worker pool |
 
-## Assertions converted to invariants (5)
+## Assertions converted to invariants (8)
 
 | upstream test | title | conversion |
 |---|---|---|
@@ -499,3 +499,6 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/parsePatchFiles.test.ts` | should parse diff.patch and match its digest snapshot | diff.patch fixture (apps/demo) absent; covered by exact oracle comparison over the corpus (patches.json), no digest |
 | `pierre/test/iterateOverDiff.test.ts` | unified/split iteration produces expected sequence; windowing skips lines correctly; windowed iteration matches full iteration slices | apps/demo fixtures fileOld/fileNew absent; run on a generated 600-line pair (assertions are the upstream properties, not recorded numbers) |
 | `pierre/test/trimPatchContext.test.ts` | trims trim.patch fixture and matches snapshot | Bun snapshot replaced by snapshot facts (hunk headers, shrinkage) plus exact comparison with the published function (layout.json trims) |
+| `pierre/test/createFileHeaderElement.test.ts` | renders default renamed file header AST | prevName is not a FileContents field, so the input is the default case; asserted as equality with it |
+| `pierre/test/createFileHeaderElement.test.ts` | all four tests | toMatchSnapshot replaced by exact comparison with the dist output for the same input |
+| `pierre/test/renderTokenLines.test.ts` | crossing decorations / markers join the following range | JSDOM queries (querySelector, textContent, parentElement) became walks over the hast tree |
