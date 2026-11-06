@@ -64,12 +64,15 @@ What it does not defend against:
 
 ## Proposed changes
 
-1. **One narrowing operation for holders:** `Narrow { capability, rights?, scope? }`, routed to the capability's owning domain. It accepts any scope the domain can prove is a subset (one doc out of a drawer scope, Read out of Write, an expiry). It replaces both "generic attenuation" and "domain re-mint from a source" in the public API; the mechanism underneath stays. This is the `zx_handle_duplicate` plus `Directory.Open` pair, collapsed into one verb.
+1. **One narrowing operation for holders:** `Narrow { capability, rights?, scope? }`, routed to the capability's owning domain. It accepts any scope the domain can prove is a subset (one doc out of a drawer scope, Read out of Write). It replaces both "generic attenuation" and "domain re-mint from a source" in the public API; the mechanism underneath stays. This is the `zx_handle_duplicate` plus `Directory.Open` pair, collapsed into one verb.
 2. **Drawer capabilities imply docs access to the drawer's documents.** The docs service accepts a drawer capability at Read or Write as an `openat`-style reference for any document in that drawer, so one handle covers a drawer and its documents. The alternative is minting both together in one call. Either way, users stop juggling two handles for one drawer.
 3. **Rename for readers:** identity proof → *identity*, domain capability → *capability*, standing grant → *grant*, gate → *revocation dependency*. Keep the mechanism terms inside the ADR's implementation section only.
 4. **Later, for remote clients:** offline-narrowable tokens (macaroons, biscuit or UCAN) layered on `CapId`, only if iroh clients need to narrow without a round trip.
 
+## Decided
+
+- No expiry on capabilities (operator, 2026-11-06): the ocap system has no clocks. Handles live until retracted or the authority restarts. Dispatch's call deadlines bound a call's duration, not its authority.
+
 ## Open questions for the operator
 
 - Change 2: one handle per drawer that the docs service also accepts, or a mint that returns both?
-- Should `Narrow` support expiry now? It needs a clock on the use path. Today handles live until retracted or restart.

@@ -630,7 +630,8 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - Remove (no shipped users): tuple `DatumShape` impls (`datum/value.rs` `tuples!`); `char`/`u128`/`i128`/`usize`/`isize`/`()` leaf types.
   - Remove: integer width formats (`datum/input/integers.rs`, `int8..uint128`); only `u32`/`u64` ship and plain `minimum`/`maximum` carry them. Automerge `Uint` vs `Int` (needed by autosurgeon's u64/i64 reads) then derives from `minimum >= 0`.
   - Drop the f32/f64 width on floats (Automerge has one f64); keep floats as decimal strings (Lexicon has no float).
-  - Review: `x-automerge: "uint"` u64-as-string (no datum user found); the `empty: true` convention for unit variants (a Lexicon-first design would use a token or const); adjacent/external union tagging (recorded, never publishable).
+  - Review: `x-automerge: "uint"` u64-as-string (no datum user found).
+  - Keep (operator, 2026-11-06): Automerge `uint` storage for unsigned values (signalled by `minimum >= 0` once widths go), and the union setup (adjacent/external tagging records, wrapper members, `empty: true`): an accommodation of Rust inside the Lexicon model, not a divergence.
   - Keep (justified by Automerge or Lexicon): text, counter, bytes, ms timestamps, string-keyed typed maps over `unknown`, `$type` unions, `knownValues`, `nullable`, open-union carrying.
 
 ## Deferred
