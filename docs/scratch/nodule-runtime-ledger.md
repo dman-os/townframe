@@ -619,6 +619,13 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 - Done (2026-11-04): a handler-less enabled nodule is `Ready` and registers nothing.
 - [main] `src/big_node/e2e/blobs/metadata.rs` isn't referenced by any `mod`, so it's dead test code from main.
 
+- **D31. Transports and validation** (operator, 2026-11-06):
+  - Remote clients use HTTP and WebSocket over iroh by default. The node needs no TCP listener for clients; any future TCP need is a narrow case with TLS terminated at a reverse proxy, so TLS on the TCP listener is dropped.
+  - GET/query XRPC operations through the `/xrpc` fallback are plain to-do work, not an open question.
+  - Dispatch validates operation input (and output) against the operation's Lexicon, as atproto's XRPC servers do. To do.
+  - Lexicon integers: err on compatibility with the atproto spec, whose integer type has no `format`. A width format is our extension; missing bounds are accepted and tighten to the format's range. Fix the macro to emit bounds.
+  - Windows work collects in `docs/scratch/windows-todo.md` and lands as one PR on a Windows machine.
+
 ## Deferred
 
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
@@ -638,4 +645,4 @@ Big_cabinet read/write options discussed with the operator 2026-11-06, deferred 
 - Live `SchemaRepo` registration of the nodule's own datum Lexicons. Nodules can't write their own datums without it. Is it in scope for this PR?
 
 - Resolved: ADR 027 was revised in place with D1–D6 (`01ea305b`).
-- Integer-format width: merge chose "bounds ⊆ format range; narrow formats require bounds". Confirm.
+- Resolved (D31): integer widths lean on spec compatibility.
