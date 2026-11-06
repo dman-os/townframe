@@ -376,7 +376,7 @@ impl PartialEq for RenderedMountProps {
 /// element: the hooks the closure calls are this mount's own, and nothing shares them with
 /// another mount of the same publication. Being its own component, those hooks also run in a
 /// fixed order, unlike in `MountedComponent`, which returns early while the mount is withdrawn.
-#[allow(non_snake_case)]
+#[expect(non_snake_case, reason = "Dioxus component naming")]
 fn RenderedMount(props: RenderedMountProps) -> Element {
     (props.render)(&props.mount)
 }

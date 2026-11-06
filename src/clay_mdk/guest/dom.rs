@@ -75,7 +75,7 @@ impl PartialEq for MountProps {
 /// The component instance a mount renders, like one instance of a custom element: the hooks
 /// `render` calls live in this scope, so every mount has its own, while whatever `render` closes
 /// over (the micro's collections, its store) is shared by all of them.
-#[allow(non_snake_case)]
+#[expect(non_snake_case, reason = "Dioxus component naming")]
 fn MountRoot(props: MountProps) -> dioxus_core::Element {
     dioxus::prelude::use_context_provider(|| props.slots.clone());
     (props.render)()
@@ -151,7 +151,10 @@ impl GuestDom {
     pub(crate) fn unmount_target(&mut self, identity: u64) {
         let target = {
             let mut mounts = self.mounts.borrow_mut();
-            let Some(index) = mounts.iter().position(|mounted| mounted.identity == identity) else {
+            let Some(index) = mounts
+                .iter()
+                .position(|mounted| mounted.identity == identity)
+            else {
                 return;
             };
             mounts.remove(index).target
