@@ -11,7 +11,8 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use iroh_blobs::HashAndFormat;
 use iroh_blobs::store::virtual_blob::Provider as _;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 
 struct UnusedAuthority;
 
@@ -29,7 +30,7 @@ async fn reopen(
     let (blobs, stop) = boot(Config {
         storage: Storage::filesystem(directory.join("store")).await?,
         sql: sql.clone(),
-        authority: Client::direct(Arc::new(UnusedAuthority)),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -69,7 +70,7 @@ async fn shutdown_recovers_pending_effects_after_service_handles_drop() -> Res<(
         let (blobs, stop) = boot(Config {
             storage,
             sql: sql.clone(),
-            authority: Client::direct(Arc::new(UnusedAuthority)),
+            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([7; 16]),
@@ -131,7 +132,7 @@ async fn shutdown_drains_cancelled_publication_before_closing_store() -> Res<()>
     let (blobs, stop) = boot(Config {
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
-        authority: Client::direct(Arc::new(UnusedAuthority)),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -192,7 +193,7 @@ async fn complete_virtual_outboard_is_unavailable_after_final_owner_release() ->
     let (blobs, stop) = boot(Config {
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
-        authority: Client::direct(Arc::new(UnusedAuthority)),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),

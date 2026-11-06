@@ -1,0 +1,29 @@
+[package]
+name = "service_client_core_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+service_core_rs.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded = "0.7"
+thiserror.workspace = true
+http.workspace = true
+uuid = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+
+# The wasm32-wasip3 build selects getrandom's `custom` backend (see `.cargo/config.toml`); a guest
+# binary supplies the entropy source, so the unit-test binary needs a stand-in (client/tests.rs).
+[target.wasm32-wasip3.dev-dependencies]
+getrandom03.workspace = true

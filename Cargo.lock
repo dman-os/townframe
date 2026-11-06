@@ -1435,6 +1435,7 @@ dependencies = [
  "rand 0.9.5",
  "serde",
  "serde_json",
+ "service_client_native_rs",
  "service_utils_rs",
  "sha2 0.10.9",
  "sqlite_rs",
@@ -1492,6 +1493,8 @@ dependencies = [
  "secrets_rs",
  "serde",
  "serde_json",
+ "service_client_core_rs",
+ "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
  "subduction_iroh",
@@ -1559,6 +1562,7 @@ dependencies = [
  "keyring-core",
  "secrets_rs",
  "serde_json",
+ "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
  "tokio",
@@ -1606,6 +1610,7 @@ dependencies = [
  "secrets_rs",
  "serde",
  "serde_json",
+ "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
  "subduction_iroh",
@@ -1637,6 +1642,7 @@ dependencies = [
  "secrets_rs",
  "serde",
  "serde_json",
+ "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
  "thiserror 2.0.21",
@@ -1683,6 +1689,7 @@ dependencies = [
  "hyper",
  "serde",
  "serde_json",
+ "service_client_native_rs",
  "service_utils_rs",
  "tokio",
  "tracing",
@@ -1704,6 +1711,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
  "thiserror 2.0.21",
@@ -4085,6 +4093,7 @@ dependencies = [
  "secrets_rs",
  "serde",
  "serde_json",
+ "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
  "tempfile",
@@ -14158,7 +14167,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "service_client_rs"
+name = "service_client_core_rs"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "getrandom 0.3.4",
+ "http",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "service_core_rs",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "service_client_native_rs"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -14173,9 +14198,9 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "service_client_core_rs",
  "service_core_rs",
  "sha1",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
  "uuid",
@@ -14186,6 +14211,8 @@ name = "service_core_rs"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "http",
  "irpc",
  "opentelemetry",
@@ -14216,7 +14243,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "service_client_rs",
+ "service_client_core_rs",
+ "service_client_native_rs",
  "service_core_rs",
  "tempfile",
  "thiserror 2.0.21",

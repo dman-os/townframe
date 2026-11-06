@@ -16,7 +16,7 @@ use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::ContextError;
 use service_utils_rs::XrpcRouter;

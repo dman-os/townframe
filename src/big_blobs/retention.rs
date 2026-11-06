@@ -23,7 +23,7 @@ use big_cabinet_core::drawer::DrawerMetaDoc;
 use big_cabinet_core::drawer::MetaRoot;
 use big_repo::SharedPartStore;
 use futures::future::BoxFuture;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;

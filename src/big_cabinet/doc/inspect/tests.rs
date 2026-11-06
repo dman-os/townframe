@@ -37,15 +37,16 @@ use big_repo::Storage;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use secrets_rs::SecretStore;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
+use service_client_native_rs::XrpcClient;
 use service_utils_rs::Admission;
-use service_utils_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::ContextError;
 use service_utils_rs::IrpcAdapter;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ServerBinding;
 use service_utils_rs::StopToken;
-use service_utils_rs::XrpcClient;
 use service_utils_rs::XrpcRouter;
 use service_utils_rs::xrpc;
 use std::sync::Arc;
@@ -884,8 +885,8 @@ async fn direct_irpc_and_xrpc_share_exact_heads_evidence_and_denials() {
     let base = url::Url::parse(&format!("http://{address}/")).unwrap();
     let transports = [
         fixture.docs.client.clone(),
-        Client::irpc(irpc),
-        Client::xrpc(XrpcClient::new(base, BODY_LIMIT).unwrap()),
+        Client::new(Transport::irpc(irpc)),
+        Client::new(Transport::xrpc(XrpcClient::new(base, BODY_LIMIT).unwrap())),
     ];
     for client in &transports {
         assert_eq!(

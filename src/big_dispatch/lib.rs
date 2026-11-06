@@ -41,7 +41,8 @@ use big_dispatch_core::Invoke;
 use big_dispatch_core::InvokeOutput;
 use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::NotReadyReason;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -281,7 +282,7 @@ pub fn boot(config: DispatchConfig) -> (Dispatch, StopToken) {
         router: Arc::clone(&router),
     });
     let (host, host_stop) = Host::new(service);
-    let client = Client::direct(DispatchBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(DispatchBinding::new(Arc::clone(&host))));
     (
         Dispatch {
             host,

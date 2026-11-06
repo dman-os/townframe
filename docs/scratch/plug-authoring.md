@@ -12,7 +12,7 @@ Scope: How an author writes a plug with micros, nodules, or both. Drafted by the
 - **Nodules** have no authoring kit. The one nodule is `src/test_nodule_guest`, a raw `wasi:http/handler@0.3.0` component. It parses the capability, idempotency and deadline headers by hand and calls other operations through `http://dispatch.local/xrpc/<nsid>`. Its manifest is built in test code (`big_node/e2e/nodule_wasm.rs::plug`).
 - **Typed service calls already exist** on the native side:
   - `service_core_rs::Operation` makes the request type the contract (`type Output`, `type Error`, `const XRPC` with the NSID). Each protocol declares its operations once, e.g. `big_cabinet_core/doc.rs` `operations!`.
-  - Callers use `service_client_rs::Client<Proto>::call(ctx, op)` over `direct`, `irpc` or `xrpc` (including UDS) transports.
+  - Callers use `service_client_core_rs::Client<T>::call(ctx, op)` over the `direct`, `irpc` or `xrpc` (including UDS) transports of `service_client_native_rs`.
   - Servers implement `service_utils_rs::Handler<Op>`.
 - **The old daybook plugs** (`plug_<x>_manifest` + `plug_<x>_routines`) used a native manifest crate plus a wflow-bundle wasm crate with bespoke WIT. They are superseded by this design.
 
@@ -95,7 +95,7 @@ ndk::export_nodule!(Tasks => [Complete]);
 ```
 
 - `export_nodule!` generates the `wasi:http/handler` export. It routes `/xrpc/<nsid>` to the right `Handler<Op>`, decodes the input against `Op` and encodes the output and error envelope (the same wire as the host's XRPC router). It also builds `Cx` from the request headers: the caller's capability, the nodule's own capability, the deadline and the idempotency key.
-- `Cx` exposes typed clients (`cx.docs()`, `cx.drawers()`, `cx.blobs()`, `cx.call::<Op>()` for another plug's operation). They are the existing `service_client_rs::Client<Proto>` with a new **wasi:http transport** to `dispatch.local`, authenticated with the nodule's capability. Guest code reads the same as native code.
+- `Cx` exposes typed clients (`cx.docs()`, `cx.drawers()`, `cx.blobs()`, `cx.call::<Op>()` for another plug's operation). They are the existing `service_client_core_rs::Client<T>` with a new **wasi:http transport** (an `HttpTransport` impl wrapped in `Xrpc`) to `dispatch.local`, authenticated with the nodule's capability. Guest code reads the same as native code.
 - A native backend serves the same `Handler<Op>` impls in-process for tests: a nodule's logic can be unit-tested without wasm, as micros are tested on the native MDK backend.
 - Dispatch validates input and output against the operation's Lexicon (D31), so the NDK's typing is checked at the boundary too.
 
@@ -110,9 +110,9 @@ The same `Client<Proto>` calls should work in micro code, with the transport swa
 
 ## Operator direction (2026-11-06)
 
-- **One typed-call model.** The generated typed clients (`service_client_rs::Client<Proto>` over `Operation` types) are the model. They already run in-process (`direct`), over irpc channels (`irpc`) and over XRPC (`xrpc`, TCP or UDS). Micros and nodules each gain a host-mediated *backend* for the same clients.
+- **One typed-call model.** The generated typed clients (`service_client_core_rs::Client<T>` over `Operation` types) are the model. They already run in-process (`direct`), over irpc channels (`irpc`) and over XRPC (`xrpc`, TCP or UDS). Micros and nodules each gain a host-mediated *backend* for the same clients.
   - **Estimated lift:**
-    1. Split a wasm-buildable client core (the `Client<Proto>` API, the envelope codec, a `Transport` trait) out of `service_client_rs`, leaving the native transports in their own crate. This is a crate split, not feature flags.
+    1. **Done:** `service_client_core_rs` (wasm-buildable: `Client<T>`, the `UnaryTransport`/`SubscriptionTransport` traits, the XRPC envelope codec and the byte-moving `HttpTransport`) split from `service_client_native_rs` (direct, irpc, hyper XRPC, iroh). A crate split, not feature flags.
     2. The nodule backend: XRPC over `wasi:http/client` to `dispatch.local`.
     3. The micro backend: a small host-import WIT, `call(nsid, metadata, input) -> result`, which the Clay host routes into dispatch with the grant it resolves per contract.
 - **Permissioning is isomorphic.** A micro requirement (contract plus access) and a nodule `requires` (operation) are the same thing: a declared need for a contract, bound to a grant at install, and resolved per contract on use. The manifest uses one `requires::<Op>()` vocabulary for both.

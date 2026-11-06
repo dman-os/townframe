@@ -191,7 +191,7 @@ impl AvailabilityObserver {
     /// capability is retracted, and the first authorization failure otherwise.
     async fn watch_access(
         &self,
-        mut authority_changes: service_utils_rs::ClientStream<ObserveCapability>,
+        mut authority_changes: service_client_core_rs::ClientStream<ObserveCapability>,
         mut policy_changes: Option<tokio::sync::watch::Receiver<u64>>,
     ) -> Result<(), DocsError> {
         loop {

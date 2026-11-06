@@ -41,7 +41,7 @@ use iroh_blobs::HashAndFormat;
 use iroh_blobs::api::Store;
 use iroh_blobs::api::TempTag;
 use serde_json::Value;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;

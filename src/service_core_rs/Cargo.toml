@@ -12,7 +12,10 @@ path = "lib.rs"
 [dependencies]
 futures.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
-irpc.workspace = true
+# Not `irpc.workspace`: the workspace entry keeps irpc's default features (noq, rustls, aws-lc), which
+# do not build for wasm. This crate only needs the channel and `Service` types, which every build
+# shares; feature unification still turns the networking features on in native builds.
+irpc = { version = "0.17.0", default-features = false, features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -25,3 +28,11 @@ http.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+
+# Browser wasm has no OS entropy source: getrandom needs its `wasm_js` backend, which the repo
+# enables through `.cargo/config.toml`'s `getrandom_backend` cfg. 0.3 comes in through
+# opentelemetry_sdk's rand, 0.4 through uuid's v7 ids.
+[target.wasm32-unknown-unknown.dependencies]
+uuid = { version = "1", features = ["js"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom03 = { workspace = true, features = ["wasm_js"] }

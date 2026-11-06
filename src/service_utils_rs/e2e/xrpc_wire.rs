@@ -3,17 +3,18 @@
 //! kind. The HTTP server and client themselves are tested in `xrpc::tests`.
 
 use super::Stack;
-use crate::Client;
 use crate::ClientError;
 use crate::Operation;
 use crate::RequestContext;
-use crate::XrpcClient;
 use crate::sample::GetValue;
 use crate::sample::PutValue;
 use crate::sample::SampleError;
 use crate::sample::SampleProtocol;
 use crate::xrpc::DOMAIN_ERROR_FIELD;
 use crate::xrpc::DOMAIN_ERROR_STATUS;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
+use service_client_native_rs::XrpcClient;
 use url::Url;
 
 #[tokio::test]
@@ -49,13 +50,13 @@ async fn connection_loss_is_outcome_unknown_only_for_procedures() {
         .expect("reserve a port");
     let address = listener.local_addr().expect("address");
     drop(listener);
-    let client = Client::<SampleProtocol>::xrpc(
+    let client = Client::new(Transport::<SampleProtocol>::xrpc(
         XrpcClient::new(
             Url::parse(&format!("http://{address}/")).expect("base URL"),
             1024,
         )
         .expect("client"),
-    );
+    ));
 
     let query = client.call(RequestContext::root(), GetValue {}).await;
     let procedure = client

@@ -16,7 +16,7 @@ use big_cabinet_core::dmeta::Uuid7;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;

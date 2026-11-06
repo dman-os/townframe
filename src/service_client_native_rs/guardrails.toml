@@ -1,0 +1,13 @@
+version = 1
+role = "interface"
+dependency_reason = "Native transports (in-process, irpc, hyper XRPC over TCP, Unix sockets and iroh) implement the service client core's transport traits."
+allowed_dependencies = ["service_client_core_rs", "service_core_rs"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = ["iroh-http"]
+
+[builds.native]
+features = ["iroh-http"]

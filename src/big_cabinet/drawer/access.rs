@@ -24,7 +24,7 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::drawer_object;
 use big_repo::SharedBigRepo;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ContextError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;

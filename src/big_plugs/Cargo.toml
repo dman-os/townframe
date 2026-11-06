@@ -17,6 +17,7 @@ big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
 big_plugs_core = { workspace = true, features = ["schemars"] }
+service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 

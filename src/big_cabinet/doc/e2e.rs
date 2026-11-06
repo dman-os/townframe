@@ -243,7 +243,7 @@ impl Node {
         self.start().await
     }
 
-    fn client(&self) -> &service_utils_rs::Client<DocsProtocol> {
+    fn client(&self) -> &service_client_native_rs::Client<DocsProtocol> {
         &self.docs.as_ref().unwrap().client
     }
 

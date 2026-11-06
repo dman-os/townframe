@@ -4,6 +4,7 @@ use iroh::protocol::ProtocolHandler;
 use iroh::protocol::Router;
 use serde_json::json;
 use service_core_rs::HttpInput;
+use service_core_rs::HttpMethod;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;

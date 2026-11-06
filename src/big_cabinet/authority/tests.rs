@@ -35,8 +35,10 @@ use irpc::Channels;
 use irpc::WithChannels;
 use irpc::channel::none::NoReceiver;
 use secrets_rs::SecretStore;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
+use service_client_native_rs::XrpcClient;
 use service_utils_rs::Admission;
-use service_utils_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::IrpcAdapter;
@@ -45,7 +47,6 @@ use service_utils_rs::Reply;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ServerBinding;
 use service_utils_rs::StopToken;
-use service_utils_rs::XrpcClient;
 use service_utils_rs::XrpcRouter;
 use service_utils_rs::xrpc;
 use sqlite_rs::RuntimeConfig;
@@ -1933,10 +1934,12 @@ async fn the_protocol_answers_alike_over_every_transport() {
     let base = url::Url::parse(&format!("http://{address}/")).expect("base URL");
     let transports = [
         ("direct", test.authority.client.clone()),
-        ("irpc", Client::irpc(irpc_client)),
+        ("irpc", Client::new(Transport::irpc(irpc_client))),
         (
             "xrpc",
-            Client::xrpc(XrpcClient::new(base, BODY_LIMIT).expect("HTTP client")),
+            Client::new(Transport::xrpc(
+                XrpcClient::new(base, BODY_LIMIT).expect("HTTP client"),
+            )),
         ),
     ];
 

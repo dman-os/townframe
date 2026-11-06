@@ -1,8 +1,11 @@
 use super::*;
+use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde::Serialize;
+use service_core_rs::ContextError;
 use service_core_rs::HttpMetadata;
 use service_core_rs::Operation;
+use service_core_rs::RequestContext;
 use service_core_rs::ResponseMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +71,7 @@ impl InlineRoute<Protocol> for Route {
 
 #[tokio::test]
 async fn protocol_and_direct_client_need_no_server_dependencies() {
-    let client = Client::<Protocol>::direct(Arc::new(Route));
+    let client = Client::<Protocol>::new(Transport::direct(Arc::new(Route)));
     assert_eq!(Protocol::OPERATIONS.unary, &[Echo::XRPC]);
     assert_eq!(Protocol::OPERATIONS.stream, &[SubscribeEvents::XRPC]);
     assert_eq!(Echo::XRPC.output_schema, "String");
@@ -104,105 +107,4 @@ async fn protocol_and_direct_client_need_no_server_dependencies() {
         })
     );
     assert_eq!(events.recv().await.unwrap(), None);
-}
-
-#[tokio::test]
-async fn end_marker_distinguishes_completion_from_truncation() {
-    let event = SampleEvent {
-        value: "one".into(),
-    };
-    for ended in [true, false] {
-        let (sender, receiver) = mpsc::channel(3);
-        sender
-            .send(Ok(EventFrame::Open(ResponseMetadata::default())))
-            .await
-            .unwrap();
-        sender
-            .send(Ok(EventFrame::Event(event.clone())))
-            .await
-            .unwrap();
-        if ended {
-            sender.send(Ok(EventFrame::End)).await.unwrap();
-        }
-        drop(sender);
-        let mut stream =
-            ClientStream::<SubscribeEvents>::open(receiver, None, RequestContext::root())
-                .await
-                .unwrap()
-                .output;
-        assert_eq!(stream.recv().await.unwrap(), Some(event.clone()));
-        if !ended {
-            assert_eq!(
-                stream.recv().await,
-                Err(ClientError::transport(
-                    "subscription closed without an end marker",
-                    false
-                ))
-            );
-        }
-        assert_eq!(stream.recv().await.unwrap(), None);
-    }
-}
-
-#[tokio::test]
-async fn malformed_establishment_and_duplicate_metadata_are_terminal() {
-    for first in [
-        EventFrame::End,
-        EventFrame::Open(ResponseMetadata::default()),
-    ] {
-        let (sender, receiver) = mpsc::channel(2);
-        sender.send(Ok(first.clone())).await.unwrap();
-        sender
-            .send(Ok(EventFrame::Open(ResponseMetadata::default())))
-            .await
-            .unwrap();
-        drop(sender);
-        let opened =
-            ClientStream::<SubscribeEvents>::open(receiver, None, RequestContext::root()).await;
-        match first {
-            EventFrame::End => assert_eq!(
-                opened.unwrap_err(),
-                ClientError::transport("subscription event preceded its response metadata", false)
-            ),
-            EventFrame::Open(_) => {
-                let mut stream = opened.unwrap().output;
-                assert_eq!(
-                    stream.recv().await,
-                    Err(ClientError::transport(
-                        "subscription sent response metadata twice",
-                        false
-                    ))
-                );
-                assert_eq!(stream.recv().await.unwrap(), None);
-            }
-            EventFrame::Event(_) => unreachable!(),
-        }
-    }
-}
-
-#[tokio::test]
-async fn cancellation_preempts_buffered_events_and_is_terminal() {
-    let context = RequestContext::root();
-    let (sender, receiver) = mpsc::channel(2);
-    sender
-        .send(Ok(EventFrame::Open(ResponseMetadata::default())))
-        .await
-        .unwrap();
-    sender
-        .send(Ok(EventFrame::Event(SampleEvent {
-            value: "buffered".into(),
-        })))
-        .await
-        .unwrap();
-    let mut stream = ClientStream::<SubscribeEvents>::open(receiver, None, context.clone())
-        .await
-        .unwrap()
-        .output;
-    context.cancel();
-    assert_eq!(
-        stream.recv().await,
-        Err(ClientError::Operation(ContextError::Cancelled))
-    );
-    sender.closed().await;
-    assert_eq!(stream.recv().await.unwrap(), None);
 }

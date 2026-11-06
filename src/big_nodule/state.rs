@@ -74,7 +74,7 @@ use big_plugs_core::Revision;
 use futures::StreamExt;
 use indexmap::IndexMap;
 use serde_json::Value;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::Spawner;

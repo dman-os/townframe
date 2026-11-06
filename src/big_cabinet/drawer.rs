@@ -148,7 +148,8 @@ use big_repo::BigKeyhiveGroup;
 use big_repo::SharedBigRepo;
 use big_repo::keyhive_core::access::Access as KeyhiveAccess;
 use serde::Serialize;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -1083,7 +1084,7 @@ pub async fn boot(config: DrawerConfig<'_>) -> Result<(Drawers, StopToken), Draw
         .sync_discovered(&RequestContext::root())
         .await?;
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::direct(DrawersBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(DrawersBinding::new(Arc::clone(&host))));
     Ok((
         Drawers {
             host,

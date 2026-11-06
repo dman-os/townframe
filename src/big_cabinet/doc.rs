@@ -117,8 +117,8 @@ use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::DatumMetadata;
 use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::Dmeta;
-use big_cabinet_core::dmeta::DmetaSchema;
 use big_cabinet_core::dmeta::DmetaRead;
+use big_cabinet_core::dmeta::DmetaSchema;
 use big_cabinet_core::dmeta::DmetaWrite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -169,7 +169,8 @@ use big_repo::BigDocHandle;
 use big_repo::DocLookup;
 use big_repo::SharedBigRepo;
 use serde_json::Value as Json;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
 use service_utils_rs::ContextError;
 use service_utils_rs::Envelope;
@@ -601,7 +602,7 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         .then(mint_stop)
         .then(service_stop)
         .then(service.capabilities.stop_token());
-    let client = Client::direct(DocsBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(DocsBinding::new(Arc::clone(&host))));
     Ok((
         DocsRepo {
             service,

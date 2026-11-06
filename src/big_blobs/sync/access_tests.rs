@@ -22,8 +22,9 @@ use iroh::protocol::Router;
 use iroh_blobs::Hash;
 use iroh_blobs::protocol::GetRequest;
 use iroh_blobs::protocol::Request;
-use service_utils_rs::Client;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::Client;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use service_utils_rs::StopToken;
 use sqlite_rs::SqliteRuntime;
 use std::sync::atomic::AtomicUsize;
@@ -214,7 +215,7 @@ impl Fixture {
         let (blobs, blob_stop) = crate::boot(crate::Config {
             storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
-            authority: Client::direct(Arc::new(UnusedAuthority)),
+            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([113; 16]),

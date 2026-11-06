@@ -26,7 +26,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use serde_json::json;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::HttpMetadata;

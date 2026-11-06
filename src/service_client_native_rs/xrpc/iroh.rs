@@ -1,15 +1,13 @@
-use super::client::XrpcClientError;
-use super::client::decode_xrpc_response;
-use super::client::encode_xrpc_request;
 use http::HeaderValue;
-use http::Method;
 use http::header;
 use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use service_client_core_rs::xrpc::XrpcClientError;
+use service_client_core_rs::xrpc::decode_response;
+use service_client_core_rs::xrpc::encode_request;
 use service_core_rs::HttpMetadata;
-use service_core_rs::HttpMethod;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseEnvelope;
 use service_core_rs::XrpcKind;
@@ -339,7 +337,7 @@ impl IrohXrpcClient {
         O: DeserializeOwned,
         E: DeserializeOwned,
     {
-        let encoded = encode_xrpc_request(operation, &context, metadata, params)
+        let encoded = encode_request(operation, &context, metadata, params)
             .map_err(XrpcClientError::Encode)?;
         let (connection, generation) =
             self.request(IrohConnectionCommand::Acquire)
@@ -366,12 +364,8 @@ impl IrohXrpcClient {
                 outcome_unknown: operation.kind == XrpcKind::Procedure,
             })?;
         let connection_task = IrohConnectionTaskGuard(Some(tokio::spawn(connection_task)));
-        let method = match operation.method {
-            HttpMethod::Get => Method::GET,
-            HttpMethod::Post => Method::POST,
-        };
         let mut request = hyper::Request::builder()
-            .method(method)
+            .method(encoded.method)
             .uri(format!("/{}", encoded.path))
             .body(http_body_util::Full::new(hyper::body::Bytes::from(
                 encoded.body,
@@ -407,7 +401,7 @@ impl IrohXrpcClient {
         if connection.close_reason().is_some() {
             self.send(IrohConnectionCommand::Discard(generation));
         }
-        decode_xrpc_response(operation, context.request_id, status, &headers, &body)
+        decode_response(operation, context.request_id, status, &headers, &body)
     }
 }
 

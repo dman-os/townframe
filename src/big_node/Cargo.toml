@@ -25,6 +25,7 @@ big_nodule_core.workspace = true
 big_sync.workspace = true
 big_sync_core.workspace = true
 secrets_rs.workspace = true
+service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 utils_rs.workspace = true

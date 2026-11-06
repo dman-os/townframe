@@ -16,6 +16,7 @@ path = "main.rs"
 utils_rs.workspace = true
 sqlite_rs.workspace = true
 secrets_rs.workspace = true
+service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
 big_dispatch.workspace = true

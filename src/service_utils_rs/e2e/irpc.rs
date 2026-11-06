@@ -4,7 +4,6 @@
 
 use super::Stack;
 use super::wait_for_activity;
-use crate::Client;
 use crate::ClientError;
 use crate::ContextError;
 use crate::RequestContext;
@@ -15,6 +14,8 @@ use crate::sample::SampleMessage;
 use crate::sample::SampleProtocol;
 use crate::sample::SubscribeEvents;
 use futures::future::join_all;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 
 #[tokio::test]
 async fn unary_admission_is_bounded_by_permits_not_by_queue_depth() {
@@ -252,7 +253,9 @@ async fn expired_admission_does_not_run_the_waiting_handler() {
 #[tokio::test]
 async fn a_lost_reply_is_outcome_unknown_only_for_procedures() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-    let client = Client::<SampleProtocol>::irpc(irpc::Client::local(sender));
+    let client = Client::new(Transport::<SampleProtocol>::irpc(irpc::Client::local(
+        sender,
+    )));
     let dropper = tokio::spawn(async move {
         for _ in 0..2 {
             match receiver.recv().await {

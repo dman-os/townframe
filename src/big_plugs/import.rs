@@ -19,7 +19,7 @@ use big_plugs_core::protocol::PlugsError;
 use big_plugs_core::protocol::PlugsProtocol;
 use big_plugs_core::protocol::PublishPlugVersion;
 use big_plugs_core::protocol::PublishedPlugVersion;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 

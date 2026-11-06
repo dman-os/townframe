@@ -51,7 +51,7 @@ use http_body_util::Full;
 use http_body_util::Limited;
 use serde_json::Value;
 use serde_json::json;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;

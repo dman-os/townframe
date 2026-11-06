@@ -1,18 +1,15 @@
 use super::ws::WsIo;
 use super::ws::WsMessage;
 use futures::StreamExt;
-use http::HeaderMap;
-use http::HeaderValue;
-use http::StatusCode;
-use http::header;
 use reqwest::Url;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use service_client_core_rs::xrpc::XrpcClientError;
+use service_client_core_rs::xrpc::decode_response;
+use service_client_core_rs::xrpc::encode_request;
 use service_core_rs::EventFrame;
-use service_core_rs::HttpInput;
 use service_core_rs::HttpMetadata;
-use service_core_rs::HttpMethod;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseEnvelope;
 use service_core_rs::ResponseMetadata;
@@ -20,117 +17,7 @@ use service_core_rs::Subscription;
 use service_core_rs::XrpcKind;
 use service_core_rs::XrpcOperation;
 use service_core_rs::xrpc::AUTHORIZATION_HEADER;
-use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
-use service_core_rs::xrpc::IDEMPOTENCY_KEY_HEADER;
 use service_core_rs::xrpc::REQUEST_ID_HEADER;
-use service_core_rs::xrpc::TIMEOUT_HEADER;
-use service_core_rs::xrpc::TRACEPARENT_HEADER;
-use service_core_rs::xrpc::XrpcErrorEnvelope;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum XrpcClientError<E> {
-    #[error("failed to encode XRPC request: {0}")]
-    Encode(String),
-    #[error("XRPC transport failed: {message}")]
-    Transport {
-        message: String,
-        outcome_unknown: bool,
-    },
-    #[error("XRPC protocol response failed: {message}")]
-    Protocol {
-        message: String,
-        outcome_unknown: bool,
-    },
-    #[error("XRPC domain error ({status}): {error:?}")]
-    Domain {
-        status: StatusCode,
-        error: E,
-        outcome_unknown: bool,
-    },
-    #[error("XRPC HTTP error ({status}): {body}")]
-    Http {
-        status: StatusCode,
-        body: Value,
-        outcome_unknown: bool,
-    },
-}
-
-pub(super) struct EncodedXrpcRequest {
-    pub(super) path: String,
-    pub(super) headers: HeaderMap,
-    pub(super) body: Vec<u8>,
-}
-
-pub(super) fn encode_xrpc_request<P: Serialize>(
-    operation: XrpcOperation,
-    context: &RequestContext,
-    metadata: &HttpMetadata,
-    params: &P,
-) -> Result<EncodedXrpcRequest, String> {
-    if operation.kind == XrpcKind::Subscription {
-        return Err("the unary HTTP adapter does not support subscriptions".to_owned());
-    }
-    let mut path = format!("xrpc/{}", operation.nsid);
-    let body = match operation.input {
-        HttpInput::Query => {
-            let query = serde_urlencoded::to_string(params).map_err(|error| error.to_string())?;
-            if !query.is_empty() {
-                path.push('?');
-                path.push_str(&query);
-            }
-            Vec::new()
-        }
-        HttpInput::JsonBody => serde_json::to_vec(params).map_err(|error| error.to_string())?,
-    };
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        REQUEST_ID_HEADER,
-        HeaderValue::from_str(&context.request_id.to_string())
-            .map_err(|error| error.to_string())?,
-    );
-    for (name, value) in [
-        (TRACEPARENT_HEADER, context.trace.traceparent()),
-        ("tracestate", context.trace.tracestate()),
-    ] {
-        if let Some(value) = value {
-            headers.insert(
-                name,
-                HeaderValue::from_str(value).map_err(|error| error.to_string())?,
-            );
-        }
-    }
-    if let Some(value) = &metadata.authorization {
-        headers.insert(
-            AUTHORIZATION_HEADER,
-            HeaderValue::from_str(value).map_err(|error| error.to_string())?,
-        );
-    }
-    if let Some(value) = &metadata.idempotency_key {
-        headers.insert(
-            IDEMPOTENCY_KEY_HEADER,
-            HeaderValue::from_str(value).map_err(|error| error.to_string())?,
-        );
-    }
-    if let Some(remaining) = context.remaining_budget() {
-        headers.insert(
-            TIMEOUT_HEADER,
-            HeaderValue::from_str(&remaining.as_millis().to_string())
-                .map_err(|error| error.to_string())?,
-        );
-    }
-    if operation.input == HttpInput::JsonBody {
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-    }
-    Ok(EncodedXrpcRequest {
-        path,
-        headers,
-        body,
-    })
-}
 
 #[derive(Clone, Debug)]
 pub struct XrpcClient {
@@ -249,18 +136,17 @@ impl XrpcClient {
                 outcome_unknown: false,
             });
         }
-        let encoded = encode_xrpc_request(operation, &context, metadata, params)
+        let encoded = encode_request(operation, &context, metadata, params)
             .map_err(XrpcClientError::Encode)?;
         let url = self
             .base_url
             .join(&encoded.path)
             .map_err(|error| XrpcClientError::Encode(error.to_string()))?;
-        let mut request = match operation.method {
-            HttpMethod::Get => self.client.get(url),
-            HttpMethod::Post => self.client.post(url),
-        }
-        .headers(encoded.headers)
-        .body(encoded.body);
+        let mut request = self
+            .client
+            .request(encoded.method, url)
+            .headers(encoded.headers)
+            .body(encoded.body);
         if let Some(timeout) = context.remaining_budget() {
             request = request.timeout(timeout);
         }
@@ -279,7 +165,7 @@ impl XrpcClient {
                 message,
                 outcome_unknown: outcome_unknown || operation.kind == XrpcKind::Procedure,
             })?;
-        decode_xrpc_response(
+        decode_response(
             operation,
             context.request_id,
             status,
@@ -437,85 +323,6 @@ impl XrpcClient {
         });
         Ok(rx)
     }
-}
-
-pub(super) fn decode_xrpc_response<O, E>(
-    operation: XrpcOperation,
-    request_id: uuid::Uuid,
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<ResponseEnvelope<O>, XrpcClientError<E>>
-where
-    O: DeserializeOwned,
-    E: DeserializeOwned,
-{
-    if let Err(message) = response_request_id(headers, request_id) {
-        return Err(XrpcClientError::Protocol {
-            message,
-            outcome_unknown: operation.kind == XrpcKind::Procedure,
-        });
-    }
-    let value =
-        serde_json::from_slice::<Value>(body).map_err(|error| XrpcClientError::Protocol {
-            message: format!("invalid JSON XRPC response: {error}"),
-            outcome_unknown: operation.kind == XrpcKind::Procedure,
-        })?;
-    if status.is_success() {
-        let output = serde_json::from_value(value).map_err(|error| XrpcClientError::Protocol {
-            message: format!("invalid XRPC success payload: {error}"),
-            outcome_unknown: operation.kind == XrpcKind::Procedure,
-        })?;
-        let metadata = ResponseMetadata::read_headers(headers).map_err(|message| {
-            XrpcClientError::Protocol {
-                message,
-                outcome_unknown: operation.kind == XrpcKind::Procedure,
-            }
-        })?;
-        return Ok(ResponseEnvelope { output, metadata });
-    }
-    let envelope = match serde_json::from_value::<XrpcErrorEnvelope>(value.clone()) {
-        Ok(envelope) => envelope,
-        Err(error) => {
-            return Err(XrpcClientError::Protocol {
-                message: format!("invalid XRPC error envelope: {error}"),
-                outcome_unknown: operation.kind == XrpcKind::Procedure,
-            });
-        }
-    };
-    let typed = envelope
-        .details()
-        .get(DOMAIN_ERROR_FIELD)
-        .cloned()
-        .unwrap_or_else(|| value.clone());
-    match serde_json::from_value::<E>(typed) {
-        Ok(error) => Err(XrpcClientError::Domain {
-            status,
-            error,
-            outcome_unknown: operation.kind == XrpcKind::Procedure && status.is_server_error(),
-        }),
-        Err(_) => Err(XrpcClientError::Http {
-            status,
-            body: value,
-            outcome_unknown: operation.kind == XrpcKind::Procedure,
-        }),
-    }
-}
-
-fn response_request_id(headers: &HeaderMap, expected: uuid::Uuid) -> Result<(), String> {
-    let Some(value) = headers.get(REQUEST_ID_HEADER) else {
-        return Ok(());
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| "XRPC response x-request-id was not valid ASCII".to_owned())?;
-    let actual = value
-        .parse::<uuid::Uuid>()
-        .map_err(|_| "XRPC response x-request-id was not a UUID".to_owned())?;
-    if actual != expected {
-        return Err("XRPC response x-request-id did not match the request".to_owned());
-    }
-    Ok(())
 }
 
 async fn read_response_body(

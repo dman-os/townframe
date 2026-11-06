@@ -5,7 +5,8 @@ use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::DocsMessage;
 use futures::future::BoxFuture;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use sqlite_rs::Sql;
 use sqlite_rs::SqliteRuntime;
 use std::collections::BTreeMap;
@@ -102,7 +103,7 @@ fn docs(
 ) -> (Client<DocsProtocol>, CapId) {
     let stub = DocsStub::new(route, At::Heads(vec![ChangeHash([9; 32])]), response);
     let capability = stub.expected.capability;
-    (Client::direct(Arc::new(stub)), capability)
+    (Client::new(Transport::direct(Arc::new(stub))), capability)
 }
 
 struct ScriptedDocs {
@@ -523,7 +524,7 @@ async fn consumer_parks_unavailable_work_and_retries_it_after_restart() -> Res<(
     projection
         .consume(
             &mut reader,
-            &Client::direct(Arc::clone(&unavailable)),
+            &Client::new(Transport::direct(Arc::clone(&unavailable))),
             &capability,
             shutdown,
         )
@@ -547,11 +548,11 @@ async fn consumer_parks_unavailable_work_and_retries_it_after_restart() -> Res<(
     );
     drop(projection);
     let restarted = BlobProjection::new(sql).await?;
-    let available = Client::direct(Arc::new(DocsStub::new(
+    let available = Client::new(Transport::direct(Arc::new(DocsStub::new(
         &second,
         At::Current,
         Ok(accepted(replacement.digest_str(), Vec::new(), 42)),
-    )));
+    ))));
     assert_eq!(restarted.parked(None).await?, vec![entry(&second, 7)]);
     let (mut reader, shutdown) = ScriptedReader::new([RevisionRead::ReplayComplete { through: 9 }]);
     restarted
@@ -626,7 +627,7 @@ async fn rearm_retries_unavailable_work_without_stopping_or_blocking_other_route
                 ),
             ],
         );
-        let docs = Client::direct(Arc::clone(&scripted));
+        let docs = Client::new(Transport::direct(Arc::clone(&scripted)));
         let capability = CapId::from_bytes([7; 16]);
         let (mut reader, exhausted) = ScriptedReader::new([RevisionRead::Entries {
             revision: 2,
@@ -710,7 +711,7 @@ async fn a_later_source_revision_retries_parked_current_signed_state() -> Res<()
             ),
         ],
     );
-    let docs = Client::direct(Arc::clone(&scripted));
+    let docs = Client::new(Transport::direct(Arc::clone(&scripted)));
     let capability = CapId::from_bytes([7; 16]);
     let (mut reader, shutdown) = ScriptedReader::new([
         RevisionRead::Entries {
@@ -992,11 +993,11 @@ async fn failed_parked_retry_rolls_back_rows_frontier_revision_and_parked_deleti
     projection
         .park(&entry(&route, 2), Progress::Complete(2))
         .await?;
-    let docs = Client::direct(Arc::new(DocsStub::new(
+    let docs = Client::new(Transport::direct(Arc::new(DocsStub::new(
         &route,
         At::Current,
         Ok(accepted(replacement.digest_str(), Vec::new(), 42)),
-    )));
+    ))));
     let capability = CapId::from_bytes([7; 16]);
     let mut shutdown = std::future::pending();
     let mut frontier = projection.open(1).await?;
@@ -1081,9 +1082,9 @@ async fn cancellation_during_typed_read_leaves_projection_unchanged() -> Res<()>
         )
         .await?;
     let started = Arc::new(Notify::new());
-    let docs = Client::direct(Arc::new(BlockingDocs {
+    let docs = Client::new(Transport::direct(Arc::new(BlockingDocs {
         started: Arc::clone(&started),
-    }));
+    })));
     let capability = CapId::from_bytes([7; 16]);
     let (mut reader, _exhausted) = ScriptedReader::new([RevisionRead::Entries {
         revision: 2,

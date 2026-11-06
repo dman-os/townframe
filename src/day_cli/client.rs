@@ -62,7 +62,7 @@ impl Reply {
 }
 
 enum Transport {
-    Daemon(service_utils_rs::XrpcClient),
+    Daemon(service_client_native_rs::XrpcClient),
     /// The booted node and the router that serves it. They are dropped together on stop: the
     /// router holds the dispatch client, which must not outlive the node it calls.
     InProcess(Box<(Booted, axum::Router)>),
@@ -80,8 +80,9 @@ impl NodeClient {
     pub async fn connect(dir: &NodeDir) -> Res<Self> {
         let socket = dir.probe_socket().await?;
         if socket == SocketState::Live {
-            let http = service_utils_rs::XrpcClient::unix(dir.socket_path()?, MAX_BODY_BYTES)
-                .map_err(|error| eyre::eyre!("{error:?}"))?;
+            let http =
+                service_client_native_rs::XrpcClient::unix(dir.socket_path()?, MAX_BODY_BYTES)
+                    .map_err(|error| eyre::eyre!("{error:?}"))?;
             return Ok(Self {
                 transport: Transport::Daemon(http),
                 socket,

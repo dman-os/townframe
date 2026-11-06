@@ -5,7 +5,7 @@
 //! same hosted handler:
 //!
 //! ```text
-//! Client<Proto>::call(ctx, params)
+//! Client<Proto>::call(ctx, params)   (service_client_native_rs)
 //!     ├─ Direct ─ routed inline on the caller's task ──┐
 //!     ├─ Irpc ─── bounded adapter spawns one task ──────┼─► Host<H> ─► layers ─► Handler<P>
 //!     └─ Xrpc ─── HTTP router decodes the request ──────┘
@@ -30,7 +30,6 @@
 //! should copy.
 
 pub mod admission;
-pub mod client;
 pub mod context;
 pub mod host;
 pub mod irpc_adapter;
@@ -48,9 +47,6 @@ pub use admission::CancellationSignal;
 pub use admission::CancellationTransport;
 pub use admission::TaskActivity;
 pub use admission::cancellation_channel;
-pub use client::Client;
-pub use client::ClientStream;
-pub use client::InlineRoute;
 pub use context::ContextError;
 pub use context::HttpMetadata;
 pub use context::RequestContext;
@@ -86,12 +82,12 @@ pub use operation::Unary;
 pub use operation::Wire;
 pub use operation::XrpcKind;
 pub use operation::XrpcOperation;
+pub use service_client_native_rs as __client_native;
 pub use service_core_rs::Protocol;
 pub use service_core_rs::ProtocolOperations;
 pub use service_core_rs::UnaryVisitor;
 pub use service_core_rs::declare_service_protocol;
 pub use service_core_rs::service_operation;
-pub use xrpc::XrpcClient;
 pub use xrpc::XrpcRouter;
 
 #[cfg(test)]

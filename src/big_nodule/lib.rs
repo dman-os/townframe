@@ -68,7 +68,8 @@ use big_nodule_core::protocol::SetNoduleOperationGrants;
 use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::protocol::UninstallNodule;
 use big_plugs_core::PlugId;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -552,7 +553,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         state,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::direct(NodulesBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(NodulesBinding::new(Arc::clone(&host))));
     Ok((
         Nodules { host, client },
         host_stop

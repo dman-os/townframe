@@ -13,11 +13,12 @@ use super::nodule_wasm::put;
 use super::nodule_wasm::set_enabled;
 use super::*;
 use big_cabinet_core::doc::DocsProtocol;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
+use service_client_native_rs::XrpcClient;
 use service_utils_rs::Envelope;
 use service_utils_rs::HttpMetadata;
 use service_utils_rs::Operation;
-use service_utils_rs::XrpcClient;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -138,7 +139,7 @@ async fn the_operator_reaches_built_in_and_nodule_operations_over_the_socket_wit
     );
     let client = XrpcClient::unix(&socket, MAX_RESPONSE).unwrap();
 
-    let docs = Client::<DocsProtocol>::xrpc(client.clone());
+    let docs = Client::new(Transport::<DocsProtocol>::xrpc(client.clone()));
     let receipt = create_note(&node, &docs, HttpMetadata::default())
         .await
         .unwrap();
@@ -175,7 +176,7 @@ async fn a_token_narrows_a_socket_connection_to_its_scope() {
     assert_eq!(status, 200, "{echoed}");
     // The same uid, so the operator without a token could create the document. The token
     // narrows it: docs operations are outside its scope and denied before the service runs.
-    let docs = Client::<DocsProtocol>::xrpc(client.clone());
+    let docs = Client::new(Transport::<DocsProtocol>::xrpc(client.clone()));
     let denied = create_note(&node, &docs, token.metadata()).await;
     let Err(denied) = denied else {
         panic!("a token without docs scope must not create a document");

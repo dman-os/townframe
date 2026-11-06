@@ -7,8 +7,9 @@ use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::dmeta::Uuid7;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use futures::future::BoxFuture;
-use service_utils_rs::Client;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::Client;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use service_utils_rs::StopToken;
 use sqlite_rs::SqliteRuntime;
 
@@ -74,7 +75,7 @@ impl Harness {
                 None => crate::Storage::memory()?,
             },
             sql: sql.clone(),
-            authority: Client::direct(Arc::new(UnusedAuthority)),
+            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([102; 16]),

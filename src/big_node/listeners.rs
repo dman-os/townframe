@@ -12,7 +12,7 @@
 use big_cabinet_core::authority::Authorization;
 use big_dispatch::Anonymous;
 use big_dispatch_core::DispatchProtocol;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::xrpc::AcceptFuture;
 use service_utils_rs::xrpc::ConnectionAcceptor;
 use service_utils_rs::xrpc::PeerCredentials;

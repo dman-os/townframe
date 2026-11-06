@@ -75,7 +75,8 @@ use big_plugs_core::protocol::WatchPlugs;
 use big_plugs_core::registry::registry_universe;
 use big_plugs_core::signature::did_key;
 use registry::Registry;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -636,7 +637,7 @@ pub async fn boot(config: PlugsConfig) -> Res<(Plugs, StopToken)> {
         tasks,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::direct(PlugsBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(PlugsBinding::new(Arc::clone(&host))));
     Ok((
         Plugs {
             host,

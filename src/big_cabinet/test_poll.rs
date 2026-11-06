@@ -17,7 +17,7 @@ use big_cabinet_core::doc::ObservedDatum;
 use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;

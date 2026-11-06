@@ -17,6 +17,8 @@ big_sync_core.workspace = true
 big_sync.workspace = true
 big_repo.workspace = true
 secrets_rs.workspace = true
+service_client_native_rs.workspace = true
+service_client_core_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 

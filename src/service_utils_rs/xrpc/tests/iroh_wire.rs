@@ -1,6 +1,8 @@
 //! HTTP/1 over Iroh: the same wire, driven through Iroh endpoints.
 
 use super::*;
+use service_client_native_rs::xrpc::IROH_XRPC_HTTP_ALPN;
+use service_client_native_rs::xrpc::IrohXrpcClient;
 
 const COEXISTING_ALPN: &[u8] = b"townframe/test-coexisting/1";
 

@@ -49,8 +49,8 @@ use super::listeners::post;
 use super::listeners::tcp_client;
 use super::*;
 use big_cabinet_core::drawer::DrawerAccess as Access;
+use service_client_native_rs::XrpcClient;
 use service_utils_rs::Operation;
-use service_utils_rs::XrpcClient;
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::alloc::System;
@@ -75,7 +75,6 @@ static LIVE: AtomicI64 = AtomicI64::new(0);
 /// The highest [`LIVE`] since [`measure`] last reset it to the then-current value.
 static PEAK: AtomicI64 = AtomicI64::new(0);
 
-
 // INSTR: count-weighted allocation-site sampler (BIG_NODE_COSTS_SAMPLE=<stride>): every stride-th allocation of any size
 // records a backtrace, tagged by INSTR_PHASE (1 = early window, 2 = late window, 0 = off). A thread-local guard stops reentry.
 static INSTR_PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // INSTR
@@ -83,37 +82,76 @@ static INSTR_ACC: AtomicU64 = AtomicU64::new(0); // INSTR
 static INSTR_STRIDE: AtomicU64 = AtomicU64::new(64); // INSTR
 static INSTR_SAMPLES: std::sync::Mutex<Vec<(u8, [usize; 40])>> = std::sync::Mutex::new(Vec::new()); // INSTR
 std::thread_local! { static INSTR_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; } // INSTR
-unsafe extern "C" { // INSTR
-    fn _Unwind_Backtrace(trace: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> i32, arg: *mut std::ffi::c_void) -> i32; // INSTR
+unsafe extern "C" {
+    // INSTR
+    fn _Unwind_Backtrace(
+        trace: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> i32,
+        arg: *mut std::ffi::c_void,
+    ) -> i32; // INSTR
     fn _Unwind_GetIP(context: *mut std::ffi::c_void) -> usize; // INSTR
 } // INSTR
-extern "C" fn instr_frame(context: *mut std::ffi::c_void, arg: *mut std::ffi::c_void) -> i32 { // INSTR
+extern "C" fn instr_frame(context: *mut std::ffi::c_void, arg: *mut std::ffi::c_void) -> i32 {
+    // INSTR
     // SAFETY: arg is the (array, depth) pair instr_sample passed; context is live for the callback. // INSTR
     let (ips, depth) = unsafe { &mut *(arg as *mut ([usize; 40], usize)) }; // INSTR
-    if *depth == 40 { return 5; } // INSTR
+    if *depth == 40 {
+        return 5;
+    } // INSTR
     ips[*depth] = unsafe { _Unwind_GetIP(context) }; // INSTR
     *depth += 1; // INSTR
     0 // INSTR
 } // INSTR
-fn instr_sample(_size: usize) { // INSTR
+fn instr_sample(_size: usize) {
+    // INSTR
     let phase = INSTR_PHASE.load(Relaxed); // INSTR
-    if phase == 0 { return; } // INSTR
-    if !INSTR_ACC.fetch_add(1, Relaxed).is_multiple_of(INSTR_STRIDE.load(Relaxed)) { return; } // INSTR
-    if INSTR_GUARD.try_with(|guard| guard.replace(true)).unwrap_or(true) { return; } // INSTR
+    if phase == 0 {
+        return;
+    } // INSTR
+    if !INSTR_ACC
+        .fetch_add(1, Relaxed)
+        .is_multiple_of(INSTR_STRIDE.load(Relaxed))
+    {
+        return;
+    } // INSTR
+    if INSTR_GUARD
+        .try_with(|guard| guard.replace(true))
+        .unwrap_or(true)
+    {
+        return;
+    } // INSTR
     // Raw libgcc unwind: no std backtrace lock, so a thread holding the ld.so loader lock cannot deadlock against us. // INSTR
     let mut frames = ([0usize; 40], 0usize); // INSTR
     unsafe { _Unwind_Backtrace(instr_frame, &mut frames as *mut _ as *mut std::ffi::c_void) }; // INSTR
-    if let Ok(mut samples) = INSTR_SAMPLES.try_lock() { samples.push((phase, frames.0)); } // INSTR
+    if let Ok(mut samples) = INSTR_SAMPLES.try_lock() {
+        samples.push((phase, frames.0));
+    } // INSTR
     INSTR_GUARD.try_with(|guard| guard.set(false)).ok(); // INSTR (fails only during TLS teardown)
 } // INSTR
-fn instr_dump() { // INSTR
+fn instr_dump() {
+    // INSTR
     INSTR_PHASE.store(0, Relaxed); // INSTR
     let samples = std::mem::take(&mut *INSTR_SAMPLES.lock().unwrap()); // INSTR
     let stride = INSTR_STRIDE.load(Relaxed); // INSTR
-    eprintln!("INSTR alloc-site samples {} stride {stride} exe {:?}", samples.len(), std::env::current_exe().unwrap()); // INSTR
-    for line in std::fs::read_to_string("/proc/self/maps").unwrap().lines().filter(|line| line.contains("big_node-")).take(1) { eprintln!("INSTR maps {line}"); } // INSTR
-    for (phase, ips) in samples { // INSTR
-        let ips: Vec<String> = ips.into_iter().take_while(|ip| *ip != 0).map(|ip| format!("{ip:x}")).collect(); // INSTR
+    eprintln!(
+        "INSTR alloc-site samples {} stride {stride} exe {:?}",
+        samples.len(),
+        std::env::current_exe().unwrap()
+    ); // INSTR
+    for line in std::fs::read_to_string("/proc/self/maps")
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("big_node-"))
+        .take(1)
+    {
+        eprintln!("INSTR maps {line}");
+    } // INSTR
+    for (phase, ips) in samples {
+        // INSTR
+        let ips: Vec<String> = ips
+            .into_iter()
+            .take_while(|ip| *ip != 0)
+            .map(|ip| format!("{ip:x}"))
+            .collect(); // INSTR
         eprintln!("INSTR sample {phase} {}", ips.join(" ")); // INSTR
     } // INSTR
 } // INSTR
@@ -329,25 +367,78 @@ async fn a_note_costs_no_more_to_create_in_a_fuller_drawer() {
     const WINDOW: usize = 5;
     let mut cluster = Cluster::boot(&["alice"]).await;
     let drawer = cluster.share_drawer(0, &[]).await;
-    if let Ok(stride) = std::env::var("BIG_NODE_COSTS_SAMPLE") { INSTR_STRIDE.store(stride.parse().unwrap(), Relaxed); } // INSTR
+    if let Ok(stride) = std::env::var("BIG_NODE_COSTS_SAMPLE") {
+        INSTR_STRIDE.store(stride.parse().unwrap(), Relaxed);
+    } // INSTR
     COUNTING.store(true, Relaxed);
     let mut created = Vec::new();
     // INSTR: process CPU (utime+stime, all threads, dead ones included) in clock ticks of 10 ms.
-    let instr_cpu = || -> u64 { let stat = std::fs::read_to_string("/proc/self/stat").unwrap(); let fields: Vec<&str> = stat.rsplit_once(')').unwrap().1.split_whitespace().collect(); fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap() }; // INSTR
+    let instr_cpu = || -> u64 {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let fields: Vec<&str> = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+    }; // INSTR
     *sqlite_rs::INSTR_SQL_CALLERS.lock().unwrap() = None; // INSTR
     for ordinal in 0..NOTES {
         let instr_cpu_before = instr_cpu(); // INSTR
-        INSTR_PHASE.store(if std::env::var("BIG_NODE_COSTS_SAMPLE").is_err() { 0 } else if (5..10).contains(&ordinal) { 1 } else if (25..30).contains(&ordinal) { 2 } else { 0 }, Relaxed); // INSTR
-        let instr_sql_before: Vec<u64> = sqlite_rs::INSTR_SQL.iter().map(|count| count.load(Relaxed)).collect(); // INSTR
+        INSTR_PHASE.store(
+            if std::env::var("BIG_NODE_COSTS_SAMPLE").is_err() {
+                0
+            } else if (5..10).contains(&ordinal) {
+                1
+            } else if (25..30).contains(&ordinal) {
+                2
+            } else {
+                0
+            },
+            Relaxed,
+        ); // INSTR
+        let instr_sql_before: Vec<u64> = sqlite_rs::INSTR_SQL
+            .iter()
+            .map(|count| count.load(Relaxed))
+            .collect(); // INSTR
         tracing::info!(ordinal, "INSTR create note begin"); // INSTR
         let (_, usage) = measure(cluster.create_note(0, &drawer, &text(ordinal))).await;
-        let instr_sql: Vec<u64> = sqlite_rs::INSTR_SQL.iter().zip(&instr_sql_before).map(|(count, before)| count.load(Relaxed) - before).collect(); // INSTR
-        eprintln!("INSTR create note {ordinal}: wall {:.1?} cpu {} ms allocations {} sql write_leases {} read_leases {} write_gate_wait {:.1}ms jobs {} job_busy {:.1}ms", usage.wall, (instr_cpu() - instr_cpu_before) * 10, usage.allocations, instr_sql[0], instr_sql[1], instr_sql[2] as f64 / 1e6, instr_sql[3], instr_sql[4] as f64 / 1e6); // INSTR
+        let instr_sql: Vec<u64> = sqlite_rs::INSTR_SQL
+            .iter()
+            .zip(&instr_sql_before)
+            .map(|(count, before)| count.load(Relaxed) - before)
+            .collect(); // INSTR
+        eprintln!(
+            "INSTR create note {ordinal}: wall {:.1?} cpu {} ms allocations {} sql write_leases {} read_leases {} write_gate_wait {:.1}ms jobs {} job_busy {:.1}ms",
+            usage.wall,
+            (instr_cpu() - instr_cpu_before) * 10,
+            usage.allocations,
+            instr_sql[0],
+            instr_sql[1],
+            instr_sql[2] as f64 / 1e6,
+            instr_sql[3],
+            instr_sql[4] as f64 / 1e6
+        ); // INSTR
         created.push(usage);
     }
-    { let mut instr_callers: Vec<(String, u64)> = sqlite_rs::INSTR_SQL_CALLERS.lock().unwrap().take().unwrap_or_default().into_iter().collect(); instr_callers.sort_by_key(|(_, count)| std::cmp::Reverse(*count)); for (caller, count) in instr_callers.iter().take(40) { eprintln!("INSTR sql caller x16 {count}: {caller}"); } } // INSTR
+    {
+        let mut instr_callers: Vec<(String, u64)> = sqlite_rs::INSTR_SQL_CALLERS
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        instr_callers.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        for (caller, count) in instr_callers.iter().take(40) {
+            eprintln!("INSTR sql caller x16 {count}: {caller}");
+        }
+    } // INSTR
     INSTR_PHASE.store(0, Relaxed); // INSTR
-    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() { instr_dump(); } // INSTR
+    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() {
+        instr_dump();
+    } // INSTR
     COUNTING.store(false, Relaxed);
     let window = |end: usize| {
         let mut window: Vec<_> = created[end - WINDOW..end]
@@ -479,13 +570,18 @@ async fn long_test_cost_table() {
     }
 
     let (live, rss) = (LIVE.load(Relaxed), resident());
-    if let Ok(stride) = std::env::var("BIG_NODE_COSTS_SAMPLE") { INSTR_STRIDE.store(stride.parse().unwrap(), Relaxed); INSTR_PHASE.store(1, Relaxed); } // INSTR
+    if let Ok(stride) = std::env::var("BIG_NODE_COSTS_SAMPLE") {
+        INSTR_STRIDE.store(stride.parse().unwrap(), Relaxed);
+        INSTR_PHASE.store(1, Relaxed);
+    } // INSTR
     tracing::info!("INSTR phase connect begin"); // INSTR
     table
         .run("connect two nodes", cluster.connect(Topology::Pair))
         .await;
     tracing::info!("INSTR phase connect end"); // INSTR
-    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() { INSTR_PHASE.store(2, Relaxed); } // INSTR
+    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() {
+        INSTR_PHASE.store(2, Relaxed);
+    } // INSTR
     // Read in order from the first note Bob could not yet read, so each wake re-reads only what is
     // still outstanding; each tenth is a sample, so a rate that degrades with the count shows.
     let next = std::cell::Cell::new(0);
@@ -533,7 +629,9 @@ async fn long_test_cost_table() {
 
     tracing::info!("INSTR phase replicate end"); // INSTR
     eprintln!("INSTR dump for connect+replicate"); // INSTR
-    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() { instr_dump(); } // INSTR
+    if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() {
+        instr_dump();
+    } // INSTR
     table.run("stop node", cluster.stop(1)).await;
     tracing::info!("INSTR phase reboot begin"); // INSTR
     table

@@ -6,7 +6,7 @@ use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use std::collections::BTreeMap;
 
 #[expect(

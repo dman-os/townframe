@@ -359,7 +359,7 @@ across paths; an in-process optimization cannot bypass hosted policy.
 Use the existing division:
 
 - `service_core_rs`: portable operation, protocol, and request-context contracts;
-- `service_client_rs`: clients usable without linking the native service host;
+- `service_client_core_rs` and `service_client_native_rs`: clients usable without linking the native service host, the core buildable for wasm guests;
 - `service_utils_rs`: hosting, middleware, routing, and lifecycle.
 
 A client holds service access, not a database, mutex, filesystem path, or

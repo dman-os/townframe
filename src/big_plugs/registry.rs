@@ -70,7 +70,7 @@ use big_plugs_core::registry::artifact_slot_version;
 use big_plugs_core::registry::identity_key;
 use big_plugs_core::registry::version_key;
 use serde_json::Value as Json;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::RequestContext;
 use service_utils_rs::Spawner;
 use sqlite_rs::Database;

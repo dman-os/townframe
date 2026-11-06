@@ -21,7 +21,8 @@ use futures::Stream;
 use iroh_blobs::Hash;
 use iroh_blobs::api::Store;
 use iroh_blobs::api::proto::BlobStatus;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -241,7 +242,7 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         })
         .expect("store shutdown task starts before shutdown");
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::direct(BlobsBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(BlobsBinding::new(Arc::clone(&host))));
     Ok((
         Blobs {
             service,

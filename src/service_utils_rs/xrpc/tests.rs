@@ -19,6 +19,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
+use service_client_core_rs::xrpc::XrpcClientError;
+use service_client_native_rs::XrpcClient;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -1828,12 +1830,13 @@ async fn unsupported_subscription_is_explicit() {
 
 #[tokio::test]
 async fn websocket_subscription_streams_hosted_events() {
-    use crate::Client;
     use crate::Route;
     use crate::sample::PutValue;
     use crate::sample::SampleProtocol;
     use crate::sample::SubscribeEvents;
     use futures::StreamExt;
+    use service_client_native_rs::Client;
+    use service_client_native_rs::Transport;
     let (sample, stop) = crate::sample::boot("initial");
     let mut router = XrpcRouter::new(1024);
     SampleProtocol::mount(&mut router, Arc::clone(&sample.host)).expect("mount sample protocol");
@@ -1844,13 +1847,13 @@ async fn websocket_subscription_streams_hosted_events() {
     let (task, shutdown) = serve(listener, router.into_router())
         .await
         .expect("start server");
-    let client = Client::<SampleProtocol>::xrpc(
+    let client = Client::new(Transport::<SampleProtocol>::xrpc(
         XrpcClient::new(
             Url::parse(&format!("http://{address}")).expect("base url"),
             1024 * 1024,
         )
         .expect("xrpc client"),
-    );
+    ));
     let mut events = client
         .subscribe(
             RequestContext::root(),

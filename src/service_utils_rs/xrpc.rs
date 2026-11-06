@@ -14,7 +14,6 @@ pub use service_core_rs::xrpc::TIMEOUT_HEADER;
 pub use service_core_rs::xrpc::TRACEPARENT_HEADER;
 pub use service_core_rs::xrpc::XrpcDomainDetailsError;
 pub use service_core_rs::xrpc::XrpcErrorEnvelope;
-mod client;
 #[cfg(feature = "iroh-http")]
 mod iroh;
 mod router;
@@ -24,12 +23,6 @@ mod tests;
 #[cfg(unix)]
 mod unix;
 
-pub use client::XrpcClient;
-pub use client::XrpcClientError;
-#[cfg(feature = "iroh-http")]
-pub use iroh::IROH_XRPC_HTTP_ALPN;
-#[cfg(feature = "iroh-http")]
-pub use iroh::IrohXrpcClient;
 #[cfg(feature = "iroh-http")]
 pub use iroh::IrohXrpcProtocolHandler;
 #[cfg(feature = "iroh-http")]

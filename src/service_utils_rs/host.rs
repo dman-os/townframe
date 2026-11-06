@@ -336,7 +336,7 @@ macro_rules! service_protocol {
     };
 }
 
-pub use service_client_rs::InlineRoute;
+use service_client_native_rs::InlineRoute;
 
 pub trait ServerBinding<Proto: Service>: InlineRoute<Proto> + 'static {
     fn route(
@@ -379,7 +379,7 @@ macro_rules! bind_service_protocol {
             }
         }
 
-        impl<H> $crate::InlineRoute<$protocol> for $binding<H>
+        impl<H> $crate::__client_native::InlineRoute<$protocol> for $binding<H>
         where H: Send + Sync + 'static $(+ $crate::Handler<$params>)* $(+ $crate::Handler<$stream_params>)* {
             fn route_inline(self: std::sync::Arc<Self>, message: $message) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
                 <Self as $crate::ServerBinding<$protocol>>::route(self, $crate::Dispatch::Inline, message)

@@ -12,11 +12,12 @@ path = "lib.rs"
 [features]
 default = []
 # HTTP/1 XRPC served over Iroh connections, in addition to TCP.
-iroh-http = ["dep:iroh", "service_client_rs/iroh-http"]
+iroh-http = ["dep:iroh", "service_client_native_rs/iroh-http"]
 
 [dependencies]
 service_core_rs.workspace = true
-service_client_rs = { workspace = true, features = ["http"] }
+service_client_core_rs.workspace = true
+service_client_native_rs.workspace = true
 #
 # async
 futures.workspace = true

@@ -1,5 +1,4 @@
 use crate::Admission;
-use crate::Client;
 use crate::ClientError;
 use crate::ContextError;
 use crate::Envelope;
@@ -16,7 +15,6 @@ use crate::StopToken;
 use crate::Subscription;
 use crate::TraceContext;
 use crate::TransportContext;
-use crate::XrpcClient;
 use crate::XrpcOperation;
 use crate::XrpcRouter;
 use crate::sample::GetValue;
@@ -31,6 +29,9 @@ use opentelemetry_sdk::trace::SpanData;
 use opentelemetry_sdk::trace::SpanExporter;
 use serde::Deserialize;
 use serde::Serialize;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
+use service_client_native_rs::XrpcClient;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::Poll;
@@ -174,20 +175,20 @@ impl Runtime {
     fn boot() -> Self {
         let (sample, dependency_stop) = crate::sample::boot("initial");
         let service = Arc::new(ProbeService {
-            dependency: Client::direct(sample.host),
+            dependency: Client::new(Transport::direct(sample.host)),
             polls: Arc::new(Mutex::new(Vec::new())),
             polled: Arc::new(Notify::new()),
             dropped: Arc::new(Notify::new()),
         });
         let (host, host_stop) = Host::new(Arc::clone(&service));
-        let direct = Client::direct(Arc::clone(&host)).with_event_buffer(1);
+        let direct = Client::new(Transport::direct(Arc::clone(&host))).with_event_buffer(1);
         let (irpc, irpc_stop) =
             IrpcAdapter::local::<_, Protocol>(Arc::clone(&host), Admission::new(2, 2), 2);
         Self {
             service,
             host,
             direct,
-            irpc: Client::irpc(irpc).with_event_buffer(1),
+            irpc: Client::new(Transport::irpc(irpc)).with_event_buffer(1),
             stop: irpc_stop.then(host_stop).then(dependency_stop),
         }
     }
@@ -207,7 +208,7 @@ impl Runtime {
             .await
             .unwrap();
         (
-            Client::xrpc(XrpcClient::new(base, 4096).unwrap()),
+            Client::new(Transport::xrpc(XrpcClient::new(base, 4096).unwrap())),
             task,
             shutdown,
         )
@@ -459,7 +460,7 @@ async fn idle_and_backpressured_streams_keep_the_request_span_and_deadline() {
 #[tokio::test(start_paused = true)]
 async fn deadlines_cover_client_queueing_and_subscription_establishment() {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    let client = Client::<Protocol>::irpc(irpc::Client::local(sender));
+    let client = Client::new(Transport::<Protocol>::irpc(irpc::Client::local(sender)));
     let pending_context = RequestContext::root();
     let pending = tokio::spawn({
         let client = client.clone();
@@ -505,12 +506,16 @@ async fn iroh_identity_comes_from_the_connection_and_response_metadata_survives(
     Protocol::mount(&mut router, Arc::clone(&runtime.host)).unwrap();
     let server_router = iroh::protocol::Router::builder(server.clone())
         .accept(
-            crate::xrpc::IROH_XRPC_HTTP_ALPN,
+            service_client_native_rs::xrpc::IROH_XRPC_HTTP_ALPN,
             crate::xrpc::iroh_protocol_handler(router.into_router(), 2, 2),
         )
         .spawn();
-    let client =
-        crate::xrpc::IrohXrpcClient::new(client_endpoint.clone(), server.addr(), 4096).unwrap();
+    let client = service_client_native_rs::xrpc::IrohXrpcClient::new(
+        client_endpoint.clone(),
+        server.addr(),
+        4096,
+    )
+    .unwrap();
     let response = client
         .execute_with_metadata::<Probe, Observation, ContextError>(
             Probe::XRPC,
@@ -524,7 +529,10 @@ async fn iroh_identity_comes_from_the_connection_and_response_metadata_survives(
     assert_eq!(response.metadata, response_metadata());
 
     let connection = client_endpoint
-        .connect(server.addr(), crate::xrpc::IROH_XRPC_HTTP_ALPN)
+        .connect(
+            server.addr(),
+            service_client_native_rs::xrpc::IROH_XRPC_HTTP_ALPN,
+        )
         .await
         .unwrap();
     let (mut send, mut recv) = connection.open_bi().await.unwrap();

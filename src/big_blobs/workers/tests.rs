@@ -11,7 +11,8 @@ use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::query::Anchor;
 use futures::future::BoxFuture;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use service_utils_rs::Spawner;
 use sqlite_rs::SqliteRuntime;
 use tokio::sync::mpsc;
@@ -93,7 +94,7 @@ impl Polls {
         let (stop, tasks) = StopToken::new();
         Ok(Self {
             queue: WorkQueue::new(sql).await?,
-            docs: Client::direct(Arc::new(DocsStub(send))),
+            docs: Client::new(Transport::direct(Arc::new(DocsStub(send)))),
             requests,
             mints,
             minted: Vec::new(),
@@ -648,7 +649,7 @@ async fn a_member_parked_before_its_content_arrives_is_read_again_when_it_materi
     let (blobs, blobs_stop) = crate::boot(crate::Config {
         storage: crate::Storage::memory().unwrap(),
         sql: sql.clone(),
-        authority: Client::direct(Arc::new(UnusedAuthority)),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
         namespace: big_cabinet_core::authority::Namespace {
             namespace_id: big_cabinet_core::dmeta::Uuid7::new(),
             capability: CapId::from_bytes([127; 16]),
@@ -660,7 +661,7 @@ async fn a_member_parked_before_its_content_arrives_is_read_again_when_it_materi
         denied: tokio::sync::Notify::new(),
         served: tokio::sync::Notify::new(),
     });
-    let docs = Client::<DocsProtocol>::direct(Arc::clone(&docs_stub));
+    let docs = Client::new(Transport::<DocsProtocol>::direct(Arc::clone(&docs_stub)));
     let parts: SharedPartStore = Arc::new(big_sync::MemoryPartStore::new());
     let queue = WorkQueue::new(sql.clone()).await?;
     sql.apply_migrations(
