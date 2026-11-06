@@ -9,6 +9,8 @@
 use clay_mdk::Access;
 use clay_mdk::AttachmentDeclaration;
 use clay_mdk::BindingResolution;
+use clay_mdk::ComponentDecl;
+use clay_mdk::ConfigDecl;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::ContributionDeclaration;
 use clay_mdk::Entrypoints;
@@ -16,6 +18,7 @@ use clay_mdk::FacetAccess;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
+use clay_mdk::PackageDecl;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
@@ -49,6 +52,39 @@ pub const INCREMENT: &str = "increment";
 pub const TOOLBAR_BINDING: &str = "toolbar";
 /// The local binding name under which the counter contributes its layout panel.
 pub const PANELS_BINDING: &str = "panels";
+
+/// The counter package's identity.
+pub struct Counter;
+
+impl PackageDecl for Counter {
+    const ID: &'static str = ID;
+    const VERSION: u32 = PACKAGE_VERSION;
+    const AUTHORITY: &'static str = AUTHORITY;
+}
+
+/// The counter's configuration facet: the count, a plain `u64`.
+pub struct CounterConfig;
+
+impl ConfigDecl for CounterConfig {
+    const BINDING: &'static str = CONFIG_NAME;
+    const NSID: &'static str = CONFIG_TAG;
+    const KEY: &'static str = CONFIG_KEY;
+    type Value = u64;
+}
+
+/// The counter's full presentation, published as [`VIEW`].
+pub struct CounterView;
+
+impl ComponentDecl for CounterView {
+    const NAME: &'static str = VIEW;
+}
+
+/// The counter's compact presentation, published as [`BADGE`].
+pub struct CounterBadge;
+
+impl ComponentDecl for CounterBadge {
+    const NAME: &'static str = BADGE;
+}
 
 pub fn manifest() -> MicroManifest {
     MicroManifest {

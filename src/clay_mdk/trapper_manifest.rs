@@ -20,6 +20,13 @@ pub const VIEW: &str = "view";
 /// micro). The shell's Settings reads rows of this contract.
 const SECTIONS: &str = "org.example.dayframe.settings.sections";
 
+/// The trapper's one presentation, published as [`VIEW`].
+pub struct TrapperView;
+
+impl clay_mdk::ComponentDecl for TrapperView {
+    const NAME: &'static str = VIEW;
+}
+
 pub fn manifest() -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),

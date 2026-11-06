@@ -14,11 +14,15 @@ use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionContract;
+use clay_mdk::CollectionDecl;
+use clay_mdk::ComponentDecl;
 use clay_mdk::ContributionDeclaration;
+use clay_mdk::DeclaredCollection;
 use clay_mdk::Entrypoints;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
+use clay_mdk::PackageDecl;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
@@ -60,6 +64,39 @@ pub struct Button {
     /// A name from the toolbar's icon vocabulary (`"plus"`); the toolbar decides how it draws.
     pub icon: String,
     pub action: Attachment,
+}
+
+/// The Toolbar package's identity.
+pub struct Toolbar;
+
+impl PackageDecl for Toolbar {
+    const ID: &'static str = ID;
+    const VERSION: u32 = PACKAGE_VERSION;
+    const AUTHORITY: &'static str = AUTHORITY;
+}
+
+/// The Toolbar presentation, published as [`VIEW`].
+pub struct ToolbarView;
+
+impl ComponentDecl for ToolbarView {
+    const NAME: &'static str = VIEW;
+}
+
+/// The buttons collection, keyed by the contributor's chosen id.
+pub struct ToolbarButtons;
+
+impl CollectionDecl for ToolbarButtons {
+    const NSID: &'static str = BUTTONS;
+    type Key = String;
+    type Value = Button;
+}
+
+impl DeclaredCollection for ToolbarButtons {
+    const KEY_SCHEMA: &'static str = BUTTON_KEY_SCHEMA;
+    const VALUE_SCHEMA: &'static str = BUTTON_VALUE_SCHEMA;
+    const SELECTOR_SCHEMA: &'static str = BUTTON_SELECTOR_SCHEMA;
+    const OFFERED: &'static [CollectionCapability] =
+        &[CollectionCapability::Read, CollectionCapability::Register];
 }
 
 /// The Toolbar micro's package declaration: it declares the buttons collection, publishes its

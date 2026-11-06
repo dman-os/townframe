@@ -18,28 +18,8 @@ use clay_mdk::Instance;
 use clay_mdk::Operation;
 use contract::Section;
 pub use micro_settings_manifest as contract;
-use serde::Deserialize;
-use serde::Serialize;
-use std::collections::BTreeSet;
 
-/// The viewer's own preferences, kept in its configuration document: which sections are hidden
-/// and which come first, by contributing micro id.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SettingsConfig {
-    #[serde(default)]
-    pub hidden: BTreeSet<String>,
-    #[serde(default)]
-    pub order: Vec<String>,
-}
-
-impl SettingsConfig {
-    pub fn rank(&self, micro: &str) -> usize {
-        self.order
-            .iter()
-            .position(|name| name == micro)
-            .unwrap_or(usize::MAX)
-    }
-}
+pub use contract::SettingsConfig;
 
 /// What the shell lets Settings use, each required under the name of the shell publication it
 /// binds. Opening a section is not among them: a row opens itself through the list scaffold
@@ -101,25 +81,24 @@ pub async fn activate(context: Context) -> Result<(), Error> {
     let micro = SettingsMicro {
         instance: context.instance(),
         sections: context
-            .collection(contract::SECTIONS_BINDING)
+            .collection::<contract::SettingsSections>()
             .expect("configuration binds the sections collection"),
         config: context
-            .config(contract::CONFIG_NAME)
-            .expect("manifest declares Settings configuration")
-            .facet::<SettingsConfig>(contract::CONFIG_TAG, contract::CONFIG_KEY)?,
+            .config::<contract::SettingsPreferences>()?
+            .expect("manifest declares Settings configuration"),
         shell: ShellHandles {
             opened: required(contract::SHELL_OPENED),
             nav_button: required(contract::SHELL_NAV_BUTTON),
         },
     };
-    context.publish_component(contract::LIST, {
+    context.publish::<contract::SettingsListView>({
         let micro = micro.clone();
         move || {
             use dioxus::prelude::*;
             rsx! { SettingsList { micro: micro.clone() } }
         }
     })?;
-    context.publish_component(contract::SECTION, move || {
+    context.publish::<contract::SettingsSectionView>(move || {
         use dioxus::prelude::*;
         rsx! { SettingsSection { micro: micro.clone() } }
     })?;
@@ -147,6 +126,7 @@ mod tests {
     use clay_mdk::host::Resources;
     use clay_mdk::host::factory;
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
     use std::num::NonZeroUsize;
 
     #[test]
@@ -203,7 +183,7 @@ mod tests {
                 CollectionBindings::new([]),
                 |context| async move {
                     use dioxus::prelude::*;
-                    context.publish_component(micro_shell_manifest::NAV_BUTTON, || {
+                    context.publish::<micro_shell_manifest::ShellNavButton>(|| {
                         rsx! { button { "back" } }
                     })?;
                     context.publish_call(micro_shell_manifest::OPENED, |_: String| async {
@@ -248,16 +228,16 @@ mod tests {
                     eager: false,
                     enabled: true,
                     requirements: [contract::SHELL_OPENED, contract::SHELL_NAV_BUTTON]
-                    .map(|publication| {
-                        (
-                            publication.to_owned(),
-                            Requirement {
-                                provider: shell_id.clone(),
-                                publication: publication.to_owned(),
-                            },
-                        )
-                    })
-                    .into(),
+                        .map(|publication| {
+                            (
+                                publication.to_owned(),
+                                Requirement {
+                                    provider: shell_id.clone(),
+                                    publication: publication.to_owned(),
+                                },
+                            )
+                        })
+                        .into(),
                     unresolved_bindings: Vec::new(),
                     factory: factory(
                         resources,

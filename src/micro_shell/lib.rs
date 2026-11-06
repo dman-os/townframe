@@ -277,12 +277,11 @@ impl Shell {
 /// so they exist before this runs.
 pub async fn activate(context: Context) -> Result<(), Error> {
     let panels: Collection<String, Panel> = context
-        .collection(contract::PANELS_BINDING)
+        .collection::<contract::ShellPanels>()
         .expect("configuration binds the panels collection");
     let config = context
-        .config(contract::CONFIG_NAME)
-        .expect("manifest declares the shell configuration")
-        .facet::<ShellConfig>(contract::CONFIG_TAG, contract::CONFIG_KEY)?;
+        .config::<contract::ShellArrangement>()?
+        .expect("manifest declares the shell configuration");
     let (state, _) = watch::channel(State::default());
     let shell = Shell {
         state: Rc::new(state),
@@ -291,14 +290,18 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         started: Rc::default(),
     };
 
-    for (name, view) in [
-        (contract::FRAME, view::frame as fn(Shell) -> Element),
-        (contract::HOME, view::home),
-        (contract::NAV_BUTTON, view::navigation_button),
-    ] {
+    context.publish::<contract::ShellFrame>({
         let shell = shell.clone();
-        context.publish_component(name, move || view(shell.clone()))?;
-    }
+        move || view::frame(shell.clone())
+    })?;
+    context.publish::<contract::ShellHome>({
+        let shell = shell.clone();
+        move || view::home(shell.clone())
+    })?;
+    context.publish::<contract::ShellNavButton>({
+        let shell = shell.clone();
+        move || view::navigation_button(shell.clone())
+    })?;
 
     context.publish_call(contract::NAVIGATE, {
         let shell = shell.clone();

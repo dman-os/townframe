@@ -13,8 +13,13 @@
 //! Handles are plain values a component captures in its `render` closure: there is no ambient
 //! context to look up. Components subscribe through the hooks in [`crate::hooks`].
 use crate::Collection;
+use crate::CollectionDecl;
+use crate::ComponentDecl;
+use crate::ConfigDecl;
 use crate::FacetState;
 use crate::Registration;
+use crate::manifest::Access;
+use crate::manifest::Request;
 use crate::rows::Minter;
 use crate::rows::Writer;
 use serde::Serialize;
@@ -361,7 +366,15 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 pub struct RowAttachment(String);
 
 impl RowAttachment {
-    pub fn own(publication: impl Into<String>) -> Self {
+    /// The presentation `P` this micro publishes.
+    pub fn own<P: ComponentDecl>() -> Self {
+        Self(P::NAME.into())
+    }
+
+    /// One of this micro's publications named by data instead of by declaration: a call
+    /// publication (calls stay named by string until they are declared by their `Method`
+    /// request type), or a name the caller does not control.
+    pub fn by_name(publication: impl Into<String>) -> Self {
         Self(publication.into())
     }
 
@@ -406,7 +419,7 @@ impl Config {
     }
 
     /// The typed facet `tag`/`key_id` of this document, watched for the incarnation's life.
-    pub fn facet<T: DeserializeOwned + Serialize>(
+    pub(crate) fn facet<T: DeserializeOwned + Serialize>(
         &self,
         tag: &str,
         key_id: &str,
@@ -602,6 +615,9 @@ pub(crate) struct Shared {
     pub(crate) configs: BTreeMap<String, Config>,
     /// Every requirement the manifest declares; an optional one nothing resolved holds `None`.
     pub(crate) requirements: BTreeMap<String, Option<Capability>>,
+    /// The manifest's collection requests, which resolve a declared collection type to the
+    /// binding name this micro requested it under.
+    pub(crate) requests: Vec<Request>,
     pub(crate) backend: Backend,
 }
 
@@ -692,10 +708,16 @@ impl Context {
         }
     }
 
-    /// The configuration document granted under `name`, or `None` when the manifest declared
-    /// no such binding or the composition activated the micro standalone.
-    pub fn config(&self, name: &str) -> Option<&Config> {
-        self.0.configs.get(name)
+    /// The facet `C` declares, watched for the incarnation's life, or `None` when the
+    /// composition activated the micro standalone and granted no document under `C::BINDING`.
+    ///
+    /// Panics when the manifest requests no configuration under `C::BINDING`.
+    pub fn config<C: ConfigDecl>(&self) -> Result<Option<Facet<C::Value>>, Error> {
+        self.0
+            .configs
+            .get(C::BINDING)
+            .map(|config| config.facet(C::NSID, C::KEY))
+            .transpose()
     }
 
     /// The reference that satisfies requirement `binding`, or `None` when configuration bound
@@ -710,12 +732,49 @@ impl Context {
             .as_ref()
     }
 
-    /// Mirror the collection bound to `binding`, or `None` when configuration left an optional
-    /// request unbound. The feed task is incarnation-owned.
+    /// The binding this micro requested collection `C` under with `access`. A read lookup
+    /// falls back to a write request, because writing implies reading.
     ///
-    /// Panics when the manifest declares no collection request `binding`, or the key or value
-    /// type does not match the collection's contract (rows crash on decode).
-    pub fn collection<K: DeserializeOwned + 'static, V: DeserializeOwned + 'static>(
+    /// Panics when the manifest has no such request, or has several (a micro that needs two
+    /// bindings to one contract with the same access cannot name them by type).
+    fn binding<C: CollectionDecl>(&self, access: Access) -> &str {
+        let matching = |access: &Access| {
+            let mut requests = self.0.requests.iter().filter(|request| {
+                request.contract.as_str() == C::NSID && request.access.as_ref() == Some(access)
+            });
+            let first = requests.next();
+            assert!(
+                requests.next().is_none(),
+                "the manifest requests {} {access:?} under several bindings",
+                C::NSID
+            );
+            first
+        };
+        let request = matching(&access)
+            .or_else(|| {
+                (access == Access::Read)
+                    .then(|| matching(&Access::Write))
+                    .flatten()
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the manifest declares no {access:?} request for collection {}",
+                    C::NSID
+                )
+            });
+        &request.binding
+    }
+
+    /// Mirror collection `C`, bound under the binding this micro's manifest requested it
+    /// under, or `None` when configuration left an optional request unbound. The feed task is
+    /// incarnation-owned.
+    ///
+    /// Panics when the manifest declares no collection request for `C`.
+    pub fn collection<C: CollectionDecl>(&self) -> Option<Collection<C::Key, C::Value>> {
+        self.mirror(self.binding::<C>(Access::Read))
+    }
+
+    fn mirror<K: DeserializeOwned + 'static, V: DeserializeOwned + 'static>(
         &self,
         binding: &str,
     ) -> Option<Collection<K, V>> {
@@ -724,37 +783,26 @@ impl Context {
         Some(collection)
     }
 
-    /// Write authority over the collection bound to `binding`, together with its mirror, or
-    /// `None` when configuration left it unbound. The writer's rows belong to this incarnation
-    /// and are retracted when it closes.
+    /// Write authority over collection `C`, together with its mirror, or `None` when
+    /// configuration left it unbound. The writer's rows belong to this incarnation and are
+    /// retracted when it closes.
     ///
-    /// Panics when the manifest's request for `binding` is read-only.
-    pub fn registration<
-        K: Serialize + DeserializeOwned + 'static,
-        V: Serialize + DeserializeOwned + 'static,
-    >(
-        &self,
-        binding: &str,
-    ) -> Option<Registration<K, V>> {
+    /// Panics when the manifest requests no write access to `C`.
+    pub fn registration<C: CollectionDecl>(&self) -> Option<Registration<C::Key, C::Value>> {
+        let binding = self.binding::<C>(Access::Write);
         let writer = self.0.backend.writer(binding)?;
-        Some(Registration::new(
-            Rc::new(writer),
-            self.collection(binding)?,
-        ))
+        Some(Registration::new(Rc::new(writer), self.mirror(binding)?))
     }
 
-    /// Stage the presentation publication `name` whose component renders `render`. The name
-    /// must be one the manifest declares as a presentation; admission checks that once
-    /// `activate` returns, and nothing is reachable by other micros before then. Any number of
+    /// Stage the presentation publication `P` whose component renders `render`. `P::NAME` must
+    /// be one the manifest declares as a presentation; admission checks that once `activate`
+    /// returns, and nothing is reachable by other micros before then. Any number of
     /// presentations may be published, one per declared name.
-    ///
-    /// Returns the staged publication, which a row can attach (see [`Registration::put`]).
-    pub fn publish_component(
+    pub fn publish<P: ComponentDecl>(
         &self,
-        name: &str,
         render: impl Fn() -> dioxus_core::Element + 'static,
     ) -> Result<(), Error> {
-        self.0.backend.publish_component(name, Rc::new(render))
+        self.0.backend.publish_component(P::NAME, Rc::new(render))
     }
 
     /// Stage the call publication `name`, served by `handler` under the contract the manifest

@@ -18,13 +18,18 @@ use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionContract;
+use clay_mdk::CollectionDecl;
+use clay_mdk::ComponentDecl;
+use clay_mdk::ConfigDecl;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::ContributionDeclaration;
+use clay_mdk::DeclaredCollection;
 use clay_mdk::Entrypoints;
 use clay_mdk::FacetAccess;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
+use clay_mdk::PackageDecl;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
@@ -79,6 +84,49 @@ pub struct Panel {
 pub struct LayoutConfig {
     #[serde(default)]
     pub visible: Vec<String>,
+}
+
+/// The Layout package's identity.
+pub struct Layout;
+
+impl PackageDecl for Layout {
+    const ID: &'static str = ID;
+    const VERSION: u32 = PACKAGE_VERSION;
+    const AUTHORITY: &'static str = AUTHORITY;
+}
+
+/// The Layout presentation, published as [`VIEW`].
+pub struct LayoutView;
+
+impl ComponentDecl for LayoutView {
+    const NAME: &'static str = VIEW;
+}
+
+/// The viewer's arrangement facet.
+pub struct LayoutArrangement;
+
+impl ConfigDecl for LayoutArrangement {
+    const BINDING: &'static str = CONFIG_NAME;
+    const NSID: &'static str = CONFIG_TAG;
+    const KEY: &'static str = CONFIG_KEY;
+    type Value = LayoutConfig;
+}
+
+/// The panels collection the layout arranges, keyed by registration id.
+pub struct LayoutPanels;
+
+impl CollectionDecl for LayoutPanels {
+    const NSID: &'static str = PANELS;
+    type Key = String;
+    type Value = Panel;
+}
+
+impl DeclaredCollection for LayoutPanels {
+    const KEY_SCHEMA: &'static str = PANEL_KEY_SCHEMA;
+    const VALUE_SCHEMA: &'static str = PANEL_VALUE_SCHEMA;
+    const SELECTOR_SCHEMA: &'static str = PANEL_SELECTOR_SCHEMA;
+    const OFFERED: &'static [CollectionCapability] =
+        &[CollectionCapability::Read, CollectionCapability::Register];
 }
 
 /// The Layout micro's package declaration: it declares the panels collection, publishes its

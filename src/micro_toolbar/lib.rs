@@ -17,9 +17,9 @@ use std::collections::BTreeSet;
 /// its view, which the shell mounts as a root.
 pub async fn activate(context: Context) -> Result<(), Error> {
     let buttons: Collection<String, Button> = context
-        .collection(contract::BUTTONS_BINDING)
+        .collection::<contract::ToolbarButtons>()
         .expect("configuration binds the buttons collection");
-    context.publish_component(contract::VIEW, move || view(&buttons))?;
+    context.publish::<contract::ToolbarView>(move || view(&buttons))?;
     Ok(())
 }
 

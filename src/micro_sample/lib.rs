@@ -8,6 +8,8 @@ use clay_mdk::Access;
 use clay_mdk::Attachment;
 use clay_mdk::AttachmentDeclaration;
 use clay_mdk::BindingResolution;
+use clay_mdk::ComponentDecl;
+use clay_mdk::ConfigDecl;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::Context;
 use clay_mdk::ContributionDeclaration;
@@ -27,6 +29,7 @@ use dioxus::prelude::*;
 use micro_layout_manifest::PANELS;
 use micro_settings_manifest::SECTIONS;
 use micro_settings_manifest::Section;
+use micro_settings_manifest::SettingsSections;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -48,6 +51,23 @@ pub const PANELS_BINDING: &str = "panels";
 pub struct SampleConfig {
     pub enabled: bool,
     pub greeting: String,
+}
+
+/// The sample's configuration facet.
+pub struct SampleFacet;
+
+impl ConfigDecl for SampleFacet {
+    const BINDING: &'static str = CONFIG_NAME;
+    const NSID: &'static str = CONFIG_TAG;
+    const KEY: &'static str = CONFIG_KEY;
+    type Value = SampleConfig;
+}
+
+/// The detail presentation, published as [`DETAIL`].
+pub struct SampleDetailView;
+
+impl ComponentDecl for SampleDetailView {
+    const NAME: &'static str = DETAIL;
 }
 
 /// The Sample micro's compile-time declaration: it publishes its detail presentation and
@@ -122,14 +142,13 @@ pub fn sidecar() -> Sidecar {
 /// long as this incarnation.
 pub async fn activate(context: Context) -> Result<(), Error> {
     let config = context
-        .config(CONFIG_NAME)
-        .expect("manifest declares the sample configuration binding")
-        .facet::<SampleConfig>(CONFIG_TAG, CONFIG_KEY)?;
-    context.publish_component(DETAIL, move || {
+        .config::<SampleFacet>()?
+        .expect("manifest declares the sample configuration binding");
+    context.publish::<SampleDetailView>(move || {
         dioxus::prelude::rsx! { view::SampleDetail { config: config.clone() } }
     })?;
     context
-        .registration::<String, Section>(SECTIONS_BINDING)
+        .registration::<SettingsSections>()
         .expect("configuration binds the sections collection")
         .put(
             &ID.to_owned(),
@@ -137,7 +156,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
                 title: "Sample micro".into(),
                 detail: Attachment::at(0),
             },
-            vec![RowAttachment::own(DETAIL)],
+            vec![RowAttachment::own::<SampleDetailView>()],
         )
         .await?;
     Ok(())

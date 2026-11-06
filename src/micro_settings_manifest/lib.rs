@@ -19,19 +19,25 @@ use clay_mdk::Attachment;
 use clay_mdk::BindingResolution;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionContract;
+use clay_mdk::CollectionDecl;
+use clay_mdk::ComponentDecl;
+use clay_mdk::ConfigDecl;
 use clay_mdk::ConfigurationRequest;
 use clay_mdk::ContributionDeclaration;
+use clay_mdk::DeclaredCollection;
 use clay_mdk::Entrypoints;
 use clay_mdk::FacetAccess;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
+use clay_mdk::PackageDecl;
 use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
 use clay_mdk::Sidecar;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 pub const ID: &str = "dayframe.settings";
 pub const PACKAGE_VERSION: u32 = 1;
@@ -68,6 +74,75 @@ pub const SECTION_SELECTOR_SCHEMA: &str = "org.example.dayframe.settings.section
 pub struct Section {
     pub title: String,
     pub detail: Attachment,
+}
+
+/// The viewer's own preferences, kept in its configuration document: which sections are hidden
+/// and which come first, by contributing micro id.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SettingsConfig {
+    #[serde(default)]
+    pub hidden: BTreeSet<String>,
+    #[serde(default)]
+    pub order: Vec<String>,
+}
+
+impl SettingsConfig {
+    pub fn rank(&self, micro: &str) -> usize {
+        self.order
+            .iter()
+            .position(|name| name == micro)
+            .unwrap_or(usize::MAX)
+    }
+}
+
+/// The Settings package's identity.
+pub struct Settings;
+
+impl PackageDecl for Settings {
+    const ID: &'static str = ID;
+    const VERSION: u32 = PACKAGE_VERSION;
+    const AUTHORITY: &'static str = AUTHORITY;
+}
+
+/// The Settings list presentation, published as [`LIST`].
+pub struct SettingsListView;
+
+impl ComponentDecl for SettingsListView {
+    const NAME: &'static str = LIST;
+}
+
+/// The presentation of the section the shell has open, published as [`SECTION`].
+pub struct SettingsSectionView;
+
+impl ComponentDecl for SettingsSectionView {
+    const NAME: &'static str = SECTION;
+}
+
+/// The viewer's preferences facet.
+pub struct SettingsPreferences;
+
+impl ConfigDecl for SettingsPreferences {
+    const BINDING: &'static str = CONFIG_NAME;
+    const NSID: &'static str = CONFIG_TAG;
+    const KEY: &'static str = CONFIG_KEY;
+    type Value = SettingsConfig;
+}
+
+/// The sections collection, keyed by the contributing micro's id.
+pub struct SettingsSections;
+
+impl CollectionDecl for SettingsSections {
+    const NSID: &'static str = SECTIONS;
+    type Key = String;
+    type Value = Section;
+}
+
+impl DeclaredCollection for SettingsSections {
+    const KEY_SCHEMA: &'static str = SECTION_KEY_SCHEMA;
+    const VALUE_SCHEMA: &'static str = SECTION_VALUE_SCHEMA;
+    const SELECTOR_SCHEMA: &'static str = SECTION_SELECTOR_SCHEMA;
+    const OFFERED: &'static [CollectionCapability] =
+        &[CollectionCapability::Read, CollectionCapability::Register];
 }
 
 /// The Settings micro's package declaration: it declares the sections collection, publishes its

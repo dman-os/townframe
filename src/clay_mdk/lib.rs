@@ -514,6 +514,22 @@ mod native;
 
 #[cfg(feature = "contract")]
 mod attachment;
+#[cfg(feature = "contract")]
+mod decl;
+#[cfg(feature = "contract")]
+pub use decl::CollectionDecl;
+#[cfg(feature = "contract")]
+pub use decl::ComponentDecl;
+#[cfg(feature = "contract")]
+pub use decl::ConfigDecl;
+#[cfg(feature = "contract")]
+pub use decl::DeclaredCollection;
+#[cfg(feature = "contract")]
+pub use decl::PackageDecl;
+#[cfg(feature = "contract")]
+pub use decl::RootRow;
+#[cfg(feature = "contract")]
+pub use decl::ShellRoots;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod context;
 #[cfg(any(feature = "in_process", feature = "guest"))]
