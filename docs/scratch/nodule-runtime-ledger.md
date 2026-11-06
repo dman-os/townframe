@@ -647,6 +647,15 @@ Big_cabinet read/write options discussed with the operator 2026-11-06, deferred 
 
 ## Open questions for the operator
 
+- **`day` CLI (landed `39888307`), questions from the port:**
+  1. **Wrapping key scope.** `big_cabinet::authority` keeps one fixed keyring entry (`big_cabinet.authority` / `wrapping`), so every node on a machine shares one wrapping key. Two first boots racing on a fresh keyring can each create a different one. The CLI's blackbox tests spawn the real binary, which uses the platform keyring: they read or create that shared entry in the operator's real keyring (create-if-missing, never delete). Options: scope the entry by node id, or keep the wrapping key in the node directory.
+  2. **Socket location.** `<node>/run/node.sock` (deterministic per node; ~100-byte `sun_path` limit, checked up front) vs ADR 032's `$XDG_RUNTIME_DIR` plus a hash of the node path.
+  3. **`day init` on an existing node** exits 1 and changes nothing; daybook warned and exited 0.
+  4. **`nodule_operations` default** in `node.json` is empty (nodules can invoke nothing); the big_node tests use `{authorities: ["org.example"]}`.
+  5. **Peers.** Should the daemon attach peers from config? That needs an operator-facing `PeersConfig` and a peers operation for `status`.
+  6. **Identity seed at rest.** `node.json` holds the seed in a 0600 file, not the keyring; ADR 032 says data is encrypted at rest.
+  - Gaps big_node exposes: no operation lists providers/operations, reports the node id, peers, readiness or version, or stops the node (the CLI uses SIGTERM plus the pid in its lock file).
+
 - Lifecycle review questions 1–7: resolved 2026-11-04. See ADR 027 §10 and ADR 028.
 
 - The seven questions at the end of `docs/scratch/nodule-lifecycle-review.md` (catalog role, dependency split, manifest reshape, init redesign, downgrades, retired prefixes, carried drawer-grant authority).
