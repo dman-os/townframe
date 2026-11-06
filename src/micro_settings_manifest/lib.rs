@@ -14,27 +14,19 @@
 //! back button, which Settings requires from it ([`SHELL_OPENED`], [`SHELL_NAV_BUTTON`]). Opening
 //! a row is the list scaffold's `ListRow`, which reaches the shell's navigation through the
 //! scaffold, so Settings never calls `navigate` itself.
-use clay_mdk::Access;
 use clay_mdk::Attachment;
-use clay_mdk::BindingResolution;
 use clay_mdk::CollectionCapability;
-use clay_mdk::CollectionContract;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
 use clay_mdk::ConfigDecl;
-use clay_mdk::ConfigurationRequest;
-use clay_mdk::ContributionDeclaration;
 use clay_mdk::DeclaredCollection;
-use clay_mdk::Entrypoints;
-use clay_mdk::FacetAccess;
+use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
 use clay_mdk::PackageDecl;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
-use clay_mdk::Request;
 use clay_mdk::Sidecar;
+use micro_shell_manifest::ShellPanels;
+use micro_shell_manifest::Socket;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -149,96 +141,41 @@ impl DeclaredCollection for SettingsSections {
 /// list and section presentations, requires the shell's navigation, and contributes its panel
 /// row to the shell.
 pub fn manifest() -> MicroManifest {
-    let presentation = |name: &str| PublicationDeclaration {
-        name: name.into(),
-        kind: PublicationKind::Presentation,
-        contract: None,
-    };
-    let requires = |binding: &str, contract: &str| Request {
-        binding: binding.into(),
-        contract: Nsid::literal(contract),
-        access: None,
-        necessity: Necessity::Required,
-        resolution: BindingResolution::Configured,
-        min_revision: None,
-    };
-    MicroManifest {
-        entrypoints: Entrypoints::micro_client(),
-        publications: vec![presentation(LIST), presentation(SECTION)],
-        requires: vec![
-            requires(SHELL_OPENED, micro_shell_manifest::OPENED_CONTRACT),
-            requires(SHELL_NAV_BUTTON, micro_shell_manifest::NAV_BUTTON_CONTRACT),
-        ],
-        configuration_requests: vec![ConfigurationRequest {
-            binding: CONFIG_NAME.into(),
-            facets: vec![FacetAccess {
-                tag: Nsid::literal(CONFIG_TAG),
-                key_id: Some(CONFIG_KEY.into()),
-                read: true,
-                write: true,
-                create: false,
-                delete: false,
-            }],
-        }],
-        collection_contracts: vec![CollectionContract {
-            id: Nsid::literal(SECTIONS),
-            selector_schema: Nsid::literal(SECTION_SELECTOR_SCHEMA),
-            key_schema: Nsid::literal(SECTION_KEY_SCHEMA),
-            value_schema: Nsid::literal(SECTION_VALUE_SCHEMA),
-            write_context_schema: None,
-            offered: vec![CollectionCapability::Read, CollectionCapability::Register],
-        }],
+    ManifestBuilder::new()
+        .component::<SettingsListView>()
+        .component::<SettingsSectionView>()
+        .requires(
+            SHELL_OPENED,
+            micro_shell_manifest::OPENED_CONTRACT,
+            Necessity::Required,
+        )
+        .requires(
+            SHELL_NAV_BUTTON,
+            micro_shell_manifest::NAV_BUTTON_CONTRACT,
+            Necessity::Required,
+        )
+        .config::<SettingsPreferences>()
+        .declares::<SettingsSections>()
         // Settings reads sections through a binding configuration resolves; with one declared
         // sections collection the default binds it. It also writes its panel row into the
         // shell's panels collection.
-        collection_requests: vec![
-            Request {
-                binding: SECTIONS_BINDING.into(),
-                contract: Nsid::literal(SECTIONS),
-                access: Some(Access::Read),
-                necessity: Necessity::Required,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-            Request {
-                binding: PANELS_BINDING.into(),
-                contract: Nsid::literal(micro_shell_manifest::PANELS),
-                access: Some(Access::Write),
-                necessity: Necessity::Required,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-        ],
+        .reads::<SettingsSections>(SECTIONS_BINDING, Necessity::Required)
+        .writes::<ShellPanels>(PANELS_BINDING, Necessity::Required)
         // Declared, not written at runtime: the shell lists Settings on home while it is
         // stopped, and opening it is what starts it.
-        contributions: vec![ContributionDeclaration {
-            id: "panel".into(),
-            binding: PANELS_BINDING.into(),
-            key: ID.into(),
-            payload: serde_json::json!({
-                "title": "Settings",
-                "sockets": ["list"],
-                "content": { "$attachment": 0 },
-                "details": { "$attachment": 1 },
-            }),
-            attachments: vec![
-                clay_mdk::AttachmentDeclaration {
-                    index: 0,
-                    publication: LIST.into(),
-                },
-                clay_mdk::AttachmentDeclaration {
-                    index: 1,
-                    publication: SECTION.into(),
-                },
-            ],
-        }],
-        extra: Default::default(),
-    }
+        .contributes::<ShellPanels>("panel", ID, |at| micro_shell_manifest::Panel {
+            title: "Settings".into(),
+            sockets: vec![Socket::List],
+            content: at.own::<SettingsListView>(),
+            details: Some(at.own::<SettingsSectionView>()),
+            home: false,
+        })
+        .build()
 }
 
 /// The Settings package as its sidecar carries it: identity, authority and manifest.
 pub fn sidecar() -> Sidecar {
-    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
+    Sidecar::of::<Settings>(manifest())
 }
 
 #[cfg(test)]
