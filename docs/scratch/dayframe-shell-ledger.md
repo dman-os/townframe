@@ -512,6 +512,31 @@ tolerance.
 Product questions: (1) full-height compact sheet vs 5/6; (2) approve `INTERACTION-007` and the new
 foundation tokens (`layer`, `motion`, `scrim`, `selected`); (3) should overlay scrims bleed under
 the system bars once guests can learn insets; (4) a kit icon button for trailing app-bar actions.
+## A1 notes (Android on an emulator)
+
+- Branch `feat/dayframe-android` rebased onto `feat/dayframe-shell` (conflicts in the desktop composition and main: the shell micro,
+  `HostInputs` and the `assemble(engine)` seam moved into `dayframe_native`: `native_runtime(.., engine: impl PackageEngine)`,
+  `wasmtime_engine`, `Shell`, `use_host_inputs`). Desktop keeps `desktop_runtime` and `assemble` for the Wasmi e2e.
+- Ran the APK on an API 36 x86_64 emulator: shell, SQLite, Wasmtime load, touch, sidebar, insets, system back. Details, paths and
+  gaps in `docs/scratch/dayframe-android.md` (A1 section).
+- Fixed: insets into `HostInputs` (JNI `WindowInsets`), predictive-back system back (MainActivity callback + `SYSTEM_BACK`),
+  `x/dayframe.ts android --abi x86_64`.
+- Pinned, not fixed: debug builds SIGSEGV in the emulator's Vulkan debug-label call (workaround `wrap.<pkg>` WGPU env); Wasm guest
+  on Android still unconfirmed; arm64 and release builds not re-run after the shell rebase.
+- Tests: `dayframe_native::tests::system_back_is_claimed_only_while_the_shell_can_go_back`; clippy clean for dayframe_desktop
+  (all targets) and dayframe_native/dayframe_mobile on x86_64-linux-android.
+
+
+## A2 notes (Android on the user's phone)
+
+- The phone (ZTE 8050, API 33, Mali) was attached and then taken away before an APK existed; no device step ran. The arm64 debug
+  build was stopped twice at the 15 GB disk floor (about 560 of 1925 crates compiled) and the release build was not started.
+- Fixed: `x/dayframe.ts android` called `prepareDayframePackages()` without its new `{ testFixtures }` argument after the shell
+  rebase, so it crashed before building anything.
+- The exact adb checklist for the next phone session (Mali render, back key and gesture on API 33, sidebar edge swipe, Counter
+  Wasm guest, Layout show/hide, IME, cold start, meminfo) is in `docs/scratch/dayframe-android.md` (A2 section).
+- Disk: removed the emulator SDK and the worktree's host `debug/` target dir; the volume still sits near the floor, so an arm64
+  build wants a quiet host and about 12 GB free.
 
 ## K5 notes: a guest trap in a sync export in the browser
 
