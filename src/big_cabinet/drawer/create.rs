@@ -617,11 +617,11 @@ impl DrawerService {
                     .drawer_id,
             );
         }
-        // The registry and node config drawers are fresh self-doc drawers: metadata docs that are
+        // The known-drawers and node config drawers are fresh self-doc drawers: metadata docs that are
         // their own drawers, whose entries are bookkeeping/config datums on them, and a foreign
         // layout arriving from a peer is carried rather than operated, as anywhere else.
         let mut self_docs = Vec::with_capacity(2);
-        for command in ["local drawer registry", "local drawer config"] {
+        for command in ["local known drawers", "local drawer config"] {
             let command = CommandId::try_from(command.to_owned())
                 .expect("the local self-doc drawer commands are within bounds");
             let receipt = self
@@ -672,7 +672,7 @@ impl DrawerService {
         }
         let [present, originated]: [DrawerId; 2] =
             created.try_into().expect("two local drawers were created");
-        let [registry_id, config_id]: [DrawerId; 2] = self_docs
+        let [known_drawers_id, config_id]: [DrawerId; 2] = self_docs
             .try_into()
             .expect("two local self-doc drawers were created");
         self.core
@@ -680,7 +680,7 @@ impl DrawerService {
             .set_local(LocalDrawers {
                 present_id: present,
                 originated_id: originated,
-                registry_id,
+                known_drawers_id,
                 config_id,
             })
             .await

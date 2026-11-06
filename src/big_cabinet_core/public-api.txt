@@ -280,7 +280,7 @@ pub struct big_cabinet_core::drawer::protocol::ListDrawers  { capability: CapId 
 pub struct big_cabinet_core::drawer::protocol::ListKnownDrawers  { capability: CapId }
 pub struct big_cabinet_core::drawer::protocol::ListedDoc  { doc_id: DocId, access: Access, via: Option < DrawerId > }
 pub struct big_cabinet_core::drawer::protocol::ListedDrawer  { drawer_id: DrawerId, layout: DrawerLayout, descriptor: Drawer, access: Access }
-pub struct big_cabinet_core::drawer::protocol::LocalDrawers  { present_id: DrawerId, originated_id: DrawerId, registry_id: DrawerId, config_id: DrawerId }
+pub struct big_cabinet_core::drawer::protocol::LocalDrawers  { present_id: DrawerId, originated_id: DrawerId, known_drawers_id: DrawerId, config_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::MetaDocCreated  { drawer_id: DrawerId, kind: String, name: String, root: MetaRoot, doc_id: DocId, heads: Vec < ChangeHash > }
 pub struct big_cabinet_core::drawer::protocol::MintDrawerCapability  { scope: DrawerScope, rights: Rights }
 pub struct big_cabinet_core::drawer::protocol::RememberDrawer  { capability: CapId, drawer_id: DrawerId, mirror: bool }

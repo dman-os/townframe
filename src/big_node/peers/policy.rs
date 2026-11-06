@@ -24,7 +24,7 @@ pub struct PolicyContext {
 }
 
 impl PolicyContext {
-    /// This node's own mirror intent (ADR 019): the known-drawers registry's `mirror` entries.
+    /// This node's own mirror intent (ADR 019): the known-drawers list's `mirror` entries.
     pub async fn mirrored(&self) -> Res<Mirrored> {
         Ok(self.drawers.mirrored(&RequestContext::root()).await?)
     }

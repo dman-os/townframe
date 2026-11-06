@@ -64,7 +64,10 @@ async fn registry_capability(node: &BigNode) -> CapId {
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
                 scope: DrawerScope {
-                    drawers: BTreeMap::from([(node.drawers.local().registry_id, Access::Admin)]),
+                    drawers: BTreeMap::from([(
+                        node.drawers.local().known_drawers_id,
+                        Access::Admin,
+                    )]),
                     create: false,
                 },
                 rights: Rights::USE,

@@ -414,7 +414,7 @@ impl ScriptRun {
             .grant(
                 &RequestContext::root(),
                 alice.actor_id,
-                drawer_object(Access::Admin, &node.local().registry_id),
+                drawer_object(Access::Admin, &node.local().known_drawers_id),
                 Rights::USE,
                 None,
             )
@@ -447,7 +447,7 @@ impl ScriptRun {
     }
 
     /// Alice's capability for a script step: Admin on every model drawer, the home, and the
-    /// registry, minted afresh since a boot retires the previous one.
+    /// known-drawers list, minted afresh since a boot retires the previous one.
     async fn admin_capability(&self, node: &Node) -> CapId {
         node.mint_drawer(
             &self.alice,
@@ -456,7 +456,7 @@ impl ScriptRun {
                     .model
                     .drawers
                     .iter()
-                    .chain([&self.home, &node.local().registry_id])
+                    .chain([&self.home, &node.local().known_drawers_id])
                     .map(|drawer| (drawer.clone(), Access::Admin))
                     .collect(),
                 create: false,

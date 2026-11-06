@@ -1019,7 +1019,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
 }
 
 #[tokio::test]
-async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_known_registry() {
+async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_known_list() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
     let bob = node.actor("bob").await;
@@ -1114,7 +1114,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
     assert_eq!(docs[0].doc_id, doc);
     assert_eq!(docs[0].access, Access::Read);
 
-    // 3. Discovering and projecting synced-in drawers never auto-populates `registry_id`; only an
+    // 3. Discovering and projecting synced-in drawers never auto-populates `known_drawers_id`; only an
     //    explicit `RememberDrawer` adds a drawer to `ListKnownDrawers`.
     let known_before = node
         .drawers()
@@ -1122,7 +1122,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
             RequestContext::root(),
             ListKnownDrawers {
                 capability: node
-                    .drawer_capability(&node.drawers_actor, &[&node.local().registry_id])
+                    .drawer_capability(&node.drawers_actor, &[&node.local().known_drawers_id])
                     .await
                     .unwrap(),
             },
@@ -1136,7 +1136,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
             RequestContext::root(),
             RememberDrawer {
                 capability: node
-                    .drawer_capability(&node.drawers_actor, &[&node.local().registry_id])
+                    .drawer_capability(&node.drawers_actor, &[&node.local().known_drawers_id])
                     .await
                     .unwrap(),
                 drawer_id: parent.clone(),
@@ -1151,7 +1151,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
             RequestContext::root(),
             ListKnownDrawers {
                 capability: node
-                    .drawer_capability(&node.drawers_actor, &[&node.local().registry_id])
+                    .drawer_capability(&node.drawers_actor, &[&node.local().known_drawers_id])
                     .await
                     .unwrap(),
             },

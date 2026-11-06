@@ -820,7 +820,7 @@ readiness, and records required artifact declarations with materialization stubb
 [`big_nodule`](../../src/big_nodule/lib.rs) is the node-side service over that inventory
 and the first piece of §6 that runs: `big_node` boots it beside the document and drawer
 domains, under its own `nodules` subsystem actor and namespace, after `DrawerService`
-ensures the four local drawers (`present_id`, `originated_id`, `registry_id`, and the
+ensures the four local drawers (`present_id`, `originated_id`, `known_drawers_id`, and the
 `SelfDoc` node config drawer `config_id`) and grants `nodules_actor` write access to
 `config_id`. Portable desired configuration lives as independently addressed datums in
 that config drawer (`org.example.daybook.nodule.install/<plug_id>`,

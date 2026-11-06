@@ -1,30 +1,30 @@
 //! RememberDrawer, ForgetDrawer, ListKnownDrawers, SetDrawerPolicy: the known-drawers
-//! registry.
+//! list.
 //!
-//! The registry is an explicitly managed list, kept as `knownEntry/<drawerId>` datums on the
-//! local registry drawer — a self-doc drawer whose own doc is the durable home, so the list
+//! The known-drawers list is explicitly managed, kept as `knownEntry/<drawerId>` datums on the
+//! local known-drawers drawer — a self-doc drawer whose own doc is the durable home, so the list
 //! survives like every other drawer fact and a peer that syncs the doc sees what this node
 //! remembered. It is bookkeeping, not membership: remembering grants no access to the drawer,
 //! mirroring intent certifies no fetched or retained bytes, and forgetting edits nothing but
-//! the local registry. Nothing scans tags into it — only these operations write it.
+//! the local list. Nothing scans tags into it — only these operations write it.
 
 use super::*;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 
 impl Core {
-    /// The registry's `knownEntry` datums, read as this service at current heads.
+    /// The list's `knownEntry` datums, read as this service at current heads.
     pub(crate) async fn known_entries(
         &self,
         context: &RequestContext,
     ) -> Result<BTreeMap<DrawerId, KnownDrawerEntry>, DrawersError> {
-        let registry = self.state.local().registry_id;
+        let known_drawers = self.state.local().known_drawers_id;
         let read = self
             .as_signer(
                 context,
                 self.issuer,
                 DocScope {
-                    read: [registry.clone()].into(),
+                    read: [known_drawers.clone()].into(),
                     ..Default::default()
                 },
                 |capability| async move {
@@ -33,7 +33,7 @@ impl Core {
                             context.child(),
                             big_cabinet_core::doc::ReadDatums {
                                 capability,
-                                doc_id: registry,
+                                doc_id: known_drawers,
                                 at: At::Current,
                                 datums: None,
                                 optimistic: false,
@@ -54,17 +54,17 @@ impl Core {
                 big_cabinet_core::doc::DatumRead::Absent { .. } => continue,
                 other => {
                     return Err(DrawersError::RosterUnreadable(format!(
-                        "{key} on the registry: {other:?}"
+                        "{key} on the known-drawers list: {other:?}"
                     )));
                 }
             };
             let Some(drawer_id) = entry_target(&key) else {
                 return Err(DrawersError::RosterUnreadable(format!(
-                    "{key} on the registry does not name a drawer"
+                    "{key} on the known-drawers list does not name a drawer"
                 )));
             };
             let entry: KnownDrawerEntry = serde_json::from_value(value).map_err(|error| {
-                DrawersError::RosterUnreadable(format!("{key} on the registry: {error}"))
+                DrawersError::RosterUnreadable(format!("{key} on the known-drawers list: {error}"))
             })?;
             known.insert(drawer_id, entry);
         }
@@ -83,18 +83,18 @@ impl DrawerService {
         core.authorize(
             context,
             &caller.authority,
-            &core.state.local().registry_id,
+            &core.state.local().known_drawers_id,
             Access::Admin,
         )
         .await?;
-        let registry = core.state.local().registry_id;
+        let known_drawers = core.state.local().known_drawers_id;
         let entry = KnownDrawerEntry {
             mirror: params.mirror.then_some(true),
             extra: Default::default(),
         };
         core.write_roster(
             context,
-            &registry,
+            &known_drawers,
             None,
             BTreeMap::from([(
                 known_entry_key(&params.drawer_id),
@@ -120,14 +120,14 @@ impl DrawerService {
         core.authorize(
             context,
             &caller.authority,
-            &core.state.local().registry_id,
+            &core.state.local().known_drawers_id,
             Access::Admin,
         )
         .await?;
-        let registry = core.state.local().registry_id;
+        let known_drawers = core.state.local().known_drawers_id;
         core.write_roster(
             context,
-            &registry,
+            &known_drawers,
             None,
             Default::default(),
             std::collections::BTreeSet::from([known_entry_key(&params.drawer_id)]),
@@ -147,7 +147,7 @@ impl DrawerService {
         core.authorize(
             context,
             &caller.authority,
-            &core.state.local().registry_id,
+            &core.state.local().known_drawers_id,
             Access::Admin,
         )
         .await?;
@@ -172,7 +172,7 @@ impl DrawerService {
         core.authorize(
             context,
             &caller.authority,
-            &core.state.local().registry_id,
+            &core.state.local().known_drawers_id,
             Access::Admin,
         )
         .await?;

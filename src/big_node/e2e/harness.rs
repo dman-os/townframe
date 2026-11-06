@@ -354,7 +354,7 @@ impl Cluster {
                 MintDrawerCapability {
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(
-                            node.drawers.local().registry_id,
+                            node.drawers.local().known_drawers_id,
                             Access::Admin,
                         )]),
                         create: false,
@@ -678,9 +678,15 @@ impl Cluster {
             .unwrap()
             .contains(&big_blobs::workers::inventory_part(&drawer.inventory))
         {
-            let parts = node.blob_workers.parts.obj_parts(blob.into()).await.unwrap(); // INSTR
+            let parts = node
+                .blob_workers
+                .parts
+                .obj_parts(blob.into())
+                .await
+                .unwrap(); // INSTR
             tracing::info!(node = self.members[index].nickname, %blob, parts = parts.len(), "INSTR wait_blob_published not yet"); // INSTR
-            loop { // INSTR
+            loop {
+                // INSTR
                 tokio::select! { // INSTR
                     next = changes.next(RevisionReadLimits::default()) => { next.unwrap(); break; } // INSTR
                     () = tokio::time::sleep(std::time::Duration::from_secs(15)) => { // INSTR
@@ -820,7 +826,8 @@ impl Cluster {
                 break;
             }
             tracing::info!(node = self.members[index].nickname, gaps = ?coverage.gaps, "INSTR blob_arrives coverage gaps"); // INSTR
-            loop { // INSTR
+            loop {
+                // INSTR
                 tokio::select! { // INSTR
                     changed = changes.changed() => { changed.unwrap(); tracing::info!(node = self.members[index].nickname, "INSTR blob_arrives coverage woke"); break; } // INSTR
                     () = tokio::time::sleep(std::time::Duration::from_secs(15)) => tracing::info!(node = self.members[index].nickname, "INSTR blob_arrives still waiting for coverage change"), // INSTR

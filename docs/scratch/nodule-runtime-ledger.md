@@ -412,7 +412,7 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - The operator superuser is not capped at the node's keyhive level: keyhive enforces at write time.
   - The e2e harness keeps reading through the drawers actor's capability for now.
 - **D26. Drawer keyhive architecture.** Revisit against upstream `design/keyline/patterns.md` together with the Keyline migration. Topics: supply roles at Edit rather than Admin, flat vs nested child drawers, rotating roles, the steward pattern.
-- Naming: cabinet's self-doc `LocalDrawers.registry_id` is the known-drawers list, not the plug registry. Rename to `known_drawers_id` (proposed, not decided).
+- Naming: DONE. cabinet's self-doc `LocalDrawers.registry_id` (the known-drawers list, not the plug registry) is now `known_drawers_id`. The SQLite `local_drawers.role` value `registry` is persisted behind a CHECK constraint and kept as is (renaming needs a migration).
 
 ## In flight
 

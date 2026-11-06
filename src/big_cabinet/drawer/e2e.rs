@@ -748,7 +748,7 @@ impl Node {
                 RequestContext::root(),
                 RememberDrawer {
                     capability: self
-                        .drawer_capability(actor, &[&self.local().registry_id])
+                        .drawer_capability(actor, &[&self.local().known_drawers_id])
                         .await
                         .unwrap(),
                     drawer_id: drawer.clone(),
@@ -801,7 +801,7 @@ impl Node {
                 RequestContext::root(),
                 ForgetDrawer {
                     capability: self
-                        .drawer_capability(actor, &[&self.local().registry_id])
+                        .drawer_capability(actor, &[&self.local().known_drawers_id])
                         .await
                         .unwrap(),
                     drawer_id: drawer.clone(),
@@ -825,7 +825,7 @@ impl Node {
                 RequestContext::root(),
                 ListKnownDrawers {
                     capability: self
-                        .drawer_capability(actor, &[&self.local().registry_id])
+                        .drawer_capability(actor, &[&self.local().known_drawers_id])
                         .await
                         .unwrap(),
                 },

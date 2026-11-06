@@ -24,7 +24,7 @@ pub struct Mirrored {
 }
 
 impl Drawers {
-    /// The parts and docs this node's mirror intent (the known-drawers registry's `mirror`
+    /// The parts and docs this node's mirror intent (the known-drawers list's `mirror`
     /// entries) asks peers for. Re-ask when [`Drawers::subscribe_changes`] fires and when a doc in
     /// the answer's `docs` arrives, since the descriptor then names more groups.
     pub async fn mirrored(&self, context: &RequestContext) -> Result<Mirrored, DrawersError> {
