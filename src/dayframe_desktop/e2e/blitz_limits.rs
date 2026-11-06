@@ -125,3 +125,339 @@ fn a_rounded_overflow_hidden_box_clips_its_child_on_the_cpu_renderer() {
         "the child fills the middle"
     );
 }
+
+/// K7: what keyboard focus the pinned Blitz gives host code. The pins below are the evidence for
+/// the "Keyboard focus" section of `.agents/skills/blitz-dioxus-native-limits` and for the K7
+/// ledger entry; each states what flips when upstream (or our fork) changes.
+mod focus {
+    use blitz_dom::Document as _;
+    use blitz_dom::DocumentConfig;
+    use blitz_dom::NodeId;
+    use blitz_traits::events::BlitzKeyEvent;
+    use blitz_traits::events::DomEventKind;
+    use blitz_traits::events::KeyState;
+    use blitz_traits::events::UiEvent;
+    use dioxus::prelude::*;
+    use dioxus_html::Code;
+    use dioxus_html::Key;
+    use dioxus_html::Location;
+    use dioxus_html::Modifiers;
+    use dioxus_html::NamedKey;
+    use dioxus_native_dom::DioxusDocument;
+    use std::cell::Cell;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::future::Future as _;
+    use std::rc::Rc;
+
+    /// What the page under test records: the event log, each element's mounted handle by id, and
+    /// whether the dialog's keydown handler traps Tab itself (`preventDefault` plus `set_focus`).
+    #[derive(Default)]
+    struct Rec {
+        log: RefCell<Vec<String>>,
+        mounted: RefCell<HashMap<&'static str, Rc<MountedData>>>,
+        trap: Cell<bool>,
+    }
+
+    fn app() -> Element {
+        let rec = consume_context::<Rc<Rec>>();
+        let log = |rec: &Rc<Rec>, what: &'static str, id: &'static str| {
+            rec.log.borrow_mut().push(format!("{what}:{id}"));
+        };
+        // One element per id; `tabindex` and an optional `inert` come from the call site.
+        macro_rules! el {
+            ($tag:ident, $id:literal $(, $attr:ident = $val:expr)*) => {{
+                let (r1, r2, r3, r4, r5) = (rec.clone(), rec.clone(), rec.clone(), rec.clone(), rec.clone());
+                rsx! {
+                    $tag {
+                        id: $id,
+                        $($attr: $val,)*
+                        onmounted: move |e: MountedEvent| { r1.mounted.borrow_mut().insert($id, e.data()); },
+                        onfocus: move |_| log(&r2, "focus", $id),
+                        onblur: move |_| log(&r3, "blur", $id),
+                        onfocusin: move |_| log(&r4, "focusin", $id),
+                        onfocusout: move |_| log(&r5, "focusout", $id),
+                    }
+                }
+            }};
+        }
+        let outside = el!(button, "outside");
+        let first = el!(button, "first");
+        let target = el!(div, "target", tabindex = "-1");
+        let positive = el!(div, "positive", tabindex = "5");
+        let last = el!(button, "last");
+        let inert_btn = el!(button, "inert-btn");
+        let trap = rec.clone();
+        rsx! {
+            {outside}
+            div {
+                id: "dialog",
+                onkeydown: move |e: KeyboardEvent| {
+                    if trap.trap.get() && e.key() == Key::Named(NamedKey::Tab) {
+                        e.prevent_default();
+                        let ids = ["first", "last"];
+                        let to = if e.modifiers().shift() { ids[1] } else { ids[0] };
+                        let handle = trap.mounted.borrow()[to].clone();
+                        // The call runs `doc_mut()` now (inside the handler), the future is trivial.
+                        drop(handle.set_focus(true));
+                        trap.log.borrow_mut().push(format!("trap->{to}"));
+                    }
+                },
+                {first}
+                {target}
+                {positive}
+                {last}
+            }
+            div { inert: true, {inert_btn} }
+        }
+    }
+
+    fn page() -> (DioxusDocument, Rc<Rec>) {
+        let rec = Rc::new(Rec::default());
+        let vdom = VirtualDom::new(app).with_root_context(Rc::clone(&rec));
+        let mut doc = DioxusDocument::new(vdom, DocumentConfig::default());
+        doc.initial_build();
+        (doc, rec)
+    }
+
+    fn id_of(doc: &DioxusDocument, id: &str) -> NodeId {
+        doc.inner().get_element_by_id(id).expect("element by id")
+    }
+
+    /// The id of the focused element; `None` when nothing is (the engine then reports the root
+    /// element, which carries no id).
+    fn focused(doc: &DioxusDocument) -> Option<String> {
+        let inner = doc.inner();
+        let node = inner.get_node(inner.get_focussed_node_id()?)?;
+        node.attr(blitz_dom::LocalName::from("id"))
+            .map(str::to_owned)
+    }
+
+    fn set_focus(rec: &Rec, id: &str, focus: bool) {
+        let handle = rec.mounted.borrow()[id].clone();
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            std::pin::pin!(handle.set_focus(focus)).poll(&mut cx),
+            std::task::Poll::Ready(Ok(()))
+        ));
+    }
+
+    fn tab(doc: &mut DioxusDocument, shift: bool) {
+        let event = BlitzKeyEvent {
+            key: Key::Named(NamedKey::Tab),
+            code: Code::Tab,
+            modifiers: if shift {
+                Modifiers::SHIFT
+            } else {
+                Modifiers::empty()
+            },
+            location: Location::Standard,
+            is_auto_repeating: false,
+            is_composing: false,
+            state: KeyState::Pressed,
+            text: None,
+        };
+        doc.handle_ui_event(UiEvent::KeyDown(event));
+    }
+
+    /// Q1: host Dioxus code can focus and blur an element through `MountedData::set_focus`
+    /// (`dioxus-native-dom/src/events.rs:299` calling `BaseDocument::set_focus_to`,
+    /// `blitz-dom/src/document.rs:1702`), and a `tabindex="-1"` element, which Tab skips, is
+    /// focusable that way (`set_focus_to` never consults `is_focussable`). Blur only clears when
+    /// the element is the focused one. Both calls dispatch NO focus events (`events.rs:302` and
+    /// `:306`: "TODO: queue focus events somehow"): the pin asserts the log stays empty, so when
+    /// the TODO is fixed this flips and the capability may stop synthesising them.
+    #[test]
+    fn set_focus_moves_and_clears_focus_but_dispatches_no_focus_events() {
+        let (doc, rec) = page();
+        assert_eq!(focused(&doc), None);
+        set_focus(&rec, "target", true);
+        assert_eq!(focused(&doc).as_deref(), Some("target"));
+        set_focus(&rec, "first", true);
+        assert_eq!(focused(&doc).as_deref(), Some("first"));
+        // Blur of an element that is not focused is a no-op.
+        set_focus(&rec, "target", false);
+        assert_eq!(focused(&doc).as_deref(), Some("first"));
+        set_focus(&rec, "first", false);
+        assert_eq!(focused(&doc), None);
+        assert!(
+            rec.log.borrow().is_empty(),
+            "programmatic focus now dispatches events ({:?}): drop the synthesis in the capability",
+            rec.log.borrow()
+        );
+    }
+
+    /// Q2/Q3: Tab is the only path that dispatches `blur`, `focusout`, `focus`, `focusin`
+    /// (`blitz-dom/src/events/focus.rs:5-40`, called from `events/keyboard.rs:26`), in that order,
+    /// `blur`/`focusout` on the element losing focus and `focus`/`focusin` on the one gaining it.
+    /// Order is document order (`traversal.rs:195`), wrapping at the end; `tabindex="-1"` is
+    /// skipped; a positive `tabindex` is NOT hoisted (`node/element.rs:634-668`: `index >= 0`);
+    /// `inert` is not honoured (`inert-btn` sits inside `<div inert>` and is still reached); and
+    /// `get_focussed_node_id` falls back to the root element when nothing is focused
+    /// (`document.rs:635-638`), so Tab with nothing focused starts from the root and lands on
+    /// the first stop (an earlier reading of this test claimed it does nothing; the run refuted it).
+    #[test]
+    fn tab_walks_document_order_across_the_whole_document_and_dispatches_focus_events() {
+        let (mut doc, rec) = page();
+        tab(&mut doc, false);
+        assert_eq!(
+            focused(&doc).as_deref(),
+            Some("outside"),
+            "Tab with nothing focused starts from the root element and lands on the first stop"
+        );
+        assert_eq!(
+            rec.log.borrow()[..],
+            ["focus:outside", "focusin:outside"],
+            "no blur/focusout reaches the page for the root it left"
+        );
+        rec.log.borrow_mut().clear();
+        let mut order = Vec::new();
+        for _ in 0..6 {
+            tab(&mut doc, false);
+            order.push(focused(&doc).unwrap());
+        }
+        assert_eq!(
+            order,
+            ["first", "positive", "last", "inert-btn", "outside", "first"],
+            "document order, no tabindex=-1 stop, positive tabindex not hoisted, inert not skipped, wraps"
+        );
+        tab(&mut doc, true);
+        assert_eq!(
+            focused(&doc).as_deref(),
+            Some("outside"),
+            "Shift+Tab reverses"
+        );
+
+        let log = rec.log.borrow();
+        let first_hop: Vec<_> = log.iter().take(4).map(String::as_str).collect();
+        assert_eq!(
+            first_hop,
+            [
+                "blur:outside",
+                "focusout:outside",
+                "focus:first",
+                "focusin:first"
+            ],
+            "Tab from `outside` to `first`"
+        );
+    }
+
+    /// Q3: constraining Tab to a subtree. There is no engine support (see the pin above), but the
+    /// key handler can do it: a `keydown` handler that calls `prevent_default` cancels the engine's
+    /// Tab traversal (`events/driver.rs:355`, `dioxus_document.rs:356`) and may move focus itself
+    /// with `set_focus`, called synchronously inside the handler without a RefCell panic. Keydown
+    /// targets the focused element and bubbles (`driver.rs:224`, `blitz-traits events.rs:436`), so
+    /// a handler on the dialog sees it as long as focus is inside. This is the FocusScope shape
+    /// available today; it needs the scope to know its own first and last tabbable (guest-side
+    /// bookkeeping), not the engine.
+    #[test]
+    fn a_keydown_handler_can_trap_tab_by_preventing_default_and_set_focus() {
+        let (mut doc, rec) = page();
+        rec.trap.set(true);
+        set_focus(&rec, "last", true);
+        tab(&mut doc, false);
+        assert_eq!(
+            focused(&doc).as_deref(),
+            Some("first"),
+            "Tab from the last wraps to the first"
+        );
+        tab(&mut doc, true);
+        assert_eq!(
+            focused(&doc).as_deref(),
+            Some("last"),
+            "Shift+Tab from the first wraps to the last"
+        );
+        assert!(rec.log.borrow().iter().any(|l| l == "trap->first"));
+        // Un-trapped, the same Tab walks on to the document's next stop.
+        rec.trap.set(false);
+        tab(&mut doc, false);
+        assert_eq!(focused(&doc).as_deref(), Some("inert-btn"));
+    }
+
+    /// Q3/Q5: the engine knows no `transitionend`/`animationend`/`transitionrun` event at all
+    /// (`blitz-traits events.rs:203-206` is the focus names; no transition or animation arm in
+    /// `DomEventKind`'s `FromStr`), so KIT-108's "neither Blitz nor the guest wire delivers it"
+    /// holds for Blitz.
+    #[test]
+    fn blitz_has_no_transition_or_animation_end_events() {
+        for name in [
+            "transitionend",
+            "animationend",
+            "transitionrun",
+            "animationstart",
+        ] {
+            assert!(
+                name.parse::<DomEventKind>().is_err(),
+                "{name} is now a Blitz event: revisit KIT-108"
+            );
+        }
+        for name in ["focus", "blur", "focusin", "focusout"] {
+            assert!(name.parse::<DomEventKind>().is_ok(), "{name}");
+        }
+    }
+
+    /// Opacity of `#id` after the last style resolution. (The `transition` must stay in the
+    /// after-change style: swapping `.a` for `.b` alone drops it and the value jumps.)
+    fn opacity(doc: &blitz_html::HtmlDocument, id: &str) -> f32 {
+        let node = doc.get_element_by_id(id).expect("element by id");
+        doc.get_node(node)
+            .unwrap()
+            .primary_styles()
+            .unwrap()
+            .get_effects()
+            .opacity
+    }
+
+    /// Q4: `:focus` matches the focused element (`blitz-dom/src/stylo.rs:476`), but
+    /// `:focus-visible` and `:focus-within` never match (`stylo.rs:477-478`, hard-coded `false`):
+    /// `focus-visible:` and `focus-within:` utilities are dead on Blitz, `focus:` works.
+    /// `FOCUSRING` is set together with `FOCUS` on every focus, mouse or keyboard
+    /// (`node/node.rs:721`), but nothing reads it. When `:focus-visible` or `:focus-within`
+    /// starts matching, the corresponding assertion flips.
+    #[test]
+    fn focus_matches_but_focus_visible_and_focus_within_never_do() {
+        let mut doc = super::parse(
+            "<html><head><style>\
+             .f{opacity:1} .f:focus{opacity:.9} .f:focus-visible{opacity:.8}\
+             #w{opacity:1} #w:focus-within{opacity:.7}\
+             </style></head><body><div id=w><button id=b class=f>x</button></div></body></html>",
+        );
+        doc.resolve(0.0);
+        assert_eq!(opacity(&doc, "b"), 1.0);
+        let button = doc.get_element_by_id("b").unwrap();
+        doc.set_focus_to(button);
+        doc.resolve(0.0);
+        assert_eq!(
+            opacity(&doc, "b"),
+            0.9,
+            ":focus applies, :focus-visible does not (it would be .8, declared later)"
+        );
+        assert_eq!(opacity(&doc, "w"), 1.0, ":focus-within never matches");
+    }
+
+    /// Q5: CSS transitions run. A class change on an element with `transition: opacity 1s linear`
+    /// is interpolated across `resolve(now)` calls (`stylo.rs:83-120` advances the animation set
+    /// every resolve and marks the node for restyle; `document.rs:2078` keeps the shell redrawing
+    /// while any is active). No `transitionend` reaches host code (previous test), so completion
+    /// is observable only by sampling style or by a timer.
+    #[test]
+    fn css_transitions_interpolate_over_resolve_time() {
+        let mut doc = super::parse(
+            "<html><head><style>\
+             .a{opacity:1;transition:opacity 1s linear} .b{opacity:0}\
+             </style></head><body><div id=d class=a>x</div></body></html>",
+        );
+        doc.resolve(0.0);
+        assert_eq!(opacity(&doc, "d"), 1.0);
+        let node = doc.get_element_by_id("d").unwrap();
+        doc.mutate()
+            .set_attribute(node, blitz_dom::qual_name!("class"), "a b");
+        doc.resolve(0.0);
+        doc.resolve(0.5);
+        let mid = opacity(&doc, "d");
+        assert!(mid > 0.1 && mid < 0.9, "mid-transition opacity {mid}");
+        doc.resolve(2.0);
+        doc.resolve(2.0);
+        assert_eq!(opacity(&doc, "d"), 0.0, "transition finished");
+    }
+}
