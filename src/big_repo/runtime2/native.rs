@@ -25,6 +25,25 @@ use crate::runtime2::support::BigRepoCiphertextLocator;
 use crate::store::sqlite::KeyhiveIncorporationSink;
 use tracing::Instrument;
 
+// INSTR: log why a document's PCS root is underivable on this node (the exact
+// beekem error, op count, and whether this node's own leaf is in the tree).
+macro_rules! instr_pcs_state {
+    ($kh_doc:expr, $sed_id:expr, $label:expr) => {{
+        let mut locked = $kh_doc.lock().await;
+        let owner_in_tree = locked.cgka_members().map(|m| m.count()).ok();
+        match locked.cgka_mut() {
+            Ok(cgka) => {
+                let ops = cgka.ops_count();
+                let root = cgka.try_pcs_key_hash();
+                tracing::info!(sed_id = ?$sed_id, label = $label, ops, ?root, ?owner_in_tree, "INSTR pcs state");
+            }
+            Err(error) => {
+                tracing::info!(sed_id = ?$sed_id, label = $label, ?error, "INSTR pcs state: no cgka");
+            }
+        }
+    }};
+}
+
 /// Period between archive/prune/WAL maintenance passes.
 pub(crate) const KEYHIVE_MAINTENANCE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(300);
@@ -534,7 +553,9 @@ where
                 if self.defers_to_other_pcs_resolver(sed_id).await? {
                     return Ok(None);
                 }
+                instr_pcs_state!(kh_doc, sed_id, "persist: before force_pcs_update"); // INSTR
                 let forced = keyhive.force_pcs_update(kh_doc_id).await;
+                instr_pcs_state!(kh_doc, sed_id, "persist: after force_pcs_update"); // INSTR
                 let (update, local_secret) = match forced {
                     Ok(update) => update,
                     Err(EncryptError::UnableToPcsUpdate(
@@ -678,6 +699,7 @@ where
             if hash.is_none()
                 && let Some(kh_doc) = keyhive.get_document(kh_doc_id).await
             {
+                instr_pcs_state!(kh_doc, sed_id, "current_causal_epoch is None"); // INSTR
             }
             Ok(hash.map(|hash| *hash.raw.as_bytes()))
         })
