@@ -60,15 +60,15 @@ fn decrypted_child_is_retried_after_its_parent() {
 
 #[test]
 fn non_automerge_shadow_node_contracts_out_of_materialized_history() {
-    use automerge::transaction::Transactable;
     use automerge::ReadDoc;
+    use automerge::transaction::Transactable;
     use sedimentree_core::blob::Blob;
     use sedimentree_core::blob::BlobMeta;
     use sedimentree_core::depth::CountLeadingZeroBytes;
     use sedimentree_core::id::SedimentreeId;
     use sedimentree_core::loose_commit::LooseCommit;
-    use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
     use sedimentree_core::sedimentree::Sedimentree;
+    use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
 
     let mut base = automerge::Automerge::new();
     base.transact(|tx| tx.put(automerge::ROOT, "base", 1))
@@ -717,8 +717,8 @@ async fn cold_load_of_a_linear_history_takes_one_causal_walk() -> Res<()> {
 #[tokio::test]
 async fn late_content_ciphertext_is_recovered_through_checkpoint_envelope() -> Res<()> {
     use crate::changes::ChangeListenerManager;
-    use automerge::transaction::Transactable;
     use automerge::ReadDoc;
+    use automerge::transaction::Transactable;
     use keyhive_crypto::symmetric_key::SymmetricKey;
 
     let mut source = automerge::AutoCommit::new();
