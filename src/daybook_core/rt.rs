@@ -2685,16 +2685,28 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn runtime_reconciles_admitted_submission_intent() -> Res<()> {
         let test_cx = crate::test_support::test_cx(utils_rs::function_full!()).await?;
-        crate::test_support::import_test_plug_oci(&test_cx).await?;
+        crate::test_support::import_and_enable_test_plug(&test_cx).await?;
 
         let doc_id = test_cx
             .drawer_repo
             .add(daybook_types::doc::AddDocArgs {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                facets: [(
-                    daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::Note),
-                    daybook_types::doc::WellKnownFacet::Note("reconcile".into()).into(),
-                )]
+                // Seed a label so the automatic label processor cannot race the
+                // manually admitted job whose recovery this test exercises.
+                facets: [
+                    (
+                        daybook_types::doc::FacetKey::from(
+                            daybook_types::doc::WellKnownFacetTag::Note,
+                        ),
+                        daybook_types::doc::WellKnownFacet::Note("reconcile".into()).into(),
+                    ),
+                    (
+                        daybook_types::doc::FacetKey::from(
+                            daybook_types::doc::WellKnownFacetTag::LabelGeneric,
+                        ),
+                        daybook_types::doc::WellKnownFacet::LabelGeneric("seed".into()).into(),
+                    ),
+                ]
                 .into(),
                 user_path: None,
                 idempotency_key: None,

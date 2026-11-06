@@ -79,4 +79,3 @@ pub async fn scan_from(db: &impl crate::sqlite_rs_alias::QueryExecutor, namespac
     let set = db.query(SCAN_FROM_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id), crate::sqlite_rs_alias::IntoValue::into_value(lower), crate::sqlite_rs_alias::IntoValue::into_value(limit)]).await?;
     set.all()
 }
-
