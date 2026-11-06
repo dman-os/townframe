@@ -51,13 +51,14 @@ impl HostPlugin for StatelessViewPlugin {
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
-            if iface.namespace == "townframe" && iface.package == "wflow" {
-                if iface.interfaces.contains("host") {
-                    service_host::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                        item.linker(),
-                        |ctx| ctx,
-                    )?;
-                }
+            if iface.namespace == "townframe"
+                && iface.package == "wflow"
+                && iface.interfaces.contains("host")
+            {
+                service_host::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                    item.linker(),
+                    |ctx| ctx,
+                )?;
             }
         }
         Ok(())

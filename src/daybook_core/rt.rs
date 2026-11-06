@@ -554,8 +554,7 @@ impl Rt {
             .await?;
         }
 
-        let authority_host: Arc<dyn wflow::wflow_tokio::authority_runtime::session::Host> =
-            wflow_plugin.clone();
+        let authority_host = Arc::clone(&wflow_plugin);
         let authority = Arc::new(wcx.start_authority_runtime(0, authority_host).await?);
         let result_watchers = Arc::new(tokio_util::task::TaskTracker::new());
         let waiter_jobs = Arc::new(std::sync::Mutex::new(HashSet::new()));
