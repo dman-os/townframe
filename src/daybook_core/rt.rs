@@ -1008,7 +1008,7 @@ impl Rt {
         self: &Arc<Self>,
         dispatch_id: &str,
         dispatch: &Arc<ActiveDispatch>,
-    ) -> Res<()> {
+    ) -> Res<Arc<ActiveDispatch>> {
         let ActiveDispatchDeets::Wflow {
             wflow_key,
             wflow_job_id: Some(job_id),
@@ -1023,16 +1023,64 @@ impl Rt {
                 .clone()
                 .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON)),
         };
-        self.authority
-            .submit(wflow::Submission::new(
-                job_id.clone(),
-                wflow_key.clone(),
-                args_json,
-            ))
-            .await
-            .map_err(|err| ferr!("error scheduling job for dispatch {dispatch_id}: {err:?}"))?;
-        self.dispatch_repo.mark_admitted(dispatch_id).await?;
-        Ok(())
+        // A cancellation mark is an outbox entry of its own.  Do not submit a
+        // job that was cancelled before this reconciler reached authority; the
+        // cancellation call is still needed for the race where submission won
+        // just before the mark was observed.
+        let cancellation_requested = self.dispatch_repo.is_cancelled(dispatch_id).await;
+        if !cancellation_requested {
+            self.authority
+                .submit(wflow::Submission::new(
+                    job_id.clone(),
+                    wflow_key.clone(),
+                    args_json,
+                ))
+                .await
+                .map_err(|err| ferr!("error scheduling job for dispatch {dispatch_id}: {err:?}"))?;
+        }
+        if cancellation_requested {
+            match self
+                .authority
+                .cancel(
+                    job_id.clone(),
+                    format!("cancellation requested for dispatch {dispatch_id}"),
+                )
+                .await
+            {
+                Ok(())
+                | Err(wflow::CancelError::UnknownJob)
+                | Err(wflow::CancelError::AlreadyTerminal) => {}
+                Err(err) => {
+                    return Err(ferr!(
+                        "error cancelling pending dispatch {dispatch_id}: {err:?}"
+                    ));
+                }
+            }
+        }
+        let admitted = self.dispatch_repo.mark_admitted(dispatch_id).await?;
+        if admitted.status == dispatch::DispatchStatus::Cancelled {
+            // The cancellation mark can race the submit above.  Once the
+            // durable transition observes it, cancel again after submission so
+            // a crash cannot leave that authority job live.
+            match self
+                .authority
+                .cancel(
+                    job_id.clone(),
+                    format!("cancellation requested for dispatch {dispatch_id}"),
+                )
+                .await
+            {
+                Ok(())
+                | Err(wflow::CancelError::UnknownJob)
+                | Err(wflow::CancelError::AlreadyTerminal) => {}
+                Err(err) => {
+                    return Err(ferr!(
+                        "error cancelling admitted dispatch {dispatch_id}: {err:?}"
+                    ));
+                }
+            }
+        }
+        Ok(admitted)
     }
 
     async fn reconcile_pending_admissions(self: &Arc<Self>) -> Res<()> {
@@ -1426,16 +1474,19 @@ impl Rt {
             .await?;
         // Keep the intent pending on an admission error, including an unknown
         // commit outcome. Boot can safely retry the same permanent job key.
-        self.submit_pending_dispatch(&dispatch_id, &pending_dispatch)
+        let admitted = self
+            .submit_pending_dispatch(&dispatch_id, &pending_dispatch)
             .await?;
-        let ActiveDispatchDeets::Wflow {
-            wflow_job_id: Some(job_id),
-            ..
-        } = &pending_dispatch.deets
-        else {
-            unreachable!("admitted dispatch has a workflow job identity");
-        };
-        self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
+        if admitted.status == dispatch::DispatchStatus::Active {
+            let ActiveDispatchDeets::Wflow {
+                wflow_job_id: Some(job_id),
+                ..
+            } = &admitted.deets
+            else {
+                unreachable!("admitted dispatch has a workflow job identity");
+            };
+            self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
+        }
         self.progress_repo
             .add_update(
                 &dispatch_id,
@@ -1987,6 +2038,7 @@ impl Rt {
         ) {
             return Ok(());
         }
+        let admission_pending = dispatch.status == dispatch::DispatchStatus::AdmissionPending;
         if matches!(dispatch.status, dispatch::DispatchStatus::Waiting) {
             self.dispatch_repo
                 .complete(dispatch_id.to_string(), dispatch::DispatchStatus::Cancelled)
@@ -2040,6 +2092,7 @@ impl Rt {
             .await
         {
             Ok(_) => {}
+            Err(wflow::CancelError::UnknownJob) if admission_pending => {}
             Err(wflow::CancelError::AlreadyTerminal) => {
                 let watcher_installed =
                     self.waiter_jobs.lock().expect(ERROR_MUTEX).contains(job_id);

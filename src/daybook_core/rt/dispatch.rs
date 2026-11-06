@@ -300,7 +300,16 @@ impl DispatchRepo {
     pub async fn get_by_wflow_job(&self, job_id: &str) -> Option<Arc<ActiveDispatch>> {
         let state = self.state.lock().await;
         let dispatch_id = state.wflow_to_dispatch.get(job_id)?;
-        let found = state.active_dispatches.get(dispatch_id).map(Arc::clone);
+        // AdmissionPending is durable callback context: authority may start the
+        // workflow before the admission transition is acknowledged locally.  A
+        // Waiting intent and terminal dispatches remain unavailable to hosts.
+        let found = state.dispatches.get(dispatch_id).and_then(|dispatch| {
+            matches!(
+                dispatch.status,
+                DispatchStatus::AdmissionPending | DispatchStatus::Active
+            )
+            .then(|| Arc::clone(dispatch))
+        });
         if let Some(dispatch) = found.as_ref() {
             let ActiveDispatchArgs::FacetRoutine(args) = &dispatch.args;
             debug!(
@@ -497,11 +506,17 @@ impl DispatchRepo {
         let Some(dispatch) = state.dispatches.get(id) else {
             eyre::bail!("dispatch not found under {id}");
         };
+        if matches!(
+            dispatch.status,
+            DispatchStatus::Succeeded | DispatchStatus::Failed | DispatchStatus::Cancelled
+        ) {
+            return Ok(false);
+        }
         if !matches!(
             dispatch.status,
-            DispatchStatus::Active | DispatchStatus::Waiting
+            DispatchStatus::Active | DispatchStatus::AdmissionPending | DispatchStatus::Waiting
         ) {
-            eyre::bail!("dispatch not active/waiting under {id}");
+            eyre::bail!("dispatch not active/waiting/pending under {id}");
         }
         if state.cancelled_dispatches.contains(id) {
             return Ok(false);
@@ -611,6 +626,14 @@ impl DispatchRepo {
             .collect()
     }
 
+    pub async fn is_cancelled(&self, dispatch_id: &str) -> bool {
+        self.state
+            .lock()
+            .await
+            .cancelled_dispatches
+            .contains(dispatch_id)
+    }
+
     pub async fn activate_waiting(
         &self,
         dispatch_id: &str,
@@ -682,40 +705,72 @@ impl DispatchRepo {
     /// for the boot reconciler to submit idempotently.
     pub async fn mark_admitted(&self, dispatch_id: &str) -> Res<Arc<ActiveDispatch>> {
         let _transition_guard = self.transition_mutex.lock().await;
-        let cur = self
-            .state
-            .lock()
-            .await
+        let state = self.state.lock().await;
+        let cur = state
             .dispatches
             .get(dispatch_id)
             .map(Arc::clone)
             .ok_or_else(|| eyre::eyre!("dispatch not found under {dispatch_id}"))?;
         if cur.status != DispatchStatus::AdmissionPending {
+            // Two reconcilers may submit the same permanent authority job.  The
+            // first transition wins; later observations must not resurrect a
+            // terminal dispatch or turn a cancellation into Active.
+            if matches!(
+                cur.status,
+                DispatchStatus::Active
+                    | DispatchStatus::Succeeded
+                    | DispatchStatus::Failed
+                    | DispatchStatus::Cancelled
+            ) {
+                return Ok(cur);
+            }
             eyre::bail!("dispatch is not pending admission: {dispatch_id}");
         }
 
+        let cancelled = state.cancelled_dispatches.contains(dispatch_id);
+        drop(state);
         let mut updated = (*cur).clone();
-        updated.status = DispatchStatus::Active;
+        updated.status = if cancelled {
+            DispatchStatus::Cancelled
+        } else {
+            DispatchStatus::Active
+        };
         let updated = Arc::new(updated);
         let tx = self.repo_sql.begin_write().await?;
         persist_dispatch_tx(&tx, dispatch_id, &updated).await?;
+        if cancelled {
+            clear_cancelled_mark_tx(&tx, dispatch_id).await?;
+        }
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
         state
             .dispatches
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
-        state
-            .active_dispatches
-            .insert(dispatch_id.to_string(), Arc::clone(&updated));
+        state.active_dispatches.remove(dispatch_id);
+        if cancelled {
+            state.cancelled_dispatches.remove(dispatch_id);
+        }
         if let ActiveDispatchDeets::Wflow {
             wflow_job_id: Some(job),
             ..
-        } = &updated.deets
+        } = &cur.deets
         {
+            state.wflow_to_dispatch.remove(job);
+        }
+        if updated.status == DispatchStatus::Active {
             state
-                .wflow_to_dispatch
-                .insert(job.clone(), dispatch_id.to_string());
+                .active_dispatches
+                .insert(dispatch_id.to_string(), Arc::clone(&updated));
+            if let ActiveDispatchDeets::Wflow {
+                wflow_job_id: Some(job),
+                ..
+            } = &updated.deets
+            {
+                state
+                    .wflow_to_dispatch
+                    .insert(job.clone(), dispatch_id.to_string());
+            }
         }
         state
             .dispatch_head_index
