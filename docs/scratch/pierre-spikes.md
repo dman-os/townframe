@@ -321,9 +321,7 @@ node bench/highlight/table.mjs $OUT
 ## H1 highlights component
 
 Lane: wrap Pierre's unmodified `highlights.wasm` (@pierre/highlights 0.4.0, sha256 2fca61b6...1290) as a component
-and compose it into a guest micro. Branch `spike/pierre-highlight`. STATUS: wrapper and composition done and measured
-under wasmtime 49 (host harness); the guest-engine runs (clay_rt_wasmtime, wasmi, wcmp/Chromium) are written but NOT
-run: the disk fell under 8 GB free and then the coordinator froze builds. Everything marked unverified below is that.
+and compose it into a guest micro. Branch `spike/pierre-highlight`. STATUS: done except the Chromium/Playwright run (see Q1 resume).
 
 ### What was built
 
@@ -400,3 +398,33 @@ Q1 engines:
   changes each upstream update) versus numeric id (current).
 - Debug builds of the spike micro used for size; release sizes unverified.
 - Strict component WAT syntax in wasm-tools 1.261 needs nested `(core memory $i "x")` forms.
+
+### H1 resume (guest engines)
+
+Decisions applied: unicode-ident kept; `build.ts` now also generates `src/micro_highlight_spike/languages.rs`
+(name -> id, parsed as data from `languages.js` beside the wasm, sorted), the micro calls `language_id("rust")`;
+the wasm interface stays `lang: u8`.
+
+Q1 results (current wcmp pin a5db353b; not re-pinned):
+- wasmtime (clay_rt_wasmtime): `cargo nextest run -p clay_rt_wasmtime highlight_spike` PASS (3.0 s): the composed micro
+  validates, instantiates and its rendered records/digest/histogram equal the direct-path golden.
+- wasmi via wcmp (clay_rt_wcmp_wasmi): same test PASS (16.0 s, 22.4 s in the second run; mostly loading the 15 MB debug
+  micro). Nested core instances, the cross-module funcref table, SIMD and Pierre-memory canon options all worked; no
+  error to pin.
+- wcmp in Chromium: NOT RUN. Needs the micro published as a package in `x/dayframe-web.ts` plus a shell route to
+  mount a `view`; I judged that too large to do with the disk floor. Since wcmp and wasmi share the component
+  lowering, the remaining risk is the browser core engine (SIMD is on by default in Chromium). Unverified.
+- Fixtures: `./x/agent-build.ts -- deno run --allow-all x/check-dayframe.ts --prepare-only`; I killed it during the
+  host-side `emit_manifest` steps (unneeded here) after `DAYFRAME_HIGHLIGHT_SPIKE_COMPONENT` was printed.
+
+Q2 in-guest (micro's own `Instant`, 5 reps, wasmtime in clay_rt_wasmtime, loadavg high):
+- rust-1k: not printed (test passes so the view text is not shown); host harness above is the 1k number.
+- rust-10k: 10754, 8554, 8008, 7935, 7961 us (median 8.0 ms).
+- rust-100k: 84138, 63272, 54460, 55605, 56807 us (median 55.6 ms; P3 direct 22 ms at loadavg 4.5, host harness here 65-69 ms at
+  loadavg ~40, so the guest is not measurably slower than the host call).
+- FINDING: the host's per-call fuel (`FUEL_PER_CALL = 50_000_000`, `src/clay_rt_wasmtime/lib.rs:730`) is exhausted by the
+  10k-line run ("wasm trap: all fuel consumed by WebAssembly", trapped during initialization); 1k fits. The numbers above
+  came from a temporary local edit to 50_000_000_000, reverted. So in production a 10k-line file in one
+  call would trap: highlighting must be sliced (live/streaming API) or the budget raised.
+- wasmi: 1k fits in ~6 s over the load baseline; rust-10k did NOT finish inside nextest's 120 s hard timeout
+  (interpreter, 1 rep). Highlighting in a wasmi guest is only practical for small inputs.

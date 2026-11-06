@@ -21,8 +21,15 @@ wit_bindgen::generate!({
 
 use townframe::highlights::highlight::highlight;
 
-/// Pierre's language id for Rust (`languages.js`).
-const RUST: u8 = 120;
+mod languages;
+
+/// Pierre's language id for `name` (alias-aware, from the generated `languages.js` table).
+fn language_id(name: &str) -> u8 {
+    let index = languages::LANGUAGES
+        .binary_search_by(|(candidate, _)| (*candidate).cmp(name))
+        .unwrap_or_else(|_| panic!("unknown language {name}"));
+    languages::LANGUAGES[index].1
+}
 const VIEW: &str = "view";
 const TEXT: &str = include_str!(env!("HIGHLIGHT_SPIKE_CORPUS"));
 const REPS: usize = match usize::from_str_radix(env!("HIGHLIGHT_SPIKE_REPS"), 10) {
@@ -69,7 +76,7 @@ fn run() -> Report {
     let mut last = Vec::new();
     for _ in 0..REPS {
         let started = Instant::now();
-        last = highlight(TEXT, RUST);
+        last = highlight(TEXT, language_id("rust"));
         micros.push(started.elapsed().as_micros());
     }
     // (end_utf16, token_id) pairs; the token id 0xFFFFFFFF ends a line.
