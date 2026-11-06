@@ -1771,6 +1771,7 @@ dependencies = [
  "autosurgeon",
  "blake3",
  "bs58",
+ "datum_core",
  "future_form",
  "futures",
  "parking_lot",
@@ -4029,11 +4030,11 @@ name = "datum_core"
 version = "0.1.0"
 dependencies = [
  "automerge",
- "big_sync_core",
  "const_format",
  "displaydoc",
  "indexmap 2.14.2",
  "jiff",
+ "macros",
  "schemars 1.2.3",
  "serde",
  "serde_json",

@@ -12,13 +12,11 @@ path = "lib.rs"
 
 [features]
 schemars = ["dep:schemars", "dep:thiserror", "dep:displaydoc"]
-# `DatumShape` for the foreign leaf types `jiff::Timestamp`, `automerge::ChangeHash` and
-# `big_sync_core::ObjKey`. The orphan rule keeps these impls in this crate, where the trait is
+# `DatumShape` for the foreign leaf types `jiff::Timestamp` and `automerge::ChangeHash`. The orphan rule keeps these impls in this crate, where the trait is
 # local, so a crate that holds those types turns the feature on and a guest that does not never
 # links them.
 jiff = ["dep:jiff"]
 automerge = ["dep:automerge"]
-sync-core = ["dep:big_sync_core"]
 
 [dependencies]
 serde.workspace = true
@@ -32,4 +30,7 @@ thiserror = { workspace = true, optional = true }
 displaydoc = { workspace = true, optional = true }
 jiff = { workspace = true, optional = true }
 automerge = { workspace = true, optional = true }
-big_sync_core = { workspace = true, default-features = false, optional = true }
+
+[dev-dependencies]
+macros = { path = "../macros" }
+serde = { workspace = true, features = ["derive"] }
