@@ -67,10 +67,13 @@ All figures are from the ledger. Conditions are stated per line; they are not co
 | Reader reconcile index | debug, 50 notes, summed lookup | 38 s | 0.5 s |
 | Duplicate keyhive ingest | debug, 50 notes, connect | 7.35 s | 5.66 s |
 | Causal checkpoint election | persists per seed 2 run | 783-1383 | 40-71 |
+| Whole branch (cost table at `94fbb0ac`, aarch64 release, 200 notes) | create note p50 first / last tenth | 131 / 316 ms | 105 / 115 ms |
+| Same table | reboot | 7.0 s / ~22 GiB | 1.61 s / 495 MiB allocated |
+| Same table | connect two nodes, then replicate 200 notes | 21.2 s | 16.2 s, then 0.65 s |
 
 Notes on what is not fixed:
-- Connect + replicate is still the outlier (22.9 s at 200 notes, aarch64 release). It is mostly keyhive membership ingest, not attributed further.
-- Create note first -> last tenth was 142 -> 312 ms in the `6ddfdef` table, and 100 -> 122 ms in the later `3d04999` table (after the dmeta fix). TODO(verify): a final release cost table at the branch head.
+- Connect is still the outlier (16.2 s at 200 notes, aarch64 release, at `94fbb0ac`). It is mostly keyhive membership ingest, not attributed further.
+- Create note first -> last tenth was 142 -> 312 ms in the `6ddfdef` table, and 100 -> 122 ms in the later `3d04999` table (after the dmeta fix). At `94fbb0ac`: 105 -> 115 ms.
 - Debug-build numbers (x86 laptop, 10 notes, about 1.4 s per create at the first measurement) are not release numbers.
 
 ## Fork pins
@@ -138,6 +141,9 @@ From the ledger; no run was repeated while drafting this description.
   - Seeds 2, 3, 4, 5 and 7 passed at `12c8127` on the aarch64 box; seed 1 timed out there, before the checkpoint fix.
   - Seed 2 timed out in 1 of 3 runs under load at `c087fd50`; the election (`0c831218`) cut persists to 40-71 per run, and a run still takes about 190 s of the 240 s budget under 3x load.
   - At `0c831218` on an unloaded box: seed 2 passed 2/2 (68 s, 65 s), seed 1 passed (51 s), big_repo 442/442.
-  - TODO(verify): a final all-seeds run (1-7 and the default seed) at the branch head.
-- Ladder suite: 11 of 13 passed at N5; the two stalls were root-caused and fixed afterwards. TODO(verify): the current ladder result.
-- TODO(verify): `cargo clippy --all-targets --all-features`, `cargo x guardrails lint`, `nix flake check` and `./x/check-dayb.ts` at the branch head.
+  - At `94fbb0ac` on the aarch64 box, unloaded: the default seed and seeds 1-7 all passed, 45-63 s each.
+  - Under ~15-18 load on the x86 laptop, seed 2 passed 2/2 at 123 s and 128 s after the root-issuer election (`a4aec85e`).
+- Ladder suite: 14/14 at `2d79a768` (11 of 13 at N5; both stalls fixed since).
+- At `2d79a768`: `cargo clippy --workspace --all-targets --all-features -- --deny warnings` clean; `cargo x guardrails lint` 0 diagnostics; `guardrails api --all --check` and `doctor` pass; big_repo 446/446.
+- Load-only: four big_node blob_discovery tests can hit nextest's 120 s timeout at `--test-threads 12` under ~13 load. Traced as CPU starvation (same work, 4-10x slower, no wait over 1 s), not a stall.
+- TODO(verify): `nix flake check` and `./x/check-dayb.ts` (operator).
