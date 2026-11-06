@@ -665,27 +665,43 @@ impl WasmPackage {
         Self::from_bytes(bytes).await
     }
 
-    /// Compile `bytes` on a thread of its own and wait for it. Cranelift runs for seconds on a
+    /// Compile `bytes` off the polling thread and wait for it. Cranelift runs for seconds on a
     /// phone, and the caller is a local future the shell polls on its UI thread; compiling in the
     /// poll froze the frame (and with it the section's loading state) for the whole compile.
+    ///
+    /// Inside a tokio runtime the compile goes to its blocking pool, not a bare thread: a runtime
+    /// with a paused test clock auto-advances virtual time whenever every task is parked, and a
+    /// future parked on a bare thread's oneshot looks parked on nothing, so the clock jumped to the
+    /// next timer (a guest feed's 30 s long poll) while the compile was still running. Tokio
+    /// inhibits that auto-advance while a blocking task is in flight, which makes the compile a
+    /// real wait that a deterministic test clock respects. Without a runtime (the Android shell
+    /// polls on its own executor) a `wasm-compile` thread does the same job.
     pub async fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
         let engine = engine()?;
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        std::thread::Builder::new()
-            .name("wasm-compile".into())
-            .spawn({
-                let engine = engine.clone();
-                move || {
-                    let component = compile_component(&engine, &bytes);
-                    // A closed receiver is the activation being cancelled mid-compile (the micro was
-                    // disabled); the finished artifact is already in the cache, so drop the result.
-                    sender.send(component).ok();
-                }
-            })
-            .expect("the OS can spawn a compile thread");
-        let component = receiver
-            .await
-            .expect("the compile thread reports before it exits")?;
+        let compile = {
+            let engine = engine.clone();
+            move || compile_component(&engine, &bytes)
+        };
+        let component = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime
+                .spawn_blocking(compile)
+                .await
+                .expect("the compile task does not panic")?,
+            Err(_) => {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                std::thread::Builder::new()
+                    .name("wasm-compile".into())
+                    .spawn(move || {
+                        // A closed receiver is the activation being cancelled mid-compile (the
+                        // micro was disabled); the finished artifact is already in the cache.
+                        sender.send(compile()).ok();
+                    })
+                    .expect("the OS can spawn a compile thread");
+                receiver
+                    .await
+                    .expect("the compile thread reports before it exits")?
+            }
+        };
         let linker = linker(&engine)?;
         Ok(Self {
             engine,

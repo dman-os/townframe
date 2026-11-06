@@ -1885,10 +1885,10 @@ async fn precompiled_artifacts_are_reused_by_content() {
     std::fs::remove_dir_all(directory).ok();
 }
 
-/// Compiling a package must not occupy the thread that polls it: on Android that is the UI
-/// thread, and a frozen frame hid the section's loading state for the whole compile.
-#[tokio::test(flavor = "current_thread")]
-async fn compiling_a_package_leaves_the_polling_thread_free() {
+/// The counter component with a trailing custom section (id 0, name "pad") holding a unique
+/// payload, so its cache key is its own and a compile of it is cold even when the artifact cache
+/// is warm.
+fn uniquely_padded_counter() -> Vec<u8> {
     let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
         .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
     let mut bytes = std::fs::read(path).unwrap();
@@ -1902,6 +1902,14 @@ async fn compiling_a_package_leaves_the_polling_thread_free() {
     bytes.extend([0, (1 + 3 + unique.len()) as u8, 3]);
     bytes.extend(b"pad");
     bytes.extend(unique);
+    bytes
+}
+
+/// Compiling a package must not occupy the thread that polls it: on Android that is the UI
+/// thread, and a frozen frame hid the section's loading state for the whole compile.
+#[tokio::test(flavor = "current_thread")]
+async fn compiling_a_package_leaves_the_polling_thread_free() {
+    let bytes = uniquely_padded_counter();
     let mut ticks = 0u32;
     let compile = WasmPackage::from_bytes(bytes);
     tokio::pin!(compile);
@@ -1918,4 +1926,19 @@ async fn compiling_a_package_leaves_the_polling_thread_free() {
         ticks > 1,
         "the polling thread ran {ticks} ticks during a cold compile; it was blocked"
     );
+}
+
+/// A compile is a real wait for a paused test clock: awaiting it must not let the runtime
+/// auto-advance virtual time to the next timer (a guest feed's long poll, in the layout e2e).
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_paused_clock_does_not_advance_while_a_package_compiles() {
+    let started = tokio::time::Instant::now();
+    let package = tokio::select! {
+        package = WasmPackage::from_bytes(uniquely_padded_counter()) => package.unwrap(),
+        () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+            panic!("the paused clock jumped to a 30 s timer while the compile was in flight")
+        }
+    };
+    drop(package);
+    assert_eq!(started.elapsed(), std::time::Duration::ZERO);
 }

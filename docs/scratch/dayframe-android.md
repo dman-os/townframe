@@ -491,3 +491,21 @@ Build note: the link step failed three times in a row with `ld.lld: failed to op
 - Phone state: untouched by this lane; it still has the A4 `apk-bc` debug build installed (per the A4 notes).
 - Open question for the user: free at least about 20 GB (e.g. drop the host `debug/` dirs of other worktrees, or the A3/A4 debug
   android output) and rerun, or approve cleaning part of the target dir.
+
+## A6 notes (desktop layout e2e: paused clock vs off-thread compile)
+
+- Cause: `WasmPackage::from_bytes` (src/clay_rt_wasmtime/lib.rs:679) awaited a `wasm-compile` std thread through a oneshot (A4). The layout e2e runs on
+  `start_paused` tokio time, which auto-advances to the next timer whenever every task is parked; a future parked on a bare thread's oneshot
+  looks parked on nothing, so virtual time jumped to the layout guest feed's 30 s long poll (and onward, "1230s") mid-compile. Tokio inhibits
+  auto-advance only while a `spawn_blocking` task is in flight. `dayframe_desktop/e2e/layout.rs:179` is where it showed.
+- Fix: inside a tokio runtime (`Handle::try_current`) the compile runs on `spawn_blocking`; with no runtime (Android shell) the `wasm-compile`
+  thread remains. Mechanism commented at the site. `clay_rt_wasmtime` now has tokio `rt` (and dev `test-util`).
+- Pin: `clay_rt_wasmtime::tests::a_paused_clock_does_not_advance_while_a_package_compiles` (fails on the thread-only path, verified by forcing that
+  branch; passes now). The cold padded-bytes helper is shared with the thread-free test.
+- Slow `hiding_a_native_panel_leaves_the_layout_mounted`: unrelated to the compile change. It uses the Wasmi/wcmp path (untouched by the branch,
+  `clay_rt_wcmp` not in the diff) on a real clock; instrumented: ~5 s to start and ~5 s per hide/show round (each re-mount re-loads the guest
+  in a debug-built Wasmi), 6 rounds = ~32-37 s on an idle machine. The 85-108 s runs were presumably under parallel build load. I did not
+  measure it on feat/dayframe-shell, so "same cost there" is unverified. Instrumentation was not committed.
+- Commands: `./x/agent-build.ts -- cargo nextest run -p dayframe_desktop -p dayframe_native -p clay_rt_wasmtime` (73 passed, 44.7 s) and
+  `cargo clippy --all-targets -p clay_rt_wasmtime -p dayframe_desktop -p dayframe_native` (only pre-existing manifest warnings), with
+  `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0` and the `check-dayframe.ts --prepare-only` exports.
