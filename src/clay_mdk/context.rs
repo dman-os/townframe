@@ -798,6 +798,10 @@ impl Context {
     /// be one the manifest declares as a presentation; admission checks that once `activate`
     /// returns, and nothing is reachable by other micros before then. Any number of
     /// presentations may be published, one per declared name.
+    ///
+    /// `render` runs once per mount, in a component scope of its own (like one instance of a
+    /// custom element): the hooks it calls are that mount's, and what it captures (collections,
+    /// facets, the micro's store) is shared by every mount.
     pub fn publish<P: ComponentDecl>(
         &self,
         render: impl Fn() -> dioxus_core::Element + 'static,

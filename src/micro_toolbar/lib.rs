@@ -23,7 +23,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
     Ok(())
 }
 
-/// The toolbar's model and view in one root-scope render. A press calls the button's attachment
+/// The toolbar's model and view in one render. A press calls the button's attachment
 /// (empty request, empty response); the redeemed call holds its provider live until it returns,
 /// and a failure (a disabled or faulted provider) is shown, not swallowed.
 fn view(buttons: &Collection<String, Button>) -> Element {
