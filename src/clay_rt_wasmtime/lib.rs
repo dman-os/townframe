@@ -669,24 +669,14 @@ impl WasmPackage {
     /// phone, and the caller is a local future the shell polls on its UI thread; compiling in the
     /// poll froze the frame (and with it the section's loading state) for the whole compile.
     pub async fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
-        let started = std::time::Instant::now();
         let engine = engine()?;
-        eprintln!("INSTR wasm engine ready in {:?}", started.elapsed());
         let (sender, receiver) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("wasm-compile".into())
             .spawn({
                 let engine = engine.clone();
                 move || {
-                    let compile_started = std::time::Instant::now();
                     let component = compile_component(&engine, &bytes);
-                    eprintln!(
-                        "INSTR wasm compile_component {} bytes in {:?} on thread {:?} (cache path: {:?})",
-                        bytes.len(),
-                        compile_started.elapsed(),
-                        std::thread::current().name(),
-                        cache_path(&engine, &bytes).map(|path| path.exists()),
-                    );
                     // A closed receiver is the activation being cancelled mid-compile (the micro was
                     // disabled); the finished artifact is already in the cache, so drop the result.
                     sender.send(component).ok();
@@ -697,7 +687,6 @@ impl WasmPackage {
             .await
             .expect("the compile thread reports before it exits")?;
         let linker = linker(&engine)?;
-        eprintln!("INSTR wasm package ready in {:?}", started.elapsed());
         Ok(Self {
             engine,
             component,
@@ -729,16 +718,11 @@ impl WasmPackage {
         store
             .set_fuel(fuel_per_call.load(Ordering::Relaxed))
             .unwrap();
-        let instantiate_started = std::time::Instant::now();
         let client = MicroClient::instantiate_async(&mut store, &self.component, &self.linker)
             .await
             .map_err(|error| {
                 ActivationError::Initialization(format!("instantiating Wasm component: {error:#}"))
             })?;
-        eprintln!(
-            "INSTR wasm instantiate_async in {:?}",
-            instantiate_started.elapsed()
-        );
         Ok((
             WasmIncarnation {
                 store,
