@@ -576,3 +576,4 @@ async fn migration_checksum_change_is_an_error() {
 }
 
 mod surface;
+mod wal;
