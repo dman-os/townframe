@@ -444,6 +444,116 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
     Ok(())
 }
 
+// ─── Conflicted CGKA root resolution ─────────────────────────────────────────
+
+/// Two admins each rotate the document PCS key while disconnected, so after
+/// reconnecting the tree root holds two conflicting keys (`NoRootKey`) until a
+/// single op causally after both replaces it. Causal coverage on a node with an
+/// underivable epoch used to mint its own update op every time; two nodes did
+/// so concurrently, so each node's resolving op re-conflicted the other's tree
+/// and the exchange never ended. Exactly one member (the lowest issuer of the
+/// concurrent updates) may resolve: both trees must converge on one derivable
+/// root and the op count must stop growing.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_concurrent_pcs_updates_resolve_without_a_mint_loop() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(244, 245, "Owner", "Admin").await?;
+    let admin_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "phase", "base"))
+        .map_err(|err| crate::ferr!("failed creating base document: {err:?}"))?;
+    let left_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = left_doc.document_id();
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id.clone(), admin_agent, Access::Admin)
+        .await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left_conn().sync_keyhive_with_peer().await?;
+    let (_left_doc, _right_doc) = fixtures::sync_doc_bidirectional(
+        pair.left_conn(),
+        pair.right_conn(),
+        &pair.left().repo,
+        &pair.right().repo,
+        doc_id.clone(),
+    )
+    .await?;
+
+    let kh_doc_id = kh_document_id(doc_id.clone())?;
+    let mut growth_per_cycle = Vec::new();
+    let mut left_to_right = pair.left_conn().clone();
+    let mut right_to_left = pair.right_conn().clone();
+    // The pre-fix loop only runs when both nodes mint within one sync
+    // round, which is timing dependent; repeat the partition so a pass
+    // cannot be luck.
+    for _ in 0..6 {
+        pair.left().disconnect_peer(pair.right().peer_id()).await?;
+        pair.right().disconnect_peer(pair.left().peer_id()).await?;
+
+        // Concurrent rotations: neither node has seen the other's op.
+        for node in [pair.left(), pair.right()] {
+            let (update, local_secret) = node
+                .repo
+                .keyhive()
+                .clone_keyhive()
+                .force_pcs_update(kh_doc_id)
+                .await?;
+            crate::runtime2::support::persist_cgka_updates_durably(
+                &node.repo.keyhive_protocol,
+                &node.repo.keyhive_storage,
+                vec![update],
+                vec![local_secret],
+            )
+            .await?;
+        }
+        let before = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone())
+            .await?
+            .cgka_operation_hashes
+            .len();
+
+        left_to_right = pair.left().connect(pair.right()).await?;
+        right_to_left = pair.right().accepted_connection().await;
+        let mut counts = Vec::new();
+        for _ in 0..4 {
+            left_to_right.sync_keyhive_with_peer().await?;
+            right_to_left.sync_keyhive_with_peer().await?;
+            pair.left().repo.wait_for_quiescence(None).await?;
+            pair.right().repo.wait_for_quiescence(None).await?;
+            let mut round = Vec::new();
+            for node in [pair.left(), pair.right()] {
+                let snapshot = kh_snap::document_snapshot(&node.repo, doc_id.clone()).await?;
+                round.push(snapshot.cgka_operation_hashes.len());
+            }
+            counts.push(round);
+        }
+        for node in [pair.left(), pair.right()] {
+            assert!(
+                node.repo
+                    .keyhive()
+                    .clone_keyhive()
+                    .try_pcs_key_hash(kh_doc_id)
+                    .await
+                    .is_some(),
+                "{} never derived a root after the concurrent rotations; op counts per round: {counts:?}",
+                node.peer_id()
+            );
+        }
+        let settled = counts.last().expect("rounds ran")[0];
+        growth_per_cycle.push(settled - before);
+    }
+    // Per cycle: the other node's rotation arrives (+1) and one resolving op
+    // (+1), plus at most a checkpoint rotation per node. The mint loop adds
+    // ops every sync round instead.
+    assert!(
+        growth_per_cycle.iter().all(|growth| *growth <= 4),
+        "CGKA ops grew {growth_per_cycle:?} per partition cycle after the rotations (mint loop)"
+    );
+    drop((left_to_right, right_to_left));
+    Ok(())
+}
+
 // ─── Group grant, then add user ─────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
