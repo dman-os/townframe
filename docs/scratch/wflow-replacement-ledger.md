@@ -1,8 +1,8 @@
 # Wflow replacement design ledger
 
-Status: Active design audit; implementation is frozen except for repairs needed to inspect or verify the branch
+Status: Replacement integrated; admission/receipt corrections and focused verification in progress. No release approval yet.
 Owner: operator + wflow replacement track
-Updated: 2026-11-04
+Updated: 2026-11-06
 Scope: Full replacement of the main-branch wflow engine. The current `daybook_core` consumer and the old partition reducer/effect-worker path are legacy and may be broken or deleted rather than preserved through compatibility shims.
 
 ## 0. Purpose
@@ -371,8 +371,8 @@ Verification policy for the implementation waves: workers run only narrow compil
 | D-storage | Bounded journal plus automatic runtime snapshot/compaction | journal `0887fb98`; cadence `0f88e366` | merged | D1/D2 accepted | production facade and integrated verification |
 | E-formal | Remove rejected actions and align model vocabulary with accepted authority | Quint authority model | merged as `5351dbc0` | Handoff accepted with Apalache blocker | run Rust conformance in verification wave |
 | F-cutover | Integrate facade/caller, remove dual hosts, legacy engine, and harness | F1-F4 `03607105`..`7bf296d0`; F5 `adb348a8` | merged | production replacement/deletion complete | fresh integrated review |
-| V-review | Fresh-context review of integrated diff | report `e52999ad` | read-only review complete | Blocked: registry publication, durable dispatch scheduling, merge recovery evidence, stale API | correction workflow `33799d8d` (Luna 5.6 high only) |
-| V-verify | Clippy, focused tests, fault/recovery matrix, native/Wasm conformance, formal checks, guardrails | integrated tree | one verification owner | Pending | evidence ledger |
+| V-review | Fresh-context review of integrated diff | reports `e52999ad`, `a6f2d4b3` | read-only Luna 5.6 high | Registry/shutdown/staging source review accepted; admission/cancellation and single-flight corrections in `4ecf2728`/`6d875839` | retained reviewer follow-up `455d864d` |
+| V-verify | Clippy, focused tests, fault/recovery matrix, native/Wasm conformance, formal checks, guardrails | integrated tree | parent; long runs on mothership | Source lint/API checks pass; remote registry/runtime 28/28; broader focused matrix running | `/tmp/wflow-remote-verify.log` on mothership |
 | V-bench | Phase-5 benchmark and closeout | integrated tree | verification owner | Frozen | starts only after architecture/semantics integrated |
 
 ### Fleet events
@@ -407,3 +407,5 @@ Verification policy for the implementation waves: workers run only narrow compil
 - 2026-11-06: Guardrails exposed shared actor-join locking and stale deletion debt. Runtime worker resume records were unavailable, so manager implemented a shared shutdown future (`47d2a2d8`), preserving the join across cancelled/concurrent stop callers. Runtime 26/26 and core/runtime all-target/all-feature clippy pass. Named core imports and obsolete harness exemptions cleaned in `ee685040`; remaining four lint diagnostics belong to the active Daybook correction lane. Native lock refreshed in `667bd0fc`: optional closure additions and removed workflow dependencies, no existing dependency version upgrades.
 - 2026-11-06: Workflow infrastructure lost fan-out directory and two worktree/session directories. Recovered dangling Daybook commits `5a0524e1` / `dd5cab0f`, protected as `recovery/daybook-admission{,-initial}`, inspected and integrated latter as `58e2cbbe`. Manager correction in progress: avoid installing pending-admission waiters before boot initialization or twice; keep deferred admission intent pending on errors. Registry worker's uncommitted diff was not recoverable, so manager rebuilt a single-lock workload registry with replacement/unbind/rollback tests. Registry clippy reached source and found type-complexity; replaced tuple with `Registration`, rerun pending.
 - 2026-11-06: Operator requested a one-hour pause on large local builds and target cleanup. Verified no active process used this target, removed inactive `debug/build` and `debug/incremental`; target shrank 7.5G to 50M, filesystem free space rose to 25G. No new large local builds during the pause. Outstanding validation: recovered Daybook correction, registry tests/clippy, storage tests, fresh integrated review, guardrail/API matrix and benchmarks. Still no-ship.
+- 2026-11-06: Source-only guardrails now pass with zero diagnostics, and all public API snapshots pass (`afa28a84`). Retained Luna-high review accepted registry/shutdown/staging mechanisms, then exposed admission callback and pending-cancellation gaps plus a second receipt handler path. Manager integrated callback support, rejected cancellation terminalization before durable authority settlement, retained cancellation marks through completion (`4ecf2728`), and routed cancellation through the one deduplicated receipt waiter (`6d875839`). Terminal-parent command replies are treated as a settled destination during replay.
+- 2026-11-06: Prepared mothership checkout and WIT deps. Remote focused registry/runtime run passed 28/28 in 4m41s including compilation. Expanded remote matrix is running under an external target and eight Cargo jobs. Its first Daybook clippy attempt exposed missing compile-time OLLAMA variables; pinned to inert localhost/empty-auth test defaults and restarted the failed step. No local large builds resumed; source-only checks use the preserved xtask binary.
