@@ -388,9 +388,10 @@ pub struct DatumPage {
 
 /// One revision-stamped fact a poll delivers.
 ///
-/// `enter` carries the document's current selected datums so a consumer that did not know the
-/// document converges from this event alone; `datum` is the cheaper form for a document the
-/// consumer already holds; `leave` is idempotent for a consumer that never held it.
+/// `datum` is one selected row of a document that matches the predicate: sent when the row
+/// changed, and for every selected row of a document that moved into the result (a move-in,
+/// ADR 025 §7). `leave` is a move-out and is idempotent for a consumer that never held the
+/// document. The consumer tracks which documents it holds; the server keeps no state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -398,11 +399,6 @@ pub struct DatumPage {
     rename_all_fields = "camelCase"
 )]
 pub enum DatumEvent {
-    Enter {
-        revision: u64,
-        doc_id: DocId,
-        datums: BTreeMap<DatumKey, ObservedDatum>,
-    },
     Datum {
         revision: u64,
         doc_id: DocId,

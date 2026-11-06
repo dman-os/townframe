@@ -151,7 +151,7 @@ tags the predicate names, and the roster tags. For each page at revision r:
    `docEntry` change, or `scoped_docs(child)` for a `childEntry` change. Re-evaluate
    those docs in one statement, so a doc reachable through two children survives
    losing one path.
-4. Stamp every resulting `enter`, `datum` or `leave` with **r**, never with the store's
+4. Stamp every resulting `datum` or `leave` with **r**, never with the store's
    latest revision.
 
 Why resume is now correct:

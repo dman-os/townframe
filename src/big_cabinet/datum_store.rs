@@ -531,13 +531,12 @@ impl<S: DatumStore> StoreOwner<S> {
         }
     }
 
-    /// Flattens a page into observed datums. An `enter` restates the document's whole selected
-    /// state, which `should_apply_observed` dedups against what is already read.
+    /// Flattens a page into observed datums. A move-in restates a document's selected rows,
+    /// which `should_apply_observed` dedups against what is already read.
     fn page_batch(&self, page: DatumPage) -> Vec<(DatumKey, ObservedDatum)> {
         let mut batch = Vec::new();
         for event in page.events {
             match event {
-                DatumEvent::Enter { datums, .. } => batch.extend(datums),
                 DatumEvent::Datum {
                     datum_key, datum, ..
                 } => batch.push((datum_key, datum)),

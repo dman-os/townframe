@@ -250,20 +250,6 @@ fn datum_listing_wire() {
 fn poll_datums_wire() {
     for (name, event) in [
         (
-            "datum_event_enter",
-            DatumEvent::Enter {
-                revision: 7,
-                doc_id: document(1),
-                datums: BTreeMap::from([(
-                    key("main"),
-                    ObservedDatum::Present {
-                        doc_heads: vec![hash(1)],
-                        version: version(&[2]),
-                    },
-                )]),
-            },
-        ),
-        (
             "datum_event_datum",
             DatumEvent::Datum {
                 revision: 8,

@@ -429,12 +429,6 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
     let mut present = false;
     while !present {
         match poll.next().await.unwrap().expect("the note never replayed") {
-            DatumEvent::Enter { doc_id, datums, .. } => {
-                assert_eq!(doc_id, doc);
-                present = datums
-                    .values()
-                    .any(|d| matches!(d, ObservedDatum::Present { .. }));
-            }
             DatumEvent::Datum {
                 doc_id,
                 datum: ObservedDatum::Present { .. },

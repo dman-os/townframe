@@ -128,7 +128,7 @@ impl Poller {
         }
     }
 
-    /// The next per-datum fact, expanding an `enter` into its datums and skipping a `leave`.
+    /// The next row fact, skipping a `leave`.
     pub(crate) async fn next_datum(&mut self) -> (DocId, DatumKey, ObservedDatum) {
         loop {
             match self.next().await.expect("poll failed").expect("poll ended") {
@@ -138,25 +138,6 @@ impl Poller {
                     datum,
                     ..
                 } => return (doc_id, datum_key, datum),
-                DatumEvent::Enter {
-                    doc_id,
-                    datums,
-                    revision,
-                } => {
-                    let mut datums = datums.into_iter();
-                    if let Some((datum_key, datum)) = datums.next() {
-                        let rest: Vec<_> = datums.collect();
-                        for (datum_key, datum) in rest.into_iter().rev() {
-                            self.pending.push_front(DatumEvent::Datum {
-                                revision,
-                                doc_id: doc_id.clone(),
-                                datum_key,
-                                datum,
-                            });
-                        }
-                        return (doc_id, datum_key, datum);
-                    }
-                }
                 DatumEvent::Leave { .. } => {}
             }
         }
@@ -187,9 +168,6 @@ pub(crate) async fn query(
         let page = poller.page(0).await?;
         for event in page.events {
             match event {
-                DatumEvent::Enter { doc_id, datums, .. } => {
-                    state.entry(doc_id).or_default().extend(datums);
-                }
                 DatumEvent::Datum {
                     doc_id,
                     datum_key,

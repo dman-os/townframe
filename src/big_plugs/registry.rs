@@ -1041,12 +1041,12 @@ impl Registry {
             after = page.through;
             // Events are facts about documents; the fold re-reads each document, so only the
             // last word per document matters. A `leave` for a document never held is
-            // idempotent, and the index can deliver one before the document's `enter`.
+            // idempotent, and the index can deliver one before the document's first row.
             let mut touched = BTreeSet::new();
             let mut left = BTreeSet::new();
             for event in &page.events {
                 match event {
-                    DatumEvent::Enter { doc_id, .. } | DatumEvent::Datum { doc_id, .. } => {
+                    DatumEvent::Datum { doc_id, .. } => {
                         left.remove(doc_id);
                         touched.insert(doc_id.clone());
                     }

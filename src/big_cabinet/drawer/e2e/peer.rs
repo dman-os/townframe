@@ -131,11 +131,6 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
             .unwrap()
             .expect("the note never replayed")
         {
-            DatumEvent::Enter { doc_id, datums, .. }
-                if doc_id == doc && datums.contains_key(&key) =>
-            {
-                break;
-            }
             DatumEvent::Datum {
                 doc_id,
                 datum_key,
