@@ -731,7 +731,42 @@ function buildPatches() {
       sha256: pins["@pierre/diffs"].sha256,
     },
     cases,
+    fromFiles: buildFromFiles(),
   };
+}
+
+/**
+ * parseDiffFromFile over pairs where a side is empty or absent: upstream's
+ * hunk line indexes are `start - 1`, so they are -1 for a side that starts at
+ * line 0, and the port must produce the same values.
+ */
+function buildFromFiles() {
+  const file = (contents) => ({ name: "a.ts", contents });
+  const texts = ["", "x\n", "x\ny\nz\n", "no newline"];
+  const cases = [];
+  for (const oldText of texts) {
+    for (const newText of texts) {
+      cases.push({
+        kind: "both",
+        oldFile: file(oldText),
+        newFile: file(newText),
+        expected: jsonClone(parseDiffFromFile(file(oldText), file(newText))),
+      });
+    }
+  }
+  for (const text of texts) {
+    cases.push({
+      kind: "added",
+      newFile: file(text),
+      expected: jsonClone(parseDiffFromFile(null, file(text))),
+    });
+    cases.push({
+      kind: "deleted",
+      oldFile: file(text),
+      expected: jsonClone(parseDiffFromFile(file(text), null)),
+    });
+  }
+  return cases;
 }
 
 function buildUtilities() {

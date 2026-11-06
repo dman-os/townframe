@@ -153,26 +153,6 @@ struct HeaderCase {
     expected: Value,
 }
 
-/// Upstream's hunk cursors are `start - 1`, so a side that starts at line 0
-/// (an added or deleted file) carries index -1; the port saturates at 0 and
-/// no reader looks at the index of a side with zero lines. The header never
-/// reads it, so the golden input is clamped to the port's domain.
-fn clamp_empty_side_indices(value: &mut Value) {
-    match value {
-        Value::Array(items) => items.iter_mut().for_each(clamp_empty_side_indices),
-        Value::Object(map) => {
-            for (key, entry) in map.iter_mut() {
-                if key.ends_with("LineIndex") && entry.as_i64() == Some(-1) {
-                    *entry = Value::from(0);
-                } else {
-                    clamp_empty_side_indices(entry);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 #[test]
 fn create_file_header_element_matches() {
     let golden = golden();
@@ -181,9 +161,7 @@ fn create_file_header_element_matches() {
         let diff: FileDiffMetadata;
         let file: FileContents;
         let file_or_diff = if case.input.get("hunks").is_some() {
-            let mut input = case.input.clone();
-            clamp_empty_side_indices(&mut input);
-            diff = serde_json::from_value(input).expect("diff");
+            diff = serde_json::from_value(case.input.clone()).expect("diff");
             FileOrDiff::Diff(&diff)
         } else {
             file = serde_json::from_value(case.input.clone()).expect("file");
@@ -328,7 +306,10 @@ fn render_diff_with_highlighter_matches() {
                 result.code.addition_lines.iter().map(flatten).collect(),
             )),
         ];
-        assert_eq!(flat_actual, case.flat, "{context}: flattened text");
+        assert_eq!(
+            flat_actual, case.flat,
+            "{context}: flattened text\ndecoration-only differences so far: {flat_only:#?}"
+        );
         let exact_actual = [
             fnv64(&serde_json::to_value(&result.code.deletion_lines).expect("json")),
             fnv64(&serde_json::to_value(&result.code.addition_lines).expect("json")),
@@ -338,7 +319,11 @@ fn render_diff_with_highlighter_matches() {
         } else {
             // Only word-diff decorations may differ, since `similar` and jsdiff
             // tokenise differently; with no line diff there is nothing to differ.
-            assert_ne!(case.line_diff_type, LineDiffTypes::None, "{context}");
+            assert_ne!(
+                case.line_diff_type,
+                LineDiffTypes::None,
+                "{context}\ndecoration-only differences so far: {flat_only:#?}"
+            );
             flat_only.push(context);
         }
     }

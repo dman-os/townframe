@@ -21,6 +21,7 @@ use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::HunkContent;
 use crate::types::patch::ParseDiffOptions;
 use crate::types::patch::ParsePatchOptions;
+use crate::types::patch::signed;
 use crate::utils::are_diff_targets_equal::are_diff_targets_equal;
 use crate::utils::compose_cache_key::compose_cache_key;
 use crate::utils::hydrate_partial_diff::hydrate_partial_diff_clone;
@@ -127,7 +128,7 @@ fn expect_partial_line_state(file_diff: &FileDiffMetadata, expected: PartialLine
     }
 }
 
-fn content_indexes(content: &HunkContent) -> (usize, usize) {
+fn content_indexes(content: &HunkContent) -> (i64, i64) {
     match content {
         HunkContent::Context(context) => (context.addition_line_index, context.deletion_line_index),
         HunkContent::Change(change) => (change.addition_line_index, change.deletion_line_index),
@@ -210,15 +211,18 @@ fn hydrates_two_sided_partial_diffs_with_full_lines_and_rewritten_line_indexes()
     assert_eq!(hydrated_specs, partial_hunk_specs);
     assert_eq!(
         first_hunk.addition_line_index,
-        first_hunk.addition_start - 1
+        signed(first_hunk.addition_start) - 1
     );
     assert_eq!(
         first_hunk.deletion_line_index,
-        first_hunk.deletion_start - 1
+        signed(first_hunk.deletion_start) - 1
     );
     assert_eq!(
         content_indexes(first_content),
-        (first_hunk.addition_start - 1, first_hunk.deletion_start - 1)
+        (
+            signed(first_hunk.addition_start) - 1,
+            signed(first_hunk.deletion_start) - 1
+        )
     );
     assert_eq!(
         verify_hunk_line_values(&partial, "file"),

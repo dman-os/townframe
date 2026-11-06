@@ -26,6 +26,7 @@ use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::Hunk;
 use crate::types::patch::HunkContent;
 use crate::types::patch::ParseDiffOptions;
+use crate::types::patch::signed;
 use crate::utf16;
 use crate::utils::iterate_over_diff::DiffLineCallbackProps;
 use crate::utils::iterate_over_diff::DiffLineMetadata;
@@ -152,8 +153,8 @@ fn row_identities(
 fn context(lines: usize, deletion_line_index: usize, addition_line_index: usize) -> HunkContent {
     HunkContent::Context(ContextContent {
         lines,
-        addition_line_index,
-        deletion_line_index,
+        addition_line_index: signed(addition_line_index),
+        deletion_line_index: signed(deletion_line_index),
     })
 }
 
@@ -165,9 +166,9 @@ fn change(
 ) -> HunkContent {
     HunkContent::Change(ChangeContent {
         deletions,
-        deletion_line_index,
+        deletion_line_index: signed(deletion_line_index),
         additions,
-        addition_line_index,
+        addition_line_index: signed(addition_line_index),
     })
 }
 
@@ -231,11 +232,11 @@ fn build_hunk_diff(
         addition_start: collapsed_before + 1,
         addition_count: counts.addition_count,
         addition_lines: counts.addition_lines,
-        addition_line_index: collapsed_before,
+        addition_line_index: signed(collapsed_before),
         deletion_start: collapsed_before + 1,
         deletion_count: counts.deletion_count,
         deletion_lines: counts.deletion_lines,
-        deletion_line_index: collapsed_before,
+        deletion_line_index: signed(collapsed_before),
         hunk_content,
         hunk_context: None,
         hunk_specs: Some(format!(

@@ -28,6 +28,7 @@ use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::HunkContent;
 use crate::types::patch::ParsePatchOptions;
 use crate::types::patch::ParsedPatch;
+use crate::types::patch::signed;
 use crate::utils::compose_cache_key::compose_cache_key;
 use crate::utils::get_total_line_count_from_hunks::get_total_line_count_from_hunks;
 use crate::utils::parse_patch_files::Parsed;
@@ -276,7 +277,7 @@ fn preserves_the_line_16_blank_insertion_from_issue_1139() {
             .expect("a blank-line insertion");
         assert_eq!(change.addition_line_index, 3);
         assert_eq!(
-            hunk.addition_start + change.addition_line_index - hunk.addition_line_index,
+            signed(hunk.addition_start) + change.addition_line_index - hunk.addition_line_index,
             16
         );
         let verified = verify_file_diff_hunk_values(&file);
@@ -313,8 +314,8 @@ fn preserves_prefix_at_blank_run_offset_in_each_hunk() {
                     Some(ChangeContent {
                         additions: usize::from(prefix == '+'),
                         deletions: usize::from(prefix == '-'),
-                        addition_line_index: hunk.addition_line_index + 1 + offset,
-                        deletion_line_index: hunk.deletion_line_index + 1 + offset,
+                        addition_line_index: hunk.addition_line_index + 1 + signed(offset),
+                        deletion_line_index: hunk.deletion_line_index + 1 + signed(offset),
                     })
                 );
             }

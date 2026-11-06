@@ -105,7 +105,7 @@ pierre/src/react/utils/useNextRenderData.ts|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useStableCallback.ts|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useUnresolvedFileInstance.ts|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/renderers/DiffHunksRenderer.ts|PORTED|S6|renderers/diff_hunks_renderer.rs;renderers/diff_hunks_renderer/process.rs|unified and split in one `process_diff_result`; protected hooks are the `DiffHunksRendererHooks` trait; caches, worker pool, edit session and async highlighting are dropped (see Dropped branches); oracle: hast JSON of processDiffResult/renderFullAST over the stub highlighter (render_s6.json)
-pierre/src/renderers/FileRenderer.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/renderers/FileRenderer.ts|PENDING|unassigned||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/renderers/UnresolvedFileHunksRenderer.ts|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/shiki-stream/index.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/shiki-stream/stream.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
@@ -286,7 +286,7 @@ pierre/test/annotationHelpers.test.ts|OUT|S6||see utils/annotationHelpers.ts: ty
 pierre/test/annotations.test.ts|PORTED|S6|renderers/annotations_test.rs|all eleven cases; demo-fixture line numbers remapped to the stand-in; placement snapshots became invariants
 pierre/test/InjectedRowHooks.test.ts|PORTED|S6|renderers/injected_row_hooks_test.rs|two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer
 pierre/test/patchFileRender.test.ts|PORTED|S6|renderers/patch_file_render_test.rs|digest snapshots became invariants over the parsed patch and the rendered rows
-pierre/test/FileRenderer*|PENDING|S6||
+pierre/test/FileRenderer*|PENDING|unassigned||
 pierre/test/CodeView*|PENDING|S12||
 pierre/test/FileDiff*|PENDING|S9||
 pierre/test/Virtualiz*|PENDING|S10||
