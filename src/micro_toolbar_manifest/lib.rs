@@ -9,24 +9,18 @@
 //! manifest, which stores a lazy endpoint to its own call publication: the toolbar renders the
 //! metadata without starting the contributor, and pressing the button calls the endpoint, which
 //! activates or joins the contributor for the length of the call.
-use clay_mdk::Access;
 use clay_mdk::Attachment;
-use clay_mdk::BindingResolution;
 use clay_mdk::CollectionCapability;
-use clay_mdk::CollectionContract;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
-use clay_mdk::ContributionDeclaration;
 use clay_mdk::DeclaredCollection;
-use clay_mdk::Entrypoints;
+use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
 use clay_mdk::PackageDecl;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
-use clay_mdk::Request;
 use clay_mdk::Sidecar;
+use micro_shell_manifest::ShellPanels;
+use micro_shell_manifest::Socket;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -103,65 +97,27 @@ impl DeclaredCollection for ToolbarButtons {
 /// view, and contributes that view as a panel in the shell's sidebar socket: it is on screen
 /// wherever the sidebar is, whatever the main position shows.
 pub fn manifest() -> MicroManifest {
-    MicroManifest {
-        entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: VIEW.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
-        requires: vec![],
-        configuration_requests: vec![],
-        collection_contracts: vec![CollectionContract {
-            id: Nsid::literal(BUTTONS),
-            selector_schema: Nsid::literal(BUTTON_SELECTOR_SCHEMA),
-            key_schema: Nsid::literal(BUTTON_KEY_SCHEMA),
-            value_schema: Nsid::literal(BUTTON_VALUE_SCHEMA),
-            write_context_schema: None,
-            offered: vec![CollectionCapability::Read, CollectionCapability::Register],
-        }],
+    ManifestBuilder::new()
+        .component::<ToolbarView>()
+        .declares::<ToolbarButtons>()
         // The toolbar reads buttons through a binding configuration resolves; with one declared
         // buttons collection the default binds it. It also writes its panel row into the shell's
         // panels collection.
-        collection_requests: vec![
-            Request {
-                binding: BUTTONS_BINDING.into(),
-                contract: Nsid::literal(BUTTONS),
-                access: Some(Access::Read),
-                necessity: Necessity::Required,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-            Request {
-                binding: PANELS_BINDING.into(),
-                contract: Nsid::literal(micro_shell_manifest::PANELS),
-                access: Some(Access::Write),
-                necessity: Necessity::Required,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-        ],
-        contributions: vec![ContributionDeclaration {
-            id: "panel".into(),
-            binding: PANELS_BINDING.into(),
-            key: ID.into(),
-            payload: serde_json::json!({
-                "title": "Toolbar",
-                "sockets": ["sidebar"],
-                "content": { "$attachment": 0 },
-            }),
-            attachments: vec![clay_mdk::AttachmentDeclaration {
-                index: 0,
-                publication: VIEW.into(),
-            }],
-        }],
-        extra: Default::default(),
-    }
+        .reads::<ToolbarButtons>(BUTTONS_BINDING, Necessity::Required)
+        .writes::<ShellPanels>(PANELS_BINDING, Necessity::Required)
+        .contributes::<ShellPanels>("panel", ID, |at| micro_shell_manifest::Panel {
+            title: "Toolbar".into(),
+            sockets: vec![Socket::Sidebar],
+            content: at.own::<ToolbarView>(),
+            details: None,
+            home: false,
+        })
+        .build()
 }
 
 /// The Toolbar package as its sidecar carries it: identity, authority and manifest.
 pub fn sidecar() -> Sidecar {
-    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
+    Sidecar::of::<Toolbar>(manifest())
 }
 
 #[cfg(test)]
