@@ -56,3 +56,8 @@ pub const UPSERT_PROGRESS_SQL: &str = include_str!("queries/upsert_progress.sql"
 pub async fn upsert_progress(db: &impl crate::sqlite_rs_alias::Executor, source: String, revision: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_PROGRESS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(source), crate::sqlite_rs_alias::IntoValue::into_value(revision)]).await
 }
+
+pub const WAKE_MATERIALIZED_SQL: &str = include_str!("queries/wake_materialized.sql");
+pub async fn wake_materialized(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(WAKE_MATERIALIZED_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id)]).await
+}

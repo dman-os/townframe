@@ -51,12 +51,51 @@ impl WorkQueue {
             tx.rollback().await?;
             return Ok(());
         }
-        tracing::info!(source, revision, documents = documents.len(), rearm_waiting, "INSTR work queue ingest"); // INSTR
+        tracing::info!(
+            source,
+            revision,
+            documents = documents.len(),
+            rearm_waiting,
+            "INSTR work queue ingest"
+        ); // INSTR
         for document in documents {
             sqlite::queries::enqueue(&tx, document.to_string()).await?;
         }
         if rearm_waiting {
             sqlite::queries::rearm_waiting(&tx).await?;
+        }
+        sqlite::queries::upsert_progress(&tx, source.to_owned(), i64::try_from(revision)?).await?;
+        tx.commit().await?;
+        self.changed.notify_one();
+        Ok(())
+    }
+
+    /// Re-dirty the parked or in-flight rows among `documents` after their content
+    /// materialized locally, and advance the `source` cursor in the same transaction.
+    ///
+    /// Only rows that are `waiting` (parked because the document could not be read yet) or
+    /// `dirty` (a pass may be reading it right now) are touched; a document that was never
+    /// enqueued is not blob work. Bumping the generation of a dirty row makes the in-flight
+    /// pass's `finish` a no-op, so content that lands between that pass's read and its
+    /// `finish` cannot be parked over: the row stays dirty and is read again.
+    pub async fn wake_materialized(
+        &self,
+        source: &str,
+        revision: u64,
+        documents: BTreeSet<DocId>,
+    ) -> Res<()> {
+        let tx = self.sql.begin_write().await?;
+        let previous = sqlite::queries::progress(&tx, source.to_owned())
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or(0) as u64;
+        if revision <= previous {
+            tx.rollback().await?;
+            return Ok(());
+        }
+        for document in documents {
+            sqlite::queries::wake_materialized(&tx, document.to_string()).await?;
         }
         sqlite::queries::upsert_progress(&tx, source.to_owned(), i64::try_from(revision)?).await?;
         tx.commit().await?;

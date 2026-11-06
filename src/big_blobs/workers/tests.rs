@@ -561,3 +561,200 @@ async fn roster_entries_on_a_polled_drawer_enqueue_only_the_member_they_name() -
     drop(call);
     Ok(())
 }
+
+/// Serves `ReadDatums` for the member doc: `Denied` until `arrived` is set (the roster names the
+/// member before its content syncs in), then an empty datum set. `denied` and `served` are
+/// notified for each read of the matching outcome.
+struct MemberDocs {
+    arrived: std::sync::atomic::AtomicBool,
+    denied: tokio::sync::Notify,
+    served: tokio::sync::Notify,
+}
+
+impl InlineRoute<DocsProtocol> for MemberDocs {
+    fn route_inline(self: Arc<Self>, message: DocsMessage) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let DocsMessage::ReadDatums(message) = message else {
+                panic!("a member doc without blobs is only read");
+            };
+            let reply = if self.arrived.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(big_cabinet_core::doc::DatumsRead {
+                    heads: Vec::new(),
+                    datums: BTreeMap::new(),
+                })
+            } else {
+                Err(DocsError::Denied)
+            };
+            let served = reply.is_ok();
+            message.tx.send(reply.map(Into::into)).await.unwrap();
+            if served {
+                self.served.notify_one();
+            } else {
+                self.denied.notify_one();
+            }
+        })
+    }
+}
+
+/// A drawer roster names a member doc whose content has not synced in: the worker reads it
+/// `Denied` and parks it. Nothing the roster poll or the policy stream publishes changes when
+/// the content lands, only the repo's Automerge frontier does, so the worker must wake the
+/// parked member from that stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_parked_before_its_content_arrives_is_read_again_when_it_materializes() -> Res<()>
+{
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let (repo, repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+        node_identity_seed: [126; 32],
+        storage: big_repo::Storage::memory(&runtime).unwrap(),
+        scope_key: "workers-materialization-wake".into(),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
+    .await?;
+    let sql = runtime.ephemeral(&[])?;
+    // The worker consults the drawer tables to tell a root drawer from a member doc.
+    sql.apply_migrations(
+        "test_drawers",
+        &[
+            sqlite_rs::Migration {
+                version: 1,
+                name: "drawers",
+                sql: include_str!("../../big_cabinet/drawer/sqlite/migrations/001_drawers.sql"),
+            },
+            sqlite_rs::Migration {
+                version: 2,
+                name: "metadata",
+                sql: include_str!(
+                    "../../big_cabinet/drawer/sqlite/migrations/003_meta_doc_roots.sql"
+                ),
+            },
+        ],
+    )
+    .await?;
+    let (blobs, blobs_stop) = crate::boot(crate::Config {
+        storage: crate::Storage::memory().unwrap(),
+        sql: sql.clone(),
+        authority: Client::direct(Arc::new(UnusedAuthority)),
+        namespace: big_cabinet_core::authority::Namespace {
+            namespace_id: big_cabinet_core::dmeta::Uuid7::new(),
+            capability: CapId::from_bytes([127; 16]),
+        },
+    })
+    .await?;
+    let docs_stub = Arc::new(MemberDocs {
+        arrived: false.into(),
+        denied: tokio::sync::Notify::new(),
+        served: tokio::sync::Notify::new(),
+    });
+    let docs = Client::<DocsProtocol>::direct(Arc::clone(&docs_stub));
+    let parts: SharedPartStore = Arc::new(big_sync::MemoryPartStore::new());
+    let queue = WorkQueue::new(sql.clone()).await?;
+    sql.apply_migrations(
+        sqlite::queries::MIGRATION_TABLE,
+        sqlite::queries::MIGRATIONS,
+    )
+    .await?;
+    let (policy, policy_rx) = watch::channel(0);
+    let metadata = MetadataCapabilities::new(
+        Arc::new(|_| panic!("a member doc is read with the worker's own capability")),
+        policy_rx.clone(),
+    );
+    let retention = Retention::new(
+        sql.clone(),
+        Arc::clone(&blobs.service),
+        docs.clone(),
+        metadata.clone(),
+        Arc::new(|_| Box::pin(async { Ok(false) })),
+        Arc::clone(&parts),
+    )
+    .await?;
+    let capability = CapId::from_bytes([7; 16]);
+    let adapter = DocumentBlobs::new(
+        docs.clone(),
+        capability,
+        blobs.service.store().clone(),
+        Arc::clone(&blobs.service.provider),
+        blobs.service.roots.clone(),
+    );
+    let (mirrors, mirrors_stop) = crate::admission::InventoryMirrors::boot(
+        sql.clone(),
+        Arc::clone(&blobs.service),
+        Arc::clone(&parts),
+        Arc::clone(&repo),
+        queue.clone(),
+    )
+    .await?;
+    let projection = Arc::new(BlobProjection::new(sql.clone()).await?);
+    let (stop, tasks) = StopToken::new();
+    spawn_worker(
+        &tasks,
+        WorkerParts {
+            repo: Arc::clone(&repo),
+            sql: sql.clone(),
+            service: Arc::clone(&blobs.service),
+            docs,
+            capability,
+            metadata,
+            mirrors,
+            observe_metadata: Arc::new(|_| panic!("the member is not a root drawer")),
+            policy: policy_rx,
+        },
+        queue.clone(),
+        retention,
+        adapter,
+        projection,
+    );
+
+    // The member doc exists in the repo (the roster names it) but its datums are not readable.
+    let mut member = automerge::Automerge::new();
+    let mut transaction = member.transaction();
+    automerge::transaction::Transactable::put(&mut transaction, automerge::ROOT, "seed", true)?;
+    transaction.commit();
+    let handle = repo.create_doc(member).await?;
+    let member = big_repo::automerge_doc_obj_id(handle.document_id());
+    queue.enqueue(&member).await?;
+
+    // Only once the worker has been refused the read does the content land, so the member is
+    // parked (or about to be) and cannot read the content on its first pass.
+    docs_stub.denied.notified().await;
+    // The content lands: the stub starts serving, and the doc changes in the repo, which is
+    // what publishes a frontier revision for it.
+    docs_stub
+        .arrived
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    handle
+        .with_document(|doc| {
+            let mut transaction = doc.transaction();
+            automerge::transaction::Transactable::put(
+                &mut transaction,
+                automerge::ROOT,
+                "content",
+                true,
+            )
+            .unwrap();
+            transaction.commit();
+        })
+        .await?;
+    docs_stub.served.notified().await;
+
+    stop.stop().await;
+    mirrors_stop.stop().await;
+    blobs_stop.stop().await;
+    repo_stop.stop().await?;
+    drop(policy);
+    Ok(())
+}
+
+struct UnusedAuthority;
+
+impl InlineRoute<big_cabinet_core::authority::AuthorityProtocol> for UnusedAuthority {
+    fn route_inline(
+        self: Arc<Self>,
+        _: big_cabinet_core::authority::AuthorityMessage,
+    ) -> BoxFuture<'static, ()> {
+        Box::pin(async { panic!("the worker test does not mint client capabilities") })
+    }
+}

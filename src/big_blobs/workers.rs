@@ -23,10 +23,15 @@ use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
+use big_repo::AutomergeFrontierEvent;
+use big_repo::AutomergeFrontierRevisionStore;
+use big_repo::AutomergeFrontierSelector;
+use big_repo::AutomergeFrontierTarget;
 use big_repo::SharedPartStore;
 use big_sync_core::PartKey;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
 use futures::future::BoxFuture;
 use service_utils_rs::Client;
@@ -141,6 +146,9 @@ pub struct BlobWorkers {
     pub parts: SharedPartStore,
     pub mirrors: crate::admission::InventoryMirrors,
 }
+
+/// The work queue progress key of the node-wide frontier reader that wakes parked documents.
+const MATERIALIZATION_SOURCE: &str = "materialization";
 
 pub fn inventory_part(document: &DocId) -> PartKey {
     let digest = blake3::derive_key(
@@ -274,13 +282,24 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
         })
         .expect("projection starts before shutdown");
     let worker = WorkerParts {
+        repo: Arc::clone(&config.repo),
         sql: config.sql.clone(),
         service: Arc::clone(&config.service),
         docs: config.docs.clone(),
         capability: config.capability,
         metadata,
         mirrors,
-        metadata_observer: config.metadata_observer,
+        observe_metadata: {
+            let observer = config.metadata_observer;
+            Arc::new(move |drawer| {
+                let observer = observer.clone();
+                Box::pin(async move {
+                    observer
+                        .observe_metadata(&RequestContext::root(), &drawer)
+                        .await
+                })
+            })
+        },
         policy: config.policy.clone(),
     };
     spawn_worker(&tasks, worker, queue, retention, adapter, projection);
@@ -305,6 +324,19 @@ fn spawn_worker(
             let mut polled = BTreeSet::new();
             let mut availability = config.service.open_availability(queue.progress("availability").await?).await?;
             let mut policy = config.policy.clone();
+            // A parked document is waiting for its content to materialize locally (a peer's
+            // member doc is named by the roster before its bytes sync in). None of the other
+            // wake sources fires when that content lands, so one node-wide reader over the
+            // Automerge frontier (the same AFW-backed stream the facet-set index parks on)
+            // re-dirties the parked rows whose documents changed. The durable cursor keeps
+            // content that arrived while the node was down from being missed.
+            let frontier = AutomergeFrontierRevisionStore::new(config.repo.frontier_part_store());
+            let mut materialized = frontier
+                .open(
+                    AutomergeFrontierSelector { targets: vec![AutomergeFrontierTarget::All] },
+                    queue.progress(MATERIALIZATION_SOURCE).await?,
+                )
+                .await?;
             poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, None).await?;
             loop {
                 if cancel.is_cancelled() { return Ok::<_, utils_rs::prelude::eyre::Report>(()); }
@@ -396,6 +428,19 @@ fn spawn_worker(
 
                         }
                     }
+                    read = materialized.next(RevisionReadLimits::default()) => {
+                        if let RevisionRead::Entries { revision, entries } = read? {
+                            let documents = entries
+                                .into_iter()
+                                .filter_map(|event| match event {
+                                    AutomergeFrontierEvent::Changed { doc_id, .. } => Some(big_repo::automerge_doc_obj_id(doc_id)),
+                                    // A removal is not content arriving.
+                                    AutomergeFrontierEvent::Removed { .. } => None,
+                                })
+                                .collect::<BTreeSet<_>>();
+                            queue.wake_materialized(MATERIALIZATION_SOURCE, revision, documents).await?;
+                        }
+                    }
                     changed = policy.changed() => {
                         changed.expect("drawer policy outlives blob workers");
                         tracing::info!("INSTR blob worker policy changed: rearm all"); // INSTR
@@ -413,15 +458,31 @@ fn spawn_worker(
 }
 
 struct WorkerParts {
+    repo: big_repo::SharedBigRepo,
     sql: Database,
     service: Arc<BlobService>,
     docs: Client<DocsProtocol>,
     capability: CapId,
     metadata: MetadataCapabilities,
     mirrors: crate::admission::InventoryMirrors,
-    metadata_observer: big_cabinet::drawer::DrawerService,
+    /// Observes a drawer's metadata roots. A closure over the drawer service so the worker
+    /// loop can be driven without booting one when no root drawer is involved.
+    observe_metadata: ObserveMetadata,
     policy: watch::Receiver<u64>,
 }
+
+type ObserveMetadata = Arc<
+    dyn Fn(
+            big_cabinet_core::drawer::protocol::DrawerId,
+        ) -> BoxFuture<
+            'static,
+            Result<
+                big_cabinet::drawer::DrawerMetadataObservation,
+                big_cabinet_core::drawer::protocol::DrawersError,
+            >,
+        > + Send
+        + Sync,
+>;
 
 fn blob_tags() -> BTreeSet<DatumTag> {
     [Blob::ID, CipherBlob::ID, BlobPin::ID, Jwk::ID]
@@ -714,11 +775,7 @@ async fn enqueue_root_members(
             continue;
         }
         let waiting = metadata.get_or_insert(false);
-        match config
-            .metadata_observer
-            .observe_metadata(&RequestContext::root(), &drawer.parse()?)
-            .await
-        {
+        match (config.observe_metadata)(drawer.parse()?).await {
             Ok(observation) => {
                 *waiting |= observation
                     .roots
