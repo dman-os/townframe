@@ -250,14 +250,14 @@ automerge = "0.11.0"
 autosurgeon = "0.13.0"
 # automerge-test = "0.9"
 
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "38b87c56d4c38529e99ce588d541385c8b1a3eb9" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "38b87c56d4c38529e99ce588d541385c8b1a3eb9" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "38b87c56d4c38529e99ce588d541385c8b1a3eb9" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "38b87c56d4c38529e99ce588d541385c8b1a3eb9" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "38b87c56d4c38529e99ce588d541385c8b1a3eb9" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "38b87c56d4c38529e99ce588d541385c8b1a3eb9" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "38b87c56d4c38529e99ce588d541385c8b1a3eb9" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "38b87c56d4c38529e99ce588d541385c8b1a3eb9" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "8dc7da49c553ef4992f858b2ea90ad8f32d1ab14" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "8dc7da49c553ef4992f858b2ea90ad8f32d1ab14" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "8dc7da49c553ef4992f858b2ea90ad8f32d1ab14" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "8dc7da49c553ef4992f858b2ea90ad8f32d1ab14" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "8dc7da49c553ef4992f858b2ea90ad8f32d1ab14" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "8dc7da49c553ef4992f858b2ea90ad8f32d1ab14" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "8dc7da49c553ef4992f858b2ea90ad8f32d1ab14" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "8dc7da49c553ef4992f858b2ea90ad8f32d1ab14" }
 
 keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "0a3689c82356e3479538faba809336ffd5a917ab" }
 keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "0a3689c82356e3479538faba809336ffd5a917ab" }
