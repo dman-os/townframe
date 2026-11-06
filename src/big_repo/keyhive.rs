@@ -194,6 +194,96 @@ pub(crate) enum EventSubject {
     Unresolved,
 }
 
+/// Reverse membership: for each agent, group or document, the groups and documents that
+/// list it as a direct member. Walking it upward from the point where a delegation enters
+/// the graph finds every document whose reader set the delegation can change, without
+/// visiting the documents it cannot reach.
+///
+/// Edges are only ever added. A revoked member leaves a stale edge, so a walk may list a
+/// document the member no longer reaches; reader reconciliation treats that as a no-op,
+/// while a missing edge would lose a CGKA add, so over-approximating is the safe side.
+#[derive(Debug, Default)]
+pub(crate) struct MembershipReach {
+    parents: HashMap<Identifier, BTreeSet<Identifier>>,
+}
+
+impl MembershipReach {
+    /// The direct-membership edges of every group and document in the hive, inverted to
+    /// child -> parents. One short lock per node and no transitive walk: O(groups +
+    /// documents + edges) of map clones. Taken once; admitted delegations extend it.
+    pub(crate) async fn from_hive(hive: &BigKeyhiveHandle) -> Self {
+        let keyhive = hive.keyhive.as_ref();
+        let doc_ids: Vec<KhDocumentId> = {
+            let docs = keyhive.documents().lock().await;
+            docs.keys().copied().collect()
+        };
+        let group_ids: Vec<KhGroupId> = {
+            let groups = keyhive.groups().lock().await;
+            groups.keys().copied().collect()
+        };
+        let mut reach = Self::default();
+        for kh_doc_id in doc_ids {
+            if let Some(doc) = keyhive.get_document(kh_doc_id).await {
+                let parent: Identifier = kh_doc_id.into();
+                for member in Membered::Document(kh_doc_id, doc)
+                    .members()
+                    .await
+                    .into_keys()
+                {
+                    reach.record(member, parent);
+                }
+            }
+        }
+        for kh_group_id in group_ids {
+            if let Some(group) = keyhive.get_group(kh_group_id).await {
+                let parent: Identifier = kh_group_id.into();
+                for member in Membered::Group(kh_group_id, group)
+                    .members()
+                    .await
+                    .into_keys()
+                {
+                    reach.record(member, parent);
+                }
+            }
+        }
+        reach
+    }
+
+    /// The ids among `ids` that name documents held by `hive`.
+    pub(crate) async fn documents_among(
+        hive: &BigKeyhiveHandle,
+        ids: impl IntoIterator<Item = Identifier>,
+    ) -> BTreeSet<DocumentId> {
+        let docs = hive.keyhive.documents().lock().await;
+        ids.into_iter()
+            .filter_map(|id| {
+                let kh_doc_id = KhDocumentId::from(id);
+                docs.contains_key(&kh_doc_id)
+                    .then(|| DocumentId::new(kh_doc_id.to_bytes()))
+            })
+            .collect()
+    }
+
+    /// `member` is a direct member of `parent`.
+    pub(crate) fn record(&mut self, member: Identifier, parent: Identifier) {
+        self.parents.entry(member).or_default().insert(parent);
+    }
+
+    /// `start` and everything that reaches it, through any depth of nesting.
+    pub(crate) fn reaching(&self, start: Identifier) -> BTreeSet<Identifier> {
+        let mut visited = BTreeSet::from([start]);
+        let mut explore = vec![start];
+        while let Some(node) = explore.pop() {
+            for parent in self.parents.get(&node).into_iter().flatten() {
+                if visited.insert(*parent) {
+                    explore.push(*parent);
+                }
+            }
+        }
+        visited
+    }
+}
+
 // a background task. rename to new
 impl BigKeyhiveHandle {
     pub(crate) async fn new(seed: [u8; 32], listener: BigRepoKeyhiveListener) -> Res<Self> {
@@ -443,8 +533,8 @@ impl BigKeyhiveHandle {
     }
 
     /// All docs reachable by `agent`, with the [`Access`] level for each.
-    /// O(all_docs × transitive_members): boot full reindex, and reader reconciliation per
-    /// admitted delegation or prekey expansion.
+    /// O(all_docs × transitive_members): boot full reindex and test diagnostics. Reader
+    /// reconciliation uses [`MembershipReach`], which does not walk every document.
     pub async fn docs_for_agent(&self, agent: &Identifier) -> BTreeMap<DocumentId, Access> {
         let keyhive = self.keyhive.as_ref();
         let mut caps = BTreeMap::new();

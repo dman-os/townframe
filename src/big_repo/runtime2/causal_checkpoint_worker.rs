@@ -14,6 +14,7 @@
 use crate::handler::BigRepoKeyhiveProtocol;
 use crate::interlude::*;
 use crate::keyhive::BigKeyhiveHandle;
+use crate::keyhive::MembershipReach;
 use crate::runtime2::WorkerGroupScope;
 use crate::runtime2::keyhive_admission;
 use crate::store::sqlite::SqliteBigRepoStore;
@@ -87,6 +88,9 @@ pub fn spawn_causal_checkpoint_worker(
                 }
             }
 
+            let reach = Arc::new(std::sync::Mutex::new(
+                MembershipReach::from_hive(&keyhive).await,
+            ));
             let source = keyhive_admission::Store {
                 store: store.clone(),
             };
@@ -129,6 +133,7 @@ pub fn spawn_causal_checkpoint_worker(
                 timer,
                 clock,
                 pending_admission: HashMap::new(),
+                reach,
             };
             worker.machine_loop().await
         };
@@ -171,7 +176,10 @@ enum Task {
         source: SourceCursor,
     },
     ReconcileReaders {
-        agent: Identifier,
+        /// Where the row entered the membership graph: the delegation's subject, or the
+        /// individual whose prekeys arrived. Only documents that reach it can gain a reader.
+        /// Boxed: an `Identifier` is several hundred bytes and would inflate every `Task`.
+        entry: Box<Identifier>,
         source: SourceCursor,
     },
 }
@@ -207,6 +215,10 @@ struct Worker<'a> {
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
     clock: Arc<dyn crate::runtime2::Clock>,
     pending_admission: HashMap<crate::DocumentId, SourceCursor>,
+    /// Reverse membership, seeded from the hive when the worker starts and extended by
+    /// every admitted delegation, so a row's affected documents come from walking up from
+    /// its entry point instead of scanning every document in the hive.
+    reach: Arc<std::sync::Mutex<MembershipReach>>,
 }
 
 impl<'a> Worker<'a> {
@@ -287,6 +299,7 @@ impl<'a> Worker<'a> {
             self.keyhive.clone(),
             Arc::clone(&self.keyhive_protocol),
             self.scope.clone(),
+            Arc::clone(&self.reach),
         );
         self.tasks.replace(key, task, future)?;
         Ok(())
@@ -321,7 +334,43 @@ impl<'a> Worker<'a> {
                 )
             }
             FrontierKey::Reach { agent, .. } => {
-                self.start_task(delta.key, Task::ReconcileReaders { agent, source })
+                let event: StaticEvent<Vec<u8>> = bincode::deserialize(&delta.entry.bytes)
+                    .expect("persisted keyhive admission event must decode");
+                let entry = match event {
+                    // A delegation enters at its subject (the proof chain's root graph) and
+                    // its delegate becomes a direct member there: record that edge before
+                    // the task starts so the walk up from the subject, and any later walk
+                    // through the delegate, sees it.
+                    StaticEvent::Delegated(delegation) => {
+                        let delegate = delegation.payload().delegate;
+                        let subject = match self
+                            .keyhive
+                            .event_subject_id(StaticEvent::Delegated(delegation))
+                            .await?
+                        {
+                            crate::keyhive::EventSubject::Named(subject) => subject,
+                            // An admitted delegation was applied to the hive, so its chain
+                            // resolves; anything else is a broken invariant.
+                            other => unreachable!("admitted delegation names no graph: {other:?}"),
+                        };
+                        self.reach
+                            .lock()
+                            .expect("reach index lock poisoned")
+                            .record(delegate, subject);
+                        subject
+                    }
+                    // Prekeys unblock seats only in documents the individual already
+                    // reads, so the walk starts at the individual itself.
+                    StaticEvent::PrekeysExpanded(_) => agent,
+                    other => unreachable!("reach key built for {other:?}"),
+                };
+                self.start_task(
+                    delta.key,
+                    Task::ReconcileReaders {
+                        entry: Box::new(entry),
+                        source,
+                    },
+                )
             }
             // Admission rows with no document payload only gate the cursor.
             FrontierKey::Decode(_) => {
@@ -392,6 +441,7 @@ async fn run_task(
     keyhive: BigKeyhiveHandle,
     keyhive_protocol: BigRepoKeyhiveProtocol,
     scope: WorkerGroupScope,
+    reach: Arc<std::sync::Mutex<MembershipReach>>,
 ) -> Res<TaskOutput> {
     let in_scope = async |doc_id: &crate::DocumentId| -> Res<bool> {
         Ok(match scope.groups() {
@@ -413,12 +463,19 @@ async fn run_task(
             tracing::warn!(wall = ?instr_start.elapsed(), "INSTR causal task timing kind=ensure_coverage"); // INSTR
             Ok(TaskOutput::Covered)
         }
-        Task::ReconcileReaders { agent, .. } => {
-            let instr_docs = keyhive.docs_for_agent(&agent).await; // INSTR
+        Task::ReconcileReaders { entry, .. } => {
+            // Walking every document in the hive per row was quadratic in the hive's
+            // size; the reverse-membership walk visits only what reaches `entry`. The
+            // guard is dropped before any await.
+            let reaching = reach
+                .lock()
+                .expect("reach index lock poisoned")
+                .reaching(*entry);
+            let instr_docs = MembershipReach::documents_among(&keyhive, reaching).await; // INSTR
             let instr_docs_wall = instr_start.elapsed(); // INSTR
             let instr_n = instr_docs.len(); // INSTR
             let mut instr_seated = 0usize; // INSTR
-            for doc_id in instr_docs.into_keys() {
+            for doc_id in instr_docs {
                 if !in_scope(&doc_id).await? {
                     continue;
                 }
@@ -432,7 +489,7 @@ async fn run_task(
                     continue;
                 }
                 instr_seated += 1; // INSTR
-                tracing::debug!(%doc_id, %agent, added = added.len(), "INSTR reader reconcile seated readers");
+                tracing::debug!(%doc_id, %entry, added = added.len(), "INSTR reader reconcile seated readers");
                 // Persisting publishes the adds to the peers and admits them locally. The
                 // task is keyed by its admission row and never replaced, so issued adds are
                 // not dropped before they are persisted.
