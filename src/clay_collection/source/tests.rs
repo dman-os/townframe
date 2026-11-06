@@ -120,13 +120,8 @@ fn one() -> ReadLimits {
     }
 }
 
-#[path = "tests_cursors.rs"]
 mod cursors;
-#[path = "tests_lifecycle.rs"]
 mod lifecycle;
-#[path = "tests_paging.rs"]
 mod paging;
-#[path = "tests_resume.rs"]
 mod resume;
-#[path = "tests_snapshot.rs"]
 mod snapshot;

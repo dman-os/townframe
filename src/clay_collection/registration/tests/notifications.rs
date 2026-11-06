@@ -7,7 +7,7 @@ use std::task::Poll;
 use std::task::Wake;
 use std::task::Waker;
 
-use super::semantics_tests::writer_id;
+use super::writer_id;
 use super::*;
 use crate::types::Cursor;
 use crate::types::ReadError;
@@ -40,7 +40,7 @@ impl Wake for SnapshotOnWake {
         );
         let projection = self.collection.projection();
         assert!(
-            crate::projection::callback_tests::unlocked(&projection),
+            crate::projection::tests::callbacks::unlocked(&projection),
             "projection locked during wake"
         );
         let mut lease = projection.acquire((), None).unwrap();
@@ -311,7 +311,7 @@ impl Wake for MutateOnWake {
         );
         let projection = self.collection.projection();
         assert!(
-            crate::projection::callback_tests::unlocked(&projection),
+            crate::projection::tests::callbacks::unlocked(&projection),
             "projection locked during wake"
         );
         let (mut lease, through) = bootstrap_through(&self.collection);
@@ -456,7 +456,7 @@ fn retired_values_reenter_after_authority_projection_and_host_unlock() {
                     let authority_unlocked = collection.inner.try_lock().is_ok();
                     let host_unlocked = host_lock.try_lock().is_ok();
                     let projection_unlocked = authority_unlocked
-                        && crate::projection::callback_tests::unlocked(&collection.projection());
+                        && crate::projection::tests::callbacks::unlocked(&collection.projection());
                     events.lock().unwrap().push((
                         authority_unlocked,
                         projection_unlocked,
@@ -545,7 +545,7 @@ fn scope_drop_and_projection_bootstrap_retirement_run_destructors_unlocked() {
                 let collection = RegistrationCollection { inner };
                 let authority_unlocked = collection.inner.try_lock().is_ok();
                 let projection_unlocked = authority_unlocked
-                    && crate::projection::callback_tests::unlocked(&collection.projection());
+                    && crate::projection::tests::callbacks::unlocked(&collection.projection());
                 events
                     .lock()
                     .unwrap()
