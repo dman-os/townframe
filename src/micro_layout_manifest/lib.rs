@@ -13,27 +13,19 @@
 //! The arrangement is the viewer's, not the contributors': [`LayoutConfig`] names registration
 //! ids, so it survives a contributor being uninstalled, disabled, or reinstalled under the same
 //! id (the layout shows a placeholder for that id and keeps it).
-use clay_mdk::Access;
 use clay_mdk::Attachment;
-use clay_mdk::BindingResolution;
 use clay_mdk::CollectionCapability;
-use clay_mdk::CollectionContract;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
 use clay_mdk::ConfigDecl;
-use clay_mdk::ConfigurationRequest;
-use clay_mdk::ContributionDeclaration;
 use clay_mdk::DeclaredCollection;
-use clay_mdk::Entrypoints;
-use clay_mdk::FacetAccess;
+use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
 use clay_mdk::PackageDecl;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
-use clay_mdk::Request;
 use clay_mdk::Sidecar;
+use micro_shell_manifest::ShellPanels;
+use micro_shell_manifest::Socket;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -133,82 +125,33 @@ impl DeclaredCollection for LayoutPanels {
 /// view, requires the shell's sidebar/back button, and contributes the view as a list panel the
 /// shell's home offers.
 pub fn manifest() -> MicroManifest {
-    MicroManifest {
-        entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: VIEW.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
-        requires: vec![Request {
-            binding: SHELL_NAV_BUTTON.into(),
-            contract: Nsid::literal(micro_shell_manifest::NAV_BUTTON_CONTRACT),
-            access: None,
-            necessity: Necessity::Required,
-            resolution: BindingResolution::Configured,
-            min_revision: None,
-        }],
-        configuration_requests: vec![ConfigurationRequest {
-            binding: CONFIG_NAME.into(),
-            facets: vec![FacetAccess {
-                tag: Nsid::literal(CONFIG_TAG),
-                key_id: Some(CONFIG_KEY.into()),
-                read: true,
-                write: true,
-                create: false,
-                delete: false,
-            }],
-        }],
-        collection_contracts: vec![CollectionContract {
-            id: Nsid::literal(PANELS),
-            selector_schema: Nsid::literal(PANEL_SELECTOR_SCHEMA),
-            key_schema: Nsid::literal(PANEL_KEY_SCHEMA),
-            value_schema: Nsid::literal(PANEL_VALUE_SCHEMA),
-            write_context_schema: None,
-            offered: vec![CollectionCapability::Read, CollectionCapability::Register],
-        }],
+    ManifestBuilder::new()
+        .component::<LayoutView>()
+        .requires(
+            SHELL_NAV_BUTTON,
+            micro_shell_manifest::NAV_BUTTON_CONTRACT,
+            Necessity::Required,
+        )
+        .config::<LayoutArrangement>()
+        .declares::<LayoutPanels>()
         // The layout reads panels through a binding configuration resolves; with one declared
         // panels collection the default binds it. It also writes its panel row into the shell's
         // panels collection.
-        collection_requests: vec![
-            Request {
-                binding: PANELS_BINDING.into(),
-                contract: Nsid::literal(PANELS),
-                access: Some(Access::Read),
-                necessity: Necessity::Required,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-            Request {
-                binding: SHELL_PANELS_BINDING.into(),
-                contract: Nsid::literal(micro_shell_manifest::PANELS),
-                access: Some(Access::Write),
-                necessity: Necessity::Required,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-        ],
-        contributions: vec![ContributionDeclaration {
-            id: "panel".into(),
-            binding: SHELL_PANELS_BINDING.into(),
-            key: ID.into(),
-            payload: serde_json::json!({
-                "title": "Layout",
-                "sockets": ["list"],
-                "content": { "$attachment": 0 },
-            }),
-            attachments: vec![clay_mdk::AttachmentDeclaration {
-                index: 0,
-                publication: VIEW.into(),
-            }],
-        }],
-        extra: Default::default(),
-    }
+        .reads::<LayoutPanels>(PANELS_BINDING, Necessity::Required)
+        .writes::<ShellPanels>(SHELL_PANELS_BINDING, Necessity::Required)
+        .contributes::<ShellPanels>("panel", ID, |at| micro_shell_manifest::Panel {
+            title: "Layout".into(),
+            sockets: vec![Socket::List],
+            content: at.own::<LayoutView>(),
+            details: None,
+            home: false,
+        })
+        .build()
 }
 
 /// The Layout package as its sidecar carries it: identity, authority and manifest.
 pub fn sidecar() -> Sidecar {
-    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
+    Sidecar::of::<Layout>(manifest())
 }
 
 #[cfg(test)]
