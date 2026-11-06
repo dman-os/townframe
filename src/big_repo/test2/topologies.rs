@@ -231,20 +231,10 @@ async fn tier3_relay_replication() -> crate::Res<()> {
     .await?;
     assert_eq!(read_title(&b_doc).await, "relay-doc");
 
-    // Materialising on the reader mints a fresh CGKA op on the reader (and prekey
-    // events); it only reaches the owner by travelling reader -> middle -> owner.
-    // Without these explicit hops the comparison below races that background
-    // propagation (INSTR run: the middle node ingested the op after the assertion
-    // had already compared and the owner hop never started).
-    topo.topo_conn(2, 1).sync_keyhive_with_peer().await?;
-    topo.topo_conn(1, 0).sync_keyhive_with_peer().await?;
-    // The owner admitting the reader's new CGKA op makes its causal-checkpoint
-    // worker mint a checkpoint commit for the new epoch (a second sedimentree
-    // head). Let that settle, then carry the checkpoint down the line again;
-    // the one-shot pulls above ran before it existed.
-    topo.topo_node(0).repo.wait_for_quiescence(None).await?;
-    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id.clone()).await?;
-    topo.topo_conn(2, 1).sync_doc_with_peer(doc_id.clone()).await?;
+    // Materialising mints follow-up facts reactively (reader op and checkpoint,
+    // then the owner's seating op and checkpoint, ...); a fixed sync script races
+    // the next one, so drive the topology to a fixed point before comparing.
+    topo.converge(&[doc_id.clone()]).await?;
 
     // Tier 0: sedimentree parity across all three nodes.
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
@@ -413,20 +403,10 @@ async fn tier3_line_replication() -> crate::Res<()> {
     .await?;
     assert_eq!(read_title(&c_doc).await, "line-doc");
 
-    // Materialising on the reader mints a fresh CGKA op on the reader (and prekey
-    // events); it only reaches the owner by travelling reader -> middle -> owner.
-    // Without these explicit hops the comparison below races that background
-    // propagation (INSTR run: the middle node ingested the op after the assertion
-    // had already compared and the owner hop never started).
-    topo.topo_conn(2, 1).sync_keyhive_with_peer().await?;
-    topo.topo_conn(1, 0).sync_keyhive_with_peer().await?;
-    // The owner admitting the reader's new CGKA op makes its causal-checkpoint
-    // worker mint a checkpoint commit for the new epoch (a second sedimentree
-    // head). Let that settle, then carry the checkpoint down the line again;
-    // the one-shot pulls above ran before it existed.
-    topo.topo_node(0).repo.wait_for_quiescence(None).await?;
-    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id.clone()).await?;
-    topo.topo_conn(2, 1).sync_doc_with_peer(doc_id.clone()).await?;
+    // Materialising mints follow-up facts reactively (reader op and checkpoint,
+    // then the owner's seating op and checkpoint, ...); a fixed sync script races
+    // the next one, so drive the topology to a fixed point before comparing.
+    topo.converge(&[doc_id.clone()]).await?;
 
     // Tier 0: sedimentree parity across all three nodes.
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
@@ -755,6 +735,16 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
         Some("partitioned-write"),
         "reader must see content written during partition"
     );
+
+    // Materialising and admitting mint follow-up keyhive ops and checkpoints on
+    // both sides reactively; a fixed sync script races the next round, so drive
+    // the pair to a fixed point before comparing.
+    crate::test2::harness::converge::converge(
+        &[a, b],
+        &[&a_b_conn2, &b_a_conn2],
+        &[doc_id.clone()],
+    )
+    .await?;
 
     // Tier 0: sedimentree parity.
     let a_state = a.repo.doc_head_state(doc_id.clone()).await?;
@@ -1297,6 +1287,14 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
         guard.node(idx).repo.wait_for_quiescence(None).await?;
     }
 
+    // Healing syncs trigger reactive keyhive ops and checkpoints on every node;
+    // drive all live links to a fixed point before the content asserts.
+    crate::test2::harness::converge::converge(
+        &[guard.node(0), guard.node(1), guard.node(2), guard.node(3)],
+        &[&a_b2, &b_a2, &c_d2, &d_c2, &b_c, &c_b, &d_a, &a_d],
+        &[doc_id.clone()],
+    )
+    .await?;
     // Both independent branches must survive the heal.
     for handle in [&owner_doc, &c_doc] {
         assert_eq!(

@@ -9,6 +9,7 @@
 //! retry loops: a missed post-condition after one sync surfaces as an error,
 //! exposing runtime2 ordering bugs instead of masking them.
 
+pub(crate) mod converge;
 pub(crate) mod dump;
 pub(crate) mod fixtures;
 pub(crate) mod heads;

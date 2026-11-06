@@ -1149,6 +1149,19 @@ impl Topo {
         Ok(Self::Triangle(TopoData3 { guard, edges }))
     }
 
+    /// Drive every link of this topology (both directions) to a fixed point
+    /// for `docs`; see [`super::converge::converge`].
+    pub(crate) async fn converge(&self, docs: &[DocumentId]) -> crate::Res<()> {
+        let (Topo::Relay(data) | Topo::Line(data) | Topo::Star(data) | Topo::Triangle(data)) = self;
+        let nodes: Vec<&Node> = data.guard.nodes.iter().collect();
+        let links: Vec<&BigRepoConnection> = data
+            .edges
+            .iter()
+            .flat_map(|(_, init, _, accept)| [init, accept])
+            .collect();
+        super::converge::converge(&nodes, &links, docs).await
+    }
+
     /// Return a reference to a node by index.
     pub(crate) fn topo_node(&self, idx: usize) -> &Node {
         match self {
