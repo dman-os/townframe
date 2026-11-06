@@ -602,6 +602,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 5. Small cleanups: unify `owns_nsid`/`under`; a separate egress message-size constant.
 
 ### Follow-ups found during the merge
+- [perf] big_node blob_discovery tests (`selected_inventory_replacement_removes_old_inventory` and 3 others) hit nextest's 120 s timeout at `--test-threads 12` under load ~13. Not a stall: traced against a solo run, the same work (236 `reconcile_readers`, ~80 `ensure_coverage` tasks for 2 nodes and 3 drawers) runs 4-10x slower, no log gap over 1 s, and the waits subscribe before checking. Lever: the per-fixture keyhive work, not timeouts.
 - [perf] `big_sync::rpc` caller-dropped replies: ~148 per seed 2 run, untouched by `c53ab910`.
 - [build] big_dispatch emits a `recursion_depth_exceeding_limit` future-incompat warning on the `Send` proof of `Host::unary::<MintDispatchCapability>` (present at `3d04999`, before the client split). Clippy does not report it; it will become a hard error.
 - [env] mold fails with `ftruncate: Invalid argument` linking `day` when day_cli is built with `--all-features` together with the service crates on the ntfs3 target disk; day_cli alone links and passes.
