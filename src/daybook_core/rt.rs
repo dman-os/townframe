@@ -1367,9 +1367,9 @@ impl Rt {
             .await?;
 
         let succeeded = matches!(&result, DaybookWflowOutcome::Success { .. });
-        // The active dispatch and permanent receipt remain durable until every
-        // post-processing operation succeeds. Boot replays this sequence after
-        // a crash or merge error; merge/delete and hooks must be idempotent.
+        // The permanent receipt lets boot replay staging and hooks while the
+        // dispatch remains active after a crash or merge error. These operations
+        // must be idempotent; dependency release below has its own bookkeeping.
         self.settle_dispatch_staging(&dispatch_id, &dispatch, succeeded)
             .await?;
         self.run_dispatch_completion_hooks(&dispatch_id, &dispatch, &result, succeeded)
