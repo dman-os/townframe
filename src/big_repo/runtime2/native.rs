@@ -351,6 +351,71 @@ impl<S> NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
+    /// Make the document's PCS root derivable so a checkpoint can be sealed
+    /// under it, minting an update op when this node may. `false` means the
+    /// checkpoint defers.
+    ///
+    /// Minting an update op for an underivable root is only sound when this
+    /// node is the one member designated to resolve the tree. Concurrent
+    /// `Update` ops leave the root conflicted until a single op causally after
+    /// all of them replaces it. If every member that sees the conflict mints
+    /// its own resolving op, those ops are again mutually concurrent: each
+    /// node's tree resolves, the peers' ops arrive and re-conflict it, and the
+    /// retriggered coverage mints again, forever (observed: >1000 persists and
+    /// 150+ ops on one doc, two nodes ping-ponging). Keyhive names the issuers
+    /// of the conflicting root versions and every node sees the same set, so
+    /// the lowest issuer resolves and the rest defer; the resolver's op is
+    /// ingested, re-triggers coverage, and finds the root derivable.
+    async fn establish_pcs_root(
+        &self,
+        sed_id: SedimentreeId,
+        kh_doc_id: KhDocumentId,
+    ) -> eyre::Result<bool> {
+        let keyhive = self.keyhive.clone_keyhive();
+        let Err(error) = keyhive.try_pcs_key_hash(kh_doc_id).await else {
+            return Ok(true);
+        };
+        if let PcsKeyError::RootConflicted { issuers } = &error {
+            let local_id = keyhive.active().lock().await.id();
+            if issuers.first() != Some(&local_id) {
+                debug!(
+                    ?sed_id,
+                    conflicting = issuers.len(),
+                    "causal checkpoint deferred: another member resolves the conflicted CGKA root"
+                );
+                return Ok(false);
+            }
+        }
+        let kh_doc = keyhive // INSTR
+            .get_document(kh_doc_id) // INSTR
+            .await // INSTR
+            .ok_or_else(|| ferr!("Keyhive document missing for causal checkpoint"))?; // INSTR
+        instr_pcs_state!(kh_doc, sed_id, "persist: before force_pcs_update"); // INSTR
+        let forced = keyhive.force_pcs_update(kh_doc_id).await;
+        instr_pcs_state!(kh_doc, sed_id, "persist: after force_pcs_update"); // INSTR
+        let (update, local_secret) = match forced {
+            Ok(update) => update,
+            Err(EncryptError::UnableToPcsUpdate(beekem::error::CgkaError::IdentifierNotFound)) => {
+                debug!(
+                    ?sed_id,
+                    "causal checkpoint deferred: local principal is absent from the current CGKA tree"
+                );
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(ferr!("failed establishing checkpoint PCS root: {error}"));
+            }
+        };
+        persist_cgka_updates_durably(
+            &self.keyhive_protocol,
+            &self.keyhive_storage,
+            vec![update],
+            vec![local_secret],
+        )
+        .await?;
+        Ok(true)
+    }
+
     /// Compute the sedimentree frontier from durable storage alone (ignoring
     /// the resident cache and the incrementally-maintained heads table).
     /// Debug-only divergence cross-check: see [`Self::sedimentree_heads`]'s
@@ -495,56 +560,8 @@ where
                 .await
                 .ok_or_else(|| ferr!("Keyhive document missing for causal checkpoint"))?;
 
-            let local_id = keyhive.active().lock().await.id();
-            if let Err(error) = keyhive.try_pcs_key_hash(kh_doc_id).await {
-                // Minting an update op for an underivable root is only sound
-                // when this node is the one member designated to resolve the
-                // tree. Concurrent `Update` ops leave the root conflicted until
-                // a single op causally after all of them replaces it. If every
-                // member that sees the conflict mints its own resolving op,
-                // those ops are again mutually concurrent: each node's tree
-                // resolves, the peers' ops arrive and re-conflict it, and the
-                // retriggered coverage mints again, forever (observed: >1000
-                // persists and 150+ ops on one doc, two nodes ping-ponging).
-                // Keyhive names the issuers of the conflicting root versions
-                // and every node sees the same set, so the lowest issuer
-                // resolves and the rest defer; the resolver's op is ingested,
-                // re-triggers coverage, and finds the root derivable.
-                if let PcsKeyError::RootConflicted { issuers } = &error
-                    && issuers.first() != Some(&local_id)
-                {
-                    debug!(
-                        ?sed_id,
-                        conflicting = issuers.len(),
-                        "causal checkpoint deferred: another member resolves the conflicted CGKA root"
-                    );
-                    return Ok(None);
-                }
-                instr_pcs_state!(kh_doc, sed_id, "persist: before force_pcs_update"); // INSTR
-                let forced = keyhive.force_pcs_update(kh_doc_id).await;
-                instr_pcs_state!(kh_doc, sed_id, "persist: after force_pcs_update"); // INSTR
-                let (update, local_secret) = match forced {
-                    Ok(update) => update,
-                    Err(EncryptError::UnableToPcsUpdate(
-                        beekem::error::CgkaError::IdentifierNotFound,
-                    )) => {
-                        debug!(
-                            ?sed_id,
-                            "causal checkpoint deferred: local principal is absent from the current CGKA tree"
-                        );
-                        return Ok(None);
-                    }
-                    Err(error) => {
-                        return Err(ferr!("failed establishing checkpoint PCS root: {error}"));
-                    }
-                };
-                persist_cgka_updates_durably(
-                    &self.keyhive_protocol,
-                    &self.keyhive_storage,
-                    vec![update],
-                    vec![local_secret],
-                )
-                .await?;
+            if !self.establish_pcs_root(sed_id, kh_doc_id).await? {
+                return Ok(None);
             }
 
             let pcs_key_hash = match keyhive.try_pcs_key_hash(kh_doc_id).await {
