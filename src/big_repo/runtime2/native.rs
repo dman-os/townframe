@@ -2387,25 +2387,12 @@ where
         Sendable::from_future(fut.instrument(tracing::info_span!("subduction_manager")))
     })?;
 
-    // Keyhive maintenance: cache warming and archive compaction have
-    // independent schedules. Cache refresh is also single-flight and is
-    // triggered on demand by the protocol when a sync needs fresh state.
-    {
-        let kh_proto = Arc::clone(&keyhive_protocol);
-        stop_token.child_tasks.spawn({
-            let timer = Arc::clone(&timer);
-            let fut = async move {
-                loop {
-                    timer.sleep(std::time::Duration::from_secs(2)).await;
-                    kh_proto
-                        .refresh_cache()
-                        .await
-                        .map_err(|error| ferr!("keyhive cache refresh failed: {error}"))?;
-                }
-            };
-            Sendable::from_future(fut.instrument(tracing::info_span!("keyhive_cache_refresh_loop")))
-        })?;
-    }
+    // Keyhive maintenance: archive compaction runs on a schedule. There is no
+    // periodic cache refresh: the protocol's cache is generation-checked and
+    // every reader (`initiate_sync_with_request`, `notification_targets`)
+    // rebuilds it on demand when local or remote changes bumped the hive
+    // generation, so a timer would only pre-warm it at the cost of locking
+    // every group and document mutex each tick.
     {
         let kh_proto = Arc::clone(&keyhive_protocol);
         let store = group_part_store.clone();
