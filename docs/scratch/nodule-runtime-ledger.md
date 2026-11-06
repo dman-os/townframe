@@ -661,6 +661,8 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - Datum value newtypes use Automerge's scalar names (`F64`, not `Float64`); integers carry no widths, as in Lexicon.
   - Renames are pre-approved: "feel free to rename anything".
 
+- **D34. "Plug" becomes "cartridge"** (operator, 2026-11-06): "plugin" implies a slight enhancement of the app, but many micros are big, self-contained apps. A cartridge (everyday "cart") is the one user-facing noun for both the store item and the distribution unit: it bundles micros, nodules and (later) workflows. The code rename (`big_plugs*`, `Plug`, `plug_*` crates, ADRs 027/028) waits for the Clay `datum_core` PR, which touches the same crates.
+
 ## Deferred
 
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
