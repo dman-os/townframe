@@ -26,5 +26,9 @@ sqlite_rs.workspace = true
 
 [dev-dependencies]
 wflow_core = { workspace = true, features = ["test-harness"] }
+anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
+wash-runtime = { workspace = true, default-features = true }
+wasmtime.workspace = true

@@ -62,6 +62,11 @@ impl Ctx {
 }
 
 #[cfg(test)]
+mod authority_conformance;
+#[cfg(test)]
+mod authority_conformance_provider;
+
+#[cfg(test)]
 mod authority_facade_tests {
     use super::*;
     use sqlite_rs::RuntimeConfig;
