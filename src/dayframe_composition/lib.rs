@@ -110,12 +110,42 @@ pub type FactoryBuilder = Box<
 >;
 
 impl InstalledMicro {
-    /// Satisfy every requirement of this micro from `provider`: each binds the provider's
-    /// publication of the same name. A catalog convention that spares each launcher spelling
-    /// the same table out; a micro whose requirements come from several providers sets
-    /// `requirements` itself.
-    pub fn satisfied_by(mut self, provider: &MicroId) -> Self {
+    /// Satisfy every requirement of this micro from `provider`, whose package is `offered`:
+    /// each binds the provider's publication of the same name. A catalog convention that
+    /// spares each launcher spelling the same table out; a micro whose requirements come from
+    /// several providers sets `requirements` itself.
+    ///
+    /// A requirement the provider cannot satisfy is refused: it names no publication of the
+    /// provider, or the provider's call publication implements another contract NSID than the
+    /// one required. A presentation publication declares no contract on the wire (every
+    /// presentation shares the reserved presentation-component contract), so a requirement of
+    /// one is checked by name only.
+    pub fn satisfied_by(
+        mut self,
+        provider: &MicroId,
+        offered: &clay_mdk::Sidecar,
+    ) -> Result<Self, String> {
         for request in &self.sidecar.manifest.requires {
+            let publication = offered
+                .manifest
+                .publications
+                .iter()
+                .find(|publication| publication.name == request.binding)
+                .ok_or_else(|| {
+                    format!(
+                        "{} requires {:?}, which {provider} does not publish",
+                        self.id, request.binding
+                    )
+                })?;
+            match &publication.contract {
+                Some(contract) if *contract != request.contract => {
+                    return Err(format!(
+                        "{} requires {:?} under {}, but {provider} publishes it under {contract}",
+                        self.id, request.binding, request.contract
+                    ));
+                }
+                _ => {}
+            }
             self.requirements.insert(
                 request.binding.clone(),
                 Requirement {
@@ -124,7 +154,7 @@ impl InstalledMicro {
                 },
             );
         }
-        self
+        Ok(self)
     }
 
     /// An on-demand, unlocked micro with no requirements, admitted disabled.

@@ -116,8 +116,72 @@ fn settings_micro(activations: Rc<std::cell::Cell<usize>>) -> InstalledMicro {
                 )
             },
         )
-        .satisfied_by(&id(micro_shell_manifest::ID))
+        .satisfied_by(
+            &id(micro_shell_manifest::ID),
+            &micro_shell_manifest::sidecar(),
+        )
+        .unwrap()
     }
+}
+
+fn unactivated_settings() -> InstalledMicro {
+    InstalledMicro::new(
+        id(micro_settings_manifest::ID),
+        micro_settings_manifest::sidecar(),
+        |_, _, _| unreachable!("a refused provider never builds the factory"),
+    )
+}
+
+#[test]
+fn a_provider_publishing_a_requirement_under_another_contract_is_refused() {
+    let mut shell = micro_shell_manifest::sidecar();
+    shell
+        .manifest
+        .publications
+        .iter_mut()
+        .find(|publication| publication.name == micro_shell_manifest::OPENED)
+        .unwrap()
+        .contract = Some(Nsid::literal("org.example.test.somethingElse"));
+    let error = unactivated_settings()
+        .satisfied_by(&id(micro_shell_manifest::ID), &shell)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains(micro_shell_manifest::OPENED_CONTRACT)
+            && error.contains("org.example.test.somethingElse"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_provider_without_the_required_publication_is_refused() {
+    let mut shell = micro_shell_manifest::sidecar();
+    shell
+        .manifest
+        .publications
+        .retain(|publication| publication.name != micro_shell_manifest::NAV_BUTTON);
+    let error = unactivated_settings()
+        .satisfied_by(&id(micro_shell_manifest::ID), &shell)
+        .err()
+        .unwrap();
+    assert!(error.contains(micro_shell_manifest::NAV_BUTTON), "{error}");
+}
+
+#[test]
+fn the_shell_satisfies_what_settings_requires() {
+    let micro = unactivated_settings()
+        .satisfied_by(
+            &id(micro_shell_manifest::ID),
+            &micro_shell_manifest::sidecar(),
+        )
+        .unwrap();
+    assert_eq!(
+        micro.requirements.keys().collect::<Vec<_>>(),
+        [
+            micro_shell_manifest::NAV_BUTTON,
+            micro_shell_manifest::OPENED
+        ]
+    );
 }
 
 /// The shell (eager), Settings (on demand) and Sample (eager) as the desktop links them, plus a
