@@ -208,3 +208,184 @@ The context module now also imports a `no_task` global; its `get`/`set` do `glob
 ### Townframe validation at 228bc7b
 Fixtures prepared (`x/check-dayframe.ts --prepare-only`). `cargo nextest run -p clay_rt_wcmp -p clay_rt_wcmp_wasmi -p clay_guest_session -p clay_host`: 148 passed. dayframe_web Playwright suite (`CI=1 DAYFRAME_WEB_PORT=4562`): NOT run, killed at the start when free disk fell under the floor (3 GB, then 2.7 GB).
 Not run: wasmi-backend measurement.
+
+## X1 ladder
+
+Question: for the Pierre window workload, how much of the 8.3 ms (120 Hz) frame does each layer cost, from the browser alone up to the Clay guest stack. One workload for every rung, one rung per page, all driven by Playwright (`--workers=1`) in headless Chromium 156.0.8078.4 (Playwright 1.64.1, software compositing, no GPU) on a Ryzen 9 7940HS (16 threads). Harness in `bench/ladder/` (this branch, committed, not pushed); raw results and logs in `/run/media/asdf/p3N/tmp/x1/` (`results.jsonl`: one JSON line per rung x workload x round, 166 lines; `tables-clean.md` / `tables-all.md`: every generated table; `profile-groups.txt`; `doc-tables.md`).
+
+### Workload and rungs
+- Rows 20 px, scroller 600 px (clientHeight 598), window `ceil(ceil((598 + 2*1000)/20)/50)*50 + 50` = 200 rows, start quantized to 50-line chunks and centred on the viewport (`window()` of the micro, ported to `bench/ladder/common.js` and `r2/src/main.rs`); rows keyed by line number, window positioned absolutely inside a content box of the whole file height; 8,000-line file. One **commit** = `scrollTop += 1000`, i.e. the window moves one chunk: 50 rows removed, 50 rows added (850 nodes at 7 spans, 1,950 at 18).
+- Row DOM is the micro's: `div(height:20px...) > span(gutter) + N token spans`. Workloads: `syn7` / `syn18` (the micro's synthetic source 0: 7 / 18 spans per line, no colors), `corpus` (P4's raw corpus tokens, `corpus/tokens.json`: rust and ts lines alternating, source 1, colored spans), `corpus-rust` (rust tokens only, for R0).
+- **R0** real `@pierre/diffs` 1.6.4 (`Virtualizer` + `VirtualizedFile`, pierre-dark, main-thread Shiki, no worker pool, `disableFileHeader`), rendering `rust-1k.rs` repeated to 8,000 lines (the file `corpus/tokens.json`'s rust half was tokenized from). `npm pack` into `/run/media/asdf/p3N/tmp/x1/pkg`, installed with `--ignore-scripts` into `r0-build/`, bundled with esbuild into `r0/dist` (`build-r0.sh`); no package script was run. Only `corpus-rust`: the micro has no rust-only mode, so R0 is compared with R1/R2 `corpus-rust`, not with R3.
+- **R1** hand-written vanilla JS, two variants: `dom` (`createElement` / `createTextNode` into a `DocumentFragment`, `appendChild`) and `html` (one HTML string per added chunk, `insertAdjacentHTML`). Scroll listener computes the window and applies a keyed shift (remove leading rows, build and attach trailing rows). **R1s** (control): all 4,400 rows the run scrolls through are pre-rendered and nothing reacts to scroll.
+- **R2** plain Dioxus web: `bench/ladder/r2` (own workspace, `Cargo.lock` seeded from the root one; dioxus fork rev `a3e1e68`, `dioxus::launch`, `onscroll` handler, release, `lto = "fat"`, wasm-bindgen 0.2.127, 728,559 byte wasm). `Row` / `Window` are the micro's components copied verbatim.
+- **R3** the existing Pierre spike micro (release guest, 1,783,225 bytes, `spike-phases`) in `dayframe_web` (`wasm-release` host with `DAYFRAME_RAISED_LIMITS=1`, host wasm 13,089,200 bytes), profile `pierre`, scroll coalescing off (`__clayNoCoalesce`, as P4's baselines). Site assembled by `bench/ladder/assemble-r3.ts` (a copy of `x/dayframe-web.ts` without the guest/manifest step: the native manifest emitters had already run and the host disk was short).
+- R2b (the Rust diff as a plain core wasm module driven from JS) is **not built**; P5's direct-V8 figures (0.6-1.2 / 2.3-2.4 ms for the diff alone, 7 / 18 spans) are the nearest data point and were not re-run.
+
+### Method (what each number is)
+- Each rung x workload x round runs five fresh pages: (A) wall clock of 70 commits after 10 warm-ups, plus a MutationObserver count and DOM census of one more commit; (B) the same 70 commits under a Chromium trace (`browser.startTracing`, categories `devtools.timeline`, `disabled-by-default-devtools.timeline`, `blink.user_timing`, `toplevel`, `v8`), sliced per commit by `performance.mark`; (C) continuous scroll under a trace, 100 frames at 1000 px/frame ("fast": one 50-row chunk per frame) and (D) 200 px/frame ("slow": a commit every fifth frame); (E) a V8 CPU profile (100 us sampling) over 70 commits. A commit window is: scrollTop write, wait until the rendered window moves, then two more frames.
+- **Trace classes** are self times on the renderer main thread: *script* = FunctionCall/EvaluateScript/v8.*/timers/event dispatch (includes wasm and the DOM API calls made from it), *style* = UpdateLayoutTree, *layout* = Layout, *paint* = PrePaint + Paint + Layerize + Commit + UpdateLayer(Tree), *other* = the rest of the task (RunTask self time, HitTest, ParseHTML, GC events inside tasks). *busy* = sum of `RunTask` durations in the window (three frames, so one frame of real work plus idle ones). Raster happens on other threads and is not counted.
+- **Frames over budget**: headless Chromium here cannot run uncapped (`--disable-frame-rate-limit --disable-gpu-vsync` left rAF at a median 17.4 ms against 16.7 ms without), so rAF intervals only show 60 Hz vsync misses. The 8.3 / 16.7 ms counts are therefore of frames whose *main-thread busy time* (every `RunTask` between one rAF callback and the next, from the trace) exceeds the budget, i.e. frames that would not fit a 120 / 60 Hz deadline if the compositor were free. `performance.now()` is clamped to 0.1 ms in this build, so the per-phase timers of R1 and the guest are 0.1 ms quantized.
+- **Statistics**: per round the median / p95 over 70 commits; cells are the median over rounds of the per-round medians and `[lo-hi]` is the spread of the round medians. Rounds interleave the rungs (round 1-6: r0, r1-dom, r1-html, r2, r3; round 7-11: r1-static, r1-dom, r2, r3). Tables below use only runs whose 1-minute load average was <= 10 at both ends (159 of 166 runs; the 7 above 10 were all in rounds 1-2 and are listed as NOISY in `tables-all.md`); host load was 1-3 for most rounds (1-minute load at the start of a run: median 2.6, minimum 1.1, maximum 30.9). Even at low load single rounds have outliers (r1-dom syn7 round 7: busy 20.6 ms at load 3.2; r1-static syn7 round 8: 29.0), which is why medians over many rounds are reported with spreads.
+
+### Ladder summary (per commit, ms; delta vs the rung named in the last column)
+| workload | rung | script | delta script | style+layout+paint | busy total | delta busy | frames >8.3 ms (fast scroll, of 100) | frames >8.3 ms (slow scroll, of 100) | delta vs |
+|---|---|---|---|---|---|---|---|---|---|
+| syn7 | r1-static | 0.33 | - | 5.25 | 7.34 | - | 10 | 1 | - |
+| syn7 | r1-dom | 1.48 | +1.14 | 6.48 | 8.95 | +1.61 | 8 | 1 | r1-static |
+| syn7 | r2 | 2.39 | +0.91 | 6.41 | 9.89 | +0.94 | 15 | 5 | r1-dom |
+| syn7 | r3 | 7.61 | +5.22 | 6.21 | 14.78 | +4.88 | 99 | 20 | r2 |
+| syn7 | r1-html | 1.08 | -0.39 | 5.99 | 8.43 | -0.52 | 6 | 2 | r1-dom |
+| syn18 | r1-static | 0.33 | - | 5.71 | 7.74 | - | 12 | 4 | - |
+| syn18 | r1-dom | 1.88 | +1.54 | 9.02 | 12.23 | +4.49 | 82 | 20 | r1-static |
+| syn18 | r2 | 3.19 | +1.32 | 8.82 | 13.46 | +1.23 | 99 | 20 | r1-dom |
+| syn18 | r3 | 12.15 | +8.96 | 9.71 | 23.23 | +9.77 | 99 | 21 | r2 |
+| syn18 | r1-html | 1.59 | -0.29 | 9.47 | 12.93 | +0.70 | 76 | 20 | r1-dom |
+| corpus | r1-static | 0.32 | - | 7.84 | 10.87 | - | 75 | 20 | - |
+| corpus | r1-dom | 1.72 | +1.40 | 4.76 | 7.44 | -3.43 | 9 | 1 | r1-static |
+| corpus | r2 | 2.80 | +1.08 | 5.10 | 8.96 | +1.52 | 19 | 6 | r1-dom |
+| corpus | r3 | 8.47 | +5.67 | 5.07 | 14.54 | +5.58 | 99 | 20 | r2 |
+| corpus | r1-html | 1.04 | -0.68 | 4.77 | 7.09 | -0.35 | 4 | 1 | r1-dom |
+| corpus-rust | r1-dom | 1.71 | - | 4.92 | 7.55 | - | 6 | 1 | r1-static |
+| corpus-rust | r2 | 2.75 | +1.04 | 5.02 | 8.96 | +1.41 | 24 | 8 | r1-dom |
+| corpus-rust | r1-html | 1.04 | -0.68 | 5.03 | 7.59 | +0.03 | 4 | 0 | r1-dom |
+| corpus-rust | r0 | 2.54 | +0.82 | 6.80 | 11.54 | +3.98 | 53 | 16 | r1-dom |
+
+### Per workload
+**`syn7`: per commit, ms (trace; the window is the commit's three frames)**
+
+| rung | rounds | script | style | layout | paint | other | busy total [round spread] | busy p95 | wall input->window |
+|---|---|---|---|---|---|---|---|---|---|
+| R1s static control | 5 | 0.3 | 0.0 | 0.0 | 5.2 | 1.7 | 7.3 [7.1-29.0] | 9.7 | 18.2 |
+| R1 vanilla createElement | 9 | 1.5 | 0.5 | 1.4 | 4.6 | 0.8 | 8.9 [7.2-20.6] | 12.0 | 17.8 |
+| R1 vanilla innerHTML | 6 | 1.1 | 0.5 | 1.2 | 4.3 | 1.2 | 8.4 [7.5-11.4] | 11.0 | 17.6 |
+| R2 dioxus-web | 11 | 2.4 | 0.5 | 1.4 | 4.5 | 0.8 | 9.9 [9.0-11.7] | 13.2 | 18.8 |
+| R3 Clay stack | 11 | 7.6 | 0.6 | 1.1 | 4.6 | 0.8 | 14.8 [13.4-19.1] | 21.1 | 23.9 |
+
+**`syn7`: continuous scroll, 100 frames; frames whose main-thread busy time exceeds the budget**
+
+| rung | fast (1000 px/frame): >8.3 / >16.7 ms | fast busy median / p95 | slow (200 px/frame, a commit every 5th frame): >8.3 / >16.7 ms | slow busy p95 |
+|---|---|---|---|---|
+| R1s static control | 10 [1-28] / 0 [0-3] | 5.9 / 9.9 | 1 [0-6] / 0 [0-0] | 6.6 |
+| R1 vanilla createElement | 8 [4-90] / 1 [0-62] | 6.4 / 9.4 | 1 [0-20] / 0 [0-17] | 7.3 |
+| R1 vanilla innerHTML | 6 [4-63] / 1 [1-15] | 6.0 / 9.0 | 2 [0-13] / 0 [0-2] | 7.1 |
+| R2 dioxus-web | 15 [9-96] / 1 [1-23] | 6.9 / 10.8 | 5 [2-16] / 0 [0-3] | 8.6 |
+| R3 Clay stack | 99 [99-99] / 8 [4-66] | 13.3 / 17.9 | 20 [20-21] / 2 [0-15] | 15.4 |
+
+**`syn18`: per commit, ms (trace; the window is the commit's three frames)**
+
+| rung | rounds | script | style | layout | paint | other | busy total [round spread] | busy p95 | wall input->window |
+|---|---|---|---|---|---|---|---|---|---|
+| R1s static control | 5 | 0.3 | 0.0 | 0.0 | 5.7 | 1.6 | 7.7 [7.4-8.4] | 12.0 | 18.2 |
+| R1 vanilla createElement | 10 | 1.9 | 0.8 | 2.0 | 6.2 | 0.8 | 12.2 [10.9-12.9] | 18.2 | 18.4 |
+| R1 vanilla innerHTML | 6 | 1.6 | 0.8 | 2.1 | 6.6 | 1.5 | 12.9 [11.2-19.8] | 18.7 | 18.1 |
+| R2 dioxus-web | 11 | 3.2 | 0.8 | 1.9 | 6.1 | 0.8 | 13.5 [12.7-19.9] | 19.4 | 19.8 |
+| R3 Clay stack | 11 | 12.2 | 1.1 | 2.0 | 6.7 | 0.8 | 23.2 [21.5-26.6] | 32.4 | 28.8 |
+
+**`syn18`: continuous scroll, 100 frames; frames whose main-thread busy time exceeds the budget**
+
+| rung | fast (1000 px/frame): >8.3 / >16.7 ms | fast busy median / p95 | slow (200 px/frame, a commit every 5th frame): >8.3 / >16.7 ms | slow busy p95 |
+|---|---|---|---|---|
+| R1s static control | 12 [5-27] / 0 [0-0] | 6.4 / 9.3 | 4 [1-5] / 0 [0-2] | 7.9 |
+| R1 vanilla createElement | 82 [39-99] / 4 [2-6] | 9.2 / 16.5 | 20 [13-20] / 0 [0-1] | 11.7 |
+| R1 vanilla innerHTML | 76 [37-99] / 4 [2-41] | 9.1 / 16.8 | 20 [19-22] / 0 [0-8] | 11.7 |
+| R2 dioxus-web | 99 [80-99] / 7 [3-57] | 11.3 / 17.0 | 20 [20-22] / 1 [0-14] | 13.6 |
+| R3 Clay stack | 99 [99-99] / 99 [98-99] | 21.7 / 29.7 | 21 [20-30] / 20 [20-22] | 23.5 |
+
+**`corpus`: per commit, ms (trace; the window is the commit's three frames)**
+
+| rung | rounds | script | style | layout | paint | other | busy total [round spread] | busy p95 | wall input->window |
+|---|---|---|---|---|---|---|---|---|---|
+| R1s static control | 5 | 0.3 | 0.0 | 0.0 | 7.8 | 2.7 | 10.9 [10.1-11.6] | 15.7 | 19.8 |
+| R1 vanilla createElement | 10 | 1.7 | 0.5 | 0.9 | 3.4 | 0.8 | 7.4 [7.0-18.7] | 10.3 | 18.4 |
+| R1 vanilla innerHTML | 6 | 1.0 | 0.5 | 1.0 | 3.4 | 1.3 | 7.1 [6.8-9.6] | 9.2 | 17.8 |
+| R2 dioxus-web | 11 | 2.8 | 0.5 | 1.0 | 3.6 | 0.9 | 9.0 [8.1-26.0] | 12.3 | 19.3 |
+| R3 Clay stack | 10 | 8.5 | 0.6 | 0.8 | 3.6 | 0.9 | 14.5 [13.5-28.2] | 20.7 | 24.8 |
+
+**`corpus`: continuous scroll, 100 frames; frames whose main-thread busy time exceeds the budget**
+
+| rung | fast (1000 px/frame): >8.3 / >16.7 ms | fast busy median / p95 | slow (200 px/frame, a commit every 5th frame): >8.3 / >16.7 ms | slow busy p95 |
+|---|---|---|---|---|
+| R1s static control | 75 [61-86] / 1 [0-37] | 9.0 / 14.1 | 20 [8-21] / 0 [0-1] | 10.9 |
+| R1 vanilla createElement | 9 [3-61] / 1 [0-13] | 5.8 / 9.2 | 1 [0-6] / 0 [0-1] | 6.6 |
+| R1 vanilla innerHTML | 4 [2-36] / 2 [0-4] | 5.3 / 7.8 | 1 [0-17] / 0 [0-9] | 6.6 |
+| R2 dioxus-web | 19 [9-99] / 2 [1-97] | 7.1 / 11.4 | 6 [3-20] / 0 [0-20] | 8.6 |
+| R3 Clay stack | 99 [99-99] / 10 [6-99] | 13.7 / 18.8 | 20 [20-21] / 2 [0-20] | 15.9 |
+
+**`corpus-rust`: per commit, ms (trace; the window is the commit's three frames)**
+
+| rung | rounds | script | style | layout | paint | other | busy total [round spread] | busy p95 | wall input->window |
+|---|---|---|---|---|---|---|---|---|---|
+| R1 vanilla createElement | 11 | 1.7 | 0.5 | 0.9 | 3.5 | 0.9 | 7.6 [6.8-9.3] | 10.1 | 18.3 |
+| R1 vanilla innerHTML | 6 | 1.0 | 0.5 | 1.0 | 3.5 | 1.3 | 7.6 [6.9-8.1] | 9.8 | 17.8 |
+| R2 dioxus-web | 11 | 2.8 | 0.5 | 1.0 | 3.5 | 0.9 | 9.0 [8.0-14.0] | 12.0 | 19.3 |
+| R0 real Pierre | 4 | 2.5 | 1.1 | 1.3 | 4.4 | 1.6 | 11.5 [9.8-12.3] | 17.1 | 33.7 |
+
+**`corpus-rust`: continuous scroll, 100 frames; frames whose main-thread busy time exceeds the budget**
+
+| rung | fast (1000 px/frame): >8.3 / >16.7 ms | fast busy median / p95 | slow (200 px/frame, a commit every 5th frame): >8.3 / >16.7 ms | slow busy p95 |
+|---|---|---|---|---|
+| R1 vanilla createElement | 6 [3-75] / 1 [0-14] | 5.5 / 8.8 | 1 [0-11] / 0 [0-0] | 6.8 |
+| R1 vanilla innerHTML | 4 [3-58] / 1 [1-11] | 5.5 / 8.1 | 0 [0-7] / 0 [0-1] | 6.2 |
+| R2 dioxus-web | 24 [10-91] / 1 [0-25] | 7.1 / 11.6 | 8 [1-14] / 0 [0-2] | 9.1 |
+| R0 real Pierre | 53 [41-99] / 2 [2-4] | 8.4 / 13.6 | 16 [13-19] / 0 [0-1] | 10.6 |
+
+### R3: where the Clay stack's script time goes (ms per commit, median over rounds)
+| | syn7 | syn18 | corpus |
+|---|---|---|---|
+| guest event parse + handler | 0.1 | 0.1 | 0.1 |
+| guest VDOM diff (`render_immediate`, incl. `Row` renders, recording writer) | 2.4 | 3.7 | 2.5 |
+| guest batch take | 0.0 | 0.0 | 0.0 |
+| guest `surface.apply` call incl. wcmp crossing + host decode | 1.3 | 2.8 | 1.7 |
+| of which `SurfaceTree::apply` (host) | 0.5 | 1.1 | 0.7 |
+| => bridge + decode (derived: apply call - `SurfaceTree::apply`) | 0.8 | 1.7 | 1.0 |
+| host `dispatch:scroll` total (from the host's own timer) | 4.0 | 6.8 | 4.65 |
+| trace *script* total of the commit window (B) | 7.6 | 12.2 | 8.5 |
+| => host-side remainder (derived: trace script - dispatch): host Dioxus diff of the surface tree, DOM apply, dioxus-web plumbing, harness | 3.6 | 5.4 | 3.8 |
+
+The host's `render` timer records median 0 in all three (not informative). Guest numbers are the guest's own `Instant` timers (`phases-dump`, committing dispatches only, 0.1 ms clock). For reference R2's whole script (diff + DOM, no wire) is 2.4 / 3.2 / 2.8.
+
+V8 CPU profile self time, grouped by function name (profile pass E, ms per commit with the profiler's own inflation, so read shares; `profile-groups.txt`, 11 rounds, browser-native `program` time excluded):
+| group (ms per commit, profiled) | R2 syn7 | R3 syn7 | R2 syn18 | R3 syn18 |
+|---|---|---|---|---|
+| guest wasm (app, dioxus-core diff, guest allocator) | - | 2.69 | - | 4.63 |
+| wcmp runtime (canonical ABI, host-call plumbing) | - | 0.94 | - | 2.01 |
+| Clay host (SurfaceTree render/apply, clay_dioxus) | - | 0.91 | - | 1.74 |
+| host Dioxus (dioxus-core / dioxus-web in the host wasm) | 0.87 | 1.41 | 1.33 | 2.56 |
+| host allocator (dlmalloc) | 0.22 | 0.51 | 0.33 | 0.99 |
+| DOM natives (remove, setAttribute, cloneNode, insertBefore, ...) | 0.83 | 1.14 | 1.38 | 1.75 |
+| js glue | 0.39 | 0.50 | 0.63 | 0.78 |
+| other wasm | 0.24 | 0.23 | 0.35 | 0.45 |
+| gc | 0.13 | 0.20 | 0.31 | 0.33 |
+
+R1 own timers (JS in the scroll handler, ms, 0.1 ms clock): `dom` syn7 total 1.1 (build 0.6, attach 0.4), syn18 1.6 (0.7 / 0.9), corpus 1.5 (0.95 / 0.4); `html` syn7 0.8 (build 0.15, attach incl. parse 0.6), syn18 1.35 (0.2 / 1.1), corpus 0.85 (0.15 / 0.7). R0: `file.render` is called once per commit and takes 1.2 ms (0.1 ms clock); window DOM 3,109 nodes / 1,738 elements against 2,965 / 1,583 for R1 `corpus-rust`; MutationObserver sees 100 nodes added and 100 removed per commit (two columns, code and gutter) against 50 / 50; its window moves one frame later than R1's (wall input -> window 33.7 ms vs 18.3 ms: the scroll event queues the render for the next animation frame).
+
+### What dominates at each rung (observations from the tables above)
+- **Browser floor (R1).** With plain JS the commit's frame already spends 6.4 ms (syn7) to 9.0 ms (syn18) on style + layout + paint, plus 1.1-1.9 ms of script, so script is 15-17% of the main-thread time and the browser alone is 6.4 ms of an 8.3 ms budget at 7 spans and over the whole budget at 18 spans. This is in headless Chromium with software compositing; whether a GPU/phone browser pays the same main-thread paint cost was not measured (**unverified**). Style + layout + paint scale with the nodes added (850 vs 1,950 nodes: 6.4 -> 9.0 ms), script barely does (1.5 -> 1.9). Fast scroll (50 rows per frame) puts 8 of 100 frames over 8.3 ms at 7 spans and 82 of 100 at 18 spans even for vanilla JS; with a commit every fifth frame (slow) vanilla JS is over 8.3 ms in 1 frame of 100 at 7 spans and 20 of 100 (every commit frame) at 18. `innerHTML` vs `createElement`: script 1.1 vs 1.5 ms (syn7), 1.6 vs 1.9 (syn18): parsing a string is cheaper than creating 850-1,950 nodes from script, but the totals are within the round spread.
+- **R1 -> R2 (Dioxus-web).** +0.9 / +1.3 / +1.1 ms script (syn7 / syn18 / corpus), about 1.6x R1-dom's script, style/layout/paint unchanged. In the CPU profile the host-side Dioxus diff and the DOM natives are each about a third of R2's script, js glue (the sledgehammer interpreter) 15%, the allocator 8%. Fast-scroll frames over 8.3 ms: 15 of 100 (syn7), 99 (syn18), 19 (corpus). Dioxus-web fits the budget in most frames at 7 spans; at 18 spans nothing fits.
+- **R2 -> R3 (Clay stack).** +5.2 / +9.0 / +5.7 ms script (7.6 / 12.2 / 8.5 ms in total), i.e. 3.2x / 3.8x / 3.0x R2's script and the only rung whose script alone exceeds 8.3 ms at 18 spans. The commit-window busy time is 14.8 / 23.2 / 14.5 ms against R2's 9.9 / 13.5 / 9.0. Fast-scroll frames over 8.3 ms: 99 of 100 in all three workloads, and over 16.7 ms: 8 (syn7), 99 (syn18), 10 (corpus). Slow scroll: every commit frame (20 of 100) is over 8.3 ms. The split above: the guest diff (2.4-3.7 ms) is now about what R2 spends on diff + DOM in total (2.4-3.2 ms), bridge + decode adds 0.8-1.7 ms, `SurfaceTree::apply` 0.5-1.1 ms and the host-side remainder (host Dioxus diff of the surface tree + DOM + plumbing) 3.6-5.4 ms, the largest single piece. In the profile the guest wasm is about 30% of the grouped self time, host Dioxus 16-17%, wcmp 11-13%, Clay host 11%, DOM natives 12-14%, allocators 6-7%.
+- **R0 (real Pierre, `corpus-rust`).** 11.5 ms per commit window against 7.6 (R1-dom) and 9.0 (R2) for the same tokens. Pierre's script is 2.5 ms (R1-dom 1.7, R2 2.8) plus 1.6 ms other (that includes `ParseHTML` of its HTML chunks, 0.65 ms in a 30-commit trial trace) but its DOM costs 6.8 ms of style/layout/paint against 4.9-5.0 for the vanilla DOM of the same text (more nodes per line, grid/gutter structure, shadow DOM). Fast scroll: 53 of 100 frames over 8.3 ms (R1-dom 6, R2 24), slow: 16 (R1-dom 1, R2 8). Its window update lands a frame later than every other rung's.
+- **Compared with earlier spikes.** The guest diff (`vdomDiff`) measured here in the browser inside wcmp, release, after the context-slot fix, is 2.4 / 3.7 ms for 7 / 18 spans at host load 1-3 (P4/W1 recorded 2-8 / 4-9 ms at load ~38). The host `dispatch:scroll` is 4.0 / 6.8 ms. The new information is that this is about half of the Clay-vs-vanilla gap: the rest is on the host side of the wire and in the browser, not in the guest.
+
+### Observations (not decisions)
+- At 18 spans per line (about 2,000 nodes added per 50-row chunk) plain JS misses 8.3 ms on style + layout + paint alone in this setup, so a 120 Hz target at that density needs fewer nodes or fewer rows added per frame regardless of runtime; P4's chunk-10 lever acts on exactly this term.
+- At 7 spans vanilla JS and plain Dioxus-web both fit most fast-scroll frames (8 and 15 of 100 over 8.3 ms); the Clay stack misses 99 of 100. A target of "Dioxus-web parity" would be a script cost of about 2.4 ms per 50-row chunk; the Clay stack is at 7.6.
+- The Clay stack pays for a second VDOM-shaped pass on the host (the surface tree re-render, 3.6-5.4 ms, inferred from function names in the profile) on top of the guest diff and the bridge; with the guest diff already near R2's total cost, host-side work and the wire (0.8-1.7 ms decode + 0.5-1.1 ms `SurfaceTree::apply`) are now the larger share than the guest.
+- Every rung that reacts to the scroll event lands its window one frame after the scroll (17.6-19.8 ms from input to window with a 16.7 ms vsync, 23.9-28.8 ms for R3, 33.7 ms for Pierre); the browser's own scrolling is compositor-driven and not delayed.
+
+### Caveats and what is unverified
+- Software-composited headless Chromium, no GPU; main-thread paint is recording, raster is off-thread and not counted. 120 Hz was never actually run: budgets are applied to measured main-thread busy time at a 60 Hz vsync. Phone numbers are not extrapolated.
+- R1s is not a clean floor: it holds 4,400 pre-rendered rows (74,801 nodes at syn7) and scrolls through them, so its tree is 22x larger than the 200-row window of the others; its paint is lower than R1-dom for syn7 and higher for `corpus` (7.8 vs 3.4 ms), which I could not explain. Treat it as a different measurement, not as a floor.
+- R0 has 4 clean rounds (the other two had load > 10), R1-html 6, R1-static 5, r1-dom / r2 / r3 9-11.
+- The `corpus` workload on R3 uses the micro's alternating rust/ts lines; R0 uses rust only, so R0 is compared with `corpus-rust` rows only.
+- Trace "other" and "busy" include harness work (`Ladder.commits` polling, about 0.1-0.9 ms per commit in the CPU profile `js` category); the profiler's `program` category is not main-thread-only idle time, and was not used for any claim.
+- The 100 us CPU profile inflates wasm time (R3 syn7: ~8.0 ms of wasm in the profile against 7.6 ms total script in the unprofiled trace), so group shares are indicative.
+- The host-side "remainder" of R3 is derived by subtraction, not timed directly.
+
+### Commands run (from the worktree root unless noted)
+- Pierre: `npm pack @pierre/diffs@1.6.4` in `/run/media/asdf/p3N/tmp/x1/pkg`; `npm install --ignore-scripts ../pkg/pierre-diffs-1.6.4.tgz esbuild@0.25.5` in `r0-build`; `bench/ladder/build-r0.sh`.
+- R2: `./x/agent-build.ts -- bench/ladder/build-r2.sh` (cold build 4 m 44 s).
+- R3: `CARGO_RESOLVER_FEATURE_UNIFICATION=selected DAYFRAME_GUEST_PROFILE=release DAYFRAME_RAISED_LIMITS=1 ./x/agent-build.ts -- deno run --allow-all x/dayframe-web.ts --build` (guests and manifests; killed twice, once by a disk guard at < 6 GB free, once by hand; the native `debug` target of the manifest emitters, 4.0 GB and later 1.1 GB, was deleted between runs), then `DAYFRAME_RAISED_LIMITS=1 ./x/agent-build.ts -- deno run --allow-all bench/ladder/assemble-r3.ts --packages=<target>/spike-scroll/dayframe/packages`.
+- Servers: `deno run --allow-all bench/ladder/serve.ts 4701 /r0/=... /r1/=... /r2/=... /corpus/=...` (PID 3697061) and `... serve.ts 4702 /=<target>/spike-scroll/dayframe_web/site` (PID 265624); both killed by PID at the end.
+- Measurements: `bench/ladder/run-matrix.sh 4 r0 r1-dom r1-html r2 r3`, then `START=5 run-matrix.sh 2 ...`, then `START=7 run-matrix.sh 5 r1-static r1-dom r2 r3`; each is `npx playwright test -c bench/ladder/playwright.config.ts --workers=1` per rung. A first pass of four rounds over r0 / r1 / r2 only (kept as `results-a-busybug.jsonl`) was discarded: its `busy` column double-counted nested `RunTask` events.
+- Tables: `AGG_CLEAN=1 python3 bench/ladder/aggregate.py results.jsonl`, `python3 bench/ladder/doc_tables.py results.jsonl`, `python3 bench/ladder/profile_groups.py results.jsonl`.

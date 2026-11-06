@@ -1,0 +1,24 @@
+# R2: plain Dioxus web (dioxus-web via wasm-bindgen, no Clay) rendering the ladder workload. A
+# workspace of its own (the root workspace builds web targets with feature unification off); its
+# Cargo.lock is seeded from the root lockfile so the dioxus fork rev and wasm-bindgen match.
+[package]
+name = "ladder_r2"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html", "launch", "web"] }
+serde_json = "1"
+wasm-bindgen = "=0.2.127"
+web-sys = { version = "0.3", features = ["Window", "Location", "Performance"] }
+js-sys = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>R2 dioxus-web</title>
+<body style="margin:8px"><div id="main"></div>
+<script src="../common.js"></script>
+<script type="module">
+  import init from "./ladder_r2.js";
+  await init();
+  const scroller = await new Promise((resolve) => {
+    const t = setInterval(() => { const s = document.querySelector('[data-testid="scroller"]'); if (s) { clearInterval(t); resolve(s); } }, 10);
+  });
+  const win = () => document.querySelector('[data-testid="window"]');
+  window.Ladder.rung = {
+    name: "r2", scroller, mutationRoot: scroller,
+    get censusRoot() { return win(); },
+    windowStart: () => Number(win().getAttribute("data-value")),
+  };
+  window.__ready = true;
+</script>
