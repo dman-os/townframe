@@ -263,6 +263,19 @@ mod tests {
     }
 
     #[test]
+    fn path_attribute_is_rejected_on_modules() {
+        let src = "#[cfg(test)]\n#[path = \"foo_tests.rs\"]\nmod tests;\n";
+        let (_, findings) = analysis::scan("src/foo/lib.rs", src);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "ERROR_PATH_ATTRIBUTE" && finding.line == 2)
+        );
+        let (_, clean) = analysis::scan("src/foo/lib.rs", "#[cfg(test)]\nmod tests;\n");
+        assert!(clean.is_empty());
+    }
+
+    #[test]
     fn aggregates_methods_across_multiple_impl_blocks() {
         let mut src = String::from("pub struct GodObject;\n");
         for block in 0..5 {
