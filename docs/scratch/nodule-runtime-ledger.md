@@ -446,6 +446,12 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 - Temp-dir leak: the disk-filling part is fixed (`998b73d9`). The operator stopped the residual work (2026-11-04): `big_repo`'s own suite still leaves about 16 dirs of ~1 MB per run. The unverified WIP is parked in `git stash` ("wip: big_repo residual temp-dir leak"): test stops, `TempDir` ownership in the stress fixture, `SqliteRuntime::drain_workers`. Low priority.
 ## Done
 
+- 2026-11-06: four concurrent agents (D36).
+  - keyhive `a84137d1`: `try_pcs_key_hash` returns `PcsKeyError` (`UnknownDocument`, `NoCgka`, `RootConflicted { issuers }`, `Underivable`). The issuers come from the root's actual versions, matched to the `Update` that minted each one. subduction `5f418129` re-pins it; townframe pin `f74260b0`. The election (`a4aec85e`) now reads `RootConflicted { issuers }` instead of the latest epoch's Update issuers. big_repo 446/446.
+  - `c53ab910`: the frontier and causal checkpoint workers coalesce a per-doc burst into the running task plus one follow-up instead of replace-cancelling it; the doc worker skips a load whose requester has gone. Seed 2: doc-worker caller-dropped replies 287 -> ~40. Only the doc-worker half has a unit pin (no cheap seam for the workers).
+  - `173786c0`: NDK step 1. `service_client_rs` is split into `service_client_core_rs` (Client<T>, transport traits, XRPC codec, bytes-only `HttpTransport`; native + both wasm targets) and `service_client_native_rs` (Direct/Irpc/Xrpc `Transport`, UDS/iroh clients). 7/7 core tests pass under wasmtime on wasip3.
+  - `ca7b1caa`: ADR 032 revision and the PR draft `docs/scratch/big-node-pr.md`.
+
 - 2026-11-04: P6 substitution, `eee4f9b9`.
   - The `org.example.daybook.nodule.substitution/<slot>` datum and `SetNoduleSubstitution` (manage on both X and Y). Y runs in X's slot, and `NoduleRecord.filled_by` shows it.
   - Authority conflicts are judged among enabled slots at enablement (ADR 028 §5); installing a rival no longer fails. Dependents see no provider change.
@@ -596,6 +602,11 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 5. Small cleanups: unify `owns_nsid`/`under`; a separate egress message-size constant.
 
 ### Follow-ups found during the merge
+- [perf] `big_sync::rpc` caller-dropped replies: ~148 per seed 2 run, untouched by `c53ab910`.
+- [build] big_dispatch emits a `recursion_depth_exceeding_limit` future-incompat warning on the `Send` proof of `Host::unary::<MintDispatchCapability>` (present at `3d04999`, before the client split). Clippy does not report it; it will become a hard error.
+- [env] mold fails with `ftruncate: Invalid argument` linking `day` when day_cli is built with `--all-features` together with the service crates on the ntfs3 target disk; day_cli alone links and passes.
+- [design] service client: guest subscriptions need a `!Send` stream (`BoxStream` today); whether the native `XrpcClient` should implement `HttpTransport` so guest and native unary paths share code.
+- [design] keyhive_wasm `tryPcsKeyHash` still returns `Option` (`.ok()`); expose the error to JS if needed.
 - [perf] `DatumStoreHandle`'s `seen_head_hashes` is a set of every head ever seen and grows without bound. It came over from the pre-merge code. Bound it, for example by keeping only the current frontier/ancestry.
 - [test] There is no dedicated test for `Predicate::sole_doc` page filtering. Add one in `big_cabinet` doc observe tests: a single-doc poll is not woken by writes elsewhere.
 - [cleanup] Two ADRs are numbered 007 (`007-doc-branch-identity`, `007-plug-manifests-as-drawer-docs`), and lint doesn't flag it. Raise with the operator.
