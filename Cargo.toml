@@ -252,18 +252,18 @@ automerge = "0.11.0"
 autosurgeon = "0.13.0"
 # automerge-test = "0.9"
 
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "a9c8697cd5407549e6b08be0b5d6e469faf2b063" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "a9c8697cd5407549e6b08be0b5d6e469faf2b063" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "a9c8697cd5407549e6b08be0b5d6e469faf2b063" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "a9c8697cd5407549e6b08be0b5d6e469faf2b063" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "a9c8697cd5407549e6b08be0b5d6e469faf2b063" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "a9c8697cd5407549e6b08be0b5d6e469faf2b063" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "a9c8697cd5407549e6b08be0b5d6e469faf2b063" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "a9c8697cd5407549e6b08be0b5d6e469faf2b063" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "4661560f517525a0b03577259941c5b6824c25a8" }
-keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "4661560f517525a0b03577259941c5b6824c25a8" }
-beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "4661560f517525a0b03577259941c5b6824c25a8" }
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
+keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
+beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
