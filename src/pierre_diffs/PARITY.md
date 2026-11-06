@@ -6,10 +6,10 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 25 | 5878 |
+| PORTED | 42 | 10832 |
 | REPLACED | 5 | 968 |
-| PENDING | 186 | 59589 |
-| OUT | 245 | 97516 |
+| PENDING | 167 | 54569 |
+| OUT | 247 | 97582 |
 | DEFER | 14 | 4790 |
 
 | upstream file | LOC | status | slice | Rust location | note |
@@ -154,7 +154,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/style.css` | 1867 | PENDING | S8 |  | PORT as stylesheet adapted to Blitz capabilities |
 | `pierre/src/types.ts` | 999 | PORTED | S1 | `types/patch.rs`, `types/options.rs`, `types/view.rs`, `types/conflict.rs`, `types/lines.rs`, `types/layout.rs` | pure-data types; callbacks, DOM-element and hast-bearing types listed in the file header as deferred or out |
 | `pierre/src/utils/annotationHelpers.ts` | 38 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/appendItems.ts` | 10 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/appendItems.ts` | 10 | OUT | - |  | engine argument-count workaround for push(...items); Vec::extend (noted in trim_patch_context.rs) |
 | `pierre/src/utils/applyLineTextWithNewline.ts` | 20 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areDiffLineAnnotationsEqual.ts` | 13 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areDiffRenderOptionsEqual.ts` | 16 | PENDING | - |  | PORT (Rust, oracle-tested) |
@@ -180,9 +180,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/cleanLastNewline.ts` | 11 | PORTED | S3 | `utils/clean_last_newline.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/cloneFileDiffMetadata.ts` | 20 | PORTED | S3 | `utils/clone_file_diff_metadata.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/composeCacheKey.ts` | 10 | PORTED | S3 | `utils/compose_cache_key.rs` | exact oracle parity (patches.json, utilities.json) |
-| `pierre/src/utils/computeEstimatedDiffHeights.ts` | 175 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/computeFileOffsets.ts` | 100 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/computeVirtualFileMetrics.ts` | 56 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/computeEstimatedDiffHeights.ts` | 175 | PORTED | S4 | `utils/compute_estimated_diff_heights.rs` | exact oracle parity (layout.json) plus ported upstream tests |
+| `pierre/src/utils/computeFileOffsets.ts` | 100 | PORTED | S4 | `utils/compute_file_offsets.rs` | exact oracle parity (layout.json) plus ported upstream tests |
+| `pierre/src/utils/computeVirtualFileMetrics.ts` | 56 | PORTED | S4 | `utils/compute_virtual_file_metrics.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/createAnnotationElement.ts` | 23 | PENDING | - |  | port or replace per slice notes (DOM helper) |
 | `pierre/src/utils/createAnnotationWrapperNode.ts` | 8 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/createCodeViewHeaderFooterHostElement.ts` | 26 | PENDING | - |  | port or replace per slice notes (DOM helper) |
@@ -198,7 +198,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/createSpanNodeFromToken.ts` | 16 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/createStyleElement.ts` | 38 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/createUnsafeCSSStyleNode.ts` | 8 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/createWindowFromScrollPosition.ts` | 50 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/createWindowFromScrollPosition.ts` | 50 | PORTED | S4 | `utils/create_window_from_scroll_position.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/cssWrappers.ts` | 81 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/detachString.ts` | 42 | OUT | - |  | V8 substring-retention workaround; Rust strings own their data |
 | `pierre/src/utils/diffAcceptRejectHunk.ts` | 41 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
@@ -229,7 +229,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/hastToHtml.ts` | 182 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/hast_utils.ts` | 142 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/hostTheme.ts` | 34 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/hydratePartialDiff.ts` | 268 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/hydratePartialDiff.ts` | 268 | PORTED | S4 | `utils/hydrate_partial_diff.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/includesFileAnnotations.ts` | 36 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/isDefaultRenderRange.ts` | 11 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/isDiffPlainText.ts` | 11 | PENDING | - |  | PORT (Rust, oracle-tested) |
@@ -237,10 +237,10 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/isGutterUtilityPath.ts` | 21 | PENDING | - |  | port or replace per slice notes (DOM helper) |
 | `pierre/src/utils/isStyleNode.ts` | 12 | PENDING | - |  | port or replace per slice notes (DOM helper) |
 | `pierre/src/utils/isWorkerContext.ts` | 10 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
-| `pierre/src/utils/iterateOverDiff.ts` | 1045 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/iterateOverDiff.ts` | 1045 | PORTED | S4 | `utils/iterate_over_diff.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/lineAnnotationIdentity.ts` | 37 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/normalizeDiffResolution.ts` | 25 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/parseDiffDecorations.ts` | 61 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/parseDiffDecorations.ts` | 61 | PORTED | S4 | `utils/parse_diff_decorations.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/parseDiffFromFile.ts` | 85 | PORTED | S3 | `utils/parse_diff_from_file.rs` | diff text from similar: invariants, not byte parity (see PARITY.md notes) |
 | `pierre/src/utils/parseLineType.ts` | 39 | PORTED | S3 | `utils/parse_line_type.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/parseMergeConflictDiffFromFile.ts` | 1228 | DEFER | - |  | DEFER (not needed for PR review v1) |
@@ -259,16 +259,16 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/resolveRegion.ts` | 419 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/utils/roundToDevicePixel.ts` | 14 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/scrollbarGutter.ts` | 55 | PENDING | - |  | port or replace per slice notes (DOM helper) |
-| `pierre/src/utils/setDeferredArrayItem.ts` | 56 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/setDeferredArrayItem.ts` | 56 | OUT | - |  | JS getter-defined lazy array element (Object.defineProperty); no Rust analogue needed, lazy rows arrive with the renderer |
 | `pierre/src/utils/setLanguageOverride.ts` | 21 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/setWrapperNodeProps.ts` | 65 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/shouldUseTokenTransformer.ts` | 25 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/splitFileContents.ts` | 13 | PORTED | S3 | `utils/split_file_contents.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/tokenStyle.ts` | 39 | PENDING | S5 |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/tokensToHtml.ts` | 72 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/trimPatchContext.ts` | 165 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/trimPatchContext.ts` | 165 | PORTED | S4 | `utils/trim_patch_context.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/updateDiffHunks.ts` | 514 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
-| `pierre/src/utils/virtualDiffLayout.ts` | 485 | PENDING | S4 |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/virtualDiffLayout.ts` | 485 | PORTED | S4 | `utils/virtual_diff_layout.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/wrapTokenFragments.ts` | 122 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/worker/WorkerPoolManager.ts` | 1830 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
 | `pierre/src/worker/errors.ts` | 67 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
@@ -343,8 +343,8 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/advancedStickySpecs.test.ts` | 199 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/annotationHelpers.test.ts` | 52 | PENDING | S6 |  |  |
 | `pierre/test/annotations.test.ts` | 628 | PENDING | S6 |  |  |
-| `pierre/test/computeEstimatedDiffHeights.test.ts` | 383 | PENDING | S4 |  |  |
-| `pierre/test/computeLineOffsets.test.ts` | 102 | PENDING | S4 |  |  |
+| `pierre/test/computeEstimatedDiffHeights.test.ts` | 383 | PORTED | S4 | `utils/compute_estimated_diff_heights_test.rs` | all upstream cases |
+| `pierre/test/computeLineOffsets.test.ts` | 102 | PORTED | S4 | `utils/compute_file_offsets_test.rs` | all upstream cases (byte offsets) |
 | `pierre/test/createCachedLoader.test.ts` | 36 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/createFileHeaderElement.test.ts` | 60 | PENDING | S5 |  |  |
 | `pierre/test/diffAcceptRejectHunk.test.ts` | 669 | DEFER | - |  | merge-conflict / edit flow |
@@ -432,7 +432,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/getChangedDocumentLines.test.ts` | 119 | OUT | - |  | edit session helper |
 | `pierre/test/getFiletypeFromFileName.test.ts` | 64 | PORTED | S3 | `utils/get_filetype_from_file_name_test.rs` | custom-extension map is an owned CustomExtensions value |
 | `pierre/test/getHighlighterThemeStyles.test.ts` | 128 | PENDING | S5 |  |  |
-| `pierre/test/getHunkSideBoundaries.test.ts` | 36 | PENDING | S4 |  |  |
+| `pierre/test/getHunkSideBoundaries.test.ts` | 36 | PORTED | S4 | `utils/get_hunk_side_boundaries_test.rs` | all upstream cases |
 | `pierre/test/getMergeConflictLineTypes.test.ts` | 70 | DEFER | - |  | merge-conflict UI |
 | `pierre/test/hastLinesTransport.test.ts` | 184 | OUT | - |  | worker transport of hast lines |
 | `pierre/test/hastToHtml.test.ts` | 224 | PENDING | S5 |  |  |
@@ -443,10 +443,10 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/highlighterTypeConflict.test.ts` | 196 | PENDING | S7 |  | adapted where the behavior exists behind the highlights adapter, else OUT |
 | `pierre/test/highlighterTypes.test.ts` | 55 | PENDING | S7 |  | adapted where the behavior exists behind the highlights adapter, else OUT |
 | `pierre/test/highlighterWorker.test.ts` | 132 | OUT | - |  | worker pool |
-| `pierre/test/hydratePartialDiff.test.ts` | 531 | PENDING | S4 |  |  |
+| `pierre/test/hydratePartialDiff.test.ts` | 531 | PORTED | S4 | `utils/hydrate_partial_diff_test.rs` | toThrow cases are panics; newFile:null on a changed diff is unrepresentable |
 | `pierre/test/hydration.test.ts` | 648 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
-| `pierre/test/isAdditionLineRenderable.test.ts` | 163 | PENDING | S4 |  |  |
-| `pierre/test/iterateOverDiff.test.ts` | 907 | PENDING | S4 |  |  |
+| `pierre/test/isAdditionLineRenderable.test.ts` | 163 | PORTED | S4 | `utils/is_addition_line_renderable_test.rs` | all upstream cases |
+| `pierre/test/iterateOverDiff.test.ts` | 907 | PORTED | S4 | `utils/iterate_over_diff_test.rs` | fileOld/fileNew-based tests run on a generated stand-in with the same properties |
 | `pierre/test/languageAttachment.test.ts` | 133 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/lazyLineAST.test.ts` | 239 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/mainThreadHighlighting.workerRendering.test.ts` | 516 | OUT | - |  | worker pool |
@@ -476,9 +476,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/testUtils.ts` | 633 | PORTED | S3 | `test_utils.rs` | hunk-verification and digest helpers ported; hast helpers arrive with the renderer (S6) |
 | `pierre/test/themeTypeUpdates.test.ts` | 323 | PENDING | S7 |  |  |
 | `pierre/test/trim.patch` | 137 | PORTED | S0 | `oracle/corpus/trim.patch` | verbatim oracle corpus file |
-| `pierre/test/trimPatchContext.test.ts` | 120 | PENDING | S4 |  |  |
+| `pierre/test/trimPatchContext.test.ts` | 120 | PORTED | S4 | `utils/trim_patch_context_test.rs` | snapshot test asserts snapshot facts plus exact oracle comparison |
 | `pierre/test/updateDiffHunks.test.ts` | 538 | OUT | - |  | edit session hunk recompute |
-| `pierre/test/virtualDiffLayout.test.ts` | 307 | PENDING | S4 |  |  |
+| `pierre/test/virtualDiffLayout.test.ts` | 307 | PORTED | S4 | `utils/virtual_diff_layout_test.rs` | all upstream cases |
 | `pierre/test/virtualFileMetricsPadding.test.ts` | 515 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/virtualizedAnnotations.workerRendering.test.ts` | 294 | OUT | - |  | worker pool |
 | `pierre/test/virtualizedApplyDocumentChange.test.ts` | 117 | PENDING | S10 |  |  |
@@ -490,10 +490,12 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/workerPoolHighlights.test.ts` | 264 | OUT | - |  | worker pool |
 | `pierre/test/workerPoolTransport.test.ts` | 148 | OUT | - |  | worker pool |
 
-## Assertions converted to invariants (3)
+## Assertions converted to invariants (5)
 
 | upstream test | title | conversion |
 |---|---|---|
 | `pierre/test/parseDiffFromFile.test.ts` | should parse diff from fileOld and fileNew and match its digest | snapshot of per-hunk geometry (jsdiff hunk boundaries; fixture fileOld/fileNew is in apps/demo, absent) became property assertions on the diffRowBufferTest pair |
 | `pierre/test/parseDiffFromFile.test.ts` | should have accurate hunk line values / should correctly set oldLines and newLines | fixture swapped for the diffRowBufferTest pair (invariants unchanged) |
 | `pierre/test/parsePatchFiles.test.ts` | should parse diff.patch and match its digest snapshot | diff.patch fixture (apps/demo) absent; covered by exact oracle comparison over the corpus (patches.json), no digest |
+| `pierre/test/iterateOverDiff.test.ts` | unified/split iteration produces expected sequence; windowing skips lines correctly; windowed iteration matches full iteration slices | apps/demo fixtures fileOld/fileNew absent; run on a generated 600-line pair (assertions are the upstream properties, not recorded numbers) |
+| `pierre/test/trimPatchContext.test.ts` | trims trim.patch fixture and matches snapshot | Bun snapshot replaced by snapshot facts (hunk headers, shrinkage) plus exact comparison with the published function (layout.json trims) |

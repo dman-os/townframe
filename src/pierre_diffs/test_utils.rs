@@ -194,3 +194,32 @@ pub fn verify_file_diff_hunk_values(diff: &FileDiffMetadata) -> VerifyResult {
         errors,
     }
 }
+
+// Number of rows a full render or iteration emits for a diff: each hunk's
+// declared rows plus any collapsed gap at or under the collapsed-context
+// threshold, which is rendered as auto-expanded context rows instead of being
+// hidden behind a separator.
+pub fn count_declared_rows(
+    diff: &FileDiffMetadata,
+    split: bool,
+    collapsed_context_threshold: usize,
+) -> usize {
+    diff.hunks
+        .iter()
+        .map(|hunk| {
+            let declared = if split {
+                hunk.split_line_count
+            } else {
+                hunk.unified_line_count
+            };
+            let auto_expanded =
+                hunk.collapsed_before > 0 && hunk.collapsed_before <= collapsed_context_threshold;
+            declared
+                + if auto_expanded {
+                    hunk.collapsed_before
+                } else {
+                    0
+                }
+        })
+        .sum()
+}
