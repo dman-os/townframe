@@ -334,6 +334,9 @@ impl<C: Clone> SurfaceTree<C> {
                 "attribute name or namespace".into(),
             ));
         }
+        if let Err(reason) = attribute_value_policy(name, ns, value) {
+            return Err(PresentationError::Unsupported(reason.into()));
+        }
         if matches!(value, AttributeValue::Float(float) if !float.is_finite()) {
             return Err(PresentationError::Unsupported(
                 "non-finite attribute".into(),

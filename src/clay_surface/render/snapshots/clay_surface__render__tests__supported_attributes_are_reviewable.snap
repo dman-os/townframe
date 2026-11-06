@@ -1,17 +1,15 @@
 ---
-source: src/clay_surface/render.rs
+source: src/clay_surface/render/tests.rs
 expression: supported
 ---
 - id
 - class
-- style
 - title
 - role
 - tabindex
 - hidden
 - lang
 - dir
-- accesskey
 - contenteditable
 - draggable
 - spellcheck
@@ -27,7 +25,6 @@ expression: supported
 - type
 - placeholder
 - autocomplete
-- autofocus
 - inputmode
 - pattern
 - min
@@ -40,26 +37,14 @@ expression: supported
 - cols
 - wrap
 - for
-- form
-- action
-- method
-- enctype
 - novalidate
 - accept
-- accept-charset
 - href
-- target
 - rel
-- download
-- src
 - alt
 - width
 - height
 - loading
-- srcset
-- sizes
-- crossorigin
-- referrerpolicy
 - open
 - datetime
 - start
@@ -197,6 +182,7 @@ expression: supported
 - "style:word-break"
 - "style:cursor"
 - "style:pointer-events"
+- "style:touch-action"
 - "style:user-select"
 - "style:opacity"
 - "style:visibility"
@@ -206,4 +192,3 @@ expression: supported
 - "style:transform-origin"
 - "style:transition"
 - "style:object-fit"
-- "http://www.w3.org/1999/xlink:href"

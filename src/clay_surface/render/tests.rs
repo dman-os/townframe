@@ -321,6 +321,7 @@ fn supported_attributes_are_reviewable() {
         "word-break",
         "cursor",
         "pointer-events",
+        "touch-action",
         "user-select",
         "opacity",
         "visibility",

@@ -391,7 +391,11 @@ fn Frame(shell: Shell) -> Element {
 
     rsx! {
         div {
-            style: "position:relative;width:100%;height:100%;min-width:0;min-height:0",
+            position: "relative",
+            width: "100%",
+            height: "100%",
+            min_width: "0",
+            min_height: "0",
             if let Some(problem) = failure() {
                 p { role: "alert", "{problem}" }
             }

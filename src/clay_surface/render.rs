@@ -106,14 +106,13 @@ pub(crate) fn static_attribute(
     }
     vocabulary!(
         None => None => [
-            "id", "class", "style", "title", "role", "tabindex", "hidden", "lang", "dir",
-            "accesskey", "contenteditable", "draggable", "spellcheck", "translate",
+            "id", "class", "title", "role", "tabindex", "hidden", "lang", "dir",
+            "contenteditable", "draggable", "spellcheck", "translate",
             "value", "checked", "disabled", "readonly", "required", "multiple", "selected",
-            "name", "type", "placeholder", "autocomplete", "autofocus", "inputmode", "pattern",
+            "name", "type", "placeholder", "autocomplete", "inputmode", "pattern",
             "min", "max", "step", "minlength", "maxlength", "size", "rows", "cols", "wrap",
-            "for", "form", "action", "method", "enctype", "novalidate", "accept", "accept-charset",
-            "href", "target", "rel", "download", "src", "alt", "width", "height", "loading",
-            "srcset", "sizes", "crossorigin", "referrerpolicy", "open", "datetime", "start",
+            "for", "novalidate", "accept", "href", "rel", "alt", "width", "height", "loading",
+            "open", "datetime", "start",
             "reversed", "colspan", "rowspan", "scope", "headers", "label", "low", "high",
             "optimum", "data-testid", "data-state", "data-value",
             "aria-label", "aria-labelledby", "aria-describedby", "aria-hidden", "aria-live",
@@ -139,11 +138,111 @@ pub(crate) fn static_attribute(
             "border", "border-color", "border-width", "border-style", "border-radius",
             "font", "font-family", "font-size", "font-weight", "font-style", "line-height",
             "text-align", "text-decoration", "text-overflow", "white-space", "word-break",
-            "cursor", "pointer-events", "user-select", "opacity", "visibility", "box-sizing",
+            "cursor", "pointer-events", "touch-action", "user-select", "opacity", "visibility", "box-sizing",
             "box-shadow", "transform", "transform-origin", "transition", "object-fit"
-        ],
-        Some("http://www.w3.org/1999/xlink") => Some("http://www.w3.org/1999/xlink") => ["href"]
+        ]
     )
+}
+
+/// The value half of the attribute vocabulary: [`static_attribute`] decides which names a guest
+/// may set, this decides which values those names may carry. Every value that can make the host
+/// request, navigate to, or autofill from something the guest names is refused here, so a batch
+/// carrying one faults the presentation exactly as an unknown name does. Names that exist only to
+/// carry such values (`src`, `srcset`, `action`, `target`, `download`, raw `style`, ...) are not in
+/// the vocabulary at all.
+///
+/// A removal (`None`, `false`) is always admitted. The checks are single byte-scans over the
+/// value with a fixed token list; nothing here allocates.
+pub(crate) fn attribute_value_policy(
+    name: &str,
+    namespace: Option<&str>,
+    value: &AttributeValue,
+) -> Result<(), &'static str> {
+    let text = match value {
+        AttributeValue::None | AttributeValue::Boolean(false) => return Ok(()),
+        AttributeValue::Text(text) => text.as_str(),
+        AttributeValue::Float(_) | AttributeValue::Int(_) | AttributeValue::Boolean(true) => {
+            // Numbers and booleans cannot carry a URL, but Dioxus stringifies them into
+            // attributes whose meaning is a scheme or an autofill token.
+            return match (name, namespace) {
+                ("href" | "autocomplete", None) => Err("non-text value for a restricted attribute"),
+                _ => Ok(()),
+            };
+        }
+    };
+    match (name, namespace) {
+        // Links carry an absolute http, https or mailto target and nothing else. The prefix test
+        // runs at byte 0 (browsers strip leading C0 controls and spaces before reading the
+        // scheme) and control characters anywhere are refused (tab and newline are stripped from
+        // inside a scheme, so `java\tscript:` would otherwise pass for a different scheme).
+        ("href", None) => {
+            let scheme_ok = ["http://", "https://", "mailto:"].iter().any(|scheme| {
+                text.as_bytes()
+                    .get(..scheme.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(scheme.as_bytes()))
+            });
+            if !scheme_ok || text.bytes().any(|byte| byte.is_ascii_control()) {
+                return Err("href must be an http, https or mailto url");
+            }
+        }
+        // Any autofill token other than `off` invites a password manager to fill a guest field.
+        ("autocomplete", None) => {
+            if text != "off" {
+                return Err("autocomplete must be off");
+            }
+        }
+        // SVG paint and clip references accept `url()`, which fetches.
+        ("fill" | "stroke" | "clip-path", None) => {
+            if css_value_is_forbidden(text, &["url("]) {
+                return Err("svg paint value carries a url");
+            }
+        }
+        (_, Some("style")) => {
+            if css_value_is_forbidden(text, CSS_FETCHING_TOKENS) {
+                return Err("style value can fetch or escape its box");
+            }
+            // Containment traps absolute and fixed boxes on the hosts that support it; the
+            // value is also refused so a host without containment support is not the only
+            // line of defence.
+            if name == "position" && css_value_is_forbidden(text, &["fixed", "sticky"]) {
+                return Err("style position escapes its box");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Functions and at-rules that make a style declaration fetch (`url()` and the image functions
+/// that wrap it), read another attribute (`attr()`), or run script in legacy engines.
+const CSS_FETCHING_TOKENS: &[&str] = &[
+    "url(",
+    "image-set(",
+    "image(",
+    "src(",
+    "element(",
+    "cross-fade(",
+    "paint(",
+    "attr(",
+    "expression",
+    "@import",
+];
+
+/// One pass over `value` looking for any of `tokens` ASCII-case-insensitively. Backslashes (CSS
+/// escapes can spell `url(` without the bytes), comments, and control characters are forbidden
+/// too, because each can hide a token from this byte scan while the CSS parser still sees it.
+fn css_value_is_forbidden(value: &str, tokens: &[&str]) -> bool {
+    let bytes = value.as_bytes();
+    bytes.iter().enumerate().any(|(index, &byte)| {
+        byte == b'\\'
+            || byte.is_ascii_control()
+            || (byte == b'/' && bytes.get(index + 1) == Some(&b'*'))
+            || tokens.iter().any(|token| {
+                bytes[index..]
+                    .get(..token.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(token.as_bytes()))
+            })
+    })
 }
 
 macro_rules! expand_surface_event_listener {

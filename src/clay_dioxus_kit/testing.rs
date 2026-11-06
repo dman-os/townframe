@@ -109,14 +109,12 @@ const WIRE_SVG_TAGS: &[&str] = &[
 const WIRE_ATTRIBUTES: &[&str] = &[
     "id",
     "class",
-    "style",
     "title",
     "role",
     "tabindex",
     "hidden",
     "lang",
     "dir",
-    "accesskey",
     "contenteditable",
     "draggable",
     "spellcheck",
@@ -132,7 +130,6 @@ const WIRE_ATTRIBUTES: &[&str] = &[
     "type",
     "placeholder",
     "autocomplete",
-    "autofocus",
     "inputmode",
     "pattern",
     "min",
@@ -145,26 +142,14 @@ const WIRE_ATTRIBUTES: &[&str] = &[
     "cols",
     "wrap",
     "for",
-    "form",
-    "action",
-    "method",
-    "enctype",
     "novalidate",
     "accept",
-    "accept-charset",
     "href",
-    "target",
     "rel",
-    "download",
-    "src",
     "alt",
     "width",
     "height",
     "loading",
-    "srcset",
-    "sizes",
-    "crossorigin",
-    "referrerpolicy",
     "open",
     "datetime",
     "start",
@@ -304,6 +289,7 @@ const WIRE_STYLE_PROPERTIES: &[&str] = &[
     "word-break",
     "cursor",
     "pointer-events",
+    "touch-action",
     "user-select",
     "opacity",
     "visibility",
@@ -647,14 +633,9 @@ impl Page {
         }
     }
 
-    /// A property of the inline `style` attribute.
+    /// A per-property `style:` attribute (the guest wire has no raw `style`).
     pub(crate) fn style(&self, node: Node, property: &str) -> Option<String> {
-        self.attr(node, "style")?
-            .split(';')
-            .find_map(|declaration| {
-                let (name, value) = declaration.split_once(':')?;
-                (name.trim() == property).then(|| value.trim().to_owned())
-            })
+        self.attr(node, &format!("style:{property}"))
     }
 
     fn role_of(&self, node: Node) -> Option<String> {

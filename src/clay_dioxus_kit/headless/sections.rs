@@ -234,15 +234,10 @@ pub fn Sections(
     let abort = use_callback(move |()| {
         drag.write().take();
     });
-    let handle_style = format!(
-        "position:relative;z-index:{};flex:none;touch-action:none;cursor:col-resize;width:{HANDLE_HIT_PX}px;margin:0 -{}px",
-        Layer::Raised.css(),
-        HANDLE_HIT_PX / 2.0
-    );
-    let gesture_style = format!(
-        "position:fixed;top:0;right:0;bottom:0;left:0;z-index:{};cursor:col-resize;touch-action:none",
-        Layer::Gesture.css()
-    );
+    let content = Layer::Content.css();
+    let raised = Layer::Raised.css();
+    let gesture = Layer::Gesture.css();
+    let handle_overlap = HANDLE_HIT_PX / 2.0;
     let tabindex = split.keyboard.then_some("0");
     let dragging_handle = drag().map(|drag| drag.handle);
 
@@ -251,14 +246,24 @@ pub fn Sections(
             class: skin.root,
             role: "group",
             "aria-label": "{label}",
-            style: "display:flex;flex-direction:row;width:100%;height:100%;min-width:0;min-height:0",
+            display: "flex",
+            flex_direction: "row",
+            width: "100%",
+            height: "100%",
+            min_width: "0",
+            min_height: "0",
             for (index, pane) in panes.iter().enumerate() {
                 div {
                     key: "pane-{index}",
                     class: skin.pane,
                     role: "region",
                     "aria-label": "{pane.name}",
-                    style: pane_style(weights[index], &split.rules[index]),
+                    flex: "{weights[index]} 1 0px",
+                    min_width: "{split.rules[index].min}px",
+                    min_height: "0",
+                    position: "relative",
+                    z_index: "{content}",
+                    max_width: if split.rules[index].max.is_finite() { "{split.rules[index].max}px" },
                     {pane.content.clone()}
                 }
                 if let Some(view) = handles.get(index) {
@@ -273,7 +278,13 @@ pub fn Sections(
                         "aria-valuemax": "{view.max}",
                         tabindex,
                         "data-state": if dragging_handle == Some(index) { "dragging" } else { "idle" },
-                        style: "{handle_style}",
+                        position: "relative",
+                        z_index: "{raised}",
+                        flex: "none",
+                        touch_action: "none",
+                        cursor: "col-resize",
+                        width: "{HANDLE_HIT_PX}px",
+                        margin: "0 -{handle_overlap}px",
                         onpointerdown: move |event| {
                             event.prevent_default();
                             drag.set(Some(Drag {
@@ -304,7 +315,16 @@ pub fn Sections(
             if drag().is_some() {
                 div {
                     role: "presentation",
-                    style: "{gesture_style}",
+                    // Absolute inside the presentation: a guest box cannot be fixed to the viewport
+                    // (the wire refuses `fixed`, and the host contains the presentation).
+                    position: "absolute",
+                    top: "0",
+                    right: "0",
+                    bottom: "0",
+                    left: "0",
+                    z_index: "{gesture}",
+                    cursor: "col-resize",
+                    touch_action: "none",
                     onpointermove: move |event| track.call(event),
                     onpointerup: move |_| release.call(()),
                     onpointerleave: move |_| release.call(()),
@@ -313,19 +333,6 @@ pub fn Sections(
             }
         }
     }
-}
-
-fn pane_style(weight: f64, rule: &SizeRule) -> String {
-    let max = if rule.max.is_finite() {
-        format!(";max-width:{}px", rule.max)
-    } else {
-        String::new()
-    };
-    format!(
-        "flex:{weight} 1 0px;min-width:{}px;min-height:0;position:relative;z-index:{}{max}",
-        rule.min,
-        Layer::Content.css()
-    )
 }
 
 #[cfg(test)]
