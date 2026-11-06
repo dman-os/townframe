@@ -1014,14 +1014,26 @@ fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    fn app(external: Rc<Cell<Option<Signal<u64>>>>) -> Element {
-        let count = use_signal(|| 0_u64);
-        external.set(Some(count));
-        rsx! { button { "{count}" } }
-    }
+    /// What the guest runtime provides at the root of a presentation, as its change tick.
+    #[derive(Clone, Copy)]
+    struct Shared(Signal<u64>);
 
     let external = Rc::new(Cell::new(None));
-    let mut dom = crate::GuestDom::new_with_props(app, external.clone());
+    let published = external.clone();
+    let mut dom = crate::GuestDom::with_setup(
+        move || {
+            let count = use_hook(|| {
+                let count = Signal::new(0_u64);
+                published.set(Some(count));
+                count
+            });
+            use_context_provider(|| Shared(count));
+        },
+        Rc::new(|| {
+            let count = use_context::<Shared>().0;
+            rsx! { button { "{count}" } }
+        }),
+    );
     let mut count = external.get().unwrap();
     count.set(17);
     dom.render().unwrap();
