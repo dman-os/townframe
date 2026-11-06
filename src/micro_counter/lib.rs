@@ -107,11 +107,14 @@ async fn activate(context: Context) -> Result<(), Error> {
 
 clay_mdk::export_micro!(activate, micro_counter_manifest::manifest);
 
+/// Bumped whenever the standalone count changes. A global signal lives in its `VirtualDom`, so
+/// every mount of the `view` presentation subscribes to the same one.
+static STANDALONE_COUNTED: GlobalSignal<u64> = Signal::global(|| 0);
+
 /// The counter's model and view in one render: `render` runs in a component scope of its own for
 /// each mount (see [`Context::publish`]), so the signals here belong to one surface.
 fn view(counter: Counter) -> Element {
-    let mut rerender = use_signal(|| 0_u64);
-    let _ = rerender();
+    let _ = STANDALONE_COUNTED();
     let mut operation = use_signal(|| None::<Operation>);
     let mut error = use_signal(|| None::<String>);
     let snapshot = counter.facet.as_ref().map(use_facet);
@@ -128,8 +131,9 @@ fn view(counter: Counter) -> Element {
                 "aria-label": "Increment Wasm counter",
                 disabled: matches!(value, FacetState::Loading),
                 onclick: move |_| match increment.increment() {
-                    // A standalone count has no document to notify the view of it changing.
-                    Ok(None) => rerender += 1,
+                    // A standalone count has no document to notify the view of it changing, so
+                    // the global tells every mount of this presentation to re-read it.
+                    Ok(None) => *STANDALONE_COUNTED.write() += 1,
                     Ok(Some(submitted)) => {
                         operation.set(Some(submitted));
                         error.set(None);
