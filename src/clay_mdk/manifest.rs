@@ -643,5 +643,4 @@ impl MicroManifest {
 }
 
 #[cfg(test)]
-#[path = "manifest_tests.rs"]
 mod tests;

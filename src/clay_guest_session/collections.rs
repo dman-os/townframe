@@ -865,12 +865,3 @@ fn full_grant(
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod capability_tests;
-
-#[cfg(test)]
-mod registration_tests;
-
-#[cfg(test)]
-mod staging_tests;

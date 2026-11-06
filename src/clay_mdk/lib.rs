@@ -507,7 +507,6 @@ pub mod package;
 #[cfg(all(test, feature = "view"))]
 extern crate self as clay_mdk;
 #[cfg(all(test, feature = "view"))]
-#[path = "context_micro.rs"]
 mod context_micro;
 
 #[cfg(feature = "in_process")]

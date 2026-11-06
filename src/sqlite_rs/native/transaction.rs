@@ -214,7 +214,10 @@ pub struct Savepoint<'parent> {
 
 impl Tx {
     pub async fn savepoint(&mut self, name: &str) -> SqlResult<Savepoint<'_>> {
-        assert!(query::valid_identifier(name), "invalid savepoint name");
+        assert!(
+            crate::query::valid_identifier(name),
+            "invalid savepoint name"
+        );
         self.next_savepoint = self
             .next_savepoint
             .checked_add(1)

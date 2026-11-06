@@ -11,9 +11,7 @@ use service_utils_rs::Spawner;
 use service_utils_rs::StopToken;
 use tokio::sync::watch;
 
-#[path = "observe.rs"]
 mod observe;
-#[path = "subscriptions.rs"]
 mod subscriptions;
 
 type Transfer = BoxFuture<'static, (Attempt, Res<Vec<TempTag>>)>;

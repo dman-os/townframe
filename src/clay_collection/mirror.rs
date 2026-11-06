@@ -254,8 +254,4 @@ impl<K: Ord + Clone, V: Clone> Mirror<K, Stamped<Option<V>>> {
 }
 
 #[cfg(test)]
-#[path = "tests_mirror.rs"]
 mod tests;
-#[cfg(test)]
-#[path = "tests_ticket_lifecycle.rs"]
-mod ticket_lifecycle_tests;

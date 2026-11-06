@@ -3,6 +3,9 @@ name = "clay_collection"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+# The crate root is the package root, so the `tests` module directory (`tests.rs` + `tests/<topic>.rs`)
+# would otherwise be auto-discovered as Cargo integration-test targets.
+autotests = false
 
 [lib]
 path = "lib.rs"

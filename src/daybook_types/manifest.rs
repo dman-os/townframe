@@ -1184,5 +1184,4 @@ pub struct LocalStateDependencyManifest {
 }
 
 #[cfg(test)]
-#[path = "manifest_tests.rs"]
 mod tests;
