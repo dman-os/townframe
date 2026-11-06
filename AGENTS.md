@@ -221,3 +221,6 @@ Does the task graze by a FIXME seen in code, flag those ahead of time in case th
 - Prompt contract: name the single item, the files to touch, what to verify (`cargo clippy -p <crate>` plus the narrowest affected test), and explicitly **forbid** full-suite runs — they time out and buy nothing.
 - Require the fork to report product and design questions instead of answering them, and to state exactly which commands it ran.
 - Never take a fork's report on trust: read its diff, then rerun the targeted test and clippy yourself. A fork that reports a timeout may still have finished the implementation.
+- No idle waits. A subagent never ends its turn "waiting on its own background work": it runs checks in the foreground with a timeout (split long suites) and reports only with results in hand. A background run that dies leaves an agent that looks busy and does nothing; this stalled work for hours more than once.
+- The manager verifies liveness instead of relaying "still running". When a subagent reports that it is waiting on background work, check right away for live cargo/nextest processes and recently touched files. If nothing is moving, stop it and continue from the working tree.
+- The manager doesn't idle either: when starting a long run, say how long it should take, and do other work in the meantime instead of ending the turn waiting on it.
