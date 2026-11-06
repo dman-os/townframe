@@ -23,7 +23,7 @@ pub fn check_field_datums(fields: &syn::Fields) -> syn::Result<()> {
         let message = if coverable {
             match kind {
                 Bare::Float => {
-                    "a bare number field must state its spelling: use `datum::Float64` for \
+                    "a bare number field must state its spelling: use `datum::F64` for \
                      the convention's decimal string, or mark this field \
                      `#[schemars(extend(\"x-automerge\" = \"number\"))]` if it is deliberately a \
                      plain json number that a consumer reads as one"
@@ -37,7 +37,7 @@ pub fn check_field_datums(fields: &syn::Fields) -> syn::Result<()> {
         } else {
             "a bare number or byte array nested in a map, a tuple, or another container is not \
              reached by a marker on the outer field, which describes one position and not the ones \
-             inside it: use `datum::Float64`/`datum::Bytes` at the nested position, or state the \
+             inside it: use `datum::F64`/`datum::Bytes` at the nested position, or state the \
              spelling on the type that holds it"
         };
         return Err(syn::Error::new_spanned(field, message));
@@ -344,7 +344,7 @@ mod tests {
         accepted("#[schemars(extend(\"x-automerge\" = \"list\"))] value: Vec<u8>,");
         accepted("#[serde(with = \"module\")] value: Vec<u8>,");
         accepted("#[schemars(schema_with = \"function\")] value: f64,");
-        accepted("value: Float64,");
+        accepted("value: F64,");
         accepted("value: Bytes,");
     }
 

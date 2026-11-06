@@ -13,7 +13,7 @@
 //! sidecar marks that object with `x-automerge`. The other three forms are `x-automerge` as well,
 //! because JSON Schema cannot describe a CRDT object, cannot say that a number is a *float*, and
 //! cannot state the non-finite values at all — so a float's declaration is its value's own type
-//! (`datum::Float64`, spelled as the decimal string it is), and a bare `f64` derives a
+//! (`datum::F64`, spelled as the decimal string it is), and a bare `f64` derives a
 //! plain number, which is the opt-out the Rust type itself states. Nothing opts in: a type declares
 //! its storage by what its `JsonSchema` says, so a foreign type whose schema states a storage form
 //! — `jiff::Timestamp` today, `chrono`'s tomorrow — is stored correctly as soon as it does.
@@ -861,44 +861,44 @@ impl autosurgeon::Hydrate for Counter {
 /// The float is a type of its own, like `Bytes` is: a JSON value cannot say that a number is a
 /// float, cannot state the non-finite values at all, and a carrier that knows nothing can lower a
 /// number's precision on the way through — so it is spelled as a decimal string, and a whole number
-/// keeps the point that says it is not an integer. There is one width, because Automerge has one
+/// keeps the point that says it is not an integer. There is one float type, because Automerge has one
 /// float: an `f32` is widened into it by the caller. A bare `f64` field derives a plain
 /// number instead, which is the opt-out stated by the type itself.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Float64(pub f64);
-impl From<f64> for Float64 {
+pub struct F64(pub f64);
+impl From<f64> for F64 {
     fn from(stated: f64) -> Self {
         Self(stated)
     }
 }
 
-impl Serialize for Float64 {
+impl Serialize for F64 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&float_string(self.0))
     }
 }
 
-impl<'de> Deserialize<'de> for Float64 {
+impl<'de> Deserialize<'de> for F64 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let stated = Value::deserialize(deserializer)?;
         parse_float(&stated)
-            .map(Float64)
+            .map(F64)
             .ok_or_else(|| serde::de::Error::custom(format!("{stated} does not spell a number")))
     }
 }
 
-impl JsonSchema for Float64 {
+impl JsonSchema for F64 {
     /// A storage form is a position, never a name a peer points at, so it is inlined.
     fn inline_schema() -> bool {
         true
     }
 
     fn schema_name() -> Cow<'static, str> {
-        "Float64".into()
+        "F64".into()
     }
 
     fn schema_id() -> Cow<'static, str> {
-        concat!(module_path!(), "::Float64").into()
+        concat!(module_path!(), "::F64").into()
     }
 
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
@@ -906,7 +906,7 @@ impl JsonSchema for Float64 {
     }
 }
 
-impl autosurgeon::Reconcile for Float64 {
+impl autosurgeon::Reconcile for F64 {
     type Key<'a> = autosurgeon::reconcile::NoKey;
 
     fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
@@ -914,18 +914,18 @@ impl autosurgeon::Reconcile for Float64 {
     }
 }
 
-impl autosurgeon::Hydrate for Float64 {
+impl autosurgeon::Hydrate for F64 {
     fn hydrate_f64(stated: f64) -> Result<Self, autosurgeon::HydrateError> {
-        Ok(Float64(stated))
+        Ok(F64(stated))
     }
 
-    // A document written before the widths were declared stores the token's kind; recover a float.
+    // A document written before floats were declared stores the token's kind; recover a float.
     fn hydrate_int(stated: i64) -> Result<Self, autosurgeon::HydrateError> {
-        Ok(Float64(stated as f64))
+        Ok(F64(stated as f64))
     }
 
     fn hydrate_uint(stated: u64) -> Result<Self, autosurgeon::HydrateError> {
-        Ok(Float64(stated as f64))
+        Ok(F64(stated as f64))
     }
 }
 

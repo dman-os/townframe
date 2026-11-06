@@ -829,8 +829,8 @@ fn a_consumer_that_holds_the_document_hydrates_it_typed() {
 fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
     #[derive(Debug, PartialEq, serde::Deserialize)]
     struct Plain {
-        fraction: Float64,
-        maybe: Option<Float64>,
+        fraction: F64,
+        maybe: Option<F64>,
         plain_number: f64,
     }
 
@@ -853,7 +853,7 @@ fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
 
     let value: Plain =
         serde_json::from_value(emitted).expect("the emitted JSON is what serde expects");
-    assert_eq!(value.fraction, Float64(0.1));
+    assert_eq!(value.fraction, F64(0.1));
     assert!(value.maybe.is_none());
     assert_eq!(value.plain_number, 2.5);
 }

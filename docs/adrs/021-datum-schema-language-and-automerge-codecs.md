@@ -373,7 +373,7 @@ decimal changes the value, and a reformatter may too. So the rule is:
 > string, or bytes — and one that is merely compared approximately may be a `number`.
 
 That is a convention on our vocabulary, not a language restriction, and it is now real: a float
-position spells the decimal string when its value's type is `datum::Float64` (§9), and
+position spells the decimal string when its value's type is `datum::F64` (§9), and
 a bare `f32`/`f64` field is the opt-out — the plain number, stated by the Rust type itself. A plain
 number is not canonical JSON, so a datum that carries one is a codec document rather than a
 publishable declaration: it assembles for the walk and is refused by the Lexicon gates (§10).
@@ -401,7 +401,7 @@ What replaces it is a bounded vocabulary of storage forms, declared at the posit
 | an RFC 3339 string | a timestamp in milliseconds | `format: "date-time"` |
 | a number | a counter | `x-automerge: "counter"` |
 | a string | a collaborative text | `x-automerge: "text"` |
-| a decimal string | a float | `x-automerge: "float"`, which `datum::Float64` emits |
+| a decimal string | a float | `x-automerge: "float"`, which `datum::F64` emits |
 | a `db+datum:` address string | the same string | `x-automerge: "reference"`, which `DatumReference` emits |
 
 The reference row is the one marker that changes no storage: the string is a string on both sides
@@ -538,7 +538,7 @@ facility.
 ### A float is a decimal string, declared by its value's type, and a bare number is the opt-out
 
 A float position that wants the convention carries it the way every other storage form does: **the
-declaration is the value's type's**. `datum::Float64` is a newtype in the codec,
+declaration is the value's type's**. `datum::F64` is a newtype in the codec,
 in the same shape as `Bytes` — its own `Serialize` and `Deserialize` spell and read the decimal
 string, its own `JsonSchema` says `{"type": "string", "x-automerge": "float"}`, inlined — so a
 field of that type spells strings in
@@ -552,7 +552,7 @@ type's affair at the edge that converts. The three
 non-finite values — which JSON's number cannot state at all, and which serde writes as `null`,
 silently turning `Some(NaN)` in an `Option<f32>` into `None` — travel by their names, `"NaN"`,
 `"Infinity"`, `"-Infinity"`, borrowed from protobuf's JSON mapping; JS parses all of them natively,
-and `Float64`'s `Deserialize` reads them back, so with a declared type a non-finite value round trips.
+and `F64`'s `Deserialize` reads them back, so with a declared type a non-finite value round trips.
 
 Why the convention at all, in the order it weighed:
 
@@ -579,7 +579,7 @@ JSON shape, consumed by plain serde against the declared types, is the whole rea
 
 **A datum's bare `f64` or `f32` field is refused: the opt-out is marked, never assumed.** The macro
 scans a datum's fields, and a bare number field states its spelling or does not compile — use
-`datum::Float64`, or mark the field
+`datum::F64`, or mark the field
 `#[schemars(extend("x-automerge" = "number"))]`, which is the statement the derived schema carries.
 The reason is the same as the closed keyword's: an accidental plain number looks correct in a JSON
 document and is wrong in every place the convention is read; the statement is also where a reviewer
@@ -799,7 +799,7 @@ order (ADR 020 §2).
    plus `x-automerge` for the shapes JSON Schema cannot describe, a value is checked into a `Stored`
    before anything is
    written, and a timestamp is stored in the milliseconds the format defines (§9). The float has
-   since joined it, declared by its value's types (`datum::Float64`) with a bare `f64` the
+   since joined it, declared by its value's types (`datum::F64`) with a bare `f64` the
    opt-out the Rust type states, and an earlier draft's *re-spelling layer* — a walk that converted
    the convention's JSON back at every parse, against a schema handed over per read — is deliberately
    **not** adopted: one JSON shape and plain serde is the read contract.
@@ -826,7 +826,7 @@ order (ADR 020 §2).
    even though the union only names them, the grammar check on every emitted file, and both gates —
    a declaration refused at authoring and an assembled codec document refused at the publish. The
    float's are there
-   too: the decimal-string projection with the point kept and the width stated, the non-finite
+   too: the decimal-string projection with the point kept, the non-finite
    values by their names, the canonicalizing encoder that destroys the opt-out's numbers and cannot
    touch the convention's strings, and the refusals for a spelling that does not parse. Still
    missing: a `Text` written by one node and read by another, and a

@@ -129,7 +129,7 @@ As the canonical storage format, the primary data model of documents is the Auto
   - Null
   - Int64
   - Uint64
-  - Float64 (IEEE 754)
+  - F64 (IEEE 754)
   - Boolean
   - Int64 counters
   - Int64 timestamps in milliseconds since Unix epoch

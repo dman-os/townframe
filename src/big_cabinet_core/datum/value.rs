@@ -828,7 +828,7 @@ values!(
 );
 
 #[cfg(feature = "schemars")]
-values!(super::Bytes, super::Counter, super::Text, super::Float64);
+values!(super::Bytes, super::Counter, super::Text, super::F64);
 
 macro_rules! containers {
     ($($container:path),* $(,)?) => {

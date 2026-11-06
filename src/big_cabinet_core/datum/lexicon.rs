@@ -314,7 +314,7 @@ fn typed(
         "number" => Err(here(
             path,
             "a plain `number` has no Lexicon type: a float is carried as the decimal string \
-             `datum::Float64` declares, and a whole number is an `integer`",
+             `datum::F64` declares, and a whole number is an `integer`",
         )),
         "null" => Err(here(
             path,
