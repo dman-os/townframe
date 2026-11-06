@@ -4425,7 +4425,7 @@ dependencies = [
 [[package]]
 name = "wcmp"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=f2c771462960004d2bfe92c2a55929ba7f7b8b8c#f2c771462960004d2bfe92c2a55929ba7f7b8b8c"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "js-sys",
@@ -4444,7 +4444,7 @@ dependencies = [
 [[package]]
 name = "wcmp-bindgen"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=f2c771462960004d2bfe92c2a55929ba7f7b8b8c#f2c771462960004d2bfe92c2a55929ba7f7b8b8c"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "heck",
@@ -4457,7 +4457,7 @@ dependencies = [
 [[package]]
 name = "wcmp-macros"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=f2c771462960004d2bfe92c2a55929ba7f7b8b8c#f2c771462960004d2bfe92c2a55929ba7f7b8b8c"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4468,7 +4468,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=f2c771462960004d2bfe92c2a55929ba7f7b8b8c#f2c771462960004d2bfe92c2a55929ba7f7b8b8c"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "thiserror 2.0.20",
@@ -4479,7 +4479,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core-web"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=f2c771462960004d2bfe92c2a55929ba7f7b8b8c#f2c771462960004d2bfe92c2a55929ba7f7b8b8c"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b#228bc7b359fd6ec65bcdcf2a644f85684e2c5e0b"
 dependencies = [
  "anyhow",
  "js-sys",
