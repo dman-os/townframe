@@ -1,6 +1,11 @@
 # How authority works in the cabinet (explainer and proposed ADR 022 rework)
 
-Status: draft for operator review (2026-11-06). ADR 022 is accurate but written from the mechanism outward. It is also stale: since N2b the caller's credential travels in an `Authorization` header on every request, while the ADR says `Authorization` exists only at mint seams. This note explains the model from the user's side first, maps it to RBAC, states what it defends against, and ends with the proposed changes. Once reviewed, it becomes the ADR 022 rewrite.
+Status: Draft
+Owner: Townframe maintainers
+Updated: 2026-11-06
+Scope: Plain-language explainer of the cabinet authority model and the proposed ADR 022 rework, for operator review.
+
+ADR 022 is accurate but written from the mechanism outward. It is also stale: since N2b the caller's credential travels in an `Authorization` header on every request, while the ADR says `Authorization` exists only at mint seams. This note explains the model from the user's side first, maps it to RBAC, states what it defends against, and ends with the proposed changes. Once reviewed, it becomes the ADR 022 rewrite.
 
 ## The model in one paragraph
 

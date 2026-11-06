@@ -1,6 +1,9 @@
 # Windows bring-up
 
-Status: scratch list (operator, 2026-11-06). Collected on Linux and delivered later as one PR on a Windows machine.
+Status: Draft
+Owner: Townframe maintainers
+Updated: 2026-11-06
+Scope: Windows work collected on Linux and delivered later as one PR on a Windows machine (operator, 2026-11-06).
 
 ## Node transport and admission
 - No local transport rule yet. `big_node` serves its router over a Unix socket and admits the operator through `SO_PEERCRED` (`OwnerOnly`), with a 0700 socket directory. None of that exists on Windows.
