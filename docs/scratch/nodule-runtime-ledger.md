@@ -599,7 +599,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 2. Done (checked 2026-11-06): capabilities resolve, mint and retract in the in-memory cap ledger (`authority/cap.rs`), and actor rows are memoized in `actor_rows` (`cached_actor_row`); SQLite is only the durable store for actors and grants.
 3. Orphan dispatch authority after a crash: persist it or sweep it at boot (slice 2c follow-up).
 4. Compare the heavy `big_cabinet` drawer test timings against an origin/main baseline (our 4th boot drawer).
-5. Small cleanups: unify `owns_nsid`/`under`; a separate egress message-size constant.
+5. Done (2026-11-06): the NSID-prefix check is one function (`DispatchScope::authority_owns`), and guest requests and handler responses share one size cap (`MAX_MESSAGE_OCTETS`, `big_nodule_wasm`).
 
 ### Follow-ups found during the merge
 - [perf] big_node blob_discovery tests (`selected_inventory_replacement_removes_old_inventory` and 3 others) hit nextest's 120 s timeout at `--test-threads 12` under load ~13. Not a stall: traced against a solo run, the same work (236 `reconcile_readers`, ~80 `ensure_coverage` tasks for 2 nodes and 3 drawers) runs 4-10x slower, no log gap over 1 s, and the waits subscribe before checking. Lever: the per-fixture keyhive work, not timeouts.
@@ -616,9 +616,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 - [main] `src/big_node/e2e/blob_discovery/mod.rs` is not rustfmt-clean on origin/main (byte-identical here), so the flake `rust-fmt` check fails on it.
 - [main] The big_node `blob_discovery` e2e tests take about 95–105s alone. Under a parallel run they exceed the default nextest kill (60s × 2) and aren't named `long_test`. Pinned 2026-11-04; they don't involve nodules.
 
-- [perf] Dispatch admission makes 2–3 in-process authority IRPC calls per invoke (`ResolveAuthority`/`ResolveActor`), each a pooled SQLite point read in the authority service. That contradicts D6 "no I/O on admission". Fix with an in-memory actor-row cache in the authority service (main's code), invalidated on actor changes. To do before the PR is review-ready.
 - [slice 2] `Provider::call` currently gets only `InvocationContext`. The Wasm provider needs the **caller identity/authority** (for the authority header). Pass the verified caller into providers. Dropping the future on deadline is the cancellation path.
-- [cleanup] `owns_nsid` (`big_nodule/state.rs`) and `under` (`big_nodule/dispatch.rs`) duplicate the NSID-prefix check. Unify in `big_nodule_core`.
 - [perf, minor] `Router::register` rebuilds the whole table per provider. Reconcile registers per nodule, so it's O(n²) per pass. Fine at today's scale; batch registration if it grows.
 
 - [test-time] Four heavy `big_cabinet` drawer e2e tests from main hit the 120s nextest kill under load, and one even alone:
@@ -633,7 +631,6 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 - [authority] The service's dispatch authority is minted per boot and retracted on clean shutdown, so nodule caps rotate on every restart (the subagent's claim that they stay stable across restarts is wrong). After a crash, the previous boot's authority is never retracted: a live orphan cap. Fix by persisting the service authority, or by sweeping at boot.
 - [convention] Nested calls inherit a deadline only if the guest forwards the header. gRPC propagates deadlines through the context automatically, so the guest SDK should do the same.
 - [decided] Production default for `nodule_operations` is empty (deny by default, the ocap convention). Caps stay stable across revision upgrades, because the actor is the same.
-- [nit] The egress request body cap reuses `MAX_RESPONSE_OCTETS`, so give it one message-size constant.
 
 ### Slice 2b follow-ups
 - Decided (operator, 2026-11-04): follow gRPC. A call whose deadline has already elapsed fails fast with the deadline error, checked first in `invoke`, and the provider is never entered. This supersedes the slice 1 "provider entered once" test contract. Folded into slice 2c.
@@ -682,6 +679,12 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 
 - **D36. Our keyhive fork is ours to fix** (operator, 2026-11-06): keyhive is being rewritten from scratch upstream, so fixes and workarounds go straight into our fork (`townframe-changes`); when the rewrite lands, compare our delta with it and port the fixes. Also: work concurrently where tasks are independent; don't block on one task.
 
+- **D37. Closing open questions** (operator, 2026-11-06):
+  - Live schema registration is not open: enabling a plug registers its Lexicons in `SchemaRepo` under the plug as owner and disabling retires them (`big_nodule/state.rs`). Already shipped.
+  - Many nodes sharing one SQLite database: not a goal (each node gets its own database, as it would on Postgres). Dropped from N3.
+  - Consent, permissions and actors, and the authoring naming questions (`plug-authoring.md`), are next week.
+  - Test threads under load, the ledger cleanups and the small follow-ups: manager decides.
+
 ## Deferred
 
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
@@ -706,8 +709,6 @@ Big_cabinet read/write options discussed with the operator 2026-11-06, deferred 
 
 - Lifecycle review questions 1–7: resolved 2026-11-04. See ADR 027 §10 and ADR 028.
 
-- The seven questions at the end of `docs/scratch/nodule-lifecycle-review.md` (catalog role, dependency split, manifest reshape, init redesign, downgrades, retired prefixes, carried drawer-grant authority).
-- Live `SchemaRepo` registration of the nodule's own datum Lexicons. Nodules can't write their own datums without it. Is it in scope for this PR?
 
 - Resolved: ADR 027 was revised in place with D1–D6 (`01ea305b`).
 - Resolved (D31): integer widths lean on spec compatibility.
