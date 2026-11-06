@@ -33,6 +33,7 @@ pub use attribution::Attribution;
 pub use attribution::AttributionError;
 #[cfg(feature = "schemars")]
 pub use storage::DmetaSchema;
+pub use storage::DmetaRead;
 pub use storage::DmetaWrite;
 pub use storage::StorageError;
 

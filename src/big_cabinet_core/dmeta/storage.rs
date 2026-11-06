@@ -1,5 +1,6 @@
 use super::ActorMetadata;
 use super::Dmeta;
+use super::DocId;
 use super::Uuid7;
 use crate::DatumKey;
 use crate::datum::CodecError;
@@ -50,6 +51,7 @@ impl From<CodecError> for StorageError {
 #[derive(Debug, Clone)]
 pub struct DmetaSchema {
     root: CompiledSchema,
+    created_at: CompiledSchema,
     updated_at: CompiledSchema,
     datum: CompiledSchema,
     actor: CompiledSchema,
@@ -58,6 +60,7 @@ pub struct DmetaSchema {
 impl DmetaSchema {
     pub fn new(root: CompiledSchema) -> Result<Self, CodecError> {
         Ok(Self {
+            created_at: root.member(&["createdAt"])?,
             updated_at: root.member(&["updatedAt"])?,
             // `datums` and `actors` are keyed maps: every member shares one declaration.
             datum: root.member(&["datums", ""])?,
@@ -85,7 +88,108 @@ pub struct DmetaWrite<'a> {
     pub doc_uuid: Uuid7,
 }
 
+/// What one write reads of the stored dmeta before it decides what to write; the read-side twin of
+/// [`DmetaWrite`].
+#[derive(Debug, Clone, Copy)]
+pub struct DmetaRead<'a> {
+    /// The datums the write touches: their metadata and the aliases bound to them are read.
+    pub datums: &'a BTreeSet<DatumKey>,
+    /// The writing actor, whose binding is read if the document holds it.
+    pub actor: Uuid7,
+    /// The document the write is made on, whose `docUuid` bindings are read.
+    pub document: &'a DocId,
+}
+
 impl Dmeta {
+    /// Hydrate only the parts of the dmeta stored at `object`/`prop` that `read` names, leaving
+    /// every other field of the result at its empty value.
+    ///
+    /// What comes back is: `createdAt`; the `docUuids` bindings that name `read.document`; the
+    /// `datumUuids` bindings that name a touched datum; each touched datum's metadata, each
+    /// hydrated against its own member schema; and the writing actor's binding. That is exactly
+    /// what a write needs to pick its aliases and `docUuid`, to carry the touched datums' `extra`
+    /// forward and to see whether its actor is already bound, and exactly what
+    /// [`Dmeta::write_atomic`] then writes back, so a write's read cost does not depend on how many
+    /// datums the document holds in its metadata.
+    ///
+    /// `datumUuids` is keyed by alias, with the datum key as the value, so there is no direct
+    /// lookup from a key to its aliases: finding them is one pass over the index that compares
+    /// each stored string with the touched keys and parses nothing else. That pass is still linear
+    /// in the number of aliases the document has ever bound; only a reverse index (key to aliases)
+    /// would make it constant.
+    ///
+    /// Like [`Dmeta::hydrate`], a conflicted container is read through its winning copy.
+    pub fn hydrate_for<D: ReadDoc>(
+        doc: &D,
+        object: &ObjId,
+        prop: autosurgeon::Prop<'_>,
+        schema: &DmetaSchema,
+        read: &DmetaRead<'_>,
+    ) -> Result<Self, StorageError> {
+        let native = native_prop(&prop);
+        let Some((automerge::Value::Object(ObjType::Map), map)) =
+            doc.get(object, native.clone())?
+        else {
+            return Err(StorageError::UnexpectedStorage {
+                object: object.clone(),
+                prop: native,
+                expected: ObjType::Map,
+            });
+        };
+        let created_at = serde_json::from_value(hydrate_value(
+            doc,
+            &map,
+            "createdAt".into(),
+            &schema.created_at,
+        )?)?;
+        let mut dmeta = Dmeta::new(created_at);
+        let document = read.document.to_string();
+        if let Some((_, bindings)) = doc.get(&map, "docUuids")? {
+            for binding in doc.map_range(&bindings, ..) {
+                if value_str(&binding.value) == Some(document.as_str()) {
+                    dmeta
+                        .doc_uuids
+                        .insert(uuid7(&binding.key)?, read.document.clone());
+                }
+            }
+        }
+        if let Some((_, bindings)) = doc.get(&map, "datumUuids")? {
+            let touched: BTreeMap<String, &DatumKey> = read
+                .datums
+                .iter()
+                .map(|key| (key.to_string(), key))
+                .collect();
+            for binding in doc.map_range(&bindings, ..) {
+                if let Some(key) = value_str(&binding.value).and_then(|text| touched.get(text)) {
+                    dmeta
+                        .datum_uuids
+                        .insert(uuid7(&binding.key)?, (*key).clone());
+                }
+            }
+        }
+        if let Some((_, datums)) = doc.get(&map, "datums")? {
+            for key in read.datums {
+                let name = key.to_string();
+                if doc.get(&datums, name.as_str())?.is_some() {
+                    let json = hydrate_value(doc, &datums, name.as_str().into(), &schema.datum)?;
+                    dmeta
+                        .datums
+                        .insert(key.clone(), serde_json::from_value(json)?);
+                }
+            }
+        }
+        if let Some((_, actors)) = doc.get(&map, "actors")? {
+            let name = read.actor.to_string();
+            if doc.get(&actors, name.as_str())?.is_some() {
+                let json = hydrate_value(doc, &actors, name.as_str().into(), &schema.actor)?;
+                dmeta
+                    .actors
+                    .insert(read.actor, serde_json::from_value(json)?);
+            }
+        }
+        Ok(dmeta)
+    }
+
     /// Hydrate dmeta, including actor creation timestamps held by non-winning concurrent maps.
     /// Ordinary map hydration selects one actor binding; `createdAt` is instead a union across every
     /// copy because each independent introduction contributed one timestamp to that binding.
@@ -172,10 +276,24 @@ impl Dmeta {
             let copies = maps(&tx, object, native.clone())?;
             let map = ensure_object(&mut tx, object, native, ObjType::Map)?;
             let doc_uuid = self.doc_uuids[&write.doc_uuid].to_string();
-            bind_string(&mut tx, &copies, &map, "docUuids", write.doc_uuid, &doc_uuid)?;
+            bind_string(
+                &mut tx,
+                &copies,
+                &map,
+                "docUuids",
+                write.doc_uuid,
+                &doc_uuid,
+            )?;
             for (uuid, key) in &self.datum_uuids {
                 if write.datums.contains(key) {
-                    bind_string(&mut tx, &copies, &map, "datumUuids", *uuid, &key.to_string())?;
+                    bind_string(
+                        &mut tx,
+                        &copies,
+                        &map,
+                        "datumUuids",
+                        *uuid,
+                        &key.to_string(),
+                    )?;
                 }
             }
             let actors = ensure_object(&mut tx, &map, "actors".into(), ObjType::Map)?;
@@ -235,6 +353,17 @@ impl Dmeta {
         }
         Ok(tx)
     }
+}
+
+fn value_str<'a>(value: &'a automerge::ValueRef<'_>) -> Option<&'a str> {
+    match value {
+        automerge::ValueRef::Scalar(automerge::ScalarValueRef::Str(text)) => Some(text.as_ref()),
+        _ => None,
+    }
+}
+
+fn uuid7(text: &str) -> Result<Uuid7, StorageError> {
+    Ok(serde_json::from_value(Value::String(text.to_owned()))?)
 }
 
 fn native_prop(prop: &autosurgeon::Prop<'_>) -> automerge::Prop {
@@ -423,8 +552,14 @@ fn actor_matches(
         return Ok(false);
     }
     let fields = [
-        ("pubkey", Some(ScalarValue::Str(actor.pubkey.to_string().into()))),
-        ("actorUrl", Some(ScalarValue::Str(actor.actor_url.as_str().into()))),
+        (
+            "pubkey",
+            Some(ScalarValue::Str(actor.pubkey.to_string().into())),
+        ),
+        (
+            "actorUrl",
+            Some(ScalarValue::Str(actor.actor_url.as_str().into())),
+        ),
         (
             "delegation",
             actor

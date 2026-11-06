@@ -118,6 +118,7 @@ use big_cabinet_core::dmeta::DatumMetadata;
 use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::Dmeta;
 use big_cabinet_core::dmeta::DmetaSchema;
+use big_cabinet_core::dmeta::DmetaRead;
 use big_cabinet_core::dmeta::DmetaWrite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;

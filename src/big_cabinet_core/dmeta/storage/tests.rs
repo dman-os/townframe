@@ -624,3 +624,65 @@ fn rebound_bindings_and_late_codec_errors_roll_back_the_owned_transaction() {
     assert_eq!(doc.get_heads(), heads);
     assert_eq!(doc.length(&objects(&doc).2[0]), 0);
 }
+
+#[test]
+fn a_partial_read_hydrates_only_what_the_write_names() {
+    let schema = schema();
+    let mut dmeta = fixture();
+    let other: crate::DatumKey = "org.example.other/main".parse().unwrap();
+    dmeta.datum_uuids.insert(Uuid7::new(), other.clone());
+    dmeta
+        .doc_uuids
+        .insert(Uuid7::new(), crate::dmeta::DocId::new(b"elsewhere"));
+    dmeta
+        .datums
+        .insert(other, dmeta.datums.values().next().unwrap().clone());
+    let mut doc = Automerge::new();
+    // Bind everything the fixture holds, the unrelated datum and document included.
+    let all: BTreeSet<_> = dmeta.datums.keys().cloned().collect();
+    let (_, actor, doc_uuid) = named(&dmeta);
+    write_atomic(doc.transaction(), &schema, &dmeta, &(all, actor, doc_uuid))
+        .unwrap()
+        .commit();
+    let full = read(&doc, &schema);
+    let key: crate::DatumKey = "org.example.note/main".parse().unwrap();
+    let document = crate::dmeta::DocId::new(b"doc");
+
+    let touched = BTreeSet::from([key.clone()]);
+    let partial = Dmeta::hydrate_for(
+        &doc,
+        &ROOT,
+        "dmeta".into(),
+        &schema,
+        &DmetaRead {
+            datums: &touched,
+            actor,
+            document: &document,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(partial.created_at, full.created_at);
+    assert_eq!(
+        partial.datums,
+        BTreeMap::from([(key.clone(), full.datums[&key].clone())])
+    );
+    assert_eq!(
+        partial.datum_uuids,
+        full.datum_uuids
+            .iter()
+            .filter(|(_, alias)| **alias == key)
+            .map(|(uuid, alias)| (*uuid, alias.clone()))
+            .collect::<BTreeMap<_, _>>()
+    );
+    assert_eq!(
+        partial.doc_uuids,
+        full.doc_uuids
+            .iter()
+            .filter(|(_, bound)| **bound == document)
+            .map(|(uuid, bound)| (*uuid, bound.clone()))
+            .collect::<BTreeMap<_, _>>()
+    );
+    assert_eq!(partial.actors.keys().collect::<Vec<_>>(), vec![&actor]);
+    assert!(partial.updated_at.is_empty());
+}
