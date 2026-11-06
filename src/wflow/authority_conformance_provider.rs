@@ -20,7 +20,8 @@ use wash_runtime::wit::WitWorld;
 
 const WASI_KEYVALUE_ID: &str = "wasi-keyvalue";
 
-pub(crate) type BucketHandle = String;
+// Bindgen publicly re-exports resource mappings inside its private test module.
+pub type BucketHandle = String;
 
 mod bindings {
     wash_runtime::wasmtime::component::bindgen!({
@@ -32,7 +33,7 @@ mod bindings {
             }
         "#,
         world: "keyvalue",
-        imports: { default: async | trappable | tracing },
+        imports: { default: async | trappable },
         with: {
             "wasi:keyvalue/store.bucket": crate::authority_conformance_provider::BucketHandle,
         },
