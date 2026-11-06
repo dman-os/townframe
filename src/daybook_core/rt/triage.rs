@@ -420,7 +420,7 @@ fn processor_dispatch_id(
     format!("{plug_id}/{routine_name}/{branch_path}-{digest}")
 }
 
-async fn enqueue_processor_plan(rt: &Rt, plan: &ProcessorDispatchPlan) -> Res<()> {
+async fn enqueue_processor_plan(rt: &Arc<Rt>, plan: &ProcessorDispatchPlan) -> Res<()> {
     if rt.dispatch_repo.get_any(&plan.dispatch_id).await.is_some() {
         return Ok(());
     }

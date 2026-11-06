@@ -1005,6 +1005,197 @@ impl Rt {
         })
     }
 
+    fn ensure_rt_live(&self) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("rt is shutting down");
+        }
+        Ok(())
+    }
+
+    async fn collect_plug_and_dependency_order(&self, plug_id: &str) -> Res<Vec<String>> {
+        fn dep_base_id(dep_id_full: &str) -> Res<String> {
+            if dep_id_full.starts_with('@') {
+                let without_prefix = dep_id_full
+                    .strip_prefix('@')
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                let base = without_prefix
+                    .split('@')
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                Ok(format!("@{base}"))
+            } else {
+                let base = dep_id_full
+                    .split('@')
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| eyre::eyre!("invalid dependency id: {dep_id_full}"))?;
+                Ok(base.to_string())
+            }
+        }
+
+        let mut permanent = HashSet::new();
+        let mut temporary = HashSet::new();
+        let mut out = vec![];
+        let mut stack: Vec<(String, bool)> = vec![(plug_id.to_string(), false)];
+        while let Some((cur, expanded)) = stack.pop() {
+            if permanent.contains(&cur) {
+                continue;
+            }
+            if expanded {
+                temporary.remove(&cur);
+                permanent.insert(cur.clone());
+                out.push(cur);
+                continue;
+            }
+            if !temporary.insert(cur.clone()) {
+                eyre::bail!("circular plug dependencies detected around {cur}");
+            }
+            stack.push((cur.clone(), true));
+            let plug = self
+                .plugs_repo
+                .get(&cur)
+                .await
+                .ok_or_else(|| ferr!("plug not found in repo: {cur}"))?;
+            let mut deps = plug
+                .dependencies
+                .keys()
+                .map(|raw| dep_base_id(raw))
+                .collect::<Res<Vec<_>>>()?;
+            deps.sort();
+            for dep in deps.into_iter().rev() {
+                if !permanent.contains(&dep) {
+                    stack.push((dep, false));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn ensure_plug_init_dispatches(
+        self: &Arc<Self>,
+        plug_id: &str,
+        startup_progress_task_id: Option<&str>,
+        total_started: Option<std::time::Instant>,
+    ) -> Res<Vec<String>> {
+        let stage_started = std::time::Instant::now();
+        let order = self.collect_plug_and_dependency_order(plug_id).await?;
+        let mut unresolved_init_dispatch_ids = vec![];
+        for plug_id in order {
+            let plug = self
+                .plugs_repo
+                .get(&plug_id)
+                .await
+                .ok_or_else(|| ferr!("plug not found in repo: {plug_id}"))?;
+            let mut init_keys = plug.inits.keys().cloned().collect::<Vec<_>>();
+            init_keys.sort();
+
+            for init_key in init_keys {
+                let init_manifest = plug.inits.get(&init_key).ok_or_else(|| {
+                    ferr!("init not found in plug manifest: {plug_id}/{init_key}")
+                })?;
+                let init_id = init::InitRepo::init_id(&plug_id, &plug.version, &init_key.0);
+                if self
+                    .init_repo
+                    .is_done(&init_manifest.run_mode, &init_id)
+                    .await?
+                {
+                    self.init_repo
+                        .report_boot_init_stage(
+                            &init_manifest.run_mode,
+                            &plug_id,
+                            &init_key.0,
+                            "already done",
+                            init::BootInitProgressContext {
+                                startup_progress_task_id_override: startup_progress_task_id
+                                    .map(str::to_owned),
+                                stage_started,
+                                total_started,
+                            },
+                        )
+                        .await?;
+                    continue;
+                }
+                if let Some(running_dispatch_id) =
+                    self.init_repo.get_running_dispatch(&init_id).await
+                {
+                    unresolved_init_dispatch_ids.push(running_dispatch_id);
+                    self.init_repo
+                        .report_boot_init_stage(
+                            &init_manifest.run_mode,
+                            &plug_id,
+                            &init_key.0,
+                            "running",
+                            init::BootInitProgressContext {
+                                startup_progress_task_id_override: startup_progress_task_id
+                                    .map(str::to_owned),
+                                stage_started,
+                                total_started,
+                            },
+                        )
+                        .await?;
+                    continue;
+                }
+                let daybook_types::manifest::InitDeets::InvokeRoutine { routine_name } =
+                    &init_manifest.deets;
+                // ADR 007 §2: the config doc is created at enablement and the
+                // mapping retained across disablement; an enabled plug always
+                // has one.
+                let config_doc_id = self
+                    .plugs_repo
+                    .get_plug_config_doc_id(&plug_id)
+                    .await
+                    .ok_or_eyre(format!(
+                        "plug {plug_id} has no config doc; expected one at enablement"
+                    ))?;
+                let config_heads = self
+                    .drawer
+                    .get_doc_branches(&config_doc_id)
+                    .await?
+                    .and_then(|doc| doc.branches.get("main").cloned())
+                    .ok_or_else(|| ferr!("config doc missing main branch for plug {plug_id}"))?;
+                let dispatch_id = self
+                    .dispatch_no_gate(
+                        &plug_id,
+                        &routine_name.0,
+                        DispatchArgs::DocRoutine {
+                            doc_id: config_doc_id,
+                            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                            heads: config_heads,
+                            invocation: dispatch::RoutineInvocation::Command,
+                            changed_facet_keys: vec![],
+                            wflow_args_json: None,
+                        },
+                        vec![DispatchOnSuccessHook::InitMarkDone {
+                            init_id: init_id.clone(),
+                            run_mode: init_manifest.run_mode.clone(),
+                        }],
+                        unresolved_init_dispatch_ids.clone(),
+                    )
+                    .await?;
+                self.init_repo
+                    .set_running_dispatch(&init_id, &dispatch_id)
+                    .await?;
+                unresolved_init_dispatch_ids.push(dispatch_id);
+                self.init_repo
+                    .report_boot_init_stage(
+                        &init_manifest.run_mode,
+                        &plug_id,
+                        &init_key.0,
+                        "queued",
+                        init::BootInitProgressContext {
+                            startup_progress_task_id_override: startup_progress_task_id
+                                .map(str::to_owned),
+                            stage_started,
+                            total_started,
+                        },
+                    )
+                    .await?;
+            }
+        }
+        Ok(unresolved_init_dispatch_ids)
+    }
+
     async fn reconcile_workflow_dispatch(
         self: &Arc<Self>,
         dispatch_id: &str,
@@ -1044,7 +1235,7 @@ impl Rt {
                 )
                 .await
             {
-                Ok(()) | Err(wflow::CancelError::AlreadyTerminal) => {}
+                Ok(_) | Err(wflow::CancelError::AlreadyTerminal) => {}
                 Err(err) => {
                     return Err(ferr!(
                         "error cancelling admitted dispatch {dispatch_id}: {err:?}"
@@ -1080,11 +1271,12 @@ impl Rt {
         }
         let rt = Arc::clone(self);
         self.result_watchers.spawn(async move {
+            let handle = rt.authority.handle(job_id.clone());
             tokio::select! {
                 _ = rt.cancel_token.cancelled() => {
                     assert!(rt.waiter_jobs.lock().expect(ERROR_MUTEX).remove(&job_id));
                 }
-                receipt = rt.authority.handle(job_id.clone()).await_receipt() => {
+                receipt = handle.await_receipt() => {
                     let receipt = receipt.expect("active persisted workflow dispatch lost its authority receipt");
                     rt.handle_wflow_receipt(dispatch_id, job_id.clone(), receipt).await.unwrap();
                     assert!(rt.waiter_jobs.lock().expect(ERROR_MUTEX).remove(&job_id));
@@ -1466,8 +1658,17 @@ impl Rt {
         Ok(())
     }
 
+    pub async fn dispatch(
+        self: &Arc<Self>,
+        plug_id: &str,
+        routine_name: &str,
+        args: DispatchArgs,
+    ) -> Res<String> {
+        self.dispatch_raw(plug_id, routine_name, args, vec![]).await
+    }
+
     pub async fn invoke_command_from_wflow_job(
-        &self,
+        self: &Arc<Self>,
         parent_wflow_job_id: &str,
         target_command_url: &str,
         request: daybook_pdk::InvokeCommandRequest,
@@ -1593,7 +1794,7 @@ impl Rt {
     }
 
     async fn dispatch_raw(
-        &self,
+        self: &Arc<Self>,
         plug_id: &str,
         routine_name: &str,
         args: DispatchArgs,
@@ -1616,7 +1817,7 @@ impl Rt {
     }
 
     async fn dispatch_no_gate(
-        &self,
+        self: &Arc<Self>,
         plug_id: &str,
         routine_name: &str,
         args: DispatchArgs,
@@ -1637,7 +1838,7 @@ impl Rt {
 
     #[expect(clippy::too_many_arguments)]
     async fn dispatch_no_gate_internal(
-        &self,
+        self: &Arc<Self>,
         plug_id: &str,
         routine_name: &str,
         args: DispatchArgs,
@@ -1930,7 +2131,7 @@ impl Rt {
                 &self.wash_host,
                 &self.wflow_plugin,
                 &self.blobs_repo,
-                plug_id.clone(),
+                plug_id.to_owned(),
                 bundle_name.clone(),
                 bundle_man,
             )
