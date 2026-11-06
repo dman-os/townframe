@@ -4,6 +4,7 @@ members = [
   "./src/am_utils_rs",
   "./src/big_cabinet/",
   "./src/big_cabinet_core/",
+  "./src/datum_core/",
   "./src/big_plugs_core/",
   "./src/big_plugs/",
   "./src/big_nodule_core/",
@@ -116,6 +117,7 @@ wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_sqlite = { path = "./src/wash_plugin_sqlite", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
+datum_core = { path = "./src/datum_core", default-features = false }
 big_plugs_core = { path = "./src/big_plugs_core/", default-features = false }
 big_plugs = { path = "./src/big_plugs/" }
 big_nodule_core = { path = "./src/big_nodule_core/", default-features = false }

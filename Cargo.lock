@@ -1526,9 +1526,9 @@ dependencies = [
  "big_sync_core",
  "blake3",
  "ciborium",
- "const_format",
  "coset",
  "data-encoding",
+ "datum_core",
  "displaydoc",
  "ed25519-dalek 2.2.0",
  "indexmap 2.14.2",
@@ -4039,6 +4039,22 @@ name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
+
+[[package]]
+name = "datum_core"
+version = "0.1.0"
+dependencies = [
+ "automerge",
+ "big_sync_core",
+ "const_format",
+ "displaydoc",
+ "indexmap 2.14.2",
+ "jiff",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "daybook_cli"
