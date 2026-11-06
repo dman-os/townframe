@@ -12,16 +12,38 @@ use dioxus::prelude::*;
 use dioxus_core::ListenerCallback;
 use dioxus_html::PlatformEventData;
 
+/// The host-drawn box around every guest presentation. `contain: layout paint` makes the box the
+/// containing block for absolutely and fixed positioned descendants (so a guest `position: fixed`
+/// from `class` cannot reach the viewport) and clips painting to the box; `overflow: clip` repeats
+/// the clip for renderers without `contain` paint support. The flex column with 100% size keeps
+/// the guest root filling its slot as it did before the wrapper existed.
+const PRESENTATION_BOX_STYLE: &str = "display:flex;flex-direction:column;flex:1 1 auto;width:100%;height:100%;min-width:0;min-height:0;position:relative;contain:layout paint;overflow:clip";
+
 impl<C: Clone> SurfaceTree<C> {
+    /// Projects the tree inside the presentation box. `nested` marks a presentation mounted by
+    /// another guest: its box also ends event bubbling, so a parent presentation's listeners never
+    /// see an event that began inside the child. A top-level presentation has no guest ancestor
+    /// to protect and leaves bubbling to the host.
     pub fn render(
         &self,
         dispatch: &SurfaceEventHandler,
         component: &dyn Fn(&C) -> Element,
+        nested: bool,
     ) -> Element {
         let root_children = &self.node(SurfaceNodeId::ROOT).children;
+        let barrier = if nested {
+            presentation_barrier()
+        } else {
+            Vec::new()
+        };
         rsx! {
-            for &child in root_children {
-                {self.render_node(child, dispatch, component)}
+            div {
+                "data-clay-presentation": "",
+                style: PRESENTATION_BOX_STYLE,
+                ..barrier,
+                for &child in root_children {
+                    {self.render_node(child, dispatch, component)}
+                }
             }
         }
     }
@@ -268,6 +290,18 @@ macro_rules! expand_surface_event_listener {
             }
         }
 
+        /// A listener for every bubbling event name that calls `stop_propagation`. Spread on the
+        /// host element wrapping a child presentation, it ends bubbling at that boundary, so no
+        /// listener of an ancestor presentation receives an event that began inside the child.
+        /// `mounted` is excluded: it is per-element and never bubbles.
+        pub fn presentation_barrier() -> Vec<dioxus_core::Attribute> {
+            let mut barrier = Vec::new();
+            $($(
+                expand_surface_event_listener!(@barrier $group, barrier, $name);
+            )*)*
+            barrier
+        }
+
         fn surface_listener_attribute(
             raw_name: &str,
             revision: u64,
@@ -312,6 +346,20 @@ macro_rules! expand_surface_event_listener {
                 _ => None,
             }
         }
+    };
+    (@barrier Mounted, $barrier:ident, $name:ident) => {};
+    (@barrier $group:ident, $barrier:ident, $name:ident) => {
+        $barrier.push(dioxus_core::Attribute::new(
+            stringify!($name),
+            dioxus_core::AttributeValue::Listener(
+                ListenerCallback::new(|evt: dioxus_core::Event<PlatformEventData>| {
+                    evt.stop_propagation();
+                })
+                .erase(),
+            ),
+            None,
+            false,
+        ));
     };
     (@serialize Mounted, $data:ident, $platform:expr) => {{
         let _ = $platform;

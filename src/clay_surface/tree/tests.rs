@@ -593,7 +593,16 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
             .keys
             .borrow_mut()
             .push(rendered.key().map(str::to_owned));
-        tree.render(&dispatch, &|_| unreachable!("test has no component slots"))
+        tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            false,
+        )
+    }
+    // The guest's first root node sits inside the host's presentation box.
+    fn guest_root_child(host_tree: &SurfaceTree) -> SurfaceNodeId {
+        let presentation_box = host_tree.node(SurfaceNodeId::ROOT).children[0];
+        host_tree.node(presentation_box).children[0]
     }
     let tree = Rc::new(std::cell::RefCell::new(SurfaceTree::new()));
     tree.borrow_mut().apply(&counter_initial_batch()).unwrap();
@@ -608,14 +617,14 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
     );
     let mut host_tree = SurfaceTree::new();
     dom.rebuild(&mut host_tree);
-    let original_host = host_tree.node(SurfaceNodeId::ROOT).children[0];
+    let original_host = guest_root_child(&host_tree);
     let mut batch = vec![Mutation::PushId(1), Mutation::Remove];
     batch.extend(counter_initial_batch());
     tree.borrow_mut().apply(&batch).unwrap();
     let replacement = tree.borrow().lookup(ElementId::from_raw(1));
     dom.mark_dirty(dioxus_core::ScopeId::APP);
     dom.render_immediate(&mut host_tree);
-    let replacement_host = host_tree.node(SurfaceNodeId::ROOT).children[0];
+    let replacement_host = guest_root_child(&host_tree);
     assert_ne!(original_host, replacement_host);
     assert_eq!(
         &*keys.borrow(),
@@ -630,10 +639,7 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
         .unwrap();
     dom.mark_dirty(dioxus_core::ScopeId::APP);
     dom.render_immediate(&mut host_tree);
-    assert_eq!(
-        host_tree.node(SurfaceNodeId::ROOT).children[0],
-        replacement_host
-    );
+    assert_eq!(guest_root_child(&host_tree), replacement_host);
     assert_eq!(host_tree.text_content(), "updated");
 
     tree.borrow_mut().clear();
@@ -644,10 +650,7 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
     assert_ne!(replacement, after_clear);
     dom.mark_dirty(dioxus_core::ScopeId::APP);
     dom.render_immediate(&mut host_tree);
-    assert_ne!(
-        host_tree.node(SurfaceNodeId::ROOT).children[0],
-        replacement_host
-    );
+    assert_ne!(guest_root_child(&host_tree), replacement_host);
     assert_eq!(host_tree.text_content(), "0");
 }
 
@@ -940,9 +943,11 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
     }
     fn app(props: Props) -> Element {
         let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
-        props
-            .tree
-            .render(&dispatch, &|_| unreachable!("test has no component slots"))
+        props.tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            false,
+        )
     }
     let mut tree = SurfaceTree::new();
     tree.apply(&[
@@ -977,7 +982,22 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
     let mut host_tree = SurfaceTree::new();
     dom.rebuild(&mut host_tree);
     assert!(host_tree.listener_id("input", "input").is_some());
-    let svg = host_tree.node(host_tree.node(SurfaceNodeId::ROOT).children[0]);
+    // Every presentation sits in a host-drawn box that contains layout and paint.
+    let boxed = host_tree.node(host_tree.node(SurfaceNodeId::ROOT).children[0]);
+    let SurfaceNodeKind::Element {
+        tag, attributes, ..
+    } = &boxed.kind
+    else {
+        panic!("the presentation box is an element");
+    };
+    assert_eq!(tag, "div");
+    let box_style = attributes
+        .get(&("style".to_owned(), None))
+        .expect("the presentation box carries its style");
+    assert!(
+        matches!(box_style, AttributeValue::Text(style) if style.contains("contain:layout paint") && style.contains("overflow:clip"))
+    );
+    let svg = host_tree.node(boxed.children[0]);
     assert!(
         matches!(&svg.kind, SurfaceNodeKind::Element { tag, namespace: Some(namespace), .. }
         if tag == "svg" && namespace == "http://www.w3.org/2000/svg")

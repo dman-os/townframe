@@ -495,9 +495,11 @@ fn listener_app(props: ListenerProps) -> Element {
             stop_propagation: true,
         }
     });
-    props
-        .tree
-        .render(&dispatch, &|_| unreachable!("test has no component slots"))
+    props.tree.render(
+        &dispatch,
+        &|_| unreachable!("test has no component slots"),
+        false,
+    )
 }
 
 #[test]

@@ -422,11 +422,17 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         response
     });
     let tree = writer.tree.lock().unwrap();
-    tree.render(&handler, &|reference| {
-        rsx! {
-            ComponentMount { owner: owner.clone(), reference: *reference }
-        }
-    })
+    // A presentation mounted under another guest's surface is a child: its box stops bubbling.
+    let nested = !path.surfaces.is_empty();
+    tree.render(
+        &handler,
+        &|reference| {
+            rsx! {
+                ComponentMount { owner: owner.clone(), reference: *reference }
+            }
+        },
+        nested,
+    )
 }
 
 #[cfg(test)]
