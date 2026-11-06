@@ -84,10 +84,9 @@ impl CompiledSchema {
     pub fn member(&self, path: &[&str]) -> Result<Self, CodecError> {
         let mut schema = resolve_schema(&self.document, &self.document, HOPS)?;
         for key in path {
-            let declared =
-                declared_member(schema, key).ok_or_else(|| CodecError::Undefined {
-                    name: format!("member `{key}`"),
-                })?;
+            let declared = declared_member(schema, key).ok_or_else(|| CodecError::Undefined {
+                name: format!("member `{key}`"),
+            })?;
             schema = resolve_schema(&self.document, declared, HOPS)?;
         }
         let mut document = schema
@@ -565,9 +564,8 @@ impl<'a> Normalization<'a, '_> {
         if schema.get(KEYWORD).and_then(Value::as_str) == Some("float")
             && let Some(number) = super::parse_float(&value)
         {
-            let at_f32 = schema.get("format").and_then(Value::as_str) == Some("float");
             self.results
-                .push(Some(Value::String(super::float_string(number, at_f32))));
+                .push(Some(Value::String(super::float_string(number))));
             return Ok(());
         }
         if schema.get(KEYWORD).and_then(Value::as_str) == Some("uint")

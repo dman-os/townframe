@@ -278,7 +278,7 @@ fn native_supplements_round_trip_through_transactions_without_datetime_precision
         &[],
     );
     let universe = supplement(
-        json!({"uint": {"type": "string", "x-automerge": "uint", "format": "uint64"}, "float": {"type": "string", "x-automerge": "float", "format": "double"}, "counter": {"type": "integer", "x-automerge": "counter"}, "text": {"type": "string", "x-automerge": "text"}}),
+        json!({"uint": {"type": "string", "x-automerge": "uint", "format": "uint64"}, "float": {"type": "string", "x-automerge": "float"}, "counter": {"type": "integer", "x-automerge": "counter"}, "text": {"type": "string", "x-automerge": "text"}}),
     );
     let compiled = Bundle::new(&universe, Vec::new())
         .validate_lexicon(TAG, &primary, &[])
@@ -333,9 +333,7 @@ fn integer_supplements_restate_bounds_and_reject_malformed_annotations() {
         &["value"],
         &[],
     );
-    let valid = supplement(
-        json!({"value": {"type": "integer", "format": "int32", "minimum": -7, "maximum": 11}}),
-    );
+    let valid = supplement(json!({"value": {"type": "integer", "minimum": -7, "maximum": 11}}));
     let compiled = Bundle::new(&valid, Vec::new())
         .validate_lexicon(TAG, &primary, &[])
         .unwrap();
@@ -350,7 +348,9 @@ fn integer_supplements_restate_bounds_and_reject_malformed_annotations() {
         json!({"type": "integer", "minimum": 0.5}),
         json!({"type": "integer", "maximum": u64::MAX}),
         json!({"type": "integer", "minimum": "0"}),
+        // A Rust width is no format on an integer position; `Declaration` turns it into bounds.
         json!({"type": "integer", "format": "uint64"}),
+        json!({"type": "integer", "format": "int32"}),
         json!({"type": "integer", "format": "int256"}),
         json!({"type": "string", "format": "int32"}),
         json!({"type": "string", "minimum": 0}),
@@ -400,8 +400,8 @@ fn unused_integer_supplements_are_checked_at_admission() {
 fn typed_integer_maps_enforce_bounds_and_the_signed_lexicon_range() {
     let primary = record(json!({"map": {"type": "unknown"}}), &["map"], &[]);
     for mapping in [
-        json!({"type": "object", "additionalProperties": {"type": "integer", "format": "uint8", "minimum": 0, "maximum": 255}}),
-        json!({"type": "object", "patternProperties": {"^[a-z]+$": {"type": "integer", "format": "uint8", "minimum": 0, "maximum": 255}}, "additionalProperties": false}),
+        json!({"type": "object", "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 255}}),
+        json!({"type": "object", "patternProperties": {"^[a-z]+$": {"type": "integer", "minimum": 0, "maximum": 255}}, "additionalProperties": false}),
     ] {
         let universe = supplement(json!({"map": mapping}));
         let compiled = Bundle::new(&universe, Vec::new())
@@ -416,10 +416,16 @@ fn typed_integer_maps_enforce_bounds_and_the_signed_lexicon_range() {
 
 #[test]
 fn generated_byte_list_and_nullable_byte_bounds_admit_and_round_trip() {
-    let bytes = serde_json::to_value(schemars::schema_for!(Vec<u8>)).unwrap();
-    let maybe = serde_json::to_value(schemars::schema_for!(Option<u8>)).unwrap();
-    let length = serde_json::to_value(schemars::schema_for!(u64)).unwrap();
-    assert_eq!(bytes["items"]["format"], json!("uint8"));
+    let generated = |schema: schemars::Schema| {
+        let mut schema = serde_json::to_value(schema).unwrap();
+        // What `Declaration::of` does to every derived schema before it is admitted.
+        crate::datum::universe::rust_number_formats_to_bounds(&mut schema).unwrap();
+        schema
+    };
+    let bytes = generated(schemars::schema_for!(Vec<u8>));
+    let maybe = generated(schemars::schema_for!(Option<u8>));
+    let length = generated(schemars::schema_for!(u64));
+    assert_eq!(bytes["items"].get("format"), None);
     assert_eq!(bytes["items"]["minimum"], json!(0));
     assert_eq!(bytes["items"]["maximum"], json!(255));
     let primary = record(
@@ -555,73 +561,6 @@ fn supplement_integer_bounds_restate_primary_limits_without_narrowing_or_widenin
 }
 
 #[test]
-fn a_narrow_integer_format_bounds_the_primary_inside_its_range() {
-    for (format, field) in [
-        (
-            "uint8",
-            json!({"type": "integer", "minimum": 0, "maximum": 1000}),
-        ),
-        (
-            "int8",
-            json!({"type": "integer", "minimum": -129, "maximum": 0}),
-        ),
-        (
-            "uint32",
-            json!({"type": "integer", "minimum": 0, "maximum": 4_294_967_296_i64}),
-        ),
-    ] {
-        let universe = supplement(json!({"value": {"type": "integer", "format": format}}));
-        let error = Bundle::new(&universe, Vec::new())
-            .validate_lexicon(TAG, &record(json!({"value": field}), &[], &[]), &[])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("exceed the range"),
-            "{format} {field}: {error}"
-        );
-    }
-    for (format, field) in [
-        (
-            "uint8",
-            json!({"type": "integer", "minimum": 0, "maximum": 255}),
-        ),
-        (
-            "int8",
-            json!({"type": "integer", "minimum": -128, "maximum": 127}),
-        ),
-        ("int64", json!({"type": "integer"})),
-        ("uint64", json!({"type": "integer", "minimum": 0})),
-    ] {
-        let universe = supplement(json!({"value": {"type": "integer", "format": format}}));
-        Bundle::new(&universe, Vec::new())
-            .validate_lexicon(TAG, &record(json!({"value": field}), &[], &[]), &[])
-            .unwrap_or_else(|error| panic!("{format} {field}: {error}"));
-    }
-}
-
-#[test]
-fn unsigned_integer_formats_cannot_reinterpret_negative_primary_values() {
-    let universe = supplement(json!({"value": {"type": "integer", "format": "uint64"}}));
-    for field in [
-        json!({"type": "integer"}),
-        json!({"type": "integer", "minimum": -1, "maximum": 255}),
-        json!({"type": "integer", "const": -1}),
-        json!({"type": "integer", "enum": [-1, 0]}),
-    ] {
-        let primary = record(json!({"value": field}), &[], &[]);
-        assert!(accepts(&compile(&primary), json!({"value": -1})));
-        let error = Bundle::new(&universe, Vec::new())
-            .validate_lexicon(TAG, &primary, &[])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("unsigned integer format contradicts"),
-            "{error}"
-        );
-    }
-}
-
-#[test]
 fn malformed_or_unsupported_supplement_bounds_are_rejected_even_when_unused() {
     let primary = record(
         json!({"value": {"type": "integer", "minimum": 0, "maximum": 255}}),
@@ -670,9 +609,7 @@ fn malformed_or_unsupported_supplement_bounds_are_rejected_even_when_unused() {
     }
     annotations.extend([
         json!({"type": "integer", "minimum": 255, "maximum": 0}),
-        json!({"type": "integer", "format": "uint8", "minimum": -1, "maximum": 255}),
-        json!({"type": "integer", "format": "uint8", "minimum": 0, "maximum": 256}),
-        json!({"type": "integer", "format": "int8", "minimum": -129}),
+        json!({"type": "integer", "format": "uint8", "minimum": 0, "maximum": 255}),
         json!({"type": "string", "format": "uint8"}),
         json!({"type": "integer", "exclusiveMinimum": 0}),
         json!({"type": "integer", "exclusiveMaximum": 255}),
@@ -863,7 +800,7 @@ fn integer_union_supplements_cannot_replace_carried_primary_bounds() {
     for maximum in [9, 10] {
         let member = json!({"type": "object", "required": ["$type", "count"], "properties": {
             "$type": {"type": "string", "const": tag},
-            "count": {"type": "integer", "format": "uint8", "minimum": 0, "maximum": maximum}
+            "count": {"type": "integer", "minimum": 0, "maximum": maximum}
         }});
         let mut universe = supplement(json!({"member": {"oneOf": [member]}}));
         universe.types.push(crate::datum::TypeDecl {
@@ -929,8 +866,7 @@ fn native_authoring_is_normalized_before_primary_enum_and_length_checks() {
         }
     }
     let primary = record(json!({"value": {"type": "string"}}), &[], &[]);
-    let universe =
-        supplement(json!({"value": {"type": "string", "x-automerge": "float", "format": "float"}}));
+    let universe = supplement(json!({"value": {"type": "string", "x-automerge": "float"}}));
     let compiled = Bundle::new(&universe, Vec::new())
         .validate_lexicon(TAG, &primary, &[])
         .unwrap();
@@ -938,7 +874,8 @@ fn native_authoring_is_normalized_before_primary_enum_and_length_checks() {
         Stored::check(&compiled, json!({"$type": TAG, "value": 1e100}))
             .unwrap()
             .into_value(),
-        json!({"$type": TAG, "value": "Infinity"})
+        json!({"$type": TAG, "value": "1e+100"}),
+        "a float is spelled at the one width Automerge has, not narrowed to an f32"
     );
 }
 

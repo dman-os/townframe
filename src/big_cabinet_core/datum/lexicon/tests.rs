@@ -28,7 +28,7 @@ fn a_typed_dynamic_map_is_an_unknown_the_sidecar_narrows() {
     assert_eq!(
         projected(json!({
             "type": "object",
-            "additionalProperties": {"type": "integer", "format": "uint64"}
+            "additionalProperties": {"type": "integer", "minimum": 0}
         })),
         json!({"type": "unknown"})
     );
@@ -150,7 +150,7 @@ fn constraints_lexicon_states_travel_and_the_ones_it_counts_differently_do_not()
         json!({"type": "string", "format": "datetime"})
     );
     assert_eq!(
-        projected(json!({"type": "integer", "format": "uint64", "minimum": 0, "maximum": 9})),
+        projected(json!({"type": "integer", "minimum": 0, "maximum": 9})),
         json!({"type": "integer", "minimum": 0, "maximum": 9})
     );
     // Lexicon counts array elements with the length keywords.
@@ -215,7 +215,7 @@ fn each_storage_form_projects_to_the_type_its_json_has() {
         json!({"type": "bytes"})
     );
     assert_eq!(
-        projected(json!({"type": "string", "x-automerge": "float", "format": "double"})),
+        projected(json!({"type": "string", "x-automerge": "float"})),
         json!({"type": "string"})
     );
     assert_eq!(
@@ -232,9 +232,9 @@ fn each_storage_form_projects_to_the_type_its_json_has() {
         projected(json!({
             "type": "array",
             "x-automerge": "list",
-            "items": {"type": "integer", "format": "uint8"}
+            "items": {"type": "integer", "minimum": 0, "maximum": 255}
         })),
-        json!({"type": "array", "items": {"type": "integer"}})
+        json!({"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255}})
     );
 }
 
@@ -244,7 +244,6 @@ fn each_storage_form_projects_to_the_type_its_json_has() {
 fn a_plain_number_is_not_a_lexicon_type() {
     for stated in [
         json!({"type": "number"}),
-        json!({"type": "number", "format": "double"}),
         json!({"type": "number", "x-automerge": "number"}),
     ] {
         let reason = refused(stated);

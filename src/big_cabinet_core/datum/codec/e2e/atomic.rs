@@ -66,13 +66,9 @@ fn atomic_reconcile_discards_pending_transaction_on_preflight_error() {
 #[test]
 fn atomic_integer_write_commits_signed_and_unsigned_native_kinds() {
     for (schema, value, expected) in [
+        (json!({"type": "integer"}), json!(1), ScalarValue::Int(1)),
         (
-            json!({"type": "integer", "format": "int64"}),
-            json!(1),
-            ScalarValue::Int(1),
-        ),
-        (
-            json!({"type": "integer", "format": "uint64"}),
+            json!({"type": "integer", "minimum": 0}),
             json!(9_007_199_254_740_991u64),
             ScalarValue::Uint(9_007_199_254_740_991),
         ),
@@ -80,7 +76,7 @@ fn atomic_integer_write_commits_signed_and_unsigned_native_kinds() {
             json!({
                 "$ref": "#/$defs/NullableSigned",
                 "$defs": {
-                    "NullableSigned": {"type": ["integer", "null"], "format": "int64"}
+                    "NullableSigned": {"type": ["integer", "null"]}
                 }
             }),
             Value::Null,
@@ -106,13 +102,13 @@ fn atomic_integer_fractional_tokens_refuse_without_panicking_or_mutating() {
         json!({
             "$ref": "#/$defs/NullableSigned",
             "$defs": {
-                "NullableSigned": {"type": ["integer", "null"], "format": "int64"}
+                "NullableSigned": {"type": ["integer", "null"]}
             }
         }),
         json!({
             "$ref": "#/$defs/NullableUnsigned",
             "$defs": {
-                "NullableUnsigned": {"type": ["integer", "null"], "format": "uint64"}
+                "NullableUnsigned": {"type": ["integer", "null"], "minimum": 0}
             }
         }),
     ];

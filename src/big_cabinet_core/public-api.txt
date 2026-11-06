@@ -307,7 +307,6 @@ pub use big_cabinet_core::datum::codec :: CodecError
 pub use big_cabinet_core::datum::codec :: CompiledSchema
 pub use big_cabinet_core::datum::codec :: Counter
 pub use big_cabinet_core::datum::codec :: DeclaredReference
-pub use big_cabinet_core::datum::codec :: Float32
 pub use big_cabinet_core::datum::codec :: Float64
 pub use big_cabinet_core::datum::codec :: KEYWORD
 pub use big_cabinet_core::datum::codec :: Stored

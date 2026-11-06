@@ -94,8 +94,15 @@ impl Declaration {
     where
         T: DatumMember + DatumShape + JsonSchema,
     {
-        let derived = schemars::schema_for!(T);
-        let document = serde_json::to_value(&derived).expect("a schema serializes");
+        let mut document =
+            serde_json::to_value(schemars::schema_for!(T)).expect("a schema serializes");
+        rust_number_formats_to_bounds(&mut document).map_err(|reason| {
+            crate::datum::ShapeError::NotLexiconAligned {
+                name: T::ID.to_owned(),
+                reason,
+            }
+        })?;
+        let derived = Schema::try_from(document.clone()).expect("a schema is a valid JSON Schema");
         let schema = without_definitions(&derived);
         let flags = check_shape(T::ID, &schema, T::SHAPE)?;
         if let Publish::Yes = publish {
@@ -110,6 +117,89 @@ impl Declaration {
             },
             types: definitions(&derived),
         })
+    }
+}
+
+/// Turns the Rust number widths `schemars` states as `format` into the bounds Lexicon and JSON
+/// Schema state them with, and drops the float widths.
+///
+/// `schemars` spells a Rust integer as `{"type": "integer", "format": "uint32", "minimum": 0}` and
+/// an `f32` as `{"type": "number", "format": "float"}`. Neither format is part of the datum model:
+/// an integer is `minimum`/`maximum` (`uint32` becomes `minimum: 0, maximum: 4294967295`, a signed
+/// width its two-sided range, `uint64` just `minimum: 0` because a Lexicon bound is an `i64`) and
+/// Automerge has the one `f64` for every float, so the float formats say nothing. A bound the
+/// field's own attribute states is kept when it is narrower than the width's. The sign survives as
+/// `minimum >= 0`, which is what the codec stores as an Automerge `Uint`; a signed width given such
+/// a bound would flip to `Uint` and no longer hydrate into its `iN`, so it is refused here.
+///
+/// Only schema positions are walked: `const`, `enum`, `default` and `examples` hold data.
+pub(in crate::datum) fn rust_number_formats_to_bounds(schema: &mut Value) -> Result<(), String> {
+    match schema {
+        Value::Array(items) => items.iter_mut().try_for_each(rust_number_formats_to_bounds),
+        Value::Object(object) => {
+            let mentions = |object: &Map<String, Value>, stated: &str| match object.get("type") {
+                Some(Value::String(one)) => one == stated,
+                Some(Value::Array(ones)) => ones.iter().any(|one| one == stated),
+                _ => false,
+            };
+            if let Some(format) = object
+                .get("format")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                if mentions(object, "integer") {
+                    // The width's inclusive range, where the `i64` a Lexicon bound is can state it.
+                    let range = match format.as_str() {
+                        "int8" => Some((Some(i64::from(i8::MIN)), Some(i64::from(i8::MAX)))),
+                        "int16" => Some((Some(i64::from(i16::MIN)), Some(i64::from(i16::MAX)))),
+                        "int32" => Some((Some(i64::from(i32::MIN)), Some(i64::from(i32::MAX)))),
+                        "int64" => Some((None, None)),
+                        "uint8" => Some((Some(0), Some(i64::from(u8::MAX)))),
+                        "uint16" => Some((Some(0), Some(i64::from(u16::MAX)))),
+                        "uint32" => Some((Some(0), Some(i64::from(u32::MAX)))),
+                        "uint64" => Some((Some(0), None)),
+                        // `int`, `uint` and the 128-bit widths are not datum shapes; whatever
+                        // reaches here with one is left for admission to refuse.
+                        _ => None,
+                    };
+                    if let Some((low, high)) = range {
+                        let narrowed =
+                            |key: &str, bound: Option<i64>, tighter: fn(i64, i64) -> i64| match (
+                                object.get(key).and_then(Value::as_i64),
+                                bound,
+                            ) {
+                                (Some(stated), Some(bound)) => Some(tighter(stated, bound)),
+                                (stated, bound) => stated.or(bound),
+                            };
+                        let minimum = narrowed("minimum", low, i64::max);
+                        let maximum = narrowed("maximum", high, i64::min);
+                        if !format.starts_with('u') && minimum.is_some_and(|minimum| minimum >= 0) {
+                            return Err(format!(
+                                "a signed `{format}` bounded to `minimum >= 0` would be stored as \
+                                 an unsigned Automerge integer that an `iN` cannot hydrate"
+                            ));
+                        }
+                        for (key, bound) in [("minimum", minimum), ("maximum", maximum)] {
+                            if let Some(bound) = bound {
+                                object.insert(key.to_owned(), bound.into());
+                            }
+                        }
+                        object.remove("format");
+                    }
+                } else if mentions(object, "number")
+                    && matches!(format.as_str(), "float" | "double")
+                {
+                    object.remove("format");
+                }
+            }
+            object
+                .iter_mut()
+                .filter(|(key, _)| {
+                    !matches!(key.as_str(), "const" | "enum" | "default" | "examples")
+                })
+                .try_for_each(|(_, value)| rust_number_formats_to_bounds(value))
+        }
+        _ => Ok(()),
     }
 }
 

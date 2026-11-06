@@ -69,8 +69,6 @@ pub use codec::Counter;
 #[cfg(feature = "schemars")]
 pub use codec::DeclaredReference;
 #[cfg(feature = "schemars")]
-pub use codec::Float32;
-#[cfg(feature = "schemars")]
 pub use codec::Float64;
 #[cfg(feature = "schemars")]
 pub use codec::KEYWORD;

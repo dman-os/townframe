@@ -373,7 +373,7 @@ decimal changes the value, and a reformatter may too. So the rule is:
 > string, or bytes — and one that is merely compared approximately may be a `number`.
 
 That is a convention on our vocabulary, not a language restriction, and it is now real: a float
-position spells the decimal string when its value's type is `datum::Float32` or `Float64` (§9), and
+position spells the decimal string when its value's type is `datum::Float64` (§9), and
 a bare `f32`/`f64` field is the opt-out — the plain number, stated by the Rust type itself. A plain
 number is not canonical JSON, so a datum that carries one is a codec document rather than a
 publishable declaration: it assembles for the walk and is refused by the Lexicon gates (§10).
@@ -401,7 +401,7 @@ What replaces it is a bounded vocabulary of storage forms, declared at the posit
 | an RFC 3339 string | a timestamp in milliseconds | `format: "date-time"` |
 | a number | a counter | `x-automerge: "counter"` |
 | a string | a collaborative text | `x-automerge: "text"` |
-| a decimal string | a float | `x-automerge: "float"`, which `datum::Float32`/`Float64` emit |
+| a decimal string | a float | `x-automerge: "float"`, which `datum::Float64` emits |
 | a `db+datum:` address string | the same string | `x-automerge: "reference"`, which `DatumReference` emits |
 
 The reference row is the one marker that changes no storage: the string is a string on both sides
@@ -474,11 +474,17 @@ Automerge shape per type — `bytes`, `timestamp`, `str`, `u64`, `i64`, `f64`, `
 ### A number is stored as the schema says, because JSON has one number type
 
 JSON Schema draws the distinction Automerge needs — `integer` and `number` are different types, and
-`format` states the width and the sign — and `schemars` emits both for the Rust types that matter:
-`f32` is `{"type": "number", "format": "float"}`, `f64` is `"double"`, `i64` is
-`{"type": "integer", "format": "int64"}`, `u64` is `"uint64"`
-(`schemars/src/json_schema_impls/primitives.rs:63-65`). Automerge's scalars make the same
-distinctions: `Int`, `Uint` and `F64`.
+an integer's `minimum` states its sign. Automerge's scalars make the same distinctions: `Int`, `Uint`
+and `F64`. Rust's widths are not part of this model: a datum integer is a plain Lexicon integer
+(`minimum`, `maximum`, `enum`, `const`, `default`), and a float is the one `F64` Automerge has.
+`schemars` does emit widths for the Rust types that matter — `f32` is `{"type": "number", "format":
+"float"}`, `i64` is `{"type": "integer", "format": "int64"}`, `u32` is `"uint32"` with `minimum: 0`
+(`schemars/src/json_schema_impls/primitives.rs:63-65`) — so `Declaration::of` rewrites every derived
+schema once, before anything else reads it: an integer `format` becomes the bounds it stands for
+(`uint8` is `minimum: 0, maximum: 255`, `int32` its two-sided range, `uint64` only `minimum: 0` because
+a Lexicon bound is an `i64`) and the float formats are dropped. The leaf types with no Automerge or
+Lexicon counterpart — tuples, `()`, `char`, `usize`, `isize`, `u128` and `i128` — are not `DatumShape`,
+so a datum field of one does not compile.
 
 What the JSON token says is not enough, and the failure hides in both other directions. Measured: one
 JSON `1` sent to three positions declared `int64`, `uint64` and `float` is stored as `Uint(1)` in all
@@ -490,8 +496,8 @@ ordering (`as_u64` first) is in `am_utils_rs::codecs::json`, so an `i64` field w
 daybook's codec today cannot be read back into an `i64`.
 
 So the position's schema decides: `type: number` is an `F64` whatever the token looks like,
-`type: integer` with `format: uint*` is a `Uint`, any other `type: integer` is an `Int` — that type
-includes the negatives, and a schema that means unsigned says so — and a position that declares no
+`type: integer` with `minimum >= 0` is a `Uint` — it can never hold a negative — any other
+`type: integer` is an `Int`, because that type includes the negatives, and a position that declares no
 type at all keeps the token's kind, because there is nothing else to go on. The type is read whether
 it is written as one type or as a list of them, since `Option<i64>` is `["integer", "null"]`.
 
@@ -500,7 +506,11 @@ the validator's business, and the assembled document is exactly what a validator
 decides how an admissible value sits in a document, not whether it is admissible. And it is not a
 precision decision, because `f32` and `f64` are one `F64` in a document: the JSON number is where the
 precision is stated, serde writes a float at the precision of its own type, and both round trip
-exactly. `format` states which one the Rust side is.
+exactly. The schema does not say which one the Rust side is.
+
+The sign rule is by value range and not by Rust type, so a signed field bounded to `minimum >= 0`
+would be stored as a `Uint` that an `i32` cannot hydrate. `Declaration::of` refuses that combination
+rather than storing a value its own type cannot read back.
 
 **A document can hold a number JSON cannot state at all.** `ScalarValue::F64` holds any sixty-four
 bits, and `serde_json::Number::from_f64` refuses NaN and the infinities, so a peer can leave a value
@@ -528,16 +538,17 @@ facility.
 ### A float is a decimal string, declared by its value's type, and a bare number is the opt-out
 
 A float position that wants the convention carries it the way every other storage form does: **the
-declaration is the value's type's**. `datum::Float64` and `datum::Float32` are newtypes in the codec,
-in the same shape as `Bytes` — their own `Serialize` and `Deserialize` spell and read the decimal
-string, their own `JsonSchema` says `{"type": "string", "x-automerge": "float"}`, inlined with
-`format` naming the width for the reader that cares — so a field of that type spells strings in
+declaration is the value's type's**. `datum::Float64` is a newtype in the codec,
+in the same shape as `Bytes` — its own `Serialize` and `Deserialize` spell and read the decimal
+string, its own `JsonSchema` says `{"type": "string", "x-automerge": "float"}`, inlined — so a
+field of that type spells strings in
 *every* JSON the type takes part in: the repo's emission, the wire between peers, the plug's
 payloads. One spelling, everywhere.
 
 **The spelling is the shortest round-tripping decimal of the value** — `"0.1"`, `"30.0"` with the
-point kept, so a reader knows it was never whole — and an `f32`'s is spelled at its own width, so a
-value never reads back as the `f64` it widened into on the way through a JSON value. The three
+point kept, so a reader knows it was never whole — of the one `f64` Automerge stores; there is no
+narrower spelling, so an `f32` field carries the `f64` it widens into, and the width is the Rust
+type's affair at the edge that converts. The three
 non-finite values — which JSON's number cannot state at all, and which serde writes as `null`,
 silently turning `Some(NaN)` in an `Option<f32>` into `None` — travel by their names, `"NaN"`,
 `"Infinity"`, `"-Infinity"`, borrowed from protobuf's JSON mapping; JS parses all of them natively,
@@ -568,7 +579,7 @@ JSON shape, consumed by plain serde against the declared types, is the whole rea
 
 **A datum's bare `f64` or `f32` field is refused: the opt-out is marked, never assumed.** The macro
 scans a datum's fields, and a bare number field states its spelling or does not compile — use
-`datum::Float32`/`Float64`, or mark the field
+`datum::Float64`, or mark the field
 `#[schemars(extend("x-automerge" = "number"))]`, which is the statement the derived schema carries.
 The reason is the same as the closed keyword's: an accidental plain number looks correct in a JSON
 document and is wrong in every place the convention is read; the statement is also where a reviewer
@@ -788,7 +799,7 @@ order (ADR 020 §2).
    plus `x-automerge` for the shapes JSON Schema cannot describe, a value is checked into a `Stored`
    before anything is
    written, and a timestamp is stored in the milliseconds the format defines (§9). The float has
-   since joined it, declared by its value's types (`datum::Float32`/`Float64`) with a bare `f64` the
+   since joined it, declared by its value's types (`datum::Float64`) with a bare `f64` the
    opt-out the Rust type states, and an earlier draft's *re-spelling layer* — a walk that converted
    the convention's JSON back at every parse, against a schema handed over per read — is deliberately
    **not** adopted: one JSON shape and plain serde is the read contract.

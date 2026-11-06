@@ -23,8 +23,8 @@ pub fn check_field_datums(fields: &syn::Fields) -> syn::Result<()> {
         let message = if coverable {
             match kind {
                 Bare::Float => {
-                    "a bare number field must state its spelling: use `datum::Float64` or \
-                     `datum::Float32` for the convention's decimal string, or mark this field \
+                    "a bare number field must state its spelling: use `datum::Float64` for \
+                     the convention's decimal string, or mark this field \
                      `#[schemars(extend(\"x-automerge\" = \"number\"))]` if it is deliberately a \
                      plain json number that a consumer reads as one"
                 }

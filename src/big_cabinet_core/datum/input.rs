@@ -569,12 +569,20 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
     if object.get("format").is_some_and(|format| {
         !matches!(
             format.as_str(),
-            Some("float" | "double" | "date-time" | "datetime" | "uuid")
-        ) && !format
-            .as_str()
-            .is_some_and(|format| integers::FORMATS.contains(&format))
+            Some("uint64" | "date-time" | "datetime" | "uuid")
+        )
     }) {
         return Err(invalid(path, "unsupported supplement format"));
+    }
+    // `uint64` is no integer width: the one place it survives is the decimal-string spelling of
+    // the `uint` storage marker, which states an Automerge `Uint` carried as a string.
+    if object.get("format").and_then(Value::as_str) == Some("uint64")
+        && object.get("x-automerge").and_then(Value::as_str) != Some("uint")
+    {
+        return Err(invalid(
+            path,
+            "integer widths are not formats: state `minimum`/`maximum`",
+        ));
     }
     integers::check_supplement(object, path)?;
     // `pattern` is not a generally admissible constraint: the one spelling the declarations carry
@@ -1035,29 +1043,19 @@ impl Overlay<'_> {
         }
         if let Some(format) = object.get("format") {
             let allowed = match marker {
-                Some("float") => matches!(format.as_str(), Some("float" | "double")),
                 Some("uint") => format.as_str() == Some("uint64"),
                 Some("timestamp" | "datetime") | None if primary["x-automerge"] == "datetime" => {
                     matches!(format.as_str(), Some("date-time" | "datetime"))
                 }
                 None if kind == "string" && format.as_str() == Some("uuid") => true,
-                None | Some("counter") if kind == "integer" => format
-                    .as_str()
-                    .is_some_and(|format| integers::FORMATS.contains(&format)),
                 _ => false,
             };
             if !allowed {
                 return Err(invalid(path, "format is not an operable native supplement"));
             }
-            if marker == Some("float") {
-                primary["format"] = format.clone();
-            }
-            if marker == Some("float") {
-                primary[KEYWORD]["width"] = format.clone();
-            }
             // `uuid` is not a storage form and not a `Constraint` format; it is the declaration's
             // own annotation on the one string spelling that carries a `pattern`.
-            if format.as_str() == Some("uuid") || kind == "integer" {
+            if format.as_str() == Some("uuid") {
                 primary["format"] = format.clone();
             }
         }
@@ -1421,9 +1419,9 @@ impl jsonschema::Keyword for Constraint {
                     return false;
                 }
                 if self.0["native"] == "float"
-                    && !value.parse::<f64>().is_ok_and(|number| {
-                        super::codec::float_string(number, self.0["width"] == "float") == value
-                    })
+                    && !value
+                        .parse::<f64>()
+                        .is_ok_and(|number| super::codec::float_string(number) == value)
                 {
                     return false;
                 }

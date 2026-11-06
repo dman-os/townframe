@@ -800,23 +800,17 @@ macro_rules! values {
 }
 
 values!(
-    (),
     bool,
-    char,
     str,
     String,
     u8,
     u16,
     u32,
     u64,
-    u128,
-    usize,
     i8,
     i16,
     i32,
     i64,
-    i128,
-    isize,
     f32,
     f64,
     Value,
@@ -834,13 +828,7 @@ values!(
 );
 
 #[cfg(feature = "schemars")]
-values!(
-    super::Bytes,
-    super::Counter,
-    super::Text,
-    super::Float32,
-    super::Float64
-);
+values!(super::Bytes, super::Counter, super::Text, super::Float64);
 
 macro_rules! containers {
     ($($container:path),* $(,)?) => {
@@ -888,33 +876,6 @@ impl<K: DatumShape, V: DatumShape, S> DatumShape for IndexMap<K, V, S> {
     const SHAPE: Shape = Shape::Value;
 }
 
-macro_rules! tuples {
-    ($(($($member:ident),+)),* $(,)?) => {
-        $(impl<$($member: DatumShape),+> DatumShape for ($($member,)+) {
-            const SHAPE: Shape = Shape::Value;
-        })*
-    };
-}
-
-tuples!(
-    (A),
-    (A, B),
-    (A, B, C),
-    (A, B, C, D),
-    (A, B, C, D, E),
-    (A, B, C, D, E, F),
-    (A, B, C, D, E, F, G),
-    (A, B, C, D, E, F, G, H),
-    (A, B, C, D, E, F, G, H, I),
-    (A, B, C, D, E, F, G, H, I, J),
-    (A, B, C, D, E, F, G, H, I, J, K),
-    (A, B, C, D, E, F, G, H, I, J, K, L),
-    (A, B, C, D, E, F, G, H, I, J, K, L, M),
-    (A, B, C, D, E, F, G, H, I, J, K, L, M, N),
-    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O),
-    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P),
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,13 +900,20 @@ mod tests {
         let _ = <std::collections::BTreeMap<String, Undeclared> as AmbiguousIfShape<_>>::marker;
         let _ = <std::collections::HashMap<Undeclared, String> as AmbiguousIfShape<_>>::marker;
         let _ = <IndexMap<String, Undeclared> as AmbiguousIfShape<_>>::marker;
-        let _ = <(String, Undeclared) as AmbiguousIfShape<_>>::marker;
+        // Rust data model features with no Automerge or Lexicon counterpart are not datum shapes.
+        let _ = <(String, u8) as AmbiguousIfShape<_>>::marker;
+        let _ = <() as AmbiguousIfShape<_>>::marker;
+        let _ = <char as AmbiguousIfShape<_>>::marker;
+        let _ = <usize as AmbiguousIfShape<_>>::marker;
+        let _ = <isize as AmbiguousIfShape<_>>::marker;
+        let _ = <u128 as AmbiguousIfShape<_>>::marker;
+        let _ = <i128 as AmbiguousIfShape<_>>::marker;
 
         fn declared<T: DatumShape + ?Sized>() {}
         declared::<Option<Vec<Box<str>>>>();
         declared::<std::collections::BTreeMap<String, Vec<crate::dmeta::ActorMetadata>>>();
         declared::<std::collections::HashMap<String, crate::dmeta::DatumMetadata>>();
-        declared::<IndexMap<String, (String, bool, crate::dmeta::BranchOrigin)>>();
+        declared::<IndexMap<String, Vec<crate::dmeta::BranchOrigin>>>();
         declared::<[crate::dmeta::DatumSignature; 2]>();
         declared::<&[crate::dmeta::InheritedWitness]>();
     }
