@@ -109,57 +109,87 @@ impl Core {
         Ok(Some(receipt))
     }
 
-    /// Make `doc` an entry of `drawer` at `access`, idempotently: only what the Keyhive grant and
-    /// the roster do not already say is done, so a retry or a boot replay finishes an interrupted
-    /// attempt. Widening grants before it publishes, narrowing publishes before it re-grants
-    /// (ADR 019), so an interruption leaves the entry at or below the authority behind it. The
-    /// receipt is the roster write's, or the drawer's current heads when nothing had to change.
+    /// Make `doc` an entry of each of `drawers` at `access`, idempotently: only what the Keyhive
+    /// grant and the roster do not already say is done, so a retry or a boot replay finishes an
+    /// interrupted attempt. Widening grants before it publishes, narrowing publishes before it
+    /// re-grants (ADR 019), so an interruption leaves the entry at or below the authority behind
+    /// it. Receipts are in `drawers` order: the roster write's, or the drawer's current heads
+    /// when nothing had to change.
+    ///
+    /// Every widening grant is issued first and Keyhive is awaited once, after the last; only
+    /// then are the roster entries published, concurrently since they write different drawer
+    /// docs. The wait is what keeps "grant first, entry second": no entry is published before
+    /// the grants behind it have reconciled, and no grant check here reads another drawer's
+    /// grant (each drawer has its own docs group, and `docs_group_level` reads that group's
+    /// direct delegation alone), so the grants need not be reconciled one by one.
     pub(crate) async fn enter(
         &self,
         context: &RequestContext,
-        drawer: &DrawerId,
+        drawers: &[DrawerId],
         doc: &DocId,
         access: Access,
-    ) -> Result<WriteReceipt, DrawersError> {
+    ) -> Result<Vec<WriteReceipt>, DrawersError> {
         let instr_start = std::time::Instant::now(); // INSTR
-        let (_meta, docs_group, _sensitive) = self.groups(drawer).await?;
-        let instr_groups = instr_start.elapsed(); // INSTR
-        let current = self.docs_group_level(&docs_group, doc).await?;
-        let instr_level = instr_start.elapsed(); // INSTR
-        let docs_group = &docs_group;
-        let regrant = |access: Access| async move {
-            self.big_repo
-                .grant_doc_access(doc.clone(), docs_group.clone(), keyhive_access(access))
-                .await
-                .map_err(keyhive_error)
-        };
-        let written = match current {
-            Some(current) if current == access => {
-                self.publish_entry(context, drawer, doc, access).await?
+        let mut narrowed = BTreeMap::new();
+        let mut to_publish = Vec::with_capacity(drawers.len());
+        let mut granted = false;
+        for (index, drawer) in drawers.iter().enumerate() {
+            let (_meta, docs_group, _sensitive) = self.groups(drawer).await?;
+            let current = self.docs_group_level(&docs_group, doc).await?;
+            match current {
+                Some(current) if current == access => {}
+                Some(current) if current > access => {
+                    let written = self.publish_entry(context, drawer, doc, access).await?;
+                    self.big_repo
+                        .revoke_doc_access(doc.clone(), docs_group.clone())
+                        .await
+                        .map_err(keyhive_error)?;
+                    self.big_repo
+                        .grant_doc_access(doc.clone(), docs_group, keyhive_access(access))
+                        .await
+                        .map_err(keyhive_error)?;
+                    narrowed.insert(index, written);
+                    continue;
+                }
+                _ => {
+                    self.big_repo
+                        .issue_doc_grant(doc.clone(), docs_group, keyhive_access(access))
+                        .await
+                        .map_err(keyhive_error)?;
+                    granted = true;
+                }
             }
-            Some(current) if current > access => {
-                let written = self.publish_entry(context, drawer, doc, access).await?;
-                self.big_repo
-                    .revoke_doc_access(doc.clone(), docs_group.clone())
-                    .await
-                    .map_err(keyhive_error)?;
-                regrant(access).await?;
-                written
-            }
-            _ => {
-                regrant(access).await?;
-                let instr_granted = instr_start.elapsed(); // INSTR
-                #[cfg(test)]
-                self.crash_at(super::CrashPoint::DocGranted)?;
-                let written = self.publish_entry(context, drawer, doc, access).await?;
-                tracing::debug!(?instr_groups, ?instr_level, ?instr_granted, published = ?instr_start.elapsed(), "INSTR enter timing"); // INSTR
-                written
-            }
-        };
-        match written {
-            Some(receipt) => Ok(receipt),
-            None => self.roster_receipt(context, drawer).await,
+            to_publish.push(index);
         }
+        let instr_issued = instr_start.elapsed(); // INSTR
+        if granted {
+            self.big_repo
+                .wait_for_keyhive_reconciliation()
+                .await
+                .map_err(keyhive_error)?;
+            #[cfg(test)]
+            self.crash_at(super::CrashPoint::DocGranted)?;
+        }
+        let instr_reconciled = instr_start.elapsed(); // INSTR
+        let published = futures::future::try_join_all(to_publish.iter().map(|&index| async move {
+            let written = self
+                .publish_entry(context, &drawers[index], doc, access)
+                .await?;
+            Ok::<_, DrawersError>((index, written))
+        }))
+        .await?;
+        narrowed.extend(published);
+        tracing::debug!(?instr_issued, ?instr_reconciled, published = ?instr_start.elapsed(), drawers = drawers.len(), "INSTR enter timing"); // INSTR
+        futures::future::try_join_all(drawers.iter().enumerate().map(|(index, drawer)| {
+            let written = narrowed.remove(&index).flatten();
+            async move {
+                match written {
+                    Some(receipt) => Ok(receipt),
+                    None => self.roster_receipt(context, drawer).await,
+                }
+            }
+        }))
+        .await
     }
 
     pub(crate) async fn resume_add_doc(
@@ -178,7 +208,11 @@ impl Core {
                 row.op
             )
         };
-        let receipt = self.enter(context, drawer_id, doc_id, *access).await?;
+        let receipt = self
+            .enter(context, std::slice::from_ref(drawer_id), doc_id, *access)
+            .await?
+            .pop()
+            .expect("one drawer yields one receipt");
         self.ledger.finish(&row.command, &receipt).await
     }
 }
@@ -224,8 +258,17 @@ impl DrawerService {
             access: params.access,
         };
         core.ledger
-            .run(&params.command, digest, actor.actor_id, op, |_| {
-                core.enter(context, &params.drawer_id, &params.doc_id, params.access)
+            .run(&params.command, digest, actor.actor_id, op, |_| async {
+                Ok(core
+                    .enter(
+                        context,
+                        std::slice::from_ref(&params.drawer_id),
+                        &params.doc_id,
+                        params.access,
+                    )
+                    .await?
+                    .pop()
+                    .expect("one drawer yields one receipt"))
             })
             .await
     }

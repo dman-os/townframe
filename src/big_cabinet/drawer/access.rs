@@ -278,10 +278,8 @@ impl Core {
                 }
                 targets.sort();
                 targets.dedup();
-                for drawer in &targets {
-                    self.enter(context, drawer, &document, Access::Admin)
-                        .await?;
-                }
+                self.enter(context, &targets, &document, Access::Admin)
+                    .await?;
             }
         }
         Ok(())
