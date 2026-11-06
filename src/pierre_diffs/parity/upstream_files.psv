@@ -473,3 +473,12 @@ pierre/test/virtualizedFileLayout.test.ts|89
 pierre/test/workerPoolHarness.ts|308
 pierre/test/workerPoolHighlights.test.ts|264
 pierre/test/workerPoolTransport.test.ts|148
+highlights/dist/highlighter.js|437
+highlights/dist/theme.js|338
+highlights/dist/tokens.js|361
+highlights/dist/languages.js|355
+highlights/dist/token-types.js|80
+highlights/dist/themes/pierre-dark.js|0
+highlights/dist/themes/pierre-light.js|0
+highlights/dist/highlights.wasm|0
+theming/dist/modules/createThemeResolver.js|116

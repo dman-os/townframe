@@ -10,5 +10,13 @@
     "tarball": "https://registry.npmjs.org/diff/-/diff-9.0.0.tgz",
     "sha256": "b898bf23c95594607576e25ddd4013f1d51ed0e862aaf0732815830c87b3b58f",
     "npmIntegrity": "sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw=="
+  },
+  "@pierre/highlights": {
+    "version": "0.4.0",
+    "npmIntegrity": "sha512-2a38H7ep3KweGi1fGQpJk+Krod2OMpDIXagKPlqBd1Y9P460T7zQmc66Wm2JAH1SpIG93wCyyhZVrkc5dnAJVQ=="
+  },
+  "@pierre/theming": {
+    "version": "1.0.2",
+    "npmIntegrity": "sha512-RmXLLqtx31UGcR8kZyO5hGAQ1EXz6loT1Cu0BFAGsbnBboIxp2BlomkLfWyvdT4WZXnBGyu25onL1gKpFQuSUw=="
   }
 }

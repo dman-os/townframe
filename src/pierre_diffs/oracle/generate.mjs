@@ -11,7 +11,7 @@
 // Inputs never contain lone surrogates: Rust `String` cannot carry them.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { ensureOracle, pins } from "./ensure.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -1958,6 +1958,152 @@ function buildRenderS6(diffs) {
   return { pins: { pierre: pins["@pierre/diffs"].version }, cases };
 }
 
+// ---- S7: the highlights backend ----------------------------------------------
+//
+// Data the Rust adapter embeds (languages, token slots, the pierre themes) is
+// exported from the pinned @pierre/highlights dist, and the golden compares the
+// dist's end-to-end token output (diffs' HighlightsHighlighter over the
+// unmodified wasm, run in node) with our glue fed the same wasm records.
+
+const highlightsDist = (relative) =>
+  pathToFileURL(join(oracle.modules, "@pierre/highlights/dist", relative)).href;
+const { default: languageTable } = await import(highlightsDist("languages.js"));
+const { default: tokenTypeNames } = await import(
+  highlightsDist("token-types.js")
+);
+const { default: pierreDark } = await import(
+  highlightsDist("themes/pierre-dark.js")
+);
+const { default: pierreLight } = await import(
+  highlightsDist("themes/pierre-light.js")
+);
+const { default: wasmBytes } = await import(
+  highlightsDist("highlights.wasm.mjs")
+);
+const highlightsLib = await import(highlightsDist("highlighter.js"));
+const { HighlightsHighlighter } = await import(
+  oracle.pierre("highlighter/backends/highlights.js")
+);
+const { getTokenOptions } = await import(
+  oracle.pierre("utils/getTokenOptions.js")
+);
+
+const highlightsPackage = JSON.parse(
+  readFileSync(join(oracle.modules, "@pierre/highlights/package.json"), "utf8"),
+);
+
+function highlightsData() {
+  return {
+    languages: Object.entries(languageTable),
+    tokenTypes: tokenTypeNames,
+    themes: { "pierre-dark": pierreDark, "pierre-light": pierreLight },
+  };
+}
+
+const highlightSamples = {
+  rust: 'use std::fmt;\n\n/// Doc comment\nfn main() {\n    let s = "héllo 😀"; // trailing\n    println!("{}", s.len() + 0x1f);\n}\n',
+  typescript:
+    'import { a } from "./a";\nconst x: number = 1 + 2;\nexport function f(y: string) { return "t" + y; }\n/* block\n   comment */\n',
+  json: '{\n  "name": "x",\n  "n": [1, 2.5, true, null]\n}\n',
+  python: 'def f(x):\n    """doc"""\n    return x ** 2  # square\n',
+  text: "plain text line\n\nsecond   line\twith tab\n",
+  crlf: "let a = 1;\r\nlet b = 'two';\r\n",
+  empty: "",
+  unicode: "const café = '日本語'; // コメント\n",
+  longline: `const long = "${"x".repeat(60)}";\nshort\n`,
+};
+
+const highlightLanguages = {
+  rust: "rust",
+  typescript: "typescript",
+  json: "json",
+  python: "py",
+  text: "text",
+  crlf: "typescript",
+  empty: "rust",
+  unicode: "javascript",
+  longline: "typescript",
+};
+
+function buildHighlights() {
+  const low = highlightsLib.createHighlighter(
+    new WebAssembly.Module(wasmBytes),
+  );
+  const themeSets = [
+    "pierre-dark",
+    "pierre-light",
+    { dark: "pierre-dark", light: "pierre-light" },
+  ];
+  const cases = [];
+  const highlighter = new HighlightsHighlighter();
+  return Promise.all(
+    ["pierre-dark", "pierre-light"].map((name) =>
+      highlighter.themeResolver.resolveTheme(name),
+    ),
+  ).then(() => {
+    const themes = {};
+    for (const name of ["pierre-dark", "pierre-light"]) {
+      const theme = highlighter.getTheme(name);
+      themes[name] = jsonClone({
+        name: theme.name,
+        type: theme.type,
+        fg: theme.fg,
+        bg: theme.bg,
+        colors: theme.colors,
+      });
+    }
+    const langCases = [
+      ...Object.keys(highlightSamples).map((key) => [
+        key,
+        highlightLanguages[key],
+      ]),
+      ["rust", "nonexistent-lang"],
+      ["rust", "RUST"],
+      ["text", "tfvars"],
+    ];
+    for (const [sample, lang] of langCases) {
+      for (const theme of themeSets) {
+        for (const maxLength of [undefined, 20]) {
+          const code = highlightSamples[sample];
+          const options = getTokenOptions(lang, theme, maxLength);
+          const result = highlighter.codeToTokens(code, options);
+          const supported = highlightsLib.isSupportedLanguage(lang);
+          const langId = highlightsLib.langIdOf(supported ? lang : "text");
+          const records = Array.from(
+            low.tokenizeLineRecords(langId, low.writeInput(code)),
+          );
+          cases.push({
+            sample,
+            code,
+            lang,
+            theme: jsonClone(theme),
+            tokenizeMaxLineLength: maxLength ?? null,
+            supported,
+            langId,
+            records,
+            expected: jsonClone({
+              tokens: result.tokens,
+              fg: result.fg,
+              bg: result.bg,
+              themeName: result.themeName,
+              rootStyle: result.rootStyle,
+            }),
+          });
+        }
+      }
+    }
+    return {
+      pins: {
+        highlights: highlightsPackage.version,
+        pierre: pins["@pierre/diffs"].version,
+      },
+      themes,
+      isAnsi: highlightsLib.isSupportedLanguage("ansi"),
+      cases,
+    };
+  });
+}
+
 const outputs = {
   "jsdiff.json": buildJsdiff(),
   "scanners.json": buildScanners(),
@@ -1967,6 +2113,8 @@ const outputs = {
   "layout.json": buildS4(),
   "render_s5.json": buildRenderS5(),
   "render_s6.json": buildRenderS6(sharedDiffs()),
+  "highlights.json": await buildHighlights(),
+  "../../highlights/data/highlights_data.json": highlightsData(),
 };
 
 let drift = false;

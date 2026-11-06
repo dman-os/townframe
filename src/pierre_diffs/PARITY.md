@@ -6,11 +6,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 72 | 18099 |
-| REPLACED | 5 | 968 |
+| PORTED | 81 | 19979 |
+| REPLACED | 9 | 1403 |
 | PENDING | 132 | 45607 |
-| OUT | 249 | 98688 |
-| DEFER | 17 | 5379 |
+| OUT | 246 | 98243 |
+| DEFER | 16 | 5196 |
 
 | upstream file | LOC | status | slice | Rust location | note |
 |---|---:|---|---|---|---|
@@ -73,8 +73,8 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/editor/types.ts` | 337 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
 | `pierre/src/editor/utils.ts` | 183 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
 | `pierre/src/highlighter/DiffsEditorTokenizer.ts` | 27 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
-| `pierre/src/highlighter/DiffsHighlighter.ts` | 96 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
-| `pierre/src/highlighter/backends/highlights.ts` | 106 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
+| `pierre/src/highlighter/DiffsHighlighter.ts` | 96 | PORTED | S7 | `highlights/backend.rs` | the base-class members the highlights backend uses (name, getTheme, codeToTokens, dispose) as the `DiffsHighlighter` trait (highlighter_types.rs) and `HighlightsHighlighter`; codeToHtml, tokenizers and the type refcount are not ported |
+| `pierre/src/highlighter/backends/highlights.ts` | 106 | PORTED | S7 | `highlights/backend.rs` | oracle: dist HighlightsHighlighter tokens over the unmodified wasm records (highlights.json); editor/stream tokenizers not ported |
 | `pierre/src/highlighter/backends/shiki.ts` | 172 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/highlighterType.ts` | 46 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/highlights-editor.ts` | 249 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
@@ -105,8 +105,8 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/highlighter/themes/registerCustomTheme.ts` | 46 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/themes/resolveTheme.ts` | 12 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/themes/resolveThemes.ts` | 12 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
-| `pierre/src/highlighter/themes/themeResolver.ts` | 221 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
-| `pierre/src/highlighter/themes/types.ts` | 22 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
+| `pierre/src/highlighter/themes/themeResolver.ts` | 221 | PORTED | S7 | `highlights/themes.rs` | highlights backend only (Zed themes; createHighlightsTheme exact against the dist); TextMate/Shiki branch dropped |
+| `pierre/src/highlighter/themes/types.ts` | 22 | PORTED | S7 | `highlights/themes.rs` | `DiffsTheme` (zed palette only; the textmate/cssVariables members belong to Shiki) |
 | `pierre/src/highlighter/tokenizer-types.ts` | 41 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/types.ts` | 52 | PORTED | S5 | `highlighter_types.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/index.ts` | 115 | OUT | - |  | OUT |
@@ -298,7 +298,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/CodeView.workerRendering.test.ts` | 1018 | OUT | - |  | worker pool |
 | `pierre/test/DiffHunksRender.test.ts` | 490 | PORTED | S6 | `renderers/diff_hunks_renderer_test.rs` | all sixteen cases; row-digest snapshots became source-text invariants, renderFullHTML assertions became hast assertions |
 | `pierre/test/DiffHunksRenderer.editHighlightCache.test.ts` | 284 | OUT | - |  | edit mode is out of scope for v1 |
-| `pierre/test/DiffHunksRendererLanguages.test.ts` | 183 | DEFER | S7 |  | language loading is the highlighter's (Shiki/@pierre/highlights); no language loader exists behind the stub |
+| `pierre/test/DiffHunksRendererLanguages.test.ts` | 183 | PORTED | S7 | `renderers/languages_test.rs` | Shiki grammar-loading assertions became the languages each side is tokenised with (recorded at the wasm boundary); hydrate/renderDiff background-loading cases are dropped with the async paths |
 | `pierre/test/DiffHunksRendererRecompute.test.ts` | 1068 | OUT | - |  | edit-session hunk recompute (edit mode is out of scope for v1) |
 | `pierre/test/DiffHunksRendererVirtualization.test.ts` | 969 | PORTED | S6 | `renderers/virtualization_test.rs` | demo-geometry numbers derived from the stand-in fixture; windowed renders are differential against the full render; 4.5/4.6/5.x are one table of windows |
 | `pierre/test/File.editSessionOwnership.test.ts` | 1588 | OUT | - |  | edit mode is out of scope for v1 |
@@ -489,8 +489,17 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/workerPoolHarness.ts` | 308 | OUT | - |  | worker pool harness |
 | `pierre/test/workerPoolHighlights.test.ts` | 264 | OUT | - |  | worker pool |
 | `pierre/test/workerPoolTransport.test.ts` | 148 | OUT | - |  | worker pool |
+| `highlights/dist/highlighter.js` | 437 | PORTED | S7 | `highlights/highlighter.rs` | langIdOf, isSupportedLanguage, codeToTokens over a `HighlightRecords` source (the wasm stays unmodified behind it); instance/memory management, HTML modes, StreamTokenizer and ansi not ported |
+| `highlights/dist/theme.js` | 338 | PORTED | S7 | `highlights/theme.rs` | style resolution (resolveThemeStyle, resolveThemeSyntax, prepareTheme); wasm HTML packing and ansi colors not ported |
+| `highlights/dist/tokens.js` | 361 | PORTED | S7 | `highlights/tokens.rs` | resolveOptionThemes, lineRecordsToTokens, rangeToToken, themeHtmlStyle, themeMeta; multi-theme HTML blobs not ported |
+| `highlights/dist/languages.js` | 355 | REPLACED | S7 | `highlights/data.rs` | exported as data (highlights/data/highlights_data.json) by oracle/generate.mjs |
+| `highlights/dist/token-types.js` | 80 | REPLACED | S7 | `highlights/data.rs` | exported as data (highlights/data/highlights_data.json) by oracle/generate.mjs |
+| `highlights/dist/themes/pierre-dark.js` | 0 | REPLACED | S7 | `highlights/data.rs` | exported as data (highlights/data/highlights_data.json); the other bundled Zed themes are not embedded |
+| `highlights/dist/themes/pierre-light.js` | 0 | REPLACED | S7 | `highlights/data.rs` | exported as data (highlights/data/highlights_data.json); the other bundled Zed themes are not embedded |
+| `highlights/dist/highlights.wasm` | 0 | OUT | S7 |  | unmodified; run by the host behind `HighlightRecords` (pure crate, no engine). Fuel and per-call slicing are the host's concern |
+| `theming/dist/modules/createThemeResolver.js` | 116 | PORTED | S7 | `highlights/theming.rs` | synchronous resolver (no inflight/generation); the rest of @pierre/theming is not needed |
 
-## Assertions converted to invariants (18)
+## Assertions converted to invariants (21)
 
 | upstream test | title | conversion |
 |---|---|---|
@@ -512,8 +521,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/patchFileRender.test.ts` | patch digest and rendered-row snapshots | replaced by: one hunk, column line counts equal the hunk's counts, every rendered line is a patch line |
 | `pierre/test/InjectedRowHooks.test.ts` | UnresolvedFileHunksRenderer emits merge conflict action rows inline | deferred with the merge-conflict renderer |
 | `pierre/test/renderTokenLines.test.ts` | undecorated editor lines retain whitespace positions and empty-line placeholders | drives useTokenTransformer (editor token transformer), not ported |
+| `pierre/test/DiffHunksRendererLanguages.test.ts` | the bundled Terraform loader renders an ordinary .tf edit and provides its aliases | hasLoadedLanguages is `not disposed` for the bundled lexers; the aliases are checked against the highlights language table |
+| `pierre/test/DiffHunksRendererLanguages.test.ts` | asyncRender <lang> -> <lang>, cold/destination loaded (8 cases) | lazy grammar loading does not exist for the highlights backend; the four language pairs are one test each, asserting the grammars used by both sides |
+| `pierre/test/DiffHunksRendererLanguages.test.ts` | renderDiff loads the missing source grammar / hydrate preloads both grammars (4 cases) | async background loading, hydrate and onRenderUpdate are dropped (PARITY.md dropped branches) |
 
-## Dropped branches (14)
+## Dropped branches (23)
 
 | upstream file | dropped | reason |
 |---|---|---|
@@ -531,3 +543,12 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/renderers/DiffHunksRenderer.ts` | `cleanUp`, `recycle`, `__id` | lifecycle and identity bookkeeping of a long-lived JS object; the Rust renderer is plain data that drops |
 | `pierre/src/renderers/DiffHunksRenderer.ts` | `createPreElement` as an overridable `protected` method | stays a method, not an extension point: nothing in the port overrides it |
 | `pierre/src/renderers/DiffHunksRenderer.ts` | `useTokenTransformer` in `getRenderOptions` | the editor token transformer is not ported (see the file headers of `render_token_lines.rs`); the option is carried but `renderDiffWithHighlighter` rejects `true` |
+| `highlights/dist/highlighter.js` | `HighlightsHighlighter` instance management: `writeInput`, `growMemoryIfNeeded`, `bindMemory`, the shared instance and its replacement above 8 MiB, `init`, `createHighlighter`, the `is_id_start`/`is_id_continue` callbacks | the wasm is behind `HighlightRecords`; the host owns instantiation, memory and the Unicode ID callbacks |
+| `highlights/dist/highlighter.js` | `codeToHtml` and output modes 0, 1, 2, 4 (inline colors, CSS variables, packed themes, prepared openers) | HTML output; the port consumes mode 3 records only |
+| `highlights/dist/highlighter.js` | `StreamTokenizer`, `LiveTokenizer`, `pooledStreamHighlighter` | streaming/live tokenisation is editor and large-input territory |
+| `highlights/dist/highlighter.js` | the `ansi` language (`ansiTokens`, `AnsiState`, `isAnsi` handling in `codeToHtml`/`codeToTokens`) | `isSupportedLanguage('ansi')` is true as upstream, but tokenising `ansi` panics: no caller in the diff pipeline asks for it |
+| `highlights/dist/theme.js` | `packHtmlOpeners`, `themeHtmlOpeners`, the 384-byte packed `table`, `themeAnsiColors`, `escapeAttribute`, `resolveTheme`/`describeThemeValue`/`isThemeObject` | wasm HTML packing and ansi palette; theme input validation is the type system's |
+| `highlights/dist/tokens.js` | `multiThemeBlob`, `multiThemeHtmlOpeners` and the WeakMap caches (`htmlStyleCache`, `blobCache`, `htmlOpenersCache`, `resolvedSetCache`, `preparedIds`) | HTML blobs; the per-call `htmlStyle` slot vector replaces the identity caches |
+| `theming/dist/modules/createThemeResolver.js` | `inflight`, `cacheGeneration`, promise-returning `resolveTheme`/`resolveThemes`/`getResolvedOrResolveTheme`, `unwrapDefault` | loaders are synchronous here, so there is nothing in flight and no module `default` to unwrap |
+| `pierre/src/highlighter/themes/themeResolver.ts` | the TextMate/Shiki branch (`createCssVariablesTheme`, `normalizeTheme`, `@pierre/theming/themes`, `registerCustomTheme` textmate/diffs loaders), `isWorkerContext` guard, `createCachedLoader`, async catalogs | Shiki backend is not ported; the highlights catalog is the two bundled Pierre themes |
+| `pierre/src/highlighter/backends/highlights.ts` | `createEditorTokenizer`, `createStreamTokenizer`, `loadLanguages`, `attachLanguages`, `releaseResources` beyond clearing used themes, `acquireHighlighterType` refcount | editor/stream tokenizers and async loading are out; bundled lexers are always loaded |

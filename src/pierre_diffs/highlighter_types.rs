@@ -8,10 +8,11 @@
 // renderers use (`name`, `getTheme`, `codeToTokens`). The highlighter itself
 // (Shiki, `@pierre/highlights`) is S7; `PlainTextHighlighter` is the
 // deterministic stub the S5/S6 oracle runs against: one token per non-empty
-// line, no colors. `DecorationItem` is defined in
-// `utils::parse_diff_decorations` until S7 moves it here.
+// line, no colors; the real backend is `highlights/`. `DecorationItem`
+// (declared in `highlighter/types.ts` upstream) is defined here.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::types::options::ThemeOption;
 use crate::types::options::ThemesType;
@@ -26,9 +27,30 @@ pub struct ThemedToken {
     pub bg_color: Option<String>,
     /// Bit flags: 1 italic, 2 bold, 4 underline, 8 strikethrough.
     pub font_style: Option<u8>,
-    /// Inline CSS declarations as ordered `(name, value)` pairs.
-    pub html_style: Option<Vec<(String, String)>>,
+    /// Inline CSS declarations as ordered `(name, value)` pairs. Shared: the
+    /// highlights backend hands every token of one scope the same list, as
+    /// upstream shares one object.
+    pub html_style: Option<Rc<[(String, String)]>>,
     pub html_attrs: Option<Vec<(String, String)>>,
+    /// Shiki's `ThemedToken.type` (TextMate `StandardTokenType`): 1 comment,
+    /// 2 string, 3 regex; absent for other tokens.
+    pub token_type: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecorationPosition {
+    pub line: usize,
+    /// UTF-16 code units, as upstream's `character`.
+    pub character: usize,
+}
+
+/// The `DecorationItem` fields `createDiffSpanDecoration` sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecorationItem {
+    pub start: DecorationPosition,
+    pub end: DecorationPosition,
+    pub properties: BTreeMap<String, String>,
+    pub always_wrap: bool,
 }
 
 /// The theme record `highlighter.getTheme(name)` returns.

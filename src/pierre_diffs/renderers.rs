@@ -9,6 +9,8 @@ mod diff_hunks_renderer_test;
 #[cfg(test)]
 mod injected_row_hooks_test;
 #[cfg(test)]
+mod languages_test;
+#[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]
 mod patch_file_render_test;

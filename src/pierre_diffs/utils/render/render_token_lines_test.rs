@@ -6,9 +6,9 @@
 use crate::hast::Element;
 use crate::hast::ElementContent;
 use crate::hast::PropValue;
+use crate::highlighter_types::DecorationItem;
+use crate::highlighter_types::DecorationPosition;
 use crate::highlighter_types::ThemedToken;
-use crate::utils::parse_diff_decorations::DecorationItem;
-use crate::utils::parse_diff_decorations::DecorationPosition;
 use crate::utils::render::render_token_lines::RenderTokenLinesOptions;
 use crate::utils::render::render_token_lines::render_token_lines;
 

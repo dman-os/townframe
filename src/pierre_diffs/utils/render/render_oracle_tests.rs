@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::highlighter_types::DecorationItem;
+use crate::highlighter_types::DecorationPosition;
 use crate::highlighter_types::PlainTextHighlighter;
 use crate::highlighter_types::ThemedToken;
 use crate::oracle_testing::assert_json_eq;
@@ -28,8 +30,6 @@ use crate::types::options::RenderDiffOptions;
 use crate::types::options::ThemeOption;
 use crate::types::patch::FileContents;
 use crate::types::patch::FileDiffMetadata;
-use crate::utils::parse_diff_decorations::DecorationItem;
-use crate::utils::parse_diff_decorations::DecorationPosition;
 use crate::utils::render::create_file_header_element::CreateFileHeaderElementProps;
 use crate::utils::render::create_file_header_element::FileOrDiff;
 use crate::utils::render::create_file_header_element::create_file_header_element;
@@ -84,8 +84,9 @@ fn token_from_json(value: &Value) -> ThemedToken {
         color: value["color"].as_str().map(str::to_owned),
         bg_color: value["bgColor"].as_str().map(str::to_owned),
         font_style: value["fontStyle"].as_u64().map(|style| style as u8),
-        html_style: string_pairs(value.get("htmlStyle")),
+        html_style: string_pairs(value.get("htmlStyle")).map(Into::into),
         html_attrs: string_pairs(value.get("htmlAttrs")),
+        token_type: value["type"].as_u64().map(|token_type| token_type as u8),
     }
 }
 
