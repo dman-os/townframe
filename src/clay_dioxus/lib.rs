@@ -37,6 +37,42 @@ use tokio::sync::watch;
 mod frames;
 mod timing;
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod direct;
+/// Native hosts have no direct receiver (X4 spike): nothing ever requests one.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod direct {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Kind {}
+    pub(crate) fn requested(_owner: &str) -> Option<Kind> {
+        None
+    }
+    pub(crate) fn create(kind: Kind) -> u32 {
+        match kind {}
+    }
+    pub(crate) fn container_id(_id: u32) -> String {
+        unreachable!("no direct receiver off the browser")
+    }
+    pub(crate) fn bind(_id: u32, _handler: clay_surface::SurfaceEventHandler) {
+        unreachable!()
+    }
+    pub(crate) fn attach(_id: u32) {
+        unreachable!()
+    }
+    pub(crate) fn apply(
+        _id: u32,
+        _edits: &[clay_surface::Mutation<clay_host::ComponentRef>],
+    ) -> Result<u64, clay_surface::PresentationError> {
+        unreachable!()
+    }
+    pub(crate) fn command(_id: u32, _element: u32, _command: clay_surface::ElementCommand) {
+        unreachable!()
+    }
+    pub(crate) fn withdraw(_id: u32) {
+        unreachable!()
+    }
+}
+
 type Renderer = Rc<dyn Fn(&Arc<Mount>) -> Element>;
 type CommandReceiver = mpsc::UnboundedReceiver<(NodeId, ElementCommand)>;
 
@@ -61,6 +97,9 @@ pub struct SurfaceWriter {
     /// Guest element ids whose `mounted` event the renderer has delivered: the only elements a
     /// command may address.
     mounted: Arc<Mutex<BTreeSet<NodeId>>>,
+    /// X4 spike: the direct receiver this surface's batches go to instead of the retained tree.
+    /// Chosen when the writer is built (`MountedSurface`), before the guest can commit.
+    direct: Option<u32>,
 }
 
 impl SurfaceWriter {
@@ -80,6 +119,7 @@ impl SurfaceWriter {
             commands,
             command_receiver: Arc::new(Mutex::new(Some(command_receiver))),
             mounted: Arc::default(),
+            direct: None,
         }
     }
 
@@ -98,6 +138,16 @@ impl SurfaceWriter {
     }
 
     pub fn apply(&self, edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+        if let Some(direct) = self.direct {
+            if !self.is_live() {
+                self.revoked.store(true, Ordering::Release);
+                return Err(PresentationError::Revoked);
+            }
+            let started = timing::now();
+            let result = direct::apply(direct, edits);
+            timing::record("apply", started, edits.len() as f64, 0.0);
+            return result;
+        }
         let mut tree = self.tree.lock().unwrap();
         if !self.is_live() {
             if !self.revoked.swap(true, Ordering::AcqRel) {
@@ -122,6 +172,12 @@ impl SurfaceWriter {
     }
 
     pub fn withdraw(&self) {
+        if let Some(direct) = self.direct {
+            if !self.revoked.swap(true, Ordering::AcqRel) {
+                direct::withdraw(direct);
+            }
+            return;
+        }
         let mut tree = self.tree.lock().unwrap();
         if !self.revoked.swap(true, Ordering::AcqRel) {
             tree.clear();
@@ -157,6 +213,10 @@ impl clay_surface::SurfaceSink<ComponentRef> for SurfaceWriter {
             return Err(PresentationError::InvalidBatch(format!(
                 "element {element} has not announced mounted"
             )));
+        }
+        if let Some(direct) = self.direct {
+            direct::command(direct, element, command);
+            return Ok(());
         }
         self.commands
             .send((element, command))
@@ -465,6 +525,7 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     let path = use_hook(|| try_consume_context::<MountPath>().unwrap_or_default());
     let writer = use_hook(|| {
         let mut writer = SurfaceWriter::new(mount.0.clone());
+        writer.direct = direct::requested(&owner.name).map(direct::create);
         writer.ancestors = path.mounts.clone();
         writer.ancestor_surfaces = path.surfaces.clone();
         writer
@@ -562,10 +623,46 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     let handler_session = session.as_ref().ok().cloned();
     let handler_writer = writer.clone();
     let handler_owner = owner.clone();
+    let direct = writer.direct;
+    use_effect(move || {
+        if let Some(id) = direct {
+            direct::attach(id);
+        }
+    });
+    // X4 spike: the host's own cost of a guest batch, measured rather than derived. A render
+    // begins when this body runs (the revision signal woke it) and its effects run once the
+    // `VirtualDom` has diffed every dirty scope below it, so the span covers the surface
+    // projection, the host diff, and the mutation writes made before the effect fires.
+    let render_started = use_hook(|| Rc::new(Cell::new(0.0_f64)));
+    if timing::ENABLED {
+        render_started.set(timing::now());
+    }
+    let render_started_for_effect = render_started.clone();
+    use_effect(move || {
+        let _ = revision();
+        if timing::ENABLED {
+            timing::record("host-render", render_started_for_effect.get(), 0.0, 0.0);
+        }
+    });
     let projection = use_hook(move || {
         let session = handler_session?;
         let dispatch = session.handler();
         let writer = handler_writer;
+        if let Some(id) = writer.direct {
+            // A direct receiver feeds DOM events straight to the guest: no retained tree to
+            // check staleness against and no host re-render to schedule.
+            let mounted = writer.mounted.clone();
+            direct::bind(
+                id,
+                Rc::new(move |event| {
+                    if event.name == "mounted" {
+                        mounted.lock().unwrap().insert(event.element);
+                    }
+                    dispatch(event)
+                }),
+            );
+            return None;
+        }
         let writer_for_event = writer.clone();
         let deliver: SurfaceEventHandler = Rc::new(move |event| {
             if !writer_for_event.is_live() {
@@ -652,6 +749,11 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
             Err(error) => rsx! { p { "Component unavailable: {error}" } },
             Ok(_) => rsx! { p { "Component withdrawn." } },
         };
+    }
+    if let Some(id) = direct {
+        // The host owns only this container; the receiver fills it, so this component never
+        // re-renders for the guest's batches.
+        return rsx! { div { id: "{direct::container_id(id)}", style: "display:contents" } };
     }
     let projection = projection.expect("a live session has a projection");
     if frames::incremental() {

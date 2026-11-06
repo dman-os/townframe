@@ -28,6 +28,6 @@ spike-raised-limits = ["clay_surface/spike-raised-limits"]
 # The browser is the only host here with a frame source, which the scroll coalescer (`frames.rs`)
 # and the timing records (`timing.rs`) use.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-web-sys = { workspace = true, features = ["Window", "Performance"] }
+web-sys = { workspace = true, features = ["Window", "Performance", "Document", "Element", "Node", "NodeList", "Text", "HtmlElement", "CssStyleDeclaration", "Event", "EventTarget", "DocumentFragment", "AddEventListenerOptions"] }
 js-sys.workspace = true
 wasm-bindgen.workspace = true

@@ -1,0 +1,34 @@
+# X4 native receiver measurement: replays the wire batches captured from the browser run (window
+# `__clayBatches`) into a headless Blitz document two ways, and times each. A workspace of its own
+# (release-only measurement, no wasm), Cargo.lock seeded from the root lockfile so the dioxus and
+# blitz forks match; the patch table is the root's.
+[package]
+name = "blitz_x4"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+clay_surface = { path = "../../src/clay_surface", features = ["spike-raised-limits"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+blitz-dom = "=0.3.0-beta.4"
+blitz-traits = "=0.3.0-beta.4"
+serde_json = "1"
+
+[patch.crates-io]
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+blitz-dom = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-html = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-net = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-paint = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-shell = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2cf7571c43f08327bd580b1871ca" }
+
+[profile.release]
+opt-level = 3
+debug = false

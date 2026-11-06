@@ -21,14 +21,21 @@ const FRAMES = 100;
 const START_TOP = 3000;
 const COMMON = path.join(import.meta.dirname, "common.js");
 
+// r3a / r3b: the same Clay stack with the Pierre surface's batches applied by a direct receiver
+// (X4): a JS receiver (one call per batch) or a Rust one (web-sys per op); see `clay_dioxus::direct`.
+const IS_R3 = RUNG === "r3" || RUNG === "r3a" || RUNG === "r3b";
+const DIRECT = ({ r3a: "js", r3b: "rust" } as Record<string, string>)[RUNG];
+
 const R3_BUTTONS: Record<string, string> = { syn7: "tokens-7", syn18: "tokens-18", corpus: "corpus-raw" };
 
 async function open(browser: Browser, workload: string): Promise<{ page: Page; failures: string[] }> {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   const failures = watchFailures(page);
-  if (RUNG === "r3") {
+  if (IS_R3) {
     await page.addInitScript({ path: COMMON });
+    if (DIRECT) await page.addInitScript((kind) => { (window as any).__clayDirect = kind; }, DIRECT);
+    if (process.env.LADDER_CAPTURE) await page.addInitScript(() => { (window as any).__clayCapture = true; });
     await page.addInitScript(() => { (window as any).__clayNoCoalesce = true; });
     await page.goto(`${BASE_R3}/`);
     await expect(page.getByRole("button", { name: "Open Settings", exact: true })).toBeVisible({ timeout: 120_000 });
@@ -87,10 +94,16 @@ for (const workload of WORKLOADS) {
     // then the DOM mutation census of one more commit.
     {
       const { page, failures } = await open(browser, workload);
-      if (RUNG === "r3") await page.getByTestId("phases-dump").click();
+      if (IS_R3) await page.getByTestId("phases-dump").click();
       const t0 = await page.evaluate(() => performance.now());
+      const captureMark = await page.evaluate(() => (window as any).__clayBatches?.length ?? 0);
       const commits: { i: number; t0: number; t1: number | null; t2: number; start: number }[] =
         await page.evaluate(([n, w]) => (window as any).Ladder.commits(n, w), [N, WARM]);
+      if (process.env.LADDER_CAPTURE) {
+        // X4: the wire batches of this run for the Blitz harness (bench/blitz-x4); r3a only.
+        const batches = await page.evaluate(() => (window as any).__clayBatches);
+        fs.writeFileSync(process.env.LADDER_CAPTURE, JSON.stringify({ mark: captureMark, batches }));
+      }
       record.commits = commits.length;
       record.completed = commits.filter((c) => c.t1 !== null).length;
       record.wallToWindowMs = stats(commits.filter((c) => c.t1 !== null).map((c) => c.t1! - c.t0));
@@ -109,7 +122,7 @@ for (const workload of WORKLOADS) {
       if (RUNG === "r0" || RUNG === "r2") {
         record.rungTimers = await page.evaluate((from) => (window as any).Ladder.rung.timers?.(from) ?? null, first);
       }
-      if (RUNG === "r3") {
+      if (IS_R3) {
         const timing: [string, number, number, number, number][] =
           await page.evaluate(() => (window as any).__clayTiming);
         const since = timing.filter((r) => r[1] >= first);
@@ -118,6 +131,10 @@ for (const workload of WORKLOADS) {
           dispatchScroll: dur("dispatch:scroll"),
           apply: dur("apply"),
           render: dur("render"),
+          hostRender: dur("host-render"),
+          directEncode: dur("direct-encode"),
+          directJs: dur("direct-js"),
+          directRust: dur("direct-rust"),
           kinds: [...new Set(since.map((r) => r[0]))],
         };
         await page.getByTestId("phases-dump").click();
@@ -169,6 +186,9 @@ for (const workload of WORKLOADS) {
         layout: cls("layout"),
         paint: cls("paint"),
         other: cls("other"),
+        topScript: Object.fromEntries(
+          [...new Set(rows.flatMap((r) => Object.keys(r.topScript)))].map((k) => [k, stats(rows.map((r) => r.topScript[k] ?? 0))]),
+        ),
         topNames: Object.entries(
           rows.reduce<Record<string, number>>((acc, r) => {
             for (const [k, v] of Object.entries(r.names)) acc[k] = (acc[k] ?? 0) + v / rows.length;

@@ -389,3 +389,173 @@ R1 own timers (JS in the scroll handler, ms, 0.1 ms clock): `dom` syn7 total 1.1
 - Servers: `deno run --allow-all bench/ladder/serve.ts 4701 /r0/=... /r1/=... /r2/=... /corpus/=...` (PID 3697061) and `... serve.ts 4702 /=<target>/spike-scroll/dayframe_web/site` (PID 265624); both killed by PID at the end.
 - Measurements: `bench/ladder/run-matrix.sh 4 r0 r1-dom r1-html r2 r3`, then `START=5 run-matrix.sh 2 ...`, then `START=7 run-matrix.sh 5 r1-static r1-dom r2 r3`; each is `npx playwright test -c bench/ladder/playwright.config.ts --workers=1` per rung. A first pass of four rounds over r0 / r1 / r2 only (kept as `results-a-busybug.jsonl`) was discarded: its `busy` column double-counted nested `RunTask` events.
 - Tables: `AGG_CLEAN=1 python3 bench/ladder/aggregate.py results.jsonl`, `python3 bench/ladder/doc_tables.py results.jsonl`, `python3 bench/ladder/profile_groups.py results.jsonl`.
+
+
+## X4 receivers
+
+Question: how much of the Clay stack's per-commit cost (X1: R3 = 7.6 / 12.2 ms script per 50-row window shift at 7 / 18 spans against R2's 2.4 / 3.2) is the host re-projecting the guest's batches into a retained tree and re-diffing that tree in the host `VirtualDom`, and what does a receiver that applies the batches straight to the real DOM (web) or to the Blitz document (native) cost instead. Everything here is a prototype on branch `spike/pierre-scroll` (committed, not pushed); observations only. Raw results, logs and captured batches are in `/run/media/asdf/p3N/tmp/x4/` (`results.jsonl`: one line per rung x workload x round, 192 lines; `tables-clean.md`; `batches-<workload>.json`; `native-*.txt`).
+
+### What was built
+- **Web seam**: `clay_dioxus::SurfaceWriter::apply` (the `SurfaceSink` the engine adapters hand a guest's decoded `Vec<Mutation<ComponentRef>>` to) forwards to a *direct receiver* for surfaces whose owner name contains `pierre_spike_scroll` when `window.__clayDirect` is `"js"` or `"rust"`. The receiver is created in `MountedSurface` before the guest can commit; the host renders only an empty container (`<div id="clay-direct-N" style="display:contents">`) and a `use_effect` moves the receiver's detached root into it. No `SurfaceTree` is built for the surface, `SurfaceRoot`/`SurfaceNodeView` never render, and the host `VirtualDom` never re-renders for the guest's batches (`revision` never changes). Files: `src/clay_dioxus/direct.rs` (Rust side, both variants, registry, element commands), `src/clay_dioxus/direct.js` (the JS receiver and shared helpers), wiring in `src/clay_dioxus/lib.rs`.
+- **Both variants run the same Dioxus mutation stack machine as `SurfaceTree`'s `WriteMutations` impl (`tree/write.rs`) on live DOM nodes**: `push-id`/`set-id`/`child`/`pop`, `create-element` (HTML or `createElementNS`), `create-text`, `clone-node` (`cloneNode(true)`), `append-children`/`replace-with`/`insert-after`/`insert-before` (m popped nodes, a fragment when m > 1), `set-attribute` (`style` namespace to `style.setProperty`, other namespaces `setAttributeNS`, `value`/`checked`/`selected` as properties, `Boolean(true)` as an empty attribute, `None`/`false` removes), `set-text`, `add/remove-event-listener`, `remove`.
+- **(a) JS receiver (`r3a`)**: Rust flattens the decoded batch into one `Vec<u32>` of ops plus one string blob (offsets in UTF-16 units, buffers reused across batches) and calls `Receiver.apply(ops, strings)` once; wasm-bindgen passes the op array as a view of wasm memory and decodes the blob once. All DOM calls are made from JS.
+- **(b) Rust receiver (`r3b`)**: wasm walks the decoded batch and calls web-sys per op (typed `Node` stack, `unchecked_ref` casts so there is no `instanceof` per op, `Closure` per listener).
+- **Events and commands (both)**: a listener is a DOM listener on the element itself that builds the payload and calls the surface's `SurfaceEventHandler` (the same `dispatch` the tree path uses, so the guest, `mounted` bookkeeping and element-command gating are unchanged); the handler's `prevent-default` / `stop-propagation` are applied to the DOM event. `mounted` is queued and delivered once the container is attached. `element-command` (`scroll`, `scroll-by`, `set-focus`, `read` with an `element-reply` event) acts on the element directly. Payloads: `scroll` is built from the element (`scroll_top` ... `client_height`), `click`/`mousedown`/`mouseup`/`dblclick` carry `SerializedMouseData::default()`; any other event name throws.
+- **Timers** (feature `spike-timing`, `window.__clayTiming`): `apply` (the sink call; same name as the tree path), `direct-encode`, `direct-js`, `direct-rust`, and `host-render` (below).
+- **Native**: `bench/blitz-x4` (own workspace, `Cargo.lock` seeded from the root's, same dioxus / blitz fork revs). `dioxus_native_dom::DioxusState::writer(&mut doc)` is already a public `WriteMutations` writer over a document subtree "for a WebAssembly component guest sending its own mutation stream" (its doc comment, and `clay_surface`'s crate docs name it as the direct-Blitz path), so the native receiver is `clay_surface::replay(batch, &mut state.writer(&mut doc))`: no new receiver code was written for Blitz, only a harness around it.
+
+### Step 1: the host remainder, measured
+X1 derived "host-side remainder" by subtraction (3.6 / 5.4 / 3.8 ms for syn7 / syn18 / corpus). The `host-render` timer measures it directly: it starts when `MountedSurface`'s body runs (the revision signal woke it) and ends in a `use_effect` that depends on `revision`, which runs after the `VirtualDom` has diffed every dirty scope below it. It covers the surface projection (`SurfaceRoot` / `SurfaceNodeView` bodies), the host Dioxus diff and the mutation writes made before effects fire.
+
+| | syn7 | syn18 | corpus |
+|---|---|---|---|
+| `host-render`, measured (R3) | 2.65 | 4.30 | 3.10 |
+| X1's derived remainder (trace script - `dispatch:scroll`) | 3.6 | 5.4 | 3.8 |
+| `SurfaceTree::apply` (host sink `apply` timer, R3) | 0.50 | 1.00 | 0.70 |
+| scroll `EventDispatch`, top-level script event in the trace (R3) | 6.89 | 11.41 | 9.53 |
+| script in every other top-level task of the commit window (R3) | 0.32 | 0.30 | 0.34 |
+
+The browser trace shows the host render does not run in a later task: the scroll `EventDispatch` (guest + host render, inclusive) is 6.9 / 11.4 / 9.5 ms and every other top-level script event of the window is 0.3 ms (the harness's `FireAnimationFrame`). dioxus-web renders synchronously inside the event handler that set the signal. The measured figure is 0.7-1.1 ms below the derived one; the difference is what a "remainder" absorbed (harness, JS glue between the pieces), plus whatever happens after the effect fires. **Unverified**: whether the interpreter's final DOM flush happens before or after the effect callbacks; if after, `host-render` under-counts by that flush (cross-check against the trace: R3's `EventDispatch` less R3a's is 2.4 / 4.1 / 4.6 ms; R3's host sink + host render (3.2 / 5.3 / 3.8) less R3a's receiver (0.7 / 1.3 / 1.0) is 2.5 / 4.0 / 2.8, which agrees for syn7 and syn18 and leaves 1.8 ms of R3 corpus's dispatch unexplained; the guest timers, `host-render` and the parse step sum to within 0.5-0.7 ms of R3's `EventDispatch` for syn7 and syn18 and 2.1 ms short for corpus).
+
+### Web results (Chromium 156, headless, software compositing, same harness and method as X1)
+Interleaved rounds (round 1-6: r1-dom, r2, r3, r3a, r3b, plus r1-dom/r2 `corpus-rust` which are not tabulated; rounds 7-12 the same five rungs, each rung waiting up to 15 minutes for the 1-minute load average to drop to 6 before starting: `MAX_LOAD=6`), 70 commits after 10 warm-ups per page, medians over rounds of per-round medians, runs whose load average was above 10 at either end excluded (138 of 192 kept; kept runs: median 4.2, range 0.7-9.2). Rounds per cell are in the tables. The host binary is rebuilt (`wasm-release`, raised limits, `spike-timing`): R3 here includes the `host-render` timer and its extra effect, so its numbers differ slightly from X1's R3 (X1 R3 syn7: 7.6 script, 14.8 busy; here 7.2 / 14.1; syn18 12.2 / 23.2 here 11.7 / 21.9; corpus 8.5 / 14.5 here 9.8 / 17.1). Scroll coalescing is off (`__clayNoCoalesce`) for every R3 rung, as in X1. DOM census after the window is identical on all five rungs (3,401 / 7,801 / 3,025 nodes); one commit adds and removes 50 rows on every rung.
+
+**Ladder summary (per commit, ms; delta vs the rung in the last column)**
+
+| workload | rung | rounds | script | delta script | style+layout+paint | busy total | delta busy | frames >8.3 ms (fast, of 100) | frames >8.3 ms (slow, of 100) | delta vs |
+|---|---|---|---|---|---|---|---|---|---|---|
+| syn7 | r1-dom | 9 | 1.44 | - | 6.13 | 8.49 | - | 11 | 3 | - |
+| syn7 | r2 | 10 | 2.34 | +0.90 | 6.33 | 9.65 | +1.16 | 16 | 8 | r1-dom |
+| syn7 | r3 | 8 | 7.21 | +4.87 | 6.02 | 14.09 | +4.43 | 99 | 20 | r2 |
+| syn7 | r3a | 9 | 4.76 | -2.45 | 6.02 | 11.68 | -2.40 | 91 | 20 | r3 |
+| syn7 | r3b | 10 | 5.28 | -1.93 | 6.38 | 12.53 | -1.56 | 99 | 20 | r3 |
+| syn18 | r1-dom | 9 | 1.97 | - | 10.06 | 13.39 | - | 98 | 20 | - |
+| syn18 | r2 | 9 | 3.37 | +1.41 | 9.05 | 14.13 | +0.74 | 99 | 20 | r1-dom |
+| syn18 | r3 | 8 | 11.68 | +8.31 | 9.22 | 21.91 | +7.78 | 99 | 21 | r2 |
+| syn18 | r3a | 9 | 7.60 | -4.08 | 9.85 | 18.21 | -3.70 | 99 | 21 | r3 |
+| syn18 | r3b | 9 | 7.90 | -3.78 | 9.63 | 18.33 | -3.58 | 99 | 21 | r3 |
+| corpus | r1-dom | 7 | 1.79 | - | 5.10 | 8.01 | - | 9 | 0 | - |
+| corpus | r2 | 9 | 2.71 | +0.92 | 4.82 | 8.61 | +0.60 | 16 | 4 | r1-dom |
+| corpus | r3 | 9 | 9.83 | +7.12 | 6.10 | 17.13 | +8.52 | 99 | 20 | r2 |
+| corpus | r3a | 9 | 5.29 | -4.54 | 4.92 | 10.96 | -6.18 | 94 | 19 | r3 |
+| corpus | r3b | 8 | 5.57 | -4.26 | 4.68 | 11.28 | -5.86 | 79 | 18 | r3 |
+
+**`syn7`: continuous scroll, 100 frames; frames whose main-thread busy time exceeds the budget**
+
+| rung | fast (1000 px/frame): >8.3 / >16.7 ms | fast busy median / p95 | slow (200 px/frame): >8.3 / >16.7 ms | slow busy p95 |
+|---|---|---|---|---|
+| R1 vanilla createElement | 11 [4-54] / 1 [0-5] | 6.5 / 9.9 | 3 [0-20] / 0 [0-7] | 7.3 |
+| R2 dioxus-web | 16 [4-99] / 2 [1-15] | 6.9 / 11.9 | 8 [1-20] / 0 [0-6] | 8.9 |
+| R3 Clay stack (host tree + Dioxus) | 99 [99-99] / 8 [3-69] | 12.1 / 18.0 | 20 [20-48] / 0 [0-29] | 14.0 |
+| R3a JS receiver | 91 [32-99] / 4 [1-56] | 9.3 / 16.4 | 20 [17-20] / 0 [0-3] | 12.1 |
+| R3b Rust receiver | 99 [28-99] / 9 [3-96] | 11.9 / 19.8 | 20 [17-20] / 0 [0-20] | 11.7 |
+**`syn18`: continuous scroll, 100 frames; frames whose main-thread busy time exceeds the budget**
+
+| rung | fast (1000 px/frame): >8.3 / >16.7 ms | fast busy median / p95 | slow (200 px/frame): >8.3 / >16.7 ms | slow busy p95 |
+|---|---|---|---|---|
+| R1 vanilla createElement | 98 [20-99] / 4 [2-37] | 9.8 / 16.6 | 20 [13-21] / 1 [0-3] | 12.4 |
+| R2 dioxus-web | 99 [55-99] / 7 [2-94] | 10.8 / 17.5 | 20 [20-20] / 0 [0-13] | 13.0 |
+| R3 Clay stack (host tree + Dioxus) | 99 [99-99] / 98 [45-99] | 21.1 / 27.1 | 21 [21-22] / 20 [19-21] | 23.6 |
+| R3a JS receiver | 99 [99-99] / 85 [10-99] | 18.0 / 24.5 | 21 [21-22] / 12 [1-21] | 19.5 |
+| R3b Rust receiver | 99 [99-99] / 57 [11-99] | 16.8 / 24.1 | 21 [21-22] / 6 [2-20] | 17.0 |
+**`corpus`: continuous scroll, 100 frames; frames whose main-thread busy time exceeds the budget**
+
+| rung | fast (1000 px/frame): >8.3 / >16.7 ms | fast busy median / p95 | slow (200 px/frame): >8.3 / >16.7 ms | slow busy p95 |
+|---|---|---|---|---|
+| R1 vanilla createElement | 9 [3-51] / 1 [0-5] | 5.3 / 10.2 | 0 [0-3] / 0 [0-0] | 6.5 |
+| R2 dioxus-web | 16 [6-100] / 1 [0-62] | 6.5 / 10.6 | 4 [2-20] / 0 [0-3] | 8.3 |
+| R3 Clay stack (host tree + Dioxus) | 99 [98-99] / 10 [2-79] | 13.6 / 18.6 | 20 [20-20] / 3 [0-12] | 16.1 |
+| R3a JS receiver | 94 [24-99] / 5 [1-98] | 9.7 / 16.8 | 19 [13-23] / 0 [0-20] | 11.3 |
+| R3b Rust receiver | 79 [36-99] / 4 [1-14] | 9.5 / 16.5 | 18 [12-24] / 0 [0-7] | 10.8 |
+
+**Where the Clay rungs' script time goes (ms per commit; guest timers use a 0.1 ms clock)**
+
+| workload | rung | guest VDOM diff | guest `surface.apply` call (wcmp crossing + lift + host sink) | host sink `apply` | of which receiver encode | of which receiver JS call / Rust loop | host render (measured: surface body -> effects) | trace top-level script: scroll EventDispatch | trace top-level script: all other tasks |
+|---|---|---|---|---|---|---|---|---|---|
+| syn7 | r3 | 2.30 | 1.35 | 0.50 | - | - | 2.65 | 6.89 | 0.32 |
+| syn7 | r3a | 2.40 | 1.50 | 0.70 | 0.00 | 0.70 | - | 4.46 | 0.33 |
+| syn7 | r3b | 2.40 | 1.85 | 1.05 | - | 1.05 | - | 4.95 | 0.33 |
+| syn18 | r3 | 3.65 | 2.65 | 1.00 | - | - | 4.30 | 11.41 | 0.30 |
+| syn18 | r3a | 3.80 | 2.90 | 1.30 | 0.00 | 1.30 | - | 7.34 | 0.32 |
+| syn18 | r3b | 3.80 | 3.50 | 1.80 | - | 1.80 | - | 7.58 | 0.31 |
+| corpus | r3 | 2.50 | 1.70 | 0.70 | - | - | 3.10 | 9.53 | 0.34 |
+| corpus | r3a | 2.40 | 2.00 | 1.00 | 0.00 | 1.00 | - | 4.98 | 0.33 |
+| corpus | r3b | 2.40 | 2.30 | 1.30 | - | 1.30 | - | 5.30 | 0.33 |
+
+Reading the table: the guest VDOM diff is the same on all three (2.3-3.8 ms). `surface.apply` call (guest's view, includes the wcmp crossing, the lift and conversion of `Vec<wit Mutation>`, the ingress budget check and the sink) minus the sink `apply` is the bridge: 0.85 / 1.65 / 1.0 ms on R3, 0.8 / 1.6 / 1.0 on R3a, 0.8 / 1.7 / 1.0 on R3b, so the bridge is untouched by a receiver. The raw-bytes variant the lane brief mentions (applying the guest's encoded batch without the lift) was **not built**: the lift happens inside the wcmp runtime before the sink is called, so it needs a runtime change; the 0.8-1.7 ms bridge is the upper bound on what it could remove.
+
+| workload | rung | EventDispatch:scroll | EventDispatch:scrollend | FireAnimationFrame | v8.callFunction |
+|---|---|---|---|---|---|
+| syn7 | r3 | 6.89 | 0.00 | 0.32 | 0.00 |
+| syn7 | r3a | 4.46 | 0.00 | 0.33 | 0.00 |
+| syn7 | r3b | 4.95 | 0.00 | 0.33 | 0.00 |
+| syn18 | r3 | 11.41 | 0.00 | 0.30 | 0.00 |
+| syn18 | r3a | 7.34 | 0.00 | 0.32 | 0.00 |
+| syn18 | r3b | 7.58 | 0.00 | 0.31 | 0.00 |
+| corpus | r3 | 9.53 | 0.00 | 0.33 | 0.00 |
+| corpus | r3a | 4.98 | 0.00 | 0.33 | 0.00 |
+| corpus | r3b | 5.30 | 0.00 | 0.33 | 0.00 |
+
+`EventDispatch:scroll` is the whole guest + host commit of the scroll event.
+
+### Native (Blitz, headless)
+`bench/blitz-x4/src/main.rs`. Input: the 85 wire batches of one r3a run (`__clayCapture`, the batches the JS receiver was given: 5 build the surface, 80 are the scroll commits of the ladder's commit loop; 3,657 / 8,057 / 4,101 mutations each). Each mode replays them into a fresh headless `BaseDocument` (viewport 1280x900, system fonts, release build, opt-level 3, no LTO; Ryzen 9 7940HS) and times every commit with `Instant`; 7 fresh documents per mode and workload, 560 commits per cell. What is timed per commit: **`today`** = `SurfaceTree::apply` (with the spike-raised limits) + host `VirtualDom` `mark_dirty(APP)` + `render_immediate` into a `MutationBuffer` (`SurfaceRoot` projection and diff) + replay of that buffer into the Blitz document through `DioxusState::writer` (the path `DioxusDocument::poll` takes) + `resolve`; **`direct`** = `replay` of the batch into `DioxusState::writer` over a container node + `resolve`. `resolve(0.0)` is Blitz's style resolution and layout; **nothing is painted** and the scroller's scroll offset is not moved (the browser's scrollTop is not replayed), so these are not frame times. The real `dayframe_desktop` window was not run. After the last batch both documents have the same tree (3,462 vs 3,463 nodes: `DioxusDocument` adds a `head`).
+
+ms per commit, median over 560 commits (p95 of the commit total in brackets). Load average 2.6-2.7 for the parallel runs; 4.1-4.6 for the sequential ones (run with `nice -n 10` while the web matrix was running).
+
+| workload | style threading | mode | tree apply | host diff | write into Blitz | receive total | resolve (style + layout) | commit total (p95) |
+|---|---|---|---|---|---|---|---|---|
+| syn7 | parallel | today | 0.44 | 1.41 | 0.68 | 2.53 | 4.67 | 7.30 (8.96) |
+| syn7 | parallel | direct | - | - | 0.52 | 0.52 | 4.79 | 5.38 (6.27) |
+| syn18 | parallel | today | 1.06 | 3.04 | 1.31 | 5.41 | 10.70 | 16.26 (18.24) |
+| syn18 | parallel | direct | - | - | 1.25 | 1.25 | 10.52 | 11.78 (13.22) |
+| corpus | parallel | today | 0.58 | 1.58 | 1.00 | 3.16 | 4.06 | 7.32 (9.23) |
+| corpus | parallel | direct | - | - | 0.85 | 0.85 | 4.10 | 4.98 (5.95) |
+| syn7 | sequential | today | 0.64 | 1.94 | 0.95 | 3.53 | 6.48 | 10.14 (13.39) |
+| syn7 | sequential | direct | - | - | 0.73 | 0.73 | 6.13 | 6.93 (9.09) |
+| syn18 | sequential | today | 1.36 | 3.78 | 1.65 | 6.80 | 13.64 | 20.67 (27.90) |
+| syn18 | sequential | direct | - | - | 1.51 | 1.51 | 12.94 | 14.60 (19.98) |
+| corpus | sequential | today | 0.85 | 2.23 | 1.49 | 4.57 | 5.15 | 9.88 (14.55) |
+| corpus | sequential | direct | - | - | 1.31 | 1.31 | 5.52 | 6.84 (9.18) |
+
+"Parallel" is blitz-dom's default Stylo traversal over its global rayon pool (16 hardware threads here); "sequential" is `StyleThreading::Sequential` on the calling thread, closer to a phone with few cores. Receiving costs 2.5-5.4 ms (parallel) today and 0.5-1.3 ms direct; `resolve` is 4.1-10.7 ms and is the same on both, so it is the larger term in both modes.
+
+### What each receiver skipped (prototype scope, explicit)
+- **Policy / validation.** None of `SurfaceTree`'s ingress checks run: no tag / attribute / listener vocabulary (`static_attribute`, `supported_tag`, `supported_listener`), no per-batch budgets (`MAX_BATCH_*`, string, node-slot, depth, retained bytes), no stack-arity or attachment checks, no cycle checks, no atomicity (a bad op throws mid-batch with the DOM half-updated; the tree path validates each mutation before applying it but also commits the surface on failure by clearing it). `PresentationHost::apply`'s `ingress_budget` and component-grant checks still run before the sink, because they sit above it. No per-element policy hook (the X2 report's `remote-dom` host receiver has one).
+- **Component slots.** `mount-component` panics: the surface the micro uses has none. The tree path turns a slot into a host `ComponentMount`.
+- **Events.** DOM listeners are per element, not delegated; with both a child and an ancestor listening for the same bubbling event the DOM would call the ancestor's listener on its own and the guest's bubbling would call it again (not exercised: the micro listens for `scroll` on one element and `click` on buttons). Payloads: `scroll` and `click` only (mouse default: no coordinates or modifiers); everything else throws. No stale-event check (`event_is_current` needs the tree). No `preventDefault` for passive listeners (scroll and wheel listeners are registered passive). No `mounted` for an element before the container is attached.
+- **Element handles.** Element commands address `nodes[id]` of the receiver; `ElementHandles` / `MountedData` are not involved. Removed elements' ids stay in the id table until reused (bounded by the id space, 32,768 here).
+- **Emulated shadow semantics.** The container is a light-DOM element. Real Pierre renders in a shadow root (X1 R0); attaching the receiver root in a shadow root, retargeting events, and style scoping were not done and their cost was not measured.
+- **Attribute volatility.** `value`, `checked`, `selected` are set as properties; no other volatile semantics, no `dangerous_inner_html`, no `Any`-valued attributes (the tree path rejects them; the wire cannot carry them).
+- **Native**: the harness replays batches into `DioxusState::writer`; it has no event path, no scroll offset, no paint.
+
+### What a production receiver must add, with estimated cost
+- **Whole-batch validation before the first DOM write.** Measured: the cheap half (tag / attribute / listener vocabulary from `render.rs`, stack arity of every op, string and batch budgets) over the captured batches in V8 (`bench/ladder/validate-cost.mjs`, Deno 2.9.7, warm, no DOM, second half of 20 reps): 0.04 ms (syn7), 0.11 (syn18), 0.13 (corpus) per commit, p95 0.06 / 0.14 / 0.19. The structural half (cycle, depth, attachment-target checks) was not measured; it needs parent links, which the DOM has (`parentNode`, `contains`) but which cost DOM reads per op, or a retained tree. The whole retained-tree path's validation + arena upkeep is `SurfaceTree::apply`: 0.5 / 1.0 / 0.7 ms in the browser (sink timer, R3) and 0.44 / 1.06 / 0.58 ms natively; that is an upper bound for validation.
+- **Per-element policy** (the X2 study's per-element allow/deny): one lookup per `create-element` / `set-attribute` on top of the vocabulary check; same order as the vocabulary pass, so estimated at ~0.1 ms per commit (not measured).
+- **Delegated events**: one root listener per event name that walks from `event.target` to the nearest node with an id (tens of steps), as Dioxus does; estimated negligible per event next to the dispatch (not measured). Needs payload serializers for the whole vocabulary (the host path's `with_html_event_groups!` list): not measured; the scroll payload (six property reads and one string) is the cheapest case, and the two variants share it.
+- **Component slots**: a host-owned child container per slot with a nested receiver; the host `VirtualDom` is involved only when a slot appears or goes, not per batch. Not built, not measured.
+- **Shadow root / style scoping**: unmeasured (see above).
+- **Atomic apply on failure**: validate-then-apply already gives it for the vocabulary half; for DOM exceptions mid-batch it needs either the tree or a rebuild of the container from the guest's next full state. Not designed here.
+
+### Observations (not decisions)
+- At the syn7 workload the direct receivers move R3's script from 7.2 ms to 4.8 (JS) / 5.3 (Rust), busy from 14.1 to 11.7 / 12.5 against R2's 9.7 and R1's 8.5. Measured as share of the R3-to-R2 busy gap closed: 54% / 35% (syn7), 48% / 46% (syn18), 72% / 69% (corpus) for JS / Rust (computed from the summary table). At 7 spans the remaining distance to R2 is about 2.0-2.9 ms busy; the guest VDOM diff (2.4) and the wcmp crossing plus lift (0.8) are what is left, and the guest diff alone equals R2's whole script (2.3).
+- The JS receiver is faster than the Rust one on every workload and cheaper per op: sink `apply` 0.70 / 1.30 / 1.00 ms against 1.05 / 1.80 / 1.30 for web-sys per op, with the encode step below the 0.1 ms clock. The Rust variant pays a wasm-to-JS call per DOM call; the JS variant pays one boundary call per batch and one blob decode. The totals in the summary table lie within each other's round spreads for syn18 and corpus (busy 18.2 vs 18.3, 11.0 vs 11.3).
+- Neither receiver brings the commit into an 8.3 ms frame at 7 spans: busy is 11.7-12.5 ms, and in fast scroll 91-99 of 100 frames exceed 8.3 ms (R2: 16, R1: 11). The browser's own style + layout + paint (6.0-6.4 ms at syn7) is the same on all rungs and is by itself most of the budget. At 18 spans every rung is over budget.
+- The host's own re-projection is smaller than the derived figure suggested (2.65 / 4.30 / 3.10 ms measured vs 3.6 / 5.4 / 3.8 derived), and it runs inside the scroll event handler, so it adds to the event's task rather than showing up as a separate task.
+- On native Blitz the host re-diff and tree upkeep cost 2.0-4.2 ms of a 7.3-16.3 ms commit (parallel Stylo; 2.8-5.3 of 9.9-20.7 sequential), and the direct writer removes them; Blitz's own style + layout (`resolve`) is the larger term (4.1-10.7 ms parallel) and unchanged. The direct writer into Blitz needed no new code, only the already-public `DioxusState::writer`.
+- Every number above is for one workload shape (a 50-row window shift of 3.4k-7.8k nodes); a surface that commits small batches (a text cursor, a toggled class) would pay the fixed parts (event, crossing, signal wake-up, host render of a small tree) rather than these per-node ones, and was not measured.
+
+### Caveats and unverified
+- Same environment caveats as X1 (headless, software-composited, 60 Hz vsync, 0.1 ms `performance.now` clock, a shared host: other agents' builds raised the load, which is why 54 of 192 runs were excluded and why waiting for load was added from round 7). Per-cell spreads are large for the frame-count columns (e.g. R3a syn7 fast `91 [32-99]`): a median of one noisy round-set; read the busy-time columns first.
+- R3's numbers differ from X1's R3 (see above); the comparison between rungs is within this run set.
+- The `host-render` timer's end point (effects) is not proven to follow the final DOM flush. The raw-bytes receiver, a shadow-root receiver, an events-complete receiver and a component-slot receiver were not built.
+- The native numbers are headless replays of recorded batches, not a running `dayframe_desktop`; no paint, no real scroll offset; the sequential rows were taken at load 4.1-4.6 with `nice`, the parallel rows at 2.6-2.7.
+- `validate-cost.mjs` measures a warm V8 loop outside the browser and the cheap half of validation only.
+
+### Commands run (from the worktree root unless noted)
+- Host build: `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_RESOLVER_FEATURE_UNIFICATION=selected DAYFRAME_RAISED_LIMITS=1 ./x/agent-build.ts -- deno run --allow-all bench/ladder/assemble-r3.ts --build --packages=<target>/spike-scroll/dayframe/packages` (`cargo clippy --locked -p clay_dioxus --target wasm32-unknown-unknown --features spike-timing` passed first, one pre-existing warning; the native build of `clay_dioxus` with the non-browser `direct` stub was started (`cargo clippy -p clay_dioxus --all-targets`) and hit the 25-minute timeout during the cold native dependency build, so it is **unverified**).
+- Servers: `deno run --allow-all bench/ladder/serve.ts 4701 /r0/=... /r1/=... /r2/=... /corpus/=... /=bench/ladder` and `... 4702 /=<target>/spike-scroll/dayframe_web/site`; both killed by PID at the end.
+- Capture: `LADDER_CAPTURE=<x4>/batches-<workload>.json LADDER_RUNG=r3a LADDER_WORKLOADS=<workload> npx playwright test -c playwright.config.ts --workers=1` (from `bench/ladder`).
+- Matrix: `bench/ladder/run-matrix.sh 6 r1-dom r2 r3 r3a r3b`, then `START=7 MAX_LOAD=6 bench/ladder/run-matrix.sh 6 r1-dom r2 r3 r3a r3b`; `python3 bench/ladder/x4_tables.py results.jsonl`.
+- Native: `cd bench/blitz-x4 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 ../../x/agent-build.ts -- cargo build --release`; `blitz_x4 <batches.json> 7 [--sequential]`; `python3 bench/blitz-x4/summarize.py <native-*.txt>`.
+- Validation cost: `deno run --allow-read bench/ladder/validate-cost.mjs <batches-*.json>`.

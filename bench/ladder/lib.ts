@@ -97,6 +97,29 @@ function mainThread(events: TraceEvent[]) {
 
 export type Breakdown = Record<string, number>;
 
+const SCRIPT_CLASSES = new Set(["script"]);
+
+/**
+ * Inclusive duration (ms) of the top-level script events (those with no script-class ancestor) in
+ * [t0, t1], keyed by event name, with the DOM event type for `EventDispatch`. X4: this separates
+ * the task that runs the guest (the scroll `EventDispatch`) from the tasks that run the host's own
+ * rendering, by what the browser reported rather than by subtraction.
+ */
+export function topLevelScript(sorted: TraceEvent[], t0: number, t1: number): Breakdown {
+  const out: Breakdown = {};
+  let until = -Infinity;
+  for (const e of sorted) {
+    if (e.ts < t0 || e.ts > t1 || e.dur === undefined) continue;
+    if (!SCRIPT_CLASSES.has(CLASS[e.name] ?? "")) continue;
+    if (e.ts < until) continue; // nested in a script event already counted
+    until = e.ts + e.dur;
+    const type = e.name === "EventDispatch" ? `:${(e.args as any)?.data?.type ?? "?"}` : "";
+    const key = `${e.name}${type}`;
+    out[key] = (out[key] ?? 0) + e.dur / 1000;
+  }
+  return out;
+}
+
 /** Per-commit breakdown (ms) from marks `c<i>-start` .. `c<i>-end`, plus the unclassified names. */
 export function commitBreakdowns(events: TraceEvent[], warm: number) {
   const { pid, tid, marks } = mainThread(events);
@@ -108,12 +131,13 @@ export function commitBreakdowns(events: TraceEvent[], warm: number) {
     if (i === undefined) continue;
     (kind === "start" ? start : end).set(Number(i), m.ts);
   }
-  const rows: { i: number; wallMs: number; classes: Breakdown; names: Breakdown }[] = [];
+  const rows: { i: number; wallMs: number; classes: Breakdown; names: Breakdown; topScript: Breakdown }[] = [];
   for (const [i, t0] of [...start.entries()].sort((a, b) => a[0] - b[0])) {
     const t1 = end.get(i);
     if (t1 === undefined || i < warm) continue;
     const classes: Breakdown = { script: 0, gc: 0, style: 0, layout: 0, paint: 0, other: 0, busy: 0 };
     const names: Breakdown = {};
+    const topScript = topLevelScript(sorted, t0, t1);
     for (const e of sorted) {
       if (e.ts < t0 || e.ts > t1) continue;
       const s = self.get(e) ?? 0;
@@ -129,7 +153,7 @@ export function commitBreakdowns(events: TraceEvent[], warm: number) {
       names[e.name] = (names[e.name] ?? 0) + s;
       if (cls) classes[cls] += s; else classes.other += s;
     }
-    rows.push({ i, wallMs: (t1 - t0) / 1000, classes, names });
+    rows.push({ i, wallMs: (t1 - t0) / 1000, classes, names, topScript });
   }
   return rows;
 }
