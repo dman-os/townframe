@@ -1563,7 +1563,7 @@ async fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::R
 }
 
 #[tokio::test]
-async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
+async fn wasm_one_incarnation_shares_data_across_surfaces_and_keeps_render_state_per_mount()
 -> wasmtime::Result<()> {
     let mut rig = BlitzRig::new()?;
     let guest = rig.spawn().await?;
@@ -1599,11 +1599,14 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     assert_eq!(rig.store.data().routes[&second_identity].len(), 2);
     let first_button = rig.buttons(&first_placement)[0];
     let second_button = rig.buttons(&second_placement)[0];
+    // The standalone count is the micro's data, shared by every mount; a standalone count has
+    // no document to notify other mounts of a change, so only the clicked mount re-renders (and
+    // reads the shared count) while the other keeps what it last rendered.
     rig.click(&guest, first_button).await?;
     assert_eq!(rig.counter_text(&first_placement), "1");
-    assert_eq!(rig.counter_text(&second_placement), "1");
+    assert_eq!(rig.counter_text(&second_placement), "0");
     rig.click(&guest, second_button).await?;
-    assert_eq!(rig.counter_text(&first_placement), "2");
+    assert_eq!(rig.counter_text(&first_placement), "1");
     assert_eq!(rig.counter_text(&second_placement), "2");
     events
         .call_unmount(&mut rig.store, Resource::new_borrow(first.rep()))
@@ -1635,7 +1638,7 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     let remounted_button = rig.buttons(&first_placement)[0];
     rig.click(&guest, remounted_button).await?;
     assert_eq!(rig.counter_text(&first_placement), "4");
-    assert_eq!(rig.counter_text(&second_placement), "4");
+    assert_eq!(rig.counter_text(&second_placement), "3");
     events
         .call_unmount(&mut rig.store, Resource::new_borrow(second.rep()))
         .await?;
@@ -1705,7 +1708,9 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
     rig.click(&guest, button).await?;
     assert_eq!(rig.counter_text(&second_placement), "1");
     assert_eq!(rig.counter_text(&first_placement), "0");
-    assert_eq!(rig.store.data().routes[&first_identity].len(), 1);
+    // A mount renders only for its own changes, so nothing has been written to the revoked
+    // surface since its placement went away: it is discovered revoked on its next write.
+    assert_eq!(rig.store.data().routes[&first_identity].len(), 2);
     rig.click(&guest, button).await?;
     assert_eq!(rig.counter_text(&second_placement), "2");
     events
@@ -1736,7 +1741,7 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
     let replacement_button = rig.buttons(&replacement_placement)[0];
     rig.click(&guest, replacement_button).await?;
     assert_eq!(rig.counter_text(&replacement_placement), "3");
-    assert_eq!(rig.counter_text(&second_placement), "3");
+    assert_eq!(rig.counter_text(&second_placement), "2");
     events
         .call_unmount(&mut rig.store, Resource::new_borrow(second.rep()))
         .await?;

@@ -76,7 +76,7 @@ impl Context {
   `render` closure; no ambient context. Hooks: `use_facet(&Facet<T>) -> Snapshot`, `use_rows(&Collection<K,V>)
   -> Vec<Row<K,V>>`, `use_changes()`. They subscribe through each handle's internal `Notifier`
   (backend sets how wakeups reach the VirtualDom: native tokio watch/scheduler, guest mirror notifier
-  -> Signal bump inside `in_presentation`). Hooks sit in the root scope of `render` as today (state shared by all surfaces).
+  -> Signal bump inside `in_presentation`). Each mount runs `render` in a component scope of its own, so hook state is per mount; what the closure captures (handles) is shared by all mounts.
 
 ## 2. Backends
 

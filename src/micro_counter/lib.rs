@@ -107,8 +107,8 @@ async fn activate(context: Context) -> Result<(), Error> {
 
 clay_mdk::export_micro!(activate, micro_counter_manifest::manifest);
 
-/// The counter's model and view in one root-scope render: its hooks are shared by every surface
-/// the host mounts this presentation into (see [`Context::publish_component`]).
+/// The counter's model and view in one render: `render` runs in a component scope of its own for
+/// each mount (see [`Context::publish`]), so the signals here belong to one surface.
 fn view(counter: Counter) -> Element {
     let mut rerender = use_signal(|| 0_u64);
     let _ = rerender();
