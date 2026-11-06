@@ -38,6 +38,12 @@ struct SleepThenEffectArgs {
 #[derive(Debug, Deserialize)]
 struct RecvMessageThenEffectArgs {}
 
+#[derive(Debug, Deserialize)]
+struct AuthorityProbeArgs {
+    key: String,
+    millis: u64,
+}
+
 /// The authority sees both adapters through its one canonical host seam.
 struct ConformanceHost {
     wasm: Arc<WflowPlugin>,
@@ -174,6 +180,7 @@ async fn setup() -> Res<ConformanceHarness> {
         "effect_chain",
         "sleep_then_effect",
         "recv_message_then_effect",
+        "authority_probe",
     ];
     let wasm = Arc::new(WflowPlugin::new());
     let keyvalue = Arc::new(WasiKeyvalue::new());
@@ -219,6 +226,28 @@ async fn setup() -> Res<ConformanceHarness> {
                 cx.effect(async || Ok(Json(serde_json::json!({"ok": true}))))
                     .await?;
                 Ok(message)
+            })
+        },
+    );
+
+    let counters = Arc::new(std::sync::Mutex::new(HashMap::<String, u64>::new()));
+    native.register_typed(
+        "native_authority_probe",
+        move |cx, args: AuthorityProbeArgs| {
+            let counters = Arc::clone(&counters);
+            Box::pin(async move {
+                let count: u64 = cx
+                    .effect(async || {
+                        let mut counters = counters.lock().expect("probe counter poisoned");
+                        let count = counters.entry(args.key).or_default();
+                        *count += 1;
+                        Ok(Json(*count))
+                    })
+                    .await?;
+                let Json(message) = cx.recv::<Json<String>>().await?;
+                cx.sleep(Duration::from_millis(args.millis)).await?;
+                cx.effect(async || Ok(Json(format!("{count}:{message}"))))
+                    .await
             })
         },
     );
@@ -306,12 +335,16 @@ async fn assert_pair(
 
 async fn assert_cold_replay(harness: &ConformanceHarness) -> Res<()> {
     for (key, workflow) in [
-        ("wasm-replay", "effect_chain"),
-        ("native-replay", "native_effect_chain"),
+        ("wasm-replay", "authority_probe"),
+        ("native-replay", "native_authority_probe"),
     ] {
         harness
             .runtime
-            .submit(Submission::new(key, workflow, r#"{"steps":3}"#))
+            .submit(Submission::new(
+                key,
+                workflow,
+                r#"{"key":"replay-counter","millis":1}"#,
+            ))
             .await
             .unwrap();
     }
@@ -330,14 +363,22 @@ async fn assert_cold_replay(harness: &ConformanceHarness) -> Res<()> {
         Arc::clone(&harness.host) as Arc<dyn Host>,
     )
     .await?;
+    for key in ["wasm-replay", "native-replay"] {
+        runtime
+            .send_message(key, "after-reopen", r#""after-reopen""#)
+            .await
+            .unwrap();
+    }
+    // The external counters survive the actor restart. Rerunning the first
+    // effect would return 2, not the committed 1, even if all steps were reset.
     assert_pair(
         &runtime,
         "wasm-replay",
         "native-replay",
-        "effect_chain",
-        "native_effect_chain",
-        r#"{"steps":3}"#,
-        ReceiptProjection::success(3, "[0,1,2]"),
+        "authority_probe",
+        "native_authority_probe",
+        r#"{"key":"replay-counter","millis":1}"#,
+        ReceiptProjection::success(4, r#""1:after-reopen""#),
     )
     .await?;
     runtime.stop().await;

@@ -1,6 +1,7 @@
 //! Plug OCI packaging: runs a manifest crate's native `manifest` binary, builds the
 //! sibling routines component for `wasm32-wasip3`, and writes an OCI image layout
-//! (Wasm layers plus a plug-manifest layer) under `target/oci/<plug id>`.
+//! (Wasm layers plus a plug-manifest layer) under `$CARGO_TARGET_DIR/oci/<plug id>`
+//! (the repository's `target/oci` when the variable is unset).
 
 use crate::interlude::*;
 
@@ -10,6 +11,7 @@ pub enum PlugCmd {
     BuildOci {
         #[arg(long)]
         plug_root: PathBuf,
+        /// Defaults to `$CARGO_TARGET_DIR/oci`, or the repository's `target/oci`.
         #[arg(long)]
         out_root: Option<PathBuf>,
     },
@@ -137,8 +139,7 @@ async fn build_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()> {
         target_directory,
     } = serde_json::from_slice(&output.stdout)?;
     build_plug_wasm_component(&workspace_root, &routines_root).await?;
-    let repository_root = crate::workspace_root().await?;
-    let out_root = out_root.unwrap_or_else(|| repository_root.join("target/oci"));
+    let out_root = resolve_oci_root(out_root).await?;
     let artifact_root = out_root.join(manifest.id());
     let blobs_sha_root = artifact_root.join("blobs/sha256");
 
@@ -291,6 +292,16 @@ async fn build_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()> {
 
     println!("wrote OCI plug artifact to {}", artifact_root.display());
     Ok(())
+}
+
+async fn resolve_oci_root(explicit: Option<PathBuf>) -> Res<PathBuf> {
+    if let Some(root) = explicit {
+        return Ok(root);
+    }
+    if let Some(target) = std::env::var_os("CARGO_TARGET_DIR") {
+        return Ok(PathBuf::from(target).join("oci"));
+    }
+    Ok(crate::workspace_root().await?.join("target/oci"))
 }
 
 async fn build_plug_wasm_component(workspace_root: &Path, plug_root: &Path) -> Res<()> {

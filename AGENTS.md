@@ -5,6 +5,14 @@
 >
 > Don't be lazy with solutions, you're better than that.
 
+## Work sequencing and compaction recovery
+
+- Finish the remaining implementation and source review before starting expensive verification loops. Do not alternate tiny edits with repeated builds, clippy runs, or test matrices. An early narrow experiment is justified only when it answers a concrete question that blocks implementation.
+- Once implementation is ready, run one consolidated verification plan. Record each stage's command, source revision, result, and log location. On failure, batch the necessary corrections, then resume failed/pending stages; rerun a passed stage only when subsequent changes invalidate its evidence.
+- Keep an active task ledger with completed work, outstanding implementation, verification evidence, blockers, and the exact next action. Distinguish implemented, source-reviewed, and execution-verified work; never imply that one establishes another.
+- After compaction or handoff, reread these instructions and the active ledger before running tools or launching work. Resume the recorded phase and next action; do not reconstruct the plan by restarting verification or redoing completed work.
+- End every compaction summary with the ledger path, current phase, next action, active run/log locations, and resource restrictions. These sequencing rules survive compaction.
+
 ## Breaking changes
 
 - If the requested change requires changing interfaces, break and change the interfaces instead of trying to shim around this.

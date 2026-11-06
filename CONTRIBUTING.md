@@ -50,7 +50,7 @@ prek -a
 ./x/check-dayb.ts
 
 # build a plug OCI package
-# goes into ./target/oci
+# goes into $CARGO_TARGET_DIR/oci (or ./target/oci when unset)
 cargo x plug build-oci --plug-root ./src/plug_test_manifest/
 ```
 
