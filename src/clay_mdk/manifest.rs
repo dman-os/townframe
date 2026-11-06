@@ -642,5 +642,12 @@ impl MicroManifest {
     }
 }
 
+#[cfg(feature = "contract")]
+mod builder;
+#[cfg(feature = "contract")]
+pub use builder::Attachments;
+#[cfg(feature = "contract")]
+pub use builder::ManifestBuilder;
+
 #[cfg(test)]
 mod tests;

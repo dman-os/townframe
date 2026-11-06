@@ -475,3 +475,122 @@ fn a_package_declares_only_nsids_under_its_authority() {
         assert_eq!(sidecar.validate().unwrap_err(), expected);
     }
 }
+
+#[cfg(feature = "contract")]
+mod builder {
+    use super::*;
+    use crate::CollectionDecl;
+    use crate::ComponentDecl;
+    use crate::ConfigDecl;
+
+    struct Shelf;
+
+    impl CollectionDecl for Shelf {
+        const NSID: &'static str = "org.example.test.shelf";
+        type Key = String;
+        type Value = Card;
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Card {
+        title: String,
+        front: Attachment,
+        back: Attachment,
+    }
+
+    struct Front;
+
+    impl ComponentDecl for Front {
+        const NAME: &'static str = "front";
+    }
+
+    struct Back;
+
+    impl ComponentDecl for Back {
+        const NAME: &'static str = "back";
+    }
+
+    struct Tally;
+
+    impl ConfigDecl for Tally {
+        const BINDING: &'static str = "tally";
+        const NSID: &'static str = "org.example.test.tally";
+        const KEY: &'static str = "main";
+        type Value = u64;
+    }
+
+    use crate::Attachment;
+
+    #[test]
+    fn a_contribution_numbers_its_attachments_in_the_order_the_row_takes_them() {
+        let manifest = ManifestBuilder::new()
+            .component::<Front>()
+            .component::<Back>()
+            .config::<Tally>()
+            .writes::<Shelf>("cards", Necessity::Optional)
+            .contributes::<Shelf>("card", "k", |at| Card {
+                title: "T".into(),
+                back: at.own::<Back>(),
+                front: at.own::<Front>(),
+            })
+            .build();
+        let contribution = &manifest.contributions[0];
+        assert_eq!(contribution.binding, "cards");
+        assert_eq!(
+            contribution.payload,
+            serde_json::json!({
+                "title": "T",
+                "back": { "$attachment": 0 },
+                "front": { "$attachment": 1 },
+            })
+        );
+        let attached: Vec<_> = contribution
+            .attachments
+            .iter()
+            .map(|attachment| (attachment.index, attachment.publication.as_str()))
+            .collect();
+        assert_eq!(attached, [(0, "back"), (1, "front")]);
+        assert_eq!(manifest.configuration_requests[0].binding, "tally");
+    }
+
+    #[test]
+    #[should_panic(expected = "needs a write request")]
+    fn a_contribution_without_a_write_request_is_a_programming_error() {
+        ManifestBuilder::new()
+            .component::<Front>()
+            .reads::<Shelf>("cards", Necessity::Optional)
+            .contributes::<Shelf>("card", "k", |at| Card {
+                title: "T".into(),
+                back: at.own::<Front>(),
+                front: at.own::<Front>(),
+            });
+    }
+
+    #[test]
+    #[should_panic(expected = "does not publish")]
+    fn an_attachment_to_an_unpublished_presentation_is_a_programming_error() {
+        ManifestBuilder::new()
+            .writes::<Shelf>("cards", Necessity::Optional)
+            .contributes::<Shelf>("card", "k", |at| Card {
+                title: "T".into(),
+                back: at.own::<Back>(),
+                front: at.own::<Back>(),
+            });
+    }
+
+    #[test]
+    fn an_attachment_is_a_tagged_index_in_cbor_and_an_object_in_json() {
+        let attachment = Attachment::at(3);
+        assert_eq!(
+            serde_json::to_value(attachment).unwrap(),
+            serde_json::json!({ "$attachment": 3 })
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&attachment, &mut bytes).unwrap();
+        assert_eq!(
+            ciborium::from_reader::<Attachment, _>(bytes.as_slice()).unwrap(),
+            attachment
+        );
+        assert_eq!(bytes[..3], [0xd9, 0xa7, 0xf8]);
+    }
+}

@@ -426,6 +426,8 @@ macro_rules! __export_guest_world {
 mod manifest;
 pub use manifest::Access;
 pub use manifest::AttachmentDeclaration;
+#[cfg(feature = "contract")]
+pub use manifest::Attachments;
 pub use manifest::BindingResolution;
 pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
@@ -436,6 +438,8 @@ pub use manifest::FacetAccess;
 pub use manifest::InterfaceRef;
 pub use manifest::LOCAL_NAMESPACE;
 pub use manifest::MANIFEST_NSID;
+#[cfg(feature = "contract")]
+pub use manifest::ManifestBuilder;
 pub use manifest::MicroId;
 pub use manifest::MicroManifest;
 pub use manifest::Necessity;
