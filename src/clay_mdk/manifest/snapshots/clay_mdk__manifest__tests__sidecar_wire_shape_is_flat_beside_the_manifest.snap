@@ -1,8 +1,11 @@
 ---
-source: src/clay_mdk/manifest_tests.rs
-expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
+source: src/clay_mdk/manifest/tests.rs
+expression: "serde_json::to_string_pretty(&canonical_sidecar()).unwrap()"
 ---
 {
+  "id": "dayframe.counter",
+  "package_version": 1,
+  "authority": "org.example.test.counter",
   "entrypoints": {
     "initialize": "townframe:dayframe/micro-lifecycle@0.4.0",
     "presentation": "townframe:dayframe/presentation-events@0.4.0",

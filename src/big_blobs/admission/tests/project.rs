@@ -1,24 +1,12 @@
-use super::project::*;
 use super::*;
+use crate::admission::project::*;
 use automerge::transaction::Transactable;
-use big_cabinet_core::authority::AuthorityMessage;
-use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::dmeta::Uuid7;
-use futures::future::BoxFuture;
 use iroh_blobs::Hash;
 use service_utils_rs::Client;
-use service_utils_rs::InlineRoute;
 use service_utils_rs::StopToken;
-
-struct UnusedAuthority;
-
-impl InlineRoute<AuthorityProtocol> for UnusedAuthority {
-    fn route_inline(self: Arc<Self>, _: AuthorityMessage) -> BoxFuture<'static, ()> {
-        Box::pin(async { panic!("admission projection does not mint client capabilities") })
-    }
-}
 
 struct Harness {
     projection: Projection,

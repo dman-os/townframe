@@ -1,5 +1,5 @@
 //! The `trapper` fixture's declarations, shared by the guest (`trapper_fixture.rs`) and the native
-//! emitter of its sidecar (`emit_trapper_manifest.rs`), which both `#[path]`-include this file.
+//! emitter of its sidecar (`emit_trapper_manifest.rs`), which each declare it as a plain `mod trapper_manifest;` (it sits beside their roots).
 //! The Settings section row mirrors the counter's, so the shell lists it and mounts its `view`.
 use clay_mdk::Access;
 use clay_mdk::AttachmentDeclaration;
@@ -56,8 +56,11 @@ pub fn manifest() -> MicroManifest {
     }
 }
 
-/// Only the sidecar emitter reads it; the guest links `manifest` alone.
-#[allow(dead_code)]
+/// Only the sidecar emitter reads it; the guest (the wasm32 build of this file) links `manifest` alone.
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(dead_code, reason = "only the native sidecar emitter calls it")
+)]
 pub fn sidecar() -> Sidecar {
     Sidecar::new(ID, 1, manifest())
 }

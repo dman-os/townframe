@@ -11,16 +11,16 @@ use clay_store::SqliteStore;
 use clay_store::StoreError;
 use proptest::prelude::*;
 
-use super::durable::collection_prefix;
-use super::durable::decode_row;
-use super::durable::encode_row;
-use super::durable::row_key;
-use super::durable::scope_prefix;
-use super::durable::split_row_key;
-use super::semantics_tests::Feed;
-use super::semantics_tests::ready;
-use super::semantics_tests::writer_id;
+use super::Feed;
+use super::ready;
+use super::writer_id;
 use super::*;
+use crate::registration::durable::collection_prefix;
+use crate::registration::durable::decode_row;
+use crate::registration::durable::encode_row;
+use crate::registration::durable::row_key;
+use crate::registration::durable::scope_prefix;
+use crate::registration::durable::split_row_key;
 
 type Collection = RegistrationCollection<u32, String>;
 

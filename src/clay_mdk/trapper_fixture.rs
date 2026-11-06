@@ -4,8 +4,7 @@
 //! faults only that micro, with the trap as the cause, on every engine: the browser's engine
 //! reports a trap through a promise, so a host that polls the export once must still see it.
 
-#[path = "trapper_manifest.rs"]
-mod manifest;
+mod trapper_manifest;
 
 use clay_mdk::Context;
 use clay_mdk::Error;
@@ -18,7 +17,7 @@ fn trap() {
 }
 
 async fn activate(context: Context) -> Result<(), Error> {
-    context.publish_component(manifest::VIEW, || {
+    context.publish_component(trapper_manifest::VIEW, || {
         rsx! {
             button {
                 "aria-label": "Trap the guest",
@@ -30,4 +29,4 @@ async fn activate(context: Context) -> Result<(), Error> {
     Ok(())
 }
 
-clay_mdk::export_micro!(activate, manifest::manifest);
+clay_mdk::export_micro!(activate, trapper_manifest::manifest);

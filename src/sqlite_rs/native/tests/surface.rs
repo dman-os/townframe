@@ -1,8 +1,8 @@
-use super::query::FromRow;
-use super::query::Sql;
 use super::*;
 use crate::IntoValue;
 use crate::gen_tests::queries::MIGRATIONS;
+use crate::query::FromRow;
+use crate::query::Sql;
 
 async fn assert_pending<F: Future>(future: std::pin::Pin<&mut F>) {
     let mut future = future;

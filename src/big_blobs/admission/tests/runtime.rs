@@ -1,21 +1,9 @@
 use super::*;
 use automerge::transaction::Transactable;
-use big_cabinet_core::authority::AuthorityMessage;
-use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::dmeta::Uuid7;
-use futures::future::BoxFuture;
 use service_utils_rs::Client;
-use service_utils_rs::InlineRoute;
-
-struct UnusedAuthority;
-
-impl InlineRoute<AuthorityProtocol> for UnusedAuthority {
-    fn route_inline(self: Arc<Self>, _: AuthorityMessage) -> BoxFuture<'static, ()> {
-        Box::pin(async { panic!("inventory runtime does not mint client capabilities") })
-    }
-}
 
 #[tokio::test]
 async fn runtime_drains_257_dirty_pairs_from_one_coalesced_notification() -> Res<()> {
