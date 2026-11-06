@@ -473,3 +473,21 @@ Build note: the link step failed three times in a row with `ld.lld: failed to op
   building at startup. `instantiate` is 3 ms after (b)/(c) and was 36 ms before.
 - Open total, tap to counter on screen: roughly 1.6 s on a second start versus about 6.7 s for the debug guest.
 - The INSTR lines are removed (`revert(clay_rt_wasmtime)`, source-only, not rebuilt: the installed APK is `apk-bc` which still has them).
+
+## A5 notes (release on the phone)
+
+**Not done: the release arm64 build was stopped at the disk floor; no release APK exists, nothing was installed or run on the phone.**
+
+- Command: `./x/agent-build.ts -- deno run --allow-all x/dayframe.ts android --abi arm64 --release --guest-profile wasm-release`
+  at d78251bb. Log: `/run/media/asdf/p3N/tmp/a5/build1.log`.
+- The release profile shares nothing with the warm debug artifacts: dx reported `[1125/1926]` crates compiled after 4850 s (about
+  81 min) when free space on the volume reached 4.2 GB (started at 29 GB, observed 28, 27, 24, 23, 21, 17, 14, 11, 7.8 GB over the
+  run) and I killed my own process tree by PID. Other lanes were building and running clippy/nextest on the same volume at the
+  same time, so not all of the 25 GB drop is this build; the split was not measured.
+- No link was reached, so no `ld.lld ... Invalid argument` flake occurred (0 of 3 retries used).
+- The target dir was not cleaned; the partial release artifacts stay there, so a rerun resumes from crate 1125 and needs roughly
+  (801 remaining crates, including the large wasmtime/vello/libmain link) more space than is free now. Unverified estimate: a
+  completed release build needs on the order of 10 to 20 GB more.
+- Phone state: untouched by this lane; it still has the A4 `apk-bc` debug build installed (per the A4 notes).
+- Open question for the user: free at least about 20 GB (e.g. drop the host `debug/` dirs of other worktrees, or the A3/A4 debug
+  android output) and rerun, or approve cleaning part of the target dir.
