@@ -192,10 +192,7 @@ fn each_native_mount_renders_in_its_own_scope_and_a_sibling_leaving_does_not_rer
         }
     }
     let second = Rc::new(Cell::new(None));
-    let mut dom = VirtualDom::new_with_props(
-        app,
-        (components, owner, reference, second.clone()),
-    );
+    let mut dom = VirtualDom::new_with_props(app, (components, owner, reference, second.clone()));
     let mut tree = SurfaceTree::new();
     dom.rebuild(&mut tree);
     assert_eq!(tree.text_content(), "0;0;");

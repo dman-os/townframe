@@ -938,7 +938,11 @@ fn sdk_each_mount_runs_its_own_render_scope_and_mounting_one_does_not_rerun_anot
     dom.render().unwrap();
     assert!(sdk_text_edits(&mut dom, first).is_empty());
     assert_eq!(sdk_text_edits(&mut dom, second), ["0"]);
-    assert_eq!(renders.get(), 2, "mounting a surface renders only that surface");
+    assert_eq!(
+        renders.get(),
+        2,
+        "mounting a surface renders only that surface"
+    );
 
     // A hook in the render closure is the mount's own: a click moves only its mount.
     sdk_click(&mut dom, second);
@@ -954,7 +958,11 @@ fn sdk_each_mount_runs_its_own_render_scope_and_mounting_one_does_not_rerun_anot
 
     dom.unmount_target(101);
     assert!(sdk_text_edits(&mut dom, first).is_empty());
-    assert_eq!(renders.get(), 5, "unmounting a surface does not re-render its siblings");
+    assert_eq!(
+        renders.get(),
+        5,
+        "unmounting a surface does not re-render its siblings"
+    );
     assert!(!dom.edits.contains_key(&second));
 
     // A fresh mount starts from fresh hook state, not the state a sibling or a predecessor left.
