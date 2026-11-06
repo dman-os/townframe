@@ -127,7 +127,7 @@ The same `Client<Proto>` calls should work in micro code, with the transport swa
 1. The Clay session lands the `datum_core` extraction (the pure move, re-exports from big_cabinet_core, and the macro's `runtime =` path) as its own small PR off main. The node session then rebases its datum and macros commits onto it (D32 `f7f1f89c`, `F64` `9e6ec666`, `DmetaRead` `87c25501`, `DatumEvent` `6d7c60f6`), relying on rename detection. The node session holds off further big_cabinet_core datum and macros edits until then.
 2. NDK v0: `Operation` declarations for nodules, `export_nodule!`, `Cx`, the wasi:http client transport, a native test backend, and `test_nodule_guest` ported to it as the first consumer.
 3. The plug manifest builder over typed declarations, plus `day plug build | publish | install | enable` porcelain.
-4. Micro typed calls over a capability-carrying host import (Clay). Depends on T1 steps 2-6 (typed declarations in clay_mdk).
+4. Micro access to node services is **deferred** (operator, 2026-11-06): once feat/big-node merges, the Clay and node sessions put Clay on top of the node, and the micro backend is designed then, as a client of the local node rather than a parallel path. T1's typed declarations proceed independently.
 
 ## Open questions for the operator
 
