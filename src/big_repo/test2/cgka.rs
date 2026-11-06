@@ -535,7 +535,7 @@ async fn tier6_concurrent_pcs_updates_resolve_without_a_mint_loop() -> crate::Re
                     .clone_keyhive()
                     .try_pcs_key_hash(kh_doc_id)
                     .await
-                    .is_some(),
+                    .is_ok(),
                 "{} never derived a root after the concurrent rotations; op counts per round: {counts:?}",
                 node.peer_id()
             );

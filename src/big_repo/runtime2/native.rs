@@ -72,6 +72,7 @@ use crate::runtime2::support::encrypt_staged_automerge_ingest;
 use crate::runtime2::support::persist_cgka_updates_durably;
 use crate::runtime2::support::sedimentree_heads_payload;
 use crate::runtime2::types::BigRepoSyncPolicy;
+use keyhive_core::cgka::PcsKeyError;
 use keyhive_core::crypto::envelope::Envelope;
 use keyhive_core::principal::document::DecryptError;
 use keyhive_core::principal::document::DocCausalDecryptionError;
@@ -350,61 +351,6 @@ impl<S> NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
-    /// Whether another member must resolve this document's underivable CGKA
-    /// root before this node may mint an update op.
-    ///
-    /// Minting an update op for an underivable root is only
-    /// sound when this node is the one member designated to
-    /// resolve the tree. Two or more concurrent `Update` ops in
-    /// the latest CGKA epoch leave the root conflicted
-    /// (`NoRootKey`) until a single op causally after all of
-    /// them replaces it. If every member that sees the conflict
-    /// mints its own resolving op, those ops are again mutually
-    /// concurrent: each node's local tree resolves, then the
-    /// peers' ops arrive and re-conflict it, and the retriggered
-    /// coverage mints again, forever (observed: >1000 persists
-    /// and 150+ ops on one doc, two nodes ping-ponging). All
-    /// nodes order the same issuer set, so the lowest issuer
-    /// resolves and the rest defer; the resolver's op is
-    /// ingested, re-triggers coverage, and finds the root
-    /// derivable.
-    async fn defers_to_other_pcs_resolver(&self, sed_id: SedimentreeId) -> eyre::Result<bool> {
-        let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
-        let keyhive = self.keyhive.clone_keyhive();
-        let kh_doc = keyhive
-            .get_document(kh_doc_id)
-            .await
-            .ok_or_else(|| ferr!("Keyhive document missing for causal checkpoint"))?;
-        let local_member =
-            beekem::id::MemberId::from(keyhive_crypto::verifiable::Verifiable::verifying_key(
-                &keyhive.active().lock().await.id(),
-            ));
-        let conflicting_issuers: BTreeSet<beekem::id::MemberId> = {
-            let locked = kh_doc.lock().await;
-            let epochs = locked.cgka_ops().map_err(|error| {
-                ferr!("failed reading CGKA ops for checkpoint PCS root: {error}")
-            })?;
-            epochs
-                .last()
-                .iter()
-                .filter_map(|op| match op.payload() {
-                    beekem::operation::CgkaOperation::Update { id, .. } => Some(*id),
-                    _ => None,
-                })
-                .collect()
-        };
-        let defers =
-            conflicting_issuers.len() >= 2 && conflicting_issuers.first() != Some(&local_member);
-        if defers {
-            tracing::debug!(
-                ?sed_id,
-                conflicting = conflicting_issuers.len(),
-                "causal checkpoint deferred: another member resolves the conflicted CGKA root"
-            );
-        }
-        Ok(defers)
-    }
-
     /// Compute the sedimentree frontier from durable storage alone (ignoring
     /// the resident cache and the incrementally-maintained heads table).
     /// Debug-only divergence cross-check: see [`Self::sedimentree_heads`]'s
@@ -549,8 +495,29 @@ where
                 .await
                 .ok_or_else(|| ferr!("Keyhive document missing for causal checkpoint"))?;
 
-            if keyhive.try_pcs_key_hash(kh_doc_id).await.is_none() {
-                if self.defers_to_other_pcs_resolver(sed_id).await? {
+            let local_id = keyhive.active().lock().await.id();
+            if let Err(error) = keyhive.try_pcs_key_hash(kh_doc_id).await {
+                // Minting an update op for an underivable root is only sound
+                // when this node is the one member designated to resolve the
+                // tree. Concurrent `Update` ops leave the root conflicted until
+                // a single op causally after all of them replaces it. If every
+                // member that sees the conflict mints its own resolving op,
+                // those ops are again mutually concurrent: each node's tree
+                // resolves, the peers' ops arrive and re-conflict it, and the
+                // retriggered coverage mints again, forever (observed: >1000
+                // persists and 150+ ops on one doc, two nodes ping-ponging).
+                // Keyhive names the issuers of the conflicting root versions
+                // and every node sees the same set, so the lowest issuer
+                // resolves and the rest defer; the resolver's op is ingested,
+                // re-triggers coverage, and finds the root derivable.
+                if let PcsKeyError::RootConflicted { issuers } = &error
+                    && issuers.first() != Some(&local_id)
+                {
+                    debug!(
+                        ?sed_id,
+                        conflicting = issuers.len(),
+                        "causal checkpoint deferred: another member resolves the conflicted CGKA root"
+                    );
                     return Ok(None);
                 }
                 instr_pcs_state!(kh_doc, sed_id, "persist: before force_pcs_update"); // INSTR
@@ -581,8 +548,8 @@ where
             }
 
             let pcs_key_hash = match keyhive.try_pcs_key_hash(kh_doc_id).await {
-                Some(pcs_key_hash) => pcs_key_hash,
-                None => {
+                Ok(pcs_key_hash) => pcs_key_hash,
+                Err(_) => {
                     // A concurrent task rotated/forked the CGKA between our
                     // preparation and this verification (remote ops ingested
                     // via ApplySyncSession). Defer like the other concurrent-
@@ -693,15 +660,16 @@ where
         Sendable::from_future(async move {
             let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
             let keyhive = self.keyhive.clone_keyhive();
-            // A missing document and an underivable PCS key both come back as
-            // `None` from `try_pcs_key_hash`, so no lookup is needed here.
+            // A missing document, a document without a CGKA and an
+            // underivable or conflicted root all mean there is no current
+            // epoch; the error only says which.
             let hash = keyhive.try_pcs_key_hash(kh_doc_id).await;
-            if hash.is_none()
+            if hash.is_err()
                 && let Some(kh_doc) = keyhive.get_document(kh_doc_id).await
             {
                 instr_pcs_state!(kh_doc, sed_id, "current_causal_epoch is None"); // INSTR
             }
-            Ok(hash.map(|hash| *hash.raw.as_bytes()))
+            Ok(hash.ok().map(|hash| *hash.raw.as_bytes()))
         })
     }
 
