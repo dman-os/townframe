@@ -61,13 +61,9 @@ Consequences and the pattern to use instead:
 1. `BaseDocument::has_changes(&self)` (`blitz-dom-0.3.0-beta.4/src/document.rs:1028`) returns `self.changed_nodes.is_empty()` (inverted) and `changed_nodes` is never cleared after initial node creation, so `window.poll()` in `blitz-shell-0.3.0-beta.4/src/window.rs:379` (`if inner.has_changes() { self.accessibility.update_tree(&inner); }`) never pushes DOM mutations that land after `InitialTreeRequested` (such as async `use_future` micro activation or state updates) to AT-SPI.
 2. `BlitzShellEvent::Accessibility → ActionRequested` (`blitz-shell-0.3.0-beta.4/src/application.rs:87`) is still an empty `// TODO`. An accessibility CLI click can therefore report dispatch success without changing the UI. Do not use that receipt as evidence of an interaction; verify the resulting state.
 
-### `tabindex` panics, so keyboard focus is unavailable
+### `tabindex` and keyboard focus (corrected K7: no longer panics; see the dayframe-shell ledger "K7 Blitz focus")
 
-Setting `tabindex: 0` routes Dioxus into `set_focus`, which calls `doc_mut()` and panics the same way
-as above. **This is an accessibility regression, not just a limitation**: a widget can carry its
-slider/button role and ARIA attributes and still be unreachable by keyboard. If you ship that, flag it
-explicitly rather than letting it look intentional. A `<button>` may already be focusable without
-`tabindex`, which is worth testing before assuming the whole tree is keyboard-dead.
+The old panic (`set_focus` taking `doc_mut()` while the document was borrowed during render) is fixed in the dioxus fork `a3e1e68` (regression test `task_polled_during_render_can_access_document`). Pinned Blitz `ffaf2bd` has: `MountedData::set_focus` (focus and blur, `dioxus-native-dom/src/events.rs:299`), Tab/Shift+Tab traversal in pure document order (`blitz-dom events/keyboard.rs:21`, `traversal.rs:195`), `:focus` styling, and focus/blur/focusin/focusout events for Tab and pointer focus. Still missing: events for programmatic focus (TODO at `events.rs:302`), `inert`, positive-`tabindex` ordering, `:focus-visible` and `:focus-within` (hard-coded false, `stylo.rs:477-478`), and `get_focussed_node_id` falls back to the root, so Tab with nothing focused lands on the first stop in the document. Tab can be contained by a `keydown` handler that `prevent_default`s and calls `set_focus`. Evidence and tests: ledger "K7 Blitz focus", `src/dayframe_desktop/e2e/blitz_limits.rs` `mod focus`. CSS animations and transitions run (`stylo.rs:83-120`) but no `transitionend`/`animationend` event exists.
 
 ### No pointer capture — a drag that leaves its box stops receiving events
 
