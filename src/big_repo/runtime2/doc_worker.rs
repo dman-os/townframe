@@ -22,8 +22,8 @@ use crate::runtime2::types::BrokenReason;
 use crate::runtime2::types::DocLookup;
 use crate::runtime2::types::LiveDocBundle;
 use crate::runtime2::types::LiveDocHandle;
-use crate::runtime2::types::handle_validity;
 use crate::runtime2::types::NoWriteAccess;
+use crate::runtime2::types::handle_validity;
 use crate::runtime2::types::invalid_handle_error;
 use big_sync_core::PeerKey;
 use futures::future::AbortRegistration;
@@ -756,7 +756,6 @@ impl<F: FutureForm> DocWorker2<F> {
             checkpoint_count,
             "load_doc_snapshot: tree composition"
         );
-        let doc_id_snapshot = self.doc_id.clone();
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
@@ -803,38 +802,12 @@ impl<F: FutureForm> DocWorker2<F> {
                 instr_covered += 1; // INSTR
                 continue;
             }
-            let cached_key = if is_checkpoint {
-                None
-            } else {
-                self.recovered_keys
-                    .lock()
-                    .expect("recovered-key cache lock poisoned")
-                    .get(&head)
-                    .copied()
-            };
-            if let Some(key) = cached_key {
-                match self
-                    .io
-                    .decrypt_with_cached_key(self.sed_id, locator, key)
-                    .await?
-                {
-                    Some(plaintext) => {
-                        instr_cached += 1; instr_bytes += plaintext.len(); // INSTR
-                        plaintexts.insert(head.as_bytes().to_vec(), plaintext);
-                        continue;
-                    }
-                    None => {
-                        tracing::debug!(
-                            %doc_id_snapshot,
-                            ?head,
-                            "cached decryption key failed AEAD; invalidating entry"
-                        );
-                        self.recovered_keys
-                            .lock()
-                            .expect("recovered-key cache lock poisoned")
-                            .remove(&head);
-                    }
-                }
+            if !is_checkpoint
+                && let Some(plaintext) = self.decrypt_with_recovered_key(head, locator).await?
+            {
+                instr_cached += 1; instr_bytes += plaintext.len(); // INSTR
+                plaintexts.insert(head.as_bytes().to_vec(), plaintext);
+                continue;
             }
 
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
@@ -917,6 +890,41 @@ impl<F: FutureForm> DocWorker2<F> {
         );
         tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_covered, instr_causal, instr_causal_complete, instr_bytes, instr_am_alloc = utils_rs::instr_tl_bytes() - instr_tl_before, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
         instr_result
+    }
+
+    /// Open one blob with its cached application secret, if the recovered-key cache holds one.
+    /// A cached key that fails AEAD is discarded on sight and reported as a miss, so the caller
+    /// falls back to the authoritative Keyhive derivation; stale keys are never trusted.
+    async fn decrypt_with_recovered_key(
+        &self,
+        head: CommitId,
+        locator: BigRepoCiphertextLocator,
+    ) -> eyre::Result<Option<Vec<u8>>> {
+        let Some(key) = self
+            .recovered_keys
+            .lock()
+            .expect("recovered-key cache lock poisoned")
+            .get(&head)
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let plaintext = self
+            .io
+            .decrypt_with_cached_key(self.sed_id, locator, key)
+            .await?;
+        if plaintext.is_none() {
+            tracing::debug!(
+                doc_id = %self.doc_id,
+                ?head,
+                "cached decryption key failed AEAD; invalidating entry"
+            );
+            self.recovered_keys
+                .lock()
+                .expect("recovered-key cache lock poisoned")
+                .remove(&head);
+        }
+        Ok(plaintext)
     }
 
     async fn take_or_load_transient_doc(

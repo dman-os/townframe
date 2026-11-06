@@ -76,15 +76,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
 code = "ERROR_FN_LENGTH"
-path = "src/big_repo/runtime2/doc_worker.rs"
-symbol = "module::DocWorker2 < F >::load_doc_snapshot"
-ceiling = 164
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_FN_LENGTH"
 path = "src/big_repo/runtime2/hub.rs"
 symbol = "module::Runtime2Hub < F , R >::handle_cmd"
 ceiling = 425
@@ -114,7 +105,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_FN_LENGTH"
 path = "src/big_repo/runtime2/native.rs"
 symbol = "module::NativeBigRepoIo < S > as DocIo < Sendable >::try_causal_decrypt"
-ceiling = 223
+ceiling = 215
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
