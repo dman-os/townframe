@@ -46,7 +46,7 @@ async fn pending_admission_publishes_callback_context_before_mark_admitted() -> 
 }
 
 #[tokio::test]
-async fn cancellation_after_authority_submit_before_mark_admitted_cannot_resurrect() -> Res<()> {
+async fn admission_keeps_cancellation_outbox_until_receipt_completion() -> Res<()> {
     let temp = tempfile::tempdir()?;
     let sql_cfg = crate::app::SqlConfig::file(temp.path().join("dispatch.sqlite"));
     let runtime = sqlite_rs::SqliteRuntime::new(default());
@@ -59,12 +59,28 @@ async fn cancellation_after_authority_submit_before_mark_admitted_cannot_resurre
 
     assert!(repo.mark_cancelled("disp-cancel-before-submit").await?);
     let admitted = repo.mark_admitted("disp-cancel-before-submit").await?;
-    assert_eq!(admitted.status, DispatchStatus::Cancelled);
-    assert!(repo.get_active("disp-cancel-before-submit").await.is_none());
+    assert_eq!(admitted.status, DispatchStatus::Active);
+    assert!(repo.is_cancelled("disp-cancel-before-submit").await);
+    // Admission acknowledgement is not cancellation completion. Until the
+    // authority receipt is handled, boot must retain both context and intent.
+    assert!(repo.get_active("disp-cancel-before-submit").await.is_some());
     assert!(
         repo.get_by_wflow_job("job-cancel-before-submit")
             .await
-            .is_none()
+            .is_some()
+    );
+    repo.complete(
+        "disp-cancel-before-submit".into(),
+        DispatchStatus::Cancelled,
+    )
+    .await?;
+    assert!(!repo.is_cancelled("disp-cancel-before-submit").await);
+    assert!(repo.get_active("disp-cancel-before-submit").await.is_none());
+    assert_eq!(
+        repo.mark_admitted("disp-cancel-before-submit")
+            .await?
+            .status,
+        DispatchStatus::Cancelled
     );
     Ok(())
 }
@@ -95,7 +111,7 @@ async fn cancellation_before_submission_terminalizes_waiting_intent() -> Res<()>
 }
 
 #[tokio::test]
-async fn cancelled_pending_admission_reconciles_after_reload() -> Res<()> {
+async fn cancellation_outbox_survives_reload_before_and_after_admission() -> Res<()> {
     let temp = tempfile::tempdir()?;
     let sql_cfg = crate::app::SqlConfig::file(temp.path().join("dispatch.sqlite"));
     let runtime = sqlite_rs::SqliteRuntime::new(default());
@@ -109,14 +125,26 @@ async fn cancelled_pending_admission_reconciles_after_reload() -> Res<()> {
     assert!(repo.mark_cancelled("disp-cancelled-reload").await?);
     drop(repo);
 
-    let sql = crate::app::open_database(&runtime, sql_cfg).await?;
+    let sql = crate::app::open_database(&runtime, sql_cfg.clone()).await?;
     let (repo, _) = setup_repo_with_sql(sql).await?;
     assert!(repo.is_cancelled("disp-cancelled-reload").await);
     assert_eq!(repo.list_pending_admissions().await.len(), 1);
     let reconciled = repo.mark_admitted("disp-cancelled-reload").await?;
-    assert_eq!(reconciled.status, DispatchStatus::Cancelled);
+    assert_eq!(reconciled.status, DispatchStatus::Active);
+    assert!(repo.is_cancelled("disp-cancelled-reload").await);
+    drop(repo);
+
+    // Simulate a crash after local admission but before cancellation receipt
+    // post-processing. The cancellation intent still participates in boot.
+    let sql = crate::app::open_database(&runtime, sql_cfg).await?;
+    let (repo, _) = setup_repo_with_sql(sql).await?;
+    assert!(repo.is_cancelled("disp-cancelled-reload").await);
+    assert_eq!(repo.list_inflight().await.len(), 1);
+    assert!(repo.get_active("disp-cancelled-reload").await.is_some());
+    repo.complete("disp-cancelled-reload".into(), DispatchStatus::Cancelled)
+        .await?;
     assert!(!repo.is_cancelled("disp-cancelled-reload").await);
-    assert!(repo.get_active("disp-cancelled-reload").await.is_none());
+    assert!(repo.list_inflight().await.is_empty());
     Ok(())
 }
 

@@ -5,11 +5,14 @@ async fn staging_merge_error_preserves_source_for_receipt_replay() -> Res<()> {
     let cx = crate::test_support::test_cx(utils_rs::function_full!()).await?;
     let staging =
         daybook_types::doc::BranchPathBuf::from(format!("/tmp/receipt-{}", Uuid::new_v4().bs58()));
-    let target = daybook_types::doc::BranchPathBuf::from("main");
+    let target = daybook_types::doc::BranchPathBuf::from(format!(
+        "/tmp/receipt-target-{}",
+        Uuid::new_v4().bs58()
+    ));
     let doc_id = cx
         .drawer_repo
         .add(daybook_types::doc::AddDocArgs {
-            branch_path: staging.clone(),
+            branch_path: "main".into(),
             facets: [(
                 daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::Note),
                 daybook_types::doc::WellKnownFacet::Note("staged".into()).into(),
@@ -18,6 +21,20 @@ async fn staging_merge_error_preserves_source_for_receipt_replay() -> Res<()> {
             user_path: None,
             idempotency_key: None,
         })
+        .await?;
+    let heads = cx
+        .drawer_repo
+        .get_branch_heads_for_path(&doc_id, daybook_types::doc::BranchPath::new("main"))
+        .await?
+        .expect("main exists");
+    cx.drawer_repo
+        .create_branch_at_heads_from_branch(
+            &doc_id,
+            &staging,
+            daybook_types::doc::BranchPath::new("main"),
+            &heads,
+            None,
+        )
         .await?;
     let heads = cx
         .drawer_repo

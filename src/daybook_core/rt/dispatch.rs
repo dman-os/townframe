@@ -712,65 +712,40 @@ impl DispatchRepo {
             .map(Arc::clone)
             .ok_or_else(|| eyre::eyre!("dispatch not found under {dispatch_id}"))?;
         if cur.status != DispatchStatus::AdmissionPending {
-            // Two reconcilers may submit the same permanent authority job.  The
-            // first transition wins; later observations must not resurrect a
-            // terminal dispatch or turn a cancellation into Active.
-            if matches!(
-                cur.status,
-                DispatchStatus::Active
-                    | DispatchStatus::Succeeded
-                    | DispatchStatus::Failed
-                    | DispatchStatus::Cancelled
-            ) {
-                return Ok(cur);
+            // Concurrent reconcilers share the permanent authority identity.
+            // Never resurrect a dispatch already admitted or completed.
+            if cur.status == DispatchStatus::Waiting {
+                eyre::bail!("dispatch is not pending admission: {dispatch_id}");
             }
-            eyre::bail!("dispatch is not pending admission: {dispatch_id}");
+            return Ok(cur);
         }
-
-        let cancelled = state.cancelled_dispatches.contains(dispatch_id);
         drop(state);
         let mut updated = (*cur).clone();
-        updated.status = if cancelled {
-            DispatchStatus::Cancelled
-        } else {
-            DispatchStatus::Active
-        };
+        updated.status = DispatchStatus::Active;
         let updated = Arc::new(updated);
         let tx = self.repo_sql.begin_write().await?;
         persist_dispatch_tx(&tx, dispatch_id, &updated).await?;
-        if cancelled {
-            clear_cancelled_mark_tx(&tx, dispatch_id).await?;
-        }
+        // A cancellation mark remains an outbox entry until the durable
+        // authority receipt is post-processed and complete() clears it. Writing
+        // Cancelled here would lose recovery if authority cancellation has not
+        // committed yet.
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
         state
             .dispatches
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
-        state.active_dispatches.remove(dispatch_id);
-        if cancelled {
-            state.cancelled_dispatches.remove(dispatch_id);
-        }
+        state
+            .active_dispatches
+            .insert(dispatch_id.to_string(), Arc::clone(&updated));
         if let ActiveDispatchDeets::Wflow {
             wflow_job_id: Some(job),
             ..
-        } = &cur.deets
+        } = &updated.deets
         {
-            state.wflow_to_dispatch.remove(job);
-        }
-        if updated.status == DispatchStatus::Active {
             state
-                .active_dispatches
-                .insert(dispatch_id.to_string(), Arc::clone(&updated));
-            if let ActiveDispatchDeets::Wflow {
-                wflow_job_id: Some(job),
-                ..
-            } = &updated.deets
-            {
-                state
-                    .wflow_to_dispatch
-                    .insert(job.clone(), dispatch_id.to_string());
-            }
+                .wflow_to_dispatch
+                .insert(job.clone(), dispatch_id.to_string());
         }
         state
             .dispatch_head_index
@@ -778,7 +753,6 @@ impl DispatchRepo {
             .or_insert_with(|| dispatch_id.to_string());
         let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
         drop(state);
-
         self.registry.notify([DispatchEvent::DispatchUpdated {
             id: dispatch_id.to_string(),
             heads,

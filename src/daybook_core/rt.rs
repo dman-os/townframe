@@ -647,7 +647,7 @@ impl Rt {
         // Admission is a durable outbox transition: reconcile intents before
         // installing receipt waiters, so a crash between submit and the active
         // transition cannot leave a waiter for a job that was never admitted.
-        rt.reconcile_pending_admissions().await?;
+        rt.reconcile_workflow_intents().await?;
         for (dispatch_id, dispatch) in rt.dispatch_repo.list().await {
             if dispatch.status == dispatch::DispatchStatus::Active
                 && let ActiveDispatchDeets::Wflow {
@@ -1004,7 +1004,7 @@ impl Rt {
         })
     }
 
-    async fn submit_pending_dispatch(
+    async fn reconcile_workflow_dispatch(
         self: &Arc<Self>,
         dispatch_id: &str,
         dispatch: &Arc<ActiveDispatch>,
@@ -1023,22 +1023,18 @@ impl Rt {
                 .clone()
                 .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON)),
         };
-        // A cancellation mark is an outbox entry of its own.  Do not submit a
-        // job that was cancelled before this reconciler reached authority; the
-        // cancellation call is still needed for the race where submission won
-        // just before the mark was observed.
-        let cancellation_requested = self.dispatch_repo.is_cancelled(dispatch_id).await;
-        if !cancellation_requested {
-            self.authority
-                .submit(wflow::Submission::new(
-                    job_id.clone(),
-                    wflow_key.clone(),
-                    args_json,
-                ))
-                .await
-                .map_err(|err| ferr!("error scheduling job for dispatch {dispatch_id}: {err:?}"))?;
-        }
-        if cancellation_requested {
+        // Admission and cancellation are separate durable stores. Always replay
+        // the same identity, then honor a cancellation mark before acknowledging
+        // admission. The mark remains recoverable until receipt post-processing.
+        self.authority
+            .submit(wflow::Submission::new(
+                job_id.clone(),
+                wflow_key.clone(),
+                args_json,
+            ))
+            .await
+            .map_err(|err| ferr!("error scheduling job for dispatch {dispatch_id}: {err:?}"))?;
+        if self.dispatch_repo.is_cancelled(dispatch_id).await {
             match self
                 .authority
                 .cancel(
@@ -1047,32 +1043,7 @@ impl Rt {
                 )
                 .await
             {
-                Ok(())
-                | Err(wflow::CancelError::UnknownJob)
-                | Err(wflow::CancelError::AlreadyTerminal) => {}
-                Err(err) => {
-                    return Err(ferr!(
-                        "error cancelling pending dispatch {dispatch_id}: {err:?}"
-                    ));
-                }
-            }
-        }
-        let admitted = self.dispatch_repo.mark_admitted(dispatch_id).await?;
-        if admitted.status == dispatch::DispatchStatus::Cancelled {
-            // The cancellation mark can race the submit above.  Once the
-            // durable transition observes it, cancel again after submission so
-            // a crash cannot leave that authority job live.
-            match self
-                .authority
-                .cancel(
-                    job_id.clone(),
-                    format!("cancellation requested for dispatch {dispatch_id}"),
-                )
-                .await
-            {
-                Ok(())
-                | Err(wflow::CancelError::UnknownJob)
-                | Err(wflow::CancelError::AlreadyTerminal) => {}
+                Ok(()) | Err(wflow::CancelError::AlreadyTerminal) => {}
                 Err(err) => {
                     return Err(ferr!(
                         "error cancelling admitted dispatch {dispatch_id}: {err:?}"
@@ -1080,13 +1051,17 @@ impl Rt {
                 }
             }
         }
-        Ok(admitted)
+        self.dispatch_repo.mark_admitted(dispatch_id).await
     }
 
-    async fn reconcile_pending_admissions(self: &Arc<Self>) -> Res<()> {
-        for (dispatch_id, dispatch) in self.dispatch_repo.list_pending_admissions().await {
-            self.submit_pending_dispatch(&dispatch_id, &dispatch)
-                .await?;
+    async fn reconcile_workflow_intents(self: &Arc<Self>) -> Res<()> {
+        for (dispatch_id, dispatch) in self.dispatch_repo.list_inflight().await {
+            if dispatch.status == dispatch::DispatchStatus::AdmissionPending
+                || self.dispatch_repo.is_cancelled(&dispatch_id).await
+            {
+                self.reconcile_workflow_dispatch(&dispatch_id, &dispatch)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -1475,7 +1450,7 @@ impl Rt {
         // Keep the intent pending on an admission error, including an unknown
         // commit outcome. Boot can safely retry the same permanent job key.
         let admitted = self
-            .submit_pending_dispatch(&dispatch_id, &pending_dispatch)
+            .reconcile_workflow_dispatch(&dispatch_id, &pending_dispatch)
             .await?;
         if admitted.status == dispatch::DispatchStatus::Active {
             let ActiveDispatchDeets::Wflow {
@@ -1978,12 +1953,12 @@ impl Rt {
             self.dispatch_repo
                 .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
                 .await?;
-            self.submit_pending_dispatch(&dispatch_id, &active_dispatch)
-                .await
-                .map_err(|err| {
-                    ferr!("error scheduling job for {plug_id}/{routine_name}: {err:?}")
-                })?;
-            self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
+            let admitted = self
+                .reconcile_workflow_dispatch(&dispatch_id, &active_dispatch)
+                .await?;
+            if admitted.status == dispatch::DispatchStatus::Active {
+                self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
+            }
         }
         let mut tags = vec![
             "/type/dispatch".to_string(),
@@ -2605,7 +2580,7 @@ mod tests {
                 .is_none()
         );
 
-        test_cx.rt.reconcile_pending_admissions().await?;
+        test_cx.rt.reconcile_workflow_intents().await?;
         test_cx
             .rt
             .install_wflow_waiter(dispatch_id.into(), job_id.clone());
