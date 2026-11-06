@@ -540,8 +540,6 @@ impl SqliteBigRepoStore {
         id: SedimentreeId,
         commit_id: Option<CommitId>,
     ) -> Result<Vec<(Signed<LooseCommit>, Blob)>, SqliteBigRepoStoreError> {
-        let instr_before = utils_rs::instr_tl_bytes(); // INSTR
-        let instr_start = std::time::Instant::now(); // INSTR
         let rows = if let Some(commit_id) = commit_id {
             queries::commit_rows_by_id(
                 &self.sql,
@@ -553,10 +551,6 @@ impl SqliteBigRepoStore {
         } else {
             queries::commit_rows(&self.sql, self.scope().id(), Self::tree_blob(id)).await?
         };
-        let instr_query = utils_rs::instr_tl_bytes() - instr_before; // INSTR
-        let instr_n = INSTR_COMMIT_ROWS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // INSTR
-        INSTR_COMMIT_ROWS_BYTES.fetch_add(instr_query, std::sync::atomic::Ordering::Relaxed); // INSTR
-        if instr_n.is_multiple_of(1000) { tracing::info!(by_id = commit_id.is_some(), rows = rows.len(), instr_query, took = ?instr_start.elapsed(), calls = instr_n, total_bytes = INSTR_COMMIT_ROWS_BYTES.load(std::sync::atomic::Ordering::Relaxed), "INSTR commit_rows query"); } // INSTR
         rows.into_iter()
             .map(|row| Ok((Signed::try_decode(&row.signed)?, Blob::new(row.blob))))
             .collect()
@@ -1266,9 +1260,6 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         })
     }
 }
-
-static INSTR_COMMIT_ROWS_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
-static INSTR_COMMIT_ROWS_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
 
 #[cfg(test)]
 mod tests {

@@ -880,7 +880,6 @@ impl<F: FutureForm> DocWorker2<F> {
             "load_doc_snapshot: walk outcome"
         );
         let instr_walk = instr_start.elapsed(); // INSTR
-        let instr_tl_before = utils_rs::instr_tl_bytes(); // INSTR
         let instr_result = LoadedDocSnapshot::from_decrypted_plaintexts(
             pending,
             partially_decrypted,
@@ -888,7 +887,7 @@ impl<F: FutureForm> DocWorker2<F> {
             blockers,
             blocked_refs,
         );
-        tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_covered, instr_causal, instr_causal_complete, instr_bytes, instr_am_alloc = utils_rs::instr_tl_bytes() - instr_tl_before, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
+        tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_covered, instr_causal, instr_causal_complete, instr_bytes, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
         instr_result
     }
 

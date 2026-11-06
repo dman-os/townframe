@@ -133,11 +133,6 @@ where
 // CiphertextStore adapter (for causal decrypt)
 // ═══════════════════════════════════════════════════════════════════════════
 
-static INSTR_CT_LOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
-static INSTR_CT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
-static INSTR_PCS_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
-static INSTR_PCS_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
-
 /// A [`CiphertextStore`] that reads encrypted blobs directly from
 /// subduction storage. Used by [`NativeBigRepoIo::try_causal_decrypt`].
 struct NativeCiphertextStore<S: BigRepoSubductionStorage> {
@@ -214,7 +209,6 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
             .try_into()
             .map_err(|_| ferr!("content_ref must be 32 bytes, got {}", content_ref.len()))?;
         let commit_id = CommitId::new(commit_id_bytes);
-        INSTR_CT_LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // INSTR
         // Prefer fragments: a fragment and its head loose commit can share a
         // content reference, but the fragment is the causally complete form.
         if let Some(verified) =
@@ -275,12 +269,7 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
             Self::GetCiphertextError,
         >,
     > {
-        Sendable::from_future(async move {
-            let instr_before = utils_rs::instr_tl_bytes(); // INSTR
-            let instr_out = self.load_and_cache(content_ref.as_slice()).await; // INSTR
-            INSTR_CT_BYTES.fetch_add(utils_rs::instr_tl_bytes() - instr_before, std::sync::atomic::Ordering::Relaxed); // INSTR
-            instr_out
-        })
+        Sendable::from_future(async move { self.load_and_cache(content_ref.as_slice()).await })
     }
 
     fn get_ciphertext_by_pcs_update<'a>(
@@ -302,8 +291,6 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
             let blobs = causal_index
                 .causal_ciphertexts_by_pcs_update(self.sed_id, pcs_update.raw.as_bytes())
                 .await?;
-            INSTR_PCS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // INSTR
-            INSTR_PCS_ROWS.fetch_add(blobs.len() as u64, std::sync::atomic::Ordering::Relaxed); // INSTR
             blobs
                 .into_iter()
                 .map(|blob| {
@@ -1037,17 +1024,10 @@ where
                 sed_id,
             );
             tracing::debug!(%sed_id, "causal: before entrypoint kh_doc lock");
-            let instr_start = std::time::Instant::now(); // INSTR
-            let instr_loads0 = INSTR_CT_LOADS.load(std::sync::atomic::Ordering::Relaxed); // INSTR
-            let instr_rows0 = INSTR_PCS_ROWS.load(std::sync::atomic::Ordering::Relaxed); // INSTR
-            let instr_calls0 = INSTR_PCS_CALLS.load(std::sync::atomic::Ordering::Relaxed); // INSTR
             let (entrypoint_raw, entrypoint_key) = {
                 let mut doc = kh_doc.lock().await;
-                let instr_tl0 = utils_rs::instr_tl_bytes(); // INSTR
                 tracing::debug!(%sed_id, "causal: acquired entrypoint kh_doc lock");
-                let instr_entry = doc.try_decrypt_content_keyed(&encrypted); // INSTR
-                tracing::info!(entry_alloc = utils_rs::instr_tl_bytes() - instr_tl0, "INSTR causal entry decrypt"); // INSTR
-                match instr_entry {
+                match doc.try_decrypt_content_keyed(&encrypted) {
                     Ok((plaintext, key)) => {
                         tracing::debug!(
                             content_ref = ?encrypted.content_ref,
@@ -1088,8 +1068,6 @@ where
             // per-ancestor classification below turns the missing refs into
             // blockers so the doc worker parks and retries; only structural
             // failures remain fatal.
-            let instr_tl1 = utils_rs::instr_tl_bytes(); // INSTR
-            let instr_walk_start = std::time::Instant::now(); // INSTR
             let state = {
                 let mut doc = kh_doc.lock().await;
                 tracing::debug!(%sed_id, "causal: acquired causal kh_doc lock");
@@ -1110,7 +1088,6 @@ where
                     }
                 }
             };
-            tracing::info!(complete = state.complete.len(), walk_tl_alloc = utils_rs::instr_tl_bytes() - instr_tl1, walk = ?instr_walk_start.elapsed(), entry_to_walk = ?instr_start.elapsed(), ct_bytes = INSTR_CT_BYTES.load(std::sync::atomic::Ordering::Relaxed), ct_loads = INSTR_CT_LOADS.load(std::sync::atomic::Ordering::Relaxed) - instr_loads0, pcs_calls = INSTR_PCS_CALLS.load(std::sync::atomic::Ordering::Relaxed) - instr_calls0, pcs_rows = INSTR_PCS_ROWS.load(std::sync::atomic::Ordering::Relaxed) - instr_rows0, "INSTR causal walk"); // INSTR
             tracing::debug!(%sed_id, "causal: released causal kh_doc lock");
             let mut missing_ciphertexts = Vec::new();
             let mut missing_keys = Vec::new();

@@ -116,7 +116,6 @@ impl CountingAllocator {
         if !COUNTING.load(Relaxed) {
             return;
         }
-        utils_rs::instr_tl_alloc(allocated); // INSTR
         instr_sample(allocated); // INSTR
         ALLOCATIONS.fetch_add(1, Relaxed);
         ALLOCATED.fetch_add(allocated as u64, Relaxed);
