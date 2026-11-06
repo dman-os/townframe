@@ -1189,34 +1189,17 @@ impl BigRepo {
     }
 
     /// Grant document access and return once Keyhive has reconciled it, so the caller can
-    /// treat the grant as visible (read-your-writes). A caller issuing several grants should
-    /// use [`BigRepo::issue_doc_grant`] for each and wait once after the last, since the
-    /// reconciliation wait is the dominant cost of a grant and one wait covers every grant
-    /// issued before it.
-    pub async fn grant_doc_access(
-        self: &Arc<Self>,
-        doc_id: DocumentId,
-        principal: impl Into<BigKeyhiveAuthority>,
-        access: keyhive_core::access::Access,
-    ) -> Res<()> {
-        let instr_start = std::time::Instant::now(); // INSTR
-        self.issue_doc_grant(doc_id, principal, access).await?;
-        let instr_issued = instr_start.elapsed(); // INSTR
-        self.wait_for_keyhive_reconciliation().await?;
-        tracing::info!(?instr_issued, reconciled = ?instr_start.elapsed(), "INSTR grant_doc_access timing"); // INSTR
-        Ok(())
-    }
-
-    /// Issue a document grant without waiting for Keyhive to reconcile it: the delegation is
-    /// persisted and the reader's causal checkpoint attempted, but peers and local readers may
-    /// not see the grant until [`BigRepo::wait_for_keyhive_reconciliation`] returns. Every
-    /// caller must wait before treating the grant as visible; one wait after the last of
-    /// several grants covers all of them.
+    /// treat the grant as visible (read-your-writes).
+    ///
+    /// The reconciliation wait is the dominant cost of a grant, and it waits for the projection
+    /// to reach the admission watermark as of the call. A caller with several grants should
+    /// therefore run them concurrently rather than one after another: their waits overlap, so
+    /// the batch costs about one reconciliation.
     ///
     /// Reader grants also attempt a key-only causal checkpoint so the readable
     /// history survives reopen and sync without mutating document content. A
     /// durable Keyhive-event consumer retries when causal keys are still in flight.
-    pub async fn issue_doc_grant(
+    pub async fn grant_doc_access(
         self: &Arc<Self>,
         doc_id: DocumentId,
         principal: impl Into<BigKeyhiveAuthority>,
@@ -1248,7 +1231,9 @@ impl BigRepo {
         if access.is_reader() && !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
             tracing::debug!(%doc_id, "document grant causal checkpoint deferred to durable event reconciliation");
         }
-        tracing::info!(?instr_heads, ?instr_granted, covered = ?instr_start.elapsed(), "INSTR issue_doc_grant timing"); // INSTR
+        let instr_covered = instr_start.elapsed(); // INSTR
+        self.wait_for_keyhive_reconciliation().await?;
+        tracing::info!(?instr_heads, ?instr_granted, ?instr_covered, reconciled = ?instr_start.elapsed(), "INSTR grant_doc_access timing"); // INSTR
         Ok(())
     }
 

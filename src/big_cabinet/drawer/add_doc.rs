@@ -116,12 +116,12 @@ impl Core {
     /// it. Receipts are in `drawers` order: the roster write's, or the drawer's current heads
     /// when nothing had to change.
     ///
-    /// Every widening grant is issued first and Keyhive is awaited once, after the last; only
-    /// then are the roster entries published, concurrently since they write different drawer
-    /// docs. The wait is what keeps "grant first, entry second": no entry is published before
-    /// the grants behind it have reconciled, and no grant check here reads another drawer's
-    /// grant (each drawer has its own docs group, and `docs_group_level` reads that group's
-    /// direct delegation alone), so the grants need not be reconciled one by one.
+    /// The widening grants run concurrently, so their Keyhive reconciliation waits overlap; only
+    /// once all of them have reconciled are the roster entries published, concurrently since
+    /// they write different drawer docs. That keeps "grant first, entry second": no entry is
+    /// published before the grants behind it have reconciled. No grant check here reads another
+    /// drawer's grant (each drawer has its own docs group, and `docs_group_level` reads that
+    /// group's direct delegation alone), so the grants need not run one after another.
     pub(crate) async fn enter(
         &self,
         context: &RequestContext,
@@ -132,7 +132,7 @@ impl Core {
         let instr_start = std::time::Instant::now(); // INSTR
         let mut narrowed = BTreeMap::new();
         let mut to_publish = Vec::with_capacity(drawers.len());
-        let mut granted = false;
+        let mut widen = Vec::new();
         for (index, drawer) in drawers.iter().enumerate() {
             let (_meta, docs_group, _sensitive) = self.groups(drawer).await?;
             let current = self.docs_group_level(&docs_group, doc).await?;
@@ -151,22 +151,20 @@ impl Core {
                     narrowed.insert(index, written);
                     continue;
                 }
-                _ => {
-                    self.big_repo
-                        .issue_doc_grant(doc.clone(), docs_group, keyhive_access(access))
-                        .await
-                        .map_err(keyhive_error)?;
-                    granted = true;
-                }
+                _ => widen.push(docs_group),
             }
             to_publish.push(index);
         }
         let instr_issued = instr_start.elapsed(); // INSTR
-        if granted {
-            self.big_repo
-                .wait_for_keyhive_reconciliation()
-                .await
-                .map_err(keyhive_error)?;
+        if !widen.is_empty() {
+            // The grants run concurrently: each one's reconciliation wait overlaps the others,
+            // so entering several drawers costs about one wait instead of one per drawer.
+            futures::future::try_join_all(widen.into_iter().map(|docs_group| {
+                self.big_repo
+                    .grant_doc_access(doc.clone(), docs_group, keyhive_access(access))
+            }))
+            .await
+            .map_err(keyhive_error)?;
             #[cfg(test)]
             self.crash_at(super::CrashPoint::DocGranted)?;
         }
