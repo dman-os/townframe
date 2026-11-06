@@ -81,7 +81,8 @@ fn native_micros() -> Vec<InstalledMicro> {
                     )
                 },
             )
-            .satisfied_by(&shell)
+            .satisfied_by(&shell, &micro_shell_manifest::sidecar())
+            .expect("the shell publishes what Settings requires")
         },
         InstalledMicro {
             enabled_on_admission: true,
@@ -203,18 +204,23 @@ fn package_micros(
                 let sidecar = package.sidecar().clone();
                 let bytes = package.bytes().to_vec();
                 let engine = engine.clone();
-                installed.push(
-                    InstalledMicro::new(
-                        package.id().clone(),
-                        sidecar.clone(),
-                        move |id, resources, bindings| {
-                            engine(resources, id, sidecar.manifest, bindings, bytes)
-                        },
-                    )
-                    // A package may require the shell's publications (the layout's app bar
-                    // button); the shell is the only provider a package can name today.
-                    .satisfied_by(&clay_mdk::MicroId::local(micro_shell_manifest::ID)),
+                let micro = InstalledMicro::new(
+                    package.id().clone(),
+                    sidecar.clone(),
+                    move |id, resources, bindings| {
+                        engine(resources, id, sidecar.manifest, bindings, bytes)
+                    },
+                )
+                // A package may require the shell's publications (the layout's app bar
+                // button); the shell is the only provider a package can name today.
+                .satisfied_by(
+                    &clay_mdk::MicroId::local(micro_shell_manifest::ID),
+                    &micro_shell_manifest::sidecar(),
                 );
+                match micro {
+                    Ok(micro) => installed.push(micro),
+                    Err(error) => errors.push(format!("{}: {error}", files.origin)),
+                }
             }
             Err(error) => errors.push(format!("{}: {error}", files.origin)),
         }

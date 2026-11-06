@@ -20,33 +20,29 @@ use clay_mdk::hooks::PresentationSlot;
 use clay_mdk::hooks::use_facet;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
-use micro_layout_manifest::CONFIG_KEY;
-use micro_layout_manifest::CONFIG_NAME;
-use micro_layout_manifest::CONFIG_TAG;
+use micro_layout_manifest::LayoutArrangement;
 use micro_layout_manifest::LayoutConfig;
-use micro_layout_manifest::PANELS_BINDING;
+use micro_layout_manifest::LayoutPanels;
+use micro_layout_manifest::LayoutView;
 use micro_layout_manifest::Panel;
 use micro_layout_manifest::SHELL_NAV_BUTTON;
-use micro_layout_manifest::VIEW;
 
 /// Bind the panels collection and the arrangement facet, and publish the view over them. The
 /// shell's sidebar/back button is required (the view mounts it in its app bar), so the layout can
 /// be left on a compact host.
 async fn activate(context: Context) -> Result<(), Error> {
     let panels: Collection<String, Panel> = context
-        .collection(PANELS_BINDING)
+        .collection::<LayoutPanels>()
         .expect("configuration binds the panels collection");
     let config = context
-        .config(CONFIG_NAME)
-        .expect("manifest declares the layout configuration")
-        .facet::<LayoutConfig>(CONFIG_TAG, CONFIG_KEY)?;
+        .config::<LayoutArrangement>()?
+        .expect("manifest declares the layout configuration");
     let nav_button = context
         .require(SHELL_NAV_BUTTON)
         .expect("a required binding is always resolved")
         .clone();
-    context.publish_component(VIEW, move || {
-        view(panels.clone(), config.clone(), nav_button.clone())
-    })?;
+    context
+        .publish::<LayoutView>(move || view(panels.clone(), config.clone(), nav_button.clone()))?;
     Ok(())
 }
 

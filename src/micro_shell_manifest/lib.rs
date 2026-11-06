@@ -22,26 +22,29 @@
 //! shell mounts in the details position while one of its rows is open. That presentation
 //! learns *which* row by asking the shell ([`OPENED`]), because a presentation takes no
 //! parameters and the shell, not the list, owns the stack.
-use clay_mdk::Access;
 use clay_mdk::Attachment;
-use clay_mdk::AttachmentDeclaration;
-use clay_mdk::BindingResolution;
 use clay_mdk::CollectionCapability;
-use clay_mdk::CollectionContract;
-use clay_mdk::ConfigurationRequest;
-use clay_mdk::ContributionDeclaration;
-use clay_mdk::Entrypoints;
-use clay_mdk::FacetAccess;
+use clay_mdk::CollectionDecl;
+use clay_mdk::ComponentDecl;
+use clay_mdk::ConfigDecl;
+use clay_mdk::DeclaredCollection;
+use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
-use clay_mdk::Request;
-use clay_mdk::SHELL_ROOTS;
+use clay_mdk::PackageDecl;
+use clay_mdk::RootRow;
+use clay_mdk::ShellRoots;
 use clay_mdk::Sidecar;
 use serde::Deserialize;
 use serde::Serialize;
+
+mod declarations;
+pub use declarations::Shell;
+pub use declarations::ShellArrangement;
+pub use declarations::ShellFrame;
+pub use declarations::ShellHome;
+pub use declarations::ShellNavButton;
+pub use declarations::ShellPanels;
 
 pub const ID: &str = "dayframe.shell";
 pub const PACKAGE_VERSION: u32 = 1;
@@ -127,11 +130,11 @@ pub struct Panel {
     pub content: Attachment,
     /// For a list panel whose rows open details: the presentation of one opened row (see the
     /// module docs). Absent for a panel whose rows open nothing.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Attachment>,
     /// Whether this is the home panel, the list the shell shows when nothing is open. Exactly
     /// one installed panel is.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub home: bool,
 }
 
@@ -190,102 +193,41 @@ impl Default for ShellConfig {
 /// home panel, its sidebar/back button and its navigation calls, contributes the home panel to
 /// its own collection, and registers the frame as a shell root.
 pub fn manifest() -> MicroManifest {
-    let call = |name: &str, contract: &str| PublicationDeclaration {
-        name: name.into(),
-        kind: PublicationKind::Call,
-        contract: Some(Nsid::literal(contract)),
-    };
-    let presentation = |name: &str| PublicationDeclaration {
-        name: name.into(),
-        kind: PublicationKind::Presentation,
-        contract: None,
-    };
-    let request = |binding: &str, contract: &str, access: Access| Request {
-        binding: binding.into(),
-        contract: Nsid::literal(contract),
-        access: Some(access),
-        necessity: Necessity::Required,
-        resolution: BindingResolution::Configured,
-        min_revision: None,
-    };
-    MicroManifest {
-        entrypoints: Entrypoints::micro_client(),
-        publications: vec![
-            presentation(FRAME),
-            presentation(HOME),
-            presentation(NAV_BUTTON),
-            call(NAVIGATE, NAVIGATE_CONTRACT),
-            call(BACK, BACK_CONTRACT),
-            call(FORWARD, FORWARD_CONTRACT),
-            call(OPEN_SHEET, OPEN_SHEET_CONTRACT),
-            call(CLOSE_SHEET, CLOSE_SHEET_CONTRACT),
-            call(OPENED, OPENED_CONTRACT),
-        ],
-        requires: vec![],
-        configuration_requests: vec![ConfigurationRequest {
-            binding: CONFIG_NAME.into(),
-            facets: vec![FacetAccess {
-                tag: Nsid::literal(CONFIG_TAG),
-                key_id: Some(CONFIG_KEY.into()),
-                read: true,
-                write: true,
-                create: false,
-                delete: false,
-            }],
-        }],
-        collection_contracts: vec![CollectionContract {
-            id: Nsid::literal(PANELS),
-            selector_schema: Nsid::literal(PANEL_SELECTOR_SCHEMA),
-            key_schema: Nsid::literal(PANEL_KEY_SCHEMA),
-            value_schema: Nsid::literal(PANEL_VALUE_SCHEMA),
-            write_context_schema: None,
-            offered: vec![CollectionCapability::Read, CollectionCapability::Register],
-        }],
+    ManifestBuilder::new()
+        .component::<ShellFrame>()
+        .component::<ShellHome>()
+        .component::<ShellNavButton>()
+        .call(NAVIGATE, NAVIGATE_CONTRACT)
+        .call(BACK, BACK_CONTRACT)
+        .call(FORWARD, FORWARD_CONTRACT)
+        .call(OPEN_SHEET, OPEN_SHEET_CONTRACT)
+        .call(CLOSE_SHEET, CLOSE_SHEET_CONTRACT)
+        .call(OPENED, OPENED_CONTRACT)
+        .config::<ShellArrangement>()
+        .declares::<ShellPanels>()
         // The shell reads panels through a binding configuration resolves; a second write
         // binding to the same contract carries its own home panel. It also registers its frame
         // into the runtime-defined `shell.roots` collection, which the runtime satisfies.
-        collection_requests: vec![
-            request(PANELS_BINDING, PANELS, Access::Read),
-            request(HOME_PANEL_BINDING, PANELS, Access::Write),
-            request(ROOTS_BINDING, SHELL_ROOTS, Access::Write),
-        ],
-        contributions: vec![
-            ContributionDeclaration {
-                id: "home-panel".into(),
-                binding: HOME_PANEL_BINDING.into(),
-                key: ID.into(),
-                payload: serde_json::json!({
-                    "title": "Home",
-                    "sockets": ["list"],
-                    "content": { "$attachment": 0 },
-                    "home": true,
-                }),
-                attachments: vec![AttachmentDeclaration {
-                    index: 0,
-                    publication: HOME.into(),
-                }],
-            },
-            ContributionDeclaration {
-                id: "root".into(),
-                binding: ROOTS_BINDING.into(),
-                key: ID.into(),
-                payload: serde_json::json!({
-                    "title": "Shell",
-                    "content": { "$attachment": 0 },
-                }),
-                attachments: vec![AttachmentDeclaration {
-                    index: 0,
-                    publication: FRAME.into(),
-                }],
-            },
-        ],
-        extra: Default::default(),
-    }
+        .reads::<ShellPanels>(PANELS_BINDING, Necessity::Required)
+        .writes::<ShellPanels>(HOME_PANEL_BINDING, Necessity::Required)
+        .writes::<ShellRoots>(ROOTS_BINDING, Necessity::Required)
+        .contributes::<ShellPanels>("home-panel", ID, |at| Panel {
+            title: "Home".into(),
+            sockets: vec![Socket::List],
+            content: at.own::<ShellHome>(),
+            details: None,
+            home: true,
+        })
+        .contributes::<ShellRoots>("root", ID, |at| RootRow {
+            title: "Shell".into(),
+            content: at.own::<ShellFrame>(),
+        })
+        .build()
 }
 
 /// The shell package as its sidecar carries it: identity, authority and manifest.
 pub fn sidecar() -> Sidecar {
-    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
+    Sidecar::of::<Shell>(manifest())
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ use clay_mdk::host::factory;
 use clay_mdk::Access;
 use clay_mdk::AttachmentDeclaration;
 use clay_mdk::BindingResolution;
+use clay_mdk::ComponentDecl;
 use clay_mdk::ContributionDeclaration;
 use clay_mdk::Entrypoints;
 use clay_mdk::MicroId;
@@ -34,6 +35,13 @@ pub const ID: &str = "dayframe.lifecycle";
 const AUTHORITY: &str = "org.example.dayframe.lifecycle";
 /// The one publication: the presentation the Settings section attaches.
 const VIEW: &str = "view";
+
+/// The lifecycle controls' one presentation, published as [`VIEW`].
+struct LifecycleView;
+
+impl ComponentDecl for LifecycleView {
+    const NAME: &'static str = VIEW;
+}
 const SECTIONS_BINDING: &str = "sections";
 
 fn manifest() -> MicroManifest {
@@ -82,7 +90,7 @@ pub fn micro() -> InstalledMicro {
             Sidecar::new(ID, 1, manifest()).with_authority(AUTHORITY),
             |id, resources, bindings| {
                 factory(resources, id, manifest(), bindings, |context| async move {
-                    context.publish_component(VIEW, || rsx! { LifecyclePanel {} })?;
+                    context.publish::<LifecycleView>(|| rsx! { LifecyclePanel {} })?;
                     Ok(())
                 })
             },

@@ -17,7 +17,7 @@ fn trap() {
 }
 
 async fn activate(context: Context) -> Result<(), Error> {
-    context.publish_component(trapper_manifest::VIEW, || {
+    context.publish::<trapper_manifest::TrapperView>(|| {
         rsx! {
             button {
                 "aria-label": "Trap the guest",

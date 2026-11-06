@@ -386,6 +386,7 @@ impl Runtime {
                     )
                 })
                 .collect(),
+            requests: manifest.collection_requests.clone(),
             backend: Backend::Guest(Rc::clone(&runtime)),
         }));
         RUNTIME.with_borrow_mut(|slot| {
