@@ -668,6 +668,8 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 
 - **D35. Commands for users, XRPC names for developers** (operator, 2026-11-06): user-facing, a cartridge offers *commands*; developer-facing, they are XRPC *methods* (query, procedure, subscription). The `Operation` trait becomes `Method` in its own wasm-buildable crate after the datum_core PR (#82) merges.
 
+- **D36. Our keyhive fork is ours to fix** (operator, 2026-11-06): keyhive is being rewritten from scratch upstream, so fixes and workarounds go straight into our fork (`townframe-changes`); when the rewrite lands, compare our delta with it and port the fixes. Also: work concurrently where tasks are independent; don't block on one task.
+
 ## Deferred
 
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
