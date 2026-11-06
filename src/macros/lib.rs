@@ -15,8 +15,8 @@ use syn::Path;
 use syn::Token;
 use syn::punctuated::Punctuated;
 
-/// The module every emitted item resolves through, so moving it is one edit.
-fn datum_path() -> Path {
+/// The module every emitted item resolves through unless the declaration says `runtime = …`.
+fn default_datum_path() -> Path {
     syn::parse_quote!(::big_cabinet_core::datum)
 }
 
@@ -81,6 +81,15 @@ struct Args {
     tagging: Option<String>,
     authority: Option<Authority>,
     name: Option<syn::LitStr>,
+    /// The module the emitted items resolve through. A crate that cannot link `big_cabinet_core`
+    /// (a wasm guest) names a re-export of `datum_core` here.
+    runtime: Option<Path>,
+}
+
+impl Args {
+    fn datum_path(&self) -> Path {
+        self.runtime.clone().unwrap_or_else(default_datum_path)
+    }
 }
 
 /// The reversed-domain authority a member's NSID is published under: a string literal, or the
@@ -131,6 +140,18 @@ impl Args {
                         ));
                     }
                 });
+            } else if meta.path().is_ident("runtime") {
+                if args.runtime.is_some() {
+                    return Err(syn::Error::new_spanned(&meta, "`runtime` is stated once"));
+                }
+                let Expr::Path(path) = meta_value(&meta)? else {
+                    return Err(syn::Error::new_spanned(
+                        &meta,
+                        "`runtime` is the path of a module that re-exports `datum_core`, e.g. \
+                         `::clay_mdk::datum`",
+                    ));
+                };
+                args.runtime = Some(path.path.clone());
             } else if meta.path().is_ident("name") {
                 if args.name.is_some() {
                     return Err(syn::Error::new_spanned(&meta, "`name` is stated once"));
@@ -153,7 +174,7 @@ impl Args {
                 return Err(syn::Error::new_spanned(
                     &meta,
                     "unknown datum argument: expected `closed`, `open_string`, `closed_string`, \
-                     `tagging = \"…\"`, `authority = …` or `name = \"…\"`",
+                     `tagging = \"…\"`, `authority = …`, `name = \"…\"` or `runtime = …`",
                 ));
             }
         }
@@ -321,7 +342,7 @@ fn member_id(name: &syn::Ident, args: &Args) -> Option<proc_macro2::TokenStream>
             quote!(#id)
         }
         Authority::Path(path) => {
-            let datum = datum_path();
+            let datum = args.datum_path();
             quote!(#datum::const_format::concatcp!(#path, ".", #segment))
         }
     })
@@ -335,15 +356,14 @@ fn last_type_ident(ty: &syn::Type) -> Option<&syn::Ident> {
 }
 
 /// Reads the id back from the `DatumMember` impl, so the schema states the string the impl does.
-fn lexicon_attr(name: &syn::Ident) -> syn::Attribute {
-    let datum = datum_path();
+fn lexicon_attr(name: &syn::Ident, datum: &Path) -> syn::Attribute {
     syn::parse_quote!(#[schemars(extend("x-lexicon-id" = (<#name as #datum::DatumMember>::ID)))])
 }
 
 /// `DatumMember`, and the assert that its id is an NSID. The assert runs where the type is
 /// declared, so an id built from a const authority is checked by the same rule as a literal one.
 fn member_impl(name: &syn::Ident, args: &Args) -> proc_macro2::TokenStream {
-    let datum = datum_path();
+    let datum = args.datum_path();
     let (Some(id), Some(authority)) = (member_id(name, args), &args.authority) else {
         return proc_macro2::TokenStream::new();
     };
@@ -372,7 +392,7 @@ fn expand(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let args = Args::parse(args)?;
     let mut item: Item = syn::parse2(item)?;
-    let datum = datum_path();
+    let datum = args.datum_path();
     let (name, shape) = match &mut item {
         Item::Struct(item) => struct_shape(item, &args, &datum)?,
         Item::Enum(item) if args.open_string || args.closed_string => {
@@ -416,7 +436,7 @@ fn struct_shape(
     if args.authority.is_some() {
         let derived = derived_traits(&item.attrs)?;
         if derived.iter().any(|name| name == "JsonSchema") {
-            item.attrs.push(lexicon_attr(&name));
+            item.attrs.push(lexicon_attr(&name, datum));
         }
     }
     datum_fields::check_field_datums(&item.fields)?;
