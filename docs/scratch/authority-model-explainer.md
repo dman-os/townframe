@@ -1,6 +1,6 @@
 # How authority works in the cabinet (explainer and proposed ADR 022 rework)
 
-Status: Draft
+Status: Superseded by ADR 022 (revised 2026-11-06)
 Owner: Townframe maintainers
 Updated: 2026-11-06
 Scope: Plain-language explainer of the cabinet authority model and the proposed ADR 022 rework, for operator review.
