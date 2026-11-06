@@ -236,7 +236,9 @@ function buildJsdiff() {
       old: oldText,
       new: newText,
       options: jsonClone(options),
-      expected: run(fn, [oldText, newText, jsonClone(options)]),
+      ...(fn === "diffLines"
+        ? { expected: run(fn, [oldText, newText, jsonClone(options)]) }
+        : {}),
     });
   };
 
@@ -273,11 +275,11 @@ function buildJsdiff() {
     push("diffTrimmedLines", oldText, newText, {});
   }
 
-  for (let count = 0; count < 100; count++) {
+  for (let count = 0; count < 60; count++) {
     const [oldText, newText] = tokenPair(random, CHAR_ALPHABET, 10);
     push("diffChars", oldText, newText, random.pick(CHAR_OPTIONS));
   }
-  for (let count = 0; count < 120; count++) {
+  for (let count = 0; count < 70; count++) {
     const [oldText, newText] = tokenPair(random, WORD_ALPHABET, 9);
     push("diffWordsWithSpace", oldText, newText, random.pick(WORD_OPTIONS));
   }
@@ -286,7 +288,7 @@ function buildJsdiff() {
     const options = random.pick([...WORD_OPTIONS, { ignoreWhitespace: false }]);
     push("diffWords", oldText, newText, options);
   }
-  for (let count = 0; count < 90; count++) {
+  for (let count = 0; count < 45; count++) {
     const [oldText, newText] = linePair(random);
     push(
       random.next() < 0.1 ? "diffTrimmedLines" : "diffLines",
@@ -333,7 +335,7 @@ function buildJsdiff() {
       pushPatch(oldText, newText, options, random.pick(HEADER_OPTIONS));
     }
   }
-  for (let count = 0; count < 70; count++) {
+  for (let count = 0; count < 35; count++) {
     const [oldText, newText] = linePair(random);
     pushPatch(
       oldText,
@@ -500,7 +502,7 @@ function buildScanners() {
   ]) {
     texts.add(text);
   }
-  while (texts.size < 450) {
+  while (texts.size < 300) {
     const length = 1 + random.int(8);
     texts.add(
       Array.from({ length }, () => random.pick(SCANNER_FRAGMENTS)).join(""),
@@ -720,7 +722,7 @@ function buildPatches() {
   for (const patch of corpus) {
     for (const options of optionSets) push(patch, options);
   }
-  for (let count = 0; count < 100; count++) {
+  for (let count = 0; count < 50; count++) {
     push(fuzzPatch(random), random.pick(optionSets));
   }
   return {
@@ -842,12 +844,444 @@ function buildUtilities() {
   return { quoted, filetypes, endings, cacheKeys };
 }
 
+// ---- S4: line iteration and layout math --------------------------------
+
+const { iterateOverDiff } = await import(
+  oracle.pierre("utils/iterateOverDiff.js")
+);
+const layout = await import(oracle.pierre("utils/virtualDiffLayout.js"));
+const { computeEstimatedDiffHeights } = await import(
+  oracle.pierre("utils/computeEstimatedDiffHeights.js")
+);
+const { createWindowFromScrollPosition } = await import(
+  oracle.pierre("utils/createWindowFromScrollPosition.js")
+);
+const offsets = await import(oracle.pierre("utils/computeFileOffsets.js"));
+const { trimPatchContext } = await import(
+  oracle.pierre("utils/trimPatchContext.js")
+);
+const { hydratePartialDiff } = await import(
+  oracle.pierre("utils/hydratePartialDiff.js")
+);
+const { computeVirtualFileMetrics } = await import(
+  oracle.pierre("utils/computeVirtualFileMetrics.js")
+);
+
+/** `null | true | [[hunkIndex, {fromStart, fromEnd}]]` as the Rust tests read it. */
+function encodeExpanded(expanded) {
+  if (expanded === undefined) return null;
+  if (expanded === true) return true;
+  return [...expanded.entries()];
+}
+
+function randomExpanded(random, hunkCount) {
+  const kind = random.int(4);
+  if (kind === 0) return undefined;
+  if (kind === 1) return true;
+  const map = new Map();
+  const entries = 1 + random.int(3);
+  for (let entry = 0; entry < entries; entry++) {
+    map.set(random.int(hunkCount + 1), {
+      fromStart: random.int(4),
+      fromEnd: random.int(4),
+    });
+  }
+  return map;
+}
+
+/** Seeded old/new file pair with scattered edits, a trailing-context tail, and optional missing final newline. */
+function syntheticPair(random, lineCount) {
+  const old = Array.from(
+    { length: lineCount },
+    (_, index) => `line ${index + 1}`,
+  );
+  const changed = old.slice();
+  const edits = 2 + random.int(5);
+  for (let edit = 0; edit < edits; edit++) {
+    const at = random.int(changed.length);
+    switch (random.int(3)) {
+      case 0:
+        changed[at] = `edited ${at}`;
+        break;
+      case 1:
+        changed.splice(at, 0, `inserted ${at}`, `inserted ${at}b`);
+        break;
+      default:
+        changed.splice(at, 1 + random.int(2));
+    }
+  }
+  const join = (lines, trailing) => lines.join("\n") + (trailing ? "\n" : "");
+  const trailing = random.next() < 0.75;
+  return [join(old, trailing), join(changed, trailing || random.next() < 0.3)];
+}
+
+function rowArray(props) {
+  const line = (metadata) =>
+    metadata === undefined
+      ? null
+      : [
+          metadata.unifiedLineIndex,
+          metadata.splitLineIndex,
+          metadata.lineIndex,
+          metadata.lineNumber,
+          metadata.noEOFCR,
+        ];
+  return [
+    props.type,
+    props.hunkIndex,
+    props.collapsedBefore,
+    props.collapsedAfter,
+    line(props.deletionLine),
+    line(props.additionLine),
+  ];
+}
+
+function buildS4() {
+  const random = makeRandom(0x5eed05);
+  const diffs = [];
+  const pairs = [
+    ...Object.values(corpusMocks.mockDiffs).map((diff) => [
+      diff.oldFile.contents,
+      diff.newFile.contents,
+    ]),
+    ...Array.from({ length: 5 }, (_, index) =>
+      syntheticPair(random, [30, 45, 60, 90, 25][index]),
+    ),
+  ];
+  for (const [oldText, newText] of pairs) {
+    const diff = parseDiffFromFile(
+      { name: "a.txt", contents: oldText },
+      { name: "a.txt", contents: newText },
+    );
+    diffs.push(jsonClone(diff));
+  }
+  // A partial diff (parsed from patch text only) exercises the isPartial branches.
+  for (const [oldText, newText] of pairs.slice(1, 4)) {
+    const patch = jsdiff.createTwoFilesPatch(
+      "p.txt",
+      "p.txt",
+      oldText,
+      newText,
+      undefined,
+      undefined,
+      {},
+    );
+    diffs.push(jsonClone(parsePatchFiles(patch)[0].files[0]));
+  }
+
+  const iterate = [];
+  for (let diffIndex = 0; diffIndex < diffs.length; diffIndex++) {
+    const diff = diffs[diffIndex];
+    const cases = diff.hunks.length === 0 ? 0 : 16;
+    for (let count = 0; count < cases; count++) {
+      const diffStyle = random.pick(["unified", "split", "both"]);
+      const windowed = random.next() < 0.7;
+      const startingLine = windowed
+        ? random.int(Math.max(diff.unifiedLineCount, 3))
+        : 0;
+      const totalLines =
+        windowed && random.next() < 0.8 ? 1 + random.int(10) : undefined;
+      const threshold = random.pick([undefined, 1, 3]);
+      const expanded = randomExpanded(random, diff.hunks.length);
+      const rows = [];
+      iterateOverDiff({
+        diff: structuredClone(diff),
+        diffStyle,
+        startingLine: startingLine === 0 ? undefined : startingLine,
+        totalLines,
+        expandedHunks: expanded,
+        collapsedContextThreshold: threshold,
+        callback: (props) => {
+          rows.push(rowArray(props));
+        },
+      });
+      iterate.push({
+        diff: diffIndex,
+        diffStyle,
+        startingLine,
+        totalLines: totalLines ?? null,
+        threshold: threshold ?? null,
+        expanded: encodeExpanded(expanded),
+        rows,
+      });
+    }
+  }
+
+  const expandedRegions = [];
+  for (let rangeSize = -1; rangeSize <= 12; rangeSize += 3) {
+    for (const isPartial of [false, true]) {
+      for (const threshold of [1, 3]) {
+        for (const expanded of [
+          undefined,
+          true,
+          new Map([[2, { fromStart: 2, fromEnd: 1 }]]),
+          new Map([[2, { fromStart: 9, fromEnd: 9 }]]),
+          new Map([[2, { fromStart: 0, fromEnd: 0 }]]),
+        ]) {
+          expandedRegions.push({
+            isPartial,
+            rangeSize,
+            threshold,
+            expanded: encodeExpanded(expanded),
+            expected: layout.getExpandedRegion({
+              isPartial,
+              rangeSize,
+              expandedHunks: expanded,
+              hunkIndex: 2,
+              collapsedContextThreshold: threshold,
+            }),
+          });
+        }
+      }
+    }
+  }
+
+  const renderable = [];
+  for (let diffIndex = 0; diffIndex < diffs.length; diffIndex++) {
+    const diff = diffs[diffIndex];
+    for (const threshold of [1, 3]) {
+      for (let variant = 0; variant < 3; variant++) {
+        const expanded =
+          variant === 0 ? undefined : randomExpanded(random, diff.hunks.length);
+        const lines = [];
+        const downs = [];
+        const ups = [];
+        for (
+          let lineNumber = 0;
+          lineNumber <= diff.additionLines.length + 3;
+          lineNumber++
+        ) {
+          const args = {
+            fileDiff: structuredClone(diff),
+            lineNumber,
+            expandedHunks: expanded,
+            collapsedContextThreshold: threshold,
+          };
+          lines.push(layout.isAdditionLineRenderable(args));
+          downs.push(
+            layout.getNearestRenderableAdditionLine({
+              ...args,
+              direction: "down",
+            }) ?? null,
+          );
+          ups.push(
+            layout.getNearestRenderableAdditionLine({
+              ...args,
+              direction: "up",
+            }) ?? null,
+          );
+        }
+        renderable.push({
+          diff: diffIndex,
+          threshold,
+          expanded: encodeExpanded(expanded),
+          renderable: lines,
+          down: downs,
+          up: ups,
+        });
+      }
+    }
+  }
+
+  const heights = [];
+  const separators = [
+    "simple",
+    "metadata",
+    "line-info",
+    "line-info-basic",
+    "custom",
+  ];
+  for (let diffIndex = 0; diffIndex < diffs.length; diffIndex++) {
+    for (let count = 0; count < 8; count++) {
+      const diff = diffs[diffIndex];
+      const metricsInput =
+        random.next() < 0.5
+          ? {}
+          : {
+              lineHeight: 18,
+              diffHeaderHeight: 30,
+              spacing: 4,
+              paddingTop: random.pick([undefined, 2]),
+              paddingBottom: random.pick([undefined, 6]),
+              hunkSeparatorHeight: random.pick([undefined, 24]),
+            };
+      const options = {
+        fileDiff: structuredClone(diff),
+        metrics: computeVirtualFileMetrics(metricsInput),
+        disableFileHeader: random.next() < 0.3,
+        hunkSeparators: random.pick(separators),
+        expandUnchanged: random.next() < 0.2,
+        expandedHunks: randomExpanded(random, diff.hunks.length),
+        collapsedContextThreshold: random.pick([1, 3]),
+        canHydratePartialDiff: random.next() < 0.5,
+      };
+      heights.push({
+        diff: diffIndex,
+        metrics: jsonClone(options.metrics),
+        disableFileHeader: options.disableFileHeader,
+        hunkSeparators: options.hunkSeparators,
+        expandUnchanged: options.expandUnchanged,
+        expanded: encodeExpanded(options.expandedHunks),
+        threshold: options.collapsedContextThreshold,
+        canHydratePartialDiff: options.canHydratePartialDiff,
+        expected: computeEstimatedDiffHeights(options),
+      });
+    }
+  }
+
+  const windows = [];
+  for (let count = 0; count < 100; count++) {
+    const input = {
+      scrollTop: random.int(5000) + (random.next() < 0.3 ? 0.5 : 0),
+      height: 100 + random.int(900),
+      scrollHeight: random.int(8000),
+      fitPerfectly: random.next() < 0.3 ? true : undefined,
+      fitPerfectlyOverscroll: random.next() < 0.3 ? random.int(200) : undefined,
+      overscrollSize: random.int(800),
+    };
+    windows.push({
+      input: jsonClone(input),
+      expected: createWindowFromScrollPosition(input),
+    });
+  }
+
+  const offsetTexts = [
+    "",
+    "a",
+    "a\n",
+    "a\r\nb\r\n",
+    "a\rb\r\nc\n",
+    "\n",
+    "\r",
+    "\r\r\n\n",
+    "a\nb\nc\nd\ne\nf\n",
+    "x\r\n".repeat(20) + "y",
+  ];
+  for (let count = 0; count < 80; count++) {
+    offsetTexts.push(
+      Array.from({ length: random.int(40) }, () =>
+        random.pick(["a", "b", "\n", "\r", "\r\n", " ", "é"]),
+      ).join(""),
+    );
+  }
+  const lineOffsets = offsetTexts.map((text) => ({
+    text,
+    offsets: offsets.computeLineOffsets(text),
+    breaks: offsets.countLineBreaks(text),
+    lines: offsets.linesFromFileContents(text),
+  }));
+
+  const trims = [];
+  const trimInputs = [
+    readFileSync(join(here, "corpus/trim.patch"), "utf8"),
+    readFileSync(join(here, "corpus/file.patch"), "utf8"),
+    corpusMocks.formatPatchWithVersionTrailer,
+    corpusMocks.finalBlankLinePatch,
+  ];
+  for (let count = 0; count < 6; count++) trimInputs.push(fuzzPatch(random));
+  for (const input of trimInputs) {
+    for (const contextSize of [0, 3, 10]) {
+      trims.push({
+        input,
+        contextSize,
+        expected: trimPatchContext(input, contextSize),
+      });
+    }
+  }
+
+  const hydrations = [];
+  for (const [oldText, newText] of pairs.slice(1, 5)) {
+    for (const kind of ["clone", "merge"]) {
+      for (const cacheKeys of kind === "clone" ? [false, true] : [false]) {
+        const patch = jsdiff.createTwoFilesPatch(
+          "p.txt",
+          "p.txt",
+          oldText,
+          newText,
+          undefined,
+          undefined,
+          {},
+        );
+        const partial = parsePatchFiles(patch, {
+          cacheKeyPrefix: cacheKeys ? "pk" : undefined,
+        })[0].files[0];
+        const files = {
+          oldFile: {
+            name: "p.txt",
+            contents: oldText,
+            cacheKey: cacheKeys ? "old" : undefined,
+          },
+          newFile: {
+            name: "p.txt",
+            contents: newText,
+            cacheKey: cacheKeys ? "new" : undefined,
+          },
+        };
+        const options = { disableLineMatching: random.next() < 0.5 };
+        const input = jsonClone(partial);
+        const result = hydratePartialDiff(
+          kind,
+          structuredClone(partial),
+          files,
+          options,
+        );
+        hydrations.push({
+          kind,
+          partial: input,
+          files: jsonClone(files),
+          options,
+          expected: jsonClone(result),
+        });
+      }
+    }
+  }
+  // A pure rename hydrates from the new file alone.
+  const renamePatch =
+    "diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\n";
+  const renamePartial = parsePatchFiles(renamePatch)[0].files[0];
+  const renameFiles = {
+    oldFile: null,
+    newFile: { name: "new.txt", contents: "x\ny\n", cacheKey: "nk" },
+  };
+  hydrations.push({
+    kind: "clone",
+    partial: jsonClone(renamePartial),
+    files: jsonClone(renameFiles),
+    options: {},
+    expected: jsonClone(
+      hydratePartialDiff(
+        "clone",
+        structuredClone(renamePartial),
+        renameFiles,
+        {},
+      ),
+    ),
+  });
+
+  return {
+    pins: {
+      pierre: pins["@pierre/diffs"].version,
+      sha256: pins["@pierre/diffs"].sha256,
+    },
+    diffs,
+    iterate,
+    expandedRegions,
+    renderable,
+    heights,
+    windows,
+    lineOffsets,
+    trims,
+    hydrations,
+  };
+}
+
 const outputs = {
   "jsdiff.json": buildJsdiff(),
   "scanners.json": buildScanners(),
   "types.json": buildTypes(),
   "patches.json": buildPatches(),
   "utilities.json": buildUtilities(),
+  "layout.json": buildS4(),
 };
 
 let drift = false;

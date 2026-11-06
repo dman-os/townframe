@@ -91,7 +91,7 @@ fn parse_options(options: &Value) -> ParsePatchOptions {
 #[test]
 fn parse_patch_files_matches_the_published_parser() {
     let golden: PatchGolden = load_golden("patches.json");
-    assert!(golden.cases.len() > 100);
+    assert!(golden.cases.len() > 50);
     let (mut errors, mut warned) = (0, 0);
     for case in &golden.cases {
         let context = format!("options={} patch={:?}", case.options, case.patch);

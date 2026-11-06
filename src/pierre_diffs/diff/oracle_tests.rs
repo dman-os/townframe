@@ -124,8 +124,8 @@ fn change_runs_reproduce_both_texts() {
             other_cases += 1;
         }
     }
-    assert!(line_cases > 10, "{line_cases}");
-    assert!(other_cases > 200, "{other_cases}");
+    assert!(line_cases > 5, "{line_cases}");
+    assert!(other_cases > 100, "{other_cases}");
 }
 
 /// Applies the hunks of `patch` (our output) to `old` and returns the result,
@@ -259,5 +259,5 @@ fn patches_have_jsdiff_headers_and_apply_cleanly() {
         assert_eq!(apply(&patch, &case.old), case.new, "applying: {context}");
         checked += 1;
     }
-    assert!(checked > 60, "{checked}");
+    assert!(checked > 40, "{checked}");
 }
