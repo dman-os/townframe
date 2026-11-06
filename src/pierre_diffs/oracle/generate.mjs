@@ -1646,6 +1646,283 @@ function buildRenderS5() {
   };
 }
 
+// ---- S6: DiffHunksRenderer over the stub highlighter -------------------------
+
+const { DiffHunksRenderer } = await import(
+  oracle.pierre("renderers/DiffHunksRenderer.js")
+);
+const { isDiffPlainText } = await import(
+  oracle.pierre("utils/isDiffPlainText.js")
+);
+
+function injectedRow(label, key) {
+  return {
+    content: {
+      type: "element",
+      tagName: "div",
+      properties: { "data-injected": `${label}-${key}` },
+      children: [{ type: "text", value: label }],
+    },
+    gutter: {
+      type: "element",
+      tagName: "div",
+      properties: { "data-injected-gutter": `${label}-${key}` },
+      children: [],
+    },
+  };
+}
+
+/**
+ * Injected rows chosen by a fixed function of (hunkIndex, lineIndex), the same
+ * function as `OracleHooks` in renderers/diff_hunks_renderer/oracle_tests.rs.
+ */
+class HookedRenderer extends DiffHunksRenderer {
+  getUnifiedInjectedRowsForLine(context) {
+    const key = context.hunkIndex * 31 + context.lineIndex;
+    switch (key % 4) {
+      case 1:
+        return { before: [injectedRow("ub", key)] };
+      case 2:
+        return { after: [injectedRow("ua1", key), injectedRow("ua2", key)] };
+      case 3:
+        return {
+          before: [injectedRow("ub", key)],
+          after: [injectedRow("ua", key)],
+        };
+      default:
+        return undefined;
+    }
+  }
+
+  getSplitInjectedRowsForLine(context) {
+    const key = context.hunkIndex * 31 + context.lineIndex;
+    switch (key % 5) {
+      case 1:
+        return {
+          before: [{ deletion: injectedRow("sbd", key), addition: undefined }],
+        };
+      case 2:
+        return {
+          after: [{ deletion: undefined, addition: injectedRow("saa", key) }],
+        };
+      case 3:
+        return {
+          before: [
+            {
+              deletion: injectedRow("sbd", key),
+              addition: injectedRow("sba", key),
+            },
+          ],
+          after: [
+            { deletion: injectedRow("sad", key), addition: undefined },
+            { deletion: undefined, addition: injectedRow("saa", key) },
+          ],
+        };
+      case 4:
+        return { before: [{ deletion: undefined, addition: undefined }] };
+      default:
+        return undefined;
+    }
+  }
+}
+
+/** Every element carrying `data-line` (a rendered code line) reduced to its text. */
+function flattenCodeLines(node) {
+  if (Array.isArray(node)) return node.map(flattenCodeLines);
+  if (node === null || typeof node !== "object") return node;
+  if (node.type === "element" && node.properties?.["data-line"] !== undefined) {
+    return { ...node, children: [{ type: "text", value: textContent(node) }] };
+  }
+  return Object.fromEntries(
+    Object.entries(node).map(([key, value]) => [key, flattenCodeLines(value)]),
+  );
+}
+
+function randomRendererCase(random, diffIndex, diff) {
+  const lineLimit =
+    Math.max(diff.additionLines.length, diff.deletionLines.length) + 3;
+  const annotations = [];
+  for (let index = 0, total = random.int(5); index < total; index++) {
+    annotations.push({
+      side: random.pick(["additions", "deletions"]),
+      lineNumber: random.next() < 0.15 ? 0 : 1 + random.int(lineLimit),
+      metadata: { n: index },
+    });
+  }
+  const expansions = [];
+  for (let index = 0, total = random.int(3); index < total; index++) {
+    expansions.push({
+      index: random.int(diff.hunks.length + 1),
+      direction: random.pick(["up", "down", "both"]),
+      count: random.pick([undefined, 1, 3]),
+    });
+  }
+  const windowed = random.next() < 0.5;
+  return {
+    diff: diffIndex,
+    lang: random.next() < 0.35 ? "typescript" : null,
+    mode: random.pick(["process", "render"]),
+    plain: random.next() < 0.5,
+    options: {
+      theme:
+        random.next() < 0.5
+          ? "pierre-dark"
+          : { dark: "pierre-dark", light: "pierre-light" },
+      diffStyle: random.pick(["unified", "split", "split"]),
+      hunkSeparators: random.pick([
+        "simple",
+        "metadata",
+        "line-info",
+        "line-info-basic",
+        "custom",
+      ]),
+      expandUnchanged: random.next() < 0.2,
+      expansionLineCount: random.pick([1, 3, 100]),
+      collapsedContextThreshold: random.pick([0, 1, 3]),
+      disableFileHeader: random.next() < 0.3,
+      headerRenderMode: random.pick(["default", "custom"]),
+      stickyHeader: random.next() < 0.5,
+      diffIndicators: random.pick(["bars", "classic", "none"]),
+      disableBackground: random.next() < 0.3,
+      disableLineNumbers: random.next() < 0.3,
+      overflow: random.pick(["scroll", "wrap"]),
+      lineDiffType: random.pick([
+        "none",
+        "word",
+        "word-alt",
+        "word-line",
+        "char",
+      ]),
+      maxLineDiffLength: 1000,
+    },
+    hasLoader: random.next() < 0.4,
+    annotations,
+    expansions,
+    hooks: random.next() < 0.4,
+    range: windowed
+      ? {
+          startingLine: random.int(6),
+          totalLines: random.next() < 0.8 ? 1 + random.int(12) : null,
+          bufferBefore: random.pick([0, 0, 20]),
+          bufferAfter: random.pick([0, 0, 40]),
+        }
+      : { startingLine: 0, totalLines: null, bufferBefore: 0, bufferAfter: 0 },
+  };
+}
+
+function runRendererCase(diff, rendererCase) {
+  const { options, range } = rendererCase;
+  const renderRange = {
+    ...range,
+    totalLines: range.totalLines ?? Number.POSITIVE_INFINITY,
+  };
+  const rendererOptions = { ...options };
+  if (rendererCase.hasLoader)
+    rendererOptions.loadDiffFiles = async () => undefined;
+  const Renderer = rendererCase.hooks ? HookedRenderer : DiffHunksRenderer;
+  const renderer = new Renderer(rendererOptions);
+  renderer.setLineAnnotations(
+    rendererCase.annotations.map((annotation) => ({ ...annotation })),
+  );
+  for (const expansion of rendererCase.expansions) {
+    renderer.expandHunk(expansion.index, expansion.direction, expansion.count);
+  }
+  const fileDiff = structuredClone(diff);
+  if (rendererCase.lang !== null) fileDiff.lang = rendererCase.lang;
+  const renderOptions = {
+    theme: options.theme,
+    useTokenTransformer: false,
+    tokenizeMaxLineLength: 1000,
+    lineDiffType: options.lineDiffType,
+    maxLineDiffLength: options.maxLineDiffLength,
+  };
+  const threshold = options.collapsedContextThreshold;
+  let themed;
+  if (rendererCase.mode === "process") {
+    themed = renderDiffWithHighlighter(
+      fileDiff,
+      stubHighlighter,
+      renderOptions,
+      rendererCase.plain
+        ? {
+            forcePlainText: true,
+            expandedHunks: true,
+            collapsedContextThreshold: threshold,
+          }
+        : { forcePlainText: false, collapsedContextThreshold: threshold },
+    );
+  } else {
+    // What `renderDiff` does for a diff it renders as plain text through a
+    // finite range (the worker's getPlainDiffAST); anything else is whole.
+    const hasContent =
+      fileDiff.additionLines.length > 0 || fileDiff.deletionLines.length > 0;
+    const forcePlainText = !hasContent || isDiffPlainText(fileDiff);
+    const defaultRange =
+      range.startingLine === 0 &&
+      range.totalLines === null &&
+      range.bufferBefore === 0 &&
+      range.bufferAfter === 0;
+    themed = renderDiffWithHighlighter(
+      fileDiff,
+      stubHighlighter,
+      renderOptions,
+      forcePlainText
+        ? {
+            forcePlainText: true,
+            startingLine: renderRange.startingLine,
+            totalLines: renderRange.totalLines,
+            expandedHunks:
+              defaultRange || options.expandUnchanged
+                ? true
+                : renderer.expandedHunks,
+            collapsedContextThreshold: threshold,
+          }
+        : { forcePlainText: false, collapsedContextThreshold: threshold },
+    );
+  }
+  const result = renderer.processDiffResult(fileDiff, renderRange, themed);
+  delete result.fileDiff;
+  return {
+    result: jsonClone(result),
+    fullAst: jsonClone(renderer.renderFullAST(result)),
+  };
+}
+
+function buildRenderS6(diffs) {
+  const random = makeRandom(0x5eed08);
+  const cases = [];
+  for (let diffIndex = 0; diffIndex < diffs.length; diffIndex++) {
+    for (let count = 0; count < 40; count++) {
+      const rendererCase = randomRendererCase(
+        random,
+        diffIndex,
+        diffs[diffIndex],
+      );
+      const { result, fullAst } = runRendererCase(
+        diffs[diffIndex],
+        rendererCase,
+      );
+      const entry = {
+        ...rendererCase,
+        expected: {
+          rowCount: result.rowCount,
+          totalLines: result.totalLines,
+          hunkData: result.hunkData,
+          exact: [fnv64(result), fnv64(fullAst)],
+          flat: [
+            fnv64(flattenCodeLines(result)),
+            fnv64(flattenCodeLines(fullAst)),
+          ],
+        },
+      };
+      // A few whole results stay in the golden so a mismatch can be diffed.
+      if (JSON.stringify(result).length < 6000) entry.expected.full = result;
+      cases.push(entry);
+    }
+  }
+  return { pins: { pierre: pins["@pierre/diffs"].version }, cases };
+}
+
 const outputs = {
   "jsdiff.json": buildJsdiff(),
   "scanners.json": buildScanners(),
@@ -1654,6 +1931,7 @@ const outputs = {
   "utilities.json": buildUtilities(),
   "layout.json": buildS4(),
   "render_s5.json": buildRenderS5(),
+  "render_s6.json": buildRenderS6(sharedDiffs()),
 };
 
 let drift = false;

@@ -1,9 +1,12 @@
 // Ported from @pierre/diffs 1.6.4 (tag diffs-v1.6.4, commit
 // 75e00805b44e193c0fb235c1bd9d7fadfa06acf6): packages/diffs/test/testUtils.ts
-// (the hunk-verification helpers; the hast helpers arrive with the renderer).
+// (the hunk-verification helpers; the renderer-facing hast helpers are in the
+// `hast` child module).
 // Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
 // Changes: test-only module; `assertDefined` is `Option::expect`; the digest
 // helpers return `serde_json::Value`.
+
+pub mod hast;
 
 use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::HunkContent;

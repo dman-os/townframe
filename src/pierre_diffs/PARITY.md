@@ -6,11 +6,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 65 | 12925 |
+| PORTED | 72 | 18099 |
 | REPLACED | 5 | 968 |
-| PENDING | 143 | 52122 |
-| OUT | 246 | 97530 |
-| DEFER | 16 | 5196 |
+| PENDING | 132 | 45607 |
+| OUT | 249 | 98688 |
+| DEFER | 17 | 5379 |
 
 | upstream file | LOC | status | slice | Rust location | note |
 |---|---:|---|---|---|---|
@@ -137,7 +137,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/react/utils/useNextRenderData.ts` | 18 | OUT | - |  | OUT (framework adapter) |
 | `pierre/src/react/utils/useStableCallback.ts` | 14 | OUT | - |  | OUT (framework adapter) |
 | `pierre/src/react/utils/useUnresolvedFileInstance.ts` | 228 | DEFER | - |  | DEFER (not needed for PR review v1) |
-| `pierre/src/renderers/DiffHunksRenderer.ts` | 2782 | PENDING | S6 |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | 2782 | PORTED | S6 | `renderers/diff_hunks_renderer.rs`, `renderers/diff_hunks_renderer/process.rs` | unified and split in one `process_diff_result`; protected hooks are the `DiffHunksRendererHooks` trait; caches, worker pool, edit session and async highlighting are dropped (see Dropped branches); oracle: hast JSON of processDiffResult/renderFullAST over the stub highlighter (render_s6.json) |
 | `pierre/src/renderers/FileRenderer.ts` | 1219 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/renderers/UnresolvedFileHunksRenderer.ts` | 421 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/shiki-stream/index.ts` | 3 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
@@ -153,7 +153,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/string-import.d.ts` | 10 | OUT | - |  | OUT |
 | `pierre/src/style.css` | 1867 | PENDING | S8 |  | PORT as stylesheet adapted to Blitz capabilities |
 | `pierre/src/types.ts` | 999 | PORTED | S1 | `types/patch.rs`, `types/options.rs`, `types/view.rs`, `types/conflict.rs`, `types/lines.rs`, `types/layout.rs` | pure-data types; callbacks, DOM-element and hast-bearing types listed in the file header as deferred or out |
-| `pierre/src/utils/annotationHelpers.ts` | 38 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/annotationHelpers.ts` | 38 | OUT | S6 |  | type guards that tell `LineAnnotation` from `DiffLineAnnotation` by a `side` key; the port has two typed structs (and `AnnotationName`), so there is nothing to discriminate |
 | `pierre/src/utils/appendItems.ts` | 10 | OUT | - |  | engine argument-count workaround for push(...items); Vec::extend (noted in trim_patch_context.rs) |
 | `pierre/src/utils/applyLineTextWithNewline.ts` | 20 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areDiffLineAnnotationsEqual.ts` | 13 | PENDING | - |  | PORT (Rust, oracle-tested) |
@@ -232,7 +232,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/hydratePartialDiff.ts` | 268 | PORTED | S4 | `utils/hydrate_partial_diff.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/includesFileAnnotations.ts` | 36 | PORTED | S5 | `utils/render/includes_file_annotations.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/isDefaultRenderRange.ts` | 11 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/isDiffPlainText.ts` | 11 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/isDiffPlainText.ts` | 11 | PORTED | S6 | `utils/is_diff_plain_text.rs` | none beyond the language |
 | `pierre/src/utils/isFilePlainText.ts` | 7 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/isGutterUtilityPath.ts` | 21 | PENDING | - |  | port or replace per slice notes (DOM helper) |
 | `pierre/src/utils/isStyleNode.ts` | 12 | PENDING | - |  | port or replace per slice notes (DOM helper) |
@@ -296,11 +296,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/CodeView.updateItemId.test.ts` | 106 | PENDING | S12 |  |  |
 | `pierre/test/CodeView.workerPoolReady.test.ts` | 363 | OUT | - |  | worker pool |
 | `pierre/test/CodeView.workerRendering.test.ts` | 1018 | OUT | - |  | worker pool |
-| `pierre/test/DiffHunksRender.test.ts` | 490 | PENDING | S6 |  |  |
+| `pierre/test/DiffHunksRender.test.ts` | 490 | PORTED | S6 | `renderers/diff_hunks_renderer_test.rs` | all sixteen cases; row-digest snapshots became source-text invariants, renderFullHTML assertions became hast assertions |
 | `pierre/test/DiffHunksRenderer.editHighlightCache.test.ts` | 284 | OUT | - |  | edit mode is out of scope for v1 |
-| `pierre/test/DiffHunksRendererLanguages.test.ts` | 183 | PENDING | S6 |  |  |
-| `pierre/test/DiffHunksRendererRecompute.test.ts` | 1068 | PENDING | S6 |  |  |
-| `pierre/test/DiffHunksRendererVirtualization.test.ts` | 969 | PENDING | S6 |  |  |
+| `pierre/test/DiffHunksRendererLanguages.test.ts` | 183 | DEFER | S7 |  | language loading is the highlighter's (Shiki/@pierre/highlights); no language loader exists behind the stub |
+| `pierre/test/DiffHunksRendererRecompute.test.ts` | 1068 | OUT | - |  | edit-session hunk recompute (edit mode is out of scope for v1) |
+| `pierre/test/DiffHunksRendererVirtualization.test.ts` | 969 | PORTED | S6 | `renderers/virtualization_test.rs` | demo-geometry numbers derived from the stand-in fixture; windowed renders are differential against the full render; 4.5/4.6/5.x are one table of windows |
 | `pierre/test/File.editSessionOwnership.test.ts` | 1588 | OUT | - |  | edit mode is out of scope for v1 |
 | `pierre/test/File.headerSlots.test.ts` | 120 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/File.partialRender.test.ts` | 148 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
@@ -315,7 +315,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/FileRenderer.ast.test.ts` | 241 | PENDING | S6 |  |  |
 | `pierre/test/FileRenderer.test.ts` | 286 | PENDING | S6 |  |  |
 | `pierre/test/FileStream.test.ts` | 154 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
-| `pierre/test/InjectedRowHooks.test.ts` | 240 | PENDING | S6 |  |  |
+| `pierre/test/InjectedRowHooks.test.ts` | 240 | PORTED | S6 | `renderers/injected_row_hooks_test.rs` | two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer |
 | `pierre/test/InteractionManager.gutterUtility.test.ts` | 1072 | PENDING | S11 |  |  |
 | `pierre/test/README.md` | 105 | OUT | - |  | upstream test instructions (bun) |
 | `pierre/test/UniversalRenderingManager.test.ts` | 156 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
@@ -341,8 +341,8 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/__snapshots__/patchFileRender.test.ts.snap` | 66 | PENDING | - |  | snapshot follows the test file it is named after; ported with it |
 | `pierre/test/__snapshots__/trimPatchContext.test.ts.snap` | 81 | PENDING | - |  | snapshot follows the test file it is named after; ported with it |
 | `pierre/test/advancedStickySpecs.test.ts` | 199 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
-| `pierre/test/annotationHelpers.test.ts` | 52 | PENDING | S6 |  |  |
-| `pierre/test/annotations.test.ts` | 628 | PENDING | S6 |  |  |
+| `pierre/test/annotationHelpers.test.ts` | 52 | OUT | S6 |  | see utils/annotationHelpers.ts: typed annotation structs |
+| `pierre/test/annotations.test.ts` | 628 | PORTED | S6 | `renderers/annotations_test.rs` | all eleven cases; demo-fixture line numbers remapped to the stand-in; placement snapshots became invariants |
 | `pierre/test/computeEstimatedDiffHeights.test.ts` | 383 | PORTED | S4 | `utils/compute_estimated_diff_heights_test.rs` | all upstream cases |
 | `pierre/test/computeLineOffsets.test.ts` | 102 | PORTED | S4 | `utils/compute_file_offsets_test.rs` | all upstream cases (byte offsets) |
 | `pierre/test/createCachedLoader.test.ts` | 36 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
@@ -456,7 +456,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/parseMergeConflictDiffFromFile.test.ts` | 250 | DEFER | - |  | merge-conflict UI |
 | `pierre/test/parsePatchFiles.test.ts` | 1009 | PORTED | S3 | `utils/parse_patch_files_test.rs`, `utils/parse_patch_files_test/headers.rs`, `utils/parse_patch_files_test/repairs.rs` | ported under upstream titles; digest snapshot (diff.patch absent from the extracted tree), lone-surrogate and renderer-count tests listed in the file header |
 | `pierre/test/parseQuotedDiffFileName.test.ts` | 87 | PORTED | S3 | `utils/parse_quoted_diff_file_name_test.rs` | all upstream cases |
-| `pierre/test/patchFileRender.test.ts` | 54 | PENDING | S6 |  |  |
+| `pierre/test/patchFileRender.test.ts` | 54 | PORTED | S6 | `renderers/patch_file_render_test.rs` | digest snapshots became invariants over the parsed patch and the rendered rows |
 | `pierre/test/preloadAnnotations.test.ts` | 51 | OUT | - |  | SSR preload |
 | `pierre/test/preloadDiffs.optionalSides.test.ts` | 86 | OUT | - |  | SSR preload |
 | `pierre/test/preloadThemeType.test.ts` | 33 | OUT | - |  | SSR preload |
@@ -473,7 +473,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/setDeferredArrayItem.test.ts` | 86 | PENDING | S4 |  |  |
 | `pierre/test/sharedHighlighter.test.ts` | 348 | OUT | - |  | Shiki highlighter registry |
 | `pierre/test/sparseLayoutCheckpoints.test.ts` | 539 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
-| `pierre/test/testUtils.ts` | 633 | PORTED | S3 | `test_utils.rs` | hunk-verification and digest helpers ported; hast helpers arrive with the renderer (S6) |
+| `pierre/test/testUtils.ts` | 633 | PORTED | S6 | `test_utils.rs`, `test_utils/hast.rs` | hunk-verification and digest helpers (S3); hast helpers (`projectColumn`, `rowDigests`, `annotationProjection`, ...) and the fixture stand-ins (S6) |
 | `pierre/test/themeTypeUpdates.test.ts` | 323 | PENDING | S7 |  |  |
 | `pierre/test/trim.patch` | 137 | PORTED | S0 | `oracle/corpus/trim.patch` | verbatim oracle corpus file |
 | `pierre/test/trimPatchContext.test.ts` | 120 | PORTED | S4 | `utils/trim_patch_context_test.rs` | snapshot test asserts snapshot facts plus exact oracle comparison |
@@ -490,7 +490,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/workerPoolHighlights.test.ts` | 264 | OUT | - |  | worker pool |
 | `pierre/test/workerPoolTransport.test.ts` | 148 | OUT | - |  | worker pool |
 
-## Assertions converted to invariants (8)
+## Assertions converted to invariants (18)
 
 | upstream test | title | conversion |
 |---|---|---|
@@ -502,3 +502,32 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/createFileHeaderElement.test.ts` | renders default renamed file header AST | prevName is not a FileContents field, so the input is the default case; asserted as equality with it |
 | `pierre/test/createFileHeaderElement.test.ts` | all four tests | toMatchSnapshot replaced by exact comparison with the dist output for the same input |
 | `pierre/test/renderTokenLines.test.ts` | crossing decorations / markers join the following range | JSDOM queries (querySelector, textContent, parentElement) became walks over the hast tree |
+| `pierre/test/DiffHunksRender.test.ts` | row-digest snapshots (buffers prepended to additions/deletions, unified, only additions, only deletions) | toMatchSnapshot of row digests pinned jsdiff's hunk boundaries; replaced by: every rendered line equals its source line, indexes strictly increase, buffer sizes equal the change-block surpluses |
+| `pierre/test/DiffHunksRender.test.ts` | renderFullHTML assertions (data-container-size, 'More unchanged context may be available', data-expand-index) | asserted on the hast (property presence, text content, `data-expand-index`) because hastToHtml is deferred |
+| `pierre/test/DiffHunksRender.test.ts` | mockDiffs.diffRowBufferTest.options | the field is absent from the corpus excerpt; default options apply |
+| `pierre/test/annotations.test.ts` | annotation placement snapshots (unified, split additions, split deletions) | replaced by the invariants asserted around them: each annotation row follows its own line and every annotation is found once |
+| `pierre/test/annotations.test.ts` | hard-coded demo line numbers (5, 8, 44, 15, 600) | fileOld/fileNew are absent; remapped to lines of the stand-in with the same roles (context 5, added 8, deleted old 302, collapsed 60, trailing 600) |
+| `pierre/test/DiffHunksRendererVirtualization.test.ts` | 517/490 rows, 267/431 column lines, indices 3/184/57-106, window sizes 37/50 | numbers of the demo geometry; derived from the stand-in diff (declared rows + auto-expanded gaps, the widest collapsed gap as hunk 3) |
+| `pierre/test/DiffHunksRendererVirtualization.test.ts` | expandHunk(3, 'both', Infinity) | a large finite count (usize has no infinity) |
+| `pierre/test/patchFileRender.test.ts` | patch digest and rendered-row snapshots | replaced by: one hunk, column line counts equal the hunk's counts, every rendered line is a patch line |
+| `pierre/test/InjectedRowHooks.test.ts` | UnresolvedFileHunksRenderer emits merge conflict action rows inline | deferred with the merge-conflict renderer |
+| `pierre/test/renderTokenLines.test.ts` | undecorated editor lines retain whitespace positions and empty-line placeholders | drives useTokenTransformer (editor token transformer), not ported |
+
+## Dropped branches (14)
+
+| upstream file | dropped | reason |
+|---|---|---|
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `renderCache`, `DiffRenderCache.hydrated`, `diffCache`, `clearRenderCache`, the `this.diff` field | the Rust renderer holds no diff and no render cache: `render_diff` takes the diff and returns the result, so there is nothing to invalidate; `expandHunk` no longer clears a cache |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `pendingHighlightResult`, `getReadyRenderResult`, `hasHighlightedRenderCache`, `applyHighlightResult`, `onHighlightSuccess`, `onRenderUpdate` | hand-off of background highlight results into the next render; highlighting is synchronous behind the `DiffsHighlighter` trait |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `asyncRender`, `asyncHighlight`, `initializeHighlighter`, `onHighlightError`, `HighlighterDisposedError` handling | highlighter loading and disposal are async in upstream; the trait is synchronous and its real implementation (S7) owns loading |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | worker pool: `workerManager`, `getHighlightWorkerManager`, `cacheHighlightResult`, `getMatchingWorkerResultCache`, `getLocalHighlightTheme`, `getEffectiveCodeOptions`, the pool theme in `getOptionsWithDefaults`, `shouldHighlightOnMainThread` | worker pool is OUT (PARITY.md); its windowed plain render `getPlainDiffAST` is the windowed branch of `render_diff` |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `hydrate`, `canRenderDiff`, `getDiffForNextRender`, `getRenderOptions.forceHighlight`, `preserveHydratedContent` | server-rendered DOM hydration and the decision of which cached AST stays on screen; no DOM, no cache |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `computedLangs`, `getDiffLanguages`, `areThemesAttached`/`areLanguagesAttached` checks | a highlighter that cannot serve a language is the highlighter's concern (S7); the stub serves all |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | edit session: `editSessionActive`, `beginEditSession`, `endEditSession`, `editorRenderReady`, `refreshHighlightedResult`, `applyRefreshedResult`, `updateRenderCache`, `applyDocumentChange`, `applySessionDocumentChange`, `applyRecomputePreservingSessionType`, `applyExpansionRemap`, `markEditSessionPass`, `setExpandedHunksMap`, `pendingStructuralRows`, `realignAdditionHastLines`, `contentLineCount`, `canAppendFinalDocumentRow`, `createPlainAdditionLineElement`, `getEditorDocumentLines` | edit mode is out of scope for v1 (CM6 lane) |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `isRenderCacheDirty` properties in `processDiffResult` (`data-line`/`data-line-index` extension), the empty-addition fallback in `renderDiffWithHighlighter` | only reachable inside an edit session |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `renderFullHTML`, `renderPartialHTML` | serialise through `hastToHtml`, which is DEFER; the UI consumes the hast |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `lazyLineAST` argument of `renderDiffWithHighlighter` | replaced by the windowed plain-text render (`startingLine`/`totalLines` of the range) used when a plain diff is rendered through a finite `RenderRange` |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `HunksRenderResult.fileDiff` | the caller owns the diff; returning it would clone |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `cleanUp`, `recycle`, `__id` | lifecycle and identity bookkeeping of a long-lived JS object; the Rust renderer is plain data that drops |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `createPreElement` as an overridable `protected` method | stays a method, not an extension point: nothing in the port overrides it |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | `useTokenTransformer` in `getRenderOptions` | the editor token transformer is not ported (see the file headers of `render_token_lines.rs`); the option is carried but `renderDiffWithHighlighter` rejects `true` |

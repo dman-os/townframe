@@ -84,6 +84,56 @@ pub fn assert_json_eq(context: &str, expected: &Value, actual: &Value) {
     }
 }
 
+/// FNV-1a 64 over the sorted-key canonical JSON of `value`, the same digest as
+/// `fnv64` in `oracle/generate.mjs`. Integral floats print as integers, as
+/// `JSON.stringify` writes them.
+pub fn fnv64(value: &Value) -> String {
+    fn write(value: &Value, out: &mut String) {
+        match value {
+            Value::Array(items) => {
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    write(item, out);
+                }
+                out.push(']');
+            }
+            Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_by(|left, right| left.0.cmp(right.0));
+                out.push('{');
+                for (index, (key, entry)) in entries.into_iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::to_string(key).expect("key"));
+                    out.push(':');
+                    write(entry, out);
+                }
+                out.push('}');
+            }
+            Value::Number(number) => match (number.as_i64(), number.as_f64()) {
+                (Some(integer), _) => out.push_str(&integer.to_string()),
+                (None, Some(float)) if float.fract() == 0.0 && float.abs() < 9e15 => {
+                    out.push_str(&(float as i64).to_string());
+                }
+                _ => out.push_str(&number.to_string()),
+            },
+            other => out.push_str(&serde_json::to_string(other).expect("scalar")),
+        }
+    }
+    let mut canonical = String::new();
+    write(value, &mut canonical);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in canonical.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

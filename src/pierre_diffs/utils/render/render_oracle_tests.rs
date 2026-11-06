@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::highlighter_types::PlainTextHighlighter;
 use crate::highlighter_types::ThemedToken;
 use crate::oracle_testing::assert_json_eq;
+use crate::oracle_testing::fnv64;
 use crate::oracle_testing::load_golden;
 use crate::types::lines::ExpandedHunks;
 use crate::types::lines::ForceDiffPlainTextOptions;
@@ -250,30 +251,6 @@ fn decode_expanded(value: &Value) -> Option<ExpandedHunks> {
     }
 }
 
-/// Sorted-key canonical JSON hashed with FNV-1a 64, as `fnv64` in generate.mjs.
-fn canonical(value: Value) -> Value {
-    match value {
-        Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
-        // serde_json's `Map` is a BTreeMap without `preserve_order`, so keys are sorted.
-        Value::Object(map) => {
-            Value::Object(map.into_iter().map(|(k, v)| (k, canonical(v))).collect())
-        }
-        other => other,
-    }
-}
-
-fn fnv64(value: Value) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in serde_json::to_string(&canonical(value))
-        .expect("json")
-        .bytes()
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
 fn flatten(line: &Option<crate::hast::ElementContent>) -> Value {
     use crate::hast::ElementContent;
     match line {
@@ -344,17 +321,17 @@ fn render_diff_with_highlighter_matches() {
             "{context}"
         );
         let flat_actual = [
-            fnv64(Value::Array(
+            fnv64(&Value::Array(
                 result.code.deletion_lines.iter().map(flatten).collect(),
             )),
-            fnv64(Value::Array(
+            fnv64(&Value::Array(
                 result.code.addition_lines.iter().map(flatten).collect(),
             )),
         ];
         assert_eq!(flat_actual, case.flat, "{context}: flattened text");
         let exact_actual = [
-            fnv64(serde_json::to_value(&result.code.deletion_lines).expect("json")),
-            fnv64(serde_json::to_value(&result.code.addition_lines).expect("json")),
+            fnv64(&serde_json::to_value(&result.code.deletion_lines).expect("json")),
+            fnv64(&serde_json::to_value(&result.code.addition_lines).expect("json")),
         ];
         if exact_actual == case.exact {
             exact += 1;

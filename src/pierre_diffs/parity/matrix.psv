@@ -121,7 +121,7 @@ pierre/src/react/utils/useForceUpdate.ts|25|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useNextRenderData.ts|18|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useStableCallback.ts|14|OUT|-||OUT (framework adapter)
 pierre/src/react/utils/useUnresolvedFileInstance.ts|228|DEFER|-||DEFER (not needed for PR review v1)
-pierre/src/renderers/DiffHunksRenderer.ts|2782|PENDING|S6||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/renderers/DiffHunksRenderer.ts|2782|PORTED|S6|renderers/diff_hunks_renderer.rs;renderers/diff_hunks_renderer/process.rs|unified and split in one `process_diff_result`; protected hooks are the `DiffHunksRendererHooks` trait; caches, worker pool, edit session and async highlighting are dropped (see Dropped branches); oracle: hast JSON of processDiffResult/renderFullAST over the stub highlighter (render_s6.json)
 pierre/src/renderers/FileRenderer.ts|1219|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
 pierre/src/renderers/UnresolvedFileHunksRenderer.ts|421|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/shiki-stream/index.ts|3|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
@@ -137,7 +137,7 @@ pierre/src/ssr/renderHTML.ts|9|OUT|-||OUT (framework adapter)
 pierre/src/string-import.d.ts|10|OUT|-||OUT
 pierre/src/style.css|1867|PENDING|S8||PORT as stylesheet adapted to Blitz capabilities
 pierre/src/types.ts|999|PORTED|S1|types/patch.rs;types/options.rs;types/view.rs;types/conflict.rs;types/lines.rs;types/layout.rs|pure-data types; callbacks, DOM-element and hast-bearing types listed in the file header as deferred or out
-pierre/src/utils/annotationHelpers.ts|38|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/annotationHelpers.ts|38|OUT|S6||type guards that tell `LineAnnotation` from `DiffLineAnnotation` by a `side` key; the port has two typed structs (and `AnnotationName`), so there is nothing to discriminate
 pierre/src/utils/appendItems.ts|10|OUT|-||engine argument-count workaround for push(...items); Vec::extend (noted in trim_patch_context.rs)
 pierre/src/utils/applyLineTextWithNewline.ts|20|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areDiffLineAnnotationsEqual.ts|13|PENDING|-||PORT (Rust, oracle-tested)
@@ -216,7 +216,7 @@ pierre/src/utils/hostTheme.ts|34|PENDING|-||PORT (Rust, oracle-tested on hast JS
 pierre/src/utils/hydratePartialDiff.ts|268|PORTED|S4|utils/hydrate_partial_diff.rs|exact oracle parity (layout.json) plus ported upstream tests
 pierre/src/utils/includesFileAnnotations.ts|36|PORTED|S5|utils/render/includes_file_annotations.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/isDefaultRenderRange.ts|11|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/isDiffPlainText.ts|11|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/isDiffPlainText.ts|11|PORTED|S6|utils/is_diff_plain_text.rs|none beyond the language
 pierre/src/utils/isFilePlainText.ts|7|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/isGutterUtilityPath.ts|21|PENDING|-||port or replace per slice notes (DOM helper)
 pierre/src/utils/isStyleNode.ts|12|PENDING|-||port or replace per slice notes (DOM helper)
@@ -280,11 +280,11 @@ pierre/test/CodeView.scrollAnchoring.test.ts|547|PENDING|S12||
 pierre/test/CodeView.updateItemId.test.ts|106|PENDING|S12||
 pierre/test/CodeView.workerPoolReady.test.ts|363|OUT|-||worker pool
 pierre/test/CodeView.workerRendering.test.ts|1018|OUT|-||worker pool
-pierre/test/DiffHunksRender.test.ts|490|PENDING|S6||
+pierre/test/DiffHunksRender.test.ts|490|PORTED|S6|renderers/diff_hunks_renderer_test.rs|all sixteen cases; row-digest snapshots became source-text invariants, renderFullHTML assertions became hast assertions
 pierre/test/DiffHunksRenderer.editHighlightCache.test.ts|284|OUT|-||edit mode is out of scope for v1
-pierre/test/DiffHunksRendererLanguages.test.ts|183|PENDING|S6||
-pierre/test/DiffHunksRendererRecompute.test.ts|1068|PENDING|S6||
-pierre/test/DiffHunksRendererVirtualization.test.ts|969|PENDING|S6||
+pierre/test/DiffHunksRendererLanguages.test.ts|183|DEFER|S7||language loading is the highlighter's (Shiki/@pierre/highlights); no language loader exists behind the stub
+pierre/test/DiffHunksRendererRecompute.test.ts|1068|OUT|-||edit-session hunk recompute (edit mode is out of scope for v1)
+pierre/test/DiffHunksRendererVirtualization.test.ts|969|PORTED|S6|renderers/virtualization_test.rs|demo-geometry numbers derived from the stand-in fixture; windowed renders are differential against the full render; 4.5/4.6/5.x are one table of windows
 pierre/test/File.editSessionOwnership.test.ts|1588|OUT|-||edit mode is out of scope for v1
 pierre/test/File.headerSlots.test.ts|120|PENDING|-||not yet assigned to a slice; triage in the owning slice
 pierre/test/File.partialRender.test.ts|148|PENDING|-||not yet assigned to a slice; triage in the owning slice
@@ -299,7 +299,7 @@ pierre/test/FileDiff.workerRendering.test.ts|485|OUT|-||worker pool
 pierre/test/FileRenderer.ast.test.ts|241|PENDING|S6||
 pierre/test/FileRenderer.test.ts|286|PENDING|S6||
 pierre/test/FileStream.test.ts|154|PENDING|-||not yet assigned to a slice; triage in the owning slice
-pierre/test/InjectedRowHooks.test.ts|240|PENDING|S6||
+pierre/test/InjectedRowHooks.test.ts|240|PORTED|S6|renderers/injected_row_hooks_test.rs|two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer
 pierre/test/InteractionManager.gutterUtility.test.ts|1072|PENDING|S11||
 pierre/test/README.md|105|OUT|-||upstream test instructions (bun)
 pierre/test/UniversalRenderingManager.test.ts|156|PENDING|-||not yet assigned to a slice; triage in the owning slice
@@ -325,8 +325,8 @@ pierre/test/__snapshots__/parsePatchFiles.test.ts.snap|2050|PENDING|-||snapshot 
 pierre/test/__snapshots__/patchFileRender.test.ts.snap|66|PENDING|-||snapshot follows the test file it is named after; ported with it
 pierre/test/__snapshots__/trimPatchContext.test.ts.snap|81|PENDING|-||snapshot follows the test file it is named after; ported with it
 pierre/test/advancedStickySpecs.test.ts|199|PENDING|-||not yet assigned to a slice; triage in the owning slice
-pierre/test/annotationHelpers.test.ts|52|PENDING|S6||
-pierre/test/annotations.test.ts|628|PENDING|S6||
+pierre/test/annotationHelpers.test.ts|52|OUT|S6||see utils/annotationHelpers.ts: typed annotation structs
+pierre/test/annotations.test.ts|628|PORTED|S6|renderers/annotations_test.rs|all eleven cases; demo-fixture line numbers remapped to the stand-in; placement snapshots became invariants
 pierre/test/computeEstimatedDiffHeights.test.ts|383|PORTED|S4|utils/compute_estimated_diff_heights_test.rs|all upstream cases
 pierre/test/computeLineOffsets.test.ts|102|PORTED|S4|utils/compute_file_offsets_test.rs|all upstream cases (byte offsets)
 pierre/test/createCachedLoader.test.ts|36|PENDING|-||not yet assigned to a slice; triage in the owning slice
@@ -440,7 +440,7 @@ pierre/test/parseDiffFromFile.test.ts|369|PORTED|S3|utils/parse_diff_from_file_t
 pierre/test/parseMergeConflictDiffFromFile.test.ts|250|DEFER|-||merge-conflict UI
 pierre/test/parsePatchFiles.test.ts|1009|PORTED|S3|utils/parse_patch_files_test.rs;utils/parse_patch_files_test/headers.rs;utils/parse_patch_files_test/repairs.rs|ported under upstream titles; digest snapshot (diff.patch absent from the extracted tree), lone-surrogate and renderer-count tests listed in the file header
 pierre/test/parseQuotedDiffFileName.test.ts|87|PORTED|S3|utils/parse_quoted_diff_file_name_test.rs|all upstream cases
-pierre/test/patchFileRender.test.ts|54|PENDING|S6||
+pierre/test/patchFileRender.test.ts|54|PORTED|S6|renderers/patch_file_render_test.rs|digest snapshots became invariants over the parsed patch and the rendered rows
 pierre/test/preloadAnnotations.test.ts|51|OUT|-||SSR preload
 pierre/test/preloadDiffs.optionalSides.test.ts|86|OUT|-||SSR preload
 pierre/test/preloadThemeType.test.ts|33|OUT|-||SSR preload
@@ -457,7 +457,7 @@ pierre/test/scrollbarGutter.test.ts|41|PENDING|-||not yet assigned to a slice; t
 pierre/test/setDeferredArrayItem.test.ts|86|PENDING|S4||
 pierre/test/sharedHighlighter.test.ts|348|OUT|-||Shiki highlighter registry
 pierre/test/sparseLayoutCheckpoints.test.ts|539|PENDING|-||not yet assigned to a slice; triage in the owning slice
-pierre/test/testUtils.ts|633|PORTED|S3|test_utils.rs|hunk-verification and digest helpers ported; hast helpers arrive with the renderer (S6)
+pierre/test/testUtils.ts|633|PORTED|S6|test_utils.rs;test_utils/hast.rs|hunk-verification and digest helpers (S3); hast helpers (`projectColumn`, `rowDigests`, `annotationProjection`, ...) and the fixture stand-ins (S6)
 pierre/test/themeTypeUpdates.test.ts|323|PENDING|S7||
 pierre/test/trim.patch|137|PORTED|S0|oracle/corpus/trim.patch|verbatim oracle corpus file
 pierre/test/trimPatchContext.test.ts|120|PORTED|S4|utils/trim_patch_context_test.rs|snapshot test asserts snapshot facts plus exact oracle comparison
