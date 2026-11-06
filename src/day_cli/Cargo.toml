@@ -52,7 +52,6 @@ data-encoding.workspace = true
 
 #
 # crypto
-ed25519-dalek.workspace = true
 rand.workspace = true
 
 #

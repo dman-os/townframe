@@ -13,7 +13,8 @@ impl SqliteFrontierCodec for big_cabinet::index::datum_set::DatumSetCodec
 impl service_utils_rs :: Handler < MintDocCapability > for big_cabinet::doc::access::DocsService
 impl std :: fmt :: Debug for big_cabinet::datum_store::DatumStoreHandle < S >
 impl std :: ops :: Deref for big_cabinet::drawer::Core
-pub big_cabinet::authority::async fn boot (secrets : & SecretStore , sql : Database ,) -> Result < (Authority , StopToken) , AuthorityError >
+pub big_cabinet::authority::async fn boot (secrets : & SecretStore , node_id : & str , sql : Database ,) -> Result < (Authority , StopToken) , AuthorityError >
+pub big_cabinet::authority::async fn delete_wrapping_key (secrets : & SecretStore , node_id : & str ,) -> Result < bool , AuthorityError >
 pub big_cabinet::doc::async fn boot (config : DocsConfig) -> Result < (DocsRepo , StopToken) , DocsError >
 pub big_cabinet::doc::async fn prepare (config : DocsConfig) -> Result < (DocsRepo , StopToken) , DocsError >
 pub big_cabinet::drawer::async fn boot (config : DrawerConfig < '_ >) -> Result < (Drawers , StopToken) , DrawersError >
@@ -26,7 +27,7 @@ pub enum big_cabinet::index::datum_ref::DatumRefQuery { # [doc = " Every edge ou
 pub enum big_cabinet::index::datum_set::DatumMembership { Present { doc_heads : Vec < ChangeHash > , datum_heads : Vec < ChangeHash > , # [doc = " Lamport clock of `datum_heads`: the greatest `max_op` among the"] # [doc = " introducing changes. See `DatumVersion` in the DocsRepo protocol."] clock : u64 , }, Removed { doc_heads : Option < Vec < ChangeHash > > , datum_heads : Vec < ChangeHash > , clock : u64 , } }
 pub enum big_cabinet::index::datum_set::DatumSetQuery { Doc (DocId), Tag (DatumTag), Route (DatumRoute), # [doc = " Every live route with exactly this datum key, across documents."] Key (DatumKey) }
 pub enum big_cabinet::schema::SchemaRepoError { # [error ("known datum schema tag is empty")] EmptyDatumTag, # [error ("known datum schema tag `{0}` is configured more than once")] DuplicateDatumTag (String), # [error ("sidecar bundle is invalid: {source}")] SidecarInvalid { # [source] source : UniverseError , }, # [error ("schema pair for datum `{tag}` is invalid: {source}")] Admission { tag : String , # [source] source : Box < LexiconAdmissionError > , }, # [error ("datum `{tag}` is not known to this SchemaRepo")] UnknownDatum { tag : String } }
-pub impl big_cabinet::authority::AuthorityService::async fn boot (secrets : & SecretStore , sql : Database ,) -> Result < (Arc < Self > , StopToken) , AuthorityError >
+pub impl big_cabinet::authority::AuthorityService::async fn boot (secrets : & SecretStore , node_id : & str , sql : Database ,) -> Result < (Arc < Self > , StopToken) , AuthorityError >
 pub impl big_cabinet::authority::AuthorityService::async fn open_namespace (& self , namespace_id : Uuid7) -> Result < Namespace , AuthorityError >
 pub impl big_cabinet::authority::AuthorityService::fn node_issuer (& self) -> MultibaseKey
 pub impl big_cabinet::authority::AuthorityService::fn node_public_key (& self) -> ActorPublicKey

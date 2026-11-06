@@ -22,7 +22,9 @@ impl Fixture {
         let sql = sqlite_rs::test_support::db(&[]).unwrap().clone();
         let store = keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(store).await.unwrap();
-        let (authority, stop) = authority::boot(&secrets, sql.clone()).await.unwrap();
+        let (authority, stop) = authority::boot(&secrets, "test-node", sql.clone())
+            .await
+            .unwrap();
         let namespace = authority
             .service
             .open_namespace(Uuid7::new())
@@ -472,7 +474,7 @@ async fn restart_preserves_standing_grants_without_adopting_live_handles() {
         .mint(fixture.proof(subject, "durable").await.dependencies)
         .await
         .unwrap();
-    let (other, stop) = authority::boot(&fixture.secrets, fixture.sql.clone())
+    let (other, stop) = authority::boot(&fixture.secrets, "test-node", fixture.sql.clone())
         .await
         .unwrap();
     let namespace = other

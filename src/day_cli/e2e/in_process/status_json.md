@@ -13,7 +13,7 @@ $ day status --json
   "peers": null,
   "services": null,
   "socket": {
-    "path": "[..]/node/run/node.sock",
+    "path": "[..]/run/day/[..].sock",
     "state": "absent"
   }
 }

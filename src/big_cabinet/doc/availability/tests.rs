@@ -93,10 +93,13 @@ impl Node {
         let keyring =
             keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
-        let (authority, authority_stop) =
-            crate::authority::boot(&secrets, sqlite_rs::test_support::db(&[]).unwrap().clone())
-                .await
-                .unwrap();
+        let (authority, authority_stop) = crate::authority::boot(
+            &secrets,
+            "test-node",
+            sqlite_rs::test_support::db(&[]).unwrap().clone(),
+        )
+        .await
+        .unwrap();
         let namespace = authority
             .service
             .open_namespace(Uuid7::new())

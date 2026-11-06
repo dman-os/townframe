@@ -6,6 +6,7 @@
 //! is a leftover of a daemon that died without cleaning up. Nothing here sleeps or polls:
 //! `start` waits for the daemon's readiness line, `stop` blocks on the lock.
 
+use crate::context::Booted;
 use crate::context::NodeDir;
 use crate::context::SocketState;
 use crate::interlude::*;
@@ -40,11 +41,12 @@ pub async fn run(command: DaemonCommands) -> Res<ExitCode> {
     }
 }
 
-/// Boots the node with its socket attached and serves until `shutdown` resolves, then stops it.
-/// `ready` is called once, when the socket accepts connections.
+/// Boots the node with its socket attached (and its peers service, when `node.json` configures
+/// one) and serves until `shutdown` resolves, then stops it. `ready` is called once, when the
+/// socket accepts connections, with the booted node.
 pub async fn serve(
     dir: &NodeDir,
-    ready: impl FnOnce(&Path) -> Res<()>,
+    ready: impl FnOnce(&Booted) -> Res<()>,
     shutdown: impl Future<Output = ()>,
 ) -> Res<()> {
     let lock = match dir.try_lock()? {
@@ -55,17 +57,8 @@ pub async fn serve(
         ),
     };
     dir.ensure_run_dir()?;
-    let socket = dir.socket_path();
-    let booted = crate::context::Booted::boot(
-        dir,
-        lock,
-        big_node::Listeners {
-            unix_socket: Some(socket.clone()),
-            ..default()
-        },
-    )
-    .await?;
-    let served = ready(&socket);
+    let booted = Booted::boot(dir, lock, true).await?;
+    let served = ready(&booted);
     if served.is_ok() {
         shutdown.await;
     }
@@ -84,7 +77,13 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
     let mut interrupt = signal(SignalKind::interrupt())?;
     serve(
         dir,
-        |socket| {
+        |booted| {
+            let socket = booted
+                .node
+                .listeners
+                .unix_socket
+                .as_ref()
+                .expect("the daemon boots with its socket attached");
             let mut stdout = std::io::stdout().lock();
             writeln!(stdout, "{READY_PREFIX}{}", socket.display())?;
             stdout.flush()?;
@@ -104,7 +103,7 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
 async fn start(dir: &NodeDir) -> Res<ExitCode> {
     match dir.probe_socket().await? {
         SocketState::Live => {
-            println!("daemon already running on {}", dir.socket_path().display());
+            println!("daemon already running on {}", dir.socket_path()?.display());
             return Ok(ExitCode::SUCCESS);
         }
         SocketState::Stale | SocketState::Absent => {}
@@ -153,7 +152,7 @@ async fn stop(dir: &NodeDir) -> Res<ExitCode> {
         Ok(_free) => {
             // Nobody has the node. A socket file left behind is a daemon that died uncleanly.
             if dir.probe_socket().await? == SocketState::Stale {
-                std::fs::remove_file(dir.socket_path())?;
+                std::fs::remove_file(dir.socket_path()?)?;
                 println!("daemon not running; removed its stale socket");
             } else {
                 println!("daemon not running");
@@ -184,7 +183,7 @@ async fn stop(dir: &NodeDir) -> Res<ExitCode> {
 }
 
 async fn status(dir: &NodeDir) -> Res<ExitCode> {
-    let socket = dir.socket_path();
+    let socket = dir.socket_path()?;
     if dir.probe_socket().await? == SocketState::Live {
         match dir.try_lock()? {
             Err(held) => println!("running ({held}) on {}", socket.display()),

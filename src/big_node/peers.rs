@@ -159,6 +159,18 @@ enum Command {
     },
 }
 
+/// Parses an endpoint ticket (the text form `iroh_tickets` gives an address: the endpoint's id,
+/// its relay and its direct addresses) into the address a dial list takes. This is the one
+/// spelling of a peer's address outside the process, as the ticket in `daybook_core`'s sync
+/// bootstrap is, and what [`Peers::ticket`] prints.
+pub fn parse_ticket(ticket: &str) -> Res<iroh::EndpointAddr> {
+    Ok(ticket
+        .parse::<iroh_tickets::endpoint::EndpointTicket>()
+        .wrap_err_with(|| format!("`{ticket}` is not an endpoint ticket"))?
+        .endpoint_addr()
+        .clone())
+}
+
 /// The handle to a running peers service.
 #[derive(Clone)]
 pub struct Peers {
@@ -172,6 +184,11 @@ impl Peers {
     /// node's dial list (or [`Peers::connect`]) is how two nodes meet.
     pub fn addr(&self) -> iroh::EndpointAddr {
         self.endpoint.addr()
+    }
+
+    /// [`Peers::addr`] as a ticket, the text [`parse_ticket`] reads back.
+    pub fn ticket(&self) -> String {
+        iroh_tickets::endpoint::EndpointTicket::from(self.addr()).to_string()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<PeersEvent> {

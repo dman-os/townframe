@@ -69,7 +69,25 @@ pub type ActorPublicKey = [u8; 32];
 /// The keyring service holding the wrapping key, and the label every sealed
 /// key is bound to.
 const NODE_SERVICE: &str = "big_cabinet.authority";
-const WRAPPING_KEY: &str = "wrapping";
+
+/// The name of a node's wrapping key within [`NODE_SERVICE`]. It carries the node id so nodes
+/// sharing one keyring (several nodes on a machine) each have their own key: with one fixed
+/// name they would seal their actor keys under one shared key, and two first boots racing on a
+/// fresh keyring could each create a different one.
+fn wrapping_key_name(node_id: &str) -> String {
+    format!("wrapping.{node_id}")
+}
+
+/// Removes the node's wrapping key from the keyring, for tearing a node down for good: the
+/// actor keys sealed under it can no longer be opened. Returns whether the key existed.
+pub async fn delete_wrapping_key(
+    secrets: &SecretStore,
+    node_id: &str,
+) -> Result<bool, AuthorityError> {
+    Ok(secrets
+        .delete_secret(NODE_SERVICE, &wrapping_key_name(node_id))
+        .await?)
+}
 
 /// Who a domain operation acts as: an actor presenting its own identity capability, or a
 /// handle the domain minted that carries a scope of its own.
@@ -189,8 +207,10 @@ impl AuthorityService {
 
     pub async fn boot(
         secrets: &SecretStore,
+        node_id: &str,
         sql: Database,
     ) -> Result<(Arc<Self>, StopToken), AuthorityError> {
+        let wrapping_name = wrapping_key_name(node_id);
         let (stop, tasks) = StopToken::new();
         store::migrate(&sql).await?;
         // The keyring read happens under the write reservation so two first
@@ -201,7 +221,7 @@ impl AuthorityService {
             // Sealed keys exist, so only the key that sealed them will do: a
             // fresh one would turn every actor into an unopenable row.
             Some(_) => secrets
-                .get_secret(NODE_SERVICE, WRAPPING_KEY)
+                .get_secret(NODE_SERVICE, &wrapping_name)
                 .await?
                 .ok_or_else(|| {
                     AuthorityError::StateCorrupt(
@@ -210,7 +230,7 @@ impl AuthorityService {
                 })?,
             None => {
                 secrets
-                    .get_or_create_secret(NODE_SERVICE, WRAPPING_KEY, 32)
+                    .get_or_create_secret(NODE_SERVICE, &wrapping_name, 32)
                     .await?
             }
         });
@@ -418,9 +438,10 @@ pub struct Authority {
 /// the host (joining in-flight calls) before the service.
 pub async fn boot(
     secrets: &SecretStore,
+    node_id: &str,
     sql: Database,
 ) -> Result<(Authority, StopToken), AuthorityError> {
-    let (service, service_stop) = AuthorityService::boot(secrets, sql).await?;
+    let (service, service_stop) = AuthorityService::boot(secrets, node_id, sql).await?;
     let (host, host_stop) = Host::new(Arc::clone(&service) as AuthorityHandler);
     let client = Client::direct(AuthorityBinding::new(Arc::clone(&host)));
     let authority = Authority {

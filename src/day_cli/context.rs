@@ -4,12 +4,16 @@
 //! where it is):
 //!
 //! ```text
-//! <node>/node.json        identity seed and operator policy, written once by `day init` (0600)
+//! <node>/node.json        identity seed, operator policy and peers, created by `day init` (0600)
 //! <node>/node.lock        flock held for as long as a process has the node booted; holds its pid
-//! <node>/run/node.sock    the daemon's Unix socket (the node creates `run/` as 0700)
 //! <node>/run/daemon.log   the background daemon's stderr
 //! <node>/node.sqlite, repo/, blobs/   the node's own storage, opened by `big_node::Bindings`
 //! ```
+//!
+//! The daemon's Unix socket is not in the node directory but in the per-user runtime directory,
+//! named by the node id (see [`NodeDir::socket_path`]), so a node directory can be anywhere,
+//! however long its path, and two nodes on a machine never share a socket. Every other secret a
+//! node keeps is in the platform keyring under entries that carry the node id too.
 
 use crate::interlude::*;
 
@@ -22,8 +26,34 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 
 /// `sockaddr_un.sun_path` holds 108 bytes on Linux (104 on the BSDs and macOS) including the
-/// terminator; refuse a node directory whose socket path cannot fit instead of failing in `bind`.
+/// terminator; refuse a socket path that cannot fit instead of failing in `bind`.
 const MAX_SOCKET_PATH_BYTES: usize = 100;
+
+/// The directory the daemon sockets live in: the one place the socket location is decided, so
+/// making it configurable is a change to this function and its caller [`NodeDir::new`].
+///
+/// - **Normally** `$XDG_RUNTIME_DIR/day`: the per-user runtime directory the login session
+///   creates as `0700` and removes at logout, which is where a local daemon's socket belongs
+///   (ADR 032 section 5). `directories` yields it only where the platform has one (Linux).
+/// - **Without one** (macOS, a session with no `XDG_RUNTIME_DIR`, a cron job) `/tmp/day-<euid>`:
+///   a directory of the user's own under `/tmp` rather than `std::env::temp_dir()`, because
+///   macOS's per-user temp dir is already ~50 bytes and a socket named by a 64 character node id
+///   would not fit in `sun_path`. A shared `/tmp` lets another user pre-create the directory, so
+///   [`NodeDir::ensure_socket_dir`] only accepts one that this uid owns and nobody else can enter.
+fn default_socket_dir() -> PathBuf {
+    let runtime =
+        directories::BaseDirs::new().and_then(|dirs| dirs.runtime_dir().map(Path::to_path_buf));
+    // SAFETY: geteuid(2) takes no arguments and cannot fail.
+    socket_dir_in(runtime.as_deref(), unsafe { libc::geteuid() })
+}
+
+/// [`default_socket_dir`] for a given runtime directory and uid.
+pub(crate) fn socket_dir_in(runtime_dir: Option<&Path>, uid: u32) -> PathBuf {
+    match runtime_dir {
+        Some(runtime) => runtime.join("day"),
+        None => PathBuf::from(format!("/tmp/day-{uid}")),
+    }
+}
 
 pub struct Config {
     pub cli_config: Arc<crate::config::CliConfig>,
@@ -32,7 +62,7 @@ pub struct Config {
 
 impl Config {
     pub fn new(cli_config: Arc<crate::config::CliConfig>) -> Res<Self> {
-        let node_dir = NodeDir::new(cli_config.node_path.clone())?;
+        let node_dir = NodeDir::new(cli_config.node_path.clone());
         Ok(Self {
             cli_config,
             node_dir,
@@ -44,6 +74,8 @@ impl Config {
 #[derive(Debug, Clone)]
 pub struct NodeDir {
     root: PathBuf,
+    /// Where this node's socket lives; [`default_socket_dir`] unless a test places it.
+    socket_dir: PathBuf,
 }
 
 /// What `day init` records. The identity seed is the node's keyhive identity and, through it, its
@@ -58,12 +90,71 @@ pub struct NodeSettings {
     /// can be granted to invoke. Empty (the default) lets nodules invoke nothing.
     #[serde(default)]
     pub nodule_operations: DispatchScope,
+    /// The node's network attachment. Absent: the daemon attaches none, so the node neither
+    /// dials nor can be dialed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers: Option<PeerSettings>,
+}
+
+/// The `peers` section of `node.json`: its presence is what makes the daemon attach the peers
+/// service (the Iroh endpoint, keyed by the node's identity).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PeerSettings {
+    /// Peers dialed as soon as the daemon starts and redialed with backoff when the connection
+    /// drops, as endpoint tickets (the `address` a node's `getNodeInfo` reports). Which nodes
+    /// belong here is the composition's policy, not the node's: a user node lists its own other
+    /// devices and a relay, a relay lists none.
+    #[serde(default)]
+    pub bootstrap: Vec<String>,
+    /// Bind the loopback interface only, with relays off (see
+    /// `big_node::peers::PeersConfig::loopback_only`).
+    #[serde(default)]
+    pub loopback_only: bool,
+}
+
+impl PeerSettings {
+    /// The id (lowercase hex) of the endpoint a bootstrap ticket names.
+    fn ticket_node_id(ticket: &str) -> Res<String> {
+        let addr = big_node::peers::parse_ticket(ticket)?;
+        Ok(data_encoding::HEXLOWER.encode(addr.id.as_bytes()))
+    }
+
+    /// Adds `ticket`, replacing an entry for the same endpoint (so a node that changed its
+    /// addresses is re-added, not duplicated). Returns whether the list changed.
+    pub fn add_bootstrap(&mut self, ticket: &str) -> Res<bool> {
+        let id = Self::ticket_node_id(ticket)?;
+        for existing in &mut self.bootstrap {
+            if Self::ticket_node_id(existing)? == id {
+                let changed = existing != ticket;
+                ticket.clone_into(existing);
+                return Ok(changed);
+            }
+        }
+        self.bootstrap.push(ticket.to_owned());
+        Ok(true)
+    }
+
+    /// The peers config the daemon boots with: dial the bootstrap list under the default
+    /// mirroring policy.
+    fn peers_config(&self) -> Res<big_node::peers::PeersConfig> {
+        let dial = self
+            .bootstrap
+            .iter()
+            .map(|ticket| big_node::peers::parse_ticket(ticket))
+            .collect::<Res<Vec<_>>>()?;
+        Ok(big_node::peers::PeersConfig {
+            loopback_only: self.loopback_only,
+            policy: big_node::peers::PolicyChoice::Mirror(big_node::peers::MirrorPolicy { dial }),
+            ..default()
+        })
+    }
 }
 
 impl NodeSettings {
     const VERSION: u32 = 1;
 
-    fn seed(&self) -> [u8; 32] {
+    pub fn seed(&self) -> [u8; 32] {
         let bytes = data_encoding::HEXLOWER
             .decode(self.identity_seed.as_bytes())
             .expect("node.json holds a hex identity seed");
@@ -72,8 +163,7 @@ impl NodeSettings {
 
     /// The node's id: the public half of the identity seed, as the repo derives its own peer id.
     pub fn node_id(&self) -> String {
-        let key = ed25519_dalek::SigningKey::from_bytes(&self.seed());
-        data_encoding::HEXLOWER.encode(key.verifying_key().as_bytes())
+        big_node::node_id(&self.seed())
     }
 }
 
@@ -89,15 +179,18 @@ pub enum SocketState {
 }
 
 impl NodeDir {
-    pub fn new(root: PathBuf) -> Res<Self> {
-        let this = Self { root };
-        let socket = this.socket_path();
-        eyre::ensure!(
-            socket.as_os_str().len() <= MAX_SOCKET_PATH_BYTES,
-            "the node socket path {} is longer than a Unix socket path can be ({MAX_SOCKET_PATH_BYTES} bytes); use a shorter --node path",
-            socket.display()
-        );
-        Ok(this)
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            socket_dir: default_socket_dir(),
+        }
+    }
+
+    /// A node directory whose socket lives in `socket_dir`, so a test does not touch the real
+    /// runtime directory.
+    #[cfg(test)]
+    pub fn with_socket_dir(root: PathBuf, socket_dir: PathBuf) -> Self {
+        Self { root, socket_dir }
     }
 
     pub fn root(&self) -> &Path {
@@ -116,8 +209,19 @@ impl NodeDir {
         self.root.join("run")
     }
 
-    pub fn socket_path(&self) -> PathBuf {
-        self.run_dir().join("node.sock")
+    /// The daemon's socket: `<socket dir>/<node id>.sock`. The node must be initialized, as the
+    /// id is read from `node.json`. It is refused when it cannot fit in `sun_path`, which a
+    /// 64 character id leaves ~35 bytes of directory for on macOS.
+    pub fn socket_path(&self) -> Res<PathBuf> {
+        let socket = self
+            .socket_dir
+            .join(format!("{}.sock", self.settings()?.node_id()));
+        eyre::ensure!(
+            socket.as_os_str().len() <= MAX_SOCKET_PATH_BYTES,
+            "the node socket path {} is longer than a Unix socket path can be ({MAX_SOCKET_PATH_BYTES} bytes); use a shorter XDG_RUNTIME_DIR",
+            socket.display()
+        );
+        Ok(socket)
     }
 
     pub fn log_path(&self) -> PathBuf {
@@ -141,6 +245,7 @@ impl NodeDir {
             version: NodeSettings::VERSION,
             identity_seed: data_encoding::HEXLOWER.encode(&seed),
             nodule_operations: DispatchScope::default(),
+            peers: None,
         };
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -169,23 +274,68 @@ impl NodeDir {
             settings.version,
             NodeSettings::VERSION
         );
+        if let Some(peers) = &settings.peers {
+            // Fail on a bad ticket whichever command reads the settings, not when a daemon
+            // happens to boot it.
+            peers
+                .peers_config()
+                .wrap_err_with(|| format!("{}: bootstrap list", path.display()))?;
+        }
         Ok(settings)
     }
 
-    /// Creates `run/` owner-only. The node's listener accepts an existing parent only if it is.
+    /// Rewrites `node.json` with `change` applied. The new file is written beside it and renamed
+    /// over it, so a reader (a daemon booting) sees the old settings or the new, never half.
+    /// Whether the node is serving does not matter: settings are read once, at boot.
+    pub fn update_settings<T>(&self, change: impl FnOnce(&mut NodeSettings) -> Res<T>) -> Res<T> {
+        let mut settings = self.settings()?;
+        let out = change(&mut settings)?;
+        let staging = self.root.join("node.json.new");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&staging)
+            .wrap_err_with(|| format!("creating {}", staging.display()))?;
+        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&settings)?)?;
+        file.sync_all()?;
+        std::fs::rename(&staging, self.settings_path())
+            .wrap_err_with(|| format!("replacing {}", self.settings_path().display()))?;
+        Ok(out)
+    }
+
+    /// Creates `run/` (the daemon's log) and the socket directory, each owner-only.
     pub fn ensure_run_dir(&self) -> Res<()> {
+        Self::ensure_private_dir(&self.run_dir())?;
+        Self::ensure_private_dir(&self.socket_dir)
+    }
+
+    /// Creates `dir` as `0700` if it is missing and refuses it unless this uid owns it and no
+    /// other user can enter it: the node's listener checks the mode of an existing parent too, but
+    /// a directory in a shared `/tmp` could also have been created by someone else.
+    fn ensure_private_dir(dir: &Path) -> Res<()> {
         use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::MetadataExt;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(self.run_dir())?;
-        let run_dir = self.run_dir();
-        let mode = std::fs::metadata(&run_dir)?.permissions().mode();
+            .create(dir)?;
+        let found = std::fs::metadata(dir)?;
+        let mode = found.permissions().mode();
         eyre::ensure!(
             mode & 0o077 == 0,
             "{} is accessible to other users (mode {:o})",
-            run_dir.display(),
+            dir.display(),
             mode & 0o7777
+        );
+        // SAFETY: geteuid(2) takes no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        eyre::ensure!(
+            found.uid() == uid,
+            "{} is owned by uid {}, not by this user (uid {uid})",
+            dir.display(),
+            found.uid()
         );
         Ok(())
     }
@@ -194,7 +344,7 @@ impl NodeDir {
     /// listener does before it replaces a stale socket.
     pub async fn probe_socket(&self) -> Res<SocketState> {
         use std::os::unix::fs::FileTypeExt;
-        let path = self.socket_path();
+        let path = self.socket_path()?;
         match std::fs::symlink_metadata(&path) {
             Ok(found) if found.file_type().is_socket() => {}
             Ok(_) => eyre::bail!("{} exists and is not a socket", path.display()),
@@ -285,10 +435,27 @@ pub struct Booted {
 }
 
 impl Booted {
-    /// Boots the node in `dir` on the lock the caller holds. `listeners` is how the caller
-    /// attaches it to the outside: none for a command's own node, the socket for the daemon.
-    pub async fn boot(dir: &NodeDir, lock: NodeLock, listeners: Listeners) -> Res<Self> {
+    /// Boots the node in `dir` on the lock the caller holds. `serving` is how it attaches to
+    /// the outside: a daemon serves its socket and attaches the peers service when `node.json`
+    /// has a `peers` section; a command's own node (not serving) attaches neither, since it
+    /// lives for one command and must not dial or hold the node's endpoint.
+    pub async fn boot(dir: &NodeDir, lock: NodeLock, serving: bool) -> Res<Self> {
         let settings = dir.settings()?;
+        let (listeners, peers) = if serving {
+            (
+                Listeners {
+                    unix_socket: Some(dir.socket_path()?),
+                    ..default()
+                },
+                settings
+                    .peers
+                    .as_ref()
+                    .map(PeerSettings::peers_config)
+                    .transpose()?,
+            )
+        } else {
+            (default(), None)
+        };
         let runtime = Arc::new(SqliteRuntime::new(default()));
         let bindings = big_node::Bindings::in_directory(&runtime, dir.root(), None).await?;
         let secrets = Arc::new(SecretStore::boot().await?);
@@ -309,7 +476,7 @@ impl Booted {
             blob_storage: bindings.blobs,
             nodule_operations: settings.nodule_operations,
             listeners,
-            peers: None,
+            peers,
         };
         let (node, stop) = BigNode::boot(config).await?;
         Ok(Self {

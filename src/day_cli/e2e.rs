@@ -11,7 +11,9 @@
 //!   invocations). Cases are literate trycmd `.md` files: one file is one sandbox, and every
 //!   ```console fence in it runs in order in the same directory. A case needs a sibling
 //!   `*.out/` directory (with at least a `.keep`) to opt into the sandbox. This layer uses the
-//!   platform keyring, since the daemon and the commands are separate processes.
+//!   platform keyring, since the daemon and the commands are separate processes: each case runs
+//!   with its node and its runtime directory in a sandbox of the test's own, and the node's
+//!   keyring entries are deleted when the case ends, whether it passed or not.
 //!
 //! The blackbox layer needs `cargo build -p day_cli` first, as cargo does not build a package's
 //! binary for its own unit tests; it refuses a binary older than the CLI's sources.
@@ -26,21 +28,58 @@ mod library {
     use crate::context::NodeDir;
     use crate::context::SocketState;
     use crate::interlude::*;
+    use big_node::peers::Peers;
     use big_nodule_core::protocol::ListNodules;
     use service_utils_rs::Operation;
     use tokio::sync::oneshot;
 
+    /// A directory under `/tmp` rather than `$TMPDIR`: a socket named by a 64 character node id
+    /// has ~35 bytes of directory to spare in `sun_path` on macOS, and `$TMPDIR` can be longer.
+    pub(super) fn short_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("d")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
+    /// An initialized node whose socket directory is `<sandbox>/run`, so no test touches the
+    /// real runtime directory.
     fn new_node() -> (tempfile::TempDir, NodeDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = NodeDir::new(tmp.path().join("node")).unwrap();
+        let tmp = short_tempdir();
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
         dir.init().unwrap();
         (tmp, dir)
+    }
+
+    /// Waits until `peers` has a registered connection to the node `node_id`. It subscribes
+    /// before it looks, so a connection that registers in between is an event it then sees.
+    async fn connected_to(peers: &Peers, node_id: &str) {
+        let mut events = peers.subscribe();
+        loop {
+            if peers
+                .connected()
+                .await
+                .unwrap()
+                .iter()
+                .any(|peer| data_encoding::HEXLOWER.encode(peer.as_bytes()) == node_id)
+            {
+                return;
+            }
+            match events.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("the peers service stopped")
+                }
+            }
+        }
     }
 
     /// A daemon served from inside the test process, stopped by [`TestDaemon::stop`].
     struct TestDaemon {
         shutdown: oneshot::Sender<()>,
         task: tokio::task::JoinHandle<Res<()>>,
+        /// The daemon's peers service, when its `node.json` configures one.
+        peers: Option<Peers>,
     }
 
     impl TestDaemon {
@@ -52,7 +91,11 @@ mod library {
             let task = tokio::spawn(async move {
                 crate::cmds::daemon::serve(
                     &dir,
-                    |_| ready_tx.send(()).map_err(|()| eyre::eyre!("test is gone")),
+                    |booted| {
+                        ready_tx
+                            .send(booted.node.peers.clone())
+                            .map_err(|_| eyre::eyre!("test is gone"))
+                    },
                     async {
                         shutdown_rx
                             .await
@@ -61,10 +104,15 @@ mod library {
                 )
                 .await
             });
-            if ready_rx.await.is_err() {
-                panic!("the daemon failed before it was serving: {:?}", task.await);
+            let peers = match ready_rx.await {
+                Ok(peers) => peers,
+                Err(_) => panic!("the daemon failed before it was serving: {:?}", task.await),
+            };
+            Self {
+                shutdown,
+                task,
+                peers,
             }
-            Self { shutdown, task }
         }
 
         async fn stop(self) {
@@ -113,7 +161,7 @@ mod library {
     async fn the_node_id_is_the_repos_peer_id() {
         let (_tmp, dir) = new_node();
         let lock = dir.try_lock().unwrap().unwrap();
-        let booted = Booted::boot(&dir, lock, default()).await.unwrap();
+        let booted = Booted::boot(&dir, lock, false).await.unwrap();
         let peer = booted.node.repo.local_peer_id().to_bytes32().unwrap();
         assert_eq!(
             dir.settings().unwrap().node_id(),
@@ -156,7 +204,7 @@ mod library {
         let (_tmp, dir) = new_node();
         dir.ensure_run_dir().unwrap();
         // A socket file nothing listens on: bind, then close without unlinking.
-        drop(std::os::unix::net::UnixListener::bind(dir.socket_path()).unwrap());
+        drop(std::os::unix::net::UnixListener::bind(dir.socket_path().unwrap()).unwrap());
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Stale);
 
         // A command falls back to its own node and says why.
@@ -176,7 +224,7 @@ mod library {
     async fn something_that_is_not_a_socket_at_the_socket_path_is_an_error() {
         let (_tmp, dir) = new_node();
         dir.ensure_run_dir().unwrap();
-        std::fs::write(dir.socket_path(), b"not a socket").unwrap();
+        std::fs::write(dir.socket_path().unwrap(), b"not a socket").unwrap();
         let error = dir.probe_socket().await.unwrap_err();
         assert!(
             format!("{error:#}").contains("is not a socket"),
@@ -221,9 +269,198 @@ mod library {
     }
 
     #[test]
-    fn a_socket_path_too_long_for_sun_path_is_refused_up_front() {
-        let long = std::path::PathBuf::from("/tmp").join("x".repeat(120));
-        assert!(NodeDir::new(long).is_err());
+    fn a_socket_path_too_long_for_sun_path_is_refused() {
+        let (tmp, _) = new_node();
+        let long = NodeDir::with_socket_dir(
+            tmp.path().join("node"),
+            std::path::PathBuf::from("/tmp").join("x".repeat(120)),
+        );
+        let error = long.socket_path().unwrap_err();
+        assert!(format!("{error:#}").contains("longer than a Unix socket path"));
+    }
+
+    #[test]
+    fn the_socket_is_named_by_the_node_id_in_the_runtime_directory() {
+        let (tmp, dir) = new_node();
+        assert_eq!(
+            dir.socket_path().unwrap(),
+            tmp.path()
+                .join("run")
+                .join(format!("{}.sock", dir.settings().unwrap().node_id()))
+        );
+        // The node directory is not where the socket goes, so a long node path is fine.
+        let far =
+            NodeDir::with_socket_dir(tmp.path().join("x".repeat(200)), tmp.path().join("run"));
+        far.init().unwrap();
+        far.socket_path().unwrap();
+    }
+
+    #[test]
+    fn the_default_socket_directory_is_the_runtime_directory_or_a_private_one_in_tmp() {
+        use crate::context::socket_dir_in;
+        assert_eq!(
+            socket_dir_in(Some(std::path::Path::new("/run/user/1000")), 1000),
+            std::path::Path::new("/run/user/1000/day")
+        );
+        assert_eq!(
+            socket_dir_in(None, 1000),
+            std::path::Path::new("/tmp/day-1000")
+        );
+    }
+
+    /// A directory that is not the user's own is refused as a socket directory, whoever made
+    /// it: here, one other users can enter.
+    #[test]
+    fn a_socket_directory_other_users_can_enter_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, dir) = new_node();
+        let run = tmp.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = dir.ensure_run_dir().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("accessible to other users"),
+            "{error:#}"
+        );
+    }
+
+    /// Two nodes on one machine (one keyring, one runtime directory) get entries and sockets of
+    /// their own: each daemon is live at its own path, and deleting one node's keyring entries
+    /// removes exactly one entry and leaves the other node's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_nodes_on_one_machine_have_distinct_sockets_and_keyring_entries() {
+        let tmp = short_tempdir();
+        let node = |name: &str| {
+            let dir = NodeDir::with_socket_dir(tmp.path().join(name), tmp.path().join("run"));
+            dir.init().unwrap();
+            dir
+        };
+        let (first, second) = (node("first"), node("second"));
+        assert_ne!(first.socket_path().unwrap(), second.socket_path().unwrap());
+        assert_eq!(
+            first.socket_path().unwrap().parent(),
+            second.socket_path().unwrap().parent()
+        );
+
+        let (first_daemon, second_daemon) = (
+            TestDaemon::start(&first).await,
+            TestDaemon::start(&second).await,
+        );
+        assert_eq!(first.probe_socket().await.unwrap(), SocketState::Live);
+        assert_eq!(second.probe_socket().await.unwrap(), SocketState::Live);
+        first_daemon.stop().await;
+        second_daemon.stop().await;
+
+        // The mock keyring is process-wide, as the platform keyring is machine-wide.
+        let secrets = secrets_rs::SecretStore::boot().await.unwrap();
+        for dir in [&first, &second] {
+            let seed = dir.settings().unwrap().seed();
+            assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 1);
+            assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 0);
+        }
+        secrets.stop().await.unwrap();
+    }
+
+    /// A daemon whose `node.json` lists a bootstrap peer dials it at start, with no command
+    /// issued. Everything is learned through the node's own operations over the sockets: the
+    /// dialed node's address from its `getNodeInfo`, and both ends then report each other as
+    /// connected. Waiting is on the peers service's events.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_daemon_dials_its_bootstrap_peer_and_both_report_the_connection() {
+        let loopback = |dir: &NodeDir| {
+            dir.update_settings(|settings| {
+                settings.peers = Some(crate::context::PeerSettings {
+                    loopback_only: true,
+                    ..default()
+                });
+                Ok(())
+            })
+            .unwrap();
+        };
+        let (_dialed_tmp, dialed_dir) = new_node();
+        loopback(&dialed_dir);
+        let dialed = TestDaemon::start(&dialed_dir).await;
+        let dialed_client = NodeClient::connect(&dialed_dir).await.unwrap();
+        assert_eq!(dialed_client.mode(), Mode::Daemon);
+        let dialed_info = crate::cmds::status::node_info(&dialed_client)
+            .await
+            .unwrap();
+        assert_eq!(
+            dialed_info.node_id,
+            dialed_dir.settings().unwrap().node_id()
+        );
+        assert!(dialed_info.peers.as_ref().unwrap().connected.is_empty());
+
+        let (_dialer_tmp, dialer_dir) = new_node();
+        loopback(&dialer_dir);
+        let address = dialed_info.peers.unwrap().address;
+        assert!(
+            dialer_dir
+                .update_settings(|settings| settings
+                    .peers
+                    .as_mut()
+                    .unwrap()
+                    .add_bootstrap(&address))
+                .unwrap()
+        );
+        // The same endpoint again replaces its entry instead of adding a second.
+        assert!(
+            !dialer_dir
+                .update_settings(|settings| settings
+                    .peers
+                    .as_mut()
+                    .unwrap()
+                    .add_bootstrap(&address))
+                .unwrap()
+        );
+        assert_eq!(
+            dialer_dir.settings().unwrap().peers.unwrap().bootstrap,
+            [address]
+        );
+        let dialer = TestDaemon::start(&dialer_dir).await;
+        let dialer_id = dialer_dir.settings().unwrap().node_id();
+        connected_to(dialer.peers.as_ref().unwrap(), &dialed_info.node_id).await;
+        connected_to(dialed.peers.as_ref().unwrap(), &dialer_id).await;
+
+        let dialer_client = NodeClient::connect(&dialer_dir).await.unwrap();
+        let from_dialer = crate::cmds::status::node_info(&dialer_client)
+            .await
+            .unwrap();
+        assert_eq!(from_dialer.peers.unwrap().connected, [dialed_info.node_id]);
+        let from_dialed = crate::cmds::status::node_info(&dialed_client)
+            .await
+            .unwrap();
+        assert_eq!(from_dialed.peers.unwrap().connected, [dialer_id]);
+
+        dialer_client.stop().await.unwrap();
+        dialed_client.stop().await.unwrap();
+        dialer.stop().await;
+        dialed.stop().await;
+        let secrets = secrets_rs::SecretStore::boot().await.unwrap();
+        for dir in [&dialer_dir, &dialed_dir] {
+            big_node::delete_secrets(&secrets, &dir.settings().unwrap().seed())
+                .await
+                .unwrap();
+        }
+        secrets.stop().await.unwrap();
+    }
+
+    #[test]
+    fn an_invalid_bootstrap_ticket_is_refused_and_writes_nothing() {
+        let (_tmp, dir) = new_node();
+        let error = dir
+            .update_settings(|settings| {
+                settings
+                    .peers
+                    .get_or_insert_with(default)
+                    .add_bootstrap("not a ticket")
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not an endpoint ticket"));
+        assert!(
+            dir.settings().unwrap().peers.is_none(),
+            "nothing was written"
+        );
     }
 }
 
@@ -275,57 +512,145 @@ mod blackbox {
         })
     }
 
-    fn new_suite() -> TestCases {
-        let suite = TestCases::new();
-        // The CLI resolves the node from DAY_NODE (cwd is ignored): point every case at a `node`
-        // subdir of its own sandbox so cases are isolated from each other and from the default
-        // data directory.
-        suite.env("DAY_NODE", "node");
-        // The binary's absolute path for `sh -c` steps, which cannot resolve it through trycmd.
-        suite.env("DAY", day_bin().to_string_lossy().into_owned());
-        // Success is reported on stdout; tracing goes to stderr and is silenced suite-wide so
-        // snapshots assert real output, while errors still surface.
-        suite.env("RUST_LOG", "error");
-        suite.env("NO_COLOR", "1");
-        suite.register_bin("day", trycmd::schema::Bin::Path(day_bin().to_owned()));
-        suite.register_bin("sh", trycmd::schema::Bin::Path("/bin/sh".into()));
-        suite
+    /// One case's private world: its node (`<sandbox>/node`) and its runtime directory
+    /// (`<sandbox>/run`, where the daemon puts its socket, as `XDG_RUNTIME_DIR` would). The node
+    /// is booted by the real binary, so it leaves entries in the platform keyring; they are
+    /// deleted when the sandbox is dropped, whether the case passed or panicked.
+    struct Sandbox {
+        tmp: tempfile::TempDir,
+    }
+
+    impl Sandbox {
+        fn new() -> Self {
+            Self {
+                tmp: super::library::short_tempdir(),
+            }
+        }
+
+        fn node(&self) -> PathBuf {
+            self.tmp.path().join("node")
+        }
+
+        fn runtime_dir(&self) -> PathBuf {
+            self.tmp.path().join("run")
+        }
+
+        /// The node's socket, from its id: `<runtime dir>/day/<node id>.sock`.
+        fn socket(&self) -> PathBuf {
+            let id = crate::context::NodeDir::new(self.node())
+                .settings()
+                .unwrap()
+                .node_id();
+            self.runtime_dir().join("day").join(format!("{id}.sock"))
+        }
+
+        fn suite(&self) -> TestCases {
+            let suite = TestCases::new();
+            // The CLI resolves the node from DAY_NODE (cwd is ignored): every case gets a node
+            // of its own, so cases are isolated from each other and from the default data
+            // directory. Its socket goes to this sandbox's runtime directory, not the real one.
+            suite.env("DAY_NODE", self.node().to_string_lossy().into_owned());
+            suite.env(
+                "XDG_RUNTIME_DIR",
+                self.runtime_dir().to_string_lossy().into_owned(),
+            );
+            // The binary's absolute path for `sh -c` steps, which cannot resolve it through
+            // trycmd.
+            suite.env("DAY", day_bin().to_string_lossy().into_owned());
+            // Success is reported on stdout; tracing goes to stderr and is silenced suite-wide so
+            // snapshots assert real output, while errors still surface.
+            suite.env("RUST_LOG", "error");
+            suite.env("NO_COLOR", "1");
+            suite.register_bin("day", trycmd::schema::Bin::Path(day_bin().to_owned()));
+            suite.register_bin("sh", trycmd::schema::Bin::Path("/bin/sh".into()));
+            suite
+        }
+
+        /// A `day` invocation against this sandbox's node and runtime directory.
+        fn day(&self, args: &[&str]) -> std::process::Output {
+            Command::new(day_bin())
+                .env("RUST_LOG", "error")
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", self.runtime_dir())
+                .arg("--node")
+                .arg(self.node())
+                .args(args)
+                .output()
+                .unwrap()
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            // A node whose settings do not parse (a case that corrupts them on purpose) never
+            // booted, so it owns no keyring entries.
+            let Ok(settings) = crate::context::NodeDir::new(self.node()).settings() else {
+                return;
+            };
+            // The test process's `SecretStore::boot` is the in-memory mock (the dev-dependency
+            // turns `test-support` on); the binary used the platform keyring.
+            let cleaned = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let secrets = secrets_rs::SecretStore::boot_platform().await?;
+                    big_node::delete_secrets(&secrets, &settings.seed()).await?;
+                    secrets.stop().await
+                });
+            match cleaned {
+                Ok(()) => {}
+                // A second panic while unwinding would abort and bury the case's own failure.
+                Err(error) if std::thread::panicking() => {
+                    eprintln!("deleting the sandbox node's keyring entries failed: {error:#}");
+                }
+                Err(error) => {
+                    panic!("deleting the sandbox node's keyring entries failed: {error:#}")
+                }
+            }
+        }
+    }
+
+    /// Runs every case in `dir`, each in a sandbox of its own, one after another.
+    fn run_cases(dir: &str) {
+        let mut cases: Vec<_> =
+            std::fs::read_dir(format!("{}/e2e/{dir}", env!("CARGO_MANIFEST_DIR")))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+                .collect();
+        cases.sort();
+        assert!(!cases.is_empty(), "no cases in e2e/{dir}");
+        for case in cases {
+            let sandbox = Sandbox::new();
+            sandbox.suite().case(&case).run();
+        }
     }
 
     /// `init`, `--help`, argument errors and completions: nothing that boots a node.
     #[test]
     fn node_cases() {
-        new_suite().case(concat!(env!("CARGO_MANIFEST_DIR"), "/e2e/node/*.md"));
+        run_cases("node");
     }
 
     /// `status` and `call` with no daemon: the command boots the node itself.
     #[test]
     fn in_process_cases() {
-        new_suite().case(concat!(env!("CARGO_MANIFEST_DIR"), "/e2e/in_process/*.md"));
+        run_cases("in_process");
     }
 
     /// `daemon start | status | stop` and the commands reaching the node over its socket.
     #[test]
     fn daemon_cases() {
-        new_suite().case(concat!(env!("CARGO_MANIFEST_DIR"), "/e2e/daemon/*.md"));
+        run_cases("daemon");
     }
 
     /// A daemon killed without cleaning up leaves a socket and no lock: every command still
     /// works, and `daemon stop` and `daemon start` clean up after it.
     #[test]
     fn a_killed_daemon_leaves_a_stale_socket_that_commands_survive() {
-        let sandbox = tempfile::tempdir().unwrap();
-        let node = sandbox.path().join("node");
-        let day = |args: &[&str]| {
-            Command::new(day_bin())
-                .env("RUST_LOG", "error")
-                .env("NO_COLOR", "1")
-                .arg("--node")
-                .arg(&node)
-                .args(args)
-                .output()
-                .unwrap()
-        };
+        let sandbox = Sandbox::new();
+        let node = sandbox.node();
+        let day = |args: &[&str]| sandbox.day(args);
         let text = |output: &std::process::Output| {
             String::from_utf8_lossy(&output.stdout).into_owned()
                 + &String::from_utf8_lossy(&output.stderr)
@@ -348,7 +673,8 @@ mod blackbox {
             .unwrap()
             .lock_shared()
             .unwrap();
-        assert!(node.join("run/node.sock").exists());
+        let socket = sandbox.socket();
+        assert!(socket.exists());
 
         let status = day(&["daemon", "status"]);
         assert_eq!(status.status.code(), Some(3), "{}", text(&status));
@@ -373,7 +699,7 @@ mod blackbox {
             "{}",
             text(&stopped)
         );
-        assert!(!node.join("run/node.sock").exists());
+        assert!(!socket.exists());
 
         // And a daemon can start over a stale socket too.
         assert!(day(&["daemon", "start"]).status.success());

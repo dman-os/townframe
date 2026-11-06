@@ -90,9 +90,10 @@ async fn harness() -> Harness {
         .await
         .expect("mock keyring");
     let sql = sqlite_rs::test_support::db(&[]).expect("database");
-    let (authority, authority_stop) = big_cabinet::authority::boot(&secrets, sql.clone())
-        .await
-        .expect("authority boot");
+    let (authority, authority_stop) =
+        big_cabinet::authority::boot(&secrets, "test-node", sql.clone())
+            .await
+            .expect("authority boot");
     let actor = authority
         .client
         .call(

@@ -1,9 +1,12 @@
 #![recursion_limit = "256"]
 
 mod blob_boot;
+mod info;
 mod listeners;
 pub mod peers;
 
+pub use info::GET_NODE_INFO;
+pub use info::NodeInfo;
 use listeners::Listener;
 pub use listeners::Listeners;
 
@@ -70,9 +73,9 @@ pub struct Config {
     /// node.
     pub sql: Database,
     pub schemas: Arc<SchemaRepo>,
-    /// The node's secret store: one per node. The authority keeps its wrapping key under a
-    /// fixed name in it, so nodes sharing one store would seal their actor keys under the same
-    /// key, and nodes booting at once could each create a different one.
+    /// The node's secret store. Every entry a node keeps in it is named by the node's id
+    /// ([`node_id`]), so several nodes on one machine share the platform keyring without sharing
+    /// a key, and [`delete_secrets`] removes exactly one node's entries.
     pub secrets: Arc<SecretStore>,
     pub index_concurrency: NonZeroUsize,
     /// The blob store, opened by the composition root.
@@ -87,6 +90,24 @@ pub struct Config {
     /// is a complete node that talks to no other node. The endpoint is keyed by
     /// `repo.node_identity_seed`, the same key as the node's keyhive identity.
     pub peers: Option<peers::PeersConfig>,
+}
+
+/// A node's id: the public half of its identity seed in lowercase hex, which is its keyhive
+/// peer id and its Iroh endpoint id (ADR 032 section 6: one node key). It is derivable before
+/// the node boots, which is what lets a host name per-node resources (keyring entries, the
+/// Unix socket) without opening the node.
+pub fn node_id(identity_seed: &[u8; 32]) -> String {
+    data_encoding::HEXLOWER.encode(iroh::SecretKey::from_bytes(identity_seed).public().as_bytes())
+}
+
+/// Removes every keyring entry the node with `identity_seed` keeps in `secrets`, for tearing a
+/// node down for good: its actor keys can no longer be opened afterwards. The list of entries
+/// lives here, next to [`Config::secrets`], so a service that starts keeping one is added once.
+/// Returns how many entries existed and were removed.
+pub async fn delete_secrets(secrets: &SecretStore, identity_seed: &[u8; 32]) -> Res<usize> {
+    let node_id = node_id(identity_seed);
+    let removed = [big_cabinet::authority::delete_wrapping_key(secrets, &node_id).await?];
+    Ok(removed.into_iter().filter(|removed| *removed).count())
 }
 
 /// The storage bindings of "a node in a directory", for embedders that want exactly that. It is
@@ -132,6 +153,8 @@ impl Bindings {
 }
 
 pub struct BigNode {
+    /// [`node_id`] of the config's identity seed.
+    pub node_id: String,
     pub repo: SharedBigRepo,
     pub authority: Authority,
     pub docs_actor: Actor,
@@ -183,13 +206,15 @@ impl Attachments {
 }
 
 impl BigNode {
-    /// Registers the built-in providers and starts the attachments the config asks for. They come
+    /// Starts the attachments the config asks for and registers the built-in providers. They come
     /// last in boot, so they stop first: nothing is served or dialed from a node whose services
     /// are coming down. Each is pushed as soon as it runs, so a later one failing to start still
     /// stops the earlier ones.
     async fn attach(&mut self, attachments: Attachments, stop: &mut StopToken) -> Res<()> {
-        stop.stages.push(self.register_built_ins());
-        self.listeners = attach_listeners(self, attachments.listeners, stop).await?;
+        // The peers service is attached before the built-ins are registered because the node
+        // info provider holds its handle. Stop order is the reverse of this: the listeners go
+        // first (nothing is served from a node coming down), then the built-ins are unbound
+        // (so no call reaches the peers handle), then the peers service.
         if let Some(config) = attachments.peers {
             self.peers = Some(
                 attach_peers(
@@ -202,6 +227,8 @@ impl BigNode {
                 .await?,
             );
         }
+        stop.stages.push(self.register_built_ins());
+        self.listeners = attach_listeners(self, attachments.listeners, stop).await?;
         Ok(())
     }
 
@@ -216,9 +243,8 @@ impl BigNode {
                 big_nodule::schema_group(),
                 big_plugs::schema_group(),
             ])?);
-            let (authority, authority_stop) =
-                big_cabinet::authority::boot(&config.secrets, config.sql.clone()).await?;
-            stop.stages.push(Stage::Service(authority_stop));
+            let node_id = node_id(&config.repo.node_identity_seed);
+            let authority = boot_authority(&config, &node_id, &mut stop).await?;
             let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;
             let (drawers_actor, drawers_namespace) = open_actor(&authority, "drawers").await?;
             let (nodules_actor, nodules_namespace) = open_actor(&authority, "nodules").await?;
@@ -328,6 +354,7 @@ impl BigNode {
             .await?;
             stop.stages.push(Stage::Service(nodules_stop));
             let mut node = Self {
+                node_id,
                 repo,
                 authority,
                 docs_actor,
@@ -401,16 +428,34 @@ impl BigNode {
                 ServiceProvider::default().serve(&self.nodules.client),
             ),
         ];
-        let mut provider_ids = Vec::with_capacity(built_ins.len());
+        let mut provider_ids = Vec::with_capacity(built_ins.len() + 1);
         for (provider_id, provider) in built_ins {
             provider.register(&self.dispatch.router, provider_id);
             provider_ids.push(provider_id);
         }
+        // The node's own facts are not a hosted service: there is no client behind them, only
+        // the node id and the peers handle, so the provider is registered directly.
+        info::register(
+            &self.dispatch.router,
+            "builtin:node",
+            self.node_id.clone(),
+            self.peers.clone(),
+        );
+        provider_ids.push("builtin:node");
         Stage::BuiltIns {
             router: Arc::clone(&self.dispatch.router),
             provider_ids,
         }
     }
+}
+
+/// Boots the authority, whose wrapping key lives in the keyring under the node's id, and stages
+/// its stop.
+async fn boot_authority(config: &Config, node_id: &str, stop: &mut StopToken) -> Res<Authority> {
+    let (authority, authority_stop) =
+        big_cabinet::authority::boot(&config.secrets, node_id, config.sql.clone()).await?;
+    stop.stages.push(Stage::Service(authority_stop));
+    Ok(authority)
 }
 
 /// Boots the repo and stages its stop.

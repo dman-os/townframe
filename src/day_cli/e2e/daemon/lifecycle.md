@@ -13,22 +13,22 @@ $ day daemon status
 stopped
 
 $ day daemon start
-daemon started (pid [..]) listening on [..]/node/run/node.sock
+daemon started (pid [..]) listening on [..]/run/day/[..].sock
 
 $ day daemon start
-daemon already running on [..]/node/run/node.sock
+daemon already running on [..]/run/day/[..].sock
 
 $ day daemon status
-running (process [..]) on [..]/node/run/node.sock
+running (process [..]) on [..]/run/day/[..].sock
 
 $ day status
 node      [..]
 path      [..]/node
 mode      daemon
-socket    [..]/node/run/node.sock (live)
+socket    [..]/run/day/[..].sock (live)
 nodules   0 enabled of 0
 services  not exposed by the node
-peers     not exposed by the node
+peers     none attached (the daemon's node.json has no peers section)
 
 $ day call org.example.daybook.nodules.listNodules
 []
@@ -44,9 +44,9 @@ $ day status
 node      [..]
 path      [..]/node
 mode      in-process
-socket    [..]/node/run/node.sock (absent)
+socket    [..]/run/day/[..].sock (absent)
 nodules   0 enabled of 0
 services  not exposed by the node
-peers     not exposed by the node
+peers     none attached (only a daemon attaches peers)
 
 ```

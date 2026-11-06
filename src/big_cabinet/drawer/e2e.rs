@@ -149,7 +149,7 @@ impl Node {
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
         let (authority, authority_stop) =
-            crate::authority::boot(&secrets, runtime.ephemeral(&[]).unwrap())
+            crate::authority::boot(&secrets, "test-node", runtime.ephemeral(&[]).unwrap())
                 .await
                 .unwrap();
         let open = |path: &str| {

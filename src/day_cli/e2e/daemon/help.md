@@ -14,7 +14,7 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-      --node <DIR>  The node's directory [env: DAY_NODE=node]
+      --node <DIR>  The node's directory [env: DAY_NODE=[..]/node]
   -h, --help        Print help
 
 ```

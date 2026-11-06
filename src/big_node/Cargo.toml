@@ -32,13 +32,16 @@ futures.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "rt", "time", "macros"] }
 async-trait.workspace = true
 iroh.workspace = true
+iroh-tickets.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+data-encoding.workspace = true
 iroh-blobs.workspace = true
 subduction_iroh.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 big_plugs_core = { workspace = true, features = ["test-support"] }
-serde_json.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
 rand.workspace = true

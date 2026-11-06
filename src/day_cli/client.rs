@@ -37,6 +37,14 @@ impl Mode {
             Self::InProcess => "in-process",
         }
     }
+
+    /// Why a node reached this way may report no peers service.
+    pub fn peers_note(self) -> &'static str {
+        match self {
+            Self::Daemon => "the daemon's node.json has no peers section",
+            Self::InProcess => "only a daemon attaches peers",
+        }
+    }
 }
 
 /// What the node answered: the HTTP status and the JSON body, whatever the transport. A
@@ -72,7 +80,7 @@ impl NodeClient {
     pub async fn connect(dir: &NodeDir) -> Res<Self> {
         let socket = dir.probe_socket().await?;
         if socket == SocketState::Live {
-            let http = service_utils_rs::XrpcClient::unix(dir.socket_path(), MAX_BODY_BYTES)
+            let http = service_utils_rs::XrpcClient::unix(dir.socket_path()?, MAX_BODY_BYTES)
                 .map_err(|error| eyre::eyre!("{error:?}"))?;
             return Ok(Self {
                 transport: Transport::Daemon(http),
@@ -86,7 +94,7 @@ impl NodeClient {
                 dir.root().display()
             ),
         };
-        let booted = Booted::boot(dir, lock, default()).await?;
+        let booted = Booted::boot(dir, lock, false).await?;
         let router = big_dispatch::xrpc_router(
             booted.node.dispatch.client.clone(),
             Anonymous::Acts(Authorization::identity(booted.node.authority.root)),

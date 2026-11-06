@@ -56,6 +56,7 @@ mod tests {
             .expect("secret store");
         boot(
             &secrets,
+            "test-node",
             sqlite_rs::test_support::db(&[])
                 .expect("authority database")
                 .clone(),

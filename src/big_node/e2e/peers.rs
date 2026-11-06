@@ -147,6 +147,84 @@ async fn a_node_without_network_config_has_no_peers() {
     shutdown(node, stop).await;
 }
 
+/// The node info operation answers through dispatch with the node's id, and, with a peers
+/// attachment, its dialable address and the peers it is connected to: the facts a client of a
+/// daemon cannot read in process. A node that dials the other's ticket shows it as connected.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_info_reports_the_id_the_address_and_the_connected_peers() {
+    utils_rs::testing::setup_tracing_once();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let peers = || PeersConfig {
+        loopback_only: true,
+        ..Default::default()
+    };
+    let (dialed, dialed_stop) = node(163, secrets().await, &runtime, peers()).await;
+    let (dialer, dialer_stop) = node(164, secrets().await, &runtime, peers()).await;
+    let bare = {
+        let cfg = config(
+            secrets().await,
+            runtime.ephemeral(&[]).unwrap(),
+            big_repo::Storage::memory(&runtime).unwrap(),
+        );
+        BigNode::boot(cfg).await.unwrap()
+    };
+
+    async fn info(node: &BigNode) -> crate::NodeInfo {
+        let output = node
+            .dispatch
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(node.authority.root).metadata(),
+                big_dispatch_core::Invoke {
+                    operation: crate::GET_NODE_INFO.to_owned(),
+                    input: json!({}),
+                    context: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        serde_json::from_value(output.output).unwrap()
+    }
+
+    let before = info(&dialer).await;
+    assert_eq!(before.node_id, crate::node_id(&[164; 32]));
+    assert_eq!(before.node_id, dialer.node_id);
+    assert_eq!(
+        before.peers.as_ref().unwrap().connected,
+        Vec::<String>::new()
+    );
+
+    let dialed_info = info(&dialed).await;
+    let ticket = dialed_info.peers.as_ref().unwrap().address.clone();
+    assert_eq!(
+        crate::peers::parse_ticket(&ticket).unwrap(),
+        dialed.peers.as_ref().unwrap().addr()
+    );
+    let connected = dialer
+        .peers
+        .as_ref()
+        .unwrap()
+        .connect(crate::peers::parse_ticket(&ticket).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(connected, dialed.repo.local_peer_id());
+    assert_eq!(
+        info(&dialer).await.peers.unwrap().connected,
+        vec![dialed_info.node_id.clone()]
+    );
+
+    // No peers attachment: the node still says who it is.
+    let (bare_node, bare_stop) = bare;
+    let bare_info = info(&bare_node).await;
+    assert_eq!(bare_info.node_id, crate::node_id(&[47; 32]));
+    assert!(bare_info.peers.is_none());
+
+    shutdown(bare_node, bare_stop).await;
+    shutdown(dialer, dialer_stop).await;
+    shutdown(dialed, dialed_stop).await;
+}
+
 /// Both nodes hold read access to both drawers; only the drawer the reader mirrors replicates,
 /// so what the reader lacks is the policy's doing, not access's. Flipping the intent replicates
 /// the other.

@@ -261,9 +261,10 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         .expect("mock keyring");
     let sql = test_support::db(&[]).expect("database");
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
-    let (authority, authority_stop) = big_cabinet::authority::boot(&secrets, sql.clone())
-        .await
-        .expect("authority boot");
+    let (authority, authority_stop) =
+        big_cabinet::authority::boot(&secrets, "test-node", sql.clone())
+            .await
+            .expect("authority boot");
     let open = |path: &str| {
         authority.client.call(
             RequestContext::root(),

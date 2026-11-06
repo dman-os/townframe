@@ -10,7 +10,7 @@ Arguments:
   [DIR]  The directory to create the node in (default: the --node directory)
 
 Options:
-      --node <DIR>  The node's directory [env: DAY_NODE=node]
+      --node <DIR>  The node's directory [env: DAY_NODE=[..]/node]
   -h, --help        Print help
 
 ```

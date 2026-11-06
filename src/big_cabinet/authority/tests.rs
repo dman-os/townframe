@@ -70,7 +70,7 @@ struct TestAuthority {
 
 async fn boot_authority() -> TestAuthority {
     let sql = test_support::db(&[]).expect("authority database");
-    let (authority, stop) = boot(&keyring().await, sql.clone())
+    let (authority, stop) = boot(&keyring().await, "test-node", sql.clone())
         .await
         .expect("authority boot");
     TestAuthority { authority, stop }
@@ -921,7 +921,7 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
     let path = directory.path().join("authority.sqlite");
     let runtime = SqliteRuntime::new(RuntimeConfig::default());
     let sql = runtime.database(&path, &[], "_test_migrations");
-    let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
+    let (authority, stop) = boot(&secrets, "test-node", sql.clone()).await.unwrap();
     let first = TestAuthority { authority, stop };
     let docs = first.subsystem("docs").await;
     let plugin = first.subsystem("plugin").await;
@@ -952,7 +952,7 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
     drop(runtime);
     let runtime = SqliteRuntime::new(RuntimeConfig::default());
     let sql = runtime.database(&path, &[], "_test_migrations");
-    let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
+    let (authority, stop) = boot(&secrets, "test-node", sql.clone()).await.unwrap();
     let reopened = TestAuthority { authority, stop };
     assert_ne!(reopened.root(), root);
     assert_eq!(reopened.authority.service.operator_uuid(), operator);
@@ -1023,7 +1023,7 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
 
     // The sealed keys open only under the wrapping key that sealed them, so a
     // keyring that lost it is refused rather than given fresh identities.
-    let refused = boot(&keyring().await, sql).await;
+    let refused = boot(&keyring().await, "test-node", sql).await;
     assert!(
         matches!(refused, Err(AuthorityError::StateCorrupt(_))),
         "{:?}",
@@ -1583,7 +1583,10 @@ async fn simultaneous_service_instances_share_identities_not_handles() {
     let second_runtime = SqliteRuntime::new(RuntimeConfig::default());
     let sql = first_runtime.database(&path, &[], "_test_migrations");
     let second_sql = second_runtime.database(&path, &[], "_test_migrations");
-    let (first, second) = tokio::join!(boot(&secrets, sql.clone()), boot(&secrets, second_sql));
+    let (first, second) = tokio::join!(
+        boot(&secrets, "test-node", sql.clone()),
+        boot(&secrets, "test-node", second_sql)
+    );
     let (authority, stop) = first.unwrap();
     let first = TestAuthority { authority, stop };
     let subject = first.subsystem("subject").await;
@@ -1621,7 +1624,7 @@ async fn simultaneous_service_instances_share_identities_not_handles() {
             .await,
         AuthorityServiceError::InvalidCapability
     );
-    let (third, third_stop) = boot(&secrets, sql).await.unwrap();
+    let (third, third_stop) = boot(&secrets, "test-node", sql).await.unwrap();
     assert_eq!(
         first
             .call(InspectCapability {
@@ -1674,7 +1677,7 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
     ] {
         let secrets = keyring().await;
         let sql = test_support::db(&[]).unwrap();
-        let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
+        let (authority, stop) = boot(&secrets, "test-node", sql.clone()).await.unwrap();
         let first = TestAuthority { authority, stop };
         let subject = first.subsystem("subject").await;
         sql.execute_batch(
@@ -1753,7 +1756,7 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
             tables
         };
         let before = snapshot().await;
-        let result = boot(&secrets, sql.clone()).await;
+        let result = boot(&secrets, "test-node", sql.clone()).await;
         let required = if statement.is_some() {
             "legacy durable capability schema requires explicit migration"
         } else {
@@ -1781,7 +1784,11 @@ async fn unversioned_identities_gain_migration_history_without_replacing_keys() 
         .unwrap();
     let wrapping = zeroize::Zeroizing::new(
         secrets
-            .get_or_create_secret(super::NODE_SERVICE, super::WRAPPING_KEY, 32)
+            .get_or_create_secret(
+                super::NODE_SERVICE,
+                &super::wrapping_key_name("test-node"),
+                32,
+            )
             .await
             .unwrap(),
     );
@@ -1798,7 +1805,7 @@ async fn unversioned_identities_gain_migration_history_without_replacing_keys() 
     let claim = datum_claim(node.operator, 11);
     let signed = super::signer::sign_claim(&wrapping, &operator, claim.clone()).unwrap();
     let before = sql.query("SELECT * FROM authority_node", ()).await.unwrap();
-    let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
+    let (authority, stop) = boot(&secrets, "test-node", sql.clone()).await.unwrap();
     let test = TestAuthority { authority, stop };
     assert_eq!(test.authority.service.operator_uuid(), node.operator);
     assert_eq!(
@@ -1849,7 +1856,7 @@ async fn obsolete_schemas_are_refused_before_recording_migrations() {
         let sql = test_support::db(&[]).unwrap();
         sql.execute_batch(schema).await.unwrap();
         let before = sql.query("SELECT * FROM sqlite_schema", ()).await.unwrap();
-        let result = boot(&secrets, sql.clone()).await;
+        let result = boot(&secrets, "test-node", sql.clone()).await;
         assert!(matches!(result, Err(AuthorityError::StateCorrupt(_))));
         assert_eq!(
             sql.query("SELECT * FROM sqlite_schema", ()).await.unwrap(),
@@ -1857,7 +1864,7 @@ async fn obsolete_schemas_are_refused_before_recording_migrations() {
         );
         assert!(
             secrets
-                .get_secret(super::NODE_SERVICE, super::WRAPPING_KEY)
+                .get_secret(super::NODE_SERVICE, &super::wrapping_key_name("test-node"))
                 .await
                 .unwrap()
                 .is_none()
@@ -1869,7 +1876,7 @@ async fn obsolete_schemas_are_refused_before_recording_migrations() {
 async fn an_empty_central_grant_table_does_not_block_boot_or_get_dropped() {
     let secrets = keyring().await;
     let sql = test_support::db(&[]).unwrap();
-    let (first, first_stop) = boot(&secrets, sql.clone()).await.unwrap();
+    let (first, first_stop) = boot(&secrets, "test-node", sql.clone()).await.unwrap();
     let schema = "CREATE TABLE authority_grants (
          issuer TEXT NOT NULL
        , subject TEXT NOT NULL REFERENCES authority_actors (uuid)
@@ -1878,7 +1885,7 @@ async fn an_empty_central_grant_table_does_not_block_boot_or_get_dropped() {
        , PRIMARY KEY (issuer, subject, object)
      )";
     sql.execute_batch(schema).await.unwrap();
-    let (second, second_stop) = boot(&secrets, sql.clone()).await.unwrap();
+    let (second, second_stop) = boot(&secrets, "test-node", sql.clone()).await.unwrap();
     assert_ne!(first.root, second.root);
     assert_eq!(
         first.service.operator_uuid(),
@@ -2125,4 +2132,35 @@ async fn cached_actor_rows_never_outlive_the_capability_that_names_them() {
     );
     assert_eq!(cached(), 2);
     test.stop.stop().await;
+}
+
+/// Nodes sharing one keyring each get a wrapping key of their own, keyed by node id, and
+/// deleting one node's key leaves the other's alone: the node that lost it cannot boot again
+/// (its actor keys are sealed under a key that is gone), the other boots as before.
+#[tokio::test]
+async fn nodes_sharing_a_keyring_keep_separate_wrapping_keys() {
+    let secrets = keyring().await;
+    let (first_sql, second_sql) = (
+        test_support::db(&[]).unwrap(),
+        test_support::db(&[]).unwrap(),
+    );
+    let (_first, first_stop) = boot(&secrets, "node-a", first_sql.clone()).await.unwrap();
+    let (_second, second_stop) = boot(&secrets, "node-b", second_sql.clone()).await.unwrap();
+    first_stop.stop().await;
+    second_stop.stop().await;
+
+    assert!(
+        super::delete_wrapping_key(&secrets, "node-a")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !super::delete_wrapping_key(&secrets, "node-a")
+            .await
+            .unwrap()
+    );
+    let refused = boot(&secrets, "node-a", first_sql.clone()).await;
+    assert!(matches!(refused, Err(AuthorityError::StateCorrupt(_))));
+    let (_again, again_stop) = boot(&secrets, "node-b", second_sql.clone()).await.unwrap();
+    again_stop.stop().await;
 }

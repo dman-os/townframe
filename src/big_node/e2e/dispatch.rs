@@ -107,6 +107,7 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
             "builtin:nodules",
             big_nodule_core::protocol::AdmitNodule::XRPC.nsid,
         ),
+        ("builtin:node", crate::GET_NODE_INFO),
     ] {
         let claimed = router.operations_of(provider_id);
         assert!(

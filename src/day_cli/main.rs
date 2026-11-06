@@ -169,6 +169,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     match cli.command {
         StaticCommands::Init { .. } | StaticCommands::Completions { .. } => unreachable!(),
         StaticCommands::Daemon { command } => cmds::daemon::run(command).await,
+        StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Status { json } => cmds::status::run(json).await,
         StaticCommands::Call { nsid, input } => cmds::call::run(nsid, input).await,
     }
@@ -215,6 +216,11 @@ enum StaticCommands {
     Daemon {
         #[clap(subcommand)]
         command: cmds::daemon::DaemonCommands,
+    },
+    /// Manage the peers the node's daemon dials at start
+    Peers {
+        #[clap(subcommand)]
+        command: cmds::peers::PeersCommands,
     },
     /// Show the node's id, how it was reached, and what it runs
     Status {
