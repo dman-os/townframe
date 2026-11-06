@@ -132,7 +132,6 @@ fn a_rounded_overflow_hidden_box_clips_its_child_on_the_cpu_renderer() {
 mod focus {
     use blitz_dom::Document as _;
     use blitz_dom::DocumentConfig;
-    use blitz_dom::NodeId;
     use blitz_traits::events::BlitzKeyEvent;
     use blitz_traits::events::DomEventKind;
     use blitz_traits::events::KeyState;
@@ -218,10 +217,6 @@ mod focus {
         let mut doc = DioxusDocument::new(vdom, DocumentConfig::default());
         doc.initial_build();
         (doc, rec)
-    }
-
-    fn id_of(doc: &DioxusDocument, id: &str) -> NodeId {
-        doc.inner().get_element_by_id(id).expect("element by id")
     }
 
     /// The id of the focused element; `None` when nothing is (the engine then reports the root
