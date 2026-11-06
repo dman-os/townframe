@@ -421,3 +421,32 @@ with `role="status"`), but the compile is a synchronous call inside an async fn 
 that future; whether it is the UI thread is unverified (the `INSTR` lines are logged from the stdio thread and do not name the
 polling thread). The A3 observation (old frame frozen for the whole compile) fits a blocked UI thread. Next check: log the thread
 name and a heartbeat in the instrumentation, or move the compile to `spawn_blocking` and see whether Loading then paints.
+
+### A4 follow-up: (a), (b), (c) implemented, not yet measured (phone disconnected)
+
+The phone (`LZ0V50ETDC6009467`) dropped off `adb devices` after the first release-guest APK was built and stayed gone for the rest
+of the session, so none of the numbers below exist yet. Code state, in commit order after `855d2285`:
+
+- `instr(clay_rt_wasmtime)` also logs the thread that compiles (drop after A4).
+- `feat(clay_rt_wasmtime)`: `set_component_cache_directory(PathBuf)` (OnceLock, set-twice panics) takes precedence over
+  `$DAYFRAME_COMPONENT_CACHE` and the XDG/home default, which remain for desktop and tests. `dayframe_mobile`'s `android_main`
+  sets `<internal_data_path>/component-cache`. Re-exported through `clay_mdk::host` and `dayframe_native`. The existing
+  `precompiled_artifacts_are_reused_by_content` test now uses the setter and asserts it wins over the environment: passes
+  (`nextest run -p clay_rt_wasmtime precompiled_artifacts`, needs `DAYFRAME_COUNTER_COMPONENT`).
+- `fix(clay_rt_wasmtime)`: `WasmPackage::from_bytes(Vec<u8>)` compiles on a `wasm-compile` thread (std thread + oneshot, no tokio
+  runtime assumed) so the polling thread is free. New test `compiling_a_package_leaves_the_polling_thread_free` (cold compile via a
+  uniquely padded component, asserts a 1 ms ticker runs on the polling thread meanwhile): passes. It was not run against the old
+  blocking code, so that it fails there is unverified.
+
+Release guests: `counter.component.wasm` 9,898,967 B and `layout.component.wasm` 11,035,457 B under `wasm-release` (debug: 15.1 and
+17.0 MB; `wasm-release` keeps line tables).
+
+APKs saved for the measurements (all with the INSTR lines, release guests, predictive-back manifest):
+`/run/media/asdf/p3N/tmp/a4/apk-a-release-guests.apk` (release guests only, thread log, no cache, compile still on the polling
+thread) and `/run/media/asdf/p3N/tmp/a4/apk-bc.apk` (plus the cache and the compile thread). `/run/media/asdf/p3N/tmp/a4/cold.sh`
+force-stops, cold-starts, opens Counter (Wasm) and prints the INSTR lines. To do, on a connected phone:
+1. install `apk-a`, run `cold.sh`: release-guest compile time, and the compiling thread's name (UI thread or not);
+2. install `apk-bc`, run `cold.sh` twice: first start compile time (cache miss), second start (cache hit; also `run-as
+   com.example.mobile ls files/component-cache`), and screencap (cropped) during the first open to see "Loading section...".
+Build note: the link step failed three times in a row with `ld.lld: failed to open .../out/dayframe_mobile: Invalid argument`
+(ntfs3 target dir) and succeeded on the fourth identical run; `fallocate`/`ftruncate` of 2 GB in that directory work, cause unknown.
