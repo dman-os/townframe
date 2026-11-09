@@ -3,6 +3,10 @@
 
 use super::*;
 use crate::test_poll::Poller;
+use big_cabinet_core::doc::DatumEvent;
+use big_cabinet_core::doc::PollDatums;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 
 #[tokio::test]
 async fn doc_poll_replays_then_reports_versions_and_removal() {
@@ -117,4 +121,99 @@ async fn a_scoped_caller_needs_an_anchor_that_reaches_the_document() {
     assert_eq!(doc_id, own.doc_id);
     assert!(matches!(datum, ObservedDatum::Present { .. }), "{datum:?}");
     node.stop().await;
+}
+
+#[tokio::test]
+async fn a_sole_doc_poll_is_not_woken_by_writes_to_other_documents() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let watched = node
+        .create(&alice, "watched", [(key("main"), note("one"))])
+        .await
+        .unwrap()
+        .doc_id;
+    let other = node
+        .create(&alice, "other", [(key("main"), note("elsewhere"))])
+        .await
+        .unwrap()
+        .doc_id;
+    // The capability reads both documents, so any leak is the predicate's filtering and not
+    // the capability's reach.
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                read: BTreeSet::from([watched.clone(), other.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    // `IsDoc` alone would hide a leak, because `matching_docs` rejects the other document
+    // anyway. Adding a tag clause makes every note write a predicate fact, which without the
+    // `sole_doc` filter marks the other document as moved and answers it with a `leave`.
+    let mut poll = Poller::new(
+        node.client(),
+        PollDatums {
+            capability,
+            predicate: Predicate::And {
+                clauses: vec![
+                    Predicate::IsDoc {
+                        doc_id: watched.clone(),
+                    },
+                    Predicate::HasTag {
+                        tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
+                    },
+                ],
+            },
+            datums: DatumSelection::All,
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    );
+    let replay = poll.page(0).await.unwrap();
+    assert!(replay.caught_up);
+    assert!(
+        replay
+            .events
+            .iter()
+            .all(|event| event_doc(event) == &watched),
+        "{:?}",
+        replay.events
+    );
+
+    node.write(
+        &alice,
+        &other,
+        WriteMode::AtCurrent,
+        [(key("main"), note("changed elsewhere"))],
+        [],
+    )
+    .await
+    .unwrap();
+    // A held poll over the other document's write returns empty once the hold expires, with
+    // the cursor moved past the unrelated entry.
+    let quiet = poll.page(500).await.unwrap();
+    assert!(quiet.events.is_empty(), "{:?}", quiet.events);
+
+    node.write(
+        &alice,
+        &watched,
+        WriteMode::AtCurrent,
+        [(key("main"), note("two"))],
+        [],
+    )
+    .await
+    .unwrap();
+    let (doc_id, _, datum) = poll.next_datum().await;
+    assert_eq!(doc_id, watched);
+    assert!(matches!(datum, ObservedDatum::Present { .. }), "{datum:?}");
+    node.stop().await;
+}
+
+fn event_doc(event: &DatumEvent) -> &DocId {
+    match event {
+        DatumEvent::Datum { doc_id, .. } | DatumEvent::Leave { doc_id, .. } => doc_id,
+    }
 }
