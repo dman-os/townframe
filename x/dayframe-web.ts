@@ -1,12 +1,16 @@
 #!/usr/bin/env -S deno run --allow-all
 
 // Build and serve the `dayframe_web` shell (ADR 018 migration steps 6–7): the shared
-// composition with the counter guest fetched as an asset, compiled by the browser's
-// `WebAssembly` engine through `wcmp`.
+// composition plus every package in `packages/index.json`. Each entry's manifest is the
+// sidecar `<name>.manifest.json` beside the component (STAND-IN until `big_plugs` delivers
+// manifests) and is pinned with the BLAKE3 digest of the component bytes; the shell fetches a
+// package only when an instance activates and verifies the digest before `wcmp` compiles it.
 //
 //   deno run --allow-all x/dayframe-web.ts            build, then serve on HOST:PORT
 //   deno run --allow-all x/dayframe-web.ts --build    build only
 
+import { crypto } from "jsr:@std/crypto@1.0.5";
+import { prepareDayframePackages } from "./dayframe-packages.ts";
 import { $ } from "./utils.ts";
 
 const buildOnly = Deno.args.includes("--build");
@@ -28,18 +32,18 @@ function matchesAt(
 // renderer's native-tls into wasm32. See CONTRIBUTING.md on `resolver.feature-unification`.
 const isolated = ["--config", 'resolver.feature-unification="selected"'];
 
-const prepared = await $`deno run --allow-all ${
-  root.join("x/check-dayframe.ts")
-} --prepare-only`.lines();
-const counter = prepared
-  .map((line) => line.match(/^DAYFRAME_COUNTER_COMPONENT=(.+)$/)?.[1])
-  .find((path) => path !== undefined);
-if (!counter) {
-  throw new Error(
-    `check-dayframe.ts printed no DAYFRAME_COUNTER_COMPONENT:\n${
-      prepared.join("\n")
-    }`,
-  );
+// Only the shells' packages: the test-only guest fixtures are not served.
+const packageDirectory =
+  (await prepareDayframePackages({ testFixtures: false }))[
+    "DAYFRAME_PACKAGE_DIR"
+  ];
+
+// BLAKE3, the digest big_blobs uses and `clay_mdk::package::Package::digest` computes (Deno's
+// Deno's own WebCrypto lacks it; `@std/crypto` adds it).
+async function blake3Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("BLAKE3", bytes.slice().buffer);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 // `wasm-release`, as `cargo x guardrails check-matrix` builds it: a debug build also links
@@ -64,7 +68,34 @@ await Deno.mkdir(site.toString(), { recursive: true });
 await $`wasm-bindgen --target web --no-typescript --out-dir ${site} --out-name dayframe_web ${
   target.join("wasm32-unknown-unknown/wasm-release/dayframe_web.wasm")
 }`;
-await Deno.copyFile(counter, site.join("counter.component.wasm").toString());
+await Deno.mkdir(site.join("packages").toString(), { recursive: true });
+// One index entry per `<name>.manifest.json` beside its `<name>.component.wasm`, in name order
+// (the order the desktop shell scans them in).
+const packageNames = [...Deno.readDirSync(packageDirectory)]
+  .flatMap((entry) => entry.name.match(/^(.+)\.manifest\.json$/)?.[1] ?? [])
+  .sort();
+let guestBytes = 0;
+{
+  const index = [];
+  for (const name of packageNames) {
+    const bytes = await Deno.readFile(
+      `${packageDirectory}/${name}.component.wasm`,
+    );
+    guestBytes += bytes.length;
+    index.push({
+      location: `packages/${name}.component.wasm`,
+      digest: await blake3Hex(bytes),
+      sidecar: JSON.parse(
+        await Deno.readTextFile(`${packageDirectory}/${name}.manifest.json`),
+      ),
+    });
+    await Deno.writeFile(
+      site.join(`packages/${name}.component.wasm`).toString(),
+      bytes,
+    );
+  }
+  await site.join("packages/index.json").writeText(JSON.stringify(index));
+}
 // `ui::ThemeRoot` loads `asset!("/assets/tailwind.css")`. Without `dx` the manganis
 // `bundled_path` stays `BundledAsset::PLACEHOLDER_HASH`, so `Asset::resolve()` asks for
 // `/assets/This should be replaced by dx…` (404 + console error → e2e fail). Rewrite the
@@ -150,9 +181,7 @@ const gzip = new Deno.Command("gzip", {
   stdout: "piped",
 }).outputSync().stdout;
 console.log(
-  `bundle-size dayframe_web host=${hostBytes} gzip=${gzip.length} guest=${
-    (await Deno.stat(counter)).size
-  }`,
+  `bundle-size dayframe_web host=${hostBytes} gzip=${gzip.length} guests=${guestBytes}`,
 );
 
 await site.join("index.html").writeText(`<!doctype html>

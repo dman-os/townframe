@@ -3,15 +3,22 @@ role = "application"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
     "clay_dioxus",
+    "clay_collection",
     "clay_docs",
+    "clay_guest_session",
+    "clay_store",
+    "clay_surface",
+    "daybook_types",
     "clay_host",
     "clay_mdk",
-    "clay_micro_core",
-    "clay_surface",
+    "micro_counter",
     "micro_counter_manifest",
     "micro_sample",
     "micro_settings",
     "micro_settings_manifest",
+    "micro_toolbar",
+    "micro_toolbar_manifest",
+    "sqlite_rs",
 ]
 allow_external_api_types = false
 

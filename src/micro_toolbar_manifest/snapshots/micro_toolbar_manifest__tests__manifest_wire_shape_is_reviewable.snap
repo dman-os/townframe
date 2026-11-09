@@ -1,0 +1,45 @@
+---
+source: src/micro_toolbar_manifest/lib.rs
+expression: sidecar()
+---
+id: dayframe.toolbar
+package_version: 1
+authority: org.example.dayframe.toolbar
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
+  installer: ~
+publications:
+  - name: view
+    kind: presentation
+    contract: ~
+requires: []
+configuration_requests: []
+collection_contracts:
+  - id: org.example.dayframe.toolbar.buttons
+    selector_schema: org.example.dayframe.toolbar.buttonSelector
+    key_schema: org.example.dayframe.toolbar.buttonKey
+    value_schema: org.example.dayframe.toolbar.button
+    write_context_schema: ~
+    offered:
+      - read
+      - register
+collection_requests:
+  - binding: buttons
+    contract: org.example.dayframe.toolbar.buttons
+    access: read
+  - binding: roots
+    contract: org.example.clay.shell.roots
+    access: write
+contributions:
+  - id: root
+    binding: roots
+    key: dayframe.toolbar
+    payload:
+      content:
+        $attachment: 0
+      pinned: true
+      title: Toolbar
+    attachments:
+      - index: 0
+        publication: view

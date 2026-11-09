@@ -14,13 +14,10 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::rc::Weak;
+use std::task::Poll;
+use std::task::Waker;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FacetState<T = String> {
-    Loading,
-    Absent,
-    Present(T),
-}
+use crate::FacetState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MirrorStatus {
@@ -157,6 +154,7 @@ impl DocumentMirror {
             state: Rc::new(OperationState {
                 receipt: RefCell::new(receipt),
                 remote: RefCell::new(remote),
+                wakers: RefCell::default(),
             }),
         };
         if pending {
@@ -205,6 +203,9 @@ impl DocumentMirror {
         if terminal {
             self.state.borrow_mut().operations.remove(&id);
             operation.state.remote.borrow_mut().take();
+        }
+        for waker in std::mem::take(&mut *operation.state.wakers.borrow_mut()) {
+            waker.wake();
         }
         self.notify();
         true
@@ -371,11 +372,38 @@ impl PartialEq for MirrorOperation {
 struct OperationState {
     receipt: RefCell<documents::OperationReceipt>,
     remote: RefCell<Option<documents::Operation>>,
+    /// Tasks waiting in [`MirrorOperation::next`] for the next receipt.
+    wakers: RefCell<Vec<Waker>>,
 }
 
 impl MirrorOperation {
     pub fn current(&self) -> documents::OperationReceipt {
         self.state.receipt.borrow().clone()
+    }
+
+    /// The receipt that follows `after_revision`: the next delivered one, `None` once the
+    /// operation settled with nothing newer, and [`documents::DocumentError::SubscriptionLagged`]
+    /// when `after_revision` is ahead of what was delivered. Completions arrive through
+    /// [`DocumentMirror::completed`].
+    pub async fn next(
+        &self,
+        after_revision: u64,
+    ) -> Result<Option<documents::OperationReceipt>, documents::DocumentError> {
+        std::future::poll_fn(|cx| {
+            let receipt = self.state.receipt.borrow();
+            if after_revision > receipt.revision {
+                return Poll::Ready(Err(documents::DocumentError::SubscriptionLagged));
+            }
+            if receipt.revision > after_revision {
+                return Poll::Ready(Ok(Some(receipt.clone())));
+            }
+            if !matches!(receipt.status, documents::OperationStatus::LocallyApplied) {
+                return Poll::Ready(Ok(None));
+            }
+            self.state.wakers.borrow_mut().push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 }
 

@@ -9,7 +9,6 @@ use super::grammar::invalid;
 use super::grammar::names;
 use super::grammar::parse_ref;
 use super::is_nsid;
-use indexmap::IndexMap;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -17,12 +16,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use unicode_segmentation::UnicodeSegmentation;
 
-/// The members of an object that its declaration does not name.
-///
-/// An open object carries one of these as its `#[serde(flatten)]` field, and that field is the only
-/// thing that makes `schemars` emit `additionalProperties: true`. An `IndexMap` rather than
-/// `serde_json::Map` so a pass-through keeps the order a peer sent.
-pub type Extra = IndexMap<String, Value>;
 
 type Result<T> = std::result::Result<T, GrammarError>;
 
@@ -791,6 +784,7 @@ pub(crate) fn datetime(value: &str) -> bool {
     })
 }
 
+// The leaf types this crate owns. The rest of the vocabulary, and the containers, are `datum_core`'s.
 macro_rules! values {
     ($($ty:ty),* $(,)?) => {
         $(impl DatumShape for $ty {
@@ -800,20 +794,6 @@ macro_rules! values {
 }
 
 values!(
-    bool,
-    str,
-    String,
-    u8,
-    u16,
-    u32,
-    u64,
-    i8,
-    i16,
-    i32,
-    i64,
-    f32,
-    f64,
-    Value,
     crate::dmeta::Uuid7,
     crate::dmeta::MultibaseKey,
     crate::dmeta::SignatureBytes,
@@ -821,64 +801,15 @@ values!(
     crate::DatumKey,
     crate::DatumReference,
     crate::drawer::GroupKey,
-    super::UnknownMember,
-    big_sync_core::ObjKey,
-    jiff::Timestamp,
-    automerge::ChangeHash,
 );
 
 #[cfg(feature = "schemars")]
 values!(super::Bytes, super::Counter, super::Text, super::F64);
 
-macro_rules! containers {
-    ($($container:path),* $(,)?) => {
-        $(impl<T: DatumShape> DatumShape for $container {
-            const SHAPE: Shape = Shape::Value;
-        })*
-    };
-}
-
-containers!(Option<T>, Vec<T>);
-
-impl<T: DatumShape + ?Sized> DatumShape for Box<T> {
-    const SHAPE: Shape = Shape::Value;
-}
-
-impl<T: DatumShape + ?Sized> DatumShape for std::sync::Arc<T> {
-    const SHAPE: Shape = Shape::Value;
-}
-
-impl<T: DatumShape + ?Sized> DatumShape for std::rc::Rc<T> {
-    const SHAPE: Shape = Shape::Value;
-}
-
-impl<T: DatumShape + ?Sized> DatumShape for &T {
-    const SHAPE: Shape = Shape::Value;
-}
-
-impl<T: DatumShape> DatumShape for [T] {
-    const SHAPE: Shape = Shape::Value;
-}
-
-impl<T: DatumShape, const N: usize> DatumShape for [T; N] {
-    const SHAPE: Shape = Shape::Value;
-}
-
-impl<K: DatumShape, V: DatumShape> DatumShape for std::collections::BTreeMap<K, V> {
-    const SHAPE: Shape = Shape::Value;
-}
-
-impl<K: DatumShape, V: DatumShape, S> DatumShape for std::collections::HashMap<K, V, S> {
-    const SHAPE: Shape = Shape::Value;
-}
-
-impl<K: DatumShape, V: DatumShape, S> DatumShape for IndexMap<K, V, S> {
-    const SHAPE: Shape = Shape::Value;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexmap::IndexMap;
 
     #[test]
     fn containers_require_every_nested_shape() {

@@ -1,30 +1,17 @@
 //! Contributor-owned native presentation; Settings mounts it without reading its document.
 use super::SampleConfig;
-use clay_mdk::native::Facet;
-use clay_mdk::native::FacetValue;
-use clay_mdk::native::Freshness;
-use clay_mdk::native::Operation;
-use clay_mdk::native::OperationReceipt;
+use clay_mdk::Facet;
+use clay_mdk::FacetState;
+use clay_mdk::Operation;
+use clay_mdk::OperationReceipt;
+use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
 
 #[component]
 pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
     let facet = config;
-    let watch = facet.watch.clone();
-    let mut state = use_signal(|| watch.current().unwrap());
-    use_future(move || {
-        let mut changes = watch.subscribe().unwrap();
-        async move {
-            loop {
-                state.set(changes.borrow_and_update().clone());
-                if changes.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    let snapshot = state();
-    let config_state = facet.state(&snapshot);
+    let snapshot = use_facet(&facet);
+    let config_state = snapshot.state.clone();
     let mut status = use_signal(|| "Configuration loaded from the mock node.".to_string());
     let mut receipt = use_signal(|| None::<OperationReceipt>);
     let mut track = move |operation: Operation| {
@@ -47,7 +34,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
         div { class: "flex flex-col gap-4",
             p { "This detail component belongs to the sample micro, not Settings." }
             match config_state {
-                FacetValue::Present(config) => {
+                FacetState::Present(config) => {
                     let config_for_toggle = config.clone();
                     rsx! {
                         p { "Greeting preview: {config.greeting}" }
@@ -61,7 +48,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                                 match sample_for_toggle.write(next) {
                                     Ok(operation) => {
                                          track(operation);
-                                         status.set("Optimistic edit is visible. Accept or reject it below.".into());
+                                         status.set("Optimistic edit is visible.".into());
                                      },
                                     Err(error) => status.set(error.to_string()),
                                 }
@@ -88,10 +75,10 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                         }
                     }
                 }
-                FacetValue::Loading => rsx! { p { "Configuration is loading." } },
-                FacetValue::Absent => rsx! { p { "Configuration is absent." } },
+                FacetState::Loading => rsx! { p { "Configuration is loading." } },
+                FacetState::Absent => rsx! { p { "Configuration is absent." } },
             }
-            if snapshot.freshness == Freshness::Refreshing {
+            if snapshot.refreshing {
                 p { role: "status", "Refreshing sample configuration." }
             }
             div { class: "flex flex-wrap gap-2",
@@ -99,8 +86,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                     class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                     "aria-label": "Refresh configuration",
                     onclick: move |_| {
-                        sample_for_refresh.watch.refresh().unwrap();
-                        if sample_for_refresh.watch.current().unwrap().freshness == Freshness::Refreshing {
+                        if sample_for_refresh.refresh().unwrap().refreshing {
                             status.set("Refreshing sample configuration; pending edits were retained.".into());
                         } else {
                             status.set("Targeted refresh completed; pending edits were retained.".into());
@@ -110,7 +96,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                 }
             }
             p { role: "status", "{status}" }
-            p { class: "text-sm text-muted-foreground", "Mirror revision {snapshot.revision} · pending writes: {snapshot.pending.len()}" }
+            p { class: "text-sm text-muted-foreground", "Mirror revision {snapshot.revision} · pending writes: {snapshot.pending}" }
             if let Some(receipt) = receipt() {
                 p { role: "status", "Operation {receipt.id}: {receipt.status:?}" }
             }

@@ -1,10 +1,9 @@
 ---
-source: src/clay_mdk/manifest.rs
+source: src/clay_mdk/manifest_tests.rs
 expression: "serde_json::to_string_pretty(&acl).unwrap()"
 ---
 {
-  "owner_plug_id": "dayframe.organizer",
-  "tag": "org.dayframe.counter.config",
+  "tag": "org.example.test.counter.config",
   "key_id": "count",
   "read": true,
   "write": true,
