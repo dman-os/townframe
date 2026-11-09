@@ -7,11 +7,10 @@
 //   deno run --allow-all x/dayframe-web.ts            build, then serve on HOST:PORT
 //   deno run --allow-all x/dayframe-web.ts --build    build only
 
-import { $, useDotenvTargetDir } from "./utils.ts";
+import { $ } from "./utils.ts";
 
 const buildOnly = Deno.args.includes("--build");
 const root = $.relativeDir("../");
-await useDotenvTargetDir();
 
 function matchesAt(
   buf: Uint8Array,
