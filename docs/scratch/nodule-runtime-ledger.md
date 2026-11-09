@@ -685,6 +685,13 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - Consent, permissions and actors, and the authoring naming questions (`plug-authoring.md`), are next week.
   - Test threads under load, the ledger cleanups and the small follow-ups: manager decides.
 
+- **D38. Week of 2026-11-09: big_ndk, relays and intxt as the grounding** (operator, 2026-11-09/10):
+  - **The backend framework is `big`**, as Clay is the frontend's: the `big_*` crates are the vocabulary nodules use and what nodes are built from. The nodule kit is **`big_ndk`** (beside `clay_mdk`, `wflow_sdk`), a working name until a better one appears. Naming roles as the operator sees them: daytxt is the app (the "OS" you interact through); dayframe is the user's computer (it runs nodules and services; Clay is the user agent to it); townframe is the communal product (subreddit-like); "node" names the networked role; the browser deployable is a *webnode*, not "webframe". Where frame ends and node begins is undecided.
+  - **This week's goal:** deliver the NDK, then the day node and relay node compositions, built top-down from intxt's requirements rather than bottom-up from the runtime. The manager owns the NDK experience and relays; most implementation goes through Sonnet subagents. A third (Opus) lane will do intxt's backend: its datums, micro and cartridge.
+  - **intxt alpha (operator):** users push intxts through their own node to a relay acting as their mother node; the web app is a Clay client of the relay and browses *public* intxt drawers only (no web sign-in until webnodes, which wait for upstream keyhive to stabilize). No sponsorship for the alpha.
+  - **`day` never builds source.** Its input starts at built wasm plus manifest, and it stays language-neutral; tools that wrap cargo and misread custom builds are the failure to avoid. No extension system for now (git-style `day-xxx` on PATH is the escape hatch if ever needed). `day call` becomes `day exec` with the alias `x`.
+  - **MCP and CLI from Lexicons (manager proposal, operator leaning):** rather than an MCP server per nodule, `day mcp` exposes the methods a capability reaches as tools, and installed cartridges get generated `day` subcommands, both from the methods' Lexicons. With GET through `/xrpc` (query params need the Lexicon to type them) and D31 input checking, that is one piece of work with four outputs.
+
 ## Deferred
 
 wflow service and durable procedures; POSIX providers; triage/processors; big_tasks; network/XRPC exposure; consumers of command/view bindings; single-instance services; generalising `NoduleGrants` to operation grants.
