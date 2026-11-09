@@ -30,6 +30,17 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 - **L5** The read API must expose a datum version's signing actor, so the UI can show authorship without an unsigned `author` field. Check what `ReadDatums` returns today; ask the node lane if missing.
 - **L6** Claytxt requirements on anchors (2026-11-10): content to re-attach against (`quote`), ranges spanning hunks with context lines, file-level anchors. Addressed in design §3; needs their review.
 
+## Findings
+
+- **F1 (2026-11-10) Automerge cost of carrying source as Text** (automerge 0.11, real PRs #76 7.4 MB / #79 5.4 MB base+head of touched files; scratchpad experiment `am-exp`, single runs on a loaded machine, ±2x):
+  - On-disk `save()` is 0.16–0.24× input for every variant (#76: one doc 1.2 MB, per-file docs 1.4 MB total, patch-as-Text 0.8 MB, plain Str 1.6 MB). Size is not the problem.
+  - Memory and load are: one doc holding all files as Text peaks at 840 MB building and 514 MB / 7 s loading. One doc per file peaks at 160 MB building, 75 MB with all 404 loaded, 6.3 s to load all (a viewer loads only the files it shows). Plain Str loads in 0.07 s.
+  - Build edits with line-diff splices; automerge's `update_text` is character-level and 25× slower (447 s vs 17 s) with 7× the patches.
+  - An incremental revision (81 files edited to #77) is 345 KB; a 1% edit in 20 files is 16 KB.
+  - Cursors made at rev1 resolve correctly at rev2 in 52/53 (#76) and 53/60 (#79) files; all misses are moved blocks, which a line diff expresses as delete+insert. Moves still need quote matching or a move-aware diff.
+- **F2 (2026-11-10) Harness transcripts** (Claude Code, OpenCode, Pi on this machine; Codex/omp have no turn data left): conversation is ~6% of a Claude Code log; every harness with data yields per-edit unified patches; none records the commit per turn. Delta ingests transcripts as ACP session updates and files via a checkout mount; its agent does no extra annotation work.
+- **F3 (2026-11-10)** `feat/dpaths` (FDR 001–003, ADR 010–012) designs checkout ingest of filesystem edits into documents (watch mode, no staging) and leaves multi-doc ingest messages to a future design: the natural hook for edit→turn provenance in the VCS stage.
+
 ## In flight
 
-- Nothing building. This checkout is on `feat/intxt` off `main`; `chore/mbx` not merged yet.
+- Nothing building. `feat/intxt` has `chore/mbx` merged (2d0f3ff1); p3N-4 since rebased `chore/mbx` as `adfd2778` with the same fixes. Build with `env -u CARGO_TARGET_DIR nix develop -c …`.
