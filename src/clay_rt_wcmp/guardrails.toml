@@ -2,6 +2,7 @@ version = 1
 role = "runtime"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
+    "clay_collection",
     "clay_docs",
     "clay_guest_session",
     "clay_host",

@@ -1,266 +1,462 @@
-# ADR 017: Clay collections — a chained replica/ledger/view substrate
+# ADR 017: Clay collection waist — leased partial replication
 
-**Status:** Accepted. Implemented in `clay_collection`, consumed by `clay_host` (contribution
-collections), `clay_docs` (document facets), and `clay_mdk::view::use_collection`.
-**Amends:** ADR 015 §4 (optimistic-write visibility, contribution collections) and §6
-(contribution collections are built on this substrate rather than a host-private store).
-**Context documents:** the session design log in `docs/scratch/dayframe-micros.md` (Turn 31,
-slices 1–5, and the guided review tour) and the original plugin-theory transcript cited by
-ADR 015.
+**Status:** Proposed. This record withdraws the original `attach` / `demand` /
+`release` relay design and replaces the later subscription/hydration draft. The
+requirements are decided; the wire protocol remains proposed until the validation
+criteria below pass through an actual component boundary.
+
+**Amends:** ADR 014's live-query and optimistic-state requirements and ADR 015's
+collection boundary. ADR 029 defines capability references carried by collection
+values. ADR 031 defines manifest-declared collections, durable registration scopes, and lazy capability attachments.
 
 ## Context
 
-Collections are how micros talk to each other. A provider declares one, others contribute or
-read, and the provider renders from its own schema; DOM structure is never an interface
-(ADR 015 settled rules). Until this change Clay had three unrelated shapes for that:
+Clay needs one small host–guest data protocol from which unrelated guest libraries
+can build rich local collection APIs. A Rust MDK is one consumer, not the definition
+of that protocol. Future guests may use TypeScript, React, TanStack DB, signals, or a
+library we have not designed.
 
-- `HostedCollection` delivered a whole `BTreeMap<u64, T>` snapshot per change through a
-  `watch` channel — the performance and security footgun the plugin-theory discussion named.
-- `clay_data` carried a private optimistic map whose acceptance simply promoted the predicted
-  value into the base. That only works when accepting a write installs exactly that value.
-- Document data, contribution registries, and guest-provided collections each needed the same
-  reactive read path, but nothing let a guest consume another guest's collection.
+The two proving workloads are:
 
-The data plane must serve node → host → guest, guest → host → guest, and later node → collection
-(TanStack-style query sources), with documents and facets as only one bespoke layer on top.
-TanStack DB (synced base plus segregated optimistic transactions, live queries over the visible
-set) and Zero (authoritative base, replayable mutators, processed-mutation progress riding with
-row patches) were studied. We take TanStack's segregation and visible-set queries, and Zero's
-lesson that reconciliation evidence must ride in the same message as the rows; we do not take
-replayable mutators.
+1. node-backed projected datum state, where the host acquires selective data from a
+   node and maintains shared optimistic predictions; and
+2. micro composition, where several micros contribute transient state that is
+   combined for consumers and disappears when its owner closes.
+
+The protocol crosses address spaces and therefore cannot assume Rust closures,
+borrowed values, a shared heap, or one UI framework. Copying every source row into
+every guest is also not acceptable as the permanent model. Each guest instead owns a
+partial replica containing only projections it has acquired.
+
+The previous design made every participant a relay with `attach`, opaque demand
+messages, eager `Batch` broadcast, coverage lists, and generic whole-row writes. In
+the implementation, demand did not narrow delivery and releasing it did not stop the
+attached relay. The design also mixed four different concerns:
+
+- replication of authoritative current state;
+- local guest query evaluation;
+- source-specific mutation semantics; and
+- shared optimistic predictions.
+
+This ADR keeps the waist narrow: it replicates selected current state. Collection
+features and guest libraries build richer behavior above it.
 
 ## Decision
 
-### 1. One hop, chained
+### 1. The waist replicates current-state projections
 
-Every participant runs the same component, a **hop**:
+A collection source exposes keyed projected current state. It is not a history API,
+event bus, CRDT change transport, blob transport, or persistence layer.
+
+A manifest-declared collection is a logical host facility independent of the declaring micro's activation. Once its plug definition is admitted, an untouched collection still exists and bootstraps as known-empty. Volatile, durable, and node-backed materializations share this read waist; backing and registration-scope lifetime are specified by ADR 031 rather than exposed through pages.
+
+A consumer acquires an immutable source-defined selector and receives a projection
+lease:
 
 ```text
-             ┌──────────────────── hop ────────────────────┐
-query ──────►│ local query over Visible = Ledger ⊕ Replica │──► rows (immediately)
-             │   Replica: key → (Version, row), tombstones │
-             │   Ledger:  OperationId → whole-row overlay  │
-demand ─────►│──────────────► Upstream ───────────────────►│──► next hop
-batches ◄────│◄────────────── Downstream ◄─────────────────│◄── next hop
-writes ─────►│──────────────► Upstream ───────────────────►│──► next hop
-             └─────────────────────────────────────────────┘
+reader.acquire(selector, resume?) -> projection-lease
+
+projection-lease.read(committed?, limits, poll-timeout) -> page
+
+drop(projection-lease) -> release host and upstream interest
 ```
 
-- **Shared:** `Replica` (latest row per key, version-guarded, deletion tombstones), `Ledger`
-  (segregated overlays), `View` (both, plus local query, demand bookkeeping, notification).
-- **Bespoke per source:** the `Upstream` implementation (what feeds a hop and how it narrows
-  demand) and the row codec. The facet frontier, a host-held store, a computed collection, and a
-  future `queryFn` source are all `Upstream` implementations.
-- A writable `View` implements `Upstream`, so **a view is a legal source**. host → guest and
-  guest → guest are the same relay; no second mechanism exists for guest-provided collections.
-- Mounting a query answers from the local visible set first and only then mounts its demand
-  upstream; each hop answers from its own replica and forwards what it cannot cover. This gives
-  "preload, then filter locally" reads with no loading flash when data is already near.
+`committed` is absent on the first read and is the `through` cursor of the last page the guest applied thereafter. A resume cursor supplied to `acquire` establishes the lease's starting boundary; the first read still passes no committed cursor. Cursors are scoped to the selector and projection generation and cannot be transferred to another lease except as that selector's best-effort resume token. A lease permits one in-flight read. Retrying from the same committed cursor returns transitions after that cursor, possibly with different page boundaries, and dropping the lease cancels its pending read.
 
-### 2. The waist
+Acquiring a lease is also preloading. The host knows the selection remains mounted
+even between reads, so it can retain the corresponding node query, index projection,
+or host materialization. Dropping the lease releases that interest. A lease is not a
+pushed stream: the guest controls consumption with bounded long polls, and the source
+does not queue data pages for an idle consumer.
 
-The protocol between hops never names "collection"; the near end cannot tell whether the far end
-is another hop, the facet frontier, or a query source.
+The selector is opaque to the waist and typed by the collection contract. Examples
+include a datum query, a toolbar surface, or the identity selector for a small
+collection. Selectors are immutable for a lease; changing one acquires a replacement
+lease.
 
-```rust
-// consumer → upstream (clay_collection::Upstream)
-fn attach(&self, downstream: &Downstream<K, V>); // before any demand: no read-then-subscribe gap
-fn demand(&self, token: DemandToken, id: DemandId);
-fn release(&self, id: DemandId);
-fn write(&self, id: OperationId, key: K, value: Option<V>, writer: ScopeId);
+### 2. Source selectors and guest-local queries are different
 
-// upstream → consumer: one Batch is one visible transition
-struct Batch<K, V> {
-    incarnation: u64,
-    base: Vec<BaseDelta<K, V>>,               // Upsert { key, version, value } | Remove { key, version }
-    overlays: Vec<OverlayDelta<K, V>>,        // Put { id, key, value: Option<V>, writer } | Clear { id }
-    settled: Vec<(OperationId, WriteOutcome)>,// Durable { version } | Rejected | Unknown
-    covered: Vec<DemandId>,
+A **selector** controls partial replication across the host–guest boundary. A
+**query** runs over the guest's partial replica.
+
+A collection-specific package defines a typed, data-shaped query IR and two
+interpretations:
+
+```text
+typed query IR
+    ├── encoded selector transported by the waist
+    ├── host planner -> node, index, SQL, or materialized-source acquisition
+    └── guest evaluator -> local filter, grouping, ordering, and derivation
+```
+
+The host and guest implementations obey the same logical contract and share
+conformance fixtures. They need not share one language or executable closure. The
+waist does not standardize a universal query language.
+
+Selector evaluation is a deterministic, read-only predicate over the selector, key,
+and value. In-process source adapters must not re-enter projection operations from
+that predicate or acquire locks that can invert projection locking. Upstream interest
+acquisition belongs in the separate source acquisition operation, which runs outside
+projection locks.
+
+A source may safely overfetch for ordinary filtering, and the guest evaluator may
+narrow the result. Authorization never overfetchs: unauthorized keys, values, pending
+state, and capability references are filtered before crossing the boundary.
+
+### 3. Pages carry atomic visible-state transitions
+
+A page contains zero or more source transactions:
+
+```text
+Page {
+    transactions: [
+        Transaction {
+            changes: [
+                Upsert {
+                    key,
+                    row_version,
+                    value,
+                    evidence,
+                    write_context?,
+                }
+              | Remove {
+                    key,
+                    row_version,
+                }
+            ]
+        }
+    ],
+    through: Cursor,
+    bootstrap_complete: bool,
 }
 ```
 
-- **One batch is one visible transition.** Base rows, overlays, settlements, and coverage land
-  in one `apply`; forwarding them separately would render a frame where a pending row reverts
-  to base and re-appears, or loses its settlement evidence.
-- **Base and overlays never merge on the wire.** A consumer can always tell an accepted value
-  from someone's pending intent.
-- Payloads crossing an address space are self-describing data (JSON today, CBOR acceptable).
-  A host change must not force every micro to rebuild (ADR 015 R9). `DemandToken` is
-  `serde_json::Value` for this reason.
+Values are inline in the first protocol. Listing plus exact-version hydration,
+cross-query body caches, and Zero-style client view records are optimizations for a
+later protocol revision. The first version does not require historical body retention
+or a second hydration round trip.
 
-### 3. Versions and epochs
+Rules:
 
-- `Version { incarnation, seq }`. `seq` is chosen by whoever is authoritative for the row;
-  `incarnation` is that authority's epoch. Versions compare only within one incarnation of one
-  authority. A batch from a higher incarnation resets base, overlays, and coverage in a single
-  event; a lower one is ignored.
-- Causal positions (Automerge heads) are never orderings and never enter `Version`.
-- A rebuilt node frontier or a restarted provider is an epoch bump that invalidates the whole
-  collection. We do not try to keep or reconcile the old collection.
-- Node-backed sources stamp `seq` from the per-node, per-boot frontier revision
-  (`FrontierRevision`). How the drawer's write path and the facet-set index agree on an order
-  for an accepted facet write is a node-side problem, owned outside the UI; this ADR assumes the
-  write path will eventually return a version comparable to that frontier.
+- A transaction is applied atomically to the guest replica and is never split across
+  pages. A transaction may exceed a requested soft page-size limit.
+- A page may contain several transactions.
+- An empty page may advance `through` when source work produced no matching rows.
+- A long-poll timeout is a successful empty page, not an error.
+- The guest advances its committed cursor only after applying the page.
+- Reading has no acknowledgement side effect. Supplying the committed cursor on the
+  next read is sufficient pull-driven flow control.
 
-### 4. Optimistic writes are segregated whole rows
+`row_version` identifies one visible version of a key within the projection. The host
+projection assigns it; domain ordering such as Automerge heads does not enter this
+field. `Cursor` orders projection transactions and is opaque to guests and generic
+collection code.
 
-- **There is no predictor.** A mutation produces the whole row it wants visible (`Some(row)`,
-  or `None` for an optimistic delete). It is held in the `Ledger`, never written into the base.
-- `OperationId` is minted by the view the write originated in and carried unchanged to every
-  hop, so all hops retire the same overlay together and an echo adopts the existing overlay
-  instead of applying it twice.
-- An overlay is removed when:
-  - the write is `Rejected`;
-  - the write is `Unknown` (transport failure): treated as a rejection for visibility, because
-    replication restores the value if the write landed. Transport uncertainty is never reported
-    as rejection to the caller (`clay_docs` keeps `RolledBack(Transport { outcome_unknown })`);
-  - the write is `Durable { version }` **and** the base reaches that version
-    (`OverlayWait::Base`). The overlay is parked, not dropped, on acceptance so the committed row
-    arrives by replication instead of flashing back to its pre-write value. This works in every
-    arrival order (receipt first, replication first, or both in one batch);
-  - the writer's scope disposes (`View::dispose_scope`).
-- Closing a view, a component, or a micro never cancels an already submitted write.
-- Overlay visibility is a property of the collection, `OverlayPolicy`:
-  - `Local` keeps the prediction in the originating view only; siblings see the value when the
-    authority echoes it.
-  - `Replicated` records and re-emits the overlay at every hop, so two views of one row on one
-    screen cannot disagree. `clay_docs` uses `Replicated`.
-  Replicated overlays obey the same grants as base rows: a context that may not read a row never
-  receives a pending write to it.
-- `clay_docs` keeps its caller-facing receipts (`LocallyApplied`, `Accepted`, `RolledBack`). This
-  amends ADR 015 §4: acceptance resolves the receipt immediately, but the overlay stays visible
-  until base reaches the accepted version. It does not "commit the intent locally".
+### 4. Bootstrap completion is explicit
 
-### 5. Demand and coverage
+Acquiring a lease captures an opening boundary. `bootstrap_complete` means every row
+matching the selector at that boundary has been represented through this page. It is
+per projection, not a claim that the source, node, or application is globally
+synchronized.
 
-- **Demand is a narrowing token, opaque to the substrate.** `DemandToken` is transported, never
-  interpreted, by the shared hop; the narrow end of the chain (a facet selector builder, a host
-  store, a computed source) parses it. A guest can therefore only ask for demands its provider's
-  contract defines.
-- **Demand is caller-authored.** A `Query`'s filter and order are closures, so no token can be
-  derived from one. `Query::demand(token)` attaches the caller's token; `View::query` evaluates
-  locally first, then mounts one lease per distinct token, view, and authority incarnation. A new
-  incarnation invalidates the old evidence and the next read renews the lease.
-- **Demand is coarse; queries are exact.** The common shape is "preload N things, filter
-  locally": a document editor demands every facet of one document, a list demands some facets of
-  N documents. Overfetching is acceptable.
-- **Releasing demand never evicts rows.** Demand controls the upstream subscription; retention is
-  the replica's own policy. Otherwise an unmount yanks data another view is about to read.
-- **Coverage is part of the waist.** `covered` resolves a demand at the hop that issued it, and
-  `View::query_coverage` reports `Unknown` (not mounted), `Partial` (awaiting evidence), or
-  `Complete`. "No row" is distinguishable from "not loaded", so a consumer never flashes a 404.
-  Coverage is routed per subscription, including two subscriptions of one cloned reader;
-  sibling, unsolicited, and released coverage is ignored. Every bespoke source must define what
-  "complete" means for its demands: the keyed frontier's `ReplayComplete` is **not** coverage,
-  because overwritten rows can move into its live phase.
+```text
+opening boundary = 100
+page through 60  -> bootstrap_complete = false
+page through 100 -> bootstrap_complete = true
+page through 101 -> bootstrap_complete = true
+```
 
-### 6. Roles and capabilities
+Later changes do not make acknowledged bootstrap progress incomplete again. A retry
+with different limits describes its own returned boundary: an unacknowledged complete
+page does not make a shorter retry complete. Merely delivering or cancelling a read
+never acknowledges it. The marker distinguishes an empty authoritative result from a
+projection whose host-side source is still loading. A guest library may render pages
+progressively, retain cached rows while showing loading evidence, or wait for
+completion; the protocol does not prescribe UI policy.
 
-- **Authority is an explicit role, never inferred from a missing upstream.** `View::authority`,
-  `View::consumer`, and `View::reader` construct the three roles. A consumer that was never wired
-  must not answer its own demand with nothing or treat its own writes as terminal.
-- **Write capability is type-state in Rust.** `View<K, V, W = Writable>` with `Writable` and
-  `ReadOnly` markers; `write`, `apply`, and `dispose_scope` exist only on writable views. A
-  host-collection reader cannot fabricate a row because the method does not exist.
-- **At the WIT boundary the same fact is a capability.** WIT cannot express type-state, so write
-  access is a resource handle a guest either holds or does not; WIT resources also give RAII for
-  demand leases. Two shapes of one fact at two boundaries is deliberate, not a shim.
-- **Reading and ingestion are separate capabilities.** `View::reader` returns the read-only view
-  and a `Downstream` ingestion handle; only the adapter keeps the latter. `clay_host`'s
-  `CollectionView` owns the view, its ingestion handle, and its subscription as one value: it is
-  the thread boundary (the host publishes under its mutex, a view is single-threaded) and a view
-  held without its pump would silently stop advancing.
+Every collection source must be able to bootstrap current state. A live-only event
+stream is not a Clay collection.
 
-### 7. Lifecycle and ordering
+### 5. Resume is best effort and reset is simple
 
-- `close` is terminal: it clears rows, overlays, coverage, and query leases, releases upstream
-  demand, closes relays, notifies listeners, and later batches are ignored. Dropping the last
-  binding closes retained view clones rather than leaving a frozen cache that looks live.
-- Only the authority bumps an epoch. A consumer's close removes its own streams; provider
-  cleanup resets the collection for everyone.
-- Owner cleanup is an authority-side batch of removes (`Replica::plan_remove_owner`), not an
-  overlay. Consumers receive ordinary removes and need no cleanup logic of their own.
-- Notifications are FIFO per hop. Applying a batch is synchronous, but delivering a reentrant
-  batch's notification waits until the outer one has reached its captured listeners and relays,
-  so a rejection issued from a listener cannot overtake the overlay it rejects.
-- Tombstones persist until a newer row supersedes them or the epoch resets, so a stale upsert
-  cannot resurrect a deleted row and a settle-only batch can still retire an overlay after a
-  newer removal.
+Guest libraries normally hide cursors. When reacquiring the same selector, a guest
+may offer its last committed opaque cursor. The host either resumes or reports
+`reset-required` because history was compacted, the host restarted, the projection
+implementation changed, or the token is invalid for that selector.
 
-### 8. Contribution collections and overrides
+Runtime-neutral in-process projections require a caller-supplied `[u64; 2]` runtime
+epoch that is fresh across runtime incarnations between which cursors can travel.
+`Projection::new(runtime_epoch)`, `Projection::with_source(source, replay_capacity,
+runtime_epoch)`, and `RegistrationCollection::new(runtime_epoch)` require it; none has
+a default constructor. Cursors retain both epoch words alongside a checked
+process-local source counter. Deterministic platform hash seeds are not restart-safe
+source identities. The projection does not acquire entropy or promise durable resume
+across restarts.
 
-- Contribution collections (Settings sections, toolbar entries, root mounts) and data
-  collections share this substrate and its waist. They do **not** share ownership or persistence
-  semantics (ADR 015 §4).
-- **Contribution collections are host-held.** The provider declares the collection; the host
-  stores it (`HostedCollection` over `Replica<u64, T>`), enforces owner disposal and ordering,
-  and fans out to consumers without waking the provider. A provider's write policy is a
-  validation path into the provider (today `Contributable::contribute`, which rejects malformed
-  payloads with `AccessError::Denied`).
-- Computed guest-provided collections (a search micro's results) may implement `Upstream`
-  themselves. Consumers cannot tell the difference.
-- **Ownership is identity.** Every contributed row carries its owner scope, and disposing the
-  owner removes its rows in one batch. The decided key shape is owner-scoped,
-  `(owner, local_key)`, with overrides keyed `(overrider, target_key)`. Today's host mints a
-  `u64` entry id and keeps the owner as a replica tag; the owner-scoped form lands with the
-  collection WIT transport, where cross-guest id namespacing is required anyway.
-- **Overrides are not optimistic writes.** They are the seam that keeps micro load and unload
-  spatiotemporally clean: an overriding micro owns its override rows, disabling it reveals the
-  current base entry, and nothing needs a reload. Overrides live in a sibling collection the
-  provider reads and merges in its own code; the substrate has no third "override" layer.
-  Ordinary node-backed collections pay nothing for a plugin-only concept.
+The first protocol responds to reset by clearing that local projection and
+bootstrapping it again. It does not reconcile rows across projection generations.
+Reset is expected to be rare and must be safe rather than clever.
 
-### 9. Documents are one bespoke layering
+Overlapping leases have independent guest-side result sets in the first
+implementation. The same logical row may therefore be copied twice. This avoids
+incorrect removal when a row leaves one selector but remains in another. A later IVM
+or client-view-record implementation may share bodies and membership while
+preserving the same selector and lease semantics.
 
-- **A facet is a row**, keyed `FacetRoute { document, branch, tag, key_id }`. A document is a
-  query (group by document), not a storage unit. This matches the node's keyed frontier, keeps
-  per-facet retention and selector pushdown, and sidesteps whole-document rewrites; typed MDK
-  accessors provide document-shaped ergonomics on top.
-- `clay_docs` backs `DocumentService` with `Replica<FacetRoute, Value>` and a `Replicated`
-  `Ledger`. Facet states are `FacetValue::{Loading, Absent, Present}` with separate `Freshness`;
-  a refresh never hides an existing value.
-- An Automerge-native node API (row bytes plus change streams) would be another `Upstream`; it
-  costs the waist nothing. Deferred: row-per-facet already covers concurrent edits to different
-  facets, and it would put Automerge in every guest that touches documents.
-- "Guests learn ids/keys and read values synchronously from the host" is a deferred memory
-  optimization for documents, not the initial contract.
+The in-process reference mirror retains current rows, their metadata, and one active
+read identity, not historical bodies or tombstones. Each response must be paired with
+the local ticket for the read that issued it. Cancellation consumes that identity even
+when the committed cursor is unchanged; replacing a lease invalidates all of its old
+tickets. This prevents duplicate or late responses from resurrecting removed rows.
+A resumed mirror retains its matching logical cursor and rows, but its first wire read
+still acknowledges nothing and bootstrap completion is relative to the new lease.
+
+### 6. Access is carried by capabilities, not request fields
+
+The reader capability defines the maximum collection access. A selector only narrows
+it. Guests do not send trusted principals, owner identities, or scope IDs.
+
+If a row stops belonging to a projection because it was deleted, no longer matches,
+or is no longer authorized, the projection emits `Remove`. The generic guest need
+not learn which reason applied. Outstanding reads wake when revocation changes the
+projection.
+
+Each collection is an independent consistency domain. A projection transaction is atomic within its collection, and there is no ordering or atomic visibility across collections. When one event, such as an incarnation closing, changes rows in several collections, each collection commits its own transaction. The host defers reader wakes until every affected collection has committed, but a reader that holds leases on two collections may still observe one change before the other. Facts that must become visible together belong in one collection. References between collections travel as capability attachments, which fail closed: closing revokes publications before it removes rows, so a reader that still sees a stale row gets `revoked` when it uses the row's reference, never a dead provider. A cross-collection commit epoch is deferred until a concrete reader needs snapshot reads across collections.
+
+Revocation prevents future host operations and removes data from managed guest
+replicas. It cannot revoke knowledge a guest already copied into its own memory, and
+the ADR makes no such promise.
+
+### 7. Values are portable data with capability attachments
+
+Collection contracts encode keys, selectors, values, mutation payloads, and opaque
+contexts as forward/backward-compatible CBOR shaped by their Lexicons. The transport
+carries bytes rather than a recursively allocated WIT value tree.
+
+Some values, such as toolbar entries, refer to live actions or surface mounts. These
+are not serialized as trusted IDs. A value contains CBOR attachment slots alongside
+recipient-local generic capability references:
+
+```text
+EncodedValue {
+    body: CBOR,
+    capabilities: [capability-ref],
+}
+```
+
+Copying the CBOR does not copy authority. ADR 029 specifies publication, typed
+redemption, proxy ownership, revocation, and replacement of these references.
+
+### 8. Reading and writing are orthogonal capabilities
+
+A read-only guest receives no writer. The read waist does not reverse direction to
+become one universal mutation protocol. Sources may expose one or more optional
+writer capabilities while retaining the same read projection.
+
+Three writer forms are initially recognized:
+
+1. owner-scoped registration;
+2. causal contribution to shared logical rows; and
+3. authoritative domain commands.
+
+They share host authorization, resource ownership, and projection delivery, not
+mutation semantics.
+
+## Writer layers above the waist
+
+### 9. Registrations are a causal map with scope-owned contributions
+
+A registration collection is a map from logical key to value with one fixed merge rule. A guest
+writes through a host-minted writer:
+
+```text
+registration-writer.put(key, basis, value) -> stamp
+registration-writer.delete(key, basis) -> stamp
+
+basis = concurrent | observed(stamp) | compare-and-set(option<stamp>)
+stamp = (lamport, writer)
+```
+
+Every write belongs to the writer's registration scope, and each live scope holds at most one
+candidate per key: a value or a tombstone. A write's lamport is one more than the larger of the
+stamp it observed and the scope's own previous lamport on that key; `concurrent` observes nothing.
+Readers see the candidate with the highest stamp. Equal lamports break by writer identity, which is
+the micro identity and so stable across restarts. Writes are always accepted. `compare-and-set` is
+opt-in: it fails unless the current winner, tombstones included, has exactly the expected stamp, and
+`none` matches an absent or tombstoned key.
+
+Rows reach readers stamped, with an optional value. A winning tombstone is a row with no value and
+the delete's stamp, so snapshots and pages replicate deletes like any other row and a reader can
+name the delete it observed. A `remove` change appears only when a key has no candidates left. The
+MDK writer defaults the basis to the stamp its replica holds for the key, tombstone included: an
+ordinary write supersedes everything its writer has seen, while writes it never saw are resolved by
+stamp order.
+
+The registration scope, not the writer handle, owns retention. Closing a writer releases mutation
+authority only. When a scope ends (an incarnation closes, a plug is uninstalled) its candidates,
+tombstones included, are retracted and only the keys it touched recompute their winner, so a
+contribution it hid resurfaces. A delete made by a scope that later ends is therefore undone; a
+delete meant to outlive its writer is written from a permanent scope. ADR 031 §4 specifies the
+scope classes.
+
+There is no key-level write authorization yet: any micro bound to a collection with Register may
+write any key, so a micro can supersede another's row. Write authority will be scoped by the
+collection query language once it exists (guest and host run the same query engine), and the grant
+will be the query. Guests have no `clear` and no per-key withdrawal of their contribution.
+
+A collection has no merge policy, materializer, or business hook. Union, priority, and grouping are
+expressed by consumers or by separate collections (§11). The single-process host orders every
+write, so the stamps need no vector clocks. Stamps are per key; a collection-wide frontier, like
+big_sync's keyed frontiers, is a likely later unification.
+
+### 10. Field-level merges are layers above the map
+
+Values are written whole. Structure that needs independent merges goes into keys, so contributors
+updating different fields write different keys. Operation-based writers with version-vector
+contexts and domain reducers are not a waist writer kind: a collection that needs them is built
+above the map by an owner that adopts contributions (§11).
+
+### 11. Canonical adoption composes collections
+
+An owner may expose an ephemeral proposal/contribution collection while retaining
+exclusive write access to a canonical collection:
+
+```text
+contributor input branches
+          -> combined proposal projection
+          -> owner observes and validates
+          -> owner writes canonical collection
+```
+
+If a contributor disappears, its proposal disappears. Already adopted canonical
+state remains. Adoption is ordinary owner logic, whether the owner is a native or
+guest micro; it is not a special replication operation.
+
+### 12. Domain commands and host-owned optimism
+
+Documents and other node-backed domains use explicit command APIs because their
+conditions, merge rules, idempotency, and settlement evidence are domain facts.
+Document mutations retain Automerge heads as their causal context and return resulting
+heads as settlement evidence.
+
+Optimistic state lives entirely on the host:
+
+```text
+authoritative projected base
+    + host-owned pending mutation intents
+    = visible projection replicated to every authorized guest
+```
+
+The guest does not implement a shared overlay engine. On submission, the host
+installs the prediction and emits an ordinary visible `Upsert` with
+`evidence = Pending`. The host submits the domain command, recomputes predictions when
+base state changes, and retires the intent only when authoritative observation
+contains the source-defined settlement token. Rejection or transport-unknown removes
+the intent according to the domain policy.
+
+Pending predictions do not compete with authoritative rows by artificial collection
+versions. Collection versions order visible host transitions; datum heads determine
+datum causality; command receipts determine settlement. These domains are never
+compared.
+
+Multiple document mutations retain their intents and base heads, allowing the host to
+recompute their deterministic Automerge result rather than stacking stale whole-row
+snapshots. Other guests see the predicted value and generic pending evidence, but not
+writer identity, raw commands, or trusted settlement tokens unless separately
+granted.
+
+## Initialization and execution
+
+A micro has one asynchronous initialization entry point, analogous to process start:
+
+```text
+initialize(arguments and capabilities) -> instance-root
+```
+
+Initialization may acquire projection leases, create writer leases, publish
+capabilities, and create presentation resources. Returning the root marks successful
+initialization; dropping it closes the incarnation and its owned resources. This
+replaces framework-specific preload phases: acquiring a lease is preload, and resource
+ownership defines cleanup.
+
+The exact WIT may retain a separate `get-args` import when generated bindings or
+runtime construction make it more ergonomic. That is an ABI-shape decision, not a
+second lifecycle phase: arguments and initial capabilities are acquired once during
+initialization.
+
+Presentation exports remain synchronous and may not suspend. Collection acquisition,
+long polling, mutations, and command outcomes are asynchronous host capabilities.
+Host-owned pending reads must not hold an instance-wide gate that prevents synchronous
+presentation from running.
+
+## Protocol evolution
+
+Protocol evolution and collection-schema evolution are separate.
+
+- The WIT surface remains small and explicitly versioned. WIT stability/version annotations record when fields and methods enter the contract, and hosts preserve supported interface versions for existing guests. Breaking transport semantics require a new interface version rather than reinterpretation of an old field.
+- Collection selectors, values, contexts, and mutations use Lexicon-compatible CBOR:
+  open records/unions, unknown-member preservation, and forward/backward-compatible
+  decoding. Ephemeral storage does not remove this requirement because old packaged
+  guests run against newer hosts.
+
+## Error model
+
+Expected edge failures are explicit:
+
+- invalid or unauthorized selector at acquisition;
+- source unavailable;
+- projection closed;
+- reset required;
+- mutation conflict or rejection;
+- transport-unknown domain command outcome; and
+- closed or revoked capability reference.
+
+A long-poll timeout is not an error. Malformed host-produced pages, non-monotonic
+cursors, wrong capability contract identities, and impossible transaction shapes are
+programming/invariant failures and must not be silently recovered.
 
 ## Consequences
 
-- One mechanism serves host, guest, and node-backed collections. A new source is an `Upstream`
-  implementation plus a codec; the shared hop never changes for it.
-- Rejection, concurrent remote edits, and receipt/replication reordering cannot restore a stale
-  snapshot over a newer value, because the visible row is always derived from the current base
-  plus the remaining overlays.
-- Read-only access is unrepresentable as a write in Rust and absent as a handle in WIT.
-- Every replica keeps its own copy of rows; deduplicating copies across guests is a later
-  host-side optimization.
-- Each bespoke source owes a definition of "complete" coverage; a source that cannot give one
-  can only report `Partial`.
+- The waist is small enough for independent Rust, TypeScript, and future guest
+  libraries.
+- Active leases give the host explicit interest for preload, upstream acquisition,
+  cancellation, and retention without introducing pushed data queues.
+- Inline values make the first implementation correct without historical hydration
+  retention. Duplicate transfer and query evaluation are accepted initially.
+- Host projections isolate guests from node ordering, storage, Automerge, and cache
+  mechanics.
+- Different write models compose over one read protocol rather than being forced into
+  one misleading generic write.
+- Causal contribution collections pay for causal branches only when their semantics
+  require them.
+- Shared optimism is implemented once on the host and appears to every language as
+  ordinary projected current state plus pending evidence.
+- Capability-bearing values remain serializable data while authority retains RAII
+  lifetime and typed redemption.
 
-## Not yet implemented
+## Deferred
 
-These are decided boundaries without code. Nothing above claims them.
+- Zero-style IVM/client-view records and unioning overlapping selectors;
+- cross-projection body sharing and exact-version hydration;
+- durable cursor retention across host restarts;
+- tombstone collection for permanent scopes, whose tombstones accumulate, and a collection-wide
+  frontier in place of per-key stamps;
+- query planning beyond collection-specific typed IRs; and
+- backing adapters, durable registration scopes, and manifest admission are specified by ADR 031 and remain implementation work rather than changes to this read waist.
 
-- **Collection WIT transport.** Only in-process micros reach collections today; Wasm guests see
-  documents and their own surfaces, not collections.
-  `OperationId` and `DemandId` are process-wide counters; across address spaces the host must
-  namespace them per guest, together with owner-scoped contribution keys (§8).
-- **Production node adapter.** A narrower from facet demand to `FacetSetRevisionStore` /
-  `DocDeltaRevisionStore` selectors, its coverage definition, and versions for direct
-  doc-service reads taken from the frontier row so a value never carries a newer label than its
-  data.
-- **Write-path versions.** The drawer write path returning the frontier version it lands at
-  (§3), required for exact `Durable` retirement of node-backed writes.
-- **Host-side query evaluation for Wasm guests.** Guests query their own partial replica. A host
-  that evaluates queries and relays already-filtered rows is a later performance specialization
-  of the same traits, not a second API.
-- **Query planning.** Queries scan the visible set; there is no index or serialized query IR.
-- **Tombstone compaction** needs a safe watermark; tombstones are kept until superseded or reset.
-- **Backpressure.** Host delivery uses unbounded channels. A lag/reset policy must be designed
-  rather than silently dropping batches.
-- **Automatic demand in `use_collection`.** The hook observes coverage but does not lease demand
-  on mount; that arrives with the first UI that renders a pending state.
-- **Derived collections as first-class owned values.** Every guest collection is already derived
-  from its upstream; naming and lifetime-owning a derived query result (owned by the declaring
-  micro's activation) is agreed in direction, not built.
+## Validation before acceptance
+
+This ADR becomes Accepted only after the same protocol validates:
+
+1. one ordinary host collection with bootstrap, empty progress, long polling, resume,
+   and clear-on-reset;
+2. one owner-scoped contribution collection whose rows survive writer-handle closure and disappear atomically when its incarnation scope closes;
+3. one shared key written by two micros with observed stamps and deterministic concurrent
+   resolution, where a re-creation after an observed delete wins and retracting a scope
+   resurfaces what it hid;
+4. one node-backed datum projection with host-owned optimism and heads-based
+   settlement;
+5. one capability-bearing toolbar or surface-mount row using ADR 029;
+6. one real Wasm component crossing the WIT boundary, not only an in-process Rust
+   adapter; and
+7. one durable manifest-declared collection that exists while its declaring micro is inactive, reloads after host restart, and removes one installation scope on uninstall.

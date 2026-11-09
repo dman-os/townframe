@@ -73,6 +73,12 @@ macro_rules! alias_byte_key {
 
 alias_byte_key!(PartKey);
 alias_byte_key!(ObjKey);
+
+// A datum may hold an object key as an opaque wire leaf. The impl lives here because `ObjKey` and
+// `DatumShape` are both foreign to `datum_core`'s users, and `datum_core` stays free of this crate.
+impl datum_core::DatumShape for ObjKey {
+    const SHAPE: datum_core::Shape = datum_core::Shape::Value;
+}
 alias_byte_key!(PeerKey);
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

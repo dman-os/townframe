@@ -112,7 +112,7 @@ fn multiple_document_mirrors_filter_warm_cache_and_follow_membership() {
 }
 
 #[test]
-fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
+fn config_binding_resolution_and_manifest_rights_are_not_conflated() {
     let host = Host::new();
     let service = DocumentService::new(32);
     let node = service.mock_documents();
@@ -120,7 +120,7 @@ fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
     node.bind_config("beta".into(), "b".into(), "main".into());
     node.seed(route("a", "main"), json!(1));
     let instance = host.start("alpha");
-    let configs = service
+    let alpha = service
         .grant_config(
             &host,
             &instance,
@@ -138,23 +138,29 @@ fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
                     write: true,
                     ..Default::default()
                 },
-                RoutineFacetAccess {
-                    owner_plug_id: Some("beta".into()),
-                    tag: "org.example.config".into(),
-                    key_id: Some("new".into()),
-                    create: true,
-                    ..Default::default()
-                },
             ],
         )
         .unwrap();
-    let facet = configs["alpha"]
+    let beta = service
+        .grant_config(
+            &host,
+            &instance,
+            "beta",
+            vec![RoutineFacetAccess {
+                tag: "org.example.config".into(),
+                key_id: Some("new".into()),
+                create: true,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    let facet = alpha
         .facet::<Value>("org.example.config".into(), "main".into())
         .unwrap();
     assert_eq!(facet.value(&facet.watch.current().unwrap()), Some(json!(1)));
     facet.write(json!(2)).unwrap();
     assert_eq!(
-        configs["alpha"]
+        alpha
             .mutate(
                 "org.example.config".into(),
                 "main".into(),
@@ -164,7 +170,7 @@ fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
         AccessError::Denied
     );
     assert_eq!(
-        configs["alpha"]
+        alpha
             .mutate(
                 "org.example.config".into(),
                 "other".into(),
@@ -174,29 +180,49 @@ fn config_owner_resolution_and_manifest_rights_are_not_conflated() {
         AccessError::Denied
     );
     assert!(matches!(
-        configs["beta"].facet::<Value>("org.example.config".into(), "new".into()),
+        beta.facet::<Value>("org.example.config".into(), "new".into()),
         Err(AccessError::Denied)
     ));
-    configs["beta"]
-        .mutate(
+    beta.mutate(
+        "org.example.config".into(),
+        "new".into(),
+        FacetMutation::Create(json!(4)),
+    )
+    .unwrap();
+    assert_eq!(
+        beta.mutate(
             "org.example.config".into(),
             "new".into(),
-            FacetMutation::Create(json!(4)),
+            FacetMutation::Write(json!(5))
         )
-        .unwrap();
-    assert_eq!(
-        configs["beta"]
-            .mutate(
-                "org.example.config".into(),
-                "new".into(),
-                FacetMutation::Write(json!(5))
-            )
-            .unwrap_err(),
+        .unwrap_err(),
         AccessError::Denied
     );
     node.settle(/*accept*/ true);
     assert_eq!(node.reads(), vec![route("a", "main"), route("b", "new")]);
     host.close();
+}
+
+#[test]
+#[should_panic(expected = "a config ACL names no owner plug")]
+fn a_config_acl_naming_an_owner_plug_is_a_programming_error() {
+    let host = Host::new();
+    let service = DocumentService::new(32);
+    service
+        .mock_documents()
+        .bind_config("alpha".into(), "a".into(), "main".into());
+    let instance = host.start("alpha");
+    let _ = service.grant_config(
+        &host,
+        &instance,
+        "alpha",
+        vec![RoutineFacetAccess {
+            owner_plug_id: Some("beta".into()),
+            tag: "org.example.config".into(),
+            read: true,
+            ..Default::default()
+        }],
+    );
 }
 
 #[test]
@@ -930,4 +956,208 @@ async fn document_next_rechecks_revocation_after_pending_or_ready_notifications(
         );
         host.close();
     }
+}
+
+/// Drops every handle of the service so its persist future sees the queue close, then drives
+/// the future to completion: everything the source changed has been written afterwards.
+async fn flush(service: DocumentService, persist: impl Future<Output = ()>) {
+    drop(service);
+    persist.await;
+}
+
+/// What the unrestricted `document` mirror observes in a service.
+fn observed(service: &DocumentService, documents: &[&str]) -> BTreeMap<FacetRoute, FacetValue> {
+    let host = Host::new();
+    let instance = host.start("observer");
+    let facets = grant(service, &host, &instance, documents, /*key_id*/ None)
+        .watch(selection(documents))
+        .unwrap()
+        .current()
+        .unwrap()
+        .facets;
+    host.close();
+    facets
+}
+
+#[tokio::test]
+async fn the_durable_source_survives_a_rebuild_and_persisted_values_beat_seeds() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    let node = service.mock_documents();
+    node.seed(route("a", "seeded"), json!(1));
+    node.seed(route("a", "written"), json!(1));
+    node.seed(route("a", "removed"), json!(1));
+    node.seed(route("a", "replaced"), json!(1));
+    node.external_change(route("a", "removed"), None);
+    node.external_change(route("a", "replaced"), Some(json!("external")));
+    // A mutation persists: the store is the only authority, so there is no rejection.
+    let host = Host::new();
+    let instance = host.start("writer");
+    let access = grant(&service, &host, &instance, &["a"], None);
+    let accepted = access
+        .mutate(route("a", "written"), FacetMutation::Write(json!(2)))
+        .unwrap();
+    let created = access
+        .mutate(route("a", "created"), FacetMutation::Create(json!(3)))
+        .unwrap();
+    host.close();
+    drop((access, accepted, created, node));
+    flush(service, persist).await;
+
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    // Reseeding after a restart must not overwrite what the previous boot persisted.
+    let node = service.mock_documents();
+    node.seed(route("a", "written"), json!("seed"));
+    node.seed(route("a", "removed"), json!("seed"));
+    let after = observed(&service, &["a"]);
+    assert_eq!(
+        after.get(&route("a", "written")),
+        Some(&FacetValue::Present(json!(2)))
+    );
+    assert_eq!(
+        after.get(&route("a", "created")),
+        Some(&FacetValue::Present(json!(3)))
+    );
+    assert_eq!(
+        after.get(&route("a", "seeded")),
+        Some(&FacetValue::Present(json!(1)))
+    );
+    assert_eq!(
+        after.get(&route("a", "replaced")),
+        Some(&FacetValue::Present(json!("external")))
+    );
+    // The removal was persisted, so the reseed lands as a fresh insert this boot.
+    assert_eq!(
+        after.get(&route("a", "removed")),
+        Some(&FacetValue::Present(json!("seed")))
+    );
+    drop(node);
+    flush(service, persist).await;
+}
+
+#[tokio::test]
+async fn a_persisted_removal_stays_removed_after_a_rebuild() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    let node = service.mock_documents();
+    node.seed(route("a", "gone"), json!(1));
+    node.external_change(route("a", "gone"), None);
+    drop(node);
+    flush(service, persist).await;
+    assert!(store.scan_prefix(b"").await.unwrap().is_empty());
+    let (service, _persist) = DocumentService::durable(store, 32).await.unwrap();
+    assert!(observed(&service, &["a"]).is_empty());
+}
+
+#[test]
+fn route_keys_round_trip_and_stay_unambiguous() {
+    let a = FacetRoute {
+        document: "ab".into(),
+        branch: "c".into(),
+        tag: "".into(),
+        key_id: "\u{0}é".into(),
+    };
+    let b = FacetRoute {
+        document: "a".into(),
+        branch: "bc".into(),
+        tag: "".into(),
+        key_id: "\u{0}é".into(),
+    };
+    assert_ne!(a.encode(), b.encode());
+    assert_eq!(FacetRoute::decode(&a.encode()), a);
+    assert_eq!(FacetRoute::decode(&b.encode()), b);
+}
+
+#[tokio::test]
+async fn closing_persistence_drains_writes_queued_just_before() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    service
+        .mock_documents()
+        .external_change(route("a", "late"), Some(json!(7)));
+    // The service stays alive: closing alone must end the future after it drains.
+    service.close_persistence();
+    persist.await;
+    assert_eq!(store.scan_prefix(b"").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[should_panic(expected = "document source changed after the composition shut down")]
+async fn a_source_write_after_closing_persistence_panics() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, _persist) = DocumentService::durable(store, 32).await.unwrap();
+    service.close_persistence();
+    service.mock_documents().seed(route("a", "x"), json!(1));
+}
+
+#[tokio::test]
+async fn a_durable_operation_is_accepted_once_its_write_reaches_the_store() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    let host = Host::new();
+    let instance = host.start("writer");
+    let access = grant(&service, &host, &instance, &["a"], None);
+    let operation = access
+        .mutate(route("a", "x"), FacetMutation::Create(json!(1)))
+        .unwrap();
+    let persisted = service.persisted();
+    // Until the persist future runs the write is only an overlay.
+    assert_eq!(operation.current().status, OperationStatus::LocallyApplied);
+    let mut persist = Box::pin(persist);
+    let mut persisted = Box::pin(persisted);
+    let mut next = Box::pin(operation.next(0));
+    assert_pending(next.as_mut());
+    assert_pending(persist.as_mut());
+    // The batch that stores the write accepts the operation before it releases `persisted`.
+    persisted.as_mut().await;
+    assert_eq!(operation.current().status, OperationStatus::Accepted);
+    assert_eq!(
+        next.await.unwrap().unwrap().status,
+        OperationStatus::Accepted
+    );
+    assert_eq!(store.scan_prefix(b"").await.unwrap().len(), 1);
+    host.close();
+    drop((access, operation));
+    flush(service, persist).await;
+}
+
+#[tokio::test]
+async fn persisted_resolves_once_earlier_changes_reach_the_store() {
+    let store = Arc::new(clay_store::MemoryStore::new());
+    let (service, persist) = DocumentService::durable(Arc::clone(&store), 32)
+        .await
+        .unwrap();
+    // Nothing queued yet: already persisted, without the persist future running.
+    service.persisted().await;
+    service
+        .mock_documents()
+        .external_change(route("a", "one"), Some(json!(1)));
+    let first = service.persisted();
+    service
+        .mock_documents()
+        .external_change(route("a", "two"), Some(json!(2)));
+    let both = service.persisted();
+    let mut persist = Box::pin(persist);
+    let mut first = Box::pin(first);
+    let mut both = Box::pin(both);
+    // Not applied until the persist future runs.
+    assert_pending(first.as_mut());
+    assert_pending(both.as_mut());
+    assert_pending(persist.as_mut());
+    // One drain applied both queued changes; each acknowledgement then resolves.
+    first.await;
+    both.await;
+    assert_eq!(store.scan_prefix(b"").await.unwrap().len(), 2);
+    // Volatile services have nothing to wait for.
+    DocumentService::new(4).persisted().await;
 }

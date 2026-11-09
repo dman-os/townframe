@@ -82,9 +82,9 @@
 use dioxus::prelude::*;
 use std::time::Duration;
 
+use crate::tiles::sample_columns;
 use crate::tiles::Column;
 use crate::tiles::TileList;
-use crate::tiles::sample_columns;
 
 /// Width of one column in world px.
 const COLUMN_WIDTH: f64 = 320.0;
