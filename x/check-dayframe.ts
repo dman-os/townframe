@@ -1,13 +1,11 @@
 #!/usr/bin/env -S deno run --allow-all
 
-import { $, useDotenvTargetDir } from "./utils.ts";
+import { $ } from "./utils.ts";
 
 const prepareOnly = Deno.args.includes("--prepare-only");
 if (prepareOnly && Deno.args.length !== 1) {
   throw new Error("--prepare-only cannot be combined with nextest arguments");
 }
-
-await useDotenvTargetDir();
 
 // Guests are wasm-only configurations: resolve their features in isolation so the root
 // workspace's native closure (tokio/net, mio) does not leak into the wasm builds. See

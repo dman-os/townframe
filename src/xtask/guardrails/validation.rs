@@ -187,24 +187,14 @@ pub fn doctor(root: &Path, json: bool) -> Res<bool> {
             ));
         }
     }
+    // mbx gives every workspace root its own managed target (a `target` symlink into its
+    // cache) unless Cargo is told where to build, and then it neither prunes that directory
+    // nor gives check/clippy their own lane. A directory shared by sibling worktrees also
+    // makes `<target>/debug/xtask` whichever tree linked last.
     if let Ok(value) = std::env::var("CARGO_TARGET_DIR") {
-        let target_dir = if Path::new(&value).is_absolute() {
-            PathBuf::from(&value)
-        } else {
-            root.join(&value)
-        };
-        if target_dir.starts_with(root) {
-            issues.push(format!(
-                "CARGO_TARGET_DIR {value} is inside the worktree; point it outside the checkout so nix copies and ntfs small-file creation stay off the build path"
-            ));
-        } else if target_dir
-            .file_name()
-            .is_none_or(|name| name != root.file_name().unwrap_or_default())
-        {
-            issues.push(format!(
-                "CARGO_TARGET_DIR {value} is shared with sibling worktrees; single-binary crates such as xtask collide at <target>/debug/xtask, so run builds through ./x/agent-build.ts which appends the worktree name"
-            ));
-        }
+        issues.push(format!(
+            "CARGO_TARGET_DIR={value} opts this checkout out of mbx-managed targets; unset it (and drop it from .env)"
+        ));
     }
     let gitignore_path = root.join(".gitignore");
     let gitignore = std::fs::read_to_string(&gitignore_path)?;
@@ -222,6 +212,12 @@ pub fn doctor(root: &Path, json: bool) -> Res<bool> {
         if !cfg_text.contains("line-tables-only") {
             issues.push(
                 ".cargo/config.toml is missing `[profile.dev.package.\"*\"] debug = \"line-tables-only\"`"
+                    .into(),
+            );
+        }
+        if cfg_text.lines().any(|line| line.trim_start().starts_with("split-debuginfo")) {
+            issues.push(
+                ".cargo/config.toml sets `split-debuginfo`; mbx then caches no native link across checkouts"
                     .into(),
             );
         }
