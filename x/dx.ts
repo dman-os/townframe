@@ -7,20 +7,7 @@ const scriptDir = $.path(new URL(".", import.meta.url));
 const root = (await scriptDir.join("x", "install-dx.ts").exists())
   ? scriptDir
   : scriptDir.parent()!;
-const dotenvPath = root.join(".env");
-const dotenvText = (await dotenvPath.exists())
-  ? await dotenvPath.readText()
-  : "";
-if (!Deno.env.get("CARGO_TARGET_DIR")) {
-  const dotenvTarget = dotenvText
-    .match(/^(?:export\s+)?CARGO_TARGET_DIR\s*=\s*["']?([^"'\r\n#]+)["']?/m)
-    ?.[1]
-    ?.trim();
-  if (dotenvTarget) {
-    Deno.env.set("CARGO_TARGET_DIR", root.resolve(dotenvTarget).toString());
-  }
-}
-const installRoot = resolveInstallRoot(root, Deno.env.toObject(), dotenvText);
+const installRoot = resolveInstallRoot(root, Deno.env.toObject());
 
 const executableName = Deno.build.os === "windows" ? "dx.exe" : "dx";
 const executable = installRoot.join("bin", executableName);
