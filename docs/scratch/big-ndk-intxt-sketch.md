@@ -5,6 +5,8 @@ Owner: Townframe maintainers
 Updated: 2026-11-10
 Scope: The intxt nodule written first, against the `big_ndk` API it wants, so the nodule decides the kit's surface (ledger D38; `intxt-node-requirements.md`). The intxt lane owns the datums; the ones here are stand-ins marked as such. NSIDs use `org.intxt.*` as a placeholder authority.
 
+> **Pending the intxt lane's model (2026-11-10).** Two changes are likely, so the intxt-specific parts below are not to be hardened: (a) anchors become a typed reference, resource + version + selector, covering git commit and diff-side ranges as well as Automerge doc + heads + datum path + text cursor; (b) an intxt is a package (drawer-like) composing independent artifacts (patch, agent sessions, evidence, annotations), so revisions may become docs in a drawer, and some writes may be plain schema-validated datum writes needing no nodule. The `big_ndk` surface this sketch derives (method macros, `export_nodule!`, `Cx` with clients, deadline and command id, `mount`, `CartridgeBuilder`, the test harness) holds either way.
+
 ## What the nodule is for
 
 Agents produce and annotate reviews; the user reviews on the phone through the intxt micro; the agent waits for the user's answer. The nodule holds the rules (what a review is, how annotations anchor, how a revision supersedes another) so that agents, the CLI, MCP and the micro all go through the same verbs instead of writing datums directly. Its methods are what `day mcp` turns into tools and what `day intxt …` turns into subcommands, so the verbs are named for agents.
