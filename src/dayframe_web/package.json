@@ -7,8 +7,8 @@
   },
   "private": true,
   "scripts": {
-    "e2e": "playwright test --grep-invert @bombadil",
     "bombadil": "playwright test --grep @bombadil",
+    "e2e": "playwright test --grep-invert @bombadil",
     "e2e:all": "playwright test"
   },
   "type": "module"
