@@ -1,4 +1,4 @@
-//! One client type over the two ways to reach a node (ADR 032 section 5).
+//! One client type over the two ways to reach a node (ADR 033 section 5).
 //!
 //! - **Daemon:** a process already serves the node on its Unix socket; calls are `POST
 //!   /xrpc/<nsid>` over it, and the kernel's peer credentials make this process the operator.

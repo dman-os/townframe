@@ -228,7 +228,7 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
     - **Not done.** Narrowing drawer/data grants by data requests; the SchemaRepo does not backfill reference edges for a datum registered after index backfill ran (new reference-declaring tags are indexed from new changes only); `set_enabled` does not fail on a Lexicon conflict as it does on an authority conflict (the record is Refused instead); the plug registry (catalogue) is not a feed, only enabled installs are; bad datum Lexicons surface at enable-time as `Refused`, not at `admit`.
 - After P2 and P4: send the Clay agent the concrete type and section names.
 
-### D14–D20. What a node is (operator, 2026-11-04; drafted as ADR 032)
+### D14–D20. What a node is (operator, 2026-11-04; drafted as ADR 033)
 - **D14.** A node owns its data and is its sync identity. There are no checkouts. Drawers are the realms, and export is explicit. The analogy is a network filesystem.
 - **D15.** The generic `big_node` knows no users. User nodes and relay nodes are compositions in their own crates.
 - **D16.** Three layers: services, clients and attachments. Services and node- or Clay-side code see only `Client<Proto>` handles. Listeners (UDS, TCP) and the peer endpoint are attachments.
@@ -450,7 +450,7 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
   - keyhive `a84137d1`: `try_pcs_key_hash` returns `PcsKeyError` (`UnknownDocument`, `NoCgka`, `RootConflicted { issuers }`, `Underivable`). The issuers come from the root's actual versions, matched to the `Update` that minted each one. subduction `5f418129` re-pins it; townframe pin `f74260b0`. The election (`a4aec85e`) now reads `RootConflicted { issuers }` instead of the latest epoch's Update issuers. big_repo 446/446.
   - `c53ab910`: the frontier and causal checkpoint workers coalesce a per-doc burst into the running task plus one follow-up instead of replace-cancelling it; the doc worker skips a load whose requester has gone. Seed 2: doc-worker caller-dropped replies 287 -> ~40. Only the doc-worker half has a unit pin (no cheap seam for the workers).
   - `173786c0`: NDK step 1. `service_client_rs` is split into `service_client_core_rs` (Client<T>, transport traits, XRPC codec, bytes-only `HttpTransport`; native + both wasm targets) and `service_client_native_rs` (Direct/Irpc/Xrpc `Transport`, UDS/iroh clients). 7/7 core tests pass under wasmtime on wasip3.
-  - `ca7b1caa`: ADR 032 revision and the PR draft `docs/scratch/big-node-pr.md`.
+  - `ca7b1caa`: ADR 033 revision and the PR draft `docs/scratch/big-node-pr.md`.
 
 - 2026-11-04: P6 substitution, `eee4f9b9`.
   - The `org.example.daybook.nodule.substitution/<slot>` datum and `SetNoduleSubstitution` (manage on both X and Y). Y runs in X's slot, and `NoduleRecord.filled_by` shows it.
@@ -610,7 +610,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 - [design] keyhive_wasm `tryPcsKeyHash` still returns `Option` (`.ok()`); expose the error to JS if needed.
 - [perf] `DatumStoreHandle`'s `seen_head_hashes` is a set of every head ever seen and grows without bound. It came over from the pre-merge code. Bound it, for example by keeping only the current frontier/ancestry.
 - [test] There is no dedicated test for `Predicate::sole_doc` page filtering. Add one in `big_cabinet` doc observe tests: a single-doc poll is not woken by writes elsewhere.
-- [cleanup] Two ADRs are numbered 007 (`007-doc-branch-identity`, `007-plug-manifests-as-drawer-docs`), and lint doesn't flag it. Raise with the operator.
+- [cleanup] DONE: the two ADRs numbered 007 are split. `007-doc-branch-identity` became `034-doc-branch-identity` (its references moved with it) and `007-plug-manifests-as-drawer-docs` keeps 007, which about 100 code comments cite. The `ERROR_ADR_ID` exemption is removed.
 - [cleanup] The root `Cargo.toml` has many unused workspace dependencies flagged by cargo's `unused_workspace_dependencies` lint (`axum-extra`, `big_node`, `bon`, `clay_rt_wcmp_wasmi`, `micro_counter`, `once_cell`, `subduction_redb_storage`, `tower`, `tower-http`, `tracing-appender`, …). All come from main. Clean up if the operator agrees.
 
 - [main] `src/big_node/e2e/blob_discovery/mod.rs` is not rustfmt-clean on origin/main (byte-identical here), so the flake `rust-fmt` check fails on it.
@@ -667,7 +667,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - Every keyring secret is scoped by node id. Sockets are node-scoped in a standard per-user runtime location; making them configurable comes later.
   - `day init` on an existing node: the manager's pick is idempotent (exit 0, unchanged), with a refusal only when the directory holds something that is not a node.
   - Which peers auto-connect is user-node vs relay-node policy, but either way a node has a set of peers to dial at start: a bootstrap list.
-  - Mother and sister nodes: only ADR 032 §2 names them (user-node composition, Dayframe); no design exists yet. They belong to the user-node composition ADR.
+  - Mother and sister nodes: only ADR 033 §2 names them (user-node composition, Dayframe); no design exists yet. They belong to the user-node composition ADR.
   - Drawers and documents stay separate authority domains (ADR 022 updated).
   - PollDatums gets no marker event for matching docs with no selected rows: the datum selection is a filter too.
   - Datum value newtypes use Automerge's scalar names (`F64`, not `Float64`); integers carry no widths, as in Lexicon.
@@ -711,7 +711,7 @@ Big_cabinet read/write options discussed with the operator 2026-11-06, deferred 
   3. **`day init` on an existing node.** Resolved (operator): idempotent, prints `node <id> already initialized at <path>` and exits 0; a `node.json` that is not a valid node is an error (exit 1) and is left alone.
   4. **`nodule_operations` default** in `node.json` is empty (nodules can invoke nothing); the big_node tests use `{authorities: ["org.example"]}`.
   5. **Peers.** Resolved (operator): `node.json` has an optional `peers` section (`bootstrap` endpoint tickets, `loopbackOnly`); the daemon attaches the peers service when it is present and dials the list. `org.example.daybook.node.getNodeInfo` (built-in provider `builtin:node`) reports the node id, its own ticket and the connected peers; `day status` and `day peers ls` read it. `day peers add <ticket>` edits `node.json` and takes effect at the next daemon start.
-  6. **Identity seed at rest.** `node.json` holds the seed in a 0600 file, not the keyring; ADR 032 says data is encrypted at rest.
+  6. **Identity seed at rest.** `node.json` holds the seed in a 0600 file, not the keyring; ADR 033 says data is encrypted at rest.
   - Gaps big_node exposes: no operation lists providers/operations, reports the node id, peers, readiness or version, or stops the node (the CLI uses SIGTERM plus the pid in its lock file).
 
 - Lifecycle review questions 1–7: resolved 2026-11-04. See ADR 027 §10 and ADR 028.

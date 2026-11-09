@@ -1,4 +1,4 @@
-//! The peers service (ADR 032 section 6): the node's attachment to other nodes, and the successor
+//! The peers service (ADR 033 section 6): the node's attachment to other nodes, and the successor
 //! of the old `IrohSyncRepo`.
 //!
 //! It owns the Iroh endpoint and the ALPN router (subduction, big_sync RPC, repo sync, iroh-blobs),

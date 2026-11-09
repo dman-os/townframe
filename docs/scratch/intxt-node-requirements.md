@@ -43,9 +43,9 @@ Scope: The top-down grounding for this week's node work (ledger D38). It derives
 
 | # | Requirement | State |
 |---|---|---|
-| R9 | **A relay composition**: a node crate with no user, a TCP listener, a peer policy, and a bootstrap identity | Generic `big_node` supports it (ADR 032); the composition and its ADR don't exist |
+| R9 | **A relay composition**: a node crate with no user, a TCP listener, a peer policy, and a bootstrap identity | Generic `big_node` supports it (ADR 033); the composition and its ADR don't exist |
 | R10 | **Mirroring private drawers to the relay**: the user adds the relay's identity to the drawer's group with keyhive `Access::Relay` (sync bytes, can't decrypt) | keyhive has the level; the user-side action and the relay's mirror policy are not wired |
-| R11 | **Peer admission for the alpha**: the relay accepts the peers it is configured to accept (an allowlist in its config), no sponsorship | Peer policy is an embedder hook (ADR 032); the relay's policy is not written |
+| R11 | **Peer admission for the alpha**: the relay accepts the peers it is configured to accept (an allowlist in its config), no sponsorship | Peer policy is an embedder hook (ADR 033); the relay's policy is not written |
 
 ### J3: the phone
 

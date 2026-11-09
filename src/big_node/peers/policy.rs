@@ -1,4 +1,4 @@
-//! The peer policy hook (ADR 032 section 6): the decisions `big_node` orchestrates but does not own.
+//! The peer policy hook (ADR 033 section 6): the decisions `big_node` orchestrates but does not own.
 //!
 //! The hook answers three questions, and nothing else: who to dial, whether to accept a peer,
 //! and what this node *wants* from a peer. The last is the mirroring half of "which parts to sync
@@ -49,7 +49,7 @@ pub trait PeerPolicy: Send + Sync + 'static {
     fn changes(&self, node: &PolicyContext) -> tokio::sync::watch::Receiver<u64>;
 }
 
-/// The default policy (ADR 019 and ADR 032 section 6): dial a fixed list, accept every peer
+/// The default policy (ADR 019 and ADR 033 section 6): dial a fixed list, accept every peer
 /// the transport authenticates (access decides what they get, not whether they may connect), and
 /// want what this node's drawer mirror intent names.
 #[derive(Debug, Clone, Default)]

@@ -1,4 +1,4 @@
-//! Dispatch served as XRPC (ADR 032 §3): `/xrpc/<nsid>` for any NSID the router claims.
+//! Dispatch served as XRPC (ADR 033 §3): `/xrpc/<nsid>` for any NSID the router claims.
 //!
 //! The surface is one fallback procedure in front of the routing table, not a route per
 //! operation: providers come and go at runtime (nodules enable and disable), so the table, not

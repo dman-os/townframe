@@ -7,7 +7,7 @@ Scope: Draft description for the `feat/big-node` -> `main` PR. Numbers come from
 
 ## Summary
 
-A node is now a value you boot, not a test helper. `big_node` boots the standard services against storage it is handed, serves one router, and optionally attaches listeners and a peers endpoint. Design: [ADR 032](../adrs/032-what-a-node-is.md), with its 2026-11-06 revision.
+A node is now a value you boot, not a test helper. `big_node` boots the standard services against storage it is handed, serves one router, and optionally attaches listeners and a peers endpoint. Design: [ADR 033](../adrs/033-what-a-node-is.md), with its 2026-11-06 revision.
 
 - **`big_dispatch` and `big_dispatch_core`** own the router, admission and providers. Authority, docs, drawers, blobs, plugs and nodules register as `builtin:<service>` providers under their existing NSIDs; nodules register as before. `big_nodule` depends on `big_dispatch`.
 - **Credential header.** The caller's credential is `Authorization: Bearer <authority>.<signer>` in envelope metadata. Resource capabilities stay in the body (N2b).
@@ -17,7 +17,7 @@ A node is now a value you boot, not a test helper. `big_node` boots the standard
 - **Test arena.** An N-node harness (`e2e/harness.rs` `Cluster`), a ladder suite, a seeded randomized stress test, a cross-node nodule test, and a costs harness with a counting allocator and a note-cost growth pin.
 - **`day` CLI.** The node's first client, in-process or over the daemon socket. Node-scoped keyring secrets and socket (`$XDG_RUNTIME_DIR/day/<node-id>.sock`), idempotent `day init`, bootstrap peers in `node.json`, and the built-in `getNodeInfo` query.
 - **Datum cleanup (D32).** Datums drop Rust number widths and shapes that Lexicon and Automerge lack.
-- **Docs.** ADR 032 revised; ADR 022 explained from the caller's side; ADR 025 section 7 and ADR 020 amended; scratch docs for cartridge naming (D34) and Windows.
+- **Docs.** ADR 033 revised; ADR 022 explained from the caller's side; ADR 025 section 7 and ADR 020 amended; scratch docs for cartridge naming (D34) and Windows.
 
 ## Major fixes
 
@@ -118,7 +118,7 @@ No `file://` patch remains. Both revs are the tips of the `townframe-changes` bo
 ## How to review
 
 Commit groups, in order (`git log --oneline main..feat/big-node`, about 117 commits):
-1. **Node design and dispatch:** `85b3f287`, `5e34392c`, `66321166` (ADR 032), `38ca61dd` (big_dispatch), `679af51b` (listeners), `c70ac20f` (credential header).
+1. **Node design and dispatch:** `85b3f287`, `5e34392c`, `66321166` (ADR 033), `38ca61dd` (big_dispatch), `679af51b` (listeners), `c70ac20f` (credential header).
 2. **Bindings and peers:** `8ef60a2b` (storage bindings), `b85e19df` (peers), `7e2c2963` (follow keyhive access, replay reset fix).
 3. **Test arena:** `b0f58bec` (harness and ladder), `3f2fc461` (stress, scale, cross-node plug), `f5971214` (cost table).
 4. **Performance and correctness fixes:** the `perf(...)`, `fix(...)` and `refactor(...)` commits listed under Major fixes, plus `f34241c9` (operator superuser, plug install on the caller's handles).

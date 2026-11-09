@@ -1,6 +1,6 @@
 //! The node directory and everything the CLI keeps in it, plus the booted in-process node.
 //!
-//! Layout of a node directory (ADR 032 section 1: the node owns its data, the CLI only knows
+//! Layout of a node directory (ADR 033 section 1: the node owns its data, the CLI only knows
 //! where it is):
 //!
 //! ```text
@@ -34,7 +34,7 @@ const MAX_SOCKET_PATH_BYTES: usize = 100;
 ///
 /// - **Normally** `$XDG_RUNTIME_DIR/day`: the per-user runtime directory the login session
 ///   creates as `0700` and removes at logout, which is where a local daemon's socket belongs
-///   (ADR 032 section 5). `directories` yields it only where the platform has one (Linux).
+///   (ADR 033 section 5). `directories` yields it only where the platform has one (Linux).
 /// - **Without one** (macOS, a session with no `XDG_RUNTIME_DIR`, a cron job) `/tmp/day-<euid>`:
 ///   a directory of the user's own under `/tmp` rather than `std::env::temp_dir()`, because
 ///   macOS's per-user temp dir is already ~50 bytes and a socket named by a 64 character node id
@@ -79,7 +79,7 @@ pub struct NodeDir {
 }
 
 /// What `day init` records. The identity seed is the node's keyhive identity and, through it, its
-/// node id (ADR 032 section 6: one node key).
+/// node id (ADR 033 section 6: one node key).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSettings {

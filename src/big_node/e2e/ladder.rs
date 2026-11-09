@@ -1,4 +1,4 @@
-//! The sync ladder as user stories (ADR 032 section 9), ported from daybook's
+//! The sync ladder as user stories (ADR 033 section 9), ported from daybook's
 //! `sync/tests/ladder.rs`: nodes that meet only through their peers attachments, driven only
 //! through their service clients. Daybook's clone bootstrap rung is provisioning, which belongs to
 //! the user-node composition, not here.

@@ -1,4 +1,4 @@
-//! What the node's operations cost (ADR 032 section 9, ledger D25): wall time, heap allocated and
+//! What the node's operations cost (ADR 033 section 9, ledger D25): wall time, heap allocated and
 //! heap peak per operation, plus the storage a note adds, for one scripted workload driven
 //! through the service clients like a user.
 //!

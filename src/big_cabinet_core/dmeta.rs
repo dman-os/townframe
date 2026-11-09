@@ -8,7 +8,7 @@
 //! Dmeta is an ordinary datum — `org.example.daybook.dmeta/main` — and the document repository is
 //! the only writer of it. Its shape is the one in `docs/wiki/docs.md`: aliases live in one forward
 //! index, identities are multibase text, and branch relationships are not duplicated here. A branch
-//! is a weak link recorded by the branch datums (ADR 007); dmeta signs those datums, it does not
+//! is a weak link recorded by the branch datums (ADR 034); dmeta signs those datums, it does not
 //! restate them.
 //!
 //! A claim authenticates the value in its **native storage form**, not its canonical JSON. The

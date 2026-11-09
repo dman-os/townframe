@@ -1,4 +1,4 @@
-//! The dispatch service: the node's XRPC reverse proxy (ADR 027 §3, §6; ADR 032 §4), hosted on
+//! The dispatch service: the node's XRPC reverse proxy (ADR 027 §3, §6; ADR 033 §4), hosted on
 //! its own beside the services it fronts. It owns an operations namespace in the authority
 //! service and knows nothing about nodules or any other provider: whoever owns providers (the
 //! nodule reconciler, the node's built-in services through [`ServiceProvider`]) registers them in

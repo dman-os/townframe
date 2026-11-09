@@ -518,7 +518,7 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     shutdown(node, stop).await;
 }
 
-/// A plug published on one node is installed and invoked on another (ADR 032 section 9). Alice
+/// A plug published on one node is installed and invoked on another (ADR 033 section 9). Alice
 /// publishes the nodule's plug in her registry and invites Bob's node to her registry drawer at
 /// `access`; the plug document and, through Bob's mirror of the drawer's blob inventory, the
 /// handler bytes sync to Bob. Bob's operator installs the document into Bob's registry, lending the

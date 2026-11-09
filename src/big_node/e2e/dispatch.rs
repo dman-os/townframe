@@ -1,4 +1,4 @@
-//! One router per node (ADR 032 §4): a built-in operation (docs) and a nodule operation (the
+//! One router per node (ADR 033 §4): a built-in operation (docs) and a nodule operation (the
 //! Wasm test guest) are invoked through the same `Client<DispatchProtocol>`, under the same
 //! admission, and the built-in service keeps checking the capability in its own request.
 

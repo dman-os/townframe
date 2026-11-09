@@ -1,4 +1,4 @@
-//! The one adapter from a hosted service to a built-in provider (ADR 032 §4).
+//! The one adapter from a hosted service to a built-in provider (ADR 033 §4).
 //!
 //! A service is reached through `Client<Proto>`, whose calls name the operation by its request
 //! type. Dispatch names it by NSID and hands over JSON, so [`ServiceProvider`] holds one typed

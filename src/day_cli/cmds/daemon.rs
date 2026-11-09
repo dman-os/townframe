@@ -1,4 +1,4 @@
-//! The node as a background server on its Unix socket (ADR 032 section 5).
+//! The node as a background server on its Unix socket (ADR 033 section 5).
 //!
 //! A daemon is the node booted with the socket attached, holding the node lock for as long as it
 //! lives. The lock is the daemon's identity: `stop` finds the pid in it and waits for its release

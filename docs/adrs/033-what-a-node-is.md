@@ -1,4 +1,4 @@
-# ADR 032: What a node is, and how its services compose
+# ADR 033: What a node is, and how its services compose
 
 **Status:** Accepted (operator, 2026-11-04). Drafted from the operator design session of 2026-11-04 (decisions D14–D21 of the
 [runtime ledger](../scratch/nodule-runtime-ledger.md)).

@@ -1,4 +1,4 @@
-//! Many nodes in one process (ADR 032 section 8): a node is a value, so twenty can be booted
+//! Many nodes in one process (ADR 033 section 8): a node is a value, so twenty can be booted
 //! from bindings, stopped, and some booted again from those bindings, leaving nothing behind.
 
 use super::listeners::owner_only_directory;

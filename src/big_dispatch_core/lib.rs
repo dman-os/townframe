@@ -1,4 +1,4 @@
-//! The dispatch wire contract (ADR 027 §3, §6; ADR 032 §4): the node's XRPC reverse proxy, seen
+//! The dispatch wire contract (ADR 027 §3, §6; ADR 033 §4): the node's XRPC reverse proxy, seen
 //! from its callers.
 //!
 //! A caller names an operation by NSID and hands dispatch JSON; dispatch admits the caller's

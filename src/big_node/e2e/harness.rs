@@ -1,4 +1,4 @@
-//! The N-node arena (ADR 032 section 9): several [`BigNode`]s in one process, each on its own
+//! The N-node arena (ADR 033 section 9): several [`BigNode`]s in one process, each on its own
 //! bindings, met only through their peers attachments and driven only through their service
 //! clients. Scenarios are written against [`Cluster`] in user terms (a drawer the nodes share, a
 //! note, a blob) and wait on conditions, not on time.

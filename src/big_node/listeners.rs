@@ -1,4 +1,4 @@
-//! Listener attachments (ADR 032 §3, §5): serve the node's router over a Unix socket and/or TCP.
+//! Listener attachments (ADR 033 §3, §5): serve the node's router over a Unix socket and/or TCP.
 //! A listener is an attachment, so the node boots and stops complete without any. Which
 //! operations exist is dispatch's business; a listener only decides who a connection is.
 //!

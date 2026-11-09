@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-**Related:** ADR 007 (doc and branch identity), ADR 019 (drawers), ADR 020 (document format and datum
+**Related:** ADR 034 (doc and branch identity), ADR 019 (drawers), ADR 020 (document format and datum
 writes — §2 codec declarations, §4 claim canonicalization, §6 verification).
 
 ## 1. What a datum schema has to do, and the three layers it is made of

@@ -1,7 +1,7 @@
 //! An iroh endpoint, a big_sync worker, and the repo/sync RPC services around one BigRepo: the
 //! two-peer wiring an embedder does, for end-to-end tests of what crosses between nodes.
 //!
-//! This stays hand-wired on purpose. The real attachment is `big_node::peers` (ADR 032 section 6),
+//! This stays hand-wired on purpose. The real attachment is `big_node::peers` (ADR 033 section 6),
 //! but `big_node` depends on `big_cabinet`, so a cabinet test cannot use it. This is the minimal
 //! subset: one worker, one RPC scope, caller-chosen `set_peer` parts and no policy, redial or
 //! teardown. Anything that needs the policy hook, redialing or two full nodes belongs in

@@ -235,7 +235,7 @@ pub struct Config {
 
 /// The storage resources a repo is handed. The repo opens no location itself: the composition
 /// root opens the database and the keyhive archive directory and passes them in, so the root
-/// alone decides where a node lives (ADR 032 section 8).
+/// alone decides where a node lives (ADR 033 section 8).
 #[derive(Clone)]
 pub struct Storage {
     /// The database holding the repo's partition stores, keyhive event log and secret blobs.

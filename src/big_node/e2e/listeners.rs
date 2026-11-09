@@ -1,4 +1,4 @@
-//! Listener attachments (ADR 032 §3, §5): the node's router served over a Unix socket and TCP.
+//! Listener attachments (ADR 033 §3, §5): the node's router served over a Unix socket and TCP.
 //! The docs call goes through the typed `Client<DocsProtocol>::xrpc`, the nodule call through
 //! plain HTTP, since a nodule's operations have no Rust request type.
 

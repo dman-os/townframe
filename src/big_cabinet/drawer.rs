@@ -176,7 +176,7 @@ pub(crate) struct Projection {
     pub(crate) capabilities: DomainCapabilities,
     pub(crate) grants: Arc<Grants>,
     pub(crate) actor: Actor,
-    /// The authority's root identity, the node operator (ADR 032 section 5). It holds no
+    /// The authority's root identity, the node operator (ADR 033 section 5). It holds no
     /// standing grants and needs none: see [`Projection::granted`].
     pub(crate) operator: Uuid7,
     pub(crate) state: State,

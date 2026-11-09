@@ -1,4 +1,4 @@
-# ADR 007: Doc and Branch Identity
+# ADR 034: Doc and Branch Identity
 
 **Status:** Partially implemented — `DocumentId` unification, `db+datum` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` core datum with concrete parent references and pinned fork heads, and `dmeta.docUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred. Amended by [ADR 026](026-drawer-native-blobs.md) §4: the branch datum gains an optional open-vocabulary `reason` (not implemented).
 

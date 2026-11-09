@@ -1,4 +1,4 @@
-//! Seeded randomized stress over the N-node arena (ADR 032 section 9): four nodes in a mesh take a
+//! Seeded randomized stress over the N-node arena (ADR 033 section 9): four nodes in a mesh take a
 //! seeded interleaving of notes created and edited, access granted, nodes stopped and booted
 //! again, and nodes partitioned (booted again but not relinked) and healed, with edits on both
 //! sides of a partition. Then every node is brought back, linked and admitted, and every note
