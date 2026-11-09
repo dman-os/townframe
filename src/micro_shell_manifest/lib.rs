@@ -23,15 +23,9 @@
 //! learns *which* row by asking the shell ([`OPENED`]), because a presentation takes no
 //! parameters and the shell, not the list, owns the stack.
 use clay_mdk::Attachment;
-use clay_mdk::CollectionCapability;
-use clay_mdk::CollectionDecl;
-use clay_mdk::ComponentDecl;
-use clay_mdk::ConfigDecl;
-use clay_mdk::DeclaredCollection;
 use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::PackageDecl;
 use clay_mdk::RootRow;
 use clay_mdk::ShellRoots;
 use clay_mdk::Sidecar;
