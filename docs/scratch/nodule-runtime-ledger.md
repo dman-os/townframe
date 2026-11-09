@@ -628,7 +628,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
 
 ### Slice 2c follow-ups
-- [authority] The service's dispatch authority is minted per boot and retracted on clean shutdown, so nodule caps rotate on every restart (the subagent's claim that they stay stable across restarts is wrong). After a crash, the previous boot's authority is never retracted: a live orphan cap. Fix by persisting the service authority, or by sweeping at boot.
+- [authority] The service's dispatch authority is minted per boot and retracted on clean shutdown, so nodule caps rotate on every restart (the subagent's claim that they stay stable across restarts is wrong). There is no orphan after a crash: the capability ledger is in-memory only (`cap::State`, rebuilt empty at every `authority::boot`; no capability table exists, asserted in `reboot_loses_handles_but_preserves_actors_and_keys`), so a dead process takes every cap with it. The clean-stop retraction only kills the handles within the running process once the nodule service is gone. No persistence or sweep is needed (checked 2026-11-10).
 - [convention] Nested calls inherit a deadline only if the guest forwards the header. gRPC propagates deadlines through the context automatically, so the guest SDK should do the same.
 - [decided] Production default for `nodule_operations` is empty (deny by default, the ocap convention). Caps stay stable across revision upgrades, because the actor is the same.
 

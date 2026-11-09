@@ -681,6 +681,10 @@ async fn boot_nodules(
 /// Then the operator mints the dispatch handle the nodule service mints every nodule's own
 /// handle from: `scope` is the most any nodule can be granted. It is retracted once the nodule
 /// service has stopped, which also kills the handles minted from it.
+///
+/// The retraction only matters within a live process: the authority's capability ledger is in
+/// memory and starts empty every boot, so after a crash nothing of the previous boot's authority
+/// survives and there is nothing to sweep.
 async fn boot_dispatch(
     authority: &Authority,
     namespace: Namespace,
