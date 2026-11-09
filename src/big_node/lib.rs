@@ -60,7 +60,7 @@ use std::sync::Arc;
 use utils_rs::prelude::Res;
 
 /// What a node is configured with. Every storage resource in it is a binding the composition
-/// root already opened (ADR 032 section 8): no service opens a path, so the node's place on disk,
+/// root already opened (ADR 033 section 8): no service opens a path, so the node's place on disk,
 /// in memory or in a shared pool is decided by whoever builds this value.
 ///
 /// Two nodes may be handed the same `SqliteRuntime` (it is a pool of workers) and the same
@@ -93,7 +93,7 @@ pub struct Config {
 }
 
 /// A node's id: the public half of its identity seed in lowercase hex, which is its keyhive
-/// peer id and its Iroh endpoint id (ADR 032 section 6: one node key). It is derivable before
+/// peer id and its Iroh endpoint id (ADR 033 section 6: one node key). It is derivable before
 /// the node boots, which is what lets a host name per-node resources (keyring entries, the
 /// Unix socket) without opening the node.
 pub fn node_id(identity_seed: &[u8; 32]) -> String {
