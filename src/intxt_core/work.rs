@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 /// A project, as far as recorders can tell (`gitRepo/<uuid>`): git has no repository identity,
 /// so the first recorder mints a UUID. Shared root commits only suggest that two clones are one
 /// project; they never merge repos.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GitRepo {
@@ -26,7 +26,7 @@ pub struct GitRepo {
 
 /// One `.git` directory or jj repository on one machine (`gitClone/<uuid>`, the UUID kept in
 /// `.git/intxt-id`). Refs and the jj op log live here.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GitClone {
@@ -54,7 +54,7 @@ pub enum Vcs {
 
 /// One checkout directory of a clone (`worktree/main`, one per worktree document). Written only
 /// by the recorder on its machine.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Worktree {
@@ -86,7 +86,7 @@ pub struct OpLogDoc {
 
 /// One observed change in a worktree (`worktreeOp/<seq>`). Sequential keys from one writer make
 /// the log linear by construction, like jj's operation log.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeOp {
@@ -168,7 +168,7 @@ pub struct JjObservation {
 }
 
 /// Provenance of a file document (`file/main`), beside the generic `path` and `note`.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct File {
@@ -184,7 +184,7 @@ pub struct File {
 /// A git commit (`gitCommit/<sha>`). Every recorder writes the same value to the same slot, and
 /// none rewrites it: a later fact about a commit goes into its own datum. Holds no pins; the op
 /// that observed the commit does.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GitCommit {
@@ -244,7 +244,7 @@ pub enum FileStatus {
 }
 
 /// A ref of one clone (`gitRef/<clone uuid>/<ref name>`). One writer: the clone's recorder.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GitRef {
@@ -257,7 +257,7 @@ pub struct GitRef {
 }
 
 /// A jj operation (`jjOperation/<op id>`): ids and structure, not the op store's contents.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JjOperation {
@@ -271,7 +271,7 @@ pub struct JjOperation {
 }
 
 /// A jj change's evolution (`jjChange/<change id>`): the commits it has been, in evolog order.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JjChange {
@@ -281,7 +281,7 @@ pub struct JjChange {
 }
 
 /// An agent session (`agentSession/main`, one per session document), named after ACP's session.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSession {
@@ -304,7 +304,7 @@ pub struct AgentSession {
 
 /// One prompt turn (`promptTurn/<harness turn id>`): a prompt and everything until its stop
 /// reason. Messages and tool calls live inside it, appended as the turn runs.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptTurn {
@@ -467,7 +467,7 @@ pub struct ToolDiff {
 
 /// The agent's plan (`plan/main`), replaced whole on every update as ACP does; its history is
 /// the plan's history.
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
@@ -501,7 +501,7 @@ pub enum Priority {
 }
 
 /// An intxt includes a repository (`repoEntry/<repo uuid>`, on the intxt's descriptor).
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoEntry {
@@ -511,7 +511,7 @@ pub struct RepoEntry {
 }
 
 /// An intxt includes a worktree's capture (`worktreeEntry/<worktree uuid>`).
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeEntry {
@@ -521,7 +521,7 @@ pub struct WorktreeEntry {
 }
 
 /// An intxt includes an agent session (`sessionEntry/<session id>`).
-#[macros::datum(authority = "org.example.work")]
+#[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {

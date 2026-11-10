@@ -29,20 +29,20 @@ The intxt's descriptor follows the drawer's own design (ADR 019): one datum iden
   "org.example.daybook.drawer/main": { "layout": { "$type": "org.example.daybook.drawer.singleGroup", … } },
 
   "org.example.intxt/main": { "empty": true },                   // this drawer is an intxt
-  "org.example.title/main": { "title": "Datum references move to dtxt:", "description": "markdown, optional" },
+  "org.example.intxt.title/main": { "title": "Datum references move to dtxt:", "description": "markdown, optional" },
 
   // entry datums: one per part, each owned by its vocabulary (ADR 040, ADR 041)
-  "org.example.work.worktreeEntry/0193a…":   { "worktree": "dtxt:datum:zWt/org.example.work.worktree/main" },
-  "org.example.work.repoEntry/0193b…":       { "repo": "dtxt:datum:zRepo/org.example.work.gitRepo/0193b…" },
-  "org.example.work.sessionEntry/eb26ecaa…": { "session": "dtxt:datum:zSess/org.example.work.agentSession/main" },
-  "org.example.annotationsEntry/main":       { "empty": true },  // annotations are found by tag across the drawer (ADR 041 §6)
+  "org.example.intxt.work.worktreeEntry/0193a…":   { "worktree": "dtxt:datum:zWt/org.example.intxt.work.worktree/main" },
+  "org.example.intxt.work.repoEntry/0193b…":       { "repo": "dtxt:datum:zRepo/org.example.intxt.work.gitRepo/0193b…" },
+  "org.example.intxt.work.sessionEntry/eb26ecaa…": { "session": "dtxt:datum:zSess/org.example.intxt.work.agentSession/main" },
+  "org.example.intxt.annotationsEntry/main":       { "empty": true },  // annotations are found by tag across the drawer (ADR 041 §6)
 
   // the ordered index of the entries
-  "org.example.body/main": { "order": [
-    "dtxt:datum:self/org.example.work.sessionEntry/eb26ecaa…",
-    "dtxt:datum:self/org.example.work.worktreeEntry/0193a…",
-    "dtxt:datum:self/org.example.work.repoEntry/0193b…",
-    "dtxt:datum:self/org.example.annotationsEntry/main"
+  "org.example.intxt.body/main": { "order": [
+    "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa…",
+    "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a…",
+    "dtxt:datum:self/org.example.intxt.work.repoEntry/0193b…",
+    "dtxt:datum:self/org.example.intxt.annotationsEntry/main"
   ] }
 }
 ```
@@ -77,16 +77,18 @@ Stateless presenters are the default. A micro starts only when the reader expand
 
 ## 5. Generic datums
 
-An intxt uses generic datums wherever one exists, so that micros built for other plugs work on intxt content and the other way round. These come from daybook's existing vocabulary (`daybook_types::doc`: `titleGeneric`, `pathGeneric`, `note {mime, content}`), moved into a shared namespace as Lexicon objects:
+An intxt uses generic datums wherever one exists, so that micros built for other plugs work on intxt content and the other way round. These come from daybook's existing vocabulary (`daybook_types::doc`: `titleGeneric`, `pathGeneric`, `note {mime, content}`), restated as Lexicon objects.
+
+**Migrate before beta** (D39). No shared design for generic datums exists yet, so intxt owns them under its own authority, `org.example.intxt.*`: a cartridge registers only NSIDs under its authority, and the node refuses a record another holder already registered. Before the beta they move to a shared vocabulary, informed by the atproto community's generic lexicons (`docs/scratch/atproto-generic-lexicons.md`), and stored datums are migrated to the new tags. The same holds for ADR 041's annotation datums.
 
 ```jsonc
-// org.example.title/main                 (was titleGeneric, a bare string)
+// org.example.intxt.title/main                 (was titleGeneric, a bare string)
 { "title": "…", "description": "markdown, optional" }
 
-// org.example.path/main                  (was pathGeneric)
+// org.example.intxt.path/main                  (was pathGeneric)
 { "path": "src/big_cabinet_core/reference.rs" }
 
-// org.example.note/main                  (was daybook.note)
+// org.example.intxt.note/main                  (was daybook.note)
 { "mime": "text/x-rust", "content": "…" }   // content is Automerge Text when a vocabulary edits it in place
 ```
 
@@ -105,6 +107,6 @@ Nothing in the core. Creating an intxt, adding entries and writing datums are pl
 
 ## 8. Open questions
 
-1. **Namespace owner** of `title`, `path`, `note`, `comment` and the other generic datums: big_cabinet_core's own vocabulary, or a shared core-datums plug. Tags stay under `org.example` until the project's domain is bought (operator).
+1. **Generic datums' real home** (D39): intxt owns them until before the beta, then they migrate to a shared vocabulary. Tags stay under `org.example` until the project's domain is bought (operator).
 2. **Renderer precedence** when several rows match a tag: configuration, deferred; Clay's settings system can hold it (operator).
 3. **The signer in reads** (ledger L5): `readDatums` returns no signer today; the node lane adds it.

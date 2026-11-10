@@ -4,7 +4,7 @@
 
 **Depends on:** ADR 036 (intxt core: layers, generic datums), ADR 035 (references), ADR 041 (annotations, which target these datums). **Capture side:** ADR 039 (the adapter that writes them; to be revised against this ADR). Evidence: ledger F1, F5–F7, F10.
 
-Datum tags use the placeholder authority `org.example.work`.
+Datum tags use the placeholder authority `org.example.intxt.work`.
 
 ## 1. The model
 
@@ -36,15 +36,15 @@ Git has no repository identity. Two clones of one project share nothing but hist
 Paths are recorded (`path`, the current absolute path) but are not identity: worktrees move, are deleted, and a new one may reuse an old path for unrelated work. A stored UUID survives the first two and distinguishes the third.
 
 ```jsonc
-// org.example.work.gitRepo/<uuid>
+// org.example.intxt.work.gitRepo/<uuid>
 { "roots": ["a1b2…"], "remotes": ["git@github.com:dman-os/townframe.git"] }
 
-// org.example.work.gitClone/<uuid>
-{ "repo": "dtxt:datum:zRepo/org.example.work.gitRepo/<uuid>", "machine": "dtxt:actor:zNode", "path": "/run/media/…/townframe-p3N-3/.git",
+// org.example.intxt.work.gitClone/<uuid>
+{ "repo": "dtxt:datum:zRepo/org.example.intxt.work.gitRepo/<uuid>", "machine": "dtxt:actor:zNode", "path": "/run/media/…/townframe-p3N-3/.git",
   "vcs": ["git", "jj"] }
 
-// org.example.work.worktree/main         (one per worktree document)
-{ "clone": "dtxt:datum:zRepo/org.example.work.gitClone/<uuid>", "id": "<uuid>", "path": "/run/media/…/townframe-p3N-3",
+// org.example.intxt.work.worktree/main         (one per worktree document)
+{ "clone": "dtxt:datum:zRepo/org.example.intxt.work.gitClone/<uuid>", "id": "<uuid>", "path": "/run/media/…/townframe-p3N-3",
   "files": { "src/big_cabinet_core/reference.rs": "zFileA" },    // path → file doc, for every path an op touched
   "opLogs": [ { "doc": "zOps0", "from": 0 }, { "doc": "zOps1", "from": 256 } ] }   // op-log documents in sequence order
 ```
@@ -54,10 +54,10 @@ Two machines with checkouts of one project are two clones, each with its worktre
 ## 3. The worktree op log
 
 ```jsonc
-// org.example.work.worktreeOp/<seq>      (seq: 0, 1, 2 … written only by the worktree's recorder)
+// org.example.intxt.work.worktreeOp/<seq>      (seq: 0, 1, 2 … written only by the worktree's recorder)
 { "at": "2026-11-10T21:04:11Z",
   "kind": "edit",                         // open: edit | checkout | reset | commit | amend | rebase | refMove | jjSnapshot
-  "cause": "dtxt:datum:zSess/org.example.work.promptTurn/<id>#toolCalls/{\"id\":\"toolu_01…\"}",   // when known
+  "cause": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/<id>#toolCalls/{\"id\":\"toolu_01…\"}",   // when known
   "files": { "src/big_cabinet_core/reference.rs": ["zbd7…"], "src/old.rs": null },   // path → file doc heads after this op; null = deleted
   "renames": { "src/url.rs": "src/uri.rs" },                      // new path → old path, continued in the old path's doc
   "git": { "head": "4c1f…", "ref": "refs/heads/feat/intxt", "from": "77b2…", "to": "4c1f…",
@@ -75,9 +75,9 @@ One document per worktree per path that some op touched: the generic `path` and 
 
 ```jsonc
 // file doc
-{ "org.example.path/main": { "path": "src/big_cabinet_core/reference.rs" },
-  "org.example.note/main": { "mime": "text/x-rust", "content": "…" },          // Automerge Text
-  "org.example.work.file/main": { "worktree": "dtxt:datum:zWt/org.example.work.worktree/main" } }
+{ "org.example.intxt.path/main": { "path": "src/big_cabinet_core/reference.rs" },
+  "org.example.intxt.note/main": { "mime": "text/x-rust", "content": "…" },          // Automerge Text
+  "org.example.intxt.work.file/main": { "worktree": "dtxt:datum:zWt/org.example.intxt.work.worktree/main" } }
 ```
 
 - **Single writer.** Only the worktree's recorder writes it, so the multi-writer machinery the ref-driven design needed (reading only at pins, repairing concurrent splices, divergent refs) is gone. Content is still always read at a pin: an op's or a commit observation's.
@@ -89,14 +89,14 @@ One document per worktree per path that some op touched: the generic `path` and 
 ## 5. Git and jj layers
 
 ```jsonc
-// org.example.work.gitCommit/<sha>       (key = sha; identical for every recorder, in the repo's document)
+// org.example.intxt.work.gitCommit/<sha>       (key = sha; identical for every recorder, in the repo's document)
 { "parents": ["9a0e…"], "changeId": "kxqoltvm…",                       // jj change id when known
   "author":    { "name": "dman-os", "email": "…", "at": "…" },
   "committer": { "name": "dman-os", "email": "…", "at": "…" },
   "message": "refactor(reference): dtxt scheme",
   "files": [ { "path": "src/big_cabinet_core/reference.rs", "status": "modified", "oldPath": null } ] }
 
-// org.example.work.gitRef/<clone uuid>/<ref name>
+// org.example.intxt.work.gitRef/<clone uuid>/<ref name>
 { "target": "4c1f…", "base": "9a0e…" }  // base: what a review compares against (merge base with upstream)
 ```
 
@@ -108,11 +108,11 @@ One document per worktree per path that some op touched: the generic `path` and 
 **jj is first class**, as its own layer over the same worktree log rather than translated into git terms:
 
 ```jsonc
-// org.example.work.jjOperation/<op id>   (the clone's jj op log; a DAG, since jj ops can diverge)
+// org.example.intxt.work.jjOperation/<op id>   (the clone's jj op log; a DAG, since jj ops can diverge)
 { "parents": ["…"], "description": "snapshot working copy", "at": "…",
   "heads": ["<commit id>", …], "bookmarks": { "feat/intxt": "<commit id>" } }
 
-// org.example.work.jjChange/<change id>  (a change's evolution: the commits it has been)
+// org.example.intxt.work.jjChange/<change id>  (a change's evolution: the commits it has been)
 { "commits": ["<commit id>", …] }       // appended in evolog order
 ```
 
@@ -123,12 +123,12 @@ jj's working copy is a commit that it snapshots on every command, so a jj worktr
 Names follow the Agent Client Protocol (ACP: session, prompt turn, tool call, plan; read 2026-11-10). The tag is `agentSession` because "session" alone is ambiguous among other vocabularies.
 
 ```jsonc
-// org.example.work.agentSession/main     (one document per session; D7, F5: largest 2.67 MB normalized)
+// org.example.intxt.work.agentSession/main     (one document per session; D7, F5: largest 2.67 MB normalized)
 { "harness": "claude-code", "sessionId": "eb26ecaa-…", "title": "intxt design",
   "cwd": "/run/media/…/townframe-p3N-3", "additionalDirectories": [],   // ACP's root set
-  "parent": "dtxt:datum:zParentSess/org.example.work.agentSession/main" }   // subagent or continuation, ours (ACP has none)
+  "parent": "dtxt:datum:zParentSess/org.example.intxt.work.agentSession/main" }   // subagent or continuation, ours (ACP has none)
 
-// org.example.work.promptTurn/<harness turn id>
+// org.example.intxt.work.promptTurn/<harness turn id>
 { "seq": 41, "at": "…", "parentTurn": "<id>", "stopReason": "end_turn",
   "messages": [ { "id": "<harness id>", "seq": 0, "at": "…", "kind": "agentMessage", "text": "…" } ],
   "toolCalls": [ { "id": "toolu_01…", "seq": 3, "title": "Edit reference.rs", "kind": "edit", "status": "completed",
@@ -136,7 +136,7 @@ Names follow the Agent Client Protocol (ACP: session, prompt turn, tool call, pl
                    "locations": [ { "path": "/run/…/reference.rs", "line": 120 } ],
                    "diffs": [ { "path": "src/reference.rs", "patch": "@@ -120 +120 @@ …" } ] } ] }   // what the harness reported, when it did
 
-// org.example.work.plan/main             (ACP plan: replaced whole on every update; its history is the plan's history)
+// org.example.intxt.work.plan/main             (ACP plan: replaced whole on every update; its history is the plan's history)
 { "entries": [ { "content": "Rewrite reference.rs", "priority": "high", "status": "completed" } ] }
 ```
 

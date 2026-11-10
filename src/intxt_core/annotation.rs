@@ -2,6 +2,9 @@
 //! after the W3C Web Annotation Data Model (targets with quote selectors, an open motivation),
 //! with an explicit `replyTo` and Patchwork's thread-level resolved flag. Not intxt-specific: any
 //! drawer can hold annotations on anything it can reference.
+//!
+//! MIGRATE BEFORE BETA, with the generic datums (see `generic`): intxt owns these under its own
+//! authority only until a shared vocabulary exists (ledger D39).
 
 use big_cabinet_core::datum::Extra;
 use schemars::JsonSchema;
@@ -9,9 +12,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-/// A comment (`org.example.comment/<uuidv7>`). Each comment is its own slot, so writers never
+/// A comment (`org.example.intxt.comment/<uuidv7>`). Each comment is its own slot, so writers never
 /// share one; authorship is what the cabinet attests, not a field.
-#[macros::datum(authority = "org.example")]
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Comment {
@@ -123,9 +126,9 @@ pub enum Motivation {
     Unknown(String),
 }
 
-/// A thread's shared state (`org.example.threadState/<root comment uuid>`). One slot written by
+/// A thread's shared state (`org.example.intxt.threadState/<root comment uuid>`). One slot written by
 /// anyone; concurrent resolve and reopen leave one of the two (ADR 041 §3).
-#[macros::datum(authority = "org.example")]
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadState {
@@ -134,8 +137,8 @@ pub struct ThreadState {
     pub extra: Extra,
 }
 
-/// Tasks, decisions, sections and other groupings (`org.example.structure/<uuidv7>`, D9).
-#[macros::datum(authority = "org.example")]
+/// Tasks, decisions, sections and other groupings (`org.example.intxt.structure/<uuidv7>`, D9).
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Structure {
@@ -185,9 +188,9 @@ pub enum Progress {
     Unknown(String),
 }
 
-/// What one reader has seen (`org.example.seen/<actor uuid>/<range>`). Only that reader writes
+/// What one reader has seen (`org.example.intxt.seen/<actor uuid>/<range>`). Only that reader writes
 /// it. Split into ranges because one map hits the native read budget at about 5,400 entries.
-#[macros::datum(authority = "org.example")]
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Seen {
@@ -199,9 +202,9 @@ pub struct Seen {
     pub extra: Extra,
 }
 
-/// The intxt's entry for its annotations (`org.example.annotationsEntry/main`): they are found by
+/// The intxt's entry for its annotations (`org.example.intxt.annotationsEntry/main`): they are found by
 /// tag across the drawer's documents, so the entry names no document.
-#[macros::datum(authority = "org.example")]
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnotationsEntry {

@@ -1,7 +1,12 @@
-//! Generic datums (ADR 036 §2, §5): not intxt's own, so any micro that understands them works on
-//! intxt content. They come from daybook's vocabulary (`titleGeneric`, `pathGeneric`, `note`,
-//! `body`), restated as Lexicon objects. Which crate owns them is ADR 036 §8 Q1; they live here
-//! until that is settled.
+//! Generic datums (ADR 036 §2, §5), meant for any app, not only intxt: a title, a path, a text
+//! body, and the order of a document's parts. They come from daybook's vocabulary
+//! (`titleGeneric`, `pathGeneric`, `note`, `body`), restated as Lexicon objects.
+//!
+//! MIGRATE BEFORE BETA. No shared design for generic datums exists yet (ledger D39), so intxt owns
+//! these under its own authority (`org.example.intxt.*`), because a cartridge registers only NSIDs
+//! under its authority and the node refuses a record another holder registered. Before the beta
+//! they move to a shared vocabulary, informed by the atproto community's generic lexicons
+//! (`docs/scratch/atproto-generic-lexicons.md`), and every stored datum's tag is migrated.
 
 use big_cabinet_core::datum::Extra;
 use schemars::JsonSchema;
@@ -10,7 +15,7 @@ use serde::Serialize;
 
 /// Marks a drawer's descriptor document as an intxt (`org.example.intxt/main`). It says nothing
 /// else yet; intxt-wide fields land beside `empty`.
-#[macros::datum(authority = "org.example")]
+#[macros::datum(authority = "org.example", name = "intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Intxt {
@@ -29,8 +34,8 @@ impl Default for Intxt {
     }
 }
 
-/// A document's title (`org.example.title/main`). One slot, last writer wins.
-#[macros::datum(authority = "org.example")]
+/// A document's title (`org.example.intxt.title/main`). One slot, last writer wins.
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Title {
@@ -42,9 +47,9 @@ pub struct Title {
     pub extra: Extra,
 }
 
-/// The path a document's content lives at (`org.example.path/main`): a file document's path in
+/// The path a document's content lives at (`org.example.intxt.path/main`): a file document's path in
 /// its worktree, `/`-separated and relative to the worktree root.
-#[macros::datum(authority = "org.example", name = "path")]
+#[macros::datum(authority = "org.example.intxt", name = "path")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PathName {
@@ -53,9 +58,9 @@ pub struct PathName {
     pub extra: Extra,
 }
 
-/// A text body and its media type (`org.example.note/main`). A document holding a `path` and a
+/// A text body and its media type (`org.example.intxt.note/main`). A document holding a `path` and a
 /// `note` is a file; one holding a `title` and a `note` is a note.
-#[macros::datum(authority = "org.example")]
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Note {
@@ -68,11 +73,11 @@ pub struct Note {
     pub extra: Extra,
 }
 
-/// The order in which readers show a document's parts (`org.example.body/main`). Each entry is a
+/// The order in which readers show a document's parts (`org.example.intxt.body/main`). Each entry is a
 /// `dtxt:datum:` reference, usually `self`-relative. An Automerge list, so concurrent appends by
 /// two writers both land; readers show a duplicated reference once, and parts missing from it
 /// after the listed ones (ADR 036 §2).
-#[macros::datum(authority = "org.example")]
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Body {

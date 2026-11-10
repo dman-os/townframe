@@ -60,30 +60,30 @@ fn every_datum_declares_publishes_and_admits() {
             .collect::<Vec<_>>(),
         [
             "org.example.intxt",
-            "org.example.title",
-            "org.example.path",
-            "org.example.note",
-            "org.example.body",
-            "org.example.comment",
-            "org.example.threadState",
-            "org.example.structure",
-            "org.example.seen",
-            "org.example.annotationsEntry",
-            "org.example.work.gitRepo",
-            "org.example.work.gitClone",
-            "org.example.work.worktree",
-            "org.example.work.worktreeOp",
-            "org.example.work.file",
-            "org.example.work.gitCommit",
-            "org.example.work.gitRef",
-            "org.example.work.jjOperation",
-            "org.example.work.jjChange",
-            "org.example.work.agentSession",
-            "org.example.work.promptTurn",
-            "org.example.work.plan",
-            "org.example.work.repoEntry",
-            "org.example.work.worktreeEntry",
-            "org.example.work.sessionEntry",
+            "org.example.intxt.title",
+            "org.example.intxt.path",
+            "org.example.intxt.note",
+            "org.example.intxt.body",
+            "org.example.intxt.comment",
+            "org.example.intxt.threadState",
+            "org.example.intxt.structure",
+            "org.example.intxt.seen",
+            "org.example.intxt.annotationsEntry",
+            "org.example.intxt.work.gitRepo",
+            "org.example.intxt.work.gitClone",
+            "org.example.intxt.work.worktree",
+            "org.example.intxt.work.worktreeOp",
+            "org.example.intxt.work.file",
+            "org.example.intxt.work.gitCommit",
+            "org.example.intxt.work.gitRef",
+            "org.example.intxt.work.jjOperation",
+            "org.example.intxt.work.jjChange",
+            "org.example.intxt.work.agentSession",
+            "org.example.intxt.work.promptTurn",
+            "org.example.intxt.work.plan",
+            "org.example.intxt.work.repoEntry",
+            "org.example.intxt.work.worktreeEntry",
+            "org.example.intxt.work.sessionEntry",
         ]
     );
     for datum in &universe.datums {
@@ -103,13 +103,13 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<generic::PathName>(json!({"path": "src/big_cabinet_core/reference.rs"}));
     codec_round_trip::<generic::Note>(json!({"mime": "text/x-rust", "content": "fn main() {}\n"}));
     codec_round_trip::<generic::Body>(json!({"order": [
-        "dtxt:datum:self/org.example.work.sessionEntry/eb26ecaa",
-        "dtxt:datum:self/org.example.work.worktreeEntry/0193a",
-        "dtxt:datum:self/org.example.annotationsEntry/main"
+        "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa",
+        "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
+        "dtxt:datum:self/org.example.intxt.annotationsEntry/main"
     ]}));
     codec_round_trip::<annotation::Comment>(json!({
         "targets": [{
-            "ref": "dtxt:datum:zFileA/org.example.note/main#content/[12@a3f-40@a3f]",
+            "ref": "dtxt:datum:zFileA/org.example.intxt.note/main#content/[12@a3f-40@a3f]",
             "refHeads": ["zbd7"],
             "lines": {"start": 120, "end": 124},
             "quote": {"exact": "fn parse(", "prefix": "pub ", "suffix": "value: &str)"}
@@ -118,10 +118,10 @@ fn the_adr_examples_are_valid_datums() {
         "motivation": "commenting"
     }));
     codec_round_trip::<annotation::Comment>(json!({
-        "targets": [{"ref": "dtxt:datum:zNotes/org.example.comment/0193"}],
+        "targets": [{"ref": "dtxt:datum:zNotes/org.example.intxt.comment/0193"}],
         "body": {"mime": "text/markdown", "content": "Because the slot can contain `/`."},
         "motivation": "replying",
-        "replyTo": "dtxt:datum:zNotes/org.example.comment/0193"
+        "replyTo": "dtxt:datum:zNotes/org.example.intxt.comment/0193"
     }));
     codec_round_trip::<annotation::ThreadState>(json!({"resolved": false}));
     codec_round_trip::<annotation::Structure>(json!({
@@ -129,13 +129,13 @@ fn the_adr_examples_are_valid_datums() {
         "title": "Move references to dtxt:",
         "status": "completed",
         "targets": [{
-            "ref": "dtxt:datum:zSess/org.example.work.promptTurn/t20",
-            "to": "dtxt:datum:zSess/org.example.work.promptTurn/t45"
+            "ref": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t20",
+            "to": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t45"
         }],
         "order": "15"
     }));
     codec_round_trip::<annotation::Seen>(json!({
-        "datums": {"org.example.comment/0193": ["zbd7"]},
+        "datums": {"org.example.intxt.comment/0193": ["zbd7"]},
         "reviewed": {"refs/heads/feat/intxt": "77b2"}
     }));
     codec_round_trip::<work::GitRepo>(json!({
@@ -143,13 +143,13 @@ fn the_adr_examples_are_valid_datums() {
         "remotes": ["git@github.com:dman-os/townframe.git"]
     }));
     codec_round_trip::<work::GitClone>(json!({
-        "repo": "dtxt:datum:zRepo/org.example.work.gitRepo/0193b",
+        "repo": "dtxt:datum:zRepo/org.example.intxt.work.gitRepo/0193b",
         "machine": "dtxt:actor:zNode",
         "path": "/run/media/p3N/townframe-p3N-3/.git",
         "vcs": ["git", "jj"]
     }));
     codec_round_trip::<work::Worktree>(json!({
-        "clone": "dtxt:datum:zRepo/org.example.work.gitClone/0193c",
+        "clone": "dtxt:datum:zRepo/org.example.intxt.work.gitClone/0193c",
         "id": "0193a",
         "path": "/run/media/p3N/townframe-p3N-3",
         "files": {"src/big_cabinet_core/reference.rs": "zFileA"},
@@ -158,7 +158,7 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<work::WorktreeOp>(json!({
         "at": "2026-11-10T21:04:11Z",
         "kind": "edit",
-        "cause": "dtxt:datum:zSess/org.example.work.promptTurn/t41#toolCalls/{\"id\":\"toolu_01\"}",
+        "cause": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t41#toolCalls/{\"id\":\"toolu_01\"}",
         "files": {"src/big_cabinet_core/reference.rs": ["zbd7"], "src/old.rs": null},
         "renames": {"src/new.rs": "src/older.rs"}
     }));
@@ -170,7 +170,7 @@ fn the_adr_examples_are_valid_datums() {
                 "reflog": "commit (amend): refactor(reference): dtxt scheme"},
         "jj": {"operation": "e1f0", "change": "kxqoltvm"}
     }));
-    codec_round_trip::<work::File>(json!({"worktree": "dtxt:datum:zWt/org.example.work.worktree/main"}));
+    codec_round_trip::<work::File>(json!({"worktree": "dtxt:datum:zWt/org.example.intxt.work.worktree/main"}));
     codec_round_trip::<work::GitCommit>(json!({
         "parents": ["9a0e"],
         "changeId": "kxqoltvm",
@@ -196,7 +196,7 @@ fn the_adr_examples_are_valid_datums() {
         "sessionId": "eb26ecaa",
         "title": "intxt design",
         "cwd": "/run/media/p3N/townframe-p3N-3",
-        "parent": "dtxt:datum:zParent/org.example.work.agentSession/main"
+        "parent": "dtxt:datum:zParent/org.example.intxt.work.agentSession/main"
     }));
     codec_round_trip::<work::PromptTurn>(json!({
         "seq": 41,
@@ -217,9 +217,9 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<work::Plan>(json!({"entries": [
         {"content": "Rewrite reference.rs", "priority": "high", "status": "completed"}
     ]}));
-    codec_round_trip::<work::RepoEntry>(json!({"repo": "dtxt:datum:zRepo/org.example.work.gitRepo/0193b"}));
-    codec_round_trip::<work::WorktreeEntry>(json!({"worktree": "dtxt:datum:zWt/org.example.work.worktree/main"}));
-    codec_round_trip::<work::SessionEntry>(json!({"session": "dtxt:datum:zSess/org.example.work.agentSession/main"}));
+    codec_round_trip::<work::RepoEntry>(json!({"repo": "dtxt:datum:zRepo/org.example.intxt.work.gitRepo/0193b"}));
+    codec_round_trip::<work::WorktreeEntry>(json!({"worktree": "dtxt:datum:zWt/org.example.intxt.work.worktree/main"}));
+    codec_round_trip::<work::SessionEntry>(json!({"session": "dtxt:datum:zSess/org.example.intxt.work.agentSession/main"}));
     codec_round_trip::<annotation::AnnotationsEntry>(json!({"empty": true}));
 }
 
@@ -228,7 +228,7 @@ fn the_adr_examples_are_valid_datums() {
 #[test]
 fn future_fields_and_vocabulary_values_are_carried() {
     codec_round_trip::<annotation::Comment>(json!({
-        "targets": [{"ref": "dtxt:datum:zDoc/org.example.note/main", "selector": {"kind": "svg"}}],
+        "targets": [{"ref": "dtxt:datum:zDoc/org.example.intxt.note/main", "selector": {"kind": "svg"}}],
         "body": {"mime": "text/markdown", "content": "Looks right.", "language": "en"},
         "motivation": "approving",
         "visibility": "team"

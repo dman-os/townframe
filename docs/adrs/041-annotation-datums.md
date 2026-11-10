@@ -17,17 +17,17 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 ## 2. Comments
 
 ```jsonc
-// org.example.comment/<uuidv7>
+// org.example.intxt.comment/<uuidv7>
 {
   "targets": [
-    { "ref": "dtxt:datum:zFileA/org.example.note/main#content/[12@a3f-40@a3f]",
+    { "ref": "dtxt:datum:zFileA/org.example.intxt.note/main#content/[12@a3f-40@a3f]",
       "refHeads": ["zbd7…"],                                              // ADR 035 §2.8: the pin, a sibling
       "lines": { "start": 120, "end": 124 },                              // 1-based, at the pinned heads; or a cursor range in the fragment
       "quote": { "exact": "fn parse(", "prefix": "pub ", "suffix": "value: &str)" } }
   ],
   "body": { "mime": "text/markdown", "content": "Why not reuse the fragment here?" },   // the generic note shape
   "motivation": "commenting",                                             // open; W3C's list
-  "replyTo": "dtxt:datum:zNotes/org.example.comment/0193…"                // replies only
+  "replyTo": "dtxt:datum:zNotes/org.example.intxt.comment/0193…"                // replies only
 }
 ```
 
@@ -43,7 +43,7 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 ## 3. Thread state
 
 ```jsonc
-// org.example.threadState/<root comment uuid>
+// org.example.intxt.threadState/<root comment uuid>
 { "resolved": false }
 ```
 
@@ -52,12 +52,12 @@ One slot per thread, written by anyone. Resolving and reopening at the same time
 ## 4. Structure
 
 ```jsonc
-// org.example.structure/<uuidv7>         (D9: tasks, decisions, sections, groupings)
+// org.example.intxt.structure/<uuidv7>         (D9: tasks, decisions, sections, groupings)
 { "kind": "task",                         // open: task | decision | section | …
   "title": "Move references to dtxt:", "body": { "mime": "text/markdown", "content": "…" },
   "status": "completed",                  // open, optional; ACP's spelling: pending | in_progress | completed
-  "targets": [ { "ref": "dtxt:datum:zSess/org.example.work.promptTurn/t20", "to": "dtxt:datum:zSess/org.example.work.promptTurn/t45" } ],
-  "parent": "dtxt:datum:zNotes/org.example.structure/0193…",
+  "targets": [ { "ref": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t20", "to": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t45" } ],
+  "parent": "dtxt:datum:zNotes/org.example.intxt.structure/0193…",
   "order": "15" }                         // fractional index: siblings sort by this string; between "1" and "2" write "15"
 ```
 
@@ -66,8 +66,8 @@ A guided review is a set of `section` structures with `order`. Adapters can map 
 ## 5. What a reader has seen
 
 ```jsonc
-// org.example.seen/<actor uuid>/<range>  (one writer: that reader)
-{ "datums": { "org.example.comment/0193…": ["zbd7…"] },   // per slot: the datum heads last read
+// org.example.intxt.seen/<actor uuid>/<range>  (one writer: that reader)
+{ "datums": { "org.example.intxt.comment/0193…": ["zbd7…"] },   // per slot: the datum heads last read
   "reviewed": { "<ref or layer>": "<position>" } }       // vocabulary-defined: e.g. a ref target last reviewed
 ```
 
