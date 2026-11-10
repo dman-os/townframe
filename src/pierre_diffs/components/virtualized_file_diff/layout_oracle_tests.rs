@@ -25,6 +25,8 @@ use super::layout::has_file_annotations;
 use super::layout_test_instance::LayoutInstance;
 use super::layout_test_instance::Options;
 use crate::components::file_diff::FileDiffHunkSeparators;
+use crate::components::file_diff::FileDiffOptions;
+use crate::document::NodeKey;
 use crate::js_collections::PtrEq;
 use crate::oracle_testing::assert_json_eq;
 use crate::oracle_testing::load_golden;
@@ -39,7 +41,7 @@ use crate::types::patch::FileDiffMetadata;
 use crate::types::view::DiffLineAnnotation;
 use crate::utils::compute_virtual_file_metrics::PartialVirtualFileMetrics;
 
-type SeparatorFn = Rc<dyn Fn(&HunkData) -> Option<u8>>;
+pub(super) type SeparatorFn = Rc<dyn Fn(&HunkData) -> Option<u8>>;
 
 #[derive(Deserialize)]
 struct Golden {
@@ -67,7 +69,7 @@ struct Scenario {
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
-struct MetricsSpec {
+pub(super) struct MetricsSpec {
     hunk_line_count: Option<usize>,
     line_height: Option<f64>,
     diff_header_height: Option<f64>,
@@ -93,7 +95,7 @@ impl From<MetricsSpec> for PartialVirtualFileMetrics {
 
 #[derive(Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
-struct Spec {
+pub(super) struct Spec {
     diff_style: Option<DiffStyle>,
     collapsed: Option<bool>,
     expand_unchanged: Option<bool>,
@@ -113,7 +115,7 @@ struct Spec {
 
 #[derive(Deserialize, Clone)]
 #[serde(untagged)]
-enum SeparatorSpec {
+pub(super) enum SeparatorSpec {
     Name(String),
     Function { r#fn: String },
 }
@@ -236,41 +238,7 @@ impl Replay {
     }
 
     fn build_options(&mut self, spec: &Spec) -> Options {
-        let mut options = Options::default();
-        options.base.base.theme = None;
-        let code = &mut options.base.base;
-        code.collapsed = spec.collapsed;
-        code.disable_file_header = spec.disable_file_header;
-        code.overflow = spec.overflow;
-        code.disable_line_numbers = spec.disable_line_numbers;
-        code.unsafe_css.clone_from(&spec.unsafe_css);
-        code.theme_type = spec.theme_type;
-        options.base.diff_style = spec.diff_style;
-        options.base.expand_unchanged = spec.expand_unchanged;
-        options.base.collapsed_context_threshold = spec.collapsed_context_threshold;
-        options.base.diff_indicators = spec.diff_indicators;
-        options.base.disable_background = spec.disable_background;
-        options.has_diff_file_loader = spec.load_diff_files;
-        options.hunk_separators =
-            spec.hunk_separators
-                .as_ref()
-                .map(|separators| match separators {
-                    SeparatorSpec::Name(name) => match name.as_str() {
-                        "simple" => FileDiffHunkSeparators::Simple,
-                        "metadata" => FileDiffHunkSeparators::Metadata,
-                        "line-info" => FileDiffHunkSeparators::LineInfo,
-                        "line-info-basic" => FileDiffHunkSeparators::LineInfoBasic,
-                        other => panic!("unknown separators {other}"),
-                    },
-                    SeparatorSpec::Function { r#fn } => {
-                        let function = self
-                            .separator_functions
-                            .entry(r#fn.clone())
-                            .or_insert_with(|| Rc::new(|_: &HunkData| None));
-                        FileDiffHunkSeparators::Custom(PtrEq(Rc::clone(function)))
-                    }
-                });
-        options
+        options_from_spec(spec, &mut self.separator_functions)
     }
 
     fn step(&mut self, step: &Step) -> Value {
@@ -421,6 +389,48 @@ impl Replay {
     }
 }
 
+/// A scenario's option spec as options (custom separators are one function
+/// per name, so equal names are equal callbacks).
+pub(super) fn options_from_spec<LAnnotation>(
+    spec: &Spec,
+    separator_functions: &mut HashMap<String, SeparatorFn>,
+) -> FileDiffOptions<NodeKey, u8, LAnnotation> {
+    let mut options = FileDiffOptions::default();
+    options.base.base.theme = None;
+    let code = &mut options.base.base;
+    code.collapsed = spec.collapsed;
+    code.disable_file_header = spec.disable_file_header;
+    code.overflow = spec.overflow;
+    code.disable_line_numbers = spec.disable_line_numbers;
+    code.unsafe_css.clone_from(&spec.unsafe_css);
+    code.theme_type = spec.theme_type;
+    options.base.diff_style = spec.diff_style;
+    options.base.expand_unchanged = spec.expand_unchanged;
+    options.base.collapsed_context_threshold = spec.collapsed_context_threshold;
+    options.base.diff_indicators = spec.diff_indicators;
+    options.base.disable_background = spec.disable_background;
+    options.has_diff_file_loader = spec.load_diff_files;
+    options.hunk_separators = spec
+        .hunk_separators
+        .as_ref()
+        .map(|separators| match separators {
+            SeparatorSpec::Name(name) => match name.as_str() {
+                "simple" => FileDiffHunkSeparators::Simple,
+                "metadata" => FileDiffHunkSeparators::Metadata,
+                "line-info" => FileDiffHunkSeparators::LineInfo,
+                "line-info-basic" => FileDiffHunkSeparators::LineInfoBasic,
+                other => panic!("unknown separators {other}"),
+            },
+            SeparatorSpec::Function { r#fn } => {
+                let function = separator_functions
+                    .entry(r#fn.clone())
+                    .or_insert_with(|| Rc::new(|_: &HunkData| None));
+                FileDiffHunkSeparators::Custom(PtrEq(Rc::clone(function)))
+            }
+        });
+    options
+}
+
 fn checkpoint_json(checkpoint: Option<DiffLayoutCheckpoint>) -> Value {
     checkpoint.map_or(Value::Null, |checkpoint| {
         json!({
@@ -431,7 +441,7 @@ fn checkpoint_json(checkpoint: Option<DiffLayoutCheckpoint>) -> Value {
     })
 }
 
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(super) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<String>()
         .cloned()

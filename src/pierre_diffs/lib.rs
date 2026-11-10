@@ -36,6 +36,8 @@ mod fake_file_diff_host;
 #[cfg(test)]
 mod fake_interaction_dom;
 #[cfg(test)]
+mod fake_virtualized_host;
+#[cfg(test)]
 mod oracle_testing;
 #[cfg(test)]
 mod parity;

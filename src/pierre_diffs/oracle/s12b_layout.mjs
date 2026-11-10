@@ -34,7 +34,7 @@ import { buildOptions } from "./s12a_file_diff.mjs";
 
 // ---- the pools scenarios name ----------------------------------------------------
 
-const METRICS = {
+export const METRICS = {
   default: undefined,
   upstreamTest: { hunkLineCount: 2, lineHeight: 10, diffHeaderHeight: 30, spacing: 4 },
   fractional: {
@@ -62,7 +62,7 @@ function file(name, contents) {
 }
 
 /** Every named diff, as JSON data. */
-async function buildDiffPool(oracle, random, corpusMocks) {
+export async function buildDiffPool(oracle, random, corpusMocks) {
   const { parseDiffFromFile } = await import(oracle.pierre("utils/parseDiffFromFile.js"));
   const { parsePatchFiles } = await import(oracle.pierre("utils/parsePatchFiles.js"));
   const jsdiff = await import(oracle.jsdiff);
@@ -383,7 +383,7 @@ const LAYOUT_FIELDS = {
 };
 const SEPARATORS = [undefined, "simple", "metadata", "line-info", "line-info-basic", { fn: "a" }, { fn: "b" }];
 
-function randomSpec(random) {
+export function randomSpec(random) {
   const spec = {};
   const chance = random.next() < 0.5 ? 0.3 : 0.7;
   for (const [field, values] of Object.entries(LAYOUT_FIELDS)) {
@@ -396,7 +396,7 @@ function randomSpec(random) {
 }
 
 /** One-field mutation of a spec, so that equal and near-equal option pairs are common. */
-function mutateSpec(random, spec) {
+export function mutateSpec(random, spec) {
   const copy = clone(spec);
   const roll = random.next();
   if (roll < 0.15) return copy;
@@ -409,14 +409,14 @@ function mutateSpec(random, spec) {
   return copy;
 }
 
-const QUERY_DIFFS_SMALL = [
+export const QUERY_DIFFS_SMALL = [
   "mock0", "mock1", "multi0", "multi1", "multi3", "multi8", "gaps0", "gaps1", "gaps3", "thresholds", "uneven",
   "random0", "random1", "random2", "random3", "noeofBoth", "noeofBothTail", "noeofAdditions", "noeofDeletions",
   "noeofAdditionsMid", "noeofDeletionsMid", "noeofAdd", "noeofDel", "noeofFlip", "noeofSame", "new",
   "deleted", "empty", "oneLine", "oneLineNoEof", "renamePure", "renameChanged", "twoHunks", "partial0", "partial1",
   "partial2", "partial3", "partialRename", "extraAdd", "extraDel", "extraBoth", "huge8", "huge8Renamed", "huge8New", "noHunks",
 ];
-const QUERY_DIFFS_LARGE = ["long", "longNoEof", "longTail", "longTrailing", "longLeading", "bigChange", "bigChangeNew", "bigChangeOld", "bigChangeAligned", "huge10k", "huge1m"];
+export const QUERY_DIFFS_LARGE = ["long", "longNoEof", "longTail", "longTrailing", "longLeading", "bigChange", "bigChangeNew", "bigChangeOld", "bigChangeAligned", "huge10k", "huge1m"];
 
 function rowCountOf(diffs, name, style) {
   const diff = diffs[name];

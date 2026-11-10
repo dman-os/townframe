@@ -24,7 +24,7 @@ use crate::utils::parse_diff_from_file::parse_diff_from_file;
 
 // `{ ...DEFAULT_CODE_VIEW_FILE_METRICS, hunkLineCount: 2, lineHeight: 10,
 // diffHeaderHeight: 30, spacing: 4 }`
-const METRICS: PartialVirtualFileMetrics = PartialVirtualFileMetrics {
+pub(super) const METRICS: PartialVirtualFileMetrics = PartialVirtualFileMetrics {
     hunk_line_count: Some(2),
     line_height: Some(10.0),
     diff_header_height: Some(30.0),
@@ -59,7 +59,7 @@ fn contents(name: &str, contents: String, cache_key: String) -> FileContents {
     }
 }
 
-fn create_two_hunk_diff(cache_key: &str) -> Rc<FileDiffMetadata> {
+pub(super) fn create_two_hunk_diff(cache_key: &str) -> Rc<FileDiffMetadata> {
     let old_lines: Vec<String> = (0..140).map(|index| (index + 1).to_string()).collect();
     let new_lines: Vec<String> = old_lines
         .iter()
@@ -93,7 +93,7 @@ fn create_two_hunk_diff(cache_key: &str) -> Rc<FileDiffMetadata> {
 }
 
 /// `createHugeSingleBlockDiff`
-fn create_huge_single_block_diff(line_count: usize) -> Rc<FileDiffMetadata> {
+pub(super) fn create_huge_single_block_diff(line_count: usize) -> Rc<FileDiffMetadata> {
     Rc::new(
         serde_json::from_value(json!({
             "name": "huge.ts",
@@ -230,14 +230,14 @@ fn estimated_height_cache_clears_estimates_and_measurements_for_changed_diff_con
 
 // `baseMetrics`: `{ ...DEFAULT_VIRTUAL_FILE_METRICS, hunkLineCount: 2, lineHeight: 10,
 // diffHeaderHeight: 30, hunkSeparatorHeight: 12, spacing: 4 }`
-fn padding_base_metrics() -> PartialVirtualFileMetrics {
+pub(super) fn padding_base_metrics() -> PartialVirtualFileMetrics {
     PartialVirtualFileMetrics {
         hunk_separator_height: Some(12.0),
         ..METRICS
     }
 }
 
-fn plain_file(name: &str, contents: &str) -> FileContents {
+pub(super) fn plain_file(name: &str, contents: &str) -> FileContents {
     FileContents {
         name: name.to_owned(),
         contents: contents.to_owned(),
@@ -247,7 +247,7 @@ fn plain_file(name: &str, contents: &str) -> FileContents {
     }
 }
 
-fn parse_files(old_file: FileContents, new_file: FileContents) -> Rc<FileDiffMetadata> {
+pub(super) fn parse_files(old_file: FileContents, new_file: FileContents) -> Rc<FileDiffMetadata> {
     Rc::new(
         parse_diff_from_file(
             &DiffFileInput::Both { old_file, new_file },

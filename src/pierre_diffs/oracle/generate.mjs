@@ -22,6 +22,7 @@ import { buildS12aOptions } from "./s12a_file_diff.mjs";
 import { buildS12aLifecycle } from "./s12a_lifecycle.mjs";
 import { buildS12bRender } from "./s12b_render.mjs";
 import { buildS12bLayout } from "./s12b_layout.mjs";
+import { buildS12bWindow } from "./s12b_window.mjs";
 import { stubHighlighter } from "./stub_highlighter.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -2096,6 +2097,7 @@ const outputs = {
   "s11b.json": await buildS11bInteraction(oracle, makeRandom(0x5eed0c)),
   "s12a_lifecycle.json": await buildS12aLifecycle(oracle, makeRandom(0x5eed0e)),
   "s12b_layout.json": await buildS12bLayout(oracle, makeRandom(0x5eed10), corpusMocks),
+  "s12b_window.json": await buildS12bWindow(oracle, makeRandom(0x5eed11), corpusMocks),
   "../../highlights/data/highlights_data.json": highlightsData(),
 };
 

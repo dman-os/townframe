@@ -132,6 +132,47 @@ fn partial_renders_keep_the_document_bounded() {
 }
 
 #[test]
+fn empty_render_ranges_keep_the_document_bounded() {
+    let dom = Rc::new(FakeDom::default());
+    let mut options = FileDiffOptions::default();
+    options.base.expand_unchanged = Some(true);
+    let instance = instance(&dom, options);
+    // Windows with no rows (a virtualized file scrolled past), alternating with
+    // windows that have some. An empty render sets no managers up, so the `pre`
+    // it replaced (the one the managers know) waits in the retired queue for the
+    // next render with rows; a `pre` the empty render made itself is freed at
+    // once, so the queue never holds more than that one.
+    let warm_up = 40;
+    let mut warm_capacity = 0;
+    for round in 0..600 {
+        let (old_file, new_file) = pair(7);
+        instance.lifecycle().render(FileDiffRenderProps {
+            old_file: Some(Some(old_file)),
+            new_file: Some(Some(new_file)),
+            render_range: Some(if round % 7 == 0 {
+                window(5, 8)
+            } else {
+                window(0, 0)
+            }),
+            ..FileDiffRenderProps::default()
+        });
+        assert!(
+            instance.state().retired.len() <= 1,
+            "round {round}: {} retired nodes",
+            instance.state().retired.len()
+        );
+        if round == warm_up {
+            warm_capacity = dom.doc.capacity();
+        }
+    }
+    assert!(
+        dom.doc.capacity() <= warm_capacity + warm_capacity / 10,
+        "the document grew from {warm_capacity} to {} slots",
+        dom.doc.capacity()
+    );
+}
+
+#[test]
 fn switching_styles_and_collapsing_keeps_the_document_bounded() {
     let dom = Rc::new(FakeDom::default());
     let instance = instance(&dom, FileDiffOptions::default());

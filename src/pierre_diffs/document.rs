@@ -429,6 +429,29 @@ impl Document {
         arena.is_element(next).then_some(next)
     }
 
+    /// `element.nextElementSibling`: the next sibling that is an element, text
+    /// nodes skipped.
+    pub fn next_element_sibling(&self, node: impl Borrow<NodeKey>) -> Option<NodeKey> {
+        let node = *node.borrow();
+        let arena = self.arena.borrow();
+        let siblings = &arena.node(arena.node(node).parent?).children;
+        let position = siblings.iter().position(|key| *key == node)?;
+        siblings[position + 1..]
+            .iter()
+            .copied()
+            .find(|key| arena.is_element(*key))
+    }
+
+    /// `element.hasAttribute(name)` (also `'name' in element.dataset`).
+    pub fn has_attribute(&self, node: impl Borrow<NodeKey>, name: &str) -> bool {
+        match &self.arena.borrow().node(*node.borrow()).data {
+            NodeData::Element { properties, .. } => {
+                properties.get(name).and_then(attribute_text).is_some()
+            }
+            NodeData::Text(_) => false,
+        }
+    }
+
     /// `element.tagName`: upper case, as the DOM reports HTML elements.
     pub fn tag_name(&self, node: impl Borrow<NodeKey>) -> String {
         match &self.arena.borrow().node(*node.borrow()).data {

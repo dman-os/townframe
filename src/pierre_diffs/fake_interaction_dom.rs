@@ -113,6 +113,9 @@ pub struct FakeDom {
     /// `getBoundingClientRect().height` by node; absent is 0.
     pub heights: RefCell<HashMap<NodeKey, f64>>,
     pub next_timer: Cell<TimeoutId>,
+    /// The scroll geometry the `VirtualizerHost` half answers (see
+    /// `fake_virtualized_host.rs`).
+    pub world: RefCell<crate::fake_virtualized_host::VirtualWorld>,
 }
 
 impl Default for FakeDom {
@@ -167,6 +170,7 @@ impl Default for FakeDom {
             frames: FakeFrames::default(),
             heights: RefCell::default(),
             next_timer: Cell::new(0),
+            world: RefCell::default(),
         }
     }
 }

@@ -208,6 +208,7 @@ mod lines;
 mod loading;
 mod nodes;
 mod theme;
+mod virtualized;
 
 use columns::Columns;
 pub use lifecycle::Lifecycle;
@@ -215,6 +216,8 @@ pub use lines::Lines;
 pub use loading::Loading;
 use nodes::Nodes;
 pub(crate) use theme::Theme;
+pub use virtualized::CodeGroups;
+pub use virtualized::Virtualized;
 
 pub type RenderHunkSeparatorCallback<Rendered> = PtrEq<dyn Fn(&HunkData) -> Option<Rendered>>;
 
@@ -1197,5 +1200,11 @@ impl<
     /// from then on, not the `Rc` it passed in.
     pub fn loading(&self) -> Loading<'_, Host, Rendered, LAnnotation> {
         Loading(self)
+    }
+
+    /// The inherited state `VirtualizedFileDiff` reads and writes directly
+    /// (`renderRange`, `placeHolder`, the code groups, `updateInputDiff`).
+    pub fn virtualized(&self) -> Virtualized<'_, Host, Rendered, LAnnotation> {
+        Virtualized(self)
     }
 }

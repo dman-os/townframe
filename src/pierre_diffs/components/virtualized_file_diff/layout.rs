@@ -23,8 +23,8 @@
 // `currentCollapsed` (read only by `updateCodeViewLayout`); `validateComputedHeight`
 // (a `console.log` of the container's measured height) so a resize-debugging run
 // recomputes as upstream does and logs nothing; `getNumericScrollAnchor` (read
-// only by `CodeView`, see dropped.psv); and `measureFileAnnotationHeight`, a DOM
-// read that ports with the measurement (S12b-2). Line indexes are `i64`
+// only by `CodeView`, see dropped.psv). `measureFileAnnotationHeight` (a DOM read) is
+// `VirtualizedFileDiff::measure_file_annotation_height` (S12b-2, `instance.rs`). Line indexes are `i64`
 // (upstream's numbers: `startLineIndex` is computed by subtraction and unread
 // when its block is empty), row counts are `usize`. `processRows` is a closure
 // over `top` and `renderedLineIndex` upstream; here it is `CheckpointBuilder`'s
@@ -176,7 +176,7 @@ pub struct LayoutContext<'ctx> {
 
 impl LayoutContext<'_> {
     /// `expandUnchanged ? true : this.hunksRenderer.getExpandedHunksMap()`
-    fn effective_expanded_hunks(&self) -> &ExpandedHunks<'_> {
+    pub(super) fn effective_expanded_hunks(&self) -> &ExpandedHunks<'_> {
         if self.options.expand_unchanged {
             &ExpandedHunks::All
         } else {

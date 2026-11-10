@@ -341,7 +341,12 @@ where
         ]: [bool; 4],
     ) {
         let nodes = Nodes(self.0);
+        let had_pre = self.state.borrow().pre.is_some();
         let pre = nodes.get_or_create_pre_node(file_container);
+        // A `pre` made by this very render and dropped again for having no rows
+        // was never seen by a manager, so it is freed at the end of the render
+        // instead of queued behind a manager setup that an empty render never runs.
+        let mut unseen_pre = None;
 
         // Attempt to partially render
         let did_partially_render = self.options.borrow().can_partially_render(
@@ -384,8 +389,23 @@ where
             {
                 Columns(self.0).apply_hunks_to_dom(pre, &hunks_result);
             } else {
-                let pre = self.state.borrow_mut().pre.take();
-                nodes.drop_optional(pre);
+                // The code groups are rows of the `pre` being dropped. Upstream keeps
+                // referencing the detached elements; here they are discarded with
+                // `pre`, so the references go with it (`reconcileHeights` would
+                // otherwise read freed nodes).
+                let pre = {
+                    let mut state = self.state.borrow_mut();
+                    state.code_unified = None;
+                    state.code_deletions = None;
+                    state.code_additions = None;
+                    state.pre.take()
+                };
+                if had_pre {
+                    nodes.drop_optional(pre);
+                } else if let Some(pre) = pre {
+                    self.document().remove(pre);
+                    unseen_pre = Some(pre);
+                }
             }
             nodes.render_separators(&hunks_result.hunk_data);
             self.adopt_render_data(Rc::clone(working_diff));
@@ -394,6 +414,9 @@ where
         Theme(self.0).inject_unsafe_css();
         nodes.render_annotations();
         nodes.render_gutter_utility();
+        if let Some(unseen_pre) = unseen_pre {
+            self.document().discard(unseen_pre);
+        }
 
         self.state.borrow_mut().managers_dirty = true;
         if !defer_managers {
@@ -443,7 +466,7 @@ where
 
     // Store a new input. Return false if the input has not changed. (The edit
     // session's outgoing diff and annotation adoption are dropped.)
-    pub(super) fn update_input_diff(
+    pub(crate) fn update_input_diff(
         &self,
         incoming_diff: Rc<FileDiffMetadata>,
         line_annotations: Option<LineAnnotations<LAnnotation>>,
