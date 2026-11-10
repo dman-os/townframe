@@ -73,104 +73,17 @@ impl Bundle<'_> {
                 format!("bundle does not declare datum `{tag}`"),
             ));
         }
-        let mut compiler = Compiler {
-            files: BTreeMap::new(),
-            names: BTreeMap::new(),
-            definitions: Map::new(),
-        };
-        for file in std::iter::once(primary).chain(carried.iter().copied()) {
-            bound(file)?;
-            let object = file
-                .as_object()
-                .ok_or_else(|| invalid("$", "a Lexicon file is an object"))?;
-            check_keys(
-                object,
-                &["lexicon", "id", "revision", "description", "defs", "$type"],
-                "$",
-            )?;
-            if object.get("lexicon") != Some(&json!(1)) {
-                return Err(invalid("lexicon", "the language version must be 1"));
-            }
-            if object
-                .get("description")
-                .is_some_and(|value| !value.is_string())
-            {
-                return Err(invalid("description", "description must be a string"));
-            }
-            if object
-                .get("$type")
-                .is_some_and(|value| value != "com.atproto.lexicon.schema")
-            {
-                return Err(invalid(
-                    "$type",
-                    "a published Lexicon has type `com.atproto.lexicon.schema`",
-                ));
-            }
-            let id = string(object, "id", "$")?;
-            if !is_nsid(id) {
-                return Err(invalid("id", "invalid NSID"));
-            }
-            if compiler.files.insert(id.to_owned(), file).is_some() {
-                return Err(invalid("id", format!("duplicate carried Lexicon `{id}`")));
-            }
-            let defs = object
-                .get("defs")
-                .and_then(Value::as_object)
-                .filter(|defs| !defs.is_empty())
-                .ok_or_else(|| invalid("defs", "non-empty definitions are required"))?;
-            for (name, definition) in defs {
-                if name.is_empty() || name.contains('#') {
-                    return Err(invalid("defs", "unsupported definition name"));
-                }
-                let kind = definition
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid(name, "a definition states its type"))?;
-                if matches!(kind, "unknown" | "ref" | "union" | "params" | "permission") {
-                    return Err(invalid(
-                        name,
-                        format!("`{kind}` cannot be a named definition"),
-                    ));
-                }
-                if kind == "record" && name != "main" {
-                    return Err(invalid(name, "a record must be the main definition"));
-                }
-                let index = compiler.names.len();
-                compiler
-                    .names
-                    .insert((id.to_owned(), name.clone()), format!("L{index}"));
-            }
-        }
+        let mut compiler = Compiler::index(
+            std::iter::once(primary).chain(carried.iter().copied()),
+            false,
+        )?;
         if primary.get("id").and_then(Value::as_str) != Some(tag) {
             return Err(invalid(
                 "id",
                 format!("primary Lexicon must identify `{tag}`"),
             ));
         }
-        let names = compiler.names.clone();
-        for ((id, name), key) in names {
-            let definition = &compiler.files[&id]["defs"][&name];
-            if definition["type"] == "token" {
-                let object = definition
-                    .as_object()
-                    .ok_or_else(|| invalid(&name, "a definition is an object"))?;
-                check_keys(object, &["type", "description"], &name)?;
-                if object
-                    .get("description")
-                    .is_some_and(|value| !value.is_string())
-                {
-                    return Err(invalid(&name, "description must be a string"));
-                }
-                continue;
-            }
-            let compiled = compiler.position(&id, definition, &format!("{id}#{name}"), 0)?;
-            compiler.definitions.insert(key.clone(), compiled.clone());
-            if definition["type"] == "object" {
-                let mut tagged = compiled;
-                add_tag(&mut tagged, &identity(&id, &name));
-                compiler.definitions.insert(format!("T{key}"), tagged);
-            }
-        }
+        compiler.compile_definitions()?;
         let root = compiler
             .names
             .get(&(tag.to_owned(), "main".to_owned()))
@@ -232,9 +145,130 @@ fn bound(value: &Value) -> Result<()> {
 }
 
 struct Compiler<'a> {
+    /// Whether a reference to a file that is not carried is an open object rather than an
+    /// error: a method's Lexicon names datum definitions that live in other files, which the
+    /// bundle binding the providers resolves, as admission leaves them to it.
+    open_external: bool,
     files: BTreeMap<String, &'a Value>,
     names: BTreeMap<(String, String), String>,
     definitions: Map<String, Value>,
+}
+
+impl<'a> Compiler<'a> {
+    /// Frame-checks and indexes the files, the first being the one whose definitions the caller
+    /// is about to use. With `operations`, a file's `main` may be a method signature
+    /// (`query`, `procedure`, `subscription`), which is skipped rather than indexed.
+    fn index(files: impl Iterator<Item = &'a Value>, operations: bool) -> Result<Self> {
+        let mut compiler = Self {
+            open_external: operations,
+            files: BTreeMap::new(),
+            names: BTreeMap::new(),
+            definitions: Map::new(),
+        };
+        for file in files {
+            bound(file)?;
+            let object = file
+                .as_object()
+                .ok_or_else(|| invalid("$", "a Lexicon file is an object"))?;
+            check_keys(
+                object,
+                &["lexicon", "id", "revision", "description", "defs", "$type"],
+                "$",
+            )?;
+            if object.get("lexicon") != Some(&json!(1)) {
+                return Err(invalid("lexicon", "the language version must be 1"));
+            }
+            if object
+                .get("description")
+                .is_some_and(|value| !value.is_string())
+            {
+                return Err(invalid("description", "description must be a string"));
+            }
+            if object
+                .get("$type")
+                .is_some_and(|value| value != "com.atproto.lexicon.schema")
+            {
+                return Err(invalid(
+                    "$type",
+                    "a published Lexicon has type `com.atproto.lexicon.schema`",
+                ));
+            }
+            let id = string(object, "id", "$")?;
+            if !is_nsid(id) {
+                return Err(invalid("id", "invalid NSID"));
+            }
+            if compiler.files.insert(id.to_owned(), file).is_some() {
+                return Err(invalid("id", format!("duplicate carried Lexicon `{id}`")));
+            }
+            let defs = object
+                .get("defs")
+                .and_then(Value::as_object)
+                .filter(|defs| !defs.is_empty())
+                .ok_or_else(|| invalid("defs", "non-empty definitions are required"))?;
+            for (name, definition) in defs {
+                if name.is_empty() || name.contains('#') {
+                    return Err(invalid("defs", "unsupported definition name"));
+                }
+                let kind = definition
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid(name, "a definition states its type"))?;
+                if matches!(kind, "unknown" | "ref" | "union" | "params" | "permission") {
+                    return Err(invalid(
+                        name,
+                        format!("`{kind}` cannot be a named definition"),
+                    ));
+                }
+                if operations
+                    && name == "main"
+                    && matches!(kind, "query" | "procedure" | "subscription")
+                {
+                    // A method's main is its signature, not a data definition: it has no
+                    // representation to compile and no reference may name it.
+                    continue;
+                }
+                if kind == "record" && name != "main" {
+                    return Err(invalid(name, "a record must be the main definition"));
+                }
+                let index = compiler.names.len();
+                compiler
+                    .names
+                    .insert((id.to_owned(), name.clone()), format!("L{index}"));
+            }
+        }
+        Ok(compiler)
+    }
+}
+
+impl Compiler<'_> {
+    /// Compiles every indexed data definition into [`Compiler::definitions`].
+    fn compile_definitions(&mut self) -> Result<()> {
+        let names = self.names.clone();
+        for ((id, name), key) in names {
+            let definition = &self.files[&id]["defs"][&name];
+            if definition["type"] == "token" {
+                let object = definition
+                    .as_object()
+                    .ok_or_else(|| invalid(&name, "a definition is an object"))?;
+                check_keys(object, &["type", "description"], &name)?;
+                if object
+                    .get("description")
+                    .is_some_and(|value| !value.is_string())
+                {
+                    return Err(invalid(&name, "description must be a string"));
+                }
+                continue;
+            }
+            let compiled = self.position(&id, definition, &format!("{id}#{name}"), 0)?;
+            self.definitions.insert(key.clone(), compiled.clone());
+            if definition["type"] == "object" {
+                let mut tagged = compiled;
+                add_tag(&mut tagged, &identity(&id, &name));
+                self.definitions.insert(format!("T{key}"), tagged);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Compiler<'_> {
@@ -260,6 +294,16 @@ impl Compiler<'_> {
             return Err(invalid(path, "a token has no data representation"));
         }
         Ok((key.clone(), identity(file, name), kind.to_owned()))
+    }
+
+    /// The identity of the definition `reference` names when it is in a file that is not carried
+    /// and such references are open; `None` when it resolves (or is an error to resolve).
+    fn open_target(&self, id: &str, reference: &str) -> Option<String> {
+        if !self.open_external || reference.starts_with('#') {
+            return None;
+        }
+        let (file, name) = reference.split_once('#').unwrap_or((reference, "main"));
+        (file != id && !self.files.contains_key(file)).then(|| identity(file, name))
     }
 
     fn position(&self, id: &str, value: &Value, path: &str, depth: usize) -> Result<Value> {
@@ -297,6 +341,9 @@ impl Compiler<'_> {
             }
             "ref" => {
                 let target = object["ref"].as_str().expect("checked ref");
+                if self.open_target(id, target).is_some() {
+                    return Ok(json!({"type": "object"}));
+                }
                 let (key, _, _) = self.target(id, target, path)?;
                 Ok(json!({"$ref": format!("#/$defs/{key}")}))
             }
@@ -356,6 +403,13 @@ impl Compiler<'_> {
         let mut tags = BTreeSet::new();
         for reference in refs {
             let reference = reference.as_str().expect("checked union ref");
+            if let Some(tag) = self.open_target(id, reference) {
+                if !tags.insert(tag.clone()) {
+                    return Err(invalid(path, "duplicate union variant"));
+                }
+                branches.push(json!({"type": "object", "properties": {"$type": {"const": tag}}, "required": ["$type"]}));
+                continue;
+            }
             let (key, tag, kind) = self.target(id, reference, path)?;
             if !matches!(kind.as_str(), "object" | "record") {
                 return Err(invalid(path, "union variants must be objects or records"));
@@ -1467,6 +1521,56 @@ impl jsonschema::Keyword for Data {
     fn is_valid(&self, instance: &Value) -> bool {
         validate_data_model(instance)
     }
+}
+
+/// A Lexicon position (a method's `input.schema` or `output.schema`, or its parameters as an
+/// object) compiled to a validator. It checks the strict Lexicon semantics and nothing more: no
+/// authoring normalization, so a value either is what the Lexicon declares or is refused.
+pub struct PositionValidator(jsonschema::Validator);
+
+impl PositionValidator {
+    /// Every way `value` departs from the position, as `path: message` lines; empty when it
+    /// conforms.
+    pub fn violations(&self, value: &Value) -> Vec<String> {
+        self.0
+            .iter_errors(value)
+            .map(|error| format!("{}: {error}", error.instance_path()))
+            .collect()
+    }
+}
+
+/// Compiles `position`, written in the Lexicon `primary` (so `#name` references resolve in its
+/// definitions), to a validator. `carried` are the other files a reference may name; a reference
+/// to a file that is not carried is refused, as admission refuses it. This is the datum Lexicon
+/// compiler run over a method's file: a method's `main` signature is skipped rather than
+/// compiled, and the position is compiled as a nested one, so a record is not admitted.
+pub fn compile_position(
+    primary: &Value,
+    carried: &[&Value],
+    position: &Value,
+    path: &str,
+) -> Result<PositionValidator> {
+    let mut compiler = Compiler::index(
+        std::iter::once(primary).chain(carried.iter().copied()),
+        true,
+    )?;
+    compiler.compile_definitions()?;
+    let id = primary["id"].as_str().expect("an indexed file has an id");
+    bound(position)?;
+    let mut document = compiler.position(id, position, path, 1)?;
+    document
+        .as_object_mut()
+        .expect("a compiled position is an object")
+        .insert("$defs".to_owned(), Value::Object(compiler.definitions));
+    let validator = options()
+        .with_retriever(super::codec::CarriedSchemaRetriever)
+        .build(&document)
+        .map_err(|error| {
+            LexiconAdmissionError::Compilation(Box::new(CodecError::InvalidSchema {
+                message: error.to_string(),
+            }))
+        })?;
+    Ok(PositionValidator(validator))
 }
 
 #[cfg(test)]

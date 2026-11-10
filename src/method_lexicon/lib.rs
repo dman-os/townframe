@@ -18,6 +18,9 @@
 //! admitted by `datum::operation::validate`, the frame check a nodule's own operation Lexicons
 //! pass. Nothing datum-specific (declarations, `Extra`, Automerge storage) applies here.
 
+use big_cabinet_core::datum::LexiconAdmissionError;
+use big_cabinet_core::datum::PositionValidator;
+use big_cabinet_core::datum::compile_position;
 use big_cabinet_core::datum::lexicon::project_position;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::datum::operation::validate;
@@ -50,6 +53,136 @@ pub enum MethodLexiconError {
     ErrorNotAnEnum { nsid: &'static str },
     #[error("{nsid}: the Lexicon file is refused: {reason}")]
     Frame { nsid: &'static str, reason: String },
+}
+
+/// Where in a method's Lexicon file a body is stated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    /// A procedure's `input.schema`.
+    Input,
+    /// A query's or procedure's `output.schema`.
+    Output,
+    /// A subscription's `message.schema`.
+    Message,
+    /// A query's or subscription's `parameters`, as the object a query string coerces to.
+    Parameters,
+}
+
+/// The validator of one position of a method's Lexicon `file`, compiled with the datum Lexicon
+/// compiler (strict atproto semantics: `unknown` admits objects only, refs resolve in the file
+/// and the `carried` files). `None` when the method states nothing at that position (a procedure
+/// has no parameters, a method returning `()` no output).
+pub fn position_validator(
+    file: &Value,
+    carried: &[&Value],
+    position: Position,
+) -> Result<Option<PositionValidator>, LexiconAdmissionError> {
+    let main = &file["defs"]["main"];
+    let (schema, path) = match position {
+        Position::Input => (main["input"].get("schema").cloned(), "input.schema"),
+        Position::Output => (main["output"].get("schema").cloned(), "output.schema"),
+        Position::Message => (main["message"].get("schema").cloned(), "message.schema"),
+        Position::Parameters => (
+            main.get("parameters").map(|parameters| {
+                json!({
+                    "type": "object",
+                    "properties": parameters.get("properties").cloned().unwrap_or_else(|| json!({})),
+                    "required": parameters.get("required").cloned().unwrap_or_else(|| json!([])),
+                })
+            }),
+            "parameters",
+        ),
+    };
+    schema
+        .map(|schema| compile_position(file, carried, &schema, path))
+        .transpose()
+}
+
+/// A query parameter that is not the type the Lexicon declares.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("parameter `{name}`: {reason}")]
+pub struct ParameterError {
+    pub name: String,
+    pub reason: String,
+}
+
+/// The typed JSON object a query string carries, read through a method's Lexicon `parameters`
+/// (`file["defs"]["main"]["parameters"]`): `boolean` is `true` or `false`, `integer` a base-10
+/// integer, `string` itself, and an `array` is every occurrence of the key, in order. This is the
+/// whole of the coercion: bounds, formats, enums and required names are the position validator's
+/// (compile [`Position::Parameters`] and validate the result), and a name the Lexicon does not
+/// declare is refused here.
+pub fn coerce_parameters(
+    parameters: &Value,
+    query: &[(&str, &str)],
+) -> Result<Map<String, Value>, Vec<ParameterError>> {
+    let empty = Map::new();
+    let declared = parameters
+        .get("properties")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let mut errors = Vec::new();
+    let mut occurrences: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, value) in query {
+        occurrences.entry(name).or_default().push(value);
+    }
+    let mut coerced = Map::new();
+    for (name, values) in occurrences {
+        let mut fail = |reason: String| {
+            errors.push(ParameterError {
+                name: name.to_owned(),
+                reason,
+            })
+        };
+        let Some(declaration) = declared.get(name) else {
+            fail("is not a parameter of this method".to_owned());
+            continue;
+        };
+        let scalar = |kind: &str, text: &str| -> Result<Value, String> {
+            match kind {
+                "string" => Ok(json!(text)),
+                "boolean" => match text {
+                    "true" => Ok(json!(true)),
+                    "false" => Ok(json!(false)),
+                    _ => Err(format!("`{text}` is not `true` or `false`")),
+                },
+                "integer" => text
+                    .parse::<i64>()
+                    .map(|number| json!(number))
+                    .map_err(|_| format!("`{text}` is not an integer")),
+                other => Err(format!("a `{other}` cannot come from a query string")),
+            }
+        };
+        let kind = declaration["type"].as_str().unwrap_or_default();
+        if kind == "array" {
+            let item = declaration["items"]["type"].as_str().unwrap_or_default();
+            let items: Result<Vec<Value>, String> =
+                values.iter().map(|text| scalar(item, text)).collect();
+            match items {
+                Ok(items) => {
+                    coerced.insert(name.to_owned(), Value::Array(items));
+                }
+                Err(reason) => fail(reason),
+            }
+        } else if let [text] = values.as_slice() {
+            match scalar(kind, text) {
+                Ok(value) => {
+                    coerced.insert(name.to_owned(), value);
+                }
+                Err(reason) => fail(reason),
+            }
+        } else {
+            fail(format!(
+                "is given {} times but is not an array",
+                values.len()
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(coerced)
+    } else {
+        Err(errors)
+    }
 }
 
 /// The Lexicon file of method `M`.
@@ -221,7 +354,33 @@ fn normalize(value: &mut Value, primitives: &BTreeMap<String, Value>) {
                     object.clear();
                     object.insert("$ref".to_owned(), reference);
                 }
-            } else if let Some(flat) = flatten_tagged(object).or_else(|| flatten_external(object)) {
+            } else if let Some(mut flat) =
+                flatten_tagged(object).or_else(|| flatten_external(object))
+            {
+                // A struct that `#[serde(flatten)]`s an enum states its own fields beside the
+                // enum's `oneOf`; they are fields of the same wire object.
+                let own = Value::Object(std::mem::take(object));
+                let flat_object = flat.as_object_mut().expect("a flattened enum is an object");
+                if let Some(Value::Object(own_properties)) = own.get("properties") {
+                    let properties = flat_object
+                        .entry("properties")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                        .expect("properties are an object");
+                    properties.extend(own_properties.clone());
+                }
+                if let Some(Value::Array(own_required)) = own.get("required") {
+                    let required = flat_object
+                        .entry("required")
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                        .expect("required is an array");
+                    for name in own_required {
+                        if !required.contains(name) {
+                            required.push(name.clone());
+                        }
+                    }
+                }
                 *value = flat;
             }
         }

@@ -43,7 +43,7 @@ pub fn bearer_token(value: &str) -> Option<&str> {
 /// before a method runs are. A shape that is neither is an error type serde does not tag
 /// externally, which method errors must.
 pub fn error_name(error: &Value) -> &str {
-    let name = match error {
+    match error {
         Value::String(name) => name,
         Value::Object(variant) if variant.len() == 1 => {
             let (name, payload) = variant.iter().next().expect("one entry");
@@ -53,8 +53,7 @@ pub fn error_name(error: &Value) -> &str {
             name
         }
         other => panic!("method errors are externally tagged enums, found {other}"),
-    };
-    name
+    }
 }
 
 /// The variant of every method error enum that wraps [`method_core::ContextError`].

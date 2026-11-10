@@ -353,6 +353,8 @@ pub use big_cabinet_core::datum::datum_core :: union_schema
 pub use big_cabinet_core::datum::grammar :: GrammarError
 pub use big_cabinet_core::datum::grammar :: parse_ref
 pub use big_cabinet_core::datum::input :: LexiconAdmissionError
+pub use big_cabinet_core::datum::input :: PositionValidator
+pub use big_cabinet_core::datum::input :: compile_position
 pub use big_cabinet_core::datum::universe :: Bundle
 pub use big_cabinet_core::datum::universe :: DatumDecl
 pub use big_cabinet_core::datum::universe :: Declaration

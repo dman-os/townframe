@@ -21,6 +21,8 @@ mod input;
 pub mod lexicon;
 #[cfg(feature = "schemars")]
 pub use input::LexiconAdmissionError;
+pub use input::PositionValidator;
+pub use input::compile_position;
 
 #[cfg(feature = "schemars")]
 mod universe;

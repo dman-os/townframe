@@ -61,6 +61,7 @@ pub use references::declared_references;
 pub(crate) use target::reconcile_json;
 pub use target::reconcile_json_atomic;
 pub use validation::CompiledSchema;
+pub(super) use validation::CarriedSchemaRetriever;
 pub use walk::Stored;
 pub use walk::hydrate_value;
 

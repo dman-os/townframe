@@ -33,7 +33,7 @@ pub struct CompiledSchema {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CarriedSchemaRetriever;
+pub(in crate::datum) struct CarriedSchemaRetriever;
 
 // This proof is private so callers can only obtain it from an immutable compiled handle after
 // validation; it is carried into Stored without validating the submitted value a second time.
