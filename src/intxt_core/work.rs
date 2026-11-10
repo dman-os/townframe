@@ -387,6 +387,10 @@ pub struct ToolCall {
     pub title: String,
     pub kind: ToolKind,
     pub status: ToolStatus,
+    /// The working directory the call ran in, when it differs from the session's `cwd`: what
+    /// resolves a shell call to the worktree it changed (ADR 039 §3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locations: Vec<ToolLocation>,
     /// The changes the harness reported, as unified patches. The worktree ops this call caused

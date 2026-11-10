@@ -209,6 +209,7 @@ fn the_adr_examples_are_valid_datums() {
         ],
         "toolCalls": [{
             "id": "toolu_01", "seq": 1, "title": "Edit reference.rs", "kind": "edit", "status": "completed",
+            "cwd": "/run/media/p3N/townframe-p3N-3/src",
             "locations": [{"path": "/run/media/p3N/townframe-p3N-3/src/reference.rs", "line": 120}],
             "diffs": [{"path": "src/reference.rs", "patch": "@@ -120 +120 @@\n-a\n+b\n"}]
         }]

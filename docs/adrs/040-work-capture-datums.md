@@ -132,6 +132,7 @@ Names follow the Agent Client Protocol (ACP: session, prompt turn, tool call, pl
 { "seq": 41, "at": "…", "parentTurn": "<id>", "stopReason": "end_turn",
   "messages": [ { "id": "<harness id>", "seq": 0, "at": "…", "kind": "agentMessage", "text": "…" } ],
   "toolCalls": [ { "id": "toolu_01…", "seq": 3, "title": "Edit reference.rs", "kind": "edit", "status": "completed",
+                   "cwd": "/run/…/townframe-p3N-3/src",                                // when it differs from the session's
                    "locations": [ { "path": "/run/…/reference.rs", "line": 120 } ],
                    "diffs": [ { "path": "src/reference.rs", "patch": "@@ -120 +120 @@ …" } ] } ] }   // what the harness reported, when it did
 
