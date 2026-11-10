@@ -86,6 +86,21 @@ sleep from the guest's clock (wasi clocks on web are `performance.now()`). Cance
 the task. To verify: the wcmp runtime's `first_poll` rule panics if a synchronous export
 suspends, so timers must run as their own tasks and never inside a dispatch.
 
+## Interaction (S11b)
+
+`InteractionManager` takes every pointer event as data: the target is a node key of the hast
+model, and `composedPath` becomes a walk from that node to the root. Geometry is needed only
+for `elementFromPoint` during a drag, behind `InteractionHost::element_from_point`. On touch,
+the finger keeps reporting the element where the drag began, so without hit-testing a drag
+can't follow the finger across rows. For the phone, the Dioxus host therefore has to supply:
+- `pointerId` and `pointerType` on every pointer event;
+- document-level `pointermove`, `pointerup` and `pointercancel` delivered to the manager
+  during a drag (pointer capture on the `pre`, or a surface-level listener);
+- a coordinate-to-row lookup. The host can compute it from the cached row rects (`onvisible`
+  and `onresize`) without asking the DOM.
+`assignedSlot` comes from the model: annotation content renders in place of upstream's slot, so
+a node's assigned slot is the annotation slot element whose name matches its `slot` attribute.
+
 ## Open measurements
 
 - **Scrollbar gutter** (`offsetHeight - clientHeight` of a probe): `onresize` gives the border
