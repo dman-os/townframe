@@ -1460,6 +1460,7 @@ dependencies = [
  "bs58",
  "irpc",
  "macros",
+ "method_core",
  "postcard",
  "schemars 1.2.3",
  "serde",
@@ -1487,6 +1488,7 @@ dependencies = [
  "irpc",
  "jiff",
  "keyring-core",
+ "method_core",
  "proptest",
  "rand 0.9.5",
  "schemars 1.2.3",
@@ -1528,6 +1530,7 @@ dependencies = [
  "json-canon",
  "jsonschema",
  "macros",
+ "method_core",
  "panproto-lens",
  "panproto-mig",
  "panproto-protocols",
@@ -1560,6 +1563,7 @@ dependencies = [
  "http",
  "irpc",
  "keyring-core",
+ "method_core",
  "secrets_rs",
  "serde_json",
  "service_client_native_rs",
@@ -1574,6 +1578,7 @@ version = "0.1.0"
 dependencies = [
  "big_cabinet_core",
  "irpc",
+ "method_core",
  "serde",
  "serde_json",
  "service_core_rs",
@@ -1606,6 +1611,7 @@ dependencies = [
  "iroh-blobs",
  "iroh-tickets",
  "keyring-core",
+ "method_core",
  "rand 0.9.5",
  "secrets_rs",
  "serde",
@@ -1639,6 +1645,7 @@ dependencies = [
  "indexmap 2.14.2",
  "irpc",
  "keyring-core",
+ "method_core",
  "secrets_rs",
  "serde",
  "serde_json",
@@ -1661,6 +1668,7 @@ dependencies = [
  "indexmap 2.14.2",
  "irpc",
  "macros",
+ "method_core",
  "schemars 1.2.3",
  "serde",
  "serde_json",
@@ -1731,6 +1739,7 @@ dependencies = [
  "irpc",
  "json-canon",
  "macros",
+ "method_core",
  "schemars 1.2.3",
  "semver",
  "serde",
@@ -4112,6 +4121,7 @@ dependencies = [
  "directories",
  "http",
  "libc",
+ "method_core",
  "rand 0.9.5",
  "secrets_rs",
  "serde",
@@ -9435,6 +9445,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "method_core"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "micro_collection_probe"
 version = "0.1.0"
 dependencies = [
@@ -14279,6 +14298,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "http",
+ "method_core",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -14300,6 +14320,7 @@ dependencies = [
  "hyper-util",
  "iroh",
  "irpc",
+ "method_core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -14321,6 +14342,7 @@ dependencies = [
  "getrandom 0.4.3",
  "http",
  "irpc",
+ "method_core",
  "opentelemetry",
  "opentelemetry_sdk",
  "serde",
@@ -14342,6 +14364,7 @@ dependencies = [
  "hyper-util",
  "iroh",
  "irpc",
+ "method_core",
  "mime",
  "opentelemetry",
  "opentelemetry_sdk",

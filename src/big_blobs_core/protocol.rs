@@ -1,8 +1,8 @@
 use crate::BlobId;
 use big_cabinet_core::authority::CapId;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
-use service_core_rs::ContextError;
 
 pub const MAX_READ_BYTES: u32 = 1024 * 1024;
 pub const MAX_PUT_BYTES: usize = 8 * 1024 * 1024;
@@ -58,9 +58,9 @@ pub struct StatBlob {
     pub blob_id: BlobId,
 }
 
-service_core_rs::service_operation!(PutBlob => BlobInfo, BlobsError, procedure("org.example.daybook.blobs.put"));
-service_core_rs::service_operation!(ReadBlob => BlobRange, BlobsError, procedure("org.example.daybook.blobs.read"));
-service_core_rs::service_operation!(StatBlob => Option<BlobInfo>, BlobsError, procedure("org.example.daybook.blobs.stat"));
+service_core_rs::service_method!(PutBlob => BlobInfo, BlobsError, procedure("org.example.daybook.blobs.put"));
+service_core_rs::service_method!(ReadBlob => BlobRange, BlobsError, procedure("org.example.daybook.blobs.read"));
+service_core_rs::service_method!(StatBlob => Option<BlobInfo>, BlobsError, procedure("org.example.daybook.blobs.stat"));
 
 service_core_rs::declare_service_protocol! {
     pub enum BlobsProtocol => BlobsMessage {

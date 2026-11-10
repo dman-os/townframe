@@ -1,6 +1,6 @@
 //! The typed service client for every build target.
 //!
-//! [`Client`] is the call API over [`service_core_rs::Operation`] types. What carries a call to
+//! [`Client`] is the call API over [`method_core::Method`] types. What carries a call to
 //! its server is a transport, a type implementing [`UnaryTransport`] and
 //! [`SubscriptionTransport`]. This crate holds no I/O and builds for native hosts and wasm guests
 //! alike; the native transports (in-process, irpc, hyper XRPC) live in

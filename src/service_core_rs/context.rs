@@ -1,5 +1,6 @@
 use crate::cancellation::CancellationSignal;
 use crate::cancellation::CancellationTransport;
+use method_core::ContextError;
 use opentelemetry::Context;
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::TraceContextExt;
@@ -13,24 +14,6 @@ use std::time::UNIX_EPOCH;
 use tokio::time::Instant;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-pub enum ContextError {
-    #[error("request context is missing a request id")]
-    MissingRequestId,
-    #[error("request was cancelled")]
-    Cancelled,
-    #[error("request cancellation key is already admitted")]
-    CancellationAlreadyAdmitted,
-    #[error("request cancellation scope capacity exhausted (limit {limit})")]
-    CancellationCapacityExceeded { limit: usize },
-    #[error("subscription capacity exhausted (limit {limit})")]
-    StreamCapacityExceeded { limit: usize },
-    #[error("request exceeded its time budget")]
-    DeadlineExceeded,
-    #[error("request carries no valid Authorization credential")]
-    Unauthenticated,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpMetadata {

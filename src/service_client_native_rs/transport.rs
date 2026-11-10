@@ -7,6 +7,8 @@ use irpc::WithChannels;
 use irpc::channel::mpsc;
 use irpc::channel::none::NoReceiver;
 use irpc::channel::oneshot;
+use method_core::Subscription;
+use method_core::Unary;
 use service_client_core_rs::Subscribed;
 use service_client_core_rs::SubscriptionTransport;
 use service_client_core_rs::UnaryTransport;
@@ -16,8 +18,6 @@ use service_core_rs::EventFrame;
 use service_core_rs::EventReply;
 use service_core_rs::Reply;
 use service_core_rs::ResponseEnvelope;
-use service_core_rs::Subscription;
-use service_core_rs::Unary;
 use std::sync::Arc;
 
 /// The client service code stores: the core client over the native [`Transport`] of `Proto`.

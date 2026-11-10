@@ -6,11 +6,11 @@ use big_cabinet_core::datum::Stored;
 use big_cabinet_core::datum::hydrate_value;
 use big_cabinet_core::datum::reconcile_json_atomic;
 use big_sync_core::ObjKey;
+use method_core::Method;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
-use service_core_rs::Operation;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 
@@ -380,7 +380,7 @@ fn protocol_wire<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
 
 #[test]
 fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
-    fn unary<P: service_core_rs::Unary, Proto: irpc::Service>()
+    fn unary<P: method_core::Unary, Proto: irpc::Service>()
     where
         service_core_rs::Envelope<P>: irpc::Channels<Proto, Tx = service_core_rs::Reply<P>>,
     {
@@ -388,12 +388,12 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
     unary::<PutBlob, BlobsProtocol>();
     unary::<ReadBlob, BlobsProtocol>();
     unary::<StatBlob, BlobsProtocol>();
-    let _: Option<<PutBlob as service_core_rs::Operation>::Output> = None::<BlobInfo>;
+    let _: Option<<PutBlob as method_core::Method>::Output> = None::<BlobInfo>;
     assert_eq!(
-        BlobsProtocol::OPERATIONS.unary,
+        BlobsProtocol::METHODS.unary,
         [PutBlob::XRPC, ReadBlob::XRPC, StatBlob::XRPC]
     );
-    assert!(BlobsProtocol::OPERATIONS.stream.is_empty());
+    assert!(BlobsProtocol::METHODS.stream.is_empty());
     for (operation, nsid, output) in [
         (PutBlob::XRPC, "org.example.daybook.blobs.put", "BlobInfo"),
         (
@@ -495,7 +495,7 @@ fn protocol_requests_results_and_errors_round_trip() {
         length_octets: 0,
     }));
     for error in [
-        BlobsError::Context(service_core_rs::ContextError::Cancelled),
+        BlobsError::Context(method_core::ContextError::Cancelled),
         BlobsError::Denied,
         BlobsError::NotFound,
         BlobsError::InvalidInput {

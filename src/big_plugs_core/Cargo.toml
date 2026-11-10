@@ -17,6 +17,7 @@ schemars = ["dep:schemars", "big_cabinet_core/schemars"]
 test-support = []
 
 [dependencies]
+method_core.workspace = true
 big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
 macros = { path = "../macros" }

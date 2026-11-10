@@ -1,16 +1,12 @@
 use crate::admission::Admission;
-use crate::context::ContextError;
 use crate::context::RequestContext;
 use crate::lifecycle::Spawner;
 use crate::lifecycle::StopToken;
 use crate::middleware::Handler;
 use crate::operation::Envelope;
 use crate::operation::EventReply;
-use crate::operation::Operation;
 use crate::operation::Reply;
-use crate::operation::Subscription;
 use crate::operation::TransportContext;
-use crate::operation::Unary;
 use crate::xrpc::XrpcRegistrationError;
 use crate::xrpc::XrpcRouter;
 use futures::StreamExt;
@@ -18,6 +14,10 @@ use futures::future::BoxFuture;
 use irpc::Channels;
 use irpc::Service;
 use irpc::WithChannels;
+use method_core::ContextError;
+use method_core::Method;
+use method_core::Subscription;
+use method_core::Unary;
 use std::sync::Arc;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -42,7 +42,7 @@ impl<H: Send + Sync + 'static> Host<H> {
         (Arc::new(Self { handler, spawner }), stop)
     }
 
-    fn request_span<P: Operation>(request: &Envelope<P>) -> tracing::Span {
+    fn request_span<P: Method>(request: &Envelope<P>) -> tracing::Span {
         let span = tracing::info_span!("service.call", nsid = P::XRPC.nsid, request_id = %request.context.request_id, worker = P::XRPC.nsid); // INSTR worker=nsid so the census keys service calls by operation
         if let Some(parent) = request.context.trace.parent() {
             match span.set_parent(parent) {
@@ -64,7 +64,7 @@ impl<H: Send + Sync + 'static> Host<H> {
         request: Envelope<P>,
     ) -> Result<crate::ResponseEnvelope<P::Output>, P::Error>
     where
-        P: Operation,
+        P: Method,
         H: Handler<P>,
     {
         let span = Self::request_span(&request);
@@ -76,7 +76,7 @@ impl<H: Send + Sync + 'static> Host<H> {
         request: Envelope<P>,
     ) -> Result<crate::ResponseEnvelope<P::Output>, P::Error>
     where
-        P: Operation,
+        P: Method,
         H: Handler<P>,
     {
         let _tracked = self.spawner.track().ok_or(ContextError::Cancelled)?;
@@ -103,7 +103,7 @@ impl<H: Send + Sync + 'static> Host<H> {
         owner: &Spawner,
     ) -> Result<crate::ResponseEnvelope<P::Output>, P::Error>
     where
-        P: Operation,
+        P: Method,
         H: Handler<P>,
     {
         tokio::select! {

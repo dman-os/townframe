@@ -5,7 +5,6 @@
 use super::Stack;
 use super::wait_for_activity;
 use crate::ClientError;
-use crate::ContextError;
 use crate::RequestContext;
 use crate::sample::GetValue;
 use crate::sample::PutValue;
@@ -14,6 +13,7 @@ use crate::sample::SampleMessage;
 use crate::sample::SampleProtocol;
 use crate::sample::SubscribeEvents;
 use futures::future::join_all;
+use method_core::ContextError;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 

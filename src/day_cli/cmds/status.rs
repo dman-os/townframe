@@ -2,7 +2,7 @@ use crate::client::NodeClient;
 use crate::interlude::*;
 
 use big_nodule_core::protocol::ListNodules;
-use service_utils_rs::Operation;
+use method_core::Method;
 
 /// What the node and this client can say about the node today.
 ///

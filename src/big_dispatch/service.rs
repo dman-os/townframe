@@ -24,6 +24,7 @@ use big_cabinet_core::datum::operation::OperationKind;
 use big_dispatch_core::InvocationContext;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use method_core::MethodKind;
 use serde_json::Value;
 use serde_json::json;
 use service_client_native_rs::Client;
@@ -33,7 +34,6 @@ use service_utils_rs::HttpMetadata;
 use service_utils_rs::Protocol;
 use service_utils_rs::RequestContext;
 use service_utils_rs::UnaryVisitor;
-use service_utils_rs::XrpcKind;
 use service_utils_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_utils_rs::xrpc::DOMAIN_ERROR_STATUS;
 use service_utils_rs::xrpc::XrpcErrorEnvelope;
@@ -70,7 +70,7 @@ where
 {
     fn visit<P>(&mut self)
     where
-        P: service_utils_rs::Unary,
+        P: method_core::Unary,
         Proto: From<Envelope<P>>,
         Proto::Message: From<irpc::WithChannels<Envelope<P>, Proto>>,
         Envelope<P>: irpc::Channels<
@@ -81,9 +81,9 @@ where
     {
         let operation = P::XRPC;
         let kind = match operation.kind {
-            XrpcKind::Query => OperationKind::Query,
-            XrpcKind::Procedure => OperationKind::Procedure,
-            XrpcKind::Subscription => unreachable!("a unary operation is never a subscription"),
+            MethodKind::Query => OperationKind::Query,
+            MethodKind::Procedure => OperationKind::Procedure,
+            MethodKind::Subscription => unreachable!("a unary operation is never a subscription"),
         };
         let client = self.client.clone();
         let call: Box<RouteFn> = Box::new(move |context, metadata, input| {

@@ -32,6 +32,7 @@ members = [
   "./src/plug_plabels_manifest",
   "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
+  "./src/method_core/",
   "./src/service_core_rs/",
   "./src/service_client_core_rs/",
   "./src/service_client_native_rs/",
@@ -104,6 +105,7 @@ am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
+method_core = { path = "./src/method_core", default-features = false }
 service_core_rs = { path = "./src/service_core_rs", default-features = false }
 service_client_core_rs = { path = "./src/service_client_core_rs", default-features = false }
 service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }

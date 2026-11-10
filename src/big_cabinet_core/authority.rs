@@ -3,14 +3,12 @@ use crate::dmeta::DatumClaim;
 use crate::dmeta::MultibaseKey;
 use crate::dmeta::SignedDatumClaim;
 use crate::dmeta::Uuid7;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
-use service_core_rs::ContextError;
 use service_core_rs::HttpMetadata;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 
 pub const OPERATOR_OBJECT: &str = "is operator";
@@ -395,27 +393,19 @@ pub struct SignDatumClaim {
     pub claim: DatumClaim,
 }
 
-macro_rules! operation {
-    ($request:ident => $output:ty, $kind:ident, $nsid:literal) => {
-        impl Operation for $request {
-            type Output = $output;
-            type Error = AuthorityServiceError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.authority.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(AuthorityServiceError));
-        }
-    };
+method_core::methods! {
+    error = AuthorityServiceError, nsid_prefix = "org.example.daybook.authority.";
+    OpenActor => Actor, procedure, "openActor";
+    ResolveActor => Actor, query, "resolveActor";
+    ResolveAuthority => ResolvedAuthority, query, "resolveAuthority";
+    MintCapability => Capability, procedure, "mintCapability";
+    AttenuateCapability => Capability, procedure, "attenuateCapability";
+    InspectCapability => Capability, query, "inspectCapability";
+    RetractCapability => (), procedure, "retractCapability";
+    SignDatumClaim => SignedDatumClaim, procedure, "signDatumClaim";
 }
-operation!(OpenActor => Actor, procedure, "openActor");
-operation!(ResolveActor => Actor, query, "resolveActor");
-operation!(ResolveAuthority => ResolvedAuthority, query, "resolveAuthority");
-operation!(MintCapability => Capability, procedure, "mintCapability");
-operation!(AttenuateCapability => Capability, procedure, "attenuateCapability");
-operation!(InspectCapability => Capability, query, "inspectCapability");
-operation!(RetractCapability => (), procedure, "retractCapability");
-operation!(SignDatumClaim => SignedDatumClaim, procedure, "signDatumClaim");
 
-service_core_rs::service_operation!(ObserveCapability => stream CapabilityStatus, AuthorityServiceError, "org.example.daybook.authority.observeCapability");
+service_core_rs::service_method!(ObserveCapability => stream CapabilityStatus, AuthorityServiceError, "org.example.daybook.authority.observeCapability");
 
 declare_service_protocol! {
     pub enum AuthorityProtocol => AuthorityMessage {

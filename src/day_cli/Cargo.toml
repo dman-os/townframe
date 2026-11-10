@@ -11,6 +11,7 @@ name = "day"
 path = "main.rs"
 
 [dependencies]
+method_core.workspace = true
 #
 # internal
 utils_rs.workspace = true

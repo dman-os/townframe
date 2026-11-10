@@ -1,11 +1,11 @@
 //! The reference service. Copy this layout for a new service:
 //!
 //! * [`protocol`]: the request, output, event, and error types; one
-//!   [`Operation`](crate::Operation) impl per request; the irpc protocol enum;
+//!   [`Method`](method_core::Method) impl per request; the irpc protocol enum;
 //!   and the [`Route`](crate::Route) impl that binds the enum to a host. This
 //!   is the whole public surface a remote consumer needs.
 //! * `service`: the implementation. One [`Handler<P>`](crate::Handler) impl
-//!   per operation, plus whatever background work the service owns, spawned
+//!   per method, plus whatever background work the service owns, spawned
 //!   on the [`Spawner`](crate::lifecycle::Spawner) of its own
 //!   [`StopToken`](crate::StopToken).
 //! * [`boot`]: wires the service into a hosted, layered handler and returns

@@ -1,5 +1,5 @@
-//! The XRPC envelope: how an operation and its request context become an HTTP request, and how
-//! an HTTP response becomes the operation's output or error. A transport implementing
+//! The XRPC envelope: how a method and its request context become an HTTP request, and how
+//! an HTTP response becomes the method's output or error. A transport implementing
 //! [`HttpTransport`] only moves the bytes; everything about the wire format lives here, in the
 //! same shape as the host's XRPC router.
 
@@ -9,20 +9,20 @@ use http::HeaderValue;
 use http::Method;
 use http::StatusCode;
 use http::header;
+use method_core::HttpInput;
+use method_core::HttpMethod;
+use method_core::MethodKind;
+use method_core::Unary;
+use method_core::XrpcMethod;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use service_core_rs::ClientError;
 use service_core_rs::Envelope;
-use service_core_rs::HttpInput;
 use service_core_rs::HttpMetadata;
-use service_core_rs::HttpMethod;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseEnvelope;
 use service_core_rs::ResponseMetadata;
-use service_core_rs::Unary;
-use service_core_rs::XrpcKind;
-use service_core_rs::XrpcOperation;
 use service_core_rs::xrpc::AUTHORIZATION_HEADER;
 use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_core_rs::xrpc::IDEMPOTENCY_KEY_HEADER;
@@ -93,7 +93,7 @@ impl<E> From<XrpcClientError<E>> for ClientError<E> {
 }
 
 /// An encoded unary request. `path` is relative to the server's base URL and carries the query
-/// string of a query operation; the deadline travels in a header.
+/// string of a query method; the deadline travels in a header.
 #[derive(Debug, Clone)]
 pub struct XrpcRequest {
     pub method: Method,
@@ -118,7 +118,7 @@ pub struct HttpTransportError {
 
 /// Moves one [`XrpcRequest`] to the server and returns its [`XrpcResponse`]. A guest implements
 /// this over its HTTP import, a host over its HTTP client; [`Xrpc`] turns it into a
-/// [`UnaryTransport`] for every unary operation. The future carries no `Send` bound for the
+/// [`UnaryTransport`] for every unary method. The future carries no `Send` bound for the
 /// same reason [`UnaryTransport`]'s does.
 pub trait HttpTransport {
     fn send(
@@ -144,7 +144,7 @@ impl<H: HttpTransport, P: Unary> UnaryTransport<P> for Xrpc<H> {
         } = request;
         let encoded = encode_request(P::XRPC, &context, &metadata, &params)
             .map_err(XrpcClientError::<P::Error>::Encode)?;
-        let outcome_unknown = P::XRPC.kind == XrpcKind::Procedure;
+        let outcome_unknown = P::XRPC.kind == MethodKind::Procedure;
         let response =
             self.0
                 .send(encoded)
@@ -164,12 +164,12 @@ impl<H: HttpTransport, P: Unary> UnaryTransport<P> for Xrpc<H> {
 }
 
 pub fn encode_request<P: Serialize>(
-    operation: XrpcOperation,
+    operation: XrpcMethod,
     context: &RequestContext,
     metadata: &HttpMetadata,
     params: &P,
 ) -> Result<XrpcRequest, String> {
-    if operation.kind == XrpcKind::Subscription {
+    if operation.kind == MethodKind::Subscription {
         return Err("the unary HTTP adapter does not support subscriptions".to_owned());
     }
     let mut path = format!("xrpc/{}", operation.nsid);
@@ -238,7 +238,7 @@ pub fn encode_request<P: Serialize>(
 }
 
 pub fn decode_response<O, E>(
-    operation: XrpcOperation,
+    operation: XrpcMethod,
     request_id: uuid::Uuid,
     status: StatusCode,
     headers: &HeaderMap,
@@ -251,23 +251,23 @@ where
     if let Err(message) = response_request_id(headers, request_id) {
         return Err(XrpcClientError::Protocol {
             message,
-            outcome_unknown: operation.kind == XrpcKind::Procedure,
+            outcome_unknown: operation.kind == MethodKind::Procedure,
         });
     }
     let value =
         serde_json::from_slice::<Value>(body).map_err(|error| XrpcClientError::Protocol {
             message: format!("invalid JSON XRPC response: {error}"),
-            outcome_unknown: operation.kind == XrpcKind::Procedure,
+            outcome_unknown: operation.kind == MethodKind::Procedure,
         })?;
     if status.is_success() {
         let output = serde_json::from_value(value).map_err(|error| XrpcClientError::Protocol {
             message: format!("invalid XRPC success payload: {error}"),
-            outcome_unknown: operation.kind == XrpcKind::Procedure,
+            outcome_unknown: operation.kind == MethodKind::Procedure,
         })?;
         let metadata = ResponseMetadata::read_headers(headers).map_err(|message| {
             XrpcClientError::Protocol {
                 message,
-                outcome_unknown: operation.kind == XrpcKind::Procedure,
+                outcome_unknown: operation.kind == MethodKind::Procedure,
             }
         })?;
         return Ok(ResponseEnvelope { output, metadata });
@@ -277,7 +277,7 @@ where
         Err(error) => {
             return Err(XrpcClientError::Protocol {
                 message: format!("invalid XRPC error envelope: {error}"),
-                outcome_unknown: operation.kind == XrpcKind::Procedure,
+                outcome_unknown: operation.kind == MethodKind::Procedure,
             });
         }
     };
@@ -290,12 +290,12 @@ where
         Ok(error) => Err(XrpcClientError::Domain {
             status,
             error,
-            outcome_unknown: operation.kind == XrpcKind::Procedure && status.is_server_error(),
+            outcome_unknown: operation.kind == MethodKind::Procedure && status.is_server_error(),
         }),
         Err(_) => Err(XrpcClientError::Http {
             status,
             body: value,
-            outcome_unknown: operation.kind == XrpcKind::Procedure,
+            outcome_unknown: operation.kind == MethodKind::Procedure,
         }),
     }
 }

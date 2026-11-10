@@ -17,6 +17,7 @@ schemars = ["dep:schemars", "datum_core/schemars"]
 manifest = []
 
 [dependencies]
+method_core.workspace = true
 big_sync_core = { workspace = true, default-features = false }
 datum_core = { workspace = true, features = ["jiff", "automerge"] }
 utils_rs = { workspace = true, features = ["hash"] }

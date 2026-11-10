@@ -34,4 +34,4 @@ pub struct ObserveDocAvailability {
     pub capability: CapId,
     pub doc_id: DocId,
 }
-service_core_rs::service_operation!(ObserveDocAvailability => stream DocAvailability, DocsError, "org.example.daybook.docs.observeDocAvailability");
+service_core_rs::service_method!(ObserveDocAvailability => stream DocAvailability, DocsError, "org.example.daybook.docs.observeDocAvailability");

@@ -17,8 +17,8 @@ use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::MintDispatchCapability;
 use big_nodule_core::protocol::NoduleRecord;
+use method_core::Method;
 use service_utils_rs::ClientError;
-use service_utils_rs::Operation;
 
 /// The operator's identity narrowed to a dispatch handle that covers `scope` only.
 pub(super) async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorization {

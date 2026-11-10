@@ -10,6 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+method_core.workspace = true
 # internal
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }

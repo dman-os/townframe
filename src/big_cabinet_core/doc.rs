@@ -8,12 +8,10 @@ use crate::drawer::DrawerAccess;
 use crate::query::DatumSelection;
 use crate::query::Predicate;
 pub use automerge::ChangeHash;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as Json;
-use service_core_rs::ContextError;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -427,18 +425,8 @@ pub enum ObservedDatum {
         version: DatumVersion,
     },
 }
-macro_rules! operations {
-    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
-        impl Operation for $request {
-            type Output = $output;
-            type Error = DocsError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.docs.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(DocsError));
-        }
-    )*};
-}
-operations! {
+method_core::methods! {
+    error = DocsError, nsid_prefix = "org.example.daybook.docs.";
     MintDocCapability => Capability, procedure, "mintDocCapability";
     CreateDoc => WriteReceipt, procedure, "createDoc";
     WriteDatums => WriteReceipt, procedure, "writeDatums";

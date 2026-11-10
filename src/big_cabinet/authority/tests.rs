@@ -34,6 +34,7 @@ use big_cabinet_core::dmeta::Uuid7;
 use irpc::Channels;
 use irpc::WithChannels;
 use irpc::channel::none::NoReceiver;
+use method_core::Method;
 use secrets_rs::SecretStore;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
@@ -42,7 +43,6 @@ use service_utils_rs::Admission;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::IrpcAdapter;
-use service_utils_rs::Operation;
 use service_utils_rs::Reply;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ServerBinding;
@@ -82,7 +82,7 @@ async fn call<P>(
     params: P,
 ) -> Result<P::Output, AuthorityServiceError>
 where
-    P: Operation<Output: service_utils_rs::Wire, Error = AuthorityServiceError>,
+    P: Method<Output: method_core::Wire, Error = AuthorityServiceError>,
     AuthorityProtocol: From<Envelope<P>>,
     AuthorityMessage: From<WithChannels<Envelope<P>, AuthorityProtocol>>,
     Envelope<P>: Channels<AuthorityProtocol, Tx = Reply<P>, Rx = NoReceiver>,
@@ -99,7 +99,7 @@ where
 impl TestAuthority {
     async fn call<P>(&self, params: P) -> Result<P::Output, AuthorityServiceError>
     where
-        P: Operation<Output: service_utils_rs::Wire, Error = AuthorityServiceError>,
+        P: Method<Output: method_core::Wire, Error = AuthorityServiceError>,
         AuthorityProtocol: From<Envelope<P>>,
         AuthorityMessage: From<WithChannels<Envelope<P>, AuthorityProtocol>>,
         Envelope<P>: Channels<AuthorityProtocol, Tx = Reply<P>, Rx = NoReceiver>,

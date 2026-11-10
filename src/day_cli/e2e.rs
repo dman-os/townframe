@@ -30,7 +30,7 @@ mod library {
     use crate::interlude::*;
     use big_node::peers::Peers;
     use big_nodule_core::protocol::ListNodules;
-    use service_utils_rs::Operation;
+    use method_core::Method;
     use tokio::sync::oneshot;
 
     /// A directory under `/tmp` rather than `$TMPDIR`: a socket named by a 64 character node id

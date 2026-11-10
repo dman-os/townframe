@@ -29,12 +29,10 @@ use big_plugs_core::PlugId;
 use big_plugs_core::Revision;
 use big_plugs_core::Version;
 use indexmap::IndexMap;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use service_core_rs::ContextError;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -270,18 +268,8 @@ impl From<InventoryError> for NodulesError {
     }
 }
 
-macro_rules! operations {
-    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
-        impl Operation for $request {
-            type Output = $output;
-            type Error = NodulesError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.nodules.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(NodulesError));
-        }
-    )*};
-}
-operations! {
+method_core::methods! {
+    error = NodulesError, nsid_prefix = "org.example.daybook.nodules.";
     MintNoduleCapability => Capability, procedure, "mintNoduleCapability";
     AdmitNodule => NoduleRecord, procedure, "admitNodule";
     ConfigureNodule => NoduleRecord, procedure, "configureNodule";

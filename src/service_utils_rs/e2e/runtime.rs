@@ -1,26 +1,26 @@
 use crate::Admission;
 use crate::ClientError;
-use crate::ContextError;
 use crate::Envelope;
-use crate::EventStream;
 use crate::Handler;
 use crate::Host;
 use crate::IrpcAdapter;
-use crate::Operation;
 use crate::RequestContext;
 use crate::ResponseEnvelope;
 use crate::ResponseMetadata;
 use crate::Route;
 use crate::StopToken;
-use crate::Subscription;
 use crate::TraceContext;
 use crate::TransportContext;
-use crate::XrpcOperation;
 use crate::XrpcRouter;
 use crate::sample::GetValue;
 use crate::sample::SampleProtocol;
 use futures::StreamExt;
 use futures::stream;
+use method_core::ContextError;
+use method_core::EventStream;
+use method_core::Method;
+use method_core::Subscription;
+use method_core::XrpcMethod;
 use opentelemetry::trace::SpanContext;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::trace::TracerProvider;
@@ -53,10 +53,10 @@ struct Observation {
     transport: String,
 }
 
-impl Operation for Probe {
+impl Method for Probe {
     type Output = Observation;
     type Error = ContextError;
-    const XRPC: XrpcOperation = XrpcOperation::query("org.example.probe.get");
+    const XRPC: XrpcMethod = XrpcMethod::query("org.example.probe.get");
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,10 +64,10 @@ struct Feed {
     ready: bool,
 }
 
-impl Operation for Feed {
+impl Method for Feed {
     type Output = EventStream<u64, ContextError>;
     type Error = ContextError;
-    const XRPC: XrpcOperation = XrpcOperation::subscription("org.example.probe.feed");
+    const XRPC: XrpcMethod = XrpcMethod::subscription("org.example.probe.feed");
 }
 
 impl Subscription for Feed {

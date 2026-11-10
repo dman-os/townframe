@@ -1,6 +1,8 @@
 use http::HeaderValue;
 use http::header;
 use http_body_util::BodyExt;
+use method_core::MethodKind;
+use method_core::XrpcMethod;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -10,8 +12,6 @@ use service_client_core_rs::xrpc::encode_request;
 use service_core_rs::HttpMetadata;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseEnvelope;
-use service_core_rs::XrpcKind;
-use service_core_rs::XrpcOperation;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -278,7 +278,7 @@ impl IrohXrpcClient {
 
     pub async fn execute<P, O, E>(
         &self,
-        operation: XrpcOperation,
+        operation: XrpcMethod,
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
@@ -295,7 +295,7 @@ impl IrohXrpcClient {
 
     pub async fn execute_with_metadata<P, O, E>(
         &self,
-        operation: XrpcOperation,
+        operation: XrpcMethod,
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
@@ -305,7 +305,7 @@ impl IrohXrpcClient {
         O: DeserializeOwned,
         E: DeserializeOwned,
     {
-        let outcome_unknown = operation.kind == XrpcKind::Procedure;
+        let outcome_unknown = operation.kind == MethodKind::Procedure;
         if let Some(timeout) = context.remaining_budget() {
             match tokio::time::timeout(
                 timeout,
@@ -327,7 +327,7 @@ impl IrohXrpcClient {
 
     async fn execute_inner<P, O, E>(
         &self,
-        operation: XrpcOperation,
+        operation: XrpcMethod,
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
@@ -344,7 +344,7 @@ impl IrohXrpcClient {
                 .await
                 .map_err(|message| XrpcClientError::Transport {
                     message,
-                    outcome_unknown: operation.kind == XrpcKind::Procedure,
+                    outcome_unknown: operation.kind == MethodKind::Procedure,
                 })?;
         let (send, recv) = match connection.open_bi().await {
             Ok(stream) => stream,
@@ -352,7 +352,7 @@ impl IrohXrpcClient {
                 self.send(IrohConnectionCommand::Discard(generation));
                 return Err(XrpcClientError::Transport {
                     message: error.to_string(),
-                    outcome_unknown: operation.kind == XrpcKind::Procedure,
+                    outcome_unknown: operation.kind == MethodKind::Procedure,
                 });
             }
         };
@@ -361,7 +361,7 @@ impl IrohXrpcClient {
             .await
             .map_err(|error| XrpcClientError::Transport {
                 message: error.to_string(),
-                outcome_unknown: operation.kind == XrpcKind::Procedure,
+                outcome_unknown: operation.kind == MethodKind::Procedure,
             })?;
         let connection_task = IrohConnectionTaskGuard(Some(tokio::spawn(connection_task)));
         let mut request = hyper::Request::builder()
@@ -381,7 +381,7 @@ impl IrohXrpcClient {
                 .await
                 .map_err(|error| XrpcClientError::Transport {
                     message: error.to_string(),
-                    outcome_unknown: operation.kind == XrpcKind::Procedure,
+                    outcome_unknown: operation.kind == MethodKind::Procedure,
                 })?;
         let status = response.status();
         let headers = response.headers().clone();
@@ -389,14 +389,14 @@ impl IrohXrpcClient {
             .await
             .map_err(|message| XrpcClientError::Protocol {
                 message,
-                outcome_unknown: operation.kind == XrpcKind::Procedure,
+                outcome_unknown: operation.kind == MethodKind::Procedure,
             })?;
         connection_task
             .join()
             .await
             .map_err(|message| XrpcClientError::Transport {
                 message: format!("connection task: {message}"),
-                outcome_unknown: operation.kind == XrpcKind::Procedure,
+                outcome_unknown: operation.kind == MethodKind::Procedure,
             })?;
         if connection.close_reason().is_some() {
             self.send(IrohConnectionCommand::Discard(generation));

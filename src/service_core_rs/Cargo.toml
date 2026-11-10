@@ -10,6 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+method_core.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
 # Not `irpc.workspace`: the workspace entry keeps irpc's default features (noq, rustls, aws-lc), which

@@ -20,11 +20,11 @@ use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
-use service_core_rs::ContextError;
 use service_core_rs::declare_service_protocol;
-use service_core_rs::service_operation;
+use service_core_rs::service_method;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -318,16 +318,16 @@ pub enum PlugsError {
     UnknownVersion { id: PlugId, version: Box<Version> },
 }
 
-service_operation!(MintPlugsCapability => Capability, PlugsError, procedure("org.example.daybook.plugs.mintPlugsCapability"));
-service_operation!(PublishPlugVersion => PublishedPlugVersion, PlugsError, procedure("org.example.daybook.plugs.publishPlugVersion"));
-service_operation!(RemovePlugVersion => (), PlugsError, procedure("org.example.daybook.plugs.removePlugVersion"));
-service_operation!(RemovePlug => (), PlugsError, procedure("org.example.daybook.plugs.removePlug"));
-service_operation!(ImportPlugDocument => PlugRecord, PlugsError, procedure("org.example.daybook.plugs.importPlugDocument"));
-service_operation!(GetPublisher => String, PlugsError, query("org.example.daybook.plugs.getPublisher"));
-service_operation!(ListPlugs => Vec<PlugRecord>, PlugsError, query("org.example.daybook.plugs.listPlugs"));
-service_operation!(GetPlug => PlugRecord, PlugsError, query("org.example.daybook.plugs.getPlug"));
-service_operation!(GetPlugVersion => PlugVersionRecord, PlugsError, query("org.example.daybook.plugs.getPlugVersion"));
-service_operation!(WatchPlugs => PlugChanges, PlugsError, procedure("org.example.daybook.plugs.watchPlugs"));
+service_method!(MintPlugsCapability => Capability, PlugsError, procedure("org.example.daybook.plugs.mintPlugsCapability"));
+service_method!(PublishPlugVersion => PublishedPlugVersion, PlugsError, procedure("org.example.daybook.plugs.publishPlugVersion"));
+service_method!(RemovePlugVersion => (), PlugsError, procedure("org.example.daybook.plugs.removePlugVersion"));
+service_method!(RemovePlug => (), PlugsError, procedure("org.example.daybook.plugs.removePlug"));
+service_method!(ImportPlugDocument => PlugRecord, PlugsError, procedure("org.example.daybook.plugs.importPlugDocument"));
+service_method!(GetPublisher => String, PlugsError, query("org.example.daybook.plugs.getPublisher"));
+service_method!(ListPlugs => Vec<PlugRecord>, PlugsError, query("org.example.daybook.plugs.listPlugs"));
+service_method!(GetPlug => PlugRecord, PlugsError, query("org.example.daybook.plugs.getPlug"));
+service_method!(GetPlugVersion => PlugVersionRecord, PlugsError, query("org.example.daybook.plugs.getPlugVersion"));
+service_method!(WatchPlugs => PlugChanges, PlugsError, procedure("org.example.daybook.plugs.watchPlugs"));
 
 declare_service_protocol! {
     pub enum PlugsProtocol => PlugsMessage {

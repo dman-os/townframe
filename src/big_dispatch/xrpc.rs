@@ -16,9 +16,9 @@ use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
+use method_core::ContextError;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
-use service_utils_rs::ContextError;
 use service_utils_rs::XrpcRouter;
 use service_utils_rs::xrpc::XrpcErrorEnvelope;
 use service_utils_rs::xrpc::XrpcHandlerError;
@@ -45,7 +45,7 @@ pub fn xrpc_router(
     let mut router = XrpcRouter::new(max_body_bytes);
     router
         .register_fallback(XrpcOperationHandler::new(
-            service_utils_rs::XrpcOperation::procedure(""),
+            method_core::XrpcMethod::procedure(""),
             move |request| {
                 let dispatch = dispatch.clone();
                 async move {

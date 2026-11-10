@@ -15,11 +15,9 @@ use crate::doc::CommandId;
 use crate::doc::DocsError;
 use crate::doc::WriteReceipt;
 use automerge::ChangeHash;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
-use service_core_rs::ContextError;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 
@@ -359,18 +357,8 @@ pub struct RevokePrincipal {
     pub principal: Principal,
 }
 
-macro_rules! operations {
-    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
-        impl Operation for $request {
-            type Output = $output;
-            type Error = DrawersError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.drawers.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(DrawersError));
-        }
-    )*};
-}
-operations! {
+method_core::methods! {
+    error = DrawersError, nsid_prefix = "org.example.daybook.drawers.";
     MintDrawerCapability => Capability, procedure, "mintDrawerCapability";
     CreateDrawer => DrawerCreated, procedure, "createDrawer";
     AddDoc => WriteReceipt, procedure, "addDoc";

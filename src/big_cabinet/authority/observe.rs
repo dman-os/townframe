@@ -1,7 +1,7 @@
 use super::*;
 use futures::StreamExt;
 use futures::stream;
-use service_utils_rs::EventStream;
+use method_core::EventStream;
 
 impl Handler<ObserveCapability> for AuthorityService {
     async fn call(

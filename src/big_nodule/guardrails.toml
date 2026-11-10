@@ -10,6 +10,7 @@ allowed_dependencies = [
     "big_nodule_core",
     "big_plugs_core",
     "big_repo",
+    "method_core",
     "secrets_rs",
     "service_client_native_rs",
     "service_utils_rs",

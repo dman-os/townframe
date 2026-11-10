@@ -1,16 +1,16 @@
 use futures::Stream;
 use futures::stream::BoxStream;
+use method_core::ContextError;
+use method_core::Method;
+use method_core::Subscription;
+use method_core::Unary;
 use service_core_rs::CancellationRequestGuard;
 use service_core_rs::ClientError;
-use service_core_rs::ContextError;
 use service_core_rs::Envelope;
 use service_core_rs::EventFrame;
 use service_core_rs::HttpMetadata;
-use service_core_rs::Operation;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseEnvelope;
-use service_core_rs::Subscription;
-use service_core_rs::Unary;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::Context;
@@ -18,11 +18,11 @@ use std::task::Poll;
 
 const DEFAULT_EVENT_BUFFER: usize = 64;
 
-/// Carries one unary operation `P` to its server and its response back.
+/// Carries one unary method `P` to its server and its response back.
 ///
-/// The trait is generic over the operation instead of object-safe. An in-process or irpc
+/// The trait is generic over the method instead of object-safe. An in-process or irpc
 /// transport moves the typed envelope without serializing it, and its bounds name the protocol
-/// message conversions of each operation, so they belong on the transport's own
+/// message conversions of each method, so they belong on the transport's own
 /// `impl<P> UnaryTransport<P>`. A transport that only moves bytes implements
 /// [`crate::xrpc::HttpTransport`] and is wrapped in [`crate::xrpc::Xrpc`].
 ///
@@ -36,8 +36,8 @@ pub trait UnaryTransport<P: Unary> {
     ) -> impl Future<Output = Result<ResponseEnvelope<P::Output>, ClientError<P::Error>>>;
 }
 
-/// Opens the event stream of one subscription operation `P`. See [`UnaryTransport`] for why this
-/// is generic over the operation.
+/// Opens the event stream of one subscription method `P`. See [`UnaryTransport`] for why this
+/// is generic over the method.
 pub trait SubscriptionTransport<P: Subscription> {
     /// `buffer` is the number of events the transport may hold ahead of the consumer.
     fn subscribe(
@@ -49,7 +49,7 @@ pub trait SubscriptionTransport<P: Subscription> {
 
 type FrameStream<P> = BoxStream<
     'static,
-    Result<EventFrame<<P as Subscription>::Event>, ClientError<<P as Operation>::Error>>,
+    Result<EventFrame<<P as Subscription>::Event>, ClientError<<P as Method>::Error>>,
 >;
 
 /// An open subscription as a transport hands it over, before [`ClientStream`] has read the

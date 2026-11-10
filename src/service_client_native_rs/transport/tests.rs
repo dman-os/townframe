@@ -1,10 +1,10 @@
 use super::*;
 use futures::future::BoxFuture;
+use method_core::ContextError;
+use method_core::Method;
 use serde::Deserialize;
 use serde::Serialize;
-use service_core_rs::ContextError;
 use service_core_rs::HttpMetadata;
-use service_core_rs::Operation;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseMetadata;
 
@@ -20,8 +20,8 @@ struct Echo {
     value: String,
 }
 
-service_core_rs::service_operation!(SubscribeEvents => stream SampleEvent, ContextError, "org.example.client.subscribeEvents");
-service_core_rs::service_operation!(Echo => String, ContextError, query("org.example.client.echo"));
+service_core_rs::service_method!(SubscribeEvents => stream SampleEvent, ContextError, "org.example.client.subscribeEvents");
+service_core_rs::service_method!(Echo => String, ContextError, query("org.example.client.echo"));
 
 service_core_rs::declare_service_protocol! {
     enum Protocol => Message {
@@ -72,8 +72,8 @@ impl InlineRoute<Protocol> for Route {
 #[tokio::test]
 async fn protocol_and_direct_client_need_no_server_dependencies() {
     let client = Client::<Protocol>::new(Transport::direct(Arc::new(Route)));
-    assert_eq!(Protocol::OPERATIONS.unary, &[Echo::XRPC]);
-    assert_eq!(Protocol::OPERATIONS.stream, &[SubscribeEvents::XRPC]);
+    assert_eq!(Protocol::METHODS.unary, &[Echo::XRPC]);
+    assert_eq!(Protocol::METHODS.stream, &[SubscribeEvents::XRPC]);
     assert_eq!(Echo::XRPC.output_schema, "String");
     assert_eq!(SubscribeEvents::XRPC.output_schema, "SampleEvent");
     assert_eq!(Echo::XRPC.error_schema, "ContextError");

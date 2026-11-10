@@ -4,7 +4,6 @@
 
 use super::Stack;
 use crate::ClientError;
-use crate::ContextError;
 use crate::Envelope;
 use crate::HttpMetadata;
 use crate::RequestContext;
@@ -12,6 +11,7 @@ use crate::sample::GetValue;
 use crate::sample::PutValue;
 use crate::sample::SampleError;
 use crate::sample::SubscribeEvents;
+use method_core::ContextError;
 use std::time::Duration;
 
 #[tokio::test]

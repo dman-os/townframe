@@ -1,6 +1,9 @@
 use super::ws::WsIo;
 use super::ws::WsMessage;
 use futures::StreamExt;
+use method_core::MethodKind;
+use method_core::Subscription;
+use method_core::XrpcMethod;
 use reqwest::Url;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -13,9 +16,6 @@ use service_core_rs::HttpMetadata;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseEnvelope;
 use service_core_rs::ResponseMetadata;
-use service_core_rs::Subscription;
-use service_core_rs::XrpcKind;
-use service_core_rs::XrpcOperation;
 use service_core_rs::xrpc::AUTHORIZATION_HEADER;
 use service_core_rs::xrpc::REQUEST_ID_HEADER;
 
@@ -103,7 +103,7 @@ impl XrpcClient {
 
     pub async fn execute<P, O, E>(
         &self,
-        operation: XrpcOperation,
+        operation: XrpcMethod,
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
@@ -120,7 +120,7 @@ impl XrpcClient {
 
     pub async fn execute_with_metadata<P, O, E>(
         &self,
-        operation: XrpcOperation,
+        operation: XrpcMethod,
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
@@ -130,7 +130,7 @@ impl XrpcClient {
         O: DeserializeOwned,
         E: DeserializeOwned,
     {
-        if operation.kind == XrpcKind::Subscription {
+        if operation.kind == MethodKind::Subscription {
             return Err(XrpcClientError::Protocol {
                 message: "the unary HTTP adapter does not support subscriptions".to_owned(),
                 outcome_unknown: false,
@@ -155,7 +155,7 @@ impl XrpcClient {
             .await
             .map_err(|error| XrpcClientError::Transport {
                 message: error.to_string(),
-                outcome_unknown: operation.kind == XrpcKind::Procedure,
+                outcome_unknown: operation.kind == MethodKind::Procedure,
             })?;
         let status = response.status();
         let response_headers = response.headers().clone();
@@ -163,7 +163,7 @@ impl XrpcClient {
             .await
             .map_err(|(message, outcome_unknown)| XrpcClientError::Protocol {
                 message,
-                outcome_unknown: outcome_unknown || operation.kind == XrpcKind::Procedure,
+                outcome_unknown: outcome_unknown || operation.kind == MethodKind::Procedure,
             })?;
         decode_response(
             operation,

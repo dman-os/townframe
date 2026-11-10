@@ -1,31 +1,31 @@
 use crate::Envelope;
 use crate::Reply;
-use crate::Subscription;
-use crate::Unary;
-use crate::XrpcOperation;
 use irpc::Channels;
 use irpc::WithChannels;
 use irpc::channel::none::NoReceiver;
+use method_core::Subscription;
+use method_core::Unary;
+use method_core::XrpcMethod;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProtocolOperations {
-    pub unary: &'static [XrpcOperation],
-    pub stream: &'static [XrpcOperation],
+pub struct ProtocolMethods {
+    pub unary: &'static [XrpcMethod],
+    pub stream: &'static [XrpcMethod],
 }
 
 pub trait Protocol: irpc::Service {
-    const OPERATIONS: ProtocolOperations;
+    const METHODS: ProtocolMethods;
 
-    /// Calls `visitor` once per unary operation of this protocol, with the operation's type. A
-    /// `Client<Self>` can only call an operation whose type it names, so this is how code that
-    /// is generic over protocols (a by-NSID router) obtains one typed route per operation
+    /// Calls `visitor` once per unary method of this protocol, with the method's type. A
+    /// `Client<Self>` can only call a method whose type it names, so this is how code that
+    /// is generic over protocols (a by-NSID router) obtains one typed route per method
     /// without a hand-written list that could drift from the protocol declaration.
     fn visit_unary<V: UnaryVisitor<Self>>(visitor: &mut V)
     where
         Self: Sized;
 }
 
-/// A callback over the unary operations of `Proto`; see [`Protocol::visit_unary`]. The bounds
+/// A callback over the unary methods of `Proto`; see [`Protocol::visit_unary`]. The bounds
 /// are exactly what `Client::call` needs, so an implementation can hold a client and call it.
 pub trait UnaryVisitor<Proto: irpc::Service> {
     fn visit<P>(&mut self)
@@ -36,15 +36,15 @@ pub trait UnaryVisitor<Proto: irpc::Service> {
         Envelope<P>: Channels<Proto, Tx = Reply<P>, Rx = NoReceiver>;
 }
 
-pub trait UnaryOperation: Unary {
-    const DECLARATION: XrpcOperation = Self::XRPC;
+pub trait UnaryMethod: Unary {
+    const DECLARATION: XrpcMethod = Self::XRPC;
 }
-impl<P: Unary> UnaryOperation for P {}
+impl<P: Unary> UnaryMethod for P {}
 
-pub trait StreamOperation: Subscription {
-    const DECLARATION: XrpcOperation = Self::XRPC;
+pub trait StreamMethod: Subscription {
+    const DECLARATION: XrpcMethod = Self::XRPC;
 }
-impl<P: Subscription> StreamOperation for P {}
+impl<P: Subscription> StreamMethod for P {}
 
 #[macro_export]
 macro_rules! declare_service_protocol {
@@ -59,38 +59,38 @@ macro_rules! declare_service_protocol {
             $( #[rpc(tx = $crate::EventReply<$stream_params>)] $stream_variant($crate::Envelope<$stream_params>), )*
         }
         impl $crate::Protocol for $protocol {
-            const OPERATIONS: $crate::ProtocolOperations = $crate::ProtocolOperations {
-                unary: &[$(<$params as $crate::protocol::UnaryOperation>::DECLARATION),*],
-                stream: &[$(<$stream_params as $crate::protocol::StreamOperation>::DECLARATION),*],
+            const METHODS: $crate::ProtocolMethods = $crate::ProtocolMethods {
+                unary: &[$(<$params as $crate::protocol::UnaryMethod>::DECLARATION),*],
+                stream: &[$(<$stream_params as $crate::protocol::StreamMethod>::DECLARATION),*],
             };
             fn visit_unary<V: $crate::protocol::UnaryVisitor<Self>>(visitor: &mut V) {
                 $( visitor.visit::<$params>(); )*
             }
         }
         impl $protocol {
-            pub const OPERATIONS: $crate::ProtocolOperations = <Self as $crate::Protocol>::OPERATIONS;
+            pub const METHODS: $crate::ProtocolMethods = <Self as $crate::Protocol>::METHODS;
         }
     };
 }
 
 #[macro_export]
-macro_rules! service_operation {
+macro_rules! service_method {
     ($params:ty => $output:ty, $error:ty, $kind:ident($nsid:literal)) => {
-        impl $crate::Operation for $params {
+        impl ::method_core::Method for $params {
             type Output = $output;
             type Error = $error;
-            const XRPC: $crate::XrpcOperation = $crate::XrpcOperation::$kind($nsid)
+            const XRPC: ::method_core::XrpcMethod = ::method_core::XrpcMethod::$kind($nsid)
                 .with_schemas(stringify!($output), stringify!($error));
         }
     };
     ($params:ty => stream $event:ty, $error:ty, $nsid:literal) => {
-        impl $crate::Operation for $params {
-            type Output = $crate::EventStream<$event, $error>;
+        impl ::method_core::Method for $params {
+            type Output = ::method_core::EventStream<$event, $error>;
             type Error = $error;
-            const XRPC: $crate::XrpcOperation = $crate::XrpcOperation::subscription($nsid)
+            const XRPC: ::method_core::XrpcMethod = ::method_core::XrpcMethod::subscription($nsid)
                 .with_schemas(stringify!($event), stringify!($error));
         }
-        impl $crate::Subscription for $params {
+        impl ::method_core::Subscription for $params {
             type Event = $event;
         }
     };

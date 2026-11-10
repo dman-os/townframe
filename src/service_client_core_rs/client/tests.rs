@@ -7,9 +7,9 @@ use crate::xrpc::XrpcResponse;
 use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
-use service_core_rs::ContextError;
 use service_core_rs::ResponseMetadata;
 use std::sync::Mutex;
 
@@ -31,9 +31,9 @@ struct Record {
     value: String,
 }
 
-service_core_rs::service_operation!(SubscribeEvents => stream SampleEvent, ContextError, "org.example.client.subscribeEvents");
-service_core_rs::service_operation!(Echo => String, ContextError, query("org.example.client.echo"));
-service_core_rs::service_operation!(Record => String, ContextError, procedure("org.example.client.record"));
+service_core_rs::service_method!(SubscribeEvents => stream SampleEvent, ContextError, "org.example.client.subscribeEvents");
+service_core_rs::service_method!(Echo => String, ContextError, query("org.example.client.echo"));
+service_core_rs::service_method!(Record => String, ContextError, procedure("org.example.client.record"));
 
 fn subscribed(
     frames: Vec<Result<EventFrame<SampleEvent>, ClientError<ContextError>>>,

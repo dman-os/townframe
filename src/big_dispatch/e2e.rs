@@ -399,7 +399,7 @@ async fn a_request_without_a_credential_is_unauthenticated() {
             ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
         }),
         Err(DispatchError::Context(
-            service_utils_rs::ContextError::Unauthenticated
+            method_core::ContextError::Unauthenticated
         ))
     );
     h.shutdown().await;

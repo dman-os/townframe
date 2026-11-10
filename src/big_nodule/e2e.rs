@@ -74,12 +74,12 @@ use indexmap::IndexMap;
 use irpc::Channels;
 use irpc::WithChannels;
 use irpc::channel::none::NoReceiver;
+use method_core::Method;
 use secrets_rs::SecretStore;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
-use service_utils_rs::Operation;
 use service_utils_rs::Reply;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
@@ -516,7 +516,7 @@ impl Node {
         params: P,
     ) -> Result<P::Output, NodulesError>
     where
-        P: Operation<Output: service_utils_rs::Wire, Error = NodulesError>,
+        P: Method<Output: method_core::Wire, Error = NodulesError>,
         NodulesProtocol: From<Envelope<P>>,
         NodulesMessage: From<WithChannels<Envelope<P>, NodulesProtocol>>,
         Envelope<P>: Channels<NodulesProtocol, Tx = Reply<P>, Rx = NoReceiver>,

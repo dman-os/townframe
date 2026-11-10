@@ -1,4 +1,4 @@
-use crate::context::ContextError;
+use method_core::ContextError;
 pub use service_core_rs::cancellation::CancellationKey;
 pub use service_core_rs::cancellation::CancellationReceiver;
 pub use service_core_rs::cancellation::CancellationRegistration;

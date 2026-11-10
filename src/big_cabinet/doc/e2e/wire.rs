@@ -23,8 +23,8 @@ use big_cabinet_core::doc::*;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
+use method_core::ContextError;
 use serde_json::json;
-use service_utils_rs::ContextError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 

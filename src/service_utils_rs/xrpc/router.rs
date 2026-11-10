@@ -16,12 +16,6 @@ use crate::context::TraceContext;
 use crate::host::Host;
 use crate::middleware::Handler;
 use crate::operation::Envelope;
-use crate::operation::HttpInput;
-use crate::operation::HttpMethod;
-use crate::operation::Subscription;
-use crate::operation::Unary;
-use crate::operation::XrpcKind;
-use crate::operation::XrpcOperation;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path;
@@ -36,6 +30,12 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::any;
 use futures::StreamExt as _;
+use method_core::HttpInput;
+use method_core::HttpMethod;
+use method_core::MethodKind;
+use method_core::Subscription;
+use method_core::Unary;
+use method_core::XrpcMethod;
 use mime::Mime;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -56,7 +56,7 @@ use tokio::sync::Semaphore;
 /// an operation that is not hosted through this crate.
 #[derive(Clone)]
 pub struct XrpcOperationHandler {
-    operation: XrpcOperation,
+    operation: XrpcMethod,
     handler: Arc<dyn Fn(XrpcRequest) -> HandlerFuture + Send + Sync>,
 }
 
@@ -73,7 +73,7 @@ impl std::fmt::Debug for XrpcOperationHandler {
 }
 
 impl XrpcOperationHandler {
-    pub fn new<F, Fut, O>(operation: XrpcOperation, handler: F) -> Self
+    pub fn new<F, Fut, O>(operation: XrpcMethod, handler: F) -> Self
     where
         F: Fn(XrpcRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<O, XrpcHandlerError>> + Send + 'static,
@@ -88,7 +88,7 @@ impl XrpcOperationHandler {
         }
     }
 
-    pub fn typed<P, O, F, Fut>(operation: XrpcOperation, handler: F) -> Self
+    pub fn typed<P, O, F, Fut>(operation: XrpcMethod, handler: F) -> Self
     where
         P: DeserializeOwned + Send + 'static,
         O: Serialize + Send + 'static,
@@ -117,7 +117,7 @@ impl XrpcOperationHandler {
         })
     }
 
-    pub fn operation(&self) -> XrpcOperation {
+    pub fn operation(&self) -> XrpcMethod {
         self.operation
     }
 
@@ -133,7 +133,7 @@ impl XrpcOperationHandler {
 /// the same `/xrpc/{nsid}` route rather than the unary HTTP exchange.
 #[derive(Clone)]
 pub struct XrpcSubscriptionHandler {
-    operation: XrpcOperation,
+    operation: XrpcMethod,
     handler: Arc<dyn Fn(XrpcRequest) -> SubscriptionFuture + Send + Sync>,
 }
 
@@ -161,7 +161,7 @@ impl std::fmt::Debug for XrpcSubscriptionHandler {
 }
 
 impl XrpcSubscriptionHandler {
-    pub fn typed<P, E, F, Fut>(operation: XrpcOperation, handler: F) -> Self
+    pub fn typed<P, E, F, Fut>(operation: XrpcMethod, handler: F) -> Self
     where
         P: DeserializeOwned + Send + 'static,
         E: Serialize + Send + 'static,
@@ -207,7 +207,7 @@ impl XrpcSubscriptionHandler {
         }
     }
 
-    pub fn operation(&self) -> XrpcOperation {
+    pub fn operation(&self) -> XrpcMethod {
         self.operation
     }
 }
@@ -392,7 +392,7 @@ impl XrpcRouter {
         &mut self,
         handler: XrpcSubscriptionHandler,
     ) -> Result<(), XrpcRegistrationError> {
-        if handler.operation().kind != XrpcKind::Subscription {
+        if handler.operation().kind != MethodKind::Subscription {
             return Err(XrpcRegistrationError::SubscriptionUnsupported);
         }
         let subscriptions = Arc::make_mut(&mut self.subscriptions);
@@ -405,7 +405,7 @@ impl XrpcRouter {
     }
 
     pub fn register(&mut self, handler: XrpcOperationHandler) -> Result<(), XrpcRegistrationError> {
-        if handler.operation().kind == XrpcKind::Subscription {
+        if handler.operation().kind == MethodKind::Subscription {
             return Err(XrpcRegistrationError::SubscriptionUnsupported);
         }
         let operations = Arc::make_mut(&mut self.operations);
@@ -426,7 +426,7 @@ impl XrpcRouter {
         handler: XrpcOperationHandler,
     ) -> Result<(), XrpcRegistrationError> {
         let operation = handler.operation();
-        if operation.kind != XrpcKind::Procedure {
+        if operation.kind != MethodKind::Procedure {
             return Err(XrpcRegistrationError::FallbackNotProcedure);
         }
         if self.fallback.is_some() {
@@ -448,7 +448,7 @@ impl XrpcRouter {
 
 /// Encodes a typed operation error as the standard XRPC error envelope. A
 /// non-serializable error is a programming error in the error type.
-fn domain_error<E>(operation: XrpcOperation, error: &E) -> XrpcHandlerError
+fn domain_error<E>(operation: XrpcMethod, error: &E) -> XrpcHandlerError
 where
     E: Serialize + std::fmt::Debug,
 {
@@ -763,7 +763,7 @@ async fn dispatch_subscription(
     response
 }
 
-fn validate_method(method: &Method, operation: XrpcOperation) -> Result<(), StatusCode> {
+fn validate_method(method: &Method, operation: XrpcMethod) -> Result<(), StatusCode> {
     let expected_method = match operation.method {
         HttpMethod::Get => Method::GET,
         HttpMethod::Post => Method::POST,
@@ -771,7 +771,7 @@ fn validate_method(method: &Method, operation: XrpcOperation) -> Result<(), Stat
     if method != expected_method {
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
-    if operation.kind == XrpcKind::Subscription {
+    if operation.kind == MethodKind::Subscription {
         return Err(StatusCode::NOT_IMPLEMENTED);
     }
     Ok(())

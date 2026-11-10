@@ -5,6 +5,7 @@ allowed_dependencies = [
     "big_cabinet",
     "big_cabinet_core",
     "big_dispatch_core",
+    "method_core",
     "secrets_rs",
     "service_client_native_rs",
     "service_utils_rs",

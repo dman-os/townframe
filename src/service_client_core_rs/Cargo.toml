@@ -10,6 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+method_core.workspace = true
 service_core_rs.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["macros"] }

@@ -20,8 +20,8 @@ pub impl service_client_core_rs::client::ClientStream < P >::async fn open (subs
 pub impl service_client_core_rs::client::ClientStream < P >::async fn recv (& mut self) -> Result < Option < P :: Event > , ClientError < P :: Error > >
 pub mod service_client_core_rs::client
 pub mod service_client_core_rs::xrpc
-pub service_client_core_rs::xrpc::fn decode_response < O , E > (operation : XrpcOperation , request_id : uuid :: Uuid , status : StatusCode , headers : & HeaderMap , body : & [u8] ,) -> Result < ResponseEnvelope < O > , XrpcClientError < E > > where O : DeserializeOwned , E : DeserializeOwned ,
-pub service_client_core_rs::xrpc::fn encode_request < P : Serialize > (operation : XrpcOperation , context : & RequestContext , metadata : & HttpMetadata , params : & P ,) -> Result < XrpcRequest , String >
+pub service_client_core_rs::xrpc::fn decode_response < O , E > (operation : XrpcMethod , request_id : uuid :: Uuid , status : StatusCode , headers : & HeaderMap , body : & [u8] ,) -> Result < ResponseEnvelope < O > , XrpcClientError < E > > where O : DeserializeOwned , E : DeserializeOwned ,
+pub service_client_core_rs::xrpc::fn encode_request < P : Serialize > (operation : XrpcMethod , context : & RequestContext , metadata : & HttpMetadata , params : & P ,) -> Result < XrpcRequest , String >
 pub struct service_client_core_rs::client::Client< T >  {  }
 pub struct service_client_core_rs::client::ClientStream< P : Subscription >  {  }
 pub struct service_client_core_rs::client::Subscribed< P : Subscription >  { frames: FrameStream < P >, scope: Option < CancellationRequestGuard > }

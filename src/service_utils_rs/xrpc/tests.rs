@@ -7,14 +7,14 @@ use super::serve::serve_with_acceptor;
 use super::*;
 use crate::context::HttpMetadata;
 use crate::context::RequestContext;
-use crate::operation::HttpInput;
-use crate::operation::HttpMethod;
-use crate::operation::XrpcKind;
-use crate::operation::XrpcOperation;
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::header;
 use futures::future::BoxFuture;
+use method_core::HttpInput;
+use method_core::HttpMethod;
+use method_core::MethodKind;
+use method_core::XrpcMethod;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -35,37 +35,36 @@ use url::Url;
 #[cfg(feature = "iroh-http")]
 mod iroh_wire;
 
-const QUERY_OPERATION: XrpcOperation = XrpcOperation {
+const QUERY_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.echo",
-    kind: XrpcKind::Query,
+    kind: MethodKind::Query,
     method: HttpMethod::Get,
     input: HttpInput::Query,
     output_schema: "EchoOutput",
     error_schema: "TestError",
     long_poll: false,
 };
-const PROCEDURE_OPERATION: XrpcOperation = XrpcOperation {
+const PROCEDURE_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.write",
-    kind: XrpcKind::Procedure,
+    kind: MethodKind::Procedure,
     method: HttpMethod::Post,
     input: HttpInput::JsonBody,
     output_schema: "WriteOutput",
     error_schema: "TestError",
     long_poll: false,
 };
-const NUMERIC_QUERY_OPERATION: XrpcOperation = XrpcOperation {
+const NUMERIC_QUERY_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.numeric",
-    kind: XrpcKind::Query,
+    kind: MethodKind::Query,
     method: HttpMethod::Get,
     input: HttpInput::Query,
     output_schema: "NumericOutput",
     error_schema: "TestError",
     long_poll: false,
 };
-const LONG_POLL_OPERATION: XrpcOperation =
-    XrpcOperation::query("org.example.test.poll").long_poll();
+const LONG_POLL_OPERATION: XrpcMethod = XrpcMethod::query("org.example.test.poll").long_poll();
 
-fn query_request(operation: XrpcOperation, value: &str) -> axum::http::Request<axum::body::Body> {
+fn query_request(operation: XrpcMethod, value: &str) -> axum::http::Request<axum::body::Body> {
     axum::http::Request::builder()
         .method("GET")
         .uri(format!("/xrpc/{}?value={value}", operation.nsid))
@@ -256,7 +255,7 @@ async fn test_server() -> (
 #[tokio::test]
 async fn loopback_query_and_procedure_map_http_and_context() {
     let (client, task, shutdown) = test_server().await;
-    assert_eq!(QUERY_OPERATION.kind, XrpcKind::Query);
+    assert_eq!(QUERY_OPERATION.kind, MethodKind::Query);
     assert_eq!(QUERY_OPERATION.input, HttpInput::Query);
     assert_eq!(PROCEDURE_OPERATION.method, HttpMethod::Post);
     let context = RequestContext::root();
@@ -1808,9 +1807,9 @@ async fn each_admission_class_refuses_when_its_own_pool_is_exhausted() {
 
 #[tokio::test]
 async fn unsupported_subscription_is_explicit() {
-    let subscription = XrpcOperation {
+    let subscription = XrpcMethod {
         nsid: "org.example.test.events",
-        kind: XrpcKind::Subscription,
+        kind: MethodKind::Subscription,
         method: HttpMethod::Get,
         input: HttpInput::Query,
         output_schema: "Event",
@@ -1902,7 +1901,7 @@ async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() 
     );
     let fallback = || {
         XrpcOperationHandler::new(
-            XrpcOperation::procedure(""),
+            XrpcMethod::procedure(""),
             |request: XrpcRequest| async move {
                 Ok::<_, XrpcHandlerError>(json!({ "nsid": request.nsid, "input": request.params }))
             },

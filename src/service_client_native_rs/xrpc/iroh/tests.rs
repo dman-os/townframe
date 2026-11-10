@@ -2,16 +2,16 @@ use super::*;
 use iroh::protocol::AcceptError;
 use iroh::protocol::ProtocolHandler;
 use iroh::protocol::Router;
+use method_core::HttpInput;
+use method_core::HttpMethod;
 use serde_json::json;
-use service_core_rs::HttpInput;
-use service_core_rs::HttpMethod;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
-const ECHO_OPERATION: XrpcOperation = XrpcOperation {
+const ECHO_METHOD: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.echo",
-    kind: XrpcKind::Procedure,
+    kind: MethodKind::Procedure,
     method: HttpMethod::Post,
     input: HttpInput::JsonBody,
     output_schema: "EchoOutput",
@@ -96,7 +96,7 @@ async fn retained_connection_is_shared_and_replaced_once_closed() {
         async move {
             client
                 .execute::<Value, Value, Value>(
-                    ECHO_OPERATION,
+                    ECHO_METHOD,
                     RequestContext::root(),
                     &HttpMetadata::default(),
                     &json!({ "value": value }),

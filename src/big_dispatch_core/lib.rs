@@ -12,12 +12,10 @@
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use service_core_rs::ContextError;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeSet;
 
@@ -175,20 +173,10 @@ pub enum DispatchError {
     Provider { status: u16, body: Value },
 }
 
-macro_rules! operations {
-    ($($request:ident => $output:ty, $nsid:literal;)*) => {$(
-        impl Operation for $request {
-            type Output = $output;
-            type Error = DispatchError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::procedure(concat!("org.example.daybook.dispatch.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(DispatchError));
-        }
-    )*};
-}
-operations! {
-    Invoke => InvokeOutput, "invoke";
-    MintDispatchCapability => Capability, "mintCapability";
+method_core::methods! {
+    error = DispatchError, nsid_prefix = "org.example.daybook.dispatch.";
+    Invoke => InvokeOutput, procedure, "invoke";
+    MintDispatchCapability => Capability, procedure, "mintCapability";
 }
 
 declare_service_protocol! {
