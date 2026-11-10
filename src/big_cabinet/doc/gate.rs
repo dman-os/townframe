@@ -351,28 +351,32 @@ fn unreadable(error: ClaimHistoryError) -> Verdict {
 
 /// The version a set of datum heads names: those heads plus their Lamport
 /// clock (the greatest `max_op` among the introducing changes).
+///
+/// The clock comes from change metadata, not `get_change_by_hash`: the latter re-encodes the whole
+/// change by scanning the document's operations, which made a listing quadratic in its slots.
 pub(super) fn datum_version(doc: &Automerge, heads: Vec<ChangeHash>) -> DatumVersion {
     let clock = heads
         .iter()
-        .filter_map(|head| doc.get_change_by_hash(head))
-        .map(|change| change.max_op())
+        .filter_map(|head| doc.get_change_meta_by_hash(head))
+        .map(|change| change.max_op)
         .max()
         .unwrap_or(0);
     DatumVersion { heads, clock }
 }
 
-/// The introductions of the signature entries on `key` visible at `heads`, without verifying any of
-/// them. This is what a listing reports; reads report the verified subset.
+/// The introductions of the signature entries on `key` in `view`, without verifying any of them.
+/// This is what a listing reports; reads report the verified subset.
+///
+/// `view` must already be the document at the heads being listed: the caller passes the live
+/// document for current heads and a single `fork_at` for historical ones. Each `*_at` read in
+/// Automerge rebuilds a clock from the explicit heads, costing time proportional to the document,
+/// so calling them per slot made a listing quadratic in the slot count.
 ///
 /// Read failures are swallowed to "nothing here": a listing is deliberately unverified, so an
 /// unreadable container is reported as an absent slot rather than turned into a verification error.
-pub(super) fn signature_heads(
-    doc: &Automerge,
-    key: &DatumKey,
-    heads: &[ChangeHash],
-) -> Vec<ChangeHash> {
+pub(super) fn signature_heads(view: &Automerge, key: &DatumKey) -> Vec<ChangeHash> {
     let maps = |object: &automerge::ObjId, prop: &str| -> Vec<automerge::ObjId> {
-        doc.get_all_at(object, prop, heads)
+        view.get_all(object, prop)
             .unwrap_or_default()
             .into_iter()
             .filter(|(value, _)| matches!(value, Value::Object(ObjType::Map)))
@@ -385,18 +389,13 @@ pub(super) fn signature_heads(
         for dmeta in maps(&datums, DMETA_KEY) {
             for metadata in maps(&dmeta, "datums") {
                 for datum in maps(&metadata, &key) {
-                    for (value, list) in doc
-                        .get_all_at(&datum, "signatures", heads)
-                        .unwrap_or_default()
-                    {
+                    for (value, list) in view.get_all(&datum, "signatures").unwrap_or_default() {
                         if value != Value::Object(ObjType::List) {
                             continue;
                         }
-                        for index in 0..doc.length_at(&list, heads) {
-                            for (_, marker) in
-                                doc.get_all_at(&list, index, heads).unwrap_or_default()
-                            {
-                                found.extend(doc.hash_for_opid(&marker));
+                        for index in 0..view.length(&list) {
+                            for (_, marker) in view.get_all(&list, index).unwrap_or_default() {
+                                found.extend(view.hash_for_opid(&marker));
                             }
                         }
                     }
