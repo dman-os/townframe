@@ -26,7 +26,7 @@ pierre/src/components/FileStream.ts|398|PENDING|S10-S12||PORT as Dioxus componen
 pierre/src/components/UnresolvedFile.ts|940|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/components/VirtualizedFile.ts|1390|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
 pierre/src/components/VirtualizedFileDiff.ts|2452|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
-pierre/src/components/Virtualizer.ts|723|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/Virtualizer.ts|723|PORTED|S10|components/virtualizer.rs;../pierre_diffs_dioxus/host.rs;../pierre_diffs_dioxus/lib.rs|logic mirrors the class statement for statement against a `VirtualizerHost` trait (components/virtualizer.rs, oracle-tested against the published class under a scripted fake DOM); the web-sys host and the Dioxus `VirtualizerRoot`/hooks are the thin layer in pierre_diffs_dioxus (compile-checked only). Dev hooks (`__STOP`, `__INSTANCE`, `__TOGGLE`) not ported
 pierre/src/components/VirtulizerDevelopment.d.ts|13|OUT|-||OUT
 pierre/src/components/web-components.ts|39|OUT|-||OUT
 pierre/src/constants.ts|108|PORTED|S1|constants.rs;scanners.rs|values in constants.rs; the twelve RegExp constants are hand-written scanners in scanners.rs
@@ -97,7 +97,7 @@ pierre/src/index.ts|115|OUT|-||OUT
 pierre/src/managers/InteractionManager.ts|2510|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
 pierre/src/managers/ResizeManager.ts|494|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
 pierre/src/managers/ScrollSyncManager.ts|102|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
-pierre/src/managers/UniversalRenderingManager.ts|48|PENDING|S11-S12||PORT as Dioxus handlers/hooks (partial)
+pierre/src/managers/UniversalRenderingManager.ts|48|PORTED|S10|managers/universal_rendering_manager.rs|module-level queue state is a `UniversalRenderingManager` value over an `AnimationFrames` host; callbacks are not wrapped in try/catch
 pierre/src/react/CodeView.tsx|1106|OUT|-||OUT (framework adapter)
 pierre/src/react/EditContext.tsx|46|OUT|-||OUT (framework adapter)
 pierre/src/react/File.tsx|83|OUT|-||OUT (framework adapter)
@@ -157,7 +157,7 @@ pierre/src/utils/areRenderRangesEqual.ts|17|PENDING|-||PORT (Rust, oracle-tested
 pierre/src/utils/areSelectionPointsEqual.ts|9|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areSelectionsEqual.ts|14|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areThemesEqual.ts|17|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/areVirtualWindowSpecsEqual.ts|15|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areVirtualWindowSpecsEqual.ts|15|PORTED|S10|utils/are_virtual_window_specs_equal.rs|oracle-tested over undefined/equal/unequal pairs
 pierre/src/utils/areWorkerStatsEqual.ts|22|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/awaitWithTimeout.ts|19|OUT|-||OUT (Clay guest + wasm component replaces)
 pierre/src/utils/canUseWASM.ts|36|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
@@ -302,17 +302,17 @@ pierre/test/FileStream.test.ts|154|PENDING|-||not yet assigned to a slice; triag
 pierre/test/InjectedRowHooks.test.ts|240|PORTED|S6|renderers/injected_row_hooks_test.rs|two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer
 pierre/test/InteractionManager.gutterUtility.test.ts|1072|PENDING|S11||
 pierre/test/README.md|105|OUT|-||upstream test instructions (bun)
-pierre/test/UniversalRenderingManager.test.ts|156|PENDING|-||not yet assigned to a slice; triage in the owning slice
+pierre/test/UniversalRenderingManager.test.ts|156|PORTED|S10|managers/universal_rendering_manager_test.rs|all six cases; the module-level queue is a manager value; one added case pins clearRenderQueue
 pierre/test/UnresolvedFile.sequentialResolve.test.ts|241|DEFER|-||merge-conflict UI
 pierre/test/UnresolvedFile.workerRendering.test.ts|302|OUT|-||worker pool
 pierre/test/VirtualizedFile.fileSwap.test.ts|184|PENDING|S10||
 pierre/test/VirtualizedFile.setVisibility.test.ts|70|PENDING|S10||
 pierre/test/VirtualizedFileDiff.partialHydration.test.ts|866|PENDING|S10||
 pierre/test/VirtualizedFileDiff.setVisibility.test.ts|89|PENDING|S10||
-pierre/test/Virtualizer.offscreenPlaceholder.test.ts|602|PENDING|S10||
-pierre/test/Virtualizer.reconcileQueue.test.ts|55|PENDING|S10||
-pierre/test/Virtualizer.scrollState.test.ts|119|PENDING|S10||
-pierre/test/Virtualizer.strictMode.test.ts|120|PENDING|S10||
+pierre/test/Virtualizer.offscreenPlaceholder.test.ts|602|PENDING|S11||drives VirtualizedFile and VirtualizedFileDiff placeholders over jsdom; ports with S11
+pierre/test/Virtualizer.reconcileQueue.test.ts|55|PORTED|S10|components/virtualizer_reconcile_queue_test.rs|the one case; jsdom elements are FakeHost names, `wait(20)` is flushing fake frames
+pierre/test/Virtualizer.scrollState.test.ts|119|PORTED|S10|components/virtualizer_scroll_state_test.rs|both cases (element root, document root); scrollTo stubs are the FakeHost world
+pierre/test/Virtualizer.strictMode.test.ts|120|PENDING|S11||drives VirtualizedFileDiff hydrate/render/cleanUp over jsdom; ports with S11
 pierre/test/WorkerPoolManager.test.ts|709|OUT|-||worker pool
 pierre/test/WorkerPoolManager.workerErrorEvents.test.ts|180|OUT|-||worker pool
 pierre/test/__snapshots__/DiffHunksRender.test.ts.snap|132|PENDING|-||snapshot follows the test file it is named after; ported with it
@@ -332,7 +332,7 @@ pierre/test/computeLineOffsets.test.ts|102|PORTED|S4|utils/compute_file_offsets_
 pierre/test/createCachedLoader.test.ts|36|PENDING|-||not yet assigned to a slice; triage in the owning slice
 pierre/test/createFileHeaderElement.test.ts|60|PORTED|S5|utils/render/create_file_header_element_test.rs|all four cases; toMatchSnapshot replaced by exact comparison with the dist output (render_s5.json)
 pierre/test/diffAcceptRejectHunk.test.ts|669|DEFER|-||merge-conflict / edit flow
-pierre/test/domHarness.ts|414|PENDING|S10||jsdom harness; oracle-side only, replaced by Rust state assertions
+pierre/test/domHarness.ts|414|REPLACED|S10|fake_dom.rs|jsdom harness replaced by `FakeHost` (declared geometry, recording trace) and `FakeFrames` (explicitly flushed animation frames); installDom/createRoot/wait have no counterpart
 pierre/test/e2e/annotations.pw.ts|43|OUT|-||Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page
 pierre/test/e2e/check-playwright-binary.ts|14|OUT|-||Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page
 pierre/test/e2e/code-view-annotations.pw.ts|596|OUT|-||Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page

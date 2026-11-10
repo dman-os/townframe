@@ -2,6 +2,7 @@
 //! (snake_case of the upstream name).
 
 pub mod are_diff_targets_equal;
+pub mod are_virtual_window_specs_equal;
 pub mod clean_last_newline;
 pub mod clone_file_diff_metadata;
 pub mod compose_cache_key;
@@ -42,8 +43,6 @@ mod hydrate_partial_diff_test;
 mod is_addition_line_renderable_test;
 #[cfg(test)]
 mod iterate_over_diff_test;
-#[cfg(test)]
-mod layout_oracle_tests;
 #[cfg(test)]
 mod oracle_tests;
 #[cfg(test)]

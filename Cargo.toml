@@ -22,6 +22,7 @@ members = [
   "./src/daybook_types",
   "./src/macros",
   "./src/pierre_diffs",
+  "./src/pierre_diffs_dioxus",
   "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
@@ -128,6 +129,7 @@ clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }
 clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
+pierre_diffs = { path = "./src/pierre_diffs" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }

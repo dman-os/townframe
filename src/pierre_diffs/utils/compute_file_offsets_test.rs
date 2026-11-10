@@ -2,7 +2,7 @@
 // 75e00805b44e193c0fb235c1bd9d7fadfa06acf6): packages/diffs/test/computeLineOffsets.test.ts.
 // Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
 // Changes: bun:test to nextest; offsets are byte offsets (ASCII inputs here, so
-// they equal upstream's UTF-16 offsets; `utils::layout_oracle_tests` compares
+// they equal upstream's UTF-16 offsets; `utils::oracle_tests::layout_oracle_tests` compares
 // non-ASCII text in UTF-16 units against the published function).
 
 use crate::utils::compute_file_offsets::compute_line_offsets;

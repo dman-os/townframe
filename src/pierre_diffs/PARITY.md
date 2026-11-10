@@ -6,9 +6,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 81 | 19979 |
-| REPLACED | 9 | 1403 |
-| PENDING | 132 | 45607 |
+| PORTED | 87 | 21095 |
+| REPLACED | 10 | 1817 |
+| PENDING | 125 | 44077 |
 | OUT | 246 | 98243 |
 | DEFER | 16 | 5196 |
 
@@ -42,7 +42,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/components/UnresolvedFile.ts` | 940 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/components/VirtualizedFile.ts` | 1390 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
 | `pierre/src/components/VirtualizedFileDiff.ts` | 2452 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
-| `pierre/src/components/Virtualizer.ts` | 723 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
+| `pierre/src/components/Virtualizer.ts` | 723 | PORTED | S10 | `components/virtualizer.rs`, `../pierre_diffs_dioxus/host.rs`, `../pierre_diffs_dioxus/lib.rs` | logic mirrors the class statement for statement against a `VirtualizerHost` trait (components/virtualizer.rs, oracle-tested against the published class under a scripted fake DOM); the web-sys host and the Dioxus `VirtualizerRoot`/hooks are the thin layer in pierre_diffs_dioxus (compile-checked only). Dev hooks (`__STOP`, `__INSTANCE`, `__TOGGLE`) not ported |
 | `pierre/src/components/VirtulizerDevelopment.d.ts` | 13 | OUT | - |  | OUT |
 | `pierre/src/components/web-components.ts` | 39 | OUT | - |  | OUT |
 | `pierre/src/constants.ts` | 108 | PORTED | S1 | `constants.rs`, `scanners.rs` | values in constants.rs; the twelve RegExp constants are hand-written scanners in scanners.rs |
@@ -113,7 +113,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/managers/InteractionManager.ts` | 2510 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
 | `pierre/src/managers/ResizeManager.ts` | 494 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
 | `pierre/src/managers/ScrollSyncManager.ts` | 102 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
-| `pierre/src/managers/UniversalRenderingManager.ts` | 48 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
+| `pierre/src/managers/UniversalRenderingManager.ts` | 48 | PORTED | S10 | `managers/universal_rendering_manager.rs` | module-level queue state is a `UniversalRenderingManager` value over an `AnimationFrames` host; callbacks are not wrapped in try/catch |
 | `pierre/src/react/CodeView.tsx` | 1106 | OUT | - |  | OUT (framework adapter) |
 | `pierre/src/react/EditContext.tsx` | 46 | OUT | - |  | OUT (framework adapter) |
 | `pierre/src/react/File.tsx` | 83 | OUT | - |  | OUT (framework adapter) |
@@ -173,7 +173,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/areSelectionPointsEqual.ts` | 9 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areSelectionsEqual.ts` | 14 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areThemesEqual.ts` | 17 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areVirtualWindowSpecsEqual.ts` | 15 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/areVirtualWindowSpecsEqual.ts` | 15 | PORTED | S10 | `utils/are_virtual_window_specs_equal.rs` | oracle-tested over undefined/equal/unequal pairs |
 | `pierre/src/utils/areWorkerStatsEqual.ts` | 22 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/awaitWithTimeout.ts` | 19 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
 | `pierre/src/utils/canUseWASM.ts` | 36 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
@@ -318,17 +318,17 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/InjectedRowHooks.test.ts` | 240 | PORTED | S6 | `renderers/injected_row_hooks_test.rs` | two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer |
 | `pierre/test/InteractionManager.gutterUtility.test.ts` | 1072 | PENDING | S11 |  |  |
 | `pierre/test/README.md` | 105 | OUT | - |  | upstream test instructions (bun) |
-| `pierre/test/UniversalRenderingManager.test.ts` | 156 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
+| `pierre/test/UniversalRenderingManager.test.ts` | 156 | PORTED | S10 | `managers/universal_rendering_manager_test.rs` | all six cases; the module-level queue is a manager value; one added case pins clearRenderQueue |
 | `pierre/test/UnresolvedFile.sequentialResolve.test.ts` | 241 | DEFER | - |  | merge-conflict UI |
 | `pierre/test/UnresolvedFile.workerRendering.test.ts` | 302 | OUT | - |  | worker pool |
 | `pierre/test/VirtualizedFile.fileSwap.test.ts` | 184 | PENDING | S10 |  |  |
 | `pierre/test/VirtualizedFile.setVisibility.test.ts` | 70 | PENDING | S10 |  |  |
 | `pierre/test/VirtualizedFileDiff.partialHydration.test.ts` | 866 | PENDING | S10 |  |  |
 | `pierre/test/VirtualizedFileDiff.setVisibility.test.ts` | 89 | PENDING | S10 |  |  |
-| `pierre/test/Virtualizer.offscreenPlaceholder.test.ts` | 602 | PENDING | S10 |  |  |
-| `pierre/test/Virtualizer.reconcileQueue.test.ts` | 55 | PENDING | S10 |  |  |
-| `pierre/test/Virtualizer.scrollState.test.ts` | 119 | PENDING | S10 |  |  |
-| `pierre/test/Virtualizer.strictMode.test.ts` | 120 | PENDING | S10 |  |  |
+| `pierre/test/Virtualizer.offscreenPlaceholder.test.ts` | 602 | PENDING | S11 |  | drives VirtualizedFile and VirtualizedFileDiff placeholders over jsdom; ports with S11 |
+| `pierre/test/Virtualizer.reconcileQueue.test.ts` | 55 | PORTED | S10 | `components/virtualizer_reconcile_queue_test.rs` | the one case; jsdom elements are FakeHost names, `wait(20)` is flushing fake frames |
+| `pierre/test/Virtualizer.scrollState.test.ts` | 119 | PORTED | S10 | `components/virtualizer_scroll_state_test.rs` | both cases (element root, document root); scrollTo stubs are the FakeHost world |
+| `pierre/test/Virtualizer.strictMode.test.ts` | 120 | PENDING | S11 |  | drives VirtualizedFileDiff hydrate/render/cleanUp over jsdom; ports with S11 |
 | `pierre/test/WorkerPoolManager.test.ts` | 709 | OUT | - |  | worker pool |
 | `pierre/test/WorkerPoolManager.workerErrorEvents.test.ts` | 180 | OUT | - |  | worker pool |
 | `pierre/test/__snapshots__/DiffHunksRender.test.ts.snap` | 132 | PENDING | - |  | snapshot follows the test file it is named after; ported with it |
@@ -348,7 +348,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/createCachedLoader.test.ts` | 36 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/createFileHeaderElement.test.ts` | 60 | PORTED | S5 | `utils/render/create_file_header_element_test.rs` | all four cases; toMatchSnapshot replaced by exact comparison with the dist output (render_s5.json) |
 | `pierre/test/diffAcceptRejectHunk.test.ts` | 669 | DEFER | - |  | merge-conflict / edit flow |
-| `pierre/test/domHarness.ts` | 414 | PENDING | S10 |  | jsdom harness; oracle-side only, replaced by Rust state assertions |
+| `pierre/test/domHarness.ts` | 414 | REPLACED | S10 | `fake_dom.rs` | jsdom harness replaced by `FakeHost` (declared geometry, recording trace) and `FakeFrames` (explicitly flushed animation frames); installDom/createRoot/wait have no counterpart |
 | `pierre/test/e2e/annotations.pw.ts` | 43 | OUT | - |  | Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page |
 | `pierre/test/e2e/check-playwright-binary.ts` | 14 | OUT | - |  | Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page |
 | `pierre/test/e2e/code-view-annotations.pw.ts` | 596 | OUT | - |  | Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page |
@@ -499,7 +499,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `highlights/dist/highlights.wasm` | 0 | OUT | S7 |  | unmodified; run by the host behind `HighlightRecords` (pure crate, no engine). Fuel and per-call slicing are the host's concern |
 | `theming/dist/modules/createThemeResolver.js` | 116 | PORTED | S7 | `highlights/theming.rs` | synchronous resolver (no inflight/generation); the rest of @pierre/theming is not needed |
 
-## Assertions converted to invariants (21)
+## Assertions converted to invariants (24)
 
 | upstream test | title | conversion |
 |---|---|---|
@@ -524,8 +524,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/DiffHunksRendererLanguages.test.ts` | the bundled Terraform loader renders an ordinary .tf edit and provides its aliases | hasLoadedLanguages is `not disposed` for the bundled lexers; the aliases are checked against the highlights language table |
 | `pierre/test/DiffHunksRendererLanguages.test.ts` | asyncRender <lang> -> <lang>, cold/destination loaded (8 cases) | lazy grammar loading does not exist for the highlights backend; the four language pairs are one test each, asserting the grammars used by both sides |
 | `pierre/test/DiffHunksRendererLanguages.test.ts` | renderDiff loads the missing source grammar / hydrate preloads both grammars (4 cases) | async background loading, hydrate and onRenderUpdate are dropped (PARITY.md dropped branches) |
+| `pierre/test/UniversalRenderingManager.test.ts` | all cases | the module-level queue is a `UniversalRenderingManager` over `FakeFrames`; bun `mock()` is a call log of the times received |
+| `pierre/test/Virtualizer.reconcileQueue.test.ts` | requestHeightReconcile reconciles instances the pass did not repaint | jsdom root/content/container are FakeHost elements; `await wait(20)` flushes the fake frame queue |
+| `pierre/test/Virtualizer.scrollState.test.ts` | reads and restores an element / document root logical scroll position | jsdom `scrollTo` stubs and `window.scrollY` / `innerHeight` overrides are the FakeHost world; its `scrollTo` clamps to the scrollable range as a browser does (no assertion can tell: every target is in range or already clamped by the virtualizer); `toEqual` on recorded scroll calls compares the host trace |
 
-## Dropped branches (23)
+## Dropped branches (26)
 
 | upstream file | dropped | reason |
 |---|---|---|
@@ -552,3 +555,6 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `theming/dist/modules/createThemeResolver.js` | `inflight`, `cacheGeneration`, promise-returning `resolveTheme`/`resolveThemes`/`getResolvedOrResolveTheme`, `unwrapDefault` | loaders are synchronous here, so there is nothing in flight and no module `default` to unwrap |
 | `pierre/src/highlighter/themes/themeResolver.ts` | the TextMate/Shiki branch (`createCssVariablesTheme`, `normalizeTheme`, `@pierre/theming/themes`, `registerCustomTheme` textmate/diffs loaders), `isWorkerContext` guard, `createCachedLoader`, async catalogs | Shiki backend is not ported; the highlights catalog is the two bundled Pierre themes |
 | `pierre/src/highlighter/backends/highlights.ts` | `createEditorTokenizer`, `createStreamTokenizer`, `loadLanguages`, `attachLanguages`, `releaseResources` beyond clearing used themes, `acquireHighlighterType` refcount | editor/stream tokenizers and async loading are out; bundled lexers are always loaded |
+| `pierre/src/components/Virtualizer.ts` | `Virtualizer.__STOP`, `__lastScrollPosition`, `window.__INSTANCE`, `window.__TOGGLE` and the `__STOP` early returns of the scroll/resize/render handlers | development hooks that upstream marks "Remove me before release"; they are window globals with no mapping |
+| `pierre/src/components/Virtualizer.ts` | `target instanceof HTMLElement` throw in `handleIntersectionChange`, `contentContainer instanceof HTMLElement`, `line instanceof HTMLElement` | type-level in Rust: the host hands over elements only (the web host downcasts and panics on a non-HTMLElement target) |
+| `pierre/src/managers/UniversalRenderingManager.ts` | try/catch + `console.error` around each queued callback | a panicking render callback propagates; a render callback failing is an invariant break |
