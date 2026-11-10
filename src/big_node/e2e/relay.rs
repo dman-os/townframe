@@ -95,3 +95,60 @@ async fn a_relay_access_member_holds_a_drawer_it_cannot_read() {
     );
     cluster.stop_all().await;
 }
+
+/// The phone is linked only to the relay, and dev is stopped before the phone reads: the note and
+/// the phone's own membership both reach it through the relay.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_reads_a_drawer_through_a_relay_while_the_dev_node_is_offline() {
+    let mut cluster = Cluster::boot_with(&["dev", "relay", "phone"], relay_policy).await;
+    cluster.connect(Topology::Line).await;
+    let drawer = cluster.share_drawer(0, &[]).await;
+    let note = cluster
+        .create_note(0, &drawer, "written on the dev machine")
+        .await;
+
+    let dev = cluster.node(0);
+    dev.drawers
+        .client
+        .call(
+            RequestContext::root(),
+            InvitePrincipal {
+                capability: super::blobs::drawer_cap(dev, &drawer.id).await,
+                drawer_id: drawer.id.clone(),
+                principal: Principal::Peer {
+                    peer_id: GroupKey(cluster.node(1).repo.local_peer_id().to_bytes32().unwrap()),
+                },
+                access: Access::Relay,
+            },
+        )
+        .await
+        .unwrap();
+    cluster.admit(0, 2, &drawer.id, Access::Read).await;
+
+    // The relay holds the note's bytes before dev goes away.
+    cluster
+        .until(async |cluster| {
+            cluster
+                .node(1)
+                .repo
+                .contains_sedimentree_id(note.clone())
+                .await
+                .unwrap()
+        })
+        .await;
+    cluster.stop(0).await;
+
+    cluster
+        .until(async |cluster| cluster.read_note(2, &note).await.is_some())
+        .await;
+    assert_eq!(
+        cluster
+            .read_note(2, &note)
+            .await
+            .unwrap()
+            .text("main")
+            .as_deref(),
+        Some("written on the dev machine")
+    );
+    cluster.stop_all().await;
+}

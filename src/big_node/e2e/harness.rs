@@ -52,6 +52,9 @@ const BLOBS: &str = "plaintext";
 pub(super) enum Topology {
     /// Node 0 dials node 1.
     Pair,
+    /// Node 0 dials node 1, which dials node 2: the ends reach each other only through the
+    /// middle node.
+    Line,
     /// Every pair, the lower index dialing.
     Mesh,
 }
@@ -62,6 +65,10 @@ impl Topology {
             Self::Pair => {
                 assert_eq!(nodes, 2, "a pair is two nodes");
                 vec![(0, 1)]
+            }
+            Self::Line => {
+                assert_eq!(nodes, 3, "a line is three nodes");
+                vec![(0, 1), (1, 2)]
             }
             Self::Mesh => (0..nodes)
                 .flat_map(|from| (from + 1..nodes).map(move |to| (from, to)))
