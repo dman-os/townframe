@@ -29,19 +29,30 @@ daybook_types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-dioxus-native = { workspace = true, features = ["scrollbars"] }
-anyrender = { version = "0.13.0" }
-anyrender_vello = { version = "0.14.0" }
-anyrender_vello_cpu = { version = "0.17.0" }
-anyrender_vello_hybrid = { version = "0.10.0" }
+dioxus-native = { workspace = true, features = ["scrollbars"], optional = true }
+anyrender = { version = "0.13.0", optional = true }
+anyrender_vello = { version = "0.14.0", optional = true }
+anyrender_vello_cpu = { version = "0.17.0", optional = true }
+anyrender_vello_hybrid = { version = "0.10.0", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Blitz disables xplat defaults; explicitly enable the Unix backend and its executor.
-accesskit_xplat = "0.2.1"
+accesskit_xplat = { version = "0.2.1", optional = true }
 
 [features]
 default = ["desktop"]
+# The shipping renderer: the shell in a system webview (Wry).
 desktop = ["dioxus/desktop"]
+# Blitz, opt-in: `x/dayframe.ts desktop --native` builds it without the default features.
+native = [
+    "dioxus/native",
+    "dep:dioxus-native",
+    "dep:anyrender",
+    "dep:anyrender_vello",
+    "dep:anyrender_vello_cpu",
+    "dep:anyrender_vello_hybrid",
+    "dep:accesskit_xplat",
+]
 
 [dev-dependencies]
 ciborium.workspace = true

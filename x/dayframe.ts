@@ -10,8 +10,8 @@ const [command, ...rest] = Deno.args;
 
 const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
 
-  desktop     build the Wasm packages and run the native desktop shell
-                --webview        webview renderer (AT-SPI interaction checks)
+  desktop     build the Wasm packages and run the desktop shell in a webview (Wry)
+                --native         the Blitz renderer instead
                 --fresh          start from an empty store in a new temp file
                 --store <path>   use this store file (DAYFRAME_STORE_PATH)
   web         build and serve dayframe_web (--build: build only)
@@ -54,8 +54,15 @@ switch (command) {
     await dx(
       "-p",
       "dayframe_desktop",
-      "--renderer",
-      flag("--webview") ? "webview" : "native",
+      ...(flag("--native")
+        ? [
+          "--renderer",
+          "native",
+          "--no-default-features",
+          "--features",
+          "native",
+        ]
+        : ["--renderer", "webview"]),
       "--hot-patch",
       "false",
     ).env(env);
