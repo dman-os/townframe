@@ -69,7 +69,6 @@ switch (command) {
     break;
   }
   case "android": {
-    await useDotenvTargetDir();
     const guestProfileFlag = rest.indexOf("--guest-profile");
     const guestProfile = guestProfileFlag >= 0
       ? rest[guestProfileFlag + 1]
