@@ -154,7 +154,7 @@ pub(super) fn keyed_map(object: &Map<String, Value>) -> Result<Option<&Value>, &
 }
 
 /// A shape whose storage in a document is not its JSON form — with one exception: a reference is
-/// a string on both sides, and its marker declares what the string *is* (a `db+datum:` address)
+/// a string on both sides, and its marker declares what the string *is* (a `dtxt:datum:` address)
 /// so that a malformed one is refused on write and the reference index can find every declared
 /// position from the schema alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,8 +173,9 @@ pub enum Codec {
     Uint,
     Datetime,
     /// A datum reference: a string in the document and in JSON, which must parse as a
-    /// [`crate::DatumReference`]. An optional `refHeads` sibling of the marked member pins the
-    /// referenced datum's frontier (ADR 021).
+    /// [`crate::DatumReference`] in its stored form, without a query. An optional `refHeads` sibling
+    /// of the marked member pins the referenced datum's frontier as multibase base58btc heads
+    /// (ADR 021, ADR 035 §2.8).
     Reference,
 }
 
@@ -388,7 +389,7 @@ impl Codec {
                 }),
             Codec::Reference => match value.as_str() {
                 Some(stated) => {
-                    crate::DatumReference::parse(stated)
+                    crate::DatumReference::parse_stored(stated)
                         .map(|_| ())
                         .map_err(|reason| CodecError::NotADatumReference {
                             stated: stated.to_owned(),
@@ -397,7 +398,7 @@ impl Codec {
                 }
                 None => Err(CodecError::NotADatumReference {
                     stated: kind(value).to_owned(),
-                    reason: "a datum reference is a `db+datum:` address string".to_owned(),
+                    reason: "a datum reference is a `dtxt:datum:` address string without a query".to_owned(),
                 }),
             },
             Codec::Counter => value
@@ -553,7 +554,7 @@ pub enum CodecError {
     #[error("this position is stored as text, so it is a string, not {found}")]
     NotAText { found: &'static str },
 
-    /// the position is declared a datum reference, and the value is not a `db+datum:` address
+    /// the position is declared a datum reference, and the value is not a `dtxt:datum:` address
     #[error("this position is declared a datum reference, and {stated} is not one: {reason}")]
     NotADatumReference { stated: String, reason: String },
 

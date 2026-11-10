@@ -340,6 +340,7 @@ pub struct BranchPath {
 #[serde(rename_all = "camelCase")]
 pub struct BranchOrigin {
     pub datum_ref: crate::DatumReference,
+    #[serde(with = "crate::reference::head_list")]
     #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub ref_heads: Vec<automerge::ChangeHash>,
     #[serde(flatten)]

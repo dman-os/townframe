@@ -68,7 +68,7 @@ fn note_linking(text: &str, target_doc: &DocId) -> (DatumKey, Value) {
         json!({
             "$type": NOTE,
             "value": text,
-            "link": format!("db+datum:/{target_doc}/{NOTE}/main"),
+            "link": format!("dtxt:datum:{target_doc}/{NOTE}/main"),
         }),
     )
 }

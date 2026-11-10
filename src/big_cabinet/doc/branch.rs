@@ -8,6 +8,9 @@ use super::pipeline::Failure;
 use super::pipeline::Plan;
 use super::pipeline::digest;
 use super::*;
+use big_cabinet_core::DatumReference;
+use big_cabinet_core::ReferenceDocId;
+use big_cabinet_core::reference::head_text;
 
 impl DocsService {
     async fn branch(
@@ -89,8 +92,12 @@ impl DocsService {
         let branch_value = serde_json::json!({
             "path": params.path,
             "from": {
-                "datumRef": format!("db+datum:/{}/{}", params.doc_id, branch_key(&params.doc_id)),
-                "refHeads": sorted(fork.get_heads()),
+                "datumRef": DatumReference::new(
+                    ReferenceDocId::Concrete(params.doc_id.clone()),
+                    branch_key(&params.doc_id),
+                )
+                .to_string(),
+                "refHeads": sorted(fork.get_heads()).iter().map(head_text).collect::<Vec<_>>(),
             },
         });
         let mut plan = Plan {

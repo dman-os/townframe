@@ -214,7 +214,7 @@ fn blob_known_and_future_fields_survive_the_full_codec_chain() {
         "lengthOctets": 4,
         "digest": BlobId::new([3; 32]).digest_str(),
         "inline": [0, 1, 2, 255],
-        "urls": ["db+blob:///zContent", "future+blob:unrecognized"],
+        "urls": ["dtxt:blob:zContent", "https://example.invalid/unrecognized"],
         "futureField": {"entries": [null, true, "untouched"], "fraction": "1.25"}
     }));
     codec_round_trip::<Blob>(json!({
@@ -241,7 +241,7 @@ fn cipher_value() -> Value {
     json!({
         "representation": {"digest": BlobId::new([9; 32]).digest_str(), "lengthOctets": 125337},
         "contentEncoding": "aes128gcm",
-        "keyRef": "db+facet:/zKeyDocument/org.example.daybook.jwk/relay",
+        "keyRef": "dtxt:datum:zKeyDocument/org.example.daybook.jwk/relay",
         "keyRefHeads": ["a".repeat(64), "b".repeat(64)],
         "encodingParameters": {"recordSize": 65536, "padding": "padme"}
     })
@@ -258,7 +258,7 @@ fn cipher_blob_preserves_uri_heads_and_future_codec_without_interpreting_them() 
     let mut future = cipher_value();
     future["representation"]["futureLocation"] = json!({"shards": ["first", "second"]});
     future["contentEncoding"] = json!("future-encoding");
-    future["keyRef"] = json!("future+key:opaque-key-reference");
+    future["keyRef"] = json!("urn:example:opaque-key-reference");
     future["encodingParameters"] = json!({
         "recordSize": 32768,
         "padding": "future-padding",

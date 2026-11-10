@@ -2,7 +2,7 @@
 //!
 //! A reference is a string the schema marks with the `reference` storage form, so extraction is a
 //! co-walk of value and schema like the codec's own: only a declared position produces an edge,
-//! and a string that happens to spell a `db+datum:` address where nothing declares a reference is
+//! and a string that happens to spell a `dtxt:datum:` address where nothing declares a reference is
 //! data, not a reference. The value was checked on the way in; what a peer wrote may not have
 //! been, so a position whose schema does not resolve for the value, and a string that does not
 //! parse, are skipped rather than refusing the rest of the walk.
@@ -14,6 +14,7 @@ use super::walk::Kind;
 use super::walk::Position;
 use super::walk::discriminant_matches;
 use crate::DatumReference;
+use crate::reference::parse_head;
 use automerge::ChangeHash;
 use serde_json::Value;
 
@@ -81,7 +82,7 @@ fn references<'a>(
     if let Ok(Some(codec)) = Codec::of(schema) {
         if codec == Codec::Reference
             && let Some(stated) = value.as_str()
-            && let Ok(reference) = DatumReference::parse(stated)
+            && let Ok(reference) = DatumReference::parse_stored(stated)
         {
             found.push(DeclaredReference {
                 path: pointer(path),
@@ -125,7 +126,7 @@ fn references<'a>(
     }
 }
 
-/// The pin a sibling `refHeads` states: an array of change-hash hex strings. Anything else, and
+/// The pin a sibling `refHeads` states: an array of multibase base58btc heads. Anything else, and
 /// any entry that does not parse, is not a pin.
 fn ref_heads(stated: Option<&Value>) -> Vec<ChangeHash> {
     stated
@@ -134,7 +135,7 @@ fn ref_heads(stated: Option<&Value>) -> Vec<ChangeHash> {
             heads
                 .iter()
                 .filter_map(Value::as_str)
-                .filter_map(|head| head.parse().ok())
+                .filter_map(|head| parse_head(head).ok())
                 .collect()
         })
         .unwrap_or_default()
@@ -169,12 +170,12 @@ fn pointer(path: &[Segment<'_>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reference::head_text;
     use schemars::JsonSchema;
     use serde::Deserialize;
     use serde::Serialize;
     use serde_json::json;
     use std::collections::BTreeMap;
-    use std::str::FromStr;
 
     #[macros::datum(authority = "org.example", closed)]
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -209,7 +210,7 @@ mod tests {
     }
 
     fn reference(suffix: &str) -> String {
-        format!("db+datum:/self/org.example.note/{suffix}")
+        format!("dtxt:datum:self/org.example.note/{suffix}")
     }
 
     #[test]
@@ -221,7 +222,10 @@ mod tests {
 
     #[test]
     fn extraction_finds_declared_positions_with_paths_and_pins() {
-        let heads = vec!["a".repeat(64), "b".repeat(64)];
+        let heads = vec![
+            head_text(&ChangeHash([1; 32])),
+            head_text(&ChangeHash([2; 32])),
+        ];
         let value = json!({
             "link": reference("main"),
             "refHeads": heads,
@@ -242,10 +246,7 @@ mod tests {
         );
         assert_eq!(
             by_path["/link"].heads,
-            vec![
-                ChangeHash::from_str(&"a".repeat(64)).unwrap(),
-                ChangeHash::from_str(&"b".repeat(64)).unwrap()
-            ]
+            vec![ChangeHash([1; 32]), ChangeHash([2; 32])]
         );
         assert_eq!(by_path["/nested/inner"].path, "/nested/inner");
         assert_eq!(by_path["/listed/0"].path, "/listed/0");
@@ -271,7 +272,7 @@ mod tests {
             "datum".into(),
             json!({
                 "link": reference("main"),
-                "refHeads": ["a".repeat(64)],
+                "refHeads": [head_text(&ChangeHash([1; 32]))],
                 "nested": {"inner": reference("inner")},
                 "listed": [],
                 "mapped": {},
@@ -309,7 +310,7 @@ mod tests {
 
         let value = json!({
             "link": reference("main"),
-            "refHeads": ["not hex at all"],
+            "refHeads": ["not a multibase head"],
             "nested": {"inner": reference("inner")},
             "maybe": null,
         });

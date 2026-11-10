@@ -584,19 +584,10 @@ fn reference_from_read(route: &DatumRoute, datum: DatumRead) -> Prepared {
 }
 
 fn plaintext_blob_id(blob: &Blob) -> Option<BlobId> {
-    blob.digest.parse().ok().or_else(|| {
-        blob.urls
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .find_map(|text| {
-                let url = text.parse::<url::Url>().ok()?;
-                if !matches!(url.scheme(), "db+blob" | "daybook-blob") {
-                    return None;
-                }
-                url.path().trim_start_matches('/').parse().ok()
-            })
-    })
+    blob.digest
+        .parse()
+        .ok()
+        .or_else(|| crate::documents::url_blob_id(blob))
 }
 
 #[cfg(test)]

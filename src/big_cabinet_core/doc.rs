@@ -416,6 +416,7 @@ pub struct QueriedDatumRef {
     pub path: String,
     pub target_doc_id: DocId,
     pub target_datum_key: DatumKey,
+    #[serde(with = "crate::reference::head_list")]
     #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub ref_heads: Vec<ChangeHash>,
 }

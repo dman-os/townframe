@@ -1163,7 +1163,7 @@ fn a_value_the_gate_does_not_accept_publishes_no_edges() {
     tx.put(
         &unsigned,
         "link",
-        format!("db+datum:/{}/{NOTE}/main", DocId::new([2; 32])),
+        format!("dtxt:datum:{}/{NOTE}/main", DocId::new([2; 32])),
     )
     .unwrap();
     tx.commit();

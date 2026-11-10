@@ -240,13 +240,13 @@ fn digest_is_authoritative_with_legacy_url_fallback_only_when_invalid() -> Res<(
             &route,
             accepted(
                 primary.digest_str(),
-                vec![format!("db+blob:///{fallback}")],
+                vec![format!("dtxt:blob:{fallback}")],
                 42,
             ),
         ),
         Prepared::Ready(Some(reference(&route, primary)))
     );
-    for scheme in ["db+blob", "daybook-blob"] {
+    for prefix in ["dtxt:blob:", "daybook-blob:///"] {
         for spelling in [fallback.digest_str(), fallback.to_string()] {
             assert_eq!(
                 reference_from_read(
@@ -256,7 +256,7 @@ fn digest_is_authoritative_with_legacy_url_fallback_only_when_invalid() -> Res<(
                         vec![
                             "not a url".into(),
                             format!("https://example.invalid/{primary}"),
-                            format!("{scheme}:///{spelling}?via=mirror"),
+                            format!("{prefix}{spelling}"),
                         ],
                         42,
                     ),

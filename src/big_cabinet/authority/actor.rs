@@ -15,6 +15,7 @@ use super::cap::Chain;
 use super::cap::State;
 use super::store::ActorRow;
 use super::store::SealedKey;
+use big_cabinet_core::ActorUrl;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Attribution;
@@ -26,8 +27,6 @@ use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use rand::RngCore;
 use zeroize::Zeroizing;
-
-const ACTOR_URL_SCHEME: &str = "db+actor://";
 
 pub(super) fn recognize(
     state: &State,
@@ -47,10 +46,12 @@ pub(super) fn key_text(public_key: &ActorPublicKey) -> Result<MultibaseKey, Auth
     MultibaseKey::try_from(public_key.as_slice()).map_err(Into::into)
 }
 
-/// `db+actor://<node key>/<path>`. The operator's path is empty, so its URL is
-/// the node root, and every other actor's path names its whole ancestry.
+/// `dtxt:actor:<node key>[/<path>]`. The operator's path is empty, so its URL is
+/// the bare node key, and every other actor's path names its whole ancestry.
 pub(super) fn actor_url(node: &ActorPublicKey, path: &str) -> Result<String, AuthorityError> {
-    Ok(format!("{ACTOR_URL_SCHEME}{}/{path}", key_text(node)?))
+    Ok(ActorUrl::new(key_text(node)?, path)
+        .map_err(|_| AuthorityError::InvalidActorPath)?
+        .to_string())
 }
 
 /// A child's path is its parent's path plus exactly one segment, so a path

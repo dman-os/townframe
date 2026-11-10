@@ -236,10 +236,10 @@ async fn boot_hosts_a_service_whose_root_is_the_operators_actor_capability() {
         }
     );
     let operator = test.actor_of(test.root()).await.expect("operator");
-    // The operator is the root of the path hierarchy: its URL is the node root.
+    // The operator is the root of the path hierarchy: its URL is the bare node key.
     assert_eq!(
         operator.url,
-        format!("db+actor://{}/", test.authority.node_issuer)
+        format!("dtxt:actor:{}", test.authority.node_issuer)
     );
     assert_eq!(operator.parent_actor_id, None);
     assert_eq!(
@@ -267,7 +267,7 @@ async fn an_opened_actor_carries_a_verifiable_attribution_certificate() {
     let actor = test.subsystem("docs").await;
     assert_eq!(
         actor.actor.url,
-        format!("db+actor://{}/docs", test.authority.node_issuer)
+        format!("dtxt:actor:{}/docs", test.authority.node_issuer)
     );
     assert_eq!(
         actor.actor.parent_actor_id,

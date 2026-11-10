@@ -1,11 +1,15 @@
-//! Canonical, schema-independent addresses for datum keys.
+//! `dtxt:` URLs: `dtxt:<kind>:<opaque path>[?heads=…][#fragment]` (ADR 035).
 //!
 //! A [`DatumReference`] is only an address. Parsing it does not check whether a
-//! document or datum exists, is retained, is readable, or is reachable.
+//! document or datum exists, is retained, is readable, or is reachable. The path after
+//! the kind is opaque (nothing follows the scheme's colon with `/`), so no URL parser
+//! normalizes it and this module parses it itself.
 
 use std::fmt;
 use std::str::FromStr;
 
+use crate::dmeta::MultibaseKey;
+use automerge::ChangeHash;
 use big_sync_core::ObjKey;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -13,9 +17,12 @@ use serde::Serialize;
 use serde::Serializer;
 use unicode_properties::GeneralCategory;
 use unicode_properties::UnicodeGeneralCategory;
-use url::Url;
 
-pub const DATUM_REFERENCE_SCHEME: &str = "db+datum";
+pub const REFERENCE_SCHEME: &str = "dtxt";
+const DATUM_KIND: &str = "datum";
+const ACTOR_KIND: &str = "actor";
+/// The only query key defined (ADR 035): the document heads a reference was made at.
+const HEADS_KEY: &str = "heads";
 pub const SELF_DOC: &str = "self";
 
 /// Unicode data used when serializing canonical Go-style datum references.
@@ -60,8 +67,7 @@ impl DatumTag {
     ///
     /// Tags are intentionally not restricted to an NSID or to ASCII. The only
     /// structural restrictions here are the ones required by the reference
-    /// grammar: the component is non-empty, contains no slash, and is not a
-    /// URL dot segment.
+    /// grammar: the component is non-empty and contains no slash.
     pub fn new(value: impl Into<String>) -> Result<Self, ReferenceError> {
         let value = value.into();
         if value.is_empty() {
@@ -69,9 +75,6 @@ impl DatumTag {
         }
         if value.contains('/') {
             return Err(ReferenceError::InvalidDatumTag(value));
-        }
-        if value == "." || value == ".." {
-            return Err(ReferenceError::DotSegment);
         }
         Ok(Self(value))
     }
@@ -265,16 +268,58 @@ impl ReferenceDocId {
     }
 }
 
-/// A schema-independent address for one datum key.
+/// A schema-independent address for one datum, optionally pinned to a version of its document.
+///
+/// Text form: `dtxt:datum:<doc>/<tag>/<slot>[?heads=<head>|<head>…]` (ADR 035). A reference
+/// inside a datum value holds the text without its query and keeps the pin in the sibling
+/// `refHeads` member; [`Self::parse_stored`] and the serde impls are that stored form, and
+/// [`fmt::Display`] and [`Self::parse`] are the text form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DatumReference {
     document: ReferenceDocId,
     key: DatumKey,
+    /// Sorted and deduplicated; empty follows the document's current frontier.
+    heads: Vec<ChangeHash>,
+}
+
+/// A position inside a datum: a [`DatumReference`] plus an optional fragment. Annotation targets
+/// and other selectors take this; APIs that take a whole datum take a [`DatumReference`] and so
+/// refuse a fragment. A location without a fragment is the whole datum.
+///
+/// The fragment is kept as the text after `#`. Its grammar (automerge-repo's path grammar, ADR
+/// 035) is interpreted by the target's type, so it is checked to be well-formed URL text but not
+/// resolved here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Location {
+    reference: DatumReference,
+    fragment: Option<String>,
+}
+
+/// `dtxt:actor:<node key>[/<path>]`: an actor's identity inside signed attribution
+/// certificates (ADR 035 §3, ADR 022). The operator's path is empty, so its URL is the bare node
+/// key; every other actor's path names its whole ancestry. It has no query or fragment.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ActorUrl {
+    node_key: MultibaseKey,
+    path: String,
 }
 
 impl DatumReference {
-    pub fn new(document: ReferenceDocId, key: DatumKey) -> Result<Self, ReferenceError> {
-        Ok(Self { document, key })
+    pub fn new(document: ReferenceDocId, key: DatumKey) -> Self {
+        Self {
+            document,
+            key,
+            heads: Vec::new(),
+        }
+    }
+
+    /// The same address pinned to `heads`.
+    #[must_use]
+    pub fn pinned(mut self, heads: impl IntoIterator<Item = ChangeHash>) -> Self {
+        self.heads = heads.into_iter().collect();
+        self.heads.sort();
+        self.heads.dedup();
+        self
     }
 
     pub fn document(&self) -> &ReferenceDocId {
@@ -285,52 +330,31 @@ impl DatumReference {
         &self.key
     }
 
-    /// Parse untrusted text without allowing `Url` to normalize the key tail.
+    pub fn heads(&self) -> &[ChangeHash] {
+        &self.heads
+    }
+
+    /// Parse the text form. Non-canonical input (unsorted heads, lowercase percent escapes, a
+    /// scheme in capitals) is accepted and canonicalized; a fragment is refused, see [`Location`].
     pub fn parse(value: &str) -> Result<Self, ReferenceError> {
-        let (scheme, remainder) = value
-            .split_once(':')
-            .ok_or_else(|| ReferenceError::InvalidReference(value.to_owned()))?;
-        if !scheme.eq_ignore_ascii_case(DATUM_REFERENCE_SCHEME) {
-            return Err(ReferenceError::WrongScheme(scheme.to_owned()));
+        let location = Location::parse(value)?;
+        if location.fragment.is_some() {
+            return Err(ReferenceError::FragmentNotAllowed);
         }
-        let (path, suffix) = split_uri_suffix(remainder);
-        if suffix.is_some() {
-            return Err(ReferenceError::QueryOrFragmentNotAllowed);
-        }
-        let path = path.strip_prefix('/').ok_or(ReferenceError::MissingPath)?;
-        if path.starts_with('/') {
-            return Err(ReferenceError::AuthorityNotAllowed);
-        }
-        reject_dot_segments(path)?;
-        Self::parse_path(path)
+        Ok(location.reference)
     }
 
-    /// Parse an already-constructed URL.
-    ///
-    /// Call [`Self::parse`] for untrusted text: a `Url` has already discarded
-    /// the original spelling of any dot segments it normalized.
-    pub fn parse_url(url: &Url) -> Result<Self, ReferenceError> {
-        if url.scheme() != DATUM_REFERENCE_SCHEME {
-            return Err(ReferenceError::WrongScheme(url.scheme().to_owned()));
+    /// Parse the stored form: the text without its query, because the pin lives in the sibling
+    /// `refHeads` member.
+    pub fn parse_stored(value: &str) -> Result<Self, ReferenceError> {
+        let reference = Self::parse(value)?;
+        if !reference.heads.is_empty() {
+            return Err(ReferenceError::PinInStoredReference);
         }
-        if url.host_str().is_some() || !url.username().is_empty() || url.port().is_some() {
-            return Err(ReferenceError::AuthorityNotAllowed);
-        }
-        if url.query().is_some() || url.fragment().is_some() {
-            return Err(ReferenceError::QueryOrFragmentNotAllowed);
-        }
-        let path = url
-            .path()
-            .strip_prefix('/')
-            .ok_or(ReferenceError::MissingPath)?;
-        if path.starts_with('/') {
-            return Err(ReferenceError::AuthorityNotAllowed);
-        }
-        reject_dot_segments(path)?;
-        Self::parse_path(path)
+        Ok(reference)
     }
 
-    fn parse_path(path: &str) -> Result<Self, ReferenceError> {
+    fn parse_path(path: &str) -> Result<(ReferenceDocId, DatumKey), ReferenceError> {
         let (document, remainder) = path.split_once('/').ok_or(ReferenceError::MissingDoc)?;
         let (tag, key_tail) = remainder
             .split_once('/')
@@ -351,54 +375,57 @@ impl DatumReference {
                 DocId::from_str(&document).map_err(|_| ReferenceError::InvalidDocId(document))?,
             )
         };
-
-        Ok(Self { document, key })
+        Ok((document, key))
     }
 
-    /// Return the canonical authorityless URI text.
-    pub fn to_uri_string(&self) -> Result<String, ReferenceError> {
+    fn write_path(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let document = match &self.document {
             ReferenceDocId::Concrete(document) => document.to_string(),
             ReferenceDocId::SelfDoc => SELF_DOC.to_owned(),
         };
-        let tag = encode_uri_component(self.key.tag.as_str().as_bytes(), false);
-        let key = encode_uri_component(go_string_escape(self.key.slot_bytes()).as_bytes(), true);
-        Ok(format!(
-            "{DATUM_REFERENCE_SCHEME}:/{}/{}/{}",
+        write!(
+            formatter,
+            "{REFERENCE_SCHEME}:{DATUM_KIND}:{}/{}/{}",
             encode_uri_component(document.as_bytes(), false),
-            tag,
-            key
-        ))
-    }
-
-    /// Return a URL only when the URL type preserves the canonical URI text.
-    ///
-    /// The `url` crate performs path normalization while parsing. Returning an
-    /// error instead of a normalized URL prevents a caller from losing identity.
-    pub fn to_url(&self) -> Result<Url, ReferenceError> {
-        let value = self.to_uri_string()?;
-        let url = Url::parse(&value).map_err(|source| ReferenceError::InvalidUri {
-            value: value.clone(),
-            source,
-        })?;
-        if url.as_str() != value {
-            return Err(ReferenceError::UrlNormalization {
-                value,
-                normalized: url.to_string(),
-            });
+            encode_uri_component(self.key.tag.as_str().as_bytes(), false),
+            encode_uri_component(go_string_escape(self.key.slot_bytes()).as_bytes(), true),
+        )?;
+        if !self.heads.is_empty() {
+            let mut heads = self.heads.iter().map(head_text).collect::<Vec<_>>();
+            heads.sort();
+            write!(formatter, "?{HEADS_KEY}={}", heads.join("|"))?;
         }
-        Ok(url)
+        Ok(())
     }
 }
 
+impl fmt::Display for DatumReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write_path(formatter)
+    }
+}
+
+impl FromStr for DatumReference {
+    type Err = ReferenceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+/// The stored form. A pinned reference cannot be serialized as one string: its pin belongs in
+/// the sibling `refHeads` member, and dropping it silently would change what the reference means.
 impl Serialize for DatumReference {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        self.to_uri_string()
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
+        if !self.heads.is_empty() {
+            return Err(serde::ser::Error::custom(
+                ReferenceError::PinInStoredReference,
+            ));
+        }
+        serializer.collect_str(self)
     }
 }
 
@@ -408,27 +435,267 @@ impl<'de> Deserialize<'de> for DatumReference {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::parse(&value).map_err(serde::de::Error::custom)
+        Self::parse_stored(&value).map_err(serde::de::Error::custom)
     }
+}
+
+impl Location {
+    pub fn new(
+        reference: DatumReference,
+        fragment: Option<String>,
+    ) -> Result<Self, ReferenceError> {
+        if let Some(fragment) = &fragment {
+            validate_fragment(fragment)?;
+        }
+        Ok(Self {
+            reference,
+            fragment,
+        })
+    }
+
+    pub fn reference(&self) -> &DatumReference {
+        &self.reference
+    }
+
+    pub fn fragment(&self) -> Option<&str> {
+        self.fragment.as_deref()
+    }
+
+    pub fn parse(value: &str) -> Result<Self, ReferenceError> {
+        let rest = strip_scheme_and_kind(value, DATUM_KIND)?;
+        let (before_fragment, fragment) = match rest.split_once('#') {
+            Some((before, fragment)) => (before, Some(fragment)),
+            None => (rest, None),
+        };
+        let (path, query) = match before_fragment.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (before_fragment, None),
+        };
+        let (document, key) = DatumReference::parse_path(path)?;
+        let heads = query
+            .map(parse_heads_query)
+            .transpose()?
+            .unwrap_or_default();
+        let reference = DatumReference::new(document, key).pinned(heads);
+        Self::new(reference, fragment.map(str::to_owned))
+    }
+}
+
+impl fmt::Display for Location {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.reference.write_path(formatter)?;
+        if let Some(fragment) = &self.fragment {
+            write!(formatter, "#{fragment}")?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for Location {
+    type Err = ReferenceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl ActorUrl {
+    /// An actor's URL from its node's key and its path (empty for the operator). Each path
+    /// segment is a non-empty run of ASCII letters, digits, `-`, `_` and `.`, other than `.` and
+    /// `..`, so it reads the same in a URL as in the actor registry.
+    pub fn new(node_key: MultibaseKey, path: impl Into<String>) -> Result<Self, ReferenceError> {
+        let path = path.into();
+        if !path.is_empty()
+            && !path.split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+            })
+        {
+            return Err(ReferenceError::InvalidActorPath(path));
+        }
+        Ok(Self { node_key, path })
+    }
+
+    pub fn node_key(&self) -> &MultibaseKey {
+        &self.node_key
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn parse(value: &str) -> Result<Self, ReferenceError> {
+        let rest = strip_scheme_and_kind(value, ACTOR_KIND)?;
+        if rest.contains(['?', '#']) {
+            return Err(ReferenceError::QueryOrFragmentNotAllowed);
+        }
+        let (node_key, path) = match rest.split_once('/') {
+            // A slash introduces a path, so a trailing one is an empty segment.
+            Some((_, "")) => return Err(ReferenceError::InvalidActorPath(String::new())),
+            Some(split) => split,
+            None => (rest, ""),
+        };
+        // The multibase decoder indexes its prefix, so it is given only non-empty ASCII.
+        let node_key = Some(node_key)
+            .filter(|key| !key.is_empty() && key.is_ascii())
+            .ok_or_else(|| ReferenceError::InvalidActorKey(node_key.to_owned()))?
+            .parse()
+            .map_err(|_| ReferenceError::InvalidActorKey(node_key.to_owned()))?;
+        Self::new(node_key, path)
+    }
+}
+
+impl fmt::Display for ActorUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{REFERENCE_SCHEME}:{ACTOR_KIND}:{}",
+            self.node_key
+        )?;
+        if !self.path.is_empty() {
+            write!(formatter, "/{}", self.path)?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for ActorUrl {
+    type Err = ReferenceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+/// A document head as it is written in `?heads=` and in the sibling `refHeads` member: the 32
+/// hash bytes as multibase base58btc, like our other ids.
+pub fn head_text(head: &ChangeHash) -> String {
+    utils_rs::hash::encode_base58_multibase(head.0)
+}
+
+pub fn parse_head(value: &str) -> Result<ChangeHash, ReferenceError> {
+    if !value.is_ascii() || value.is_empty() {
+        return Err(ReferenceError::InvalidHead(value.to_owned()));
+    }
+    let bytes = utils_rs::hash::decode_base58_multibase(value)
+        .map_err(|_| ReferenceError::InvalidHead(value.to_owned()))?;
+    <[u8; 32]>::try_from(bytes)
+        .map(ChangeHash)
+        .map_err(|_| ReferenceError::InvalidHead(value.to_owned()))
+}
+
+/// Serde for a sibling `refHeads` member: an array of [`head_text`] strings.
+pub mod head_list {
+    use super::ChangeHash;
+    use super::head_text;
+    use super::parse_head;
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serializer;
+
+    pub fn serialize<S: Serializer>(
+        heads: &[ChangeHash],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(heads.iter().map(head_text))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<ChangeHash>, D::Error> {
+        Vec::<String>::deserialize(deserializer)?
+            .iter()
+            .map(|head| parse_head(head).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
+
+fn parse_heads_query(query: &str) -> Result<Vec<ChangeHash>, ReferenceError> {
+    let heads = query
+        .strip_prefix(HEADS_KEY)
+        .and_then(|rest| rest.strip_prefix('='))
+        .ok_or_else(|| ReferenceError::UnsupportedQuery(query.to_owned()))?;
+    if heads.is_empty() {
+        return Err(ReferenceError::EmptyHeads);
+    }
+    heads.split('|').map(parse_head).collect()
+}
+
+/// `value` without its `dtxt:<kind>:` prefix. The scheme is matched case-insensitively and
+/// canonicalized; kinds are lowercase words.
+fn strip_scheme_and_kind<'a>(value: &'a str, kind: &str) -> Result<&'a str, ReferenceError> {
+    let (scheme, remainder) = value
+        .split_once(':')
+        .ok_or_else(|| ReferenceError::InvalidReference(value.to_owned()))?;
+    if !scheme.eq_ignore_ascii_case(REFERENCE_SCHEME) {
+        return Err(ReferenceError::WrongScheme(scheme.to_owned()));
+    }
+    let (found, rest) = remainder
+        .split_once(':')
+        .ok_or_else(|| ReferenceError::InvalidReference(value.to_owned()))?;
+    if found != kind {
+        return Err(ReferenceError::UnexpectedKind {
+            expected: kind.to_owned(),
+            found: found.to_owned(),
+        });
+    }
+    Ok(rest)
+}
+
+/// A fragment is URL text: non-empty, no space, control or non-ASCII byte, no second `#`, and
+/// well-formed percent escapes.
+fn validate_fragment(fragment: &str) -> Result<(), ReferenceError> {
+    let bytes = fragment.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if !bytes
+                    .get(index + 1..index + 3)
+                    .is_some_and(|escape| escape.iter().all(|byte| hex(*byte).is_some()))
+                {
+                    return Err(ReferenceError::InvalidFragment(fragment.to_owned()));
+                }
+                index += 3;
+            }
+            b'#' | b' ' | 0..=0x1f | 0x7f..=0xff => {
+                return Err(ReferenceError::InvalidFragment(fragment.to_owned()));
+            }
+            _ => index += 1,
+        }
+    }
+    if fragment.is_empty() {
+        return Err(ReferenceError::InvalidFragment(String::new()));
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReferenceError {
-    #[error("invalid URI {value:?}: {source}")]
-    InvalidUri {
-        value: String,
-        source: url::ParseError,
-    },
-    #[error("invalid datum reference {0:?}")]
+    #[error("invalid reference {0:?}")]
     InvalidReference(String),
     #[error("wrong URI scheme {0:?}")]
     WrongScheme(String),
-    #[error("datum references cannot have an authority")]
-    AuthorityNotAllowed,
-    #[error("datum references cannot have a query or fragment")]
+    #[error("expected a `dtxt:{expected}:` reference, found kind {found:?}")]
+    UnexpectedKind { expected: String, found: String },
+    #[error("a datum reference cannot have a fragment; a location can")]
+    FragmentNotAllowed,
+    #[error("this reference kind cannot have a query or fragment")]
     QueryOrFragmentNotAllowed,
-    #[error("datum reference path must be absolute")]
-    MissingPath,
+    #[error("unsupported query {0:?}: only `heads=` is defined")]
+    UnsupportedQuery(String),
+    #[error("`heads=` is empty; an unpinned reference has no query")]
+    EmptyHeads,
+    #[error("{0:?} is not a document head: expected 32 bytes as multibase base58btc")]
+    InvalidHead(String),
+    #[error("a stored reference holds no query; its pin is the sibling `refHeads` member")]
+    PinInStoredReference,
+    #[error("invalid fragment {0:?}")]
+    InvalidFragment(String),
     #[error("datum reference is missing a document id")]
     MissingDoc,
     #[error("datum reference is missing a datum tag or key slot")]
@@ -437,52 +704,23 @@ pub enum ReferenceError {
     EmptyDatumTag,
     #[error("invalid datum tag {0:?}")]
     InvalidDatumTag(String),
-    #[error("invalid percent escape in datum reference component")]
+    #[error("invalid percent escape in reference component")]
     InvalidPercentEscape,
     #[error("invalid Go string escape in datum key slot")]
     InvalidGoEscape,
-    #[error("invalid UTF-8 in datum reference component")]
+    #[error("invalid UTF-8 in reference component")]
     InvalidUtf8,
     #[error("invalid document id {0:?}")]
     InvalidDocId(String),
-    #[error("dot segments are not valid in datum reference paths")]
-    DotSegment,
-    #[error("URL normalization would change datum reference {value:?} to {normalized:?}")]
-    UrlNormalization { value: String, normalized: String },
+    #[error("{0:?} is not an actor node key")]
+    InvalidActorKey(String),
+    #[error("invalid actor path {0:?}")]
+    InvalidActorPath(String),
 }
 
 fn validate_key_slot(slot: &[u8]) -> Result<(), ReferenceError> {
     if slot.is_empty() {
         return Err(ReferenceError::MissingDatumKey);
-    }
-    if slot
-        .split(|byte| *byte == b'/')
-        .any(|segment| segment == b"." || segment == b"..")
-    {
-        return Err(ReferenceError::DotSegment);
-    }
-    Ok(())
-}
-
-fn split_uri_suffix(value: &str) -> (&str, Option<&str>) {
-    let query = value.find('?');
-    let fragment = value.find('#');
-    let end = query.into_iter().chain(fragment).min();
-    match end {
-        Some(end) => (&value[..end], Some(&value[end..])),
-        None => (value, None),
-    }
-}
-
-fn reject_dot_segments(path: &str) -> Result<(), ReferenceError> {
-    for segment in path.split('/') {
-        if segment == "." || segment == ".." {
-            return Err(ReferenceError::DotSegment);
-        }
-        let decoded = decode_uri_component(segment)?;
-        if decoded == "." || decoded == ".." {
-            return Err(ReferenceError::DotSegment);
-        }
     }
     Ok(())
 }
@@ -696,12 +934,16 @@ fn parse_unicode_escape(
     Ok((value, width))
 }
 
+/// Percent-encode one path component. Only what the URL grammar needs is escaped (`%`, `?`,
+/// `#`, controls, space, non-ASCII and the other bytes RFC 3986 does not allow in a path), with
+/// uppercase hex digits, so each component has one canonical spelling (ADR 035 §2.7). `/` is
+/// kept raw when `allow_slash`.
 fn encode_uri_component(bytes: &[u8], allow_slash: bool) -> String {
     let mut output = String::with_capacity(bytes.len());
     for &byte in bytes {
         if (allow_slash && byte == b'/')
             || byte.is_ascii_alphanumeric()
-            || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            || b"-._~!$&'()*+,;=:@".contains(&byte)
         {
             output.push(byte as char);
         } else {
@@ -757,263 +999,4 @@ fn hex_char(value: u8) -> char {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn doc() -> DocId {
-        DocId::from_str("z11111111111111111111111111111111").unwrap()
-    }
-
-    #[test]
-    fn go_quote_vectors_are_independent_and_round_trip() {
-        let cases: &[(&[u8], &str)] = &[
-            ("café/東京".as_bytes(), "café/東京"),
-            (b"quote\" slash\\ percent%", "quote\\\" slash\\\\ percent%"),
-            (
-                b"\0\x01\x07\x08\x0c\n\r\t\x0b\x1f\x7f",
-                "\\x00\\x01\\a\\b\\f\\n\\r\\t\\v\\x1f\\x7f",
-            ),
-            (&[0x80, 0xff], "\\x80\\xff"),
-        ];
-        for (bytes, expected) in cases {
-            assert_eq!(go_string_escape(bytes), *expected);
-            assert_eq!(go_string_unescape(expected.as_bytes()).unwrap(), *bytes);
-        }
-    }
-
-    #[test]
-    fn go_quote_matches_published_go_quote_edge_table() {
-        // Provenance: Go 1.23.0 src/strconv/quote.go (Quote/IsPrint) and
-        // src/strconv/quote_test.go (quotetests), fetched from the published Go
-        // source at https://raw.githubusercontent.com/golang/go/go1.23.0/src/strconv/.
-        let cases = [
-            ("\u{0085}".as_bytes(), r"\u0085"),
-            ("\u{00a0}".as_bytes(), r"\u00a0"),
-            ("\u{200b}".as_bytes(), r"\u200b"),
-            ("\u{2028}".as_bytes(), r"\u2028"),
-            ("\u{2029}".as_bytes(), r"\u2029"),
-            // U+088F was unassigned in Unicode 15.0 (Go 1.23's data) and
-            // must remain escaped even though later Unicode data assigns it.
-            ("\u{088f}".as_bytes(), r"\u088f"),
-            ("é東京".as_bytes(), "é東京"),
-        ];
-        for (bytes, expected) in cases {
-            assert_eq!(go_string_escape(bytes), expected);
-            assert_eq!(go_string_unescape(expected.as_bytes()).unwrap(), bytes);
-        }
-    }
-
-    #[test]
-    fn canonical_unicode_data_version_is_pinned() {
-        assert_eq!(
-            unicode_properties::UNICODE_VERSION,
-            CANONICAL_REFERENCE_UNICODE_VERSION
-        );
-        assert!(!go_is_print('\u{088f}'));
-        assert_eq!(go_string_escape("\u{088f}".as_bytes()), r"\u088f");
-    }
-
-    #[test]
-    fn every_byte_round_trips_through_go_escapes() {
-        let bytes = (0..=u8::MAX).collect::<Vec<_>>();
-        let escaped = go_string_escape(&bytes);
-        assert_eq!(go_string_unescape(escaped.as_bytes()).unwrap(), bytes);
-    }
-
-    #[test]
-    fn malformed_go_escape_width_and_value_are_structured_errors() {
-        for value in [
-            br"\1".as_slice(),
-            br"\12".as_slice(),
-            br"\777".as_slice(),
-            br"\400".as_slice(),
-            br"\x0".as_slice(),
-            br"\u123".as_slice(),
-            br"\U1234567".as_slice(),
-            br"\uD800".as_slice(),
-            br"\U00110000".as_slice(),
-            br"\'".as_slice(),
-            b"\"".as_slice(),
-            b"\n".as_slice(),
-        ] {
-            assert!(
-                matches!(
-                    go_string_unescape(value),
-                    Err(ReferenceError::InvalidGoEscape)
-                ),
-                "{value:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn go_and_uri_layers_reject_decoded_dot_keys() {
-        for value in [
-            "db+datum:/self/org.example.note/%5Cx2e",
-            "db+datum:/self/org.example.note/%5C%78%32%65",
-            "db+datum:/self/org.example.note/%5C056",
-        ] {
-            assert!(
-                matches!(
-                    DatumReference::parse(value),
-                    Err(ReferenceError::DotSegment)
-                ),
-                "{value}"
-            );
-        }
-
-        let escaped = DatumReference::parse("db+datum:/self/org.example.note/%5Cu0061").unwrap();
-        assert_eq!(escaped.key().slot_bytes(), b"a");
-        assert_eq!(
-            escaped.to_uri_string().unwrap(),
-            "db+datum:/self/org.example.note/a"
-        );
-    }
-
-    #[test]
-    fn canonical_uri_vectors_use_one_transport_escape_pass() {
-        let cases: &[(&[u8], &str)] = &[
-            (
-                "café/東京".as_bytes(),
-                "db+datum:/self/org.example.note/caf%C3%A9/%E6%9D%B1%E4%BA%AC",
-            ),
-            (
-                b"quote\" slash\\ percent%",
-                "db+datum:/self/org.example.note/quote%5C%22%20slash%5C%5C%20percent%25",
-            ),
-            (
-                &[0x80, 0xff],
-                "db+datum:/self/org.example.note/%5Cx80%5Cxff",
-            ),
-            (
-                "\u{0085}\u{00a0}\u{200b}\u{2028}\u{2029}".as_bytes(),
-                "db+datum:/self/org.example.note/%5Cu0085%5Cu00a0%5Cu200b%5Cu2028%5Cu2029",
-            ),
-        ];
-        for (id, expected) in cases {
-            let key = DatumKey::new("org.example.note", id.to_vec()).unwrap();
-            let reference = DatumReference::new(ReferenceDocId::SelfDoc, key).unwrap();
-            assert_eq!(reference.to_uri_string().unwrap(), *expected);
-            assert_eq!(DatumReference::parse(expected).unwrap(), reference);
-            assert_eq!(
-                DatumReference::parse_url(&Url::parse(expected).unwrap()).unwrap(),
-                reference
-            );
-        }
-    }
-
-    #[test]
-    fn round_trips_slashes_percent_and_versioned_key_slots() {
-        for slot in [
-            b"main/notes/v1.2".as_slice(),
-            b"/photos/beach.jpg".as_slice(),
-            b"100%/literal".as_slice(),
-            b"self".as_slice(),
-        ] {
-            let key = DatumKey::new("org.example.dpath", slot.to_vec()).unwrap();
-            let reference = DatumReference::new(ReferenceDocId::SelfDoc, key).unwrap();
-            let uri = reference.to_uri_string().unwrap();
-            assert_eq!(DatumReference::parse(&uri).unwrap(), reference, "{uri}");
-            assert_eq!(
-                DatumReference::parse(&uri)
-                    .unwrap()
-                    .to_uri_string()
-                    .unwrap(),
-                uri
-            );
-        }
-    }
-
-    #[test]
-    fn preserves_encoded_literal_percent_and_rejects_dot_traversal() {
-        let percent = DatumReference::parse("db+datum:/self/org.example.note/100%25/v1").unwrap();
-        assert_eq!(percent.key().slot_bytes(), b"100%/v1");
-        assert_eq!(
-            percent.to_uri_string().unwrap(),
-            "db+datum:/self/org.example.note/100%25/v1"
-        );
-
-        for value in [
-            "db+datum:/self/org.example.note/./v1",
-            "db+datum:/self/org.example.note/../v1",
-            "db+datum:/self/org.example.note/%2E/v1",
-            "db+datum:/self/org.example.note/%2e%2e/v1",
-        ] {
-            assert!(
-                matches!(
-                    DatumReference::parse(value),
-                    Err(ReferenceError::DotSegment)
-                ),
-                "{value}"
-            );
-        }
-
-        let literal_percent_dot =
-            DatumReference::parse("db+datum:/self/org.example.note/%252E/v1").unwrap();
-        assert_eq!(literal_percent_dot.key().slot_bytes(), b"%2E/v1");
-        assert_eq!(
-            literal_percent_dot.to_uri_string().unwrap(),
-            "db+datum:/self/org.example.note/%252E/v1"
-        );
-    }
-
-    #[test]
-    fn constructors_and_serde_enforce_invariants() {
-        assert!(DatumTag::new("").is_err());
-        assert!(DatumTag::new("tag/with/slash").is_err());
-        assert!(DatumKey::new("tag", Vec::<u8>::new()).is_err());
-        assert!(DatumKey::new("tag", b"a/../b".to_vec()).is_err());
-        assert!(serde_json::from_str::<DatumTag>("\"\"").is_err());
-        assert!(serde_json::from_str::<DatumKey>("\"tag/\"").is_err());
-
-        let key = DatumKey::new("org.example.note", b"main".to_vec()).unwrap();
-        let reference = DatumReference::new(ReferenceDocId::SelfDoc, key).unwrap();
-        let encoded = serde_json::to_string(&reference).unwrap();
-        assert_eq!(
-            serde_json::from_str::<DatumReference>(&encoded).unwrap(),
-            reference
-        );
-    }
-
-    #[test]
-    fn contextual_self_and_concrete_objkey_identity_are_distinct() {
-        let self_reference = DatumReference::parse("db+datum:/self/org.example.note/main").unwrap();
-        assert_eq!(self_reference.document(), &ReferenceDocId::SelfDoc);
-        assert_eq!(self_reference.document().resolve(&doc()), doc());
-
-        let concrete = DatumReference::parse(
-            "db+datum:/z11111111111111111111111111111111/org.example.note/main",
-        )
-        .unwrap();
-        assert!(matches!(concrete.document(), ReferenceDocId::Concrete(_)));
-    }
-
-    #[test]
-    fn refuses_authorities_queries_fragments_and_malformed_paths() {
-        for value in [
-            "db+datum://node/self/org.example.note/main",
-            "db+datum:///self/org.example.note/main",
-            "db+datum:/self/org.example.note",
-            "db+datum:/self//main",
-            "db+datum:/self/org.example.note/",
-            "db+datum:/self/org.example.note/main?at=head",
-            "db+datum:/self/org.example.note/main#fragment",
-            "db+datum:/self/org.example.note/main%",
-            "db+datum:/self/org.example.note/main%2",
-            "db+datum:/self/org.example.note/main%GG",
-            "db+datum:/self/org.example.note/main%FF",
-        ] {
-            assert!(DatumReference::parse(value).is_err(), "{value}");
-        }
-    }
-
-    #[test]
-    fn to_url_refuses_normalization_instead_of_changing_identity() {
-        let key = DatumKey::new("org.example.note", b"%2E/v1".to_vec()).unwrap();
-        let reference = DatumReference::new(ReferenceDocId::SelfDoc, key).unwrap();
-        let uri = reference.to_uri_string().unwrap();
-        assert_eq!(uri, "db+datum:/self/org.example.note/%252E/v1");
-        let url = reference.to_url();
-        assert!(url.is_ok() || matches!(url, Err(ReferenceError::UrlNormalization { .. })));
-    }
-}
+mod tests;

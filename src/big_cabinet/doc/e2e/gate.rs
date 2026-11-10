@@ -630,7 +630,7 @@ async fn signed_outside(
                 tx.put(&binding, "delegation", vec![0xf6_u8]).unwrap()
             }
             Damage::WrongUrl => tx
-                .put(&binding, "actorUrl", "db+actor://wrong/bob")
+                .put(&binding, "actorUrl", "dtxt:actor:wrong/bob")
                 .unwrap(),
             Damage::InheritedValue => {
                 let inherited = tx.put_object(&entry, "inherited", ObjType::Map).unwrap();

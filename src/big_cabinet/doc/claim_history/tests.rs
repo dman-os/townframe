@@ -63,7 +63,7 @@ impl Fixture {
         let public_key =
             MultibaseKey::try_from(fixture.key.verifying_key().as_bytes().as_slice()).unwrap();
         tx.put(&actor, "pubkey", public_key.to_string()).unwrap();
-        tx.put(&actor, "actorUrl", "db+actor://node/test").unwrap();
+        tx.put(&actor, "actorUrl", "dtxt:actor:node/test").unwrap();
         let metadata = tx.put_object(&dmeta, "datums", ObjType::Map).unwrap();
         let metadata = tx.put_object(&metadata, DATUM, ObjType::Map).unwrap();
         tx.put_object(&metadata, "updatedAt", ObjType::List)

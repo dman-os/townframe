@@ -257,7 +257,7 @@ fn authority_identifiers_wire() {
     let certificate = Bytes::from(vec![3, 4]);
     let actor = Actor {
         actor_id,
-        url: "db+actor://node/child".into(),
+        url: "dtxt:actor:node/child".into(),
         public_key: public_key.clone(),
         certificate: certificate.clone(),
         parent_actor_id: Some(actor_id),
@@ -266,7 +266,7 @@ fn authority_identifiers_wire() {
         &actor,
         json!({
             "actorId": actor_id,
-            "url": "db+actor://node/child",
+            "url": "dtxt:actor:node/child",
             "publicKey": public_key,
             "certificate": certificate,
             "parentActorId": actor_id,
@@ -280,7 +280,7 @@ fn authority_identifiers_wire() {
         },
         json!({
             "actorId": actor_id,
-            "url": "db+actor://node/child",
+            "url": "dtxt:actor:node/child",
             "publicKey": public_key,
             "certificate": certificate,
             "parentActorId": actor_id,
@@ -319,7 +319,7 @@ fn authority_resolution_and_mint_wire() {
     };
     let actor = Actor {
         actor_id,
-        url: "db+actor://node/child".into(),
+        url: "dtxt:actor:node/child".into(),
         public_key: MultibaseKey::try_from(&[2u8; 32][..]).unwrap(),
         certificate: Bytes::from(vec![3, 4]),
         parent_actor_id: None,

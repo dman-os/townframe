@@ -9,7 +9,10 @@ use super::super::commands::State;
 use super::*;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
+use big_cabinet_core::DatumReference;
+use big_cabinet_core::ReferenceDocId;
 use big_cabinet_core::dmeta::BranchPath;
+use big_cabinet_core::reference::head_text;
 
 fn command(text: &str) -> CommandId {
     CommandId::try_from(text.to_owned()).unwrap()
@@ -19,12 +22,16 @@ fn branch_key(branch: &DocId) -> DatumKey {
     format!("{}/{branch}", BranchPath::ID).parse().unwrap()
 }
 
+fn origin_reference(origin: &DocId) -> String {
+    DatumReference::new(ReferenceDocId::Concrete(origin.clone()), branch_key(origin)).to_string()
+}
+
 fn branch_value(path: &str, origin: &WriteReceipt) -> Value {
     json!({
         "path": path,
         "from": {
-            "datumRef": format!("db+datum:/{}/{}", origin.doc_id, branch_key(&origin.doc_id)),
-            "refHeads": origin.heads,
+            "datumRef": origin_reference(&origin.doc_id),
+            "refHeads": origin.heads.iter().map(head_text).collect::<Vec<_>>(),
         },
     })
 }
@@ -311,8 +318,8 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
     );
     let typed: big_cabinet_core::dmeta::BranchPath = serde_json::from_value(expected).unwrap();
     assert_eq!(
-        typed.from.unwrap().datum_ref.to_uri_string().unwrap(),
-        format!("db+datum:/{}/{}", origin.doc_id, branch_key(&origin.doc_id))
+        typed.from.unwrap().datum_ref.to_string(),
+        origin_reference(&origin.doc_id)
     );
     node.stop().await;
 }

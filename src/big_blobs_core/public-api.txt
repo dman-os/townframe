@@ -44,3 +44,5 @@ pub use big_blobs_core::protocol :: MAX_READ_BYTES
 pub use big_blobs_core::protocol :: PutBlob
 pub use big_blobs_core::protocol :: ReadBlob
 pub use big_blobs_core::protocol :: StatBlob
+pub use big_blobs_core::url :: BlobUrl
+pub use big_blobs_core::url :: BlobUrlError

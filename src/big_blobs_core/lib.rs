@@ -1,6 +1,7 @@
 pub mod datum;
 mod identity;
 pub mod protocol;
+mod url;
 
 pub use datum::Blob;
 pub use datum::BlobPin;
@@ -23,6 +24,8 @@ pub use protocol::MAX_READ_BYTES;
 pub use protocol::PutBlob;
 pub use protocol::ReadBlob;
 pub use protocol::StatBlob;
+pub use url::BlobUrl;
+pub use url::BlobUrlError;
 
 #[cfg(test)]
 mod tests;

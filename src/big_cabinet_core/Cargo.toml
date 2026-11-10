@@ -34,7 +34,6 @@ schemars = { version = "1.2", features = ["jiff02", "indexmap2", "uuid1"], optio
 thiserror.workspace = true
 jsonschema = { version = "0.42.0", default-features = false }
 displaydoc.workspace = true
-url.workspace = true
 unicode-properties = { version = "=0.1.1", default-features = false, features = ["general-category"] }
 unicode-segmentation = "=1.13.3"
 autosurgeon = { workspace = true, features = ["uuid"] }
