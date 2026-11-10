@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # R2: release build of the plain dioxus-web app + wasm-bindgen into r2/site. Run from the worktree
-# root through ./x/agent-build.ts (host-wide jobserver, cgroup limits).
+# root through plain cargo (mbx).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here/r2"

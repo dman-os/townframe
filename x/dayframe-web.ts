@@ -11,11 +11,10 @@
 
 import { crypto } from "jsr:@std/crypto@1.0.5";
 import { prepareDayframePackages } from "./dayframe-packages.ts";
-import { $, useDotenvTargetDir } from "./utils.ts";
+import { $ } from "./utils.ts";
 
 const buildOnly = Deno.args.includes("--build");
 const root = $.relativeDir("../");
-await useDotenvTargetDir();
 
 function matchesAt(
   buf: Uint8Array,

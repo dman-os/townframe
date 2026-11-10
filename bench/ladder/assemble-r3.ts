@@ -10,11 +10,10 @@
 //   deno run --allow-all x/dayframe-web.ts --build    build only
 
 import { crypto } from "jsr:@std/crypto@1.0.5";
-import { $, useDotenvTargetDir } from "../../x/utils.ts";
+import { $ } from "../../x/utils.ts";
 
 const buildOnly = Deno.args.includes("--build");
 const root = $.relativeDir("../");
-await useDotenvTargetDir();
 
 function matchesAt(
   buf: Uint8Array,

@@ -23,10 +23,9 @@ x = "run --package xtask --"
 rustflags = ["--cfg", "tokio_unstable"]
 
 [profile.dev]
-# One debuginfo file per dependency, to reduce file size of tests/examples.
-# Note that this value is not supported on Windows.
-# See https://doc.rust-lang.org/cargo/reference/profiles.html#split-debuginfo
-split-debuginfo = "unpacked"
+# No `split-debuginfo = "unpacked"`: mbx refuses to share a native link across
+# checkouts when it is set, which leaves every build script, proc macro and test
+# binary uncached. Line tables alone keep the embedded debuginfo small.
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
