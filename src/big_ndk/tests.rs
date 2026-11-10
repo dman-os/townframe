@@ -1,6 +1,6 @@
 use crate::Cx;
 use crate::Handler;
-use crate::cx::call_through;
+use crate::HttpHandle;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::Method;
@@ -17,7 +17,8 @@ use service_client_core_rs::xrpc::XrpcResponse;
 use service_core_rs::ClientError;
 use service_core_rs::RequestContext;
 use service_core_rs::TraceContext;
-use std::sync::Mutex;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -81,7 +82,15 @@ async fn post(path: &str, headers: &[(&str, &str)], body: &str) -> (StatusCode, 
             HeaderValue::from_str(value).unwrap(),
         );
     }
-    let response = crate::serve(&Greeter, &Method::POST, path, &map, body.as_bytes()).await;
+    let response = crate::serve(
+        &Greeter,
+        HttpHandle::new(Recording::default()),
+        &Method::POST,
+        path,
+        &map,
+        body.as_bytes(),
+    )
+    .await;
     let (parts, body) = response.into_parts();
     (
         parts.status,
@@ -136,6 +145,7 @@ async fn refusals_that_are_not_the_methods_are_bare_errors() {
     );
     let get = crate::serve(
         &Greeter,
+        HttpHandle::new(Recording::default()),
         &Method::GET,
         "/xrpc/org.example.test.greet",
         &HeaderMap::new(),
@@ -194,13 +204,13 @@ async fn a_spent_budget_is_the_methods_deadline_error_and_the_handler_is_not_ent
     );
 }
 
-/// Answers every call with an echo of what it was sent, recording the request.
-#[derive(Default)]
-struct Recording(Mutex<Vec<XrpcRequest>>);
+/// Answers every call with a fixed reply, recording the request.
+#[derive(Clone, Default)]
+struct Recording(Rc<RefCell<Vec<XrpcRequest>>>);
 
-impl HttpTransport for &Recording {
+impl HttpTransport for Recording {
     async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
-        self.0.lock().unwrap().push(request);
+        self.0.borrow_mut().push(request);
         Ok(XrpcResponse {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
@@ -209,7 +219,7 @@ impl HttpTransport for &Recording {
     }
 }
 
-fn cx_with(nodule: Option<&str>, budget: Option<Duration>) -> Cx {
+fn cx_with(transport: &Recording, nodule: Option<&str>, budget: Option<Duration>) -> Cx {
     let mut request = RequestContext::root();
     request.trace = TraceContext::from_headers(
         Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
@@ -223,6 +233,7 @@ fn cx_with(nodule: Option<&str>, budget: Option<Duration>) -> Cx {
         caller: Some("caller-cap".to_owned()),
         nodule: nodule.map(str::to_owned),
         idempotency_key: Some("outer-key".to_owned()),
+        transport: HttpHandle::new(transport.clone()),
     }
 }
 
@@ -231,18 +242,14 @@ fn cx_with(nodule: Option<&str>, budget: Option<Duration>) -> Cx {
 #[test]
 fn a_nested_call_is_the_next_hop_authorized_with_the_nodules_own_capability() {
     let transport = Recording::default();
-    let cx = cx_with(Some("own-cap"), Some(Duration::from_secs(60)));
-    let output = futures::executor::block_on(call_through(
-        &transport,
-        &cx,
-        Greet {
-            name: "ada".to_owned(),
-        },
-    ))
+    let cx = cx_with(&transport, Some("own-cap"), Some(Duration::from_secs(60)));
+    let output = futures::executor::block_on(cx.call(Greet {
+        name: "ada".to_owned(),
+    }))
     .unwrap();
     assert_eq!(output, "hello back");
 
-    let sent = transport.0.lock().unwrap();
+    let sent = transport.0.borrow();
     let [request] = sent.as_slice() else {
         panic!("one request, got {}", sent.len());
     };
@@ -272,13 +279,12 @@ fn a_nested_call_is_the_next_hop_authorized_with_the_nodules_own_capability() {
 #[test]
 fn a_nested_call_without_a_capability_of_its_own_is_unauthenticated() {
     let transport = Recording::default();
-    let result =
-        futures::executor::block_on(call_through(&transport, &cx_with(None, None), Whoami {}));
+    let result = futures::executor::block_on(cx_with(&transport, None, None).call(Whoami {}));
     assert!(matches!(
         result,
         Err(ClientError::Method(TestError::Context(
             ContextError::Unauthenticated
         )))
     ));
-    assert!(transport.0.lock().unwrap().is_empty());
+    assert!(transport.0.borrow().is_empty());
 }

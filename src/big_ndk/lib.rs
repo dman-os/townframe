@@ -38,6 +38,7 @@ mod serve;
 mod wasi;
 
 pub use cx::Cx;
+pub use cx::HttpHandle;
 pub use method_core;
 pub use serve::Nodule;
 pub use serve::Reply;

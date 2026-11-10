@@ -6,6 +6,7 @@
 pub mod big_ndk::wit
 pub trait big_ndk::Handler< M : Unary > { fn call (& self , cx : & Cx , input : M) -> impl Future < Output = Result < M :: Output , M :: Error > > }
 pub use big_ndk::cx :: Cx
+pub use big_ndk::cx :: HttpHandle
 pub use big_ndk::method_core
 pub use big_ndk::serve :: Nodule
 pub use big_ndk::serve :: Reply
