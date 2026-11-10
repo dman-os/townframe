@@ -76,11 +76,19 @@ same way Pierre's own framework adapters work.
 A doesn't block B. The crate in A is exactly what B would wrap later.
 
 **What crosses the boundary (in both cases):**
-- In: the parsed diff, or base and head text; layout (unified or split); theme; annotations
-  already resolved to (file, side, line range), each with a stable key and a state (current or
-  outdated); the selected range.
-- Out: range selected, annotation row toggled, context expanded, which rows are visible (for
-  read state).
+- In:
+  - **Base and head text, the first-class input.** intxt keeps each touched file as an Automerge
+    Text doc and pins a revision as a set of heads, so its micro has texts, not patches. The diff
+    crate diffs them itself (`parseDiffFromFile` and the `similar`-backed diff module, ported in
+    S3). A parsed patch stays a secondary input.
+  - Layout (unified or split) and theme.
+  - Annotations already resolved to (file, side, line range), each with a stable key and a state
+    (current or outdated). A range may span hunks and include unchanged context lines. A
+    whole-file annotation has no range and renders as a file-header row.
+  - The selected range.
+- Out: range selected, annotation row toggled, context expanded, which rows are visible. Read
+  state built from the visible rows is per reader, one datum slot each and never a shared counter,
+  but that's the intxt micro's business; the diff view only reports what's on screen.
 - The diff view never sees the anchor model. The intxt micro resolves anchors to line ranges
   (re-attaching across revisions, J6) and hands over the result. That keeps the anchor model
   wholly the intext lane's.
@@ -101,9 +109,23 @@ A doesn't block B. The crate in A is exactly what B would wrap later.
 | Range selection on touch (gutter tap, drag, extend) | J5 | not started; needs Android input checks | claytxt |
 | Bottom sheet with the keyboard up | J4, J5 | ADR 032 §6 sheets; keyboard behaviour on Android unverified | claytxt |
 | Text input for the composer | J4, J5 | Dioxus input; Android IME unverified | claytxt |
-| Datums: change, revision, file, annotation, thread, reply | all | intext lane | intext |
+| Datums (intext's model, see below) | all | intext lane | intext |
 | Anchor model and re-attaching on a new revision | J3, J6 | intext lane | intext |
 | Live sync between devices | J6, the live loop | node lane | node |
+
+## How the screens map onto intext's model
+
+This summarises the intext lane's draft, which lives on `feat/intxt` (p3N-3) in
+`docs/scratch/intxt-design.md`, `intxt-use-cases.md` and `intxt-ledger.md`. Their FDRs are the
+source of truth.
+
+- **Change** = one intxt, one drawer.
+- **Revision** = a pin over file-doc heads, plus commit datums (sha, parents, jj change id).
+- **File** = one Automerge Text doc per touched file.
+- **Annotation** and **reply** are both annotation datums; a reply is one that targets another
+  annotation. A **thread** is a root annotation plus its replies, with a per-thread resolved
+  flag. There is no thread datum.
+- **Verdict** (J7) would be one datum; whether it's in the alpha is the operator's call.
 
 ## Work order for the claytxt lane (Sonnet lanes, at most two building at once)
 
