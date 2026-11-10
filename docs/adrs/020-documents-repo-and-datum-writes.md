@@ -183,6 +183,46 @@ For an ordinary Automerge write, a signature entry carries `actorUuid`, `docUuid
 
 `deletedAt` is always present and initialized, empty for an authored non-tombstone. A removal records a deletion candidate; a later Set clears the candidates it observed. A concurrent Remove/Set merge can retain deletion candidates even when a value is visible. Timestamps are unsigned display metadata: neither a nonempty `deletedAt` nor the latest timestamp decides current tombstone status. The signed operation and its match to the current slot state do. Older entries may remain in Automerge history without being duplicated in current dmeta. Granting broader local access creates no entries in untouched documents.
 
+### Revision 2026-11-11: the dmeta cut (proposed, awaiting the operator)
+
+Measured on replayed editing traces (the 260k-edit Automerge paper trace, seph-blog1, rustcode,
+sveltecomponent), every signed write leaves 70–100 bytes in history after `save()`, against 3–5 for
+the plain edit. A signature's 64 bytes do not compress. The shape of the entry moves that by about a
+quarter; the number of signed writes is what decides it. Signed every 10 edits, the paper trace's
+saved document is 20× plain (2.6 MB against 129 KB) and loads in 0.61 s against 0.26 s; every 100
+edits, 3×; every 1000, 1.2×. One map object per signature entry also doubles load time against a
+single scalar, because each map adds operations a load rebuilds. So:
+
+1. **Signed writes are coarse.** A writer signs once per flush (a pause, a save, a commit of a
+   batch of edits), never per keystroke. Per-character collaboration belongs to a branch kind that
+   is not signed while it is edited and is signed once when it is published; that design is its own
+   ADR.
+2. **A signature entry is one bytes value**: a format byte `0x01`, then `actorUuid` (16 bytes),
+   `docUuid` (16 bytes) and the 64 signature bytes, 97 bytes in all, inserted as a scalar into the
+   datum's `signatures` set in place of the `{actorUuid, docUuid, signature}` map. `docUuid` stays
+   in every entry: a branch's writes bind their own, and shared history cannot tell which document
+   introduced an entry. An entry that has to carry `message` or `inherited` (export, compaction) is a
+   map whose `signature` member is that same packed value; ordinary writes never produce one.
+3. **There is no document-level `updatedAt`.** When a document last changed is the latest of its
+   datums' `updatedAt`, which is what every reader of the document-level set computed anyway.
+4. **The version tag is the datum's `updatedAt` entry.** Every write replaces that entry, so its
+   Automerge operation id changes on every write and never otherwise. Comparing the op ids a reader
+   saw is the version check, and the change that wrote it is recovered from the op id. No new field
+   and no new bytes.
+5. **Aliases live under their datum:** `datums[key].uuids: Uuid7 -> true`, and `datumUuids` is
+   removed. ADR 015's reason for one index stands: there is still one copy of each binding. Concurrent
+   creators of a datum each create `datums[key]`, so Automerge keeps several copies and shows one;
+   every reader of `uuids` unions the visible copies at the position it reads (`get_all`), as the
+   losing signature sets already are. The chosen alias is the smallest in that union at the writing
+   transaction. A claim signs its `(key, uuid)` pair, so a UUID that also appears under another key
+   cannot be confused for this one; nothing looks a datum up by UUID, and a lookup that needs to would
+   be a derived index in the repository, not a second copy in the document. Finding a datum's aliases
+   is then a read of its own entry, not a scan of every binding the document has, which also lifts the
+   per-frontier budget ceiling of about 500 datums the scan imposed.
+
+With 2–5 an ordinary write makes four operations in dmeta instead of nine: the datum's `updatedAt` entry and its signature entry, each a delete and an insert. Bindings in `docUuids` and
+`actors`, and the reconstruction of claims at their introducing change (§4, §6), are unchanged.
+
 ### Branches, merges, and compaction witnesses
 
 Because a normal branch is forked from its origin's Automerge history and a merge combines history-sharing Automerge documents, signatures travel with their introducing changes and reconstruct through `docUuid` and `docUuids` without `inherited` witnesses. By contrast, a history-truncating compaction or history-free import discards the Automerge changes a signature's claim would be reconstructed from; a signature retained across compaction therefore carries an `inherited` witness: origin document, the exact domain-prefixed signed message, and, when the compacted value differs from the signed one, the canonical native bytes of the historical signed value. Keep these witnesses even when they do not cover the current value. They authenticate only their own claim; an authentic historical value is not a signature on a differing merged value. A signature authored on a branch or after compaction names its own document through `docUuid` and uses its own reconstructible history or optional `message`, not `inherited`.
