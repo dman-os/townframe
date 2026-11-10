@@ -34,6 +34,7 @@ The loop repeats until the operator is satisfied. Finishing (merging, pushing to
 **Operator**
 - Lists intxts with new activity and unseen comments.
 - Reads a revision by file or by commit, and compares any two revisions.
+- Sees what is new since they last looked, even if the agent rebased in between (Jane Street Iron's per-reviewer "brain"; see `docs/scratch/intxt-prior-art.md`). What each reader has seen is their own, so two readers never disturb each other.
 - Reads the session alongside the code and jumps from a note to what it refers to.
 - Writes comments, replies and resolutions from any device.
 - Sees for every comment who wrote it, and whether it is current or refers to an earlier revision.
