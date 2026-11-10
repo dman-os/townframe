@@ -1,9 +1,8 @@
 import { expect, type Browser, type Page, test } from "@playwright/test";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
-import * as path from "node:path";
-import { openLifecycle, watchFailures } from "../../src/dayframe_web/e2e/shell";
 import { commitBreakdowns, frameBusy, load, stats, traceOf } from "./lib";
+import { isR3, openRung } from "./open";
 
 // The perf ladder (docs/scratch/pierre-spikes.md, "X1 ladder"). One test per (rung, workload);
 // `LADDER_RUNG` picks the rung, `LADDER_WORKLOADS` the workloads, `LADDER_ROUND` labels the run
@@ -19,66 +18,11 @@ const BASE = `http://127.0.0.1:${process.env.LADDER_PORT_A ?? "4701"}`;
 const BASE_R3 = `http://127.0.0.1:${process.env.LADDER_PORT_R3 ?? "4702"}`;
 const FRAMES = 100;
 const START_TOP = 3000;
-const COMMON = path.join(import.meta.dirname, "common.js");
+const IS_R3 = isR3(RUNG);
 
-// r3a / r3b: the same Clay stack with the Pierre surface's batches applied by a direct receiver
-// (X4): a JS receiver (one call per batch) or a Rust one (web-sys per op); see `clay_dioxus::direct`.
-const IS_R3 = RUNG === "r3" || RUNG === "r3a" || RUNG === "r3b";
-const DIRECT = ({ r3a: "js", r3b: "rust" } as Record<string, string>)[RUNG];
-
-const R3_BUTTONS: Record<string, string> = { syn7: "tokens-7", syn18: "tokens-18", corpus: "corpus-raw" };
 
 async function open(browser: Browser, workload: string): Promise<{ page: Page; failures: string[] }> {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-  const page = await context.newPage();
-  const failures = watchFailures(page);
-  if (IS_R3) {
-    await page.addInitScript({ path: COMMON });
-    if (DIRECT) await page.addInitScript((kind) => { (window as any).__clayDirect = kind; }, DIRECT);
-    if (process.env.LADDER_CAPTURE) await page.addInitScript(() => { (window as any).__clayCapture = true; });
-    await page.addInitScript(() => { (window as any).__clayNoCoalesce = true; });
-    await page.goto(`${BASE_R3}/`);
-    await expect(page.getByRole("button", { name: "Open Settings", exact: true })).toBeVisible({ timeout: 120_000 });
-    await openLifecycle(page);
-    await page.getByRole("button", { name: "Enable dayframe.layout micro" }).click();
-    await page.getByRole("button", { name: "Enable dayframe.pierre_spike_scroll micro" }).click();
-    await expect(page.getByRole("button", { name: "Disable dayframe.pierre_spike_scroll micro" })).toBeVisible();
-    await page.getByRole("button", { name: "Show Layout" }).click();
-    await page.getByRole("button", { name: "Show Pierre scroll spike panel" }).click({ timeout: 120_000 });
-    await expect(page.getByTestId("scroller")).toBeVisible({ timeout: 120_000 });
-    await page.getByTestId("scroller").scrollIntoViewIfNeeded();
-    await page.getByTestId("profile-pierre").click();
-    await page.getByTestId(R3_BUTTONS[workload]).click();
-    await page.evaluate(() => {
-      const L = (window as any).Ladder;
-      const win = () => document.querySelector('[data-testid="window"]')!;
-      L.rung = {
-        name: "r3",
-        scroller: document.querySelector('[data-testid="scroller"]'),
-        mutationRoot: document.querySelector('[data-testid="scroller"]'),
-        censusRoot: win(),
-        windowStart: () => Number(win().getAttribute("data-value")),
-      };
-    });
-  } else {
-    const url = {
-      "r0": `${BASE}/r0/?workload=${workload}`,
-      "r1-dom": `${BASE}/r1/?variant=dom&workload=${workload}`,
-      "r1-html": `${BASE}/r1/?variant=html&workload=${workload}`,
-      "r1-static": `${BASE}/r1/?variant=static&workload=${workload}`,
-      "r2": `${BASE}/r2/?workload=${workload}`,
-    }[RUNG];
-    if (!url) throw new Error(`unknown rung ${RUNG}`);
-    await page.goto(url);
-    await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 120_000 });
-  }
-  // Start away from the file top (the window is clamped there) and settle.
-  await page.evaluate(async (top) => {
-    const L = (window as any).Ladder;
-    L.rung.scroller.scrollTop = top;
-    for (let i = 0; i < 6; i++) await L.nextFrame();
-  }, START_TOP);
-  return { page, failures };
+  return openRung(browser, { rung: RUNG, workload, base: BASE, baseR3: BASE_R3, profile: "pierre", startTop: START_TOP });
 }
 
 const uptime = () => execSync("uptime").toString().trim();

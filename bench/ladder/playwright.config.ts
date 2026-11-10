@@ -4,7 +4,7 @@ import { defineConfig, devices } from "@playwright/test";
 // webServer entry: the harness starts and stops its servers by PID.
 export default defineConfig({
   testDir: ".",
-  testMatch: "ladder.spec.ts",
+  testMatch: process.env.LADDER_SPEC ?? "ladder.spec.ts",
   fullyParallel: false,
   workers: 1,
   reporter: "list",
