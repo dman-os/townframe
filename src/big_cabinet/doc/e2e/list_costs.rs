@@ -10,6 +10,8 @@ use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::alloc::System;
 use std::cell::Cell;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 struct Counting;
 
@@ -17,10 +19,19 @@ thread_local! {
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
+/// Allocations on every thread, for work that runs on the repository's tasks rather than the
+/// calling thread (`write_costs`).
+static ALL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn all_allocations() -> u64 {
+    ALL_ALLOCATIONS.load(Ordering::Relaxed)
+}
+
 // SAFETY: defers to the system allocator; the counter is a thread-local `Cell` touched only here.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.with(|count| count.set(count.get() + 1));
+        ALL_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
