@@ -27,6 +27,8 @@ use dioxus_html::EventData;
 use dioxus_html::Modifiers;
 use dioxus_html::SerializedHtmlEventConverter;
 use dioxus_html::SerializedMouseData;
+use dioxus_html::SerializedPointInteraction;
+use dioxus_html::SerializedPointerData;
 use dioxus_native_dom::DioxusState;
 
 mod blitz_limits;
@@ -230,6 +232,44 @@ impl HeadlessDom {
         );
     }
 
+    /// A pointer event of `name` at document x `page_x` on the element `selector` names. The
+    /// primary button is held for a press and a move, as in a drag.
+    fn pointer(&mut self, selector: &str, name: &str, page_x: f64) {
+        let target = self.one(selector);
+        let raw = self
+            .document
+            .get_node(target)
+            .expect("selected node exists")
+            .attr(LocalName::from("data-dioxus-id"))
+            .expect("a pointer target is a Dioxus element")
+            .parse()
+            .expect("valid host Dioxus id");
+        let mut json = serde_json::to_value(SerializedPointInteraction {
+            page_x,
+            client_x: page_x,
+            buttons: u16::from(matches!(name, "pointerdown" | "pointermove")),
+            ..Default::default()
+        })
+        .expect("point serializes");
+        json.as_object_mut().unwrap().extend(
+            serde_json::json!({
+                "pointer_id": 1, "width": 1.0, "height": 1.0, "pressure": 0.5,
+                "tangential_pressure": 0.0, "tilt_x": 0, "tilt_y": 0, "twist": 0,
+                "pointer_type": "mouse", "is_primary": true,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let data: SerializedPointerData = serde_json::from_value(json).expect("pointer data");
+        self.dom.runtime().handle_event_for_target(
+            RenderTargetId::ROOT,
+            name,
+            dioxus_core::Event::new(EventData::Pointer(data).into_any(), true),
+            ElementId::from_raw(raw),
+        );
+    }
+
     async fn wait_until(&mut self, checkpoint: &str, ready: impl Fn(&Self) -> bool) {
         eprintln!("composed DOM checkpoint: {checkpoint}");
         loop {
@@ -418,6 +458,68 @@ async fn home_to_settings_to_a_section_and_back_at_a_wide_width() {
     ui.wait_until("home", |ui| ui.find(HOME).is_some()).await;
 }
 
+const SIDEBAR_NAV: &str = "nav[aria-label=\"Sidebar\"]";
+const SIDEBAR_HANDLE: &str = "[role=\"separator\"][aria-label=\"Resize Sidebar and Content\"]";
+const SIDEBAR_EDGE: &str = "[role=\"separator\"][aria-label=\"Open Sidebar\"]";
+const GESTURE_OVERLAY: &str = "[role=\"presentation\"]";
+
+// Dragging the sidebar handle 48 px past the sidebar's minimum hides it, as the Hide sidebar
+// button does, and dragging the edge strip that replaces it brings it back at the width it had.
+#[tokio::test(flavor = "current_thread")]
+async fn dragging_the_sidebar_shut_hides_it_and_the_edge_strip_brings_it_back_at_its_width() {
+    let Shell { mut ui, .. } = Shell::start(WIDE_PX).await;
+    // The default weights give the sidebar a sixth of the window: 200 px, 17 per cent.
+    assert!(ui.find(SIDEBAR_NAV).is_some());
+    assert_eq!(
+        ui.attribute(SIDEBAR_HANDLE, "aria-valuenow").as_deref(),
+        Some("17")
+    );
+
+    // 100 px is below the 112 px threshold (160 minimum, 48 distance).
+    ui.pointer(SIDEBAR_HANDLE, "pointerdown", 200.0);
+    ui.wait_until("the gesture overlay", |ui| {
+        ui.find(GESTURE_OVERLAY).is_some()
+    })
+    .await;
+    ui.pointer(GESTURE_OVERLAY, "pointermove", 100.0);
+    ui.pointer(GESTURE_OVERLAY, "pointerup", 100.0);
+    ui.wait_until("the sidebar folded behind its edge strip", |ui| {
+        ui.find(SIDEBAR_NAV).is_none()
+            && ui.find(SIDEBAR_EDGE).is_some()
+            && ui.find(SIDEBAR_HANDLE).is_none()
+    })
+    .await;
+
+    // Short of the threshold the strip leaves it closed.
+    ui.pointer(SIDEBAR_EDGE, "pointerdown", 2.0);
+    ui.wait_until("the gesture overlay", |ui| {
+        ui.find(GESTURE_OVERLAY).is_some()
+    })
+    .await;
+    ui.pointer(GESTURE_OVERLAY, "pointermove", 100.0);
+    ui.pointer(GESTURE_OVERLAY, "pointerup", 100.0);
+    ui.wait_until("the gesture ended", |ui| ui.find(GESTURE_OVERLAY).is_none())
+        .await;
+    assert!(ui.find(SIDEBAR_NAV).is_none());
+
+    // Past it the sidebar opens at the pointer: the same 200 px it was.
+    ui.pointer(SIDEBAR_EDGE, "pointerdown", 2.0);
+    ui.wait_until("the gesture overlay", |ui| {
+        ui.find(GESTURE_OVERLAY).is_some()
+    })
+    .await;
+    ui.pointer(GESTURE_OVERLAY, "pointermove", 200.0);
+    ui.pointer(GESTURE_OVERLAY, "pointerup", 200.0);
+    ui.wait_until("the sidebar is back", |ui| {
+        ui.find(SIDEBAR_NAV).is_some() && ui.find(SIDEBAR_EDGE).is_none()
+    })
+    .await;
+    assert_eq!(
+        ui.attribute(SIDEBAR_HANDLE, "aria-valuenow").as_deref(),
+        Some("17")
+    );
+}
+
 // Opening the counter's Settings section is what starts its Wasm guest: the section is a
 // manifest-declared row whose presentation is a lazy endpoint (ADR 031 §7).
 #[tokio::test(flavor = "current_thread")]
@@ -584,8 +686,10 @@ async fn the_lifecycle_section_enables_and_disables_a_micro() {
     ui.click("button[aria-label=\"Open Micro lifecycle settings\"]");
     let disable = "button[aria-label=\"Disable dayframe.counter micro\"]";
     let enable = "button[aria-label=\"Enable dayframe.counter micro\"]";
-    ui.wait_until("the counter is listed enabled", |ui| ui.find(disable).is_some())
-        .await;
+    ui.wait_until("the counter is listed enabled", |ui| {
+        ui.find(disable).is_some()
+    })
+    .await;
     ui.click(disable);
     ui.wait_until("the counter is disabled", |ui| ui.find(enable).is_some())
         .await;

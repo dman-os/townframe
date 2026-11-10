@@ -31,21 +31,25 @@ use micro_shell_manifest::Socket;
 use std::cell::Cell;
 use std::rc::Rc;
 
-/// Limits of the sidebar pane and the list/details panes, in logical px (`KIT-042`).
+/// Limits of the sidebar pane and the list/details panes, in logical px (`KIT-042`). Dragging the
+/// sidebar 48 px below its minimum hides it, as the "Hide sidebar" button does.
 const SIDEBAR_RULE: SizeRule = SizeRule {
     min: 160.0,
     max: 480.0,
     snap: None,
+    collapse_past: Some(48.0),
 };
 const LIST_RULE: SizeRule = SizeRule {
     min: 200.0,
     max: f64::INFINITY,
     snap: None,
+    collapse_past: None,
 };
 const DETAILS_RULE: SizeRule = SizeRule {
     min: 240.0,
     max: f64::INFINITY,
     snap: None,
+    collapse_past: None,
 };
 
 const BUTTON: &str = "rounded-md border border-border px-4 py-2 text-left focus-visible:outline";
@@ -271,6 +275,27 @@ fn sheet_element(
     })
 }
 
+/// The details position's mounted panel and its accessible name.
+fn details_pane(
+    shell: &Shell,
+    details: Option<(&Row<String, Panel>, Option<&str>, clay_mdk::Attachment)>,
+) -> (Option<Element>, String) {
+    let slot = details.map(|(row_panel, row, attachment)| {
+        placed_slot(
+            shell,
+            Placement::Details,
+            format!("{}/{row:?}", row_panel.key),
+            row_panel,
+            attachment,
+        )
+    });
+    let name = details.map_or_else(
+        || "Details".to_owned(),
+        |(row_panel, ..)| format!("{} details", row_panel.value.title),
+    );
+    (slot, name)
+}
+
 #[component]
 fn Frame(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
@@ -320,7 +345,8 @@ fn Frame(shell: Shell) -> Element {
         }
     };
 
-    let sidebar_visible = width.fits_side_by_side() && !state.sidebar_hidden;
+    let wide = width.fits_side_by_side();
+    let sidebar_visible = wide && !state.sidebar_hidden;
     let outer = Split::new(vec![config.sidebar, config.list + config.details], width_px)
         .rule(0, SIDEBAR_RULE)
         .renderer(host.renderer);
@@ -342,32 +368,26 @@ fn Frame(shell: Shell) -> Element {
         main,
         main.value.content,
     );
-    let details_slot = details.map(|(row_panel, row, attachment)| {
-        placed_slot(
-            &shell,
-            Placement::Details,
-            format!("{}/{row:?}", row_panel.key),
-            row_panel,
-            attachment,
-        )
-    });
-    let details_name = details.map_or_else(
-        || "Details".to_owned(),
-        |(row_panel, ..)| format!("{} details", row_panel.value.title),
-    );
-    let write = {
-        let config_handle = shell.config.clone();
-        move |next: ShellConfig| {
-            config_handle
-                .write(next)
-                .expect("the shell may write its own configuration");
-        }
-    };
+    let (details_slot, details_name) = details_pane(&shell, details);
     let on_resize_inner = {
-        let write = write.clone();
-        move |weights: Vec<f64>| write(with_inner_weights(config, &weights))
+        let shell = shell.clone();
+        move |weights: Vec<f64>| shell.write_config(with_inner_weights(config, &weights))
     };
-    let on_resize_outer = move |weights: Vec<f64>| write(with_outer_weights(config, &weights));
+    let on_resize_outer = {
+        let shell = shell.clone();
+        move |weights: Vec<f64>| shell.write_config(with_outer_weights(config, &weights))
+    };
+    // Dragging the sidebar shut and reopening it from the edge strip set the same state as the
+    // "Hide sidebar" button and the sidebar/back button; the weights stay, so it reopens at the
+    // width it had.
+    let on_collapse_outer = {
+        let shell = shell.clone();
+        move |_pane: usize| shell.set_sidebar_hidden(true)
+    };
+    let on_expand_outer = {
+        let shell = shell.clone();
+        move |()| shell.set_sidebar_hidden(false)
+    };
 
     let current = state.navigation.opened(&main.key).map(str::to_owned);
     let list_details = rsx! {
@@ -395,7 +415,7 @@ fn Frame(shell: Shell) -> Element {
             if let Some(problem) = failure() {
                 p { role: "alert", "{problem}" }
             }
-            if sidebar_visible {
+            if wide {
                 Sections {
                     label: "Shell",
                     panes: vec![
@@ -409,7 +429,10 @@ fn Frame(shell: Shell) -> Element {
                         },
                     ],
                     split: outer,
+                    folded: state.sidebar_hidden,
                     on_resize: on_resize_outer,
+                    on_collapse: on_collapse_outer,
+                    on_expand: on_expand_outer,
                 }
             } else {
                 {list_details}
@@ -461,12 +484,7 @@ fn Sidebar(shell: Shell) -> Element {
                     "aria-label": "Hide sidebar",
                     onclick: {
                         let shell = shell.clone();
-                        move |_| {
-                            shell.edit(|state| {
-                                state.sidebar_hidden = true;
-                                true
-                            });
-                        }
+                        move |_| shell.set_sidebar_hidden(true)
                     },
                     "Hide sidebar"
                 }

@@ -154,6 +154,22 @@ impl Shell {
         moved
     }
 
+    /// Store the arrangement weights the user dragged to.
+    fn write_config(&self, next: ShellConfig) {
+        self.config
+            .write(next)
+            .expect("the shell may write its own configuration");
+    }
+
+    /// Fold the sidebar of a wide host away (the "Hide sidebar" button, dragging it shut) or
+    /// bring it back (the sidebar/back button, its edge strip).
+    fn set_sidebar_hidden(&self, hidden: bool) {
+        self.edit(|state| {
+            state.sidebar_hidden = hidden;
+            true
+        });
+    }
+
     /// The panels once the collection has loaded: a call made before that would otherwise find
     /// no panel at all.
     async fn loaded_panels(&self) -> Result<std::rc::Rc<[clay_mdk::Row<String, Panel>]>, Error> {

@@ -20,8 +20,20 @@ pub fn Sections(
     panes: Vec<SectionPane>,
     split: Split,
     on_resize: EventHandler<Vec<f64>>,
+    #[props(default)] on_collapse: EventHandler<usize>,
+    #[props(default)] on_expand: EventHandler<()>,
+    #[props(default)] folded: bool,
 ) -> Element {
     rsx! {
-        sections::Sections { label, panes, split, on_resize, skin: SKIN }
+        sections::Sections {
+            label,
+            panes,
+            split,
+            on_resize,
+            on_collapse,
+            on_expand,
+            folded,
+            skin: SKIN,
+        }
     }
 }
