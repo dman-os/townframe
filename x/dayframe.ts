@@ -48,6 +48,8 @@ switch (command) {
       // A path that does not exist yet: the app creates it, so the run starts empty.
       store = `${await Deno.makeTempDir({ prefix: "dayframe-store-" })}/store`;
     }
+    // One binary carries both launchers; the variable picks Blitz (see dayframe_desktop/main.rs).
+    if (flag("--native")) env["DAYFRAME_RENDERER"] = "blitz";
     if (store) env["DAYFRAME_STORE_PATH"] = $.path(store).resolve().toString();
     console.log(`package dir: ${env["DAYFRAME_PACKAGE_DIR"]}`);
     console.log(`store path: ${env["DAYFRAME_STORE_PATH"] ?? "(app default)"}`);
@@ -55,13 +57,7 @@ switch (command) {
       "-p",
       "dayframe_desktop",
       ...(flag("--native")
-        ? [
-          "--renderer",
-          "native",
-          "--no-default-features",
-          "--features",
-          "native",
-        ]
+        ? ["--renderer", "native", "--features", "blitz"]
         : ["--renderer", "webview"]),
       "--hot-patch",
       "false",

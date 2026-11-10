@@ -1760,7 +1760,7 @@ fn frame_app(props: FrameApp) -> Element {
         insets,
         platform_back,
         can_back,
-        keyboard: false,
+        renderer: Renderer::Blitz,
         start: None,
     });
     rsx! { PresentationSlot { reference: props.reference } }

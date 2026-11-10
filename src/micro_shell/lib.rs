@@ -17,6 +17,7 @@
 //! The host tells the shell what only it knows through [`HostInputs`], a Dioxus context the
 //! composition provides around the frame: the size available to the frame (the shell never
 //! measures the DOM, `KIT-040`) and the platform back gesture.
+pub use clay_dioxus_kit::Renderer;
 pub use micro_shell_manifest as contract;
 mod navigation;
 mod view;
@@ -71,11 +72,11 @@ pub struct HostInputs {
     /// Written by the shell: whether back has somewhere to go, so a host that must decide
     /// whether to claim the platform gesture (the browser's history) can.
     pub can_back: Signal<bool>,
-    /// Whether the renderer takes keyboard focus. `tabindex` panics Blitz, so the kit's
-    /// keyboard-resizable handles are opt-in (`Split::keyboard`) and the browser build turns
-    /// them on. This reaches the shell's own layout; a guest micro's components cannot read it
-    /// yet (see ADR 032, open items).
-    pub keyboard: bool,
+    /// The engine rendering the shell. Blitz panics on `tabindex` and has no pointer capture, so
+    /// the kit gates keyboard-resizable handles and the drag overlay's pointer-leave handling on
+    /// it (`Split::renderer`). This reaches the shell's own layout; a guest micro's components
+    /// cannot read it yet (see ADR 032, open items).
+    pub renderer: Renderer,
     /// A development seed: the navigation stack the shell starts on instead of home, so a state
     /// that needs clicks can be captured (the native window takes no injected pointer input).
     /// Comma-separated entries opened in order: `panel` opens a panel, `panel/row` opens one of

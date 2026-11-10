@@ -11,14 +11,16 @@
 //!   extent, so the host passes it in [`Split::extent`] instead of the component asking.
 //! * No pointer capture on Blitz: a drag that leaves the handle stops delivering events. While a
 //!   drag is live the component therefore mounts a window-sized overlay, which every later move
-//!   lands on however far the pointer travels. The overlay also ends the gesture when the
-//!   pointer leaves the window, so a release outside the app cannot leave it stuck. On touch the
-//!   browser captures the pointer implicitly to the handle, so the handle takes the same
-//!   move/release handlers as the overlay.
+//!   lands on however far the pointer travels. Where [`Renderer::captures_pointer`] is false
+//!   (Blitz) the overlay also ends the gesture when the pointer leaves the window, so a release
+//!   outside the app cannot leave it stuck. A browser engine keeps delivering a pressed
+//!   pointer's events after it leaves the window, so there the gesture ends only on
+//!   `pointerup`/`pointercancel`. On touch the browser captures the pointer implicitly to the
+//!   handle, so the handle takes the same move/release handlers as the overlay.
 //! * Positions come from `page_coordinates()`: the event target changes from handle to overlay
 //!   mid-gesture, and element-relative coordinates would jump with it.
-//! * `tabindex` panics Blitz, so keyboard resizing is opt-in through [`Split::keyboard`]: the
-//!   web build turns it on, the native build leaves it off.
+//! * `tabindex` panics Blitz, so keyboard resizing is gated on [`Renderer::takes_focus`], which the host
+//!   sets through [`Split::renderer`]: browser engines turn it on, Blitz leaves it off.
 use crate::Layer;
 use dioxus::prelude::*;
 use std::rc::Rc;
@@ -52,6 +54,27 @@ impl Default for SizeRule {
     }
 }
 
+/// The engine a host renders with, so the kit can work around what that engine lacks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Renderer {
+    /// A browser engine (Wry webview, the web build).
+    Browser,
+    /// The native Blitz renderer (desktop native, Android).
+    Blitz,
+}
+
+impl Renderer {
+    /// Whether elements take keyboard focus; Blitz panics on `tabindex`.
+    pub fn takes_focus(self) -> bool {
+        matches!(self, Self::Browser)
+    }
+
+    /// Whether a pressed pointer keeps delivering events outside the window; Blitz has no pointer capture.
+    pub fn captures_pointer(self) -> bool {
+        matches!(self, Self::Browser)
+    }
+}
+
 /// The controlled layout state of a run of panes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Split {
@@ -61,8 +84,8 @@ pub struct Split {
     pub extent: f64,
     /// Limits per pane.
     pub rules: Vec<SizeRule>,
-    /// Whether handles take keyboard focus and arrow-key resizing.
-    pub keyboard: bool,
+    /// The renderer the split runs in; see [`Renderer`] and the module docs.
+    pub renderer: Renderer,
 }
 
 impl Split {
@@ -84,7 +107,7 @@ impl Split {
             weights,
             extent,
             rules,
-            keyboard: false,
+            renderer: Renderer::Blitz,
         }
     }
 
@@ -94,9 +117,9 @@ impl Split {
         self
     }
 
-    /// Enable keyboard resizing; see the module docs.
-    pub fn keyboard(mut self, keyboard: bool) -> Self {
-        self.keyboard = keyboard;
+    /// Name the renderer so the split can use what it supports; see the module docs.
+    pub fn renderer(mut self, renderer: Renderer) -> Self {
+        self.renderer = renderer;
         self
     }
 
@@ -243,7 +266,8 @@ pub fn Sections(
         "position:fixed;top:0;right:0;bottom:0;left:0;z-index:{};cursor:col-resize;touch-action:none",
         Layer::Gesture.css()
     );
-    let tabindex = split.keyboard.then_some("0");
+    let tabindex = split.renderer.takes_focus().then_some("0");
+    let captures_pointer = split.renderer.captures_pointer();
     let dragging_handle = drag().map(|drag| drag.handle);
 
     rsx! {
@@ -307,7 +331,11 @@ pub fn Sections(
                     style: "{gesture_style}",
                     onpointermove: move |event| track.call(event),
                     onpointerup: move |_| release.call(()),
-                    onpointerleave: move |_| release.call(()),
+                    onpointerleave: move |_| {
+                        if !captures_pointer {
+                            release.call(());
+                        }
+                    },
                     onpointercancel: move |_| abort.call(()),
                 }
             }
@@ -444,9 +472,16 @@ mod tests {
         Split::new(vec![1.0, 0.0], 100.0);
     }
 
+    /// The one report a gesture made, as pane sizes.
+    fn reported_sizes(reports: &RefCell<Vec<Vec<f64>>>) -> Vec<f64> {
+        let reports = reports.borrow();
+        assert_eq!(reports.len(), 1);
+        sizes_of(&Split::new(vec![1.0, 3.0], 800.0), reports[0].clone())
+    }
+
     #[derive(Clone)]
     struct Probe {
-        keyboard: bool,
+        renderer: Renderer,
         reports: Rc<RefCell<Vec<Vec<f64>>>>,
     }
 
@@ -461,7 +496,7 @@ mod tests {
                     ..SizeRule::default()
                 },
             )
-            .keyboard(probe.keyboard);
+            .renderer(probe.renderer);
         rsx! {
             Sections {
                 label: "Shell",
@@ -478,10 +513,10 @@ mod tests {
         }
     }
 
-    fn render(keyboard: bool) -> (Page, Rc<RefCell<Vec<Vec<f64>>>>) {
+    fn render(renderer: Renderer) -> (Page, Rc<RefCell<Vec<Vec<f64>>>>) {
         let reports = Rc::new(RefCell::new(vec![]));
         let probe = Probe {
-            keyboard,
+            renderer,
             reports: Rc::clone(&reports),
         };
         (Page::with_props(app, probe), reports)
@@ -489,7 +524,7 @@ mod tests {
 
     #[test]
     fn panes_are_named_regions_and_the_handle_a_named_separator() {
-        let (page, _) = render(false);
+        let (page, _) = render(Renderer::Blitz);
         page.by_role("group", "Shell");
         page.by_role("region", "Sidebar");
         page.by_role("region", "Content");
@@ -504,7 +539,7 @@ mod tests {
 
     #[test]
     fn panes_handles_and_the_gesture_overlay_stack_on_the_layer_scale() {
-        let (mut page, _) = render(false);
+        let (mut page, _) = render(Renderer::Blitz);
         let layer = |page: &Page, node| page.style(node, "z-index");
         // A pane is a stacking context of its own, so what an app bar inside it does cannot
         // climb over the handle that overlaps its edge.
@@ -522,7 +557,7 @@ mod tests {
 
     #[test]
     fn a_drag_previews_live_and_reports_once_on_release() {
-        let (mut page, reports) = render(false);
+        let (mut page, reports) = render(Renderer::Blitz);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         page.pointer(handle, "pointerdown", 200.0);
         assert_eq!(page.attr(handle, "data-state").as_deref(), Some("dragging"));
@@ -533,13 +568,7 @@ mod tests {
         assert_eq!(page.style(sidebar, "flex").as_deref(), Some("1.3 1 0px"));
         assert!(reports.borrow().is_empty(), "nothing is reported mid-drag");
         page.pointer(overlay, "pointerup", 260.0);
-        let reported = reports.borrow();
-        assert_eq!(reported.len(), 1);
-        assert_eq!(
-            sizes_of(&Split::new(vec![1.0, 3.0], 800.0), reported[0].clone()),
-            [260.0, 540.0]
-        );
-        drop(reported);
+        assert_eq!(reported_sizes(&reports), [260.0, 540.0]);
         assert!(!page.has_role("presentation", ""), "the overlay goes away");
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         assert_eq!(page.attr(handle, "data-state").as_deref(), Some("idle"));
@@ -547,34 +576,46 @@ mod tests {
 
     #[test]
     fn a_drag_honours_the_pane_minimum() {
-        let (mut page, reports) = render(false);
+        let (mut page, reports) = render(Renderer::Blitz);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         page.pointer(handle, "pointerdown", 200.0);
         let overlay = page.by_role("presentation", "");
         page.pointer(overlay, "pointermove", -500.0);
         page.pointer(overlay, "pointerup", -500.0);
-        let reported = reports.borrow();
-        assert_eq!(
-            sizes_of(&Split::new(vec![1.0, 3.0], 800.0), reported[0].clone())[0],
-            100.0
-        );
+        assert_eq!(reported_sizes(&reports)[0], 100.0);
     }
 
-    #[test]
-    fn leaving_the_window_ends_the_gesture_with_what_was_shown() {
-        let (mut page, reports) = render(false);
+    /// Press the handle, move to 230 and leave the window.
+    fn drag_and_leave(renderer: Renderer) -> (Page, Rc<RefCell<Vec<Vec<f64>>>>) {
+        let (mut page, reports) = render(renderer);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         page.pointer(handle, "pointerdown", 200.0);
         let overlay = page.by_role("presentation", "");
         page.pointer(overlay, "pointermove", 230.0);
         page.pointer(overlay, "pointerleave", 230.0);
-        assert_eq!(reports.borrow().len(), 1);
+        (page, reports)
+    }
+
+    #[test]
+    fn on_blitz_leaving_the_window_ends_the_gesture_with_what_was_shown() {
+        let (page, reports) = drag_and_leave(Renderer::Blitz);
+        near(reported_sizes(&reports)[0], 230.0);
         assert!(!page.has_role("presentation", ""));
     }
 
     #[test]
+    fn in_a_browser_leaving_the_window_keeps_the_gesture_until_release() {
+        let (mut page, reports) = drag_and_leave(Renderer::Browser);
+        assert!(reports.borrow().is_empty(), "leaving does not end the drag");
+        let overlay = page.by_role("presentation", "");
+        page.pointer(overlay, "pointermove", 260.0);
+        page.pointer(overlay, "pointerup", 260.0);
+        assert_eq!(reported_sizes(&reports), [260.0, 540.0]);
+    }
+
+    #[test]
     fn a_cancelled_gesture_reports_nothing() {
-        let (mut page, reports) = render(false);
+        let (mut page, reports) = render(Renderer::Blitz);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         page.pointer(handle, "pointerdown", 200.0);
         let overlay = page.by_role("presentation", "");
@@ -588,7 +629,7 @@ mod tests {
 
     #[test]
     fn touch_moves_that_stay_captured_by_the_handle_still_drag() {
-        let (mut page, reports) = render(false);
+        let (mut page, reports) = render(Renderer::Blitz);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         page.pointer(handle, "pointerdown", 200.0);
         page.pointer(handle, "pointermove", 240.0);
@@ -598,25 +639,20 @@ mod tests {
 
     #[test]
     fn handles_take_keyboard_focus_only_when_the_host_says_the_renderer_can() {
-        let (page, _) = render(false);
+        let (page, _) = render(Renderer::Blitz);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         assert_eq!(page.attr(handle, "tabindex"), None);
-        let (page, _) = render(true);
+        let (page, _) = render(Renderer::Browser);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         assert_eq!(page.attr(handle, "tabindex").as_deref(), Some("0"));
     }
 
     #[test]
     fn arrow_keys_resize_by_a_step() {
-        let (mut page, reports) = render(true);
+        let (mut page, reports) = render(Renderer::Browser);
         let handle = page.by_role("separator", "Resize Sidebar and Content");
         page.key(handle, Key::Named(NamedKey::ArrowRight));
         page.key(handle, Key::Named(NamedKey::Tab));
-        let reported = reports.borrow();
-        assert_eq!(reported.len(), 1, "only arrows resize");
-        assert_eq!(
-            sizes_of(&Split::new(vec![1.0, 3.0], 800.0), reported[0].clone()),
-            [216.0, 584.0]
-        );
+        assert_eq!(reported_sizes(&reports), [216.0, 584.0]);
     }
 }

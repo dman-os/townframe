@@ -323,7 +323,7 @@ fn Frame(shell: Shell) -> Element {
     let sidebar_visible = width.fits_side_by_side() && !state.sidebar_hidden;
     let outer = Split::new(vec![config.sidebar, config.list + config.details], width_px)
         .rule(0, SIDEBAR_RULE)
-        .keyboard(host.keyboard);
+        .renderer(host.renderer);
     // The list/details split lays out inside the content pane, so its extent is that pane's.
     let content_px = if sidebar_visible {
         outer.sizes()[1]
@@ -333,7 +333,7 @@ fn Frame(shell: Shell) -> Element {
     let inner = Split::new(vec![config.list, config.details], content_px)
         .rule(0, LIST_RULE)
         .rule(1, DETAILS_RULE)
-        .keyboard(host.keyboard);
+        .renderer(host.renderer);
 
     let main_slot = placed_slot(
         &shell,

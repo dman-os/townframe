@@ -11,6 +11,7 @@ use clay_host::MicroState;
 use clay_mdk::MicroId;
 use dayframe_composition::HostInputs;
 use dayframe_composition::Insets;
+use dayframe_composition::Renderer;
 use dioxus::prelude::*;
 use dioxus_core::ElementId;
 use dioxus_core::RenderTargetId;
@@ -69,7 +70,7 @@ pub(crate) fn composed(launch: Launch) -> Element {
         insets: insets.into(),
         platform_back,
         can_back,
-        keyboard: false,
+        renderer: Renderer::Blitz,
         start: None,
     };
     *launch.host.borrow_mut() = Some(host.clone());

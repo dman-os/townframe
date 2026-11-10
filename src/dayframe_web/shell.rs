@@ -7,6 +7,7 @@ use clay_mdk::host::factory;
 use dayframe_composition::CompositionRuntime;
 use dayframe_composition::HostInputs;
 use dayframe_composition::Insets;
+use dayframe_composition::Renderer;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
 use serde::Deserialize;
@@ -314,7 +315,7 @@ fn use_host_inputs() -> HostInputs {
         insets: insets.into(),
         platform_back,
         can_back,
-        keyboard: true,
+        renderer: Renderer::Browser,
         start: None,
     }
 }
