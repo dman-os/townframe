@@ -897,3 +897,43 @@ async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
     writer.withdraw();
     assert!(writer.mounted.lock().unwrap().is_empty());
 }
+
+/// A mount's root is the `data-dioxus-shadow` element, and the guest's sanitized stylesheet is
+/// its first child, ahead of the guest's own content.
+#[test]
+fn a_guest_stylesheet_renders_as_the_first_child_of_the_shadow_root() {
+    let (_host, owner, mount, _writer) = mounted_writer();
+    let factory = SurfaceFactory(Rc::new(|_mount, writer| {
+        let mut batch = counter_initial_batch();
+        batch.push(Mutation::SetStyleSheet(
+            ".btn { color: red; background: url(https://evil.example/x.png) } @import \"evil.css\";"
+                .into(),
+        ));
+        writer.apply(&batch)?;
+        Ok(SurfaceSession::new(|_| EventResponse::default()))
+    }));
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        mount: SharedMount,
+        owner: Instance,
+        factory: SurfaceFactory,
+    }
+    fn app(props: Props) -> Element {
+        rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
+    }
+    let mut dom = VirtualDom::new_with_props(
+        app,
+        Props {
+            mount: SharedMount(mount),
+            owner,
+            factory,
+        },
+    );
+    let mut tree = SurfaceTree::new();
+    dom.rebuild(&mut tree);
+    assert_eq!(
+        tree.outline(),
+        "(div[data-dioxus-shadow,style](style(#),button[class](#)))"
+    );
+    assert_eq!(tree.text_content(), ".btn {\ncolor: red;\n}0");
+}

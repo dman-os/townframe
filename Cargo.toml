@@ -203,6 +203,7 @@ atproto-dasl = "0.14.5"
 #
 # macros
 pastey = "0.1"
+cssparser = "0.38"
 displaydoc = "0.2"
 educe = "0.6"
 struct-patch = "0.10.4"

@@ -34,6 +34,7 @@ interface presentation {
         insert-before(u32),
         set-attribute(tuple<string, option<string>, attribute-value>),
         set-text(string),
+        set-style-sheet(string),
         add-event-listener(string),
         remove-event-listener(string),
         remove,

@@ -21,7 +21,13 @@ impl<C: Clone> SurfaceTree<C> {
         handles: &ElementHandles,
     ) -> Element {
         let root_children = &self.node(SurfaceNodeId::ROOT).children;
+        // The guest's sanitized stylesheet comes first, so every rule of the mount precedes the
+        // mount's content. A renderer that gives the mount a shadow root (see `MountedSurface`)
+        // scopes it there; otherwise it is a light-DOM `<style>`.
         rsx! {
+            if !self.stylesheet.is_empty() {
+                style { "{self.stylesheet}" }
+            }
             for &child in root_children {
                 {self.render_node(child, dispatch, component, handles)}
             }

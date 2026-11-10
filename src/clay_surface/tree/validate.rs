@@ -245,6 +245,10 @@ impl<C: Clone> SurfaceTree<C> {
                 self.validate_attribute(top, name, ns.as_deref(), value, bytes, work)
             }
             Mutation::SetText(text) => self.validate_text(top, text, bytes, work),
+            Mutation::SetStyleSheet(sheet) => {
+                Self::charge_work(work, 1 + sheet.len() / 64)?;
+                Self::charge_string(bytes, sheet)
+            }
             Mutation::AddEventListener(name) | Mutation::RemoveEventListener(name) => {
                 self.validate_listener(top, mutation, name, bytes)
             }

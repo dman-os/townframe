@@ -2890,6 +2890,7 @@ dependencies = [
 name = "clay_surface"
 version = "0.1.0"
 dependencies = [
+ "cssparser 0.38.0",
  "dioxus",
  "dioxus-core",
  "dioxus-html",

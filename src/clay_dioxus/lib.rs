@@ -614,15 +614,26 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         response
     });
     let tree = writer.tree.lock().unwrap();
-    tree.render(
-        &handler,
-        &|reference| {
-            rsx! {
-                ComponentMount { owner: owner.clone(), reference: *reference }
-            }
-        },
-        &handles,
-    )
+    // The mount's root element. `data-dioxus-shadow` asks the Dioxus interpreter to attach a
+    // shadow root to it and place its children (the sanitized `<style>` first, then the guest's
+    // content) inside, so a micro's stylesheet and `:host` rules apply to this mount only. An
+    // interpreter without that support leaves them as light-DOM children. `display: contents`
+    // keeps the wrapper out of layout.
+    rsx! {
+        div {
+            "data-dioxus-shadow": "",
+            style: "display: contents",
+            {tree.render(
+                &handler,
+                &|reference| {
+                    rsx! {
+                        ComponentMount { owner: owner.clone(), reference: *reference }
+                    }
+                },
+                &handles,
+            )}
+        }
+    }
 }
 
 #[cfg(test)]

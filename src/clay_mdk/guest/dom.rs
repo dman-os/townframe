@@ -295,6 +295,42 @@ impl dioxus_html::RenderedElementBacking for GuestElement {
     }
 }
 
+/// What the guest's standard `document::*` head components have asked for. `document::Style`
+/// with inline text sets the stylesheet that [`GuestDom::render`] sends each mount as
+/// `set-style-sheet` (the latest one wins). A `<link>` (which `document::Stylesheet` and
+/// `document::Style { href }` create) and a `<script>` would make the host fetch or run
+/// something, which is egress with no capability to grant it, so they are refused: the next
+/// flush fails with `invalid-batch`. Other head elements (`<meta>`, the title) are inert and
+/// ignored.
+#[derive(Default)]
+pub(crate) struct HeadState {
+    pub(crate) sheet: std::cell::RefCell<Option<String>>,
+    refused: std::cell::RefCell<Option<String>>,
+}
+
+impl dioxus::document::Document for HeadState {
+    fn eval(&self, js: String) -> dioxus::document::Eval {
+        dioxus::document::NoOpDocument.eval(js)
+    }
+
+    fn create_head_element(
+        &self,
+        name: &str,
+        _attributes: &[(&str, String)],
+        contents: Option<String>,
+    ) {
+        match name {
+            "style" => *self.sheet.borrow_mut() = contents,
+            "link" | "script" => {
+                *self.refused.borrow_mut() = Some(format!(
+                    "a micro's <{name}> head element would fetch or run external content; only inline document::Style text is supported"
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The guest owns its `VirtualDom` and event closures in linear memory; only typed `WriteMutations`
 /// batches cross `surface.apply`.
 pub struct GuestDom {
@@ -310,6 +346,9 @@ pub struct GuestDom {
         ),
     >,
     slots: std::rc::Rc<Slots>,
+    pub(crate) head: std::rc::Rc<HeadState>,
+    /// The stylesheet each mount (by surface identity) was last sent.
+    sheets_sent: std::collections::BTreeMap<u64, Option<String>>,
     pub(crate) replies: std::rc::Rc<ElementReplies>,
 }
 
@@ -338,9 +377,14 @@ impl GuestDom {
         let root_targets = targets.clone();
         let slots = std::rc::Rc::new(Slots::default());
         let root_slots = slots.clone();
+        let head = std::rc::Rc::new(HeadState::default());
+        let root_head = head.clone();
         let mut dom = dioxus_core::VirtualDom::new_with_props(
             move |()| {
                 use_context_provider(|| root_slots.clone());
+                use_context_provider(|| {
+                    root_head.clone() as std::rc::Rc<dyn dioxus::document::Document>
+                });
                 let children = app();
                 let targets = root_targets.borrow();
                 rsx! {
@@ -363,6 +407,8 @@ impl GuestDom {
             edits,
             surfaces: std::collections::BTreeMap::new(),
             slots,
+            head,
+            sheets_sent: std::collections::BTreeMap::new(),
             replies: std::rc::Rc::default(),
         }
     }
@@ -396,6 +442,7 @@ impl GuestDom {
             .expect("mounted target must have a writer");
         assert!(self.dom.runtime().remove_render_target(target));
         self.surfaces.remove(&identity);
+        self.sheets_sent.remove(&identity);
     }
 
     pub fn mount(
@@ -437,6 +484,9 @@ impl GuestDom {
     pub fn render(&mut self) -> Result<(), presentation::PresentationError> {
         loop {
             self.dom.render_immediate(&mut self.edits);
+            if let Some(reason) = self.head.refused.take() {
+                return Err(presentation::PresentationError::InvalidBatch(reason));
+            }
             let mut revoked = Vec::new();
             let held = self.slots.held.borrow();
             for (&identity, (target, surface)) in &self.surfaces {
@@ -444,11 +494,29 @@ impl GuestDom {
                     .edits
                     .get_mut(target)
                     .expect("mounted target must have a writer");
-                if !edits.is_empty() {
-                    let batch = edits.take_resolving(|id| {
+                let sheet = self.head.sheet.borrow().clone();
+                let sheet_changed = self.sheets_sent.get(&identity) != Some(&sheet);
+                if !edits.is_empty() || sheet_changed {
+                    let mut batch = edits.take_resolving(|id| {
                         held.get(&id)
                             .unwrap_or_else(|| panic!("slot {id} was written without a reference"))
                     });
+                    if sheet_changed {
+                        // A mount that has not been sent a sheet yet gets one only if the
+                        // guest set one; an unset sheet is the host's default of none.
+                        if sheet.is_some() || self.sheets_sent.contains_key(&identity) {
+                            batch.insert(
+                                0,
+                                presentation::Mutation::SetStyleSheet(
+                                    sheet.clone().unwrap_or_default(),
+                                ),
+                            );
+                        }
+                        self.sheets_sent.insert(identity, sheet);
+                    }
+                    if batch.is_empty() {
+                        continue;
+                    }
                     match surface.apply(&batch) {
                         Ok(_) => {}
                         Err(presentation::PresentationError::Revoked) => revoked.push(identity),

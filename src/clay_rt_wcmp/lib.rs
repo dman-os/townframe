@@ -315,6 +315,7 @@ pub fn convert_mutation(
             },
         )),
         Wire::SetText(text) => Mutation::SetText(text),
+        Wire::SetStyleSheet(sheet) => Mutation::SetStyleSheet(sheet),
         Wire::AddEventListener(name) => Mutation::AddEventListener(name),
         Wire::RemoveEventListener(name) => Mutation::RemoveEventListener(name),
         Wire::Remove => Mutation::Remove,

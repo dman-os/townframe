@@ -306,6 +306,7 @@ pub fn map_mutations<R, C, E>(
                 Mutation::InsertBefore(count) => Mutation::InsertBefore(count),
                 Mutation::SetAttribute(attribute) => Mutation::SetAttribute(attribute),
                 Mutation::SetText(text) => Mutation::SetText(text),
+                Mutation::SetStyleSheet(sheet) => Mutation::SetStyleSheet(sheet),
                 Mutation::AddEventListener(name) => Mutation::AddEventListener(name),
                 Mutation::RemoveEventListener(name) => Mutation::RemoveEventListener(name),
                 Mutation::Remove => Mutation::Remove,
@@ -327,6 +328,7 @@ pub fn ingress_budget<R>(edits: &[Mutation<R>]) -> Result<(), &'static str> {
             Mutation::CreateElement((tag, namespace)) => [Some(tag), namespace.as_deref(), None],
             Mutation::CreateText(text)
             | Mutation::SetText(text)
+            | Mutation::SetStyleSheet(text)
             | Mutation::AddEventListener(text)
             | Mutation::RemoveEventListener(text) => [Some(text), None, None],
             Mutation::SetAttribute((name, namespace, value)) => [

@@ -7,6 +7,7 @@ use crate::render::static_attribute;
 use crate::render::supported_listener;
 use crate::render::supported_tag;
 use crate::replay::replay;
+use crate::stylesheet::sanitize_stylesheet;
 use crate::wire::AttributeValue;
 use crate::wire::Mutation;
 use crate::wire::NodeId;
@@ -66,6 +67,9 @@ pub struct SurfaceTree<C = ()> {
     element_to_node: Vec<Option<SurfaceNodeId>>,
     pub(crate) revision: u64,
     retained_bytes: usize,
+    /// The sanitized stylesheet of this mount (empty when the guest sent none). Bounded by the
+    /// per-string limit at ingress, so it is not charged against `retained_bytes`.
+    pub(crate) stylesheet: String,
     /// Distinct `data-*` names this surface has used, bounded by [`Self::MAX_DATA_ATTRIBUTE_NAMES`].
     /// Kept across `clear` so a surface cannot reset its budget by resetting its tree.
     data_attribute_names: std::collections::BTreeSet<&'static str>,
@@ -86,6 +90,7 @@ impl<C: PartialEq> PartialEq for SurfaceTree<C> {
     fn eq(&self, other: &Self) -> bool {
         self.revision == other.revision
             && self.nodes == other.nodes
+            && self.stylesheet == other.stylesheet
             && self.failure == other.failure
     }
 }
@@ -121,6 +126,7 @@ impl<C: Clone> SurfaceTree<C> {
             element_to_node: vec![Some(SurfaceNodeId::ROOT)],
             revision: 0,
             retained_bytes: 0,
+            stylesheet: String::new(),
             data_attribute_names: std::collections::BTreeSet::new(),
             failure: None,
             retired_elements: BTreeSet::new(),
@@ -166,6 +172,7 @@ impl<C: Clone> SurfaceTree<C> {
                         element_id: None,
                     });
                 }
+                Mutation::SetStyleSheet(sheet) => self.stylesheet = sanitize_stylesheet(sheet),
                 _ => replay(std::slice::from_ref(mutation), self)?,
             }
             if self
@@ -233,6 +240,46 @@ impl<C: Clone> SurfaceTree<C> {
     pub fn text_content(&self) -> String {
         let mut out = String::new();
         self.collect_text(SurfaceNodeId::ROOT, &mut out);
+        out
+    }
+
+    /// A compact structural summary of the tree: `tag[attribute names](children)` (the root, which has no tag, is just its parenthesized
+    /// children), with `#` for
+    /// a text node and `<slot>` for a component slot. For tests and diagnostics that assert the
+    /// shape of what a host renders without spelling out its contents.
+    pub fn outline(&self) -> String {
+        fn walk<C: Clone>(tree: &SurfaceTree<C>, id: SurfaceNodeId, out: &mut String) {
+            let node = tree.node(id);
+            match &node.kind {
+                SurfaceNodeKind::Root => {}
+                SurfaceNodeKind::Text(_) => out.push('#'),
+                SurfaceNodeKind::Component(_) => out.push_str("<slot>"),
+                SurfaceNodeKind::Element {
+                    tag, attributes, ..
+                } => {
+                    out.push_str(tag);
+                    let names: Vec<&str> =
+                        attributes.keys().map(|(name, _)| name.as_str()).collect();
+                    if !names.is_empty() {
+                        out.push('[');
+                        out.push_str(&names.join(","));
+                        out.push(']');
+                    }
+                }
+            }
+            if !node.children.is_empty() {
+                out.push('(');
+                for (index, &child) in node.children.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    walk(tree, child, out);
+                }
+                out.push(')');
+            }
+        }
+        let mut out = String::new();
+        walk(self, SurfaceNodeId::ROOT, &mut out);
         out
     }
 

@@ -14,6 +14,7 @@
 //! listener vocabulary a batch may name.
 mod render;
 mod replay;
+mod stylesheet;
 mod tree;
 mod wire;
 

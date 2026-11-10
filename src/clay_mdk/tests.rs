@@ -92,6 +92,7 @@ fn replay(batch: &[presentation::Mutation], to: &mut impl WriteMutations) {
             Mutation::CreateElement((tag, ns)) => to.create_element(tag, ns.as_deref()),
             Mutation::CreateText(value) => to.create_text(value),
             Mutation::MountComponent(_) => unreachable!("counter fixture has no component grants"),
+            Mutation::SetStyleSheet(_) => unreachable!("counter fixture sets no stylesheet"),
             Mutation::CloneNode => to.clone(),
             Mutation::AppendChildren(m) => to.append_children(*m as usize),
             Mutation::ReplaceWith(m) => to.replace_with(*m as usize),
@@ -1819,4 +1820,41 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
     rig.click(&second, second_button).await?;
     assert_eq!(rig.counter_text(&second_placement), "1");
     Ok(())
+}
+
+/// Standard `document::Style` with inline text becomes the guest's stylesheet, the text a mount
+/// is sent as `set-style-sheet`; `document::Stylesheet` (a `<link>`) is egress and the next
+/// flush refuses it. A native test has no surface to send the mutation over, so this reads the
+/// guest document where `GuestDom::render` takes it from.
+#[test]
+fn sdk_document_style_sets_the_stylesheet_and_stylesheet_links_are_refused() {
+    use dioxus::document::Style;
+    use dioxus::document::Stylesheet;
+    use dioxus::prelude::*;
+
+    fn styled() -> Element {
+        rsx! {
+            Style { ":host {{ display: block }}" }
+            p { "content" }
+        }
+    }
+    let mut dom = crate::GuestDom::new(styled);
+    dom.mount_target(1);
+    dom.render().unwrap();
+    assert_eq!(
+        dom.head.sheet.borrow().as_deref(),
+        Some(":host { display: block }")
+    );
+
+    fn linked() -> Element {
+        rsx! { Stylesheet { href: "https://example.invalid/a.css" } }
+    }
+    let mut dom = crate::GuestDom::new(linked);
+    dom.mount_target(1);
+    let error = dom.render().unwrap_err();
+    assert!(
+        matches!(&error, crate::presentation::PresentationError::InvalidBatch(reason) if reason.contains("<link>")),
+        "{error:?}"
+    );
+    assert!(dom.head.sheet.borrow().is_none());
 }

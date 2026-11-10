@@ -410,6 +410,7 @@ fn convert_mutation(mutation: wit_presentation::Mutation) -> Mutation<Resource<W
             Mutation::SetAttribute((name, ns, convert_attribute_value(value)))
         }
         wit_presentation::Mutation::SetText(value) => Mutation::SetText(value),
+        wit_presentation::Mutation::SetStyleSheet(sheet) => Mutation::SetStyleSheet(sheet),
         wit_presentation::Mutation::AddEventListener(name) => Mutation::AddEventListener(name),
         wit_presentation::Mutation::RemoveEventListener(name) => {
             Mutation::RemoveEventListener(name)

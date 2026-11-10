@@ -39,6 +39,10 @@ pub enum Mutation<C = ()> {
     InsertBefore(u32),
     SetAttribute((String, Option<String>, AttributeValue)),
     SetText(String),
+    /// The mount's whole stylesheet, replacing any earlier one. The host sanitizes it at ingress
+    /// (see `stylesheet`) and renders it as a `<style>` first child of the mount's root. It is a
+    /// surface-level fact, not a node edit, so it has no `WriteMutations` counterpart.
+    SetStyleSheet(String),
     AddEventListener(String),
     RemoveEventListener(String),
     Remove,
