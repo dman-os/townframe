@@ -5,6 +5,8 @@ Owner: Townframe maintainers
 Updated: 2026-11-10
 Scope: The top-down grounding for this week's node work (ledger D38). It derives the node, `big_ndk`, `day` and relay requirements from the intxt alpha's user journeys, and it is the boundary between the node lane (this one) and the intxt lane: the intxt lane owns intxt's datums, micro and cartridge contents; the node lane owns everything those stand on.
 
+> **Update (2026-11-11), from the intxt lane's ADR 036 (draft):** intxt's review loop needs no nodule. Clients and agents write intxt datums directly (`WriteDatums`), waiting is a `PollDatums` long-poll, and per-reader seen state stores per-slot datum heads compared against one `ListDatums`. So the node side's critical path for the alpha is: Method Lexicons (R6), then `day mcp` and generated CLI subcommands over the generic docs methods (R4, R5), then long-polls that outlast MCP and CLI timeouts (R14), then the relay composition (R9–R11), with micro access to node services (R13) in the Clay lane. R2 (big_ndk) is delivered as a general kit rather than intxt's first consumer; R19 (mounts) waits on the gitoxide check.
+
 ## The alpha, as the operator scoped it
 
 - intxt is a product shipped as a micro (inside a cartridge). Its first job: the operator reviews the PRs agents write, on their phone. Reviews live in drawers.
