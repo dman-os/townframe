@@ -188,7 +188,7 @@ None of the loop's writes. Creating the intxt, recording history and sessions, c
 
 ## 10. Open questions
 
-1. **Cost of seen state.** Per-slot heads grow with the number of notes, and `ListDatums` on a large notes doc is unmeasured. Measure before the alpha; a `since`-heads read mode is on the node lane's deferred list if it's needed.
+1. **Cost of seen state and large docs.** Measured (ledger F8): `ListDatums` is roughly quadratic in the slot count (0.1 s at 100, 5.1 s at 1,000, 25 s at 5,000, release), because each slot's version is read at explicit heads; and a doc with about 1,000 signed datums refuses updates to existing slots (`HistoryBudget.max_entries_per_frontier`). Notes docs and long session docs reach these sizes. Either big_cabinet fixes both (current-heads reads without `_at`; a per-datum rather than per-frontier budget), or notes and session docs are sharded by count. Decide with the big_cabinet owner before the alpha.
 2. **refMove vs the ref datum's own history.** Keep the explicit append-only `refMove` list, or read past targets from the `gitRef` datum's history (D17) and drop `refMove`?
 3. **Session shape details** (F5: one doc per session is fine, largest 2.67 MB): add ordering fields (`seq`, `at`), a `marker` datum (compaction, subagent spawn), and message kinds for non-human records; decide whether failed edits and synthetic agent messages are recorded.
 4. **Merges.** A merge commit's first-parent diff pulls in everything merged from upstream (797 file docs for one merge in F6's sample). A revision's files should probably be the net base..target diff, and merges recorded without per-file states for upstream changes.
