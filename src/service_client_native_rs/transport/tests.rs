@@ -143,8 +143,7 @@ async fn the_transport_enforces_the_deadline_the_client_does_not() {
     let error = client
         .subscribe(context, SubscribeEvents {})
         .await
-        .err()
-        .expect("a spent budget fails the open");
+        .expect_err("a spent budget fails the open");
     assert!(matches!(
         error,
         ClientError::Method(ContextError::DeadlineExceeded)
