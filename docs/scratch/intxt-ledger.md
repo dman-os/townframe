@@ -9,6 +9,7 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 
 - intxt (this lane, p3N-3): datums, reference/anchor model, intxt micro, MCP surface.
 - Node (p3N-2): `big_ndk`, intxt nodule kit surface, day node, relay, `day`.
+  - ADR numbers: node lane holds 037 (holder-bound capabilities, channel identity) and 038 (node orientations, relay alpha), 2026-11-10. intxt holds 035, 036; next intxt ADR is 039+. Per 037 the CLI over the Unix socket needs no token (operator = peer uid); open: agent attribution when hooks run as the operator's uid (asked p3N-2).
 - claytxt (p3N-4): Clay, the diff view (Pierre port) the intxt micro embeds, shell, Android. Reviews anchors from the diff side.
 - Webnodes (separate lane): node in the browser; web runs the same composition on a throwaway webnode.
 
