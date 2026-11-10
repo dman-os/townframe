@@ -177,11 +177,19 @@ pub enum Codec {
     /// of the marked member pins the referenced datum's frontier as multibase base58btc heads
     /// (ADR 021, ADR 035 §2.8).
     Reference,
+    /// A position inside a datum: a [`Self::Reference`] that may also carry a `#` fragment, which
+    /// the target's type interprets (an Automerge cursor range in a text, say). It is stored and
+    /// pinned as a reference is, and the reference index records its datum part, so "what points
+    /// at this datum" finds annotations too. It is its own form rather than a reference that
+    /// tolerates fragments because a position that names a whole datum must refuse one (ADR 035
+    /// §2.3): a reader decoding it as a whole-datum reference would otherwise meet a value the
+    /// schema accepted and its type cannot hold.
+    Location,
 }
 
 impl Codec {
     /// Every shape a declaration can state.
-    pub const ALL: [Codec; 8] = [
+    pub const ALL: [Codec; 9] = [
         Codec::Bytes,
         Codec::Timestamp,
         Codec::Counter,
@@ -190,6 +198,7 @@ impl Codec {
         Codec::Uint,
         Codec::Datetime,
         Codec::Reference,
+        Codec::Location,
     ];
 
     /// How this shape is spelled in our keyword, and how it is named in a message.
@@ -203,6 +212,7 @@ impl Codec {
             Codec::Uint => "uint",
             Codec::Datetime => "datetime",
             Codec::Reference => "reference",
+            Codec::Location => "location",
         }
     }
 
@@ -265,7 +275,7 @@ impl Codec {
             Codec::Uint => {
                 reconciler.u64(value.as_str().expect("checked").parse().expect("checked"))
             }
-            Codec::Reference => reconciler.str(value.as_str().expect("checked")),
+            Codec::Reference | Codec::Location => reconciler.str(value.as_str().expect("checked")),
             Codec::Counter => reconciler.counter()?.set(value.as_i64().expect("checked")),
             Codec::Text => reconciler.text()?.update(value.as_str().expect("checked")),
             Codec::Float => {
@@ -308,10 +318,12 @@ impl Codec {
                 ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
                 other => Err(unexpected(stored_scalar(other))),
             },
-            (Codec::Reference, automerge::Value::Scalar(stated)) => match stated.as_ref() {
-                ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
-                other => Err(unexpected(stored_scalar(other))),
-            },
+            (Codec::Reference | Codec::Location, automerge::Value::Scalar(stated)) => {
+                match stated.as_ref() {
+                    ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
+                    other => Err(unexpected(stored_scalar(other))),
+                }
+            }
             (Codec::Timestamp, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Timestamp(millis) => Ok(Value::String(instant_string(*millis))),
                 other => Err(unexpected(stored_scalar(other))),
@@ -387,20 +399,24 @@ impl Codec {
                     path: String::new(),
                     message: "expected a stringified uint64".to_owned(),
                 }),
-            Codec::Reference => match value.as_str() {
-                Some(stated) => {
-                    crate::DatumReference::parse_stored(stated)
-                        .map(|_| ())
-                        .map_err(|reason| CodecError::NotADatumReference {
-                            stated: stated.to_owned(),
-                            reason: reason.to_string(),
-                        })
-                }
-                None => Err(CodecError::NotADatumReference {
-                    stated: kind(value).to_owned(),
-                    reason: "a datum reference is a `dtxt:datum:` address string without a query".to_owned(),
-                }),
-            },
+            Codec::Reference | Codec::Location => {
+                let Some(stated) = value.as_str() else {
+                    return Err(CodecError::NotADatumReference {
+                        form: self.name(),
+                        stated: kind(value).to_owned(),
+                        reason: "it is a `dtxt:datum:` address string without a query".to_owned(),
+                    });
+                };
+                let parsed = match self {
+                    Codec::Reference => crate::DatumReference::parse_stored(stated).map(|_| ()),
+                    _ => crate::Location::parse_stored(stated).map(|_| ()),
+                };
+                parsed.map_err(|reason| CodecError::NotADatumReference {
+                    form: self.name(),
+                    stated: stated.to_owned(),
+                    reason: reason.to_string(),
+                })
+            }
             Codec::Counter => value
                 .as_i64()
                 .map(|_value| ())
@@ -511,7 +527,8 @@ pub fn codec_schema(codec: Codec, schema: Schema) -> Schema {
         | Codec::Float
         | Codec::Uint
         | Codec::Datetime
-        | Codec::Reference => {
+        | Codec::Reference
+        | Codec::Location => {
             schema.insert(KEYWORD.to_owned(), codec.name().into());
         }
     };
@@ -554,9 +571,14 @@ pub enum CodecError {
     #[error("this position is stored as text, so it is a string, not {found}")]
     NotAText { found: &'static str },
 
-    /// the position is declared a datum reference, and the value is not a `dtxt:datum:` address
-    #[error("this position is declared a datum reference, and {stated} is not one: {reason}")]
-    NotADatumReference { stated: String, reason: String },
+    /// the position is declared a datum reference or location, and the value is not a
+    /// `dtxt:datum:` address of that form
+    #[error("this position is declared a {form}, and {stated} is not one: {reason}")]
+    NotADatumReference {
+        form: &'static str,
+        stated: String,
+        reason: String,
+    },
 
     /// the position is declared as a float, and the value does not spell a number
     #[error(

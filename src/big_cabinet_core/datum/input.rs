@@ -617,6 +617,7 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
                     | "counter"
                     | "list"
                     | "reference"
+                    | "location"
             )
         )
     }) {
@@ -1062,7 +1063,7 @@ impl Overlay<'_> {
         if let Some(marker) = marker {
             let expected = match marker {
                 "bytes" => primary.get("x-automerge").and_then(Value::as_str) == Some("bytes"),
-                "float" | "uint" | "text" | "reference" => kind == "string",
+                "float" | "uint" | "text" | "reference" | "location" => kind == "string",
                 "timestamp" | "datetime" => {
                     kind == "string"
                         && primary

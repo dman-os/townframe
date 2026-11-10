@@ -402,14 +402,23 @@ What replaces it is a bounded vocabulary of storage forms, declared at the posit
 | a number | a counter | `x-automerge: "counter"` |
 | a string | a collaborative text | `x-automerge: "text"` |
 | a decimal string | a float | `x-automerge: "float"`, which `datum::F64` emits |
-| a `db+datum:` address string | the same string | `x-automerge: "reference"`, which `DatumReference` emits |
+| a `dtxt:datum:` address string | the same string | `x-automerge: "reference"`, which `DatumReference` emits |
+| a `dtxt:datum:` address string, optionally with a `#` fragment | the same string | `x-automerge: "location"`, which `Location` emits |
 
-The reference row is the one marker that changes no storage: the string is a string on both sides
-of the document's edge. What the declaration buys is semantics — a value at a marked position must
-parse as a `db+datum:` address or the write is refused, and a consumer can find every reference a
-schema declares from the schema alone (the `datum_ref` index does exactly this, and reads the
-optional sibling `refHeads` array of change-hash hex strings as the pin named above). A string
-that happens to spell an address where nothing declares a reference is data, not a reference.
+The reference and location rows are the markers that change no storage: the string is a string on
+both sides of the document's edge. What the declaration buys is semantics — a value at a marked
+position must parse as a `dtxt:datum:` address without a query (ADR 035) or the write is refused,
+and a consumer can find every reference a schema declares from the schema alone (the `datum_ref`
+index does exactly this, and reads the optional sibling `refHeads` array of multibase base58btc
+heads as the pin named above). A string that happens to spell an address where nothing declares a
+reference is data, not a reference.
+
+A location is a position inside a datum: an annotation's target, say, whose fragment is an
+Automerge cursor range the target's type interprets. The index records its datum part, so "what
+points at this datum" finds annotations too; the fragment stays in the value. It is a marker of its
+own, not a reference that tolerates fragments, because a position that names a whole datum must
+refuse a fragment (ADR 035 §2.3), and a reader decoding a `reference` position into a whole-datum
+type must never meet a value the schema let through.
 
 The timestamp row uses JSON Schema's standard `format: "date-time"` — the one standard keyword the
 vocabulary uses. Canonical bytes are the `{"$bytes": "…"}` object and nothing else: `contentEncoding`

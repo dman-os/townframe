@@ -800,6 +800,8 @@ values!(
     crate::dmeta::Bytes,
     crate::DatumKey,
     crate::DatumReference,
+    crate::Location,
+    crate::ActorUrl,
     crate::drawer::GroupKey,
 );
 

@@ -464,6 +464,22 @@ impl Location {
         self.fragment.as_deref()
     }
 
+    /// The datum this location is inside, without its fragment.
+    pub fn into_reference(self) -> DatumReference {
+        self.reference
+    }
+
+    /// Parse the stored form: the text without its query, because the pin lives in the sibling
+    /// `refHeads` member, as for [`DatumReference::parse_stored`]. The fragment stays: it moves
+    /// when the position moves, not when the pin does (ADR 035 §2.8).
+    pub fn parse_stored(value: &str) -> Result<Self, ReferenceError> {
+        let location = Self::parse(value)?;
+        if !location.reference.heads.is_empty() {
+            return Err(ReferenceError::PinInStoredReference);
+        }
+        Ok(location)
+    }
+
     pub fn parse(value: &str) -> Result<Self, ReferenceError> {
         let rest = strip_scheme_and_kind(value, DATUM_KIND)?;
         let (before_fragment, fragment) = match rest.split_once('#') {
@@ -499,6 +515,55 @@ impl FromStr for Location {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
+    }
+}
+
+/// The stored form, as for [`DatumReference`]: a pinned location is refused rather than written
+/// without its pin.
+impl Serialize for Location {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if !self.reference.heads.is_empty() {
+            return Err(serde::ser::Error::custom(
+                ReferenceError::PinInStoredReference,
+            ));
+        }
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Location {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse_stored(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Location {
+    /// A position, like a reference, so it is inlined.
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Location".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::Location").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        crate::datum::codec_schema(
+            crate::datum::Codec::Location,
+            schemars::json_schema!({ "type": "string" }),
+        )
     }
 }
 
@@ -571,6 +636,46 @@ impl FromStr for ActorUrl {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
+    }
+}
+
+/// The text form. An actor URL names an actor, not a datum, so the reference index never reads
+/// it and its schema is a plain string.
+impl Serialize for ActorUrl {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ActorUrl {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for ActorUrl {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ActorUrl".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::ActorUrl").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
     }
 }
 

@@ -374,6 +374,23 @@ fn the_stored_form_holds_no_pin() {
         serde_json::from_str::<DatumReference>(&encoded).unwrap(),
         plain
     );
+
+    // A location stores the same way and keeps its fragment: the fragment moves with the
+    // position, the pin moves on its own (ADR 035 §2.8).
+    let pinned_location = Location::new(pinned, Some("meta/@0".to_owned())).unwrap();
+    assert!(matches!(
+        Location::parse_stored(&pinned_location.to_string()),
+        Err(ReferenceError::PinInStoredReference)
+    ));
+    assert!(serde_json::to_string(&pinned_location).is_err());
+    let location = Location::new(plain.clone(), Some("meta/@0".to_owned())).unwrap();
+    let encoded = serde_json::to_string(&location).unwrap();
+    assert_eq!(encoded, "\"dtxt:datum:self/org.example.note/main#meta/@0\"");
+    let decoded = serde_json::from_str::<Location>(&encoded).unwrap();
+    assert_eq!(decoded, location);
+    assert_eq!(decoded.into_reference(), plain);
+    // A whole-datum position refuses what a location accepts.
+    assert!(serde_json::from_str::<DatumReference>(&encoded).is_err());
 }
 
 #[test]
@@ -448,6 +465,11 @@ fn actor_urls_round_trip_with_and_without_a_path() {
     assert_eq!(ActorUrl::parse(&text).unwrap(), nested);
     assert_eq!(nested.node_key(), &node_key());
     assert_eq!(nested.path(), "agents/session-1.a_b");
+
+    let encoded = serde_json::to_string(&nested).unwrap();
+    assert_eq!(encoded, format!("\"{text}\""));
+    assert_eq!(serde_json::from_str::<ActorUrl>(&encoded).unwrap(), nested);
+    assert!(serde_json::from_str::<ActorUrl>("\"dtxt:actor:\"").is_err());
 }
 
 #[test]

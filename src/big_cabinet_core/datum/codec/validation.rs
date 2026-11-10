@@ -101,12 +101,17 @@ impl CompiledSchema {
         Self::compile(Value::Object(document))
     }
 
-    /// Whether any position declares the `reference` storage form. A consumer walks a value for
+    /// Whether any position declares the `reference` or `location` storage form. A consumer walks a value for
     /// its references only when this says there are any to find.
     pub fn declares_references(&self) -> bool {
         schema_positions(&self.document)
             .into_iter()
-            .any(|schema| matches!(Codec::of(schema), Ok(Some(Codec::Reference))))
+            .any(|schema| {
+                matches!(
+                    Codec::of(schema),
+                    Ok(Some(Codec::Reference | Codec::Location))
+                )
+            })
     }
 
     pub(super) fn proof(&self) -> ValidationProof {
@@ -255,7 +260,8 @@ impl CompiledSchema {
                 | Codec::Text
                 | Codec::Uint
                 | Codec::Datetime
-                | Codec::Reference => "string",
+                | Codec::Reference
+                | Codec::Location => "string",
                 Codec::Counter => "integer",
             };
             if let Some(stated) = object.get("type") {

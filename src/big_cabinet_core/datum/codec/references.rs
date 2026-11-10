@@ -1,7 +1,7 @@
 //! Extracting the references a schema declares out of a datum value.
 //!
-//! A reference is a string the schema marks with the `reference` storage form, so extraction is a
-//! co-walk of value and schema like the codec's own: only a declared position produces an edge,
+//! A reference is a string the schema marks with the `reference` or `location` storage form, so
+//! extraction is a co-walk of value and schema like the codec's own: only a declared position produces an edge,
 //! and a string that happens to spell a `dtxt:datum:` address where nothing declares a reference is
 //! data, not a reference. The value was checked on the way in; what a peer wrote may not have
 //! been, so a position whose schema does not resolve for the value, and a string that does not
@@ -14,6 +14,7 @@ use super::walk::Kind;
 use super::walk::Position;
 use super::walk::discriminant_matches;
 use crate::DatumReference;
+use crate::Location;
 use crate::reference::parse_head;
 use automerge::ChangeHash;
 use serde_json::Value;
@@ -30,7 +31,8 @@ const DEPTH: usize = 1024;
 pub struct DeclaredReference {
     /// Where the reference sits in the datum value, as a JSON pointer (`""` is the root).
     pub path: String,
-    /// The address the string holds.
+    /// The datum the string addresses. A location's fragment is a position inside that datum and
+    /// not part of its identity, so it is left at `path` for the reader rather than indexed.
     pub reference: DatumReference,
     /// The frontier the sibling `refHeads` pins. Empty means unpinned: the reference follows the
     /// target's current frontier. An entry that does not parse is dropped, so a malformed sibling
@@ -80,10 +82,15 @@ fn references<'a>(
         return;
     };
     if let Ok(Some(codec)) = Codec::of(schema) {
-        if codec == Codec::Reference
-            && let Some(stated) = value.as_str()
-            && let Ok(reference) = DatumReference::parse_stored(stated)
-        {
+        let stated = value.as_str();
+        let reference = match codec {
+            Codec::Reference => stated.and_then(|stated| DatumReference::parse_stored(stated).ok()),
+            Codec::Location => stated
+                .and_then(|stated| Location::parse_stored(stated).ok())
+                .map(Location::into_reference),
+            _ => None,
+        };
+        if let Some(reference) = reference {
             found.push(DeclaredReference {
                 path: pointer(path),
                 reference,
@@ -191,6 +198,8 @@ mod tests {
         mapped: BTreeMap<String, DatumReference>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maybe: Option<DatumReference>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Location>,
     }
 
     #[macros::datum(closed)]
@@ -233,13 +242,19 @@ mod tests {
             "listed": [reference("first"), reference("second")],
             "mapped": {"key/one": reference("mapped")},
             "maybe": null,
+            "at": format!("{}#text/@3", reference("located")),
         });
         let found = declared_references(&compiled(), &value);
         let by_path: BTreeMap<&str, &DeclaredReference> = found
             .iter()
             .map(|edge| (edge.path.as_str(), edge))
             .collect();
-        assert_eq!(found.len(), 5, "{by_path:?}");
+        assert_eq!(found.len(), 6, "{by_path:?}");
+        // A location is indexed by the datum it is inside; its fragment stays in the value.
+        assert_eq!(
+            by_path["/at"].reference,
+            DatumReference::parse(&reference("located")).unwrap()
+        );
         assert_eq!(
             by_path["/link"].reference,
             DatumReference::parse(&reference("main")).unwrap()
@@ -296,11 +311,14 @@ mod tests {
             "type": "object",
             "properties": {
                 "declared": {"type": "string", "x-automerge": "reference"},
+                "whole": {"type": "string", "x-automerge": "reference"},
                 "plain": {"type": "string"},
             },
         });
         let value = json!({
             "declared": "not a reference",
+            // A whole-datum position does not take a location's fragment.
+            "whole": format!("{}#text/@3", reference("main")),
             "plain": reference("sniffed"),
             "unknown": {"nested": reference("hidden")},
         });
