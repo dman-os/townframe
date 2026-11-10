@@ -14,4 +14,8 @@
 @source "../desktop/src/**/*.rs";
 
 /* Button props form class names at runtime; keep every declared variant in the bundle. */
+/* Tailwind scans the whole repository; a WIT interface name in the nodule crates reads as an
+   arbitrary property and would emit an invalid rule. */
+@source not inline("[wasi:http/handler@0.3.0]");
+
 @source inline("df-button-default df-button-secondary df-button-outline df-button-ghost df-button-destructive df-button-sm df-button-md df-button-lg");
