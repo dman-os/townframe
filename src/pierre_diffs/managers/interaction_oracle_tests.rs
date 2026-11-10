@@ -51,8 +51,10 @@ use crate::utils::render::create_gutter_utility_element::create_gutter_utility_e
 #[derive(Deserialize)]
 struct WorldSpec {
     tree: Vec<TreeNode>,
-    #[serde(default)]
-    slots: HashMap<String, String>,
+    // `slots` (light content name to slot name) is accepted and ignored: the
+    // document derives `assignedSlot` from the `slot` and `name` attributes.
+    #[serde(default, rename = "slots")]
+    _slots: HashMap<String, String>,
     #[serde(default)]
     hits: HashMap<String, Option<String>>,
     #[serde(rename = "hitTestAvailable", default = "default_true")]
@@ -417,14 +419,8 @@ fn interaction_manager_matches_the_published_class() {
         let dom = Rc::new(FakeDom::default());
         dom.hit_test_available
             .set(scenario.world.hit_test_available);
-        let mut roots = Vec::new();
         for node in &scenario.world.tree {
-            roots.push(dom.build(node, None));
-        }
-        for (slotted, slot) in &scenario.world.slots {
-            let slot_id = dom.id(slot);
-            let slotted_id = dom.id(slotted);
-            dom.nodes.borrow_mut()[slotted_id].assigned_slot = Some(slot_id);
+            dom.build(node, None);
         }
         for (key, name) in &scenario.world.hits {
             dom.hits
@@ -448,17 +444,17 @@ fn interaction_manager_matches_the_published_class() {
         let manager = match constructed {
             Ok(manager) => manager,
             Err(payload) => {
-                dom.recording.set(true);
+                dom.recording().set(true);
                 dom.emit(json!(["throws", panic_message(payload.as_ref())]));
                 assert_json_eq(
                     &format!("scenario `{}`", scenario.name),
                     &case.trace,
-                    &Value::Array(dom.trace.borrow().clone()),
+                    &Value::Array(dom.trace()),
                 );
                 continue;
             }
         };
-        dom.recording.set(true);
+        dom.recording().set(true);
 
         for step in &scenario.steps {
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| match step {
@@ -502,16 +498,14 @@ fn interaction_manager_matches_the_published_class() {
                     name,
                     value,
                 } => {
+                    // A silent edit of the world (no trace entry).
                     let id = dom.id(target);
-                    let mut nodes = dom.nodes.borrow_mut();
-                    let node = &mut nodes[id];
+                    let recording = dom.recording().replace(false);
                     match value {
-                        None => node.attrs.retain(|(key, _)| key != name),
-                        Some(value) => match node.attrs.iter_mut().find(|(key, _)| key == name) {
-                            Some((_, slot)) => slot.clone_from(value),
-                            None => node.attrs.push((name.clone(), value.clone())),
-                        },
+                        None => dom.doc.remove_attribute(id, name),
+                        Some(value) => dom.doc.set_attribute(id, name, value),
                     }
+                    dom.recording().set(recording);
                 }
                 Op::Frames { limit, time } => {
                     dom.frames.flush_frames(*limit, *time);
@@ -525,7 +519,7 @@ fn interaction_manager_matches_the_published_class() {
         assert_json_eq(
             &format!("scenario `{}`", scenario.name),
             &case.trace,
-            &Value::Array(dom.trace.borrow().clone()),
+            &Value::Array(dom.trace()),
         );
     }
 }

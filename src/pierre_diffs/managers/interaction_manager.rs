@@ -49,14 +49,14 @@ mod targets;
 
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::hash::Hash;
 use std::rc::Rc;
 use std::rc::Weak;
 
 use self::gutter_utility::GutterUtility;
 use self::selection_rows::SelectionRows;
 use self::targets::Targets;
-use crate::hast;
+use crate::document::Document;
+use crate::document::NodeKey;
 use crate::js_text::parse_int;
 use crate::managers::universal_rendering_manager::AnimationFrames;
 use crate::managers::universal_rendering_manager::RenderCallback;
@@ -334,44 +334,14 @@ pub enum HitTest<Element> {
     Element(Element),
 }
 
+/// What the platform supplies: the rendered document, hit-testing and event
+/// registration. The structural reads and writes are the `Document`'s.
 pub trait InteractionHost: AnimationFrames + Sized + 'static {
-    type Element: Clone + Eq + Hash + 'static;
-
-    /// `element.parentNode` when it is an element (the `pre` has the shadow
-    /// root above it, which no path consumer reads).
-    fn parent(&self, element: &Self::Element) -> Option<Self::Element>;
-    /// `element.children`
-    fn children(&self, element: &Self::Element) -> Vec<Self::Element>;
-    fn previous_element_sibling(&self, element: &Self::Element) -> Option<Self::Element>;
-    /// `element.nextSibling`, when that node is an element.
-    fn next_sibling_element(&self, element: &Self::Element) -> Option<Self::Element>;
-    /// `element.tagName` (upper case for HTML)
-    fn tag_name(&self, element: &Self::Element) -> String;
-    fn get_attribute(&self, element: &Self::Element, name: &str) -> Option<String>;
-    fn set_attribute(&self, element: &Self::Element, name: &str, value: &str);
-    fn remove_attribute(&self, element: &Self::Element, name: &str);
-    /// `element.assignedSlot`
-    fn assigned_slot(&self, element: &Self::Element) -> Option<Self::Element>;
-    /// Descendants of `root` (not `root` itself), in document order, having
-    /// attribute `name` (with `value` when given): `[name]` / `[name="value"]`.
-    fn query_by_attribute(
-        &self,
-        root: &Self::Element,
-        name: &str,
-        value: Option<&str>,
-    ) -> Vec<Self::Element>;
-    fn element_from_point(&self, x: f64, y: f64) -> HitTest<Self::Element>;
-    /// `document.createElement(tag)`
-    fn create_element(&self, tag: &str) -> Self::Element;
-    /// The detached element the hast describes (the built-in utility button).
-    fn create_element_from_hast(&self, element: &hast::Element) -> Self::Element;
-    fn append_child(&self, parent: &Self::Element, child: &Self::Element);
-    /// `node.remove()`
-    fn remove_node(&self, node: &Self::Element);
-    fn replace_children(&self, parent: &Self::Element, children: &[Self::Element]);
+    fn document(&self) -> &Document;
+    fn element_from_point(&self, x: f64, y: f64) -> HitTest<NodeKey>;
     /// `click`, `pointerdown`, `pointermove`, `pointerleave` on the `pre`.
-    fn add_pre_listeners(&self, pre: &Self::Element);
-    fn remove_pre_listeners(&self, pre: &Self::Element);
+    fn add_pre_listeners(&self, pre: NodeKey);
+    fn remove_pre_listeners(&self, pre: NodeKey);
     /// `pointermove`, `pointerup`, `pointercancel` on the document.
     fn add_document_listeners(&self);
     fn remove_document_listeners(&self);
@@ -462,15 +432,15 @@ pub struct InteractionManager<Host: InteractionHost> {
     render_queue: UniversalRenderingManager<Host>,
     render_selection_callback: RenderCallback,
     mode: InteractionManagerMode,
-    options: RefCell<Rc<InteractionManagerOptions<Host::Element>>>,
+    options: RefCell<Rc<InteractionManagerOptions<NodeKey>>>,
 
-    hovered_line: RefCell<Option<LineEventBaseProps<Host::Element>>>,
-    pre: RefCell<Option<Host::Element>>,
+    hovered_line: RefCell<Option<LineEventBaseProps<NodeKey>>>,
+    pre: RefCell<Option<NodeKey>>,
 
-    gutter_utility_line: RefCell<Option<LineEventBaseProps<Host::Element>>>,
-    gutter_utility_container: RefCell<Option<Host::Element>>,
-    gutter_utility_button: RefCell<Option<Host::Element>>,
-    gutter_utility_slot: RefCell<Option<Host::Element>>,
+    gutter_utility_line: RefCell<Option<LineEventBaseProps<NodeKey>>>,
+    gutter_utility_container: RefCell<Option<NodeKey>>,
+    gutter_utility_button: RefCell<Option<NodeKey>>,
+    gutter_utility_slot: RefCell<Option<NodeKey>>,
 
     interactive_lines_attr: Cell<bool>,
     interactive_line_numbers_attr: Cell<bool>,
@@ -495,7 +465,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         host: Rc<Host>,
         render_queue: UniversalRenderingManager<Host>,
         mode: InteractionManagerMode,
-        options: InteractionManagerOptions<Host::Element>,
+        options: InteractionManagerOptions<NodeKey>,
     ) -> Rc<Self> {
         Rc::new_cyclic(|weak: &Weak<Self>| {
             let weak = Weak::clone(weak);
@@ -532,11 +502,11 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         })
     }
 
-    fn options(&self) -> Rc<InteractionManagerOptions<Host::Element>> {
+    fn options(&self) -> Rc<InteractionManagerOptions<NodeKey>> {
         Rc::clone(&self.options.borrow())
     }
 
-    pub fn set_options(&self, options: InteractionManagerOptions<Host::Element>) {
+    pub fn set_options(&self, options: InteractionManagerOptions<NodeKey>) {
         *self.options.borrow_mut() = Rc::new(options);
     }
 
@@ -547,13 +517,16 @@ impl<Host: InteractionHost> InteractionManager<Host> {
     pub fn clean_up(&self) {
         let pre = self.pre.borrow_mut().take();
         if let Some(pre) = &pre {
-            self.host.remove_pre_listeners(pre);
-            self.host.remove_attribute(pre, "data-interactive-lines");
+            self.host.remove_pre_listeners(*pre);
             self.host
+                .document()
+                .remove_attribute(pre, "data-interactive-lines");
+            self.host
+                .document()
                 .remove_attribute(pre, "data-interactive-line-numbers");
         }
         if let Some(container) = self.gutter_utility_container.borrow_mut().take() {
-            self.host.remove_node(&container);
+            self.host.document().remove(container);
         }
         *self.gutter_utility_line.borrow_mut() = None;
         *self.gutter_utility_button.borrow_mut() = None;
@@ -569,7 +542,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         self.set_selection_dirty();
     }
 
-    pub fn setup(&self, pre: &Host::Element) {
+    pub fn setup(&self, pre: &NodeKey) {
         self.set_selection_dirty();
         let options = self.options();
         let uses_custom_gutter_utility = options.uses_custom_gutter_utility.unwrap_or(false);
@@ -578,14 +551,14 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         let new_container = self.pre.borrow().as_ref() != Some(pre);
         if new_container {
             self.clean_up();
-            *self.pre.borrow_mut() = Some(pre.clone());
+            *self.pre.borrow_mut() = Some(*pre);
         }
 
         if enable_gutter_utility {
             GutterUtility(self).ensure_gutter_utility_node(uses_custom_gutter_utility);
         } else if self.gutter_utility_container.borrow().is_some() {
             if let Some(container) = self.gutter_utility_container.borrow_mut().take() {
-                self.host.remove_node(&container);
+                self.host.document().remove(container);
             }
             *self.gutter_utility_line.borrow_mut() = None;
             *self.gutter_utility_button.borrow_mut() = None;
@@ -656,7 +629,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         }
     }
 
-    pub fn handle_pointer_click(&self, event: &PointerEventData<Host::Element>) -> PointerResponse {
+    pub fn handle_pointer_click(&self, event: &PointerEventData<NodeKey>) -> PointerResponse {
         let options = self.options();
         if options.on_hunk_expand.is_none()
             && options.base.on_line_click.is_none()
@@ -673,7 +646,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         PointerResponse::default()
     }
 
-    pub fn handle_pointer_move(&self, event: &PointerEventData<Host::Element>) -> PointerResponse {
+    pub fn handle_pointer_move(&self, event: &PointerEventData<NodeKey>) -> PointerResponse {
         // Touch and pen moves are active drag/scroll gestures, not hover. Keeping
         // hover mouse-only prevents content scrolls from leaving stale utilities.
         if event.pointer_type != PointerType::Mouse {
@@ -696,7 +669,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         PointerResponse::default()
     }
 
-    pub fn handle_pointer_leave(&self, event: &PointerEventData<Host::Element>) -> PointerResponse {
+    pub fn handle_pointer_leave(&self, event: &PointerEventData<NodeKey>) -> PointerResponse {
         if self.hovered_line.borrow().is_none() {
             return PointerResponse::default();
         }
@@ -717,8 +690,8 @@ impl<Host: InteractionHost> InteractionManager<Host> {
 
     fn handle_move_event(
         &self,
-        event: &PointerEventData<Host::Element>,
-        options: &InteractionManagerOptions<Host::Element>,
+        event: &PointerEventData<NodeKey>,
+        options: &InteractionManagerOptions<NodeKey>,
     ) {
         let target = Targets(self).resolve_pointer_target(&Targets(self).composed_path(event));
         let hoverable = match &target {
@@ -766,8 +739,8 @@ impl<Host: InteractionHost> InteractionManager<Host> {
 
     fn handle_click_event(
         &self,
-        event: &PointerEventData<Host::Element>,
-        options: &InteractionManagerOptions<Host::Element>,
+        event: &PointerEventData<NodeKey>,
+        options: &InteractionManagerOptions<NodeKey>,
     ) {
         let target = Targets(self).resolve_pointer_target(&Targets(self).composed_path(event));
         let Some(target) = target else {
@@ -814,7 +787,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         }
     }
 
-    fn sync_pointer_listeners(&self, pre: &Host::Element) {
+    fn sync_pointer_listeners(&self, pre: &NodeKey) {
         let options = self.options();
         let line_hover_highlight = options.base.line_hover_highlight.unwrap_or_default();
         let enable_gutter_utility = options.base.enable_gutter_utility.unwrap_or(false);
@@ -831,10 +804,10 @@ impl<Host: InteractionHost> InteractionManager<Host> {
             || enable_gutter_selection;
 
         if should_attach_pointer_listeners && !self.has_pointer_listeners.get() {
-            self.host.add_pre_listeners(pre);
+            self.host.add_pre_listeners(*pre);
             self.has_pointer_listeners.set(true);
         } else if !should_attach_pointer_listeners && self.has_pointer_listeners.get() {
-            self.host.remove_pre_listeners(pre);
+            self.host.remove_pre_listeners(*pre);
             self.has_pointer_listeners.set(false);
         }
 
@@ -856,7 +829,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
     }
 
     fn update_interactive_line_attributes(&self) {
-        let Some(pre) = self.pre.borrow().clone() else {
+        let Some(pre) = *self.pre.borrow() else {
             return;
         };
         let options = self.options();
@@ -865,26 +838,32 @@ impl<Host: InteractionHost> InteractionManager<Host> {
             || options.base.enable_line_selection.unwrap_or(false);
 
         if should_have_interactive_lines && !self.interactive_lines_attr.get() {
-            self.host.set_attribute(&pre, "data-interactive-lines", "");
+            self.host
+                .document()
+                .set_attribute(pre, "data-interactive-lines", "");
             self.interactive_lines_attr.set(true);
         } else if !should_have_interactive_lines && self.interactive_lines_attr.get() {
-            self.host.remove_attribute(&pre, "data-interactive-lines");
+            self.host
+                .document()
+                .remove_attribute(pre, "data-interactive-lines");
             self.interactive_lines_attr.set(false);
         }
 
         if should_have_interactive_line_numbers && !self.interactive_line_numbers_attr.get() {
             self.host
-                .set_attribute(&pre, "data-interactive-line-numbers", "");
+                .document()
+                .set_attribute(pre, "data-interactive-line-numbers", "");
             self.interactive_line_numbers_attr.set(true);
         } else if !should_have_interactive_line_numbers && self.interactive_line_numbers_attr.get()
         {
             self.host
-                .remove_attribute(&pre, "data-interactive-line-numbers");
+                .document()
+                .remove_attribute(pre, "data-interactive-line-numbers");
             self.interactive_line_numbers_attr.set(false);
         }
     }
 
-    pub fn handle_pointer_down(&self, event: &PointerEventData<Host::Element>) -> PointerResponse {
+    pub fn handle_pointer_down(&self, event: &PointerEventData<NodeKey>) -> PointerResponse {
         if (event.pointer_type == PointerType::Mouse && event.button != 0)
             || self.pre.borrow().is_none()
             || self.session() != PointerSession::Idle
@@ -906,7 +885,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         }
     }
 
-    fn start_line_selection_from_pointer_down(&self, event: &PointerEventData<Host::Element>) {
+    fn start_line_selection_from_pointer_down(&self, event: &PointerEventData<NodeKey>) {
         let options = self.options();
         if !options.base.enable_line_selection.unwrap_or(false) {
             return;
@@ -923,7 +902,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
             return;
         };
 
-        let Some(pre) = self.pre.borrow().clone() else {
+        let Some(pre) = *self.pre.borrow() else {
             return;
         };
 
@@ -942,7 +921,11 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         if let (true, Some(selected_range)) = (event.shift_key, &selected_range) {
             let Some(row_range) = SelectionRows(self).get_indexes_from_selection(
                 selected_range,
-                self.host.get_attribute(&pre, "data-diff-type").as_deref() == Some("split"),
+                self.host
+                    .document()
+                    .get_attribute(pre, "data-diff-type")
+                    .as_deref()
+                    == Some("split"),
             ) else {
                 return;
             };
@@ -1010,7 +993,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
 
     fn start_gutter_selection_from_pointer_down(
         &self,
-        event: &PointerEventData<Host::Element>,
+        event: &PointerEventData<NodeKey>,
     ) -> PointerResponse {
         if self.options().base.on_gutter_utility_click.is_none() {
             return PointerResponse::default();
@@ -1056,7 +1039,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
 
     pub fn handle_document_pointer_move(
         &self,
-        event: &PointerEventData<Host::Element>,
+        event: &PointerEventData<NodeKey>,
     ) -> PointerResponse {
         let coordinates_first = SelectionHitOptions {
             source: SelectionHitSource::CoordinatesFirst,
@@ -1149,10 +1132,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         }
     }
 
-    pub fn handle_document_pointer_up(
-        &self,
-        event: &PointerEventData<Host::Element>,
-    ) -> PointerResponse {
+    pub fn handle_document_pointer_up(&self, event: &PointerEventData<NodeKey>) -> PointerResponse {
         let prevented = PointerResponse {
             prevent_default: true,
             stop_propagation: false,
@@ -1223,7 +1203,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
 
     pub fn handle_document_pointer_cancel(
         &self,
-        event: &PointerEventData<Host::Element>,
+        event: &PointerEventData<NodeKey>,
     ) -> PointerResponse {
         let pointer_id = match self.session() {
             PointerSession::Idle => return PointerResponse::default(),
@@ -1247,12 +1227,14 @@ impl<Host: InteractionHost> InteractionManager<Host> {
             return;
         };
         self.host
-            .remove_attribute(&hovered_line.line_element, "data-hovered");
+            .document()
+            .remove_attribute(hovered_line.line_element, "data-hovered");
         self.host
-            .remove_attribute(&hovered_line.number_element, "data-hovered");
+            .document()
+            .remove_attribute(hovered_line.number_element, "data-hovered");
     }
 
-    fn set_hovered_line(&self, hovered_line: LineEventBaseProps<Host::Element>) {
+    fn set_hovered_line(&self, hovered_line: LineEventBaseProps<NodeKey>) {
         let line_hover_highlight = self.options().base.line_hover_highlight.unwrap_or_default();
         if self.hovered_line.borrow().is_some() {
             self.clear_hovered_line();
@@ -1264,14 +1246,16 @@ impl<Host: InteractionHost> InteractionManager<Host> {
                 LineHoverHighlight::Both | LineHoverHighlight::Line
             ) {
                 self.host
-                    .set_attribute(&hovered_line.line_element, "data-hovered", "");
+                    .document()
+                    .set_attribute(hovered_line.line_element, "data-hovered", "");
             }
             if matches!(
                 line_hover_highlight,
                 LineHoverHighlight::Both | LineHoverHighlight::Number
             ) {
                 self.host
-                    .set_attribute(&hovered_line.number_element, "data-hovered", "");
+                    .document()
+                    .set_attribute(hovered_line.number_element, "data-hovered", "");
             }
         }
     }
@@ -1355,7 +1339,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
             highlight_side: self.selected_range_highlight_side.get(),
             line_number_only: self.selected_range_line_number_only.get(),
         };
-        let Some(pre) = self.pre.borrow().clone() else {
+        let Some(pre) = *self.pre.borrow() else {
             return;
         };
         let selected_lines_changed = !are_line_render_states_equal(
@@ -1376,7 +1360,12 @@ impl<Host: InteractionHost> InteractionManager<Host> {
             self.rendered_editor_clean.set(false);
         }
 
-        let split = self.host.get_attribute(&pre, "data-diff-type").as_deref() == Some("split");
+        let split = self
+            .host
+            .document()
+            .get_attribute(pre, "data-diff-type")
+            .as_deref()
+            == Some("split");
         let selected_row_range = if selected_lines_changed {
             SelectionRows(self).resolve_line_render_range(&selected_lines, split)
         } else {
@@ -1392,9 +1381,12 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         if selected_lines_changed {
             for element in self
                 .host
-                .query_by_attribute(&pre, "data-selected-line", None)
+                .document()
+                .query_by_attribute(pre, "data-selected-line", None)
             {
-                self.host.remove_attribute(&element, "data-selected-line");
+                self.host
+                    .document()
+                    .remove_attribute(element, "data-selected-line");
             }
         }
 

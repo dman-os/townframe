@@ -23,56 +23,49 @@ impl<'manager, Host: InteractionHost> Deref for GutterUtility<'manager, Host> {
 impl<Host: InteractionHost> GutterUtility<'_, Host> {
     pub(super) fn ensure_gutter_utility_node(&self, use_custom_gutter_utility: bool) {
         if self.gutter_utility_container.borrow().is_none() {
-            let container = self.host.create_element("div");
+            let container = self.host.document().create_element("div");
             self.host
-                .set_attribute(&container, "data-gutter-utility-slot", "");
+                .document()
+                .set_attribute(container, "data-gutter-utility-slot", "");
             *self.gutter_utility_container.borrow_mut() = Some(container);
         }
-        let container = self
-            .gutter_utility_container
-            .borrow()
-            .clone()
-            .expect("the container was just ensured");
+        let container =
+            (*self.gutter_utility_container.borrow()).expect("the container was just ensured");
         if use_custom_gutter_utility {
             if let Some(button) = self.gutter_utility_button.borrow_mut().take() {
-                self.host.remove_node(&button);
+                self.host.document().remove(button);
             }
             if self.gutter_utility_slot.borrow().is_none() {
-                let slot = self.host.create_element("slot");
+                let slot = self.host.document().create_element("slot");
                 self.host
-                    .set_attribute(&slot, "name", "gutter-utility-slot");
+                    .document()
+                    .set_attribute(slot, "name", "gutter-utility-slot");
                 *self.gutter_utility_slot.borrow_mut() = Some(slot);
             }
-            let slot = self
-                .gutter_utility_slot
-                .borrow()
-                .clone()
-                .expect("the slot was just ensured");
-            if self.host.parent(&slot).as_ref() != Some(&container) {
-                self.host.replace_children(&container, &[slot]);
+            let slot = (*self.gutter_utility_slot.borrow()).expect("the slot was just ensured");
+            if self.host.document().parent(slot).as_ref() != Some(&container) {
+                self.host.document().replace_children(container, &[slot]);
             }
         } else {
             if let Some(slot) = self.gutter_utility_slot.borrow_mut().take() {
-                self.host.remove_node(&slot);
+                self.host.document().remove(slot);
             }
             if self.gutter_utility_button.borrow().is_none() {
                 let button = self
                     .host
-                    .create_element_from_hast(&create_gutter_utility_element());
+                    .document()
+                    .create_from_hast(&create_gutter_utility_element());
                 *self.gutter_utility_button.borrow_mut() = Some(button);
             }
-            let button = self
-                .gutter_utility_button
-                .borrow()
-                .clone()
-                .expect("the button was just ensured");
-            if self.host.parent(&button).as_ref() != Some(&container) {
-                self.host.replace_children(&container, &[button]);
+            let button =
+                (*self.gutter_utility_button.borrow()).expect("the button was just ensured");
+            if self.host.document().parent(button).as_ref() != Some(&container) {
+                self.host.document().replace_children(container, &[button]);
             }
         }
     }
 
-    pub(super) fn reveal_utility_from_gutter_path(&self, path: &[Host::Element]) {
+    pub(super) fn reveal_utility_from_gutter_path(&self, path: &[NodeKey]) {
         if self.place_utility_from_selection() {
             return;
         }
@@ -111,18 +104,18 @@ impl<Host: InteractionHost> GutterUtility<'_, Host> {
         true
     }
 
-    pub(super) fn show_utility_on_line(&self, line: LineEventBaseProps<Host::Element>) {
-        let Some(container) = self.gutter_utility_container.borrow().clone() else {
+    pub(super) fn show_utility_on_line(&self, line: LineEventBaseProps<NodeKey>) {
+        let Some(container) = *self.gutter_utility_container.borrow() else {
             return;
         };
-        let number_element = line.number_element.clone();
+        let number_element = line.number_element;
         *self.gutter_utility_line.borrow_mut() = Some(line);
-        self.host.append_child(&number_element, &container);
+        self.host.document().append_child(number_element, container);
     }
 
     pub(super) fn hide_utility(&self) {
         if let Some(container) = self.gutter_utility_container.borrow().as_ref() {
-            self.host.remove_node(container);
+            self.host.document().remove(container);
         }
         *self.gutter_utility_line.borrow_mut() = None;
     }

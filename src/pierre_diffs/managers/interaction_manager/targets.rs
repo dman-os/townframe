@@ -21,21 +21,18 @@ impl<'manager, Host: InteractionHost> Deref for Targets<'manager, Host> {
 }
 
 impl<Host: InteractionHost> Targets<'_, Host> {
-    pub(super) fn get_element_path(&self, element: &Host::Element) -> Vec<Host::Element> {
+    pub(super) fn get_element_path(&self, element: &NodeKey) -> Vec<NodeKey> {
         let mut path = Vec::new();
-        let mut current = Some(element.clone());
+        let mut current = Some(*element);
         while let Some(node) = current {
-            current = self.host.parent(&node);
+            current = self.host.document().parent(node);
             path.push(node);
         }
         path
     }
 
     /// `event.composedPath()`: the target and its ancestors in the model.
-    pub(super) fn composed_path(
-        &self,
-        event: &PointerEventData<Host::Element>,
-    ) -> Vec<Host::Element> {
+    pub(super) fn composed_path(&self, event: &PointerEventData<NodeKey>) -> Vec<NodeKey> {
         event
             .target
             .as_ref()
@@ -43,33 +40,35 @@ impl<Host: InteractionHost> Targets<'_, Host> {
             .unwrap_or_default()
     }
 
-    pub(super) fn is_gutter_utility_path(&self, path: &[Host::Element]) -> bool {
-        is_gutter_utility_path(path, |element, name| self.host.get_attribute(element, name))
+    pub(super) fn is_gutter_utility_path(&self, path: &[NodeKey]) -> bool {
+        is_gutter_utility_path(path, |element, name| {
+            self.host.document().get_attribute(element, name)
+        })
     }
 
-    pub(super) fn has_attribute(&self, element: &Host::Element, name: &str) -> bool {
-        self.host.get_attribute(element, name).is_some()
+    pub(super) fn has_attribute(&self, element: &NodeKey, name: &str) -> bool {
+        self.host.document().get_attribute(element, name).is_some()
     }
 
     // `element.closest(...)` over the model: the element itself, then ancestors.
     pub(super) fn closest(
         &self,
-        element: &Host::Element,
-        matches: impl Fn(&Host::Element) -> bool,
-    ) -> Option<Host::Element> {
-        let mut current = Some(element.clone());
+        element: &NodeKey,
+        matches: impl Fn(&NodeKey) -> bool,
+    ) -> Option<NodeKey> {
+        let mut current = Some(*element);
         while let Some(node) = current {
             if matches(&node) {
                 return Some(node);
             }
-            current = self.host.parent(&node);
+            current = self.host.document().parent(node);
         }
         None
     }
 
     // Pointer hits often land on text/token descendants. This normalizes those
     // hits back to the row elements InteractionManager knows how to resolve.
-    pub(super) fn closest_selectable_row(&self, element: &Host::Element) -> Option<Host::Element> {
+    pub(super) fn closest_selectable_row(&self, element: &NodeKey) -> Option<NodeKey> {
         if let Some(row) = self.closest(element, |node| {
             self.has_attribute(node, "data-line") || self.has_attribute(node, "data-column-number")
         }) {
@@ -80,12 +79,16 @@ impl<Host: InteractionHost> Targets<'_, Host> {
             self.has_attribute(node, "data-line-annotation")
                 || self
                     .host
+                    .document()
                     .get_attribute(node, "data-gutter-buffer")
                     .as_deref()
                     == Some("annotation")
         })?;
 
-        let previous_row = self.host.previous_element_sibling(&annotation_row)?;
+        let previous_row = self
+            .host
+            .document()
+            .previous_element_sibling(annotation_row)?;
         (self.has_attribute(&previous_row, "data-line")
             || self.has_attribute(&previous_row, "data-column-number"))
         .then_some(previous_row)
@@ -93,18 +96,16 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     // Resolve the shadow annotation row an event target projects into, from
     // either slotted light-DOM content or the slot element itself.
-    pub(super) fn annotation_row_from_slot(
-        &self,
-        element: &Host::Element,
-    ) -> Option<Host::Element> {
+    pub(super) fn annotation_row_from_slot(&self, element: &NodeKey) -> Option<NodeKey> {
         let slotted = self.closest(element, |node| {
             self.host
+                .document()
                 .get_attribute(node, "slot")
                 .is_some_and(|slot| slot.starts_with("annotation-"))
         });
-        let slot = match slotted.and_then(|slotted| self.host.assigned_slot(&slotted)) {
+        let slot = match slotted.and_then(|slotted| self.host.document().assigned_slot(slotted)) {
             Some(slot) => Some(slot),
-            None if self.host.tag_name(element) == "SLOT" => Some(element.clone()),
+            None if self.host.document().tag_name(element) == "SLOT" => Some(*element),
             None => None,
         };
         let slot = slot?;
@@ -113,24 +114,22 @@ impl<Host: InteractionHost> Targets<'_, Host> {
         })
     }
 
-    pub(super) fn get_annotation_slot_name(&self, element: &Host::Element) -> Option<String> {
+    pub(super) fn get_annotation_slot_name(&self, element: &NodeKey) -> Option<String> {
         let slotted_element = self.closest(element, |node| {
             self.host
+                .document()
                 .get_attribute(node, "slot")
                 .is_some_and(|slot| slot.starts_with("annotation-"))
         });
         if let Some(slotted_element) = slotted_element {
-            return self.host.get_attribute(&slotted_element, "slot");
+            return self.host.document().get_attribute(slotted_element, "slot");
         }
 
-        let slot_name = self.host.get_attribute(element, "name")?;
+        let slot_name = self.host.document().get_attribute(element, "name")?;
         slot_name.starts_with("annotation-").then_some(slot_name)
     }
 
-    pub(super) fn path_from_annotation_slot(
-        &self,
-        element: &Host::Element,
-    ) -> Option<Vec<Host::Element>> {
+    pub(super) fn path_from_annotation_slot(&self, element: &NodeKey) -> Option<Vec<NodeKey>> {
         // Don't trust the slot name for the line number: during an edit session
         // an annotation keeps its original name while edits move it to other
         // lines, so a name like "annotation-20" can point at a line the
@@ -139,7 +138,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
         // parse the name only as a fallback.
         let annotated_line = self
             .annotation_row_from_slot(element)
-            .and_then(|row| self.host.previous_element_sibling(&row));
+            .and_then(|row| self.host.document().previous_element_sibling(row));
         if let Some(annotated_line) = &annotated_line
             && (self.has_attribute(annotated_line, "data-line")
                 || self.has_attribute(annotated_line, "data-column-number"))
@@ -155,9 +154,9 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn path_from_element(
         &self,
-        element: &Host::Element,
+        element: &NodeKey,
         exclude_utility: bool,
-    ) -> Option<Vec<Host::Element>> {
+    ) -> Option<Vec<NodeKey>> {
         let path = self.get_element_path(element);
         if exclude_utility && self.is_gutter_utility_path(&path) {
             return None;
@@ -174,9 +173,9 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn path_from_event_path(
         &self,
-        path: &[Host::Element],
+        path: &[NodeKey],
         exclude_utility: bool,
-    ) -> Option<Vec<Host::Element>> {
+    ) -> Option<Vec<NodeKey>> {
         if exclude_utility && self.is_gutter_utility_path(path) {
             return None;
         }
@@ -187,9 +186,9 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn path_from_coordinates(
         &self,
-        event: &PointerEventData<Host::Element>,
+        event: &PointerEventData<NodeKey>,
         exclude_utility: bool,
-    ) -> CoordinatePath<Host::Element> {
+    ) -> CoordinatePath<NodeKey> {
         match self.hit_test(event) {
             HitTest::Unavailable => CoordinatePath::Unavailable,
             HitTest::NoElement => CoordinatePath::NoElement,
@@ -202,10 +201,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
         }
     }
 
-    pub(super) fn hit_test(
-        &self,
-        event: &PointerEventData<Host::Element>,
-    ) -> HitTest<Host::Element> {
+    pub(super) fn hit_test(&self, event: &PointerEventData<NodeKey>) -> HitTest<NodeKey> {
         // Return Unavailable when coordinate hit-testing cannot run at all, which
         // allows callers to fall back to the event path for tests and older DOMs.
         // Return NoElement when hit-testing ran but found no element, so active drags
@@ -218,9 +214,9 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn resolve_selection_path(
         &self,
-        event: &PointerEventData<Host::Element>,
+        event: &PointerEventData<NodeKey>,
         options: SelectionHitOptions,
-    ) -> Option<Vec<Host::Element>> {
+    ) -> Option<Vec<NodeKey>> {
         let exclude_utility = options.exclude_utility != Some(false);
         match options.source {
             SelectionHitSource::EventPath => {
@@ -243,7 +239,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn resolve_selection_point(
         &self,
-        event: &PointerEventData<Host::Element>,
+        event: &PointerEventData<NodeKey>,
         options: SelectionHitOptions,
     ) -> Option<SelectionPoint> {
         let path = self.resolve_selection_path(event, options)?;
@@ -252,7 +248,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn resolve_selection_info(
         &self,
-        event: &PointerEventData<Host::Element>,
+        event: &PointerEventData<NodeKey>,
         options: SelectionHitOptions,
         require_number_column: bool,
     ) -> Option<SelectionInfo> {
@@ -260,10 +256,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
         self.selection_info_from_path(&path, require_number_column)
     }
 
-    pub(super) fn selection_point_from_path(
-        &self,
-        path: &[Host::Element],
-    ) -> Option<SelectionPoint> {
+    pub(super) fn selection_point_from_path(&self, path: &[NodeKey]) -> Option<SelectionPoint> {
         let Some(ResolvedPointerTarget::Line(target)) = self.resolve_pointer_target(path) else {
             return None;
         };
@@ -279,7 +272,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn selection_info_from_path(
         &self,
-        path: &[Host::Element],
+        path: &[NodeKey],
         require_number_column: bool,
     ) -> Option<SelectionInfo> {
         let Some(ResolvedPointerTarget::Line(target)) = self.resolve_pointer_target(path) else {
@@ -302,16 +295,16 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn resolve_pointer_target(
         &self,
-        path: &[Host::Element],
-    ) -> Option<ResolvedPointerTarget<Host::Element>> {
-        let host = &self.host;
+        path: &[NodeKey],
+    ) -> Option<ResolvedPointerTarget<NodeKey>> {
+        let host = self.host.document();
         let mut number_column = false;
         let mut line_type: Option<LineTypes> = None;
-        let mut code_element: Option<Host::Element> = None;
-        let mut line_element: Option<Host::Element> = None;
+        let mut code_element: Option<NodeKey> = None;
+        let mut line_element: Option<NodeKey> = None;
         let mut line_index_value: Option<String> = None;
-        let mut number_element: Option<Host::Element> = None;
-        let mut token_element: Option<Host::Element> = None;
+        let mut number_element: Option<NodeKey> = None;
+        let mut token_element: Option<NodeKey> = None;
         let mut expand_info: Option<(Option<i64>, ExpansionDirections, bool)> = None;
         let mut line_number: Option<i64> = None;
 
@@ -321,7 +314,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
             if token_element.is_none()
                 && let Some(start_attr) = host.get_attribute(element, "data-char")
             {
-                token_element = Some(element.clone());
+                token_element = Some(*element);
                 if parse_int(&start_attr).is_some() {
                     continue;
                 }
@@ -333,7 +326,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
                 None
             };
             if let Some(column_number) = column_number {
-                number_element = Some(element.clone());
+                number_element = Some(*element);
                 line_number = parse_int(&column_number);
                 number_column = true;
                 line_type = self.get_line_type_from_element(element);
@@ -347,7 +340,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
                 None
             };
             if let Some(line_attr) = line_attr {
-                line_element = Some(element.clone());
+                line_element = Some(*element);
                 line_number = parse_int(&line_attr);
                 line_type = self.get_line_type_from_element(element);
                 line_index_value = host.get_attribute(element, "data-line-index");
@@ -383,7 +376,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
             }
 
             if code_element.is_none() && self.has_attribute(element, "data-code") {
-                code_element = Some(element.clone());
+                code_element = Some(*element);
                 break;
             }
         }
@@ -450,7 +443,7 @@ impl<Host: InteractionHost> Targets<'_, Host> {
     pub(super) fn get_annotation_side(
         &self,
         line_type: LineTypes,
-        code_element: &Host::Element,
+        code_element: &NodeKey,
     ) -> AnnotationSide {
         match line_type {
             LineTypes::ChangeDeletion => AnnotationSide::Deletions,
@@ -465,8 +458,13 @@ impl<Host: InteractionHost> Targets<'_, Host> {
         }
     }
 
-    pub(super) fn get_line_type_from_element(&self, element: &Host::Element) -> Option<LineTypes> {
-        match self.host.get_attribute(element, "data-line-type")?.as_str() {
+    pub(super) fn get_line_type_from_element(&self, element: &NodeKey) -> Option<LineTypes> {
+        match self
+            .host
+            .document()
+            .get_attribute(element, "data-line-type")?
+            .as_str()
+        {
             "change-deletion" => Some(LineTypes::ChangeDeletion),
             "change-addition" => Some(LineTypes::ChangeAddition),
             "context" => Some(LineTypes::Context),
@@ -479,14 +477,15 @@ impl<Host: InteractionHost> Targets<'_, Host> {
         self.pre
             .borrow()
             .as_ref()
-            .and_then(|pre| self.host.get_attribute(pre, "data-diff-type"))
+            .and_then(|pre| self.host.document().get_attribute(pre, "data-diff-type"))
             .as_deref()
             == Some("split")
     }
 
-    pub(super) fn parse_line_index(&self, element: &Host::Element, split: bool) -> Option<i64> {
+    pub(super) fn parse_line_index(&self, element: &NodeKey, split: bool) -> Option<i64> {
         let attribute = self
             .host
+            .document()
             .get_attribute(element, "data-line-index")
             .unwrap_or_default();
         let line_indexes: Vec<i64> = attribute.split(',').filter_map(parse_int).collect();
@@ -516,8 +515,8 @@ impl<Host: InteractionHost> Targets<'_, Host> {
     pub(super) fn target_for_selection_point(
         &self,
         point: &SelectionPoint,
-    ) -> Option<TargetFields<Host::Element>> {
-        let pre = self.pre.borrow().clone()?;
+    ) -> Option<TargetFields<NodeKey>> {
+        let pre = (*self.pre.borrow())?;
         let indexes = self.get_line_index(point.line_number, point.side)?;
         let line_index = if self.mode == InteractionManagerMode::Diff {
             format!("{},{}", indexes.0, indexes.1)
@@ -530,11 +529,13 @@ impl<Host: InteractionHost> Targets<'_, Host> {
         let line_number = point.line_number.to_string();
         let candidates =
             self.host
-                .query_by_attribute(&pre, "data-column-number", Some(&line_number));
+                .document()
+                .query_by_attribute(pre, "data-column-number", Some(&line_number));
         for element in candidates {
             if self
                 .host
-                .get_attribute(&element, "data-line-index")
+                .document()
+                .get_attribute(element, "data-line-index")
                 .as_deref()
                 != Some(&line_index)
             {
@@ -558,15 +559,15 @@ impl<Host: InteractionHost> Targets<'_, Host> {
 
     pub(super) fn to_event_base_props(
         &self,
-        target: &TargetFields<Host::Element>,
-    ) -> LineEventBaseProps<Host::Element> {
+        target: &TargetFields<NodeKey>,
+    ) -> LineEventBaseProps<NodeKey> {
         if self.mode == InteractionManagerMode::File {
             return LineEventBaseProps {
                 kind: LineEventKind::Line,
-                line_element: target.line_element.clone(),
+                line_element: target.line_element,
                 line_number: target.line_number,
                 number_column: target.number_column,
-                number_element: target.number_element.clone(),
+                number_element: target.number_element,
                 annotation_side: None,
                 line_type: None,
             };
@@ -576,8 +577,8 @@ impl<Host: InteractionHost> Targets<'_, Host> {
             kind: LineEventKind::DiffLine,
             annotation_side: target.side,
             line_type: Some(target.line_type),
-            line_element: target.line_element.clone(),
-            number_element: target.number_element.clone(),
+            line_element: target.line_element,
+            number_element: target.number_element,
             line_number: target.line_number,
             number_column: target.number_column,
         }

@@ -63,15 +63,15 @@ impl<Host: InteractionHost> SelectionRows<'_, Host> {
         &self,
         selected_lines: &LineRenderState,
         selected_row_range: Option<(i64, i64)>,
-    ) -> Vec<LineRenderColumn<Host::Element>> {
-        let Some(pre) = self.pre.borrow().clone() else {
+    ) -> Vec<LineRenderColumn<NodeKey>> {
+        let Some(pre) = *self.pre.borrow() else {
             return Vec::new();
         };
         if selected_row_range.is_none() {
             return Vec::new();
         }
 
-        let code_elements = self.host.children(&pre);
+        let code_elements = self.host.document().children(pre);
         assert!(
             code_elements.len() <= 2,
             "InteractionManager.renderSelection: Somehow there are more than 2 code elements..."
@@ -93,18 +93,19 @@ impl<Host: InteractionHost> SelectionRows<'_, Host> {
                 continue;
             }
 
-            let code_children = self.host.children(&code);
+            let code_children = self.host.document().children(code);
             let (Some(gutter), Some(content)) = (code_children.first(), code_children.get(1))
             else {
                 panic!("InteractionManager.renderSelection: missing gutter or content element");
             };
             assert!(
-                self.host.children(content).len() == self.host.children(gutter).len(),
+                self.host.document().children(content).len()
+                    == self.host.document().children(gutter).len(),
                 "InteractionManager.renderSelection: gutter and content children dont match, something is wrong"
             );
             columns.push(LineRenderColumn {
-                content: content.clone(),
-                gutter: gutter.clone(),
+                content: *content,
+                gutter: *gutter,
             });
         }
         columns
@@ -112,15 +113,15 @@ impl<Host: InteractionHost> SelectionRows<'_, Host> {
 
     pub(super) fn render_selected_column(
         &self,
-        column: &LineRenderColumn<Host::Element>,
+        column: &LineRenderColumn<NodeKey>,
         selected_first: i64,
         selected_last: i64,
         selected_lines: &LineRenderState,
         split: bool,
     ) {
         let selected_is_single = selected_first == selected_last;
-        let content_children = self.host.children(&column.content);
-        let gutter_children = self.host.children(&column.gutter);
+        let content_children = self.host.document().children(column.content);
+        let gutter_children = self.host.document().children(column.gutter);
         for (content_element, gutter_element) in content_children.iter().zip(&gutter_children) {
             let line_index = Targets(self.0).parse_line_index(content_element, split);
             if line_index.unwrap_or(0) > selected_last {
@@ -141,34 +142,50 @@ impl<Host: InteractionHost> SelectionRows<'_, Host> {
             } else {
                 ""
             };
-            self.host
-                .set_attribute(gutter_element, "data-selected-line", attribute_value);
+            self.host.document().set_attribute(
+                gutter_element,
+                "data-selected-line",
+                attribute_value,
+            );
             // A number-only highlight marks just the gutter number, leaving the
             // line background and any annotation rows untouched.
             if selected_lines.line_number_only {
                 continue;
             }
-            self.host
-                .set_attribute(content_element, "data-selected-line", attribute_value);
-            let gutter_next = self.host.next_sibling_element(gutter_element);
-            let content_next = self.host.next_sibling_element(content_element);
+            self.host.document().set_attribute(
+                content_element,
+                "data-selected-line",
+                attribute_value,
+            );
+            let gutter_next = self.host.document().next_sibling_element(gutter_element);
+            let content_next = self.host.document().next_sibling_element(content_element);
             if let (Some(gutter_next), Some(content_next)) = (gutter_next, content_next)
                 && Targets(self.0).has_attribute(&content_next, "data-line-annotation")
             {
                 if selected_is_single {
                     attribute_value = "last";
-                    self.host
-                        .set_attribute(content_element, "data-selected-line", "first");
+                    self.host.document().set_attribute(
+                        content_element,
+                        "data-selected-line",
+                        "first",
+                    );
                 } else if line_index == selected_first {
                     attribute_value = "";
                 } else if line_index == selected_last {
                     self.host
+                        .document()
                         .set_attribute(content_element, "data-selected-line", "");
                 }
-                self.host
-                    .set_attribute(&content_next, "data-selected-line", attribute_value);
-                self.host
-                    .set_attribute(&gutter_next, "data-selected-line", attribute_value);
+                self.host.document().set_attribute(
+                    content_next,
+                    "data-selected-line",
+                    attribute_value,
+                );
+                self.host.document().set_attribute(
+                    gutter_next,
+                    "data-selected-line",
+                    attribute_value,
+                );
             }
         }
     }

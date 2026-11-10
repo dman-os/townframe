@@ -15,6 +15,7 @@
 pub mod components;
 pub mod constants;
 pub mod diff;
+pub mod document;
 pub mod hast;
 pub mod highlighter_types;
 pub mod highlights;

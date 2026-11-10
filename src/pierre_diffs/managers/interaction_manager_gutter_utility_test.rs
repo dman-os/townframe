@@ -19,7 +19,6 @@ use std::rc::Weak;
 
 use crate::fake_interaction_dom::FakeDom;
 use crate::managers::interaction_manager::GetHoveredLineResult;
-use crate::managers::interaction_manager::InteractionHost;
 use crate::managers::interaction_manager::InteractionManager;
 use crate::managers::interaction_manager::InteractionManagerMode;
 use crate::managers::interaction_manager::InteractionManagerOptions;
@@ -89,9 +88,9 @@ impl Harness {
     }
 
     fn create(&self, tag: &str, attrs: &[(&str, &str)]) -> usize {
-        let id = self.dom.create_element(tag);
+        let id = self.dom.doc.create_element(tag);
         for (name, value) in attrs {
-            self.dom.set_attribute(&id, name, value);
+            self.dom.doc.set_attribute(id, name, value);
         }
         id
     }
@@ -115,7 +114,7 @@ impl Harness {
                 ],
             );
             gutter_rows.push(gutter_row);
-            self.dom.append_child(&gutter, &gutter_row);
+            self.dom.doc.append_child(gutter, gutter_row);
             let content_row = self.create(
                 "div",
                 &[
@@ -125,11 +124,11 @@ impl Harness {
                 ],
             );
             content_rows.push(content_row);
-            self.dom.append_child(&content, &content_row);
+            self.dom.doc.append_child(content, content_row);
         }
-        self.dom.append_child(&code, &gutter);
-        self.dom.append_child(&code, &content);
-        self.dom.append_child(&pre, &code);
+        self.dom.doc.append_child(code, gutter);
+        self.dom.doc.append_child(code, content);
+        self.dom.doc.append_child(pre, code);
         FilePreFixture {
             content_rows,
             gutter_rows,
@@ -141,23 +140,20 @@ impl Harness {
 
     // `element.after(sibling)`
     fn insert_after(&self, reference: usize, sibling: usize) {
-        let parent = self.dom.parent(&reference).expect("a parent");
-        self.dom.detach(sibling);
-        let mut nodes = self.dom.nodes.borrow_mut();
-        let position = nodes[parent]
-            .children
-            .iter()
-            .position(|id| *id == reference)
-            .expect("the reference is a child");
-        nodes[parent].children.insert(position + 1, sibling);
-        nodes[sibling].parent = Some(parent);
+        let parent = self.dom.doc.parent(reference).expect("a parent");
+        let next = self
+            .dom
+            .doc
+            .children(parent)
+            .into_iter()
+            .skip_while(|key| *key != reference)
+            .nth(1);
+        self.dom.doc.insert_before(parent, sibling, next);
     }
 
     fn insert_first(&self, parent: usize, child: usize) {
-        self.dom.detach(child);
-        let mut nodes = self.dom.nodes.borrow_mut();
-        nodes[parent].children.insert(0, child);
-        nodes[child].parent = Some(parent);
+        let first = self.dom.doc.children(parent).first().copied();
+        self.dom.doc.insert_before(parent, child, first);
     }
 
     fn set_element_from_point(&self, x: f64, y: f64, element: usize) {
@@ -170,14 +166,16 @@ impl Harness {
     fn has_descendant(&self, root: usize, attribute: &str) -> bool {
         !self
             .dom
-            .query_by_attribute(&root, attribute, None)
+            .doc
+            .query_by_attribute(root, attribute, None)
             .is_empty()
     }
 
     fn utility_button(&self, row: usize) -> usize {
         *self
             .dom
-            .query_by_attribute(&row, "data-utility-button", None)
+            .doc
+            .query_by_attribute(row, "data-utility-button", None)
             .first()
             .expect("missing gutter utility button")
     }
@@ -493,14 +491,16 @@ fn keeps_a_controlled_cross_side_gesture_after_its_utility_callback_replaces_sel
     for row in [fixture.content_rows[0], fixture.gutter_rows[0]] {
         harness
             .dom
-            .set_attribute(&row, "data-line-type", "change-deletion");
-        harness.dom.set_attribute(&row, "data-line-index", "0,0");
+            .doc
+            .set_attribute(row, "data-line-type", "change-deletion");
+        harness.dom.doc.set_attribute(row, "data-line-index", "0,0");
     }
     for row in [fixture.content_rows[1], fixture.gutter_rows[1]] {
         harness
             .dom
-            .set_attribute(&row, "data-line-type", "change-addition");
-        harness.dom.set_attribute(&row, "data-line-index", "1,1");
+            .doc
+            .set_attribute(row, "data-line-type", "change-addition");
+        harness.dom.doc.set_attribute(row, "data-line-index", "1,1");
     }
     harness.manager.setup(&fixture.pre);
     harness.dispatch(
@@ -631,11 +631,13 @@ fn normal_touch_line_selection_normalizes_lateral_hits_to_selectable_rows() {
     let token = harness.create("span", &[("data-char", "0")]);
     harness
         .dom
-        .replace_children(&fixture.content_rows[3], &[token]);
+        .doc
+        .replace_children(fixture.content_rows[3], &[token]);
     let line_number = harness.create("span", &[("data-line-number-content", "")]);
     harness
         .dom
-        .append_child(&fixture.gutter_rows[2], &line_number);
+        .doc
+        .append_child(fixture.gutter_rows[2], line_number);
     harness.manager.setup(&fixture.pre);
     harness.set_element_from_point(80.0, 80.0, token);
     harness.set_element_from_point(4.0, 60.0, line_number);
@@ -684,7 +686,8 @@ fn create_annotation_row_after(
     let annotation_content = harness.create("div", &[("data-annotation-content", "")]);
     harness
         .dom
-        .append_child(&content_annotation, &annotation_content);
+        .doc
+        .append_child(content_annotation, annotation_content);
     harness.insert_after(fixture.gutter_rows[line_index], gutter_annotation);
     harness.insert_after(fixture.content_rows[line_index], content_annotation);
     annotation_content
@@ -720,7 +723,7 @@ fn normal_touch_line_selection_follows_annotation_rows() {
 fn slotted_annotation_button(harness: &Harness, slot: &str) -> usize {
     let content = harness.create("div", &[("slot", slot)]);
     let button = harness.create("button", &[("type", "button")]);
-    harness.dom.append_child(&content, &button);
+    harness.dom.doc.append_child(content, button);
     button
 }
 
@@ -807,7 +810,7 @@ fn normal_touch_line_selection_holds_range_while_dragging_over_hunk_separators()
         "div",
         &[("data-expand-index", "0"), ("data-expand-button", "")],
     );
-    harness.dom.append_child(&fixture.pre, &separator);
+    harness.dom.doc.append_child(fixture.pre, separator);
     harness.manager.setup(&fixture.pre);
     harness.set_element_from_point(8.0, 80.0, fixture.gutter_rows[3]);
     harness.set_element_from_point(8.0, 48.0, separator);
