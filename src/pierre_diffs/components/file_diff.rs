@@ -35,8 +35,9 @@
 // * `FileDiff` is an `Rc` (the interaction manager's `getLineIndex` and
 //   `handleExpandHunk` callbacks reach back into the instance, as the arrow
 //   functions upstream do) over `Cell`/`RefCell` state, with a `FileDiffHost`:
-//   the four manager host traits (`VirtualizerHost` for `VirtualizedFileDiff`,
-//   which extends this class) all answering the one `Document` the instance
+//   the three manager host traits (`VirtualizedFileDiffHost` adds
+//   `VirtualizerHost` for `VirtualizedFileDiff`, which extends this class) all
+//   answering the one `Document` the instance
 //   renders into. The three managers and the renderer are built in the
 //   constructor in upstream's order; the resize observer hub and the render
 //   queue, which are module statics upstream, are constructor arguments shared
@@ -68,7 +69,7 @@
 // * Node ownership. The instance owns the nodes it creates in its `Document`.
 //   The managers hold keys of nodes that have left the tree until their next
 //   `setup` cleans them up (they write to and read from them), so a render
-//   `retire`s the nodes it replaces (detached, still alive) and the instance
+//   detaches the nodes it replaces itself and `retire`s them (queued, still alive) and the instance
 //   `discard`s them in `flush_managers` right after the managers' setup for
 //   that render has run: the managers have then dropped every key. A
 //   `flush_managers` that returns early (nothing dirty, or no `pre`) runs no
@@ -430,19 +431,18 @@ pub fn get_line_index_for_diff(
     Some((target_unified_index?, target_split_index?))
 }
 
-/// What `FileDiff` asks of its platform: the four manager host traits, all
+/// What `FileDiff` asks of its platform: the three manager host traits, all
 /// answering the same `Document` the instance renders into (the trait system
 /// cannot say so; an implementation whose `document()` methods disagree is a
-/// bug). Implemented for every type that implements the four.
-pub trait FileDiffHost:
-    VirtualizerHost + ResizeManagerHost + ScrollSyncHost + InteractionHost
-{
-}
+/// bug). Implemented for every type that implements the three.
+pub trait FileDiffHost: ResizeManagerHost + ScrollSyncHost + InteractionHost {}
 
-impl<Host> FileDiffHost for Host where
-    Host: VirtualizerHost + ResizeManagerHost + ScrollSyncHost + InteractionHost
-{
-}
+impl<Host> FileDiffHost for Host where Host: ResizeManagerHost + ScrollSyncHost + InteractionHost {}
+
+/// What `VirtualizedFileDiff` (which extends `FileDiff`) adds: the virtualizer.
+pub trait VirtualizedFileDiffHost: FileDiffHost + VirtualizerHost {}
+
+impl<Host> VirtualizedFileDiffHost for Host where Host: FileDiffHost + VirtualizerHost {}
 
 /// A `DiffLineAnnotation<LAnnotation>[]` with JavaScript's array identity.
 pub type LineAnnotations<LAnnotation> = Rc<Vec<DiffLineAnnotation<LAnnotation>>>;
@@ -939,10 +939,13 @@ impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
         }
     }
 
-    /// A node a render replaced, detached from the tree and now the instance's
-    /// to discard once the managers have set up (see the file header).
+    /// A node a render replaced (the render detached it with its own `remove` or
+    /// `replace_children`, as upstream does), now the instance's to discard once the managers have set up (see the file header).
     pub fn retire(&self, node: NodeKey) {
-        self.document().remove(node);
+        assert!(
+            self.document().parent(node).is_none(),
+            "retire takes a node the render already detached"
+        );
         self.state.borrow_mut().retired.push(node);
     }
 
