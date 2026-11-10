@@ -32,6 +32,7 @@ use big_plugs_core::example_plug;
 use big_plugs_core::request::Necessity;
 use big_plugs_core::request::Request;
 use service_utils_rs::ClientError;
+use service_utils_rs::TraceContext;
 use std::time::Duration;
 
 /// One nodule running the test guest: the guest serves `echo` and `relay` under whatever
@@ -270,6 +271,18 @@ pub(super) async fn boot_node(secrets: &Arc<SecretStore>) -> (BigNode, StopToken
     .unwrap()
 }
 
+const OUTER_TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+/// A traceparent in the outer call's trace (same trace id) under a span of its own.
+fn assert_continues_trace(traceparent: &str) {
+    let (outer, seen) = (
+        OUTER_TRACEPARENT.split('-').collect::<Vec<_>>(),
+        traceparent.split('-').collect::<Vec<_>>(),
+    );
+    assert_eq!(seen[1], outer[1], "the trace id continues");
+    assert_ne!(seen[2], outer[2], "each hop is a new span");
+}
+
 #[tokio::test]
 async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     let bytes = guest_bytes();
@@ -290,7 +303,8 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
     };
-    let outer = RequestContext::root();
+    let mut outer = RequestContext::root();
+    outer.trace = TraceContext::from_headers(Some(OUTER_TRACEPARENT), None);
     let echoed = invoke_within(&node, &echo, json!({ "n": 1 }), context, outer.clone())
         .await
         .unwrap();
@@ -301,7 +315,11 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     );
     assert_eq!(echoed["idempotencyKey"], "key-1");
     assert_eq!(echoed["timeoutMs"], Value::Null);
-    assert_eq!(echoed["requestId"], outer.request_id.to_string());
+    // The guest's request id is the delivery hop's, not the caller's; the trace continues
+    // under a new span.
+    assert_ne!(echoed["requestId"], outer.request_id.to_string());
+    assert_eq!(echoed["requestId"].as_str().unwrap().len(), 36, "a uuid");
+    assert_continues_trace(echoed["traceparent"].as_str().unwrap());
     assert_eq!(echoed["noduleCapability"], Value::Null);
 
     // A budget travels as the relative `x-timeout-ms`, re-derived from what is left.
@@ -316,14 +334,14 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     );
     assert_eq!(echoed["idempotencyKey"], Value::Null);
 
-    // A budget already spent fails before the handler is entered: in the host's request
-    // validation (`Context`) or dispatch's own check, which both answer a deadline.
+    // A budget already spent fails before the handler is entered.
     let elapsed = RequestContext::root().with_time_budget(std::time::Duration::ZERO);
-    assert!(matches!(
+    assert_eq!(
         invoke_within(&node, &echo, json!({}), Default::default(), elapsed).await,
-        Err(DispatchError::DeadlineExceeded
-            | DispatchError::Context(method_core::ContextError::DeadlineExceeded))
-    ));
+        Err(DispatchError::Context(
+            method_core::ContextError::DeadlineExceeded
+        ))
+    );
 
     // The guest's own refusal of an operation it does not serve is the provider's error.
     assert_eq!(
@@ -443,10 +461,12 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     // B has no grants of its own, so it was handed no capability to confuse with A's.
     assert_eq!(relayed["body"]["noduleCapability"], Value::Null);
 
-    // The nested call continues the outer call's request id and stays inside its budget: the
-    // guest forwards the headers it was delivered, and the egress parses them rather than
-    // starting a fresh context.
-    let outer = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
+    // The nested call is a hop of its own: a new request id (the id is the admission key and
+    // the outer call is still in flight), the outer trace under a new span, and a budget
+    // within the outer one. The guest forwards the trace and budget it was delivered and the
+    // egress parses them rather than starting a fresh context.
+    let mut outer = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
+    outer.trace = TraceContext::from_headers(Some(OUTER_TRACEPARENT), None);
     let nested = invoke_within(
         &node,
         &a.relay(),
@@ -457,7 +477,8 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     .await
     .unwrap();
     assert_eq!(nested["status"], 200, "{nested}");
-    assert_eq!(nested["body"]["requestId"], outer.request_id.to_string());
+    assert_ne!(nested["body"]["requestId"], outer.request_id.to_string());
+    assert_continues_trace(nested["body"]["traceparent"].as_str().unwrap());
     let nested_ms: u64 = nested["body"]["timeoutMs"]
         .as_str()
         .unwrap()

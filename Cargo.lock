@@ -1695,6 +1695,7 @@ dependencies = [
  "bytes",
  "http-body-util",
  "hyper",
+ "method_core",
  "serde",
  "serde_json",
  "service_client_core_rs",

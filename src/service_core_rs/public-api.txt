@@ -39,12 +39,14 @@ pub impl service_core_rs::context::RequestContext::async fn expired (& self)
 pub impl service_core_rs::context::RequestContext::fn cancel (& self)
 pub impl service_core_rs::context::RequestContext::fn child (& self) -> Self
 pub impl service_core_rs::context::RequestContext::fn for_receiver (mut self) -> Self
+pub impl service_core_rs::context::RequestContext::fn next_hop (& self) -> Self
 pub impl service_core_rs::context::RequestContext::fn remaining_budget (& self) -> Option < Duration >
 pub impl service_core_rs::context::RequestContext::fn root () -> Self
 pub impl service_core_rs::context::RequestContext::fn validate (& self) -> Result < () , ContextError >
 pub impl service_core_rs::context::RequestContext::fn with_cancellation_transport (mut self , transport : CancellationTransport) -> Self
 pub impl service_core_rs::context::RequestContext::fn with_command_id (mut self , command_id : Uuid) -> Self
 pub impl service_core_rs::context::RequestContext::fn with_time_budget (mut self , budget : Duration) -> Self
+pub impl service_core_rs::context::TraceContext::fn child_span (& self) -> Self
 pub impl service_core_rs::context::TraceContext::fn current () -> Self
 pub impl service_core_rs::context::TraceContext::fn from_headers (traceparent : Option < & str > , tracestate : Option < & str >) -> Self
 pub impl service_core_rs::context::TraceContext::fn parent (& self) -> Option < Context >

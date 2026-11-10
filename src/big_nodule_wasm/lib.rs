@@ -49,6 +49,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use http_body_util::Limited;
+use method_core::ContextError;
 use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::write_context_headers;
@@ -420,9 +421,10 @@ impl Provider for WasmProvider {
         // idempotency key, and the caller's capability as a bare `Bearer` token: the caller's
         // signer never enters a guest.
         let mut headers = hyper::HeaderMap::new();
+        let hop = request.next_hop();
         write_context_headers(
             &mut headers,
-            request,
+            &hop,
             &HttpMetadata {
                 authorization: Some(format!(
                     "Bearer {}",
@@ -547,8 +549,8 @@ type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
 /// the calling workload's nodule actor as the signer. Dispatch then admits the call as it admits
 /// any other: the capability must be live, permit the NSID and be bound to that actor, so a
 /// guest that presents another nodule's capability id is denied there. Nothing else the guest
-/// says (headers, body) is trusted as identity. The request id, trace and `x-timeout-ms` budget
-/// continue into the nested call, so it stays inside the outer call's budget.
+/// says (headers, body) is trusted as identity. The trace and `x-timeout-ms` budget continue
+/// into the nested call, so it stays inside the outer call's budget; its request id is new.
 #[derive(Clone)]
 struct Egress {
     dispatch: Client<DispatchProtocol>,
@@ -577,10 +579,12 @@ impl Egress {
                 );
             }
         };
-        // The same parser every XRPC server hop uses: request id, trace, the budget from the
-        // relative `x-timeout-ms`, `authorization` and `idempotency-key`.
+        // The same parser every XRPC server hop uses: trace, the budget from the relative
+        // `x-timeout-ms`, `authorization` and `idempotency-key`. The nested call is a hop of its
+        // own: a fresh request id (the guest's id is the delivery hop's, and the outer call is
+        // still in flight under its own) and a child span of the incoming trace.
         let (request_context, metadata) = match request_context(&parts.headers) {
-            Ok(parsed) => parsed,
+            Ok((parsed, metadata)) => (parsed.next_hop(), metadata),
             Err(message) => return bad(hyper::StatusCode::BAD_REQUEST, "InvalidRequest", &message),
         };
         // The token is the bare capability id the guest was delivered. Never the
@@ -680,7 +684,9 @@ fn dispatch_error_response(error: DispatchError) -> (hyper::StatusCode, Value) {
             StatusCode::BAD_REQUEST,
             json!({ "error": "InvalidRequest", "message": message }),
         ),
-        DispatchError::DeadlineExceeded => named(StatusCode::GATEWAY_TIMEOUT, "DeadlineExceeded"),
+        DispatchError::Context(ContextError::DeadlineExceeded) => {
+            named(StatusCode::GATEWAY_TIMEOUT, "DeadlineExceeded")
+        }
         DispatchError::Provider { status, body } => (
             StatusCode::from_u16(*status).expect("a provider answered a valid status"),
             body.clone(),

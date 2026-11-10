@@ -41,6 +41,7 @@ use big_dispatch_core::Invoke;
 use big_dispatch_core::InvokeOutput;
 use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::NotReadyReason;
+use method_core::ContextError;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
@@ -133,7 +134,7 @@ impl DispatchService {
         // which operations exist.
         let budget = context.remaining_budget();
         if budget == Some(Duration::ZERO) {
-            return Err(DispatchError::DeadlineExceeded);
+            return Err(ContextError::DeadlineExceeded.into());
         }
         let verified = self.caller(context, authorization).await?;
         let scope = self.scope_of(&verified)?;
@@ -178,7 +179,7 @@ impl DispatchService {
         let result = match budget {
             Some(budget) => tokio::time::timeout(budget, call)
                 .await
-                .map_err(|_| DispatchError::DeadlineExceeded)?,
+                .map_err(|_| DispatchError::from(ContextError::DeadlineExceeded))?,
             None => call.await,
         };
         match result {

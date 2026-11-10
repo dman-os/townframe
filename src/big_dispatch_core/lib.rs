@@ -163,8 +163,6 @@ pub enum DispatchError {
     NotReady { reason: NotReadyReason },
     #[error("the provider refused the input: {0}")]
     InvalidInput(String),
-    #[error("the call exceeded its deadline")]
-    DeadlineExceeded,
     /// The provider's own XRPC error, passed through untouched.
     #[error("the provider failed with status {status}")]
     Provider { status: u16, body: Value },

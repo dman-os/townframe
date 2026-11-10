@@ -17,8 +17,8 @@
 //!   POSTs `input` to `http://dispatch.local/xrpc/<operation>` with
 //!   `authorization: Bearer <authority>`, where `authority` defaults to the
 //!   capability id in `x-nodule-capability`. It forwards the incoming
-//!   `idempotency-key`, `x-timeout-ms`, `x-request-id`, `traceparent` and
-//!   `tracestate` unchanged and answers
+//!   `idempotency-key`, `x-timeout-ms`, `traceparent` and
+//!   `tracestate` unchanged (the egress gives the nested call its own request id) and answers
 //!   200 with `{ status, body }` (`body` is the upstream JSON, or a string when
 //!   the upstream body is not JSON) and 502 when the outgoing request fails.
 //! - Any other `/xrpc/` operation answers 404 `{ "error": "UnknownOperation" }`
@@ -66,7 +66,6 @@ impl wit::exports::wasi::http::handler::Guest for Component {
         let forwarded: Vec<(&'static str, String)> = [
             "idempotency-key",
             "x-timeout-ms",
-            "x-request-id",
             "traceparent",
             "tracestate",
         ]

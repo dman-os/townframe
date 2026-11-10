@@ -351,7 +351,7 @@ async fn an_elapsed_budget_fails_before_the_provider_and_a_running_call_is_cut_o
     // provider that was entered would have signalled `started`, so an unconsumed permit here
     // means it was.
     let elapsed = RequestContext::root().with_time_budget(Duration::ZERO);
-    assert!(matches!(
+    assert_eq!(
         h.invoke_with(
             operator,
             ECHO,
@@ -360,9 +360,8 @@ async fn an_elapsed_budget_fails_before_the_provider_and_a_running_call_is_cut_o
             elapsed
         )
         .await,
-        Err(DispatchError::DeadlineExceeded
-            | DispatchError::Context(ContextError::DeadlineExceeded))
-    ));
+        Err(DispatchError::Context(ContextError::DeadlineExceeded))
+    );
     assert!(
         echo.started.notified().now_or_never().is_none(),
         "the provider was entered for a call whose deadline had passed"
@@ -371,9 +370,7 @@ async fn an_elapsed_budget_fails_before_the_provider_and_a_running_call_is_cut_o
     // A budget still ahead lets the call in; the provider parks on its gate until the budget
     // runs out, which cuts it off. The gate is never released.
     let future = RequestContext::root().with_time_budget(Duration::from_secs(1));
-    // The host enforces the request's own budget around the whole call, so it is the one that
-    // cuts a running call off (`Context`); dispatch's own timeout answers the same way.
-    assert!(matches!(
+    assert_eq!(
         h.invoke_with(
             operator,
             ECHO,
@@ -382,9 +379,8 @@ async fn an_elapsed_budget_fails_before_the_provider_and_a_running_call_is_cut_o
             future
         )
         .await,
-        Err(DispatchError::DeadlineExceeded
-            | DispatchError::Context(ContextError::DeadlineExceeded))
-    ));
+        Err(DispatchError::Context(ContextError::DeadlineExceeded))
+    );
     echo.started.notified().await;
 
     // A call without a budget completes once released.

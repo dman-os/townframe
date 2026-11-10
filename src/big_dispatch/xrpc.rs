@@ -96,8 +96,7 @@ fn refusal(error: ClientError<DispatchError>) -> XrpcHandlerError {
         ClientError::Transport { message, .. } => return XrpcHandlerError::Unavailable(message),
     };
     match error {
-        DispatchError::Context(ContextError::DeadlineExceeded)
-        | DispatchError::DeadlineExceeded => XrpcHandlerError::domain(
+        DispatchError::Context(ContextError::DeadlineExceeded) => XrpcHandlerError::domain(
             StatusCode::GATEWAY_TIMEOUT,
             "DeadlineExceeded",
             error.to_string(),
