@@ -39,13 +39,23 @@ where
     Stored::check(&schema, value.clone()).unwrap_or_else(|error| panic!("{}: {error}", T::ID));
     let mut doc = automerge::Automerge::new();
     let transaction = doc.transaction();
-    let transaction =
-        reconcile_json_atomic(transaction, &schema, &automerge::ROOT, "datum".into(), value)
-            .unwrap();
+    let transaction = reconcile_json_atomic(
+        transaction,
+        &schema,
+        &automerge::ROOT,
+        "datum".into(),
+        value,
+    )
+    .unwrap();
     transaction.commit();
     let restored = automerge::Automerge::load(&doc.save()).unwrap();
     let hydrated = hydrate_value(&restored, &automerge::ROOT, "datum".into(), &schema).unwrap();
-    assert_eq!(serde_json::to_vec(&hydrated).unwrap(), original, "{}", T::ID);
+    assert_eq!(
+        serde_json::to_vec(&hydrated).unwrap(),
+        original,
+        "{}",
+        T::ID
+    );
     assert_eq!(serde_json::from_value::<T>(hydrated).unwrap(), typed);
 }
 
@@ -171,7 +181,9 @@ fn the_adr_examples_are_valid_datums() {
                 "reflog": "commit (amend): refactor(reference): dtxt scheme"},
         "jj": {"operation": "e1f0", "change": "kxqoltvm"}
     }));
-    codec_round_trip::<work::File>(json!({"worktree": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.worktree/main"}));
+    codec_round_trip::<work::File>(
+        json!({"worktree": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.worktree/main"}),
+    );
     codec_round_trip::<work::GitCommit>(json!({
         "parents": ["9a0e"],
         "changeId": "kxqoltvm",
@@ -218,9 +230,15 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<work::Plan>(json!({"entries": [
         {"content": "Rewrite reference.rs", "priority": "high", "status": "completed"}
     ]}));
-    codec_round_trip::<work::RepoEntry>(json!({"repo": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitRepo/0193b"}));
-    codec_round_trip::<work::WorktreeEntry>(json!({"worktree": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.worktree/main"}));
-    codec_round_trip::<work::SessionEntry>(json!({"session": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.agentSession/main"}));
+    codec_round_trip::<work::RepoEntry>(
+        json!({"repo": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitRepo/0193b"}),
+    );
+    codec_round_trip::<work::WorktreeEntry>(
+        json!({"worktree": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.worktree/main"}),
+    );
+    codec_round_trip::<work::SessionEntry>(
+        json!({"session": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.agentSession/main"}),
+    );
     codec_round_trip::<annotation::AnnotationsEntry>(json!({"empty": true}));
 }
 
