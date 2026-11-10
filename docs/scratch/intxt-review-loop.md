@@ -26,7 +26,7 @@ each lane swaps a mock for the real piece when it exists.
 | J4 | Thread | Reads a thread, replies, resolves or reopens it. |
 | J5 | New annotation | Selects a line or range (tap the gutter; drag or extend on touch) and writes an annotation there. |
 | J6 | New revision | The agent pushes again. The diff updates, and threads either re-attach or show as outdated. |
-| J7 | Verdict | Approves or requests changes. **Open: is a verdict part of the alpha, or does resolving every thread replace it?** |
+| J7 | Verdict | **Not in the alpha** (operator, intext ledger D18): intxt doesn't manage trunks yet, so approve/request-changes vocabulary waits. A change is done when its threads are resolved. |
 
 ## Screens and where they live in the shell
 
@@ -88,9 +88,15 @@ A doesn't block B. The crate in A is exactly what B would wrap later.
     (current or outdated). A range may span hunks and include unchanged context lines. A
     whole-file annotation has no range and renders as a file-header row.
   - The selected range.
+  - **Ranges new since this reader last reviewed**, already computed by the intxt micro, so the
+    view can mark them. Each reader has one datum pinning what they last reviewed, and it
+    survives rebases (like Jane Street Iron's per-reviewer brain).
 - Out: range selected, annotation row toggled, context expanded, which rows are visible. Read
   state built from the visible rows is per reader, one datum slot each and never a shared counter,
-  but that's the intxt micro's business; the diff view only reports what's on screen.
+  but that's the intxt micro's business; the diff view only reports what's on screen. Those
+  reports feed the per-reader "last reviewed" pin.
+- Agents read and write an intxt as plain datums, with no feedback API of their own, so an
+  agent's annotation reaches the view exactly like a human's.
 - The diff view never sees the anchor model. The intxt micro resolves anchors to line ranges
   (re-attaching across revisions, J6) and hands over the result. That keeps the anchor model
   wholly the intext lane's.
@@ -126,7 +132,8 @@ source of truth.
 - **Annotation** and **reply** are both annotation datums; a reply is one that targets another
   annotation. A **thread** is a root annotation plus its replies, with a per-thread resolved
   flag. There is no thread datum.
-- **Verdict** (J7) would be one datum; whether it's in the alpha is the operator's call.
+- **Verdict** (J7): not in the alpha (D18).
+- **Seen state**: one datum per reader pinning what they last reviewed, for "new since I last looked" across rebases.
 
 ## Work order for the claytxt lane (Sonnet lanes, at most two building at once)
 
@@ -142,6 +149,5 @@ source of truth.
 
 ## Questions for the operator
 
-1. **J7:** is a verdict (approve or request changes) part of the alpha?
-2. **Mock review micro (step 4):** should claytxt build it, or should the intext lane start from
-   the diff crate directly?
+1. **Mock review micro (step 4):** should claytxt build it, or should the intext lane start from
+   the diff crate directly? (The intext lane prefers a thin mock that they replace.)
