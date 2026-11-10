@@ -23,6 +23,7 @@ Scope: Costs, wrong turns and lifecycle defects in `big_repo` (and its keyhive a
 
 ## Open: costs
 
+- `commit_delta` persistence is ~39% of a small datum write (2.75 ms release) and grows with doc history even with dmeta off (node lane, 2026-11-10, `~/scratch/gatecost*` on mothership). A loose-commit row is ~1.7 KB: the stored blob is the change plus ~770 B fixed, plus a 232 B signed header. Per change, a plain header is ~141 of 185 B (48 B actor, 32 B dep, 36 B command-id message). Not yet profiled to a cause.
 - `persist_local_commits` (`native.rs` ~398) runs one transaction per change, each a full `mutate_tree_in_tx` with minimization. An `InsertBatch` mutation exists.
 - `load_doc_snapshot` re-walks and re-decrypts history on every call, including each `ReattemptMaterialization` while pending. It also rebuilds the Automerge doc from scratch (~30 MB allocations per drawer load at 200 notes). Check what remains after `2cd3261e`.
 - `try_causal_decrypt` builds a fresh `NativeCiphertextStore` per call, so every walk re-runs two SQL loads per ancestor.
