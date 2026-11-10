@@ -108,3 +108,45 @@ async fn protocol_and_direct_client_need_no_server_dependencies() {
     );
     assert_eq!(events.recv().await.unwrap(), None);
 }
+
+/// Takes every request and never answers, so only the transport's deadline can end a call.
+struct Silent;
+impl InlineRoute<Protocol> for Silent {
+    fn route_inline(self: Arc<Self>, message: Message) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let _held = message;
+            std::future::pending::<()>().await;
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_transport_enforces_the_deadline_the_client_does_not() {
+    let client = Client::<Protocol>::new(Transport::direct(Arc::new(Silent)));
+    let context = RequestContext::root().with_time_budget(std::time::Duration::from_secs(5));
+    let started = tokio::time::Instant::now();
+    let error = client
+        .call(
+            context.clone(),
+            Echo {
+                value: "never".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ClientError::Method(ContextError::DeadlineExceeded)
+    ));
+    assert_eq!(started.elapsed(), std::time::Duration::from_secs(5));
+
+    let error = client
+        .subscribe(context, SubscribeEvents {})
+        .await
+        .err()
+        .expect("a spent budget fails the open");
+    assert!(matches!(
+        error,
+        ClientError::Method(ContextError::DeadlineExceeded)
+    ));
+}

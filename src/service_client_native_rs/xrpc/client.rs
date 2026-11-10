@@ -142,15 +142,13 @@ impl XrpcClient {
             .base_url
             .join(&encoded.path)
             .map_err(|error| XrpcClientError::Encode(error.to_string()))?;
-        let mut request = self
+        // No reqwest timeout: `Transport` owns the deadline, so a spent budget surfaces as
+        // `ContextError::DeadlineExceeded` and not as a racing transport error.
+        let response = self
             .client
             .request(encoded.method, url)
             .headers(encoded.headers)
-            .body(encoded.body);
-        if let Some(timeout) = context.remaining_budget() {
-            request = request.timeout(timeout);
-        }
-        let response = request
+            .body(encoded.body)
             .send()
             .await
             .map_err(|error| XrpcClientError::Transport {

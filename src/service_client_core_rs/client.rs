@@ -20,6 +20,11 @@ const DEFAULT_EVENT_BUFFER: usize = 64;
 
 /// Carries one unary method `P` to its server and its response back.
 ///
+/// The transport enforces the call's deadline (`context.remaining_budget()`), like a gRPC
+/// channel does, and answers [`ContextError::DeadlineExceeded`] when it runs out. [`Client`]
+/// only validates the context and honours cancellation, so it holds no timer and runs on a
+/// guest with no tokio runtime.
+///
 /// The trait is generic over the method instead of object-safe. An in-process or irpc
 /// transport moves the typed envelope without serializing it, and its bounds name the protocol
 /// message conversions of each method, so they belong on the transport's own
@@ -37,7 +42,8 @@ pub trait UnaryTransport<P: Unary> {
 }
 
 /// Opens the event stream of one subscription method `P`. See [`UnaryTransport`] for why this
-/// is generic over the method.
+/// is generic over the method. Like a unary transport it enforces the deadline, both while
+/// opening and on every frame it yields afterwards.
 pub trait SubscriptionTransport<P: Subscription> {
     /// `buffer` is the number of events the transport may hold ahead of the consumer.
     fn subscribe(
@@ -130,7 +136,6 @@ impl<T> Client<T> {
         tokio::select! {
             biased;
             _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
-            _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
             result = self.transport.call(request) => result,
         }
     }
@@ -166,7 +171,6 @@ impl<T> Client<T> {
         tokio::select! {
             biased;
             _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
-            _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
             result = open => result,
         }
     }
@@ -178,7 +182,8 @@ pub struct ClientStream<P: Subscription> {
 
 impl<P: Subscription> ClientStream<P> {
     /// Reads the response metadata from the first frame, then yields the events, ending at the
-    /// end marker. Cancellation and the deadline preempt buffered events and are terminal.
+    /// end marker. Cancellation preempts buffered events and is terminal; so is the deadline, which the
+    /// transport enforces on the frames it yields (see [`SubscriptionTransport`]).
     pub async fn open(
         subscribed: Subscribed<P>,
         context: RequestContext,
@@ -216,7 +221,6 @@ impl<P: Subscription> ClientStream<P> {
             let item = tokio::select! {
                 biased;
                 _ = state.context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
-                _ = state.context.expired() => Err(ContextError::DeadlineExceeded.into()),
                 frame = state.frames.next() => match frame {
                     Some(Ok(EventFrame::Event(event))) => Ok(event),
                     Some(Ok(EventFrame::Open(_))) => Err(ClientError::transport("subscription sent response metadata twice", false)),

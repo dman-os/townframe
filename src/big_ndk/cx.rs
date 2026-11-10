@@ -1,11 +1,10 @@
 use crate::wasi::WasiHttp;
 use method_core::ContextError;
 use method_core::Unary;
-use service_client_core_rs::UnaryTransport;
+use service_client_core_rs::Client;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::Xrpc;
 use service_core_rs::ClientError;
-use service_core_rs::Envelope;
 use service_core_rs::HttpMetadata;
 use service_core_rs::RequestContext;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
@@ -102,16 +101,11 @@ pub(crate) async fn call_through<H: HttpTransport, M: Unary>(
     };
     let metadata = HttpMetadata {
         authorization: Some(bearer_header_value(capability)),
+        // The nested call is a different command from the one being served, so it does not
+        // inherit the idempotency key: reusing it would make dispatch treat the two as one.
         idempotency_key: None,
     };
-    // `Client::call` would also race the call against `RequestContext::expired`, a tokio timer,
-    // and a guest has no tokio runtime to run one: it panics as soon as a budget is set. The
-    // spent-budget check is `validate`; the in-flight deadline is the host's, which parses the
-    // `x-timeout-ms` this hop writes and cancels the nested call when it runs out.
-    let context = cx.next_hop();
-    context.validate()?;
-    Xrpc(transport)
-        .call(Envelope::with_metadata(context, metadata, input))
+    Client::new(Xrpc(transport))
+        .call_with(cx.next_hop(), metadata, input)
         .await
-        .map(|response| response.output)
 }

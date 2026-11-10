@@ -75,7 +75,8 @@ pub trait Handler<M: Unary> {
 ///
 /// `export_nodule!(Type => [MethodA, MethodB])` routes `POST /xrpc/<nsid>` to the
 /// [`Handler`] impl of `Type` for the method whose `XRPC.nsid` is `<nsid>` exactly, and
-/// requires `Type: Default` (a fresh value serves each request). `export_nodule!(Type)` exports
+/// requires `Type: Default`: a fresh value serves each request, because a component is
+/// stateless between requests and durable state goes through services. `export_nodule!(Type)` exports
 /// a `Type` that implements [`Nodule`] by hand, for a nodule whose routing is not an exact NSID
 /// match.
 #[macro_export]

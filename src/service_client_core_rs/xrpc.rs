@@ -119,7 +119,8 @@ pub struct HttpTransportError {
 /// Moves one [`XrpcRequest`] to the server and returns its [`XrpcResponse`]. A guest implements
 /// this over its HTTP import, a host over its HTTP client; [`Xrpc`] turns it into a
 /// [`UnaryTransport`] for every unary method. The future carries no `Send` bound for the
-/// same reason [`UnaryTransport`]'s does.
+/// same reason [`UnaryTransport`]'s does. The request's `x-timeout-ms` header is the budget the
+/// call has left; the implementation, or the server it talks to, enforces it.
 pub trait HttpTransport {
     fn send(
         &self,

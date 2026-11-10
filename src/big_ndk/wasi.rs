@@ -11,11 +11,13 @@ use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
+use service_core_rs::xrpc::TIMEOUT_HEADER;
 use wit::wasi::http::client;
 use wit::wasi::http::types::ErrorCode;
 use wit::wasi::http::types::Fields;
 use wit::wasi::http::types::Method;
 use wit::wasi::http::types::Request;
+use wit::wasi::http::types::RequestOptions;
 use wit::wasi::http::types::Response;
 use wit::wasi::http::types::Scheme;
 
@@ -38,7 +40,22 @@ impl HttpTransport for WasiHttp {
         }
         let (mut body_tx, body_rx) = wit::wit_stream::new::<u8>();
         let (trailers_tx, trailers_rx) = wit::wit_future::new(|| Ok(None));
-        let (outgoing, _completion) = Request::new(headers, Some(body_rx), trailers_rx, None);
+        // A guest has no timer of its own, so the deadline is the host's: it parses the
+        // `x-timeout-ms` this request carries, and the first-byte timeout below tells the
+        // transport the same budget.
+        let options = request.headers.get(TIMEOUT_HEADER).map(|value| {
+            let millis: u64 = value
+                .to_str()
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .expect("`write_context_headers` writes x-timeout-ms as integer milliseconds");
+            let options = RequestOptions::new();
+            options
+                .set_first_byte_timeout(Some(millis.saturating_mul(1_000_000)))
+                .expect("the host's wasi:http client supports a first-byte timeout");
+            options
+        });
+        let (outgoing, _completion) = Request::new(headers, Some(body_rx), trailers_rx, options);
         outgoing
             .set_method(&match request.method {
                 http::Method::GET => Method::Get,
