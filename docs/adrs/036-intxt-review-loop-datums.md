@@ -2,7 +2,7 @@
 
 **Status:** Proposed.
 
-**Depends on:** ADR 019 (drawers), ADR 020 (documents and datum writes), ADR 021 (datum schemas and codecs), ADR 026 (drawer-native blobs), ADR 035 (the `dtxt:` reference scheme; to be written). Functional requirements: FDR 006 (intxt) and FDR 007 (the review loop). Decisions are tracked in `docs/scratch/intxt-ledger.md` (D-numbers below).
+**Depends on:** ADR 019 (drawers), ADR 020 (documents and datum writes), ADR 021 (datum schemas and codecs), ADR 026 (drawer-native blobs), ADR 035 (references and URLs). Functional requirements: FDR 006 (intxt) and FDR 007 (the review loop). Decisions are tracked in `docs/scratch/intxt-ledger.md` (D-numbers below).
 
 Datum tags use the placeholder authority `org.example.intxt` until the naming lane settles NSIDs.
 
