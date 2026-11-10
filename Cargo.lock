@@ -1603,6 +1603,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_ndk_testing"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "big_blobs",
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_dispatch",
+ "big_dispatch_core",
+ "big_ndk",
+ "big_node",
+ "big_nodule",
+ "big_nodule_core",
+ "big_plugs_core",
+ "big_repo",
+ "http",
+ "keyring-core",
+ "method_core",
+ "secrets_rs",
+ "serde_json",
+ "service_client_core_rs",
+ "service_client_native_rs",
+ "service_utils_rs",
+ "sqlite_rs",
+ "test_nodule_handlers",
+ "tokio",
+ "utils_rs",
+]
+
+[[package]]
 name = "big_node"
 version = "0.1.0"
 dependencies = [
