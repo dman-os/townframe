@@ -199,12 +199,29 @@ pending operator review), which is the source of truth. References use the `dtxt
    against ADR 032 §4).
 3. **Diff components S10–S12**: virtualized unified and split views, built as a crate
    that doesn't assume micro execution, with a render callback for injected rows (option A).
-4. **A mock review micro:** J1–J4 over mock collections, built on the diff crate. It's a stand-in
+4. **The lab micro, starting with a mock review:** J1–J4 over mock collections, built on the diff crate. It's a stand-in
    the intext lane replaces with the real intxt micro, so it stays deliberately thin.
 5. **Touch range selection, the composer sheet, and Android IME checks** (J5).
 7. **H1, the last step:** highlighting in the guest under a fuel budget.
 
-## Questions for the operator
+## Operator decisions (2026-11-11)
 
-1. **Mock review micro (step 4):** should claytxt build it, or should the intext lane start from
-   the diff crate directly? (The intext lane prefers a thin mock that they replace.)
+1. **A lab micro.** claytxt builds one micro that holds its experiments, starting with the thin
+   mock review (step 4). The intext lane replaces the mock review with the real intxt micro.
+2. **intxt is malleable.** Other plugs' content may render between diff lines. In the diff view
+   that is Pierre's line annotations: the annotation callback returns ordinary Dioxus content,
+   and that content can be an embedded micro.
+3. **The diff view is plain Dioxus.** `pierre_diffs_dioxus` doesn't know it runs in claytxt. It
+   works in any Dioxus app, on standard events and `MountedData`, and a micro uses it as it would
+   any Dioxus component. Clay's job is to make standard Dioxus work inside a micro, not to give
+   the diff view a Clay-specific API. That is deliberately a stress test of the guest surface;
+   change course only on a serious blocker.
+
+What the stress test asks of Clay, beyond the needs table:
+- **`MountedData` in a micro.** On `feat/dayframe-shell` a guest's `onmounted` carries `null`
+  (`clay_surface/render.rs`, `@serialize Mounted`), so `scroll`, `get_scroll_offset` and
+  `set_focus` don't exist in a micro. W1/W2's element commands (`ElementCommand::Scroll`,
+  `ScrollBy`, the scroll-offset read) live only on `spike/pierre-scroll`. They have to land for
+  every backend, together with host contract 1 (commands from a handler run before paint).
+- **A micro embedded inside an annotation row** of a virtualized diff inside a micro: nested
+  embedding, with the embedded micro's height feeding the virtualizer through `onresize`.
