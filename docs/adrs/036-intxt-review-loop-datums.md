@@ -176,11 +176,11 @@ A guided review is a set of `section` structures with `order`. Structure is a re
 
 ```jsonc
 // org.example.intxt.seen/<actor id>       (one slot per reader; only that reader writes it)
-{ "notesHeads": "5Nkx|8Qrt",                                  // notes-doc heads when they last caught up
+{ "notes": { "org.example.intxt.note/0193…": "5Nkx", "org.example.intxt.thread/0193…": "8Qrt" },  // per slot: the datum heads last read
   "reviewed": { "refs/heads/feat/intxt": "77b2…" } }          // the ref target they last reviewed
 ```
 
-"New comments" are note slots changed after `notesHeads`. "New since I last looked" (Jane Street Iron's per-reviewer brain, `docs/scratch/intxt-prior-art.md`) is the diff between the revision at `reviewed` and the current target, per file, across any rebase in between. An agent uses the same datum to find what it hasn't read.
+"New comments" are the slots whose current datum version differs from the heads recorded here: one `ListDatums` at current heads (per-slot `DatumVersion`s, no values) compared on the client. Datum heads are global, so the comparison is the same on every device. A single doc-heads watermark was rejected: it needs two listings, one at historical heads (which materializes that version), and `PollDatums` cursors are node-local, so they can't be synced seen state (node lane, 2026-11-10). "New since I last looked" (Jane Street Iron's per-reviewer brain, `docs/scratch/intxt-prior-art.md`) is the diff between the revision at `reviewed` and the current target, per file, across any rebase in between. An agent uses the same datum to find what it hasn't read.
 
 ## 9. What needs a nodule
 
@@ -188,7 +188,7 @@ None of the loop's writes. Creating the intxt, recording history and sessions, c
 
 ## 10. Open questions
 
-1. **Seen as heads.** `notesHeads` uses document heads as a watermark. Does Cabinet expose "slots changed since heads H" cheaply enough for a phone, or does the seen datum need a different shape?
+1. **Cost of seen state.** Per-slot heads grow with the number of notes, and `ListDatums` on a large notes doc is unmeasured. Measure before the alpha; a `since`-heads read mode is on the node lane's deferred list if it's needed.
 2. **refMove vs the ref datum's own history.** Keep the explicit append-only `refMove` list, or read past targets from the `gitRef` datum's history (D17) and drop `refMove`?
 3. **Session size.** One session doc holds every turn's datums; the largest normalized session is estimated at 1–3 MB. Confirm with a real import before deciding whether long sessions split.
 4. **Line-splice recorder for rewrites.** A rebase appends the rebased contents as splices from the previous state of the same file doc. Confirm with a real rebase that cursors made on the old commit resolve sensibly at the new one.
