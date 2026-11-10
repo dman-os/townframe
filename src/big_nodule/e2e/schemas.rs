@@ -127,6 +127,77 @@ async fn an_enabled_nodules_datums_are_registered_live_and_retired_with_it() {
     node.shutdown().await;
 }
 
+/// `cartridge` with `document` as the sidecar of its record `nsid`.
+fn with_sidecar(mut cartridge: Cartridge, nsid: &str, document: Value) -> Cartridge {
+    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
+        panic!("init cartridges carry a nodule");
+    };
+    nodule
+        .description
+        .entry("sidecar".into())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .unwrap()
+        .insert(nsid.to_owned(), document);
+    cartridge
+}
+
+/// The sidecar document `Bundle::document` renders for a record with one string `field`, stored
+/// in the form `storage` names.
+fn sidecar(field: &str, storage: &str) -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/$defs/Note",
+        "$defs": { "Note": {
+            "type": "object",
+            "properties": { field: { "type": "string", "x-automerge": storage } },
+        } },
+    })
+}
+
+#[tokio::test]
+async fn a_held_records_sidecar_gives_it_storage_forms() {
+    let node = node_with_alpha(Vec::new()).await;
+    // The Lexicon alone cannot say `link` is a datum reference: registered without a sidecar it
+    // is a plain string, and the reference index never sees it.
+    node.admit(node.operator(), beta("1.0.0", 1)).await.unwrap();
+    node.set_enabled(BETA, true).await;
+    let plain = node.schemas.require_for_write(NOTE).unwrap();
+    assert!(!plain.compiled().declares_references());
+
+    let cartridge = with_sidecar(
+        with_lexicon(
+            init_cartridge("beta", "1.1.0", &[], &[], &[]),
+            record(NOTE, Some(2), "text"),
+        ),
+        NOTE,
+        sidecar("text", "reference"),
+    );
+    node.admit(node.operator(), cartridge).await.unwrap();
+    let declared = node.schemas.require_for_write(NOTE).unwrap();
+    assert_eq!(declared.lexicon()["revision"], 2);
+    assert!(declared.compiled().declares_references());
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_sidecar_for_a_record_the_nodule_does_not_hold_is_refused() {
+    let node = node_hosting(&Probe::new()).await;
+    // Alpha holds nothing under `org.example.beta`: describing beta's record is not its to do.
+    let cartridge = with_sidecar(
+        init_cartridge("alpha", "1.0.0", &[], &[], &[]),
+        NOTE,
+        sidecar("text", "reference"),
+    );
+    let error = node
+        .admit(node.operator(), cartridge)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("not a record this cartridge holds"), "{error}");
+    node.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_nodule_holding_a_datum_the_node_already_knows_is_refused() {
     // `dmeta` is a boot schema: a cartridge claiming its NSID would shadow the node's own.

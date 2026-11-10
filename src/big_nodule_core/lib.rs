@@ -62,6 +62,14 @@ pub struct Nodule {
     /// schema language.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lexicons: Vec<IndexMap<String, Value>>,
+    /// Per record this nodule holds, keyed by its NSID: the record's sidecar JSON Schema document,
+    /// which carries what its Lexicon cannot say, the `x-automerge` storage forms above all (ADR 021
+    /// §3), in the form `big_cabinet_core`'s `Bundle::document` renders. Without one, a held record
+    /// keeps the plain JSON kind its Lexicon states at every position: no collaborative text, no
+    /// counter, no declared reference. Admission checks that each key is a held record; the
+    /// document itself is checked against the record's Lexicon when the record is registered.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub sidecar: IndexMap<String, Value>,
     /// What the nodule uses that it does not hold, in the shared request shape: foreign
     /// operations it calls (a request without `access`), datum contracts it reads or writes.
     /// Strictness: any NSID the description references outside the envelope's authority that it
@@ -113,8 +121,8 @@ pub struct Handler {
 /// A nodule's datum Lexicons split for the schema registry: see [`Nodule::registrable_datums`].
 #[derive(Debug, Default)]
 pub struct RegistrableDatums<'a> {
-    /// `(nsid, file)` of each record the nodule holds.
-    pub held: Vec<(&'a str, &'a IndexMap<String, Value>)>,
+    /// `(nsid, file, sidecar)` of each record the nodule holds; see [`Nodule::sidecar`].
+    pub held: Vec<(&'a str, &'a IndexMap<String, Value>, Option<&'a Value>)>,
     pub carried: Vec<&'a IndexMap<String, Value>>,
 }
 
@@ -376,7 +384,7 @@ impl Nodule {
             if is_record
                 && authority.is_some_and(|authority| DispatchScope::authority_owns(authority, id))
             {
-                split.held.push((id, file));
+                split.held.push((id, file, self.sidecar.get(id)));
             } else {
                 split.carried.push(file);
             }
@@ -403,6 +411,7 @@ impl Nodule {
         };
         admission.requests()?;
         admission.lexicon_files()?;
+        admission.sidecar()?;
         admission.lexicon_refs()?;
         admission.private_state()?;
         let (operations, artifacts) = admission.services()?;
@@ -558,6 +567,21 @@ impl<'a> Admission<'a> {
                             .map(|authority| format!(" `{authority}`"))
                             .unwrap_or_default()
                     ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A sidecar document belongs to a record this nodule holds: a vendored copy is the holder's
+    /// to describe, and a document for a record nothing declares would never be read.
+    fn sidecar(&self) -> Result<()> {
+        let held = self.nodule.registrable_datums(self.authority).held;
+        for nsid in self.nodule.sidecar.keys() {
+            if !held.iter().any(|(id, _, _)| id == nsid) {
+                return Err(NoduleError::invalid(
+                    format!("sidecar.{nsid}"),
+                    format!("`{nsid}` is not a record this cartridge holds"),
                 ));
             }
         }

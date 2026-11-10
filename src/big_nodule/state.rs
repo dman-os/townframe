@@ -1105,7 +1105,13 @@ impl State {
                 split
                     .held
                     .iter()
-                    .map(|(nsid, file)| SchemaRegistration::new(*nsid, object(file))),
+                    .map(|(nsid, file, sidecar)| {
+                        let registration = SchemaRegistration::new(*nsid, object(file));
+                        match sidecar {
+                            Some(document) => registration.with_supplement((*document).clone()),
+                            None => registration,
+                        }
+                    }),
                 split.carried.iter().map(|file| object(file)).collect(),
             );
             let outcome = self

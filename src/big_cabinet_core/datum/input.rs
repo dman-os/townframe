@@ -58,6 +58,8 @@ fn invalid(path: &str, reason: impl Into<String>) -> LexiconAdmissionError {
 }
 
 impl Bundle<'_> {
+    /// [`admit_lexicon`] with this bundle's declaration of `tag` as the supplement. A bundle that
+    /// declares anything must declare `tag`.
     pub fn validate_lexicon(
         &self,
         tag: &str,
@@ -73,56 +75,89 @@ impl Bundle<'_> {
                 format!("bundle does not declare datum `{tag}`"),
             ));
         }
-        let mut compiler = Compiler::index(
-            std::iter::once(primary).chain(carried.iter().copied()),
-            false,
-        )?;
-        if primary.get("id").and_then(Value::as_str) != Some(tag) {
-            return Err(invalid(
-                "id",
-                format!("primary Lexicon must identify `{tag}`"),
-            ));
-        }
-        compiler.compile_definitions()?;
-        let root = compiler
-            .names
-            .get(&(tag.to_owned(), "main".to_owned()))
-            .ok_or_else(|| invalid("defs.main", "the datum requires a main definition"))?
-            .clone();
-        let main = &primary["defs"]["main"];
-        if !matches!(main["type"].as_str(), Some("record" | "object")) {
-            return Err(invalid(
-                "defs.main.type",
-                "a datum must have record or object main",
-            ));
-        }
-        let mut document = json!({"$ref": format!("#/$defs/{root}"), DATA: true});
-        if let Some(datum) = self.cartridge.datums.iter().find(|datum| datum.id == tag) {
-            let supplement = serde_json::to_value(
-                self.document(&datum.name)
-                    .expect("validated datum definition"),
-            )
-            .expect("schema serializes");
-            bound(&supplement)?;
-            let source = supplement["$defs"].as_object().expect("bundle definitions");
-            check_supplement(&supplement, source, "supplement")?;
-            CompiledSchema::check_storage_declarations(&supplement)
-                .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))?;
-            let mut overlay = Overlay {
-                source,
-                base: compiler.definitions.clone(),
-                definitions: &mut compiler.definitions,
-                paired: HashMap::new(),
-            };
-            overlay.apply(&mut document, &supplement, "supplement", 0)?;
-        }
-        document
-            .as_object_mut()
-            .expect("compiled root")
-            .insert("$defs".to_owned(), Value::Object(compiler.definitions));
-        CompiledSchema::compile(document)
-            .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))
+        let supplement = self
+            .cartridge
+            .datums
+            .iter()
+            .find(|datum| datum.id == tag)
+            .map(|datum| {
+                serde_json::to_value(
+                    self.document(&datum.name)
+                        .expect("validated datum definition"),
+                )
+                .expect("schema serializes")
+            });
+        admit_lexicon(tag, primary, carried, supplement.as_ref())
     }
+}
+
+/// Compiles the datum `tag`'s published Lexicon `primary`, with `carried` resolving the references
+/// it makes, into the schema its stored values are read against.
+///
+/// `supplement` is the datum's sidecar JSON Schema document (ADR 021 §3), in the form
+/// [`Bundle::document`] renders: `$ref` to the datum's definition and every definition it reaches
+/// under `$defs`. It carries what a Lexicon cannot say, the `x-automerge` storage forms above all, and
+/// is overlaid on the Lexicon's definitions: it may narrow them, never admit a value the Lexicon
+/// refuses. It may come from a peer's cartridge, so its shape and size are checked, not assumed.
+/// Without one, every position keeps the plain JSON kind its Lexicon states.
+pub fn admit_lexicon(
+    tag: &str,
+    primary: &Value,
+    carried: &[&Value],
+    supplement: Option<&Value>,
+) -> Result<CompiledSchema> {
+    let mut compiler = Compiler::index(
+        std::iter::once(primary).chain(carried.iter().copied()),
+        false,
+    )?;
+    if primary.get("id").and_then(Value::as_str) != Some(tag) {
+        return Err(invalid(
+            "id",
+            format!("primary Lexicon must identify `{tag}`"),
+        ));
+    }
+    compiler.compile_definitions()?;
+    let root = compiler
+        .names
+        .get(&(tag.to_owned(), "main".to_owned()))
+        .ok_or_else(|| invalid("defs.main", "the datum requires a main definition"))?
+        .clone();
+    let main = &primary["defs"]["main"];
+    if !matches!(main["type"].as_str(), Some("record" | "object")) {
+        return Err(invalid(
+            "defs.main.type",
+            "a datum must have record or object main",
+        ));
+    }
+    let mut document = json!({"$ref": format!("#/$defs/{root}"), DATA: true});
+    if let Some(supplement) = supplement {
+        bound(supplement)?;
+        let source = supplement
+            .get("$defs")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                invalid(
+                    "supplement.$defs",
+                    "a supplement states its definitions under `$defs`",
+                )
+            })?;
+        check_supplement(supplement, source, "supplement")?;
+        CompiledSchema::check_storage_declarations(supplement)
+            .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))?;
+        let mut overlay = Overlay {
+            source,
+            base: compiler.definitions.clone(),
+            definitions: &mut compiler.definitions,
+            paired: HashMap::new(),
+        };
+        overlay.apply(&mut document, supplement, "supplement", 0)?;
+    }
+    document
+        .as_object_mut()
+        .expect("compiled root")
+        .insert("$defs".to_owned(), Value::Object(compiler.definitions));
+    CompiledSchema::compile(document)
+        .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))
 }
 
 fn bound(value: &Value) -> Result<()> {

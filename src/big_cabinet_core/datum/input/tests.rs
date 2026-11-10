@@ -1156,3 +1156,38 @@ fn unsupported_primary_forms_and_sidecar_rules_are_explicit_admission_errors() {
         );
     }
 }
+
+#[test]
+fn a_supplement_from_data_is_checked_not_assumed() {
+    let primary = record(json!({"text": {"type": "string"}}), &[], &[]);
+    // A cartridge ships the document `Bundle::document` renders; admitting it from data gives the
+    // same storage forms the bundle would.
+    let universe = supplement(json!({"text": {"type": "string", "x-automerge": "reference"}}));
+    let bundle = Bundle::new(&universe, Vec::new());
+    let document = serde_json::to_value(bundle.document("Authored").unwrap()).unwrap();
+    let from_data = admit_lexicon(TAG, &primary, &[], Some(&document)).unwrap();
+    assert!(from_data.declares_references());
+    assert!(
+        bundle
+            .validate_lexicon(TAG, &primary, &[])
+            .unwrap()
+            .declares_references()
+    );
+    assert!(
+        !admit_lexicon(TAG, &primary, &[], None)
+            .unwrap()
+            .declares_references()
+    );
+
+    // A peer's document is refused, not trusted, when it has no definitions or widens the Lexicon.
+    let shapeless = json!({"$ref": "#/$defs/Authored"});
+    assert!(matches!(
+        admit_lexicon(TAG, &primary, &[], Some(&shapeless)),
+        Err(LexiconAdmissionError::Invalid { .. })
+    ));
+    let widening = json!({
+        "$ref": "#/$defs/Authored",
+        "$defs": {"Authored": {"type": "object", "properties": {"text": {"type": "integer"}}}},
+    });
+    assert!(admit_lexicon(TAG, &primary, &[], Some(&widening)).is_err());
+}

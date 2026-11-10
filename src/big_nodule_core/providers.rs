@@ -173,7 +173,7 @@ impl ProviderIndex {
                     });
             }
             let authority = installed.admitted.authority.as_deref();
-            for (nsid, _) in installed.nodule.registrable_datums(authority).held {
+            for (nsid, _, _) in installed.nodule.registrable_datums(authority).held {
                 offers
                     .entry(nsid.to_owned())
                     .or_default()

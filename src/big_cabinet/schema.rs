@@ -18,6 +18,7 @@ use big_cabinet_core::datum::CompiledSchema;
 use big_cabinet_core::datum::Declaration;
 use big_cabinet_core::datum::LexiconAdmissionError;
 use big_cabinet_core::datum::Universe;
+use big_cabinet_core::datum::admit_lexicon;
 use big_cabinet_core::datum::UniverseError;
 use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Dmeta;
@@ -96,6 +97,10 @@ fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
 pub struct SchemaRegistration {
     pub datum_tag: String,
     pub lexicon: Value,
+    /// The datum's sidecar JSON Schema document, when it arrives as data rather than as a Rust
+    /// declaration: a cartridge's nodule ships one per record it holds. A group with a
+    /// [`SchemaRegistrationGroup::sidecar`] renders its own, so it states none here.
+    pub supplement: Option<Value>,
 }
 
 impl SchemaRegistration {
@@ -103,7 +108,15 @@ impl SchemaRegistration {
         Self {
             datum_tag: datum_tag.into(),
             lexicon,
+            supplement: None,
         }
+    }
+
+    /// The same registration with `supplement` as its sidecar document.
+    #[must_use]
+    pub fn with_supplement(mut self, supplement: Value) -> Self {
+        self.supplement = Some(supplement);
+        self
     }
 }
 
@@ -228,7 +241,6 @@ impl KnownSchemas {
         groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
     ) -> Result<(), SchemaRepoError> {
         let known = &mut self.known;
-        let empty = Universe::default();
         for group in groups {
             let mut tags = std::collections::BTreeSet::new();
             for registration in &group.registrations {
@@ -246,10 +258,6 @@ impl KnownSchemas {
                 .map(OwnedSidecar::from_bundle)
                 .transpose()?
                 .map(Arc::new);
-            let borrowed = sidecar.as_ref().map_or_else(
-                || Bundle::new(&empty, Vec::new()),
-                |sidecar| sidecar.borrowed(),
-            );
             for registration in &group.registrations {
                 let tag = &registration.datum_tag;
                 if tag.is_empty() {
@@ -269,9 +277,23 @@ impl KnownSchemas {
                             .map(|other| &other.lexicon),
                     )
                     .collect();
-                let compiled = borrowed
-                    .validate_lexicon(tag, &registration.lexicon, &carried)
-                    .map_err(|source| SchemaRepoError::Admission {
+                let compiled = match (&sidecar, &registration.supplement) {
+                    (Some(_), Some(_)) => {
+                        panic!("`{tag}` states a supplement in a group whose sidecar renders one")
+                    }
+                    (Some(sidecar), None) => {
+                        sidecar
+                            .borrowed()
+                            .validate_lexicon(tag, &registration.lexicon, &carried)
+                    }
+                    (None, supplement) => admit_lexicon(
+                        tag,
+                        &registration.lexicon,
+                        &carried,
+                        supplement.as_ref(),
+                    ),
+                }
+                .map_err(|source| SchemaRepoError::Admission {
                         tag: tag.clone(),
                         source: Box::new(source),
                     })?;
