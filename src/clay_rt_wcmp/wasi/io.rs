@@ -34,6 +34,14 @@ pub(super) enum Console {
 
 impl Console {
     fn write(self, label: &str, line: &str) {
+        // Spike: std's stdio is a no-op on wasm32-unknown-unknown, so a guest's panic message
+        // (written to its stderr) was lost; send it to the page console.
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            web_sys::console::error_1(&format!("{label} {line}").into());
+            return;
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         match self {
             Console::Stdout => println!("{label} {line}"),
             Console::Stderr => eprintln!("{label} {line}"),

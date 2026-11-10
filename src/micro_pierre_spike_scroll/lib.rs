@@ -292,11 +292,14 @@ fn ThreadWindow(start: usize, count: usize, grown: Vec<usize>, probe: bool, log:
             "data-state": "{count}",
             style: "position:absolute;left:0;right:0;top:{y_of_line(start, &grown)}px",
             for line in start..start + count {
-                div { key: "{line}", "data-line": "{line}",
-                    Row { line, tokens: 1, source: 1 }
-                }
-                if line % THREAD_EVERY == THREAD_EVERY - 1 {
-                    ThreadRow { key: "t{line}", k: line / THREAD_EVERY, lines: thread_base(line / THREAD_EVERY) + grown[line / THREAD_EVERY], probe, log }
+                // One root per iteration (a keyed list item): the line, then the thread after it.
+                div { key: "{line}",
+                    div { "data-line": "{line}",
+                        Row { line, tokens: 1, source: 1 }
+                    }
+                    if line % THREAD_EVERY == THREAD_EVERY - 1 {
+                        ThreadRow { k: line / THREAD_EVERY, lines: thread_base(line / THREAD_EVERY) + grown[line / THREAD_EVERY], probe, log }
+                    }
                 }
             }
         }
