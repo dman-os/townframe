@@ -294,7 +294,7 @@ fn ThreadWindow(start: usize, count: usize, grown: Vec<usize>, probe: bool, log:
             for line in start..start + count {
                 // One root per iteration (a keyed list item): the line, then the thread after it.
                 div { key: "{line}",
-                    div { "data-line": "{line}",
+                    div { "data-value": "{line}",
                         Row { line, tokens: 1, source: 1 }
                     }
                     if line % THREAD_EVERY == THREAD_EVERY - 1 {
@@ -321,7 +321,7 @@ fn ThreadRow(k: usize, lines: usize, probe: bool, log: Signal<String>) -> Elemen
     if probe {
         rsx! {
             div {
-                "data-thread": "{k}",
+                "data-state": "{k}",
                 style,
                 // The ResizeData the wire delivers (W2): one entry per observed size change.
                 onresize: move |event| {
@@ -332,7 +332,7 @@ fn ThreadRow(k: usize, lines: usize, probe: bool, log: Signal<String>) -> Elemen
             }
         }
     } else {
-        rsx! { div { "data-thread": "{k}", style, {body} } }
+        rsx! { div { "data-state": "{k}", style, {body} } }
     }
 }
 

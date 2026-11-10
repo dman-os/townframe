@@ -177,13 +177,13 @@ if (MODE === "w2") {
           const w2: any = w.__w2 = { samples: [], scrolls: [], running: false, marker: null, n: 0, clickN: -1, domGrow: [] };
           sc.addEventListener("scroll", () => { if (w2.running) w2.scrolls.push([performance.now(), w2.n, sc.scrollTop]); }, { capture: true });
           new MutationObserver((list) => {
-            for (const rec of list) if ((rec.target as Element).closest?.("[data-thread]") && rec.addedNodes.length) w2.domGrow.push([performance.now(), w2.n]);
+            for (const rec of list) if ((rec.target as Element).closest?.("[data-testid=\"window\"] [data-state]") && rec.addedNodes.length) w2.domGrow.push([performance.now(), w2.n]);
           }).observe(sc, { subtree: true, childList: true });
           w2.arm = () => {
             const top = sc.getBoundingClientRect().top + sc.clientTop;
             const want = top + sc.clientHeight - 140;
             let best: HTMLElement | null = null, bd = 1e9;
-            for (const el of sc.querySelectorAll<HTMLElement>("[data-line]")) {
+            for (const el of sc.querySelectorAll<HTMLElement>("[data-testid=\"window\"] [data-value]")) {
               const t = el.getBoundingClientRect().top;
               if (t < top || t + 20 > top + sc.clientHeight) continue;
               if (Math.abs(t - want) < bd) { bd = Math.abs(t - want); best = el; }
