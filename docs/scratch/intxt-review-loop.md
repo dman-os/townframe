@@ -122,18 +122,25 @@ A doesn't block B. The crate in A is exactly what B would wrap later.
 
 ## How the screens map onto intext's model
 
-This summarises the intext lane's draft, which lives on `feat/intxt` (p3N-3) in
-`docs/scratch/intxt-design.md`, `intxt-use-cases.md` and `intxt-ledger.md`. Their FDRs are the
-source of truth.
+This summarises ADR 036 (`docs/adrs/036-intxt-review-loop-datums.md` on `feat/intxt`, p3N-3,
+pending operator review), which is the source of truth. References use the `dtxt:` scheme
+(ADR 035), which replaces db+datum references.
 
-- **Change** = one intxt, one drawer.
-- **Revision** = a pin over file-doc heads, plus commit datums (sha, parents, jj change id).
-- **File** = one Automerge Text doc per touched file.
-- **Annotation** and **reply** are both annotation datums; a reply is one that targets another
-  annotation. A **thread** is a root annotation plus its replies, with a per-thread resolved
-  flag. There is no thread datum.
+- **Change** = one intxt, one drawer: a descriptor, a history doc, one file doc per touched
+  path, session docs and a notes doc.
+- **File** = `file/main`, an Automerge Text; every observed state is appended as line splices.
+- **Commit** = `gitCommit/<sha>`, pinning each changed file's base and head states as dtxt URLs
+  with heads. That pair is the diff view's base and head text.
+- **Revision** = a gitRef position; `refMove/<uuid>` lists the revisions.
+- **Annotation** = `note/<uuid>`. Its targets are dtxt refs with a `[cursor-cursor]` fragment
+  for a text range, plus a quote as fallback. A **reply** is a note with `inReplyTo`. A
+  **thread** is a root note plus its replies; `thread/<root>` holds `{resolved}`. The micro
+  resolves cursors to line ranges before the diff view sees them.
+- **Seen state** = `seen/<actor>`, per reader: the notes-doc heads plus the ref target they
+  last reviewed, for "new since I last looked" across rebases.
+- **Structure** = `structure/<uuid>`: tasks, sections and guide order (the change overview's
+  ordering, J2).
 - **Verdict** (J7): not in the alpha (D18).
-- **Seen state**: one datum per reader pinning what they last reviewed, for "new since I last looked" across rebases.
 
 ## Work order for the claytxt lane (Sonnet lanes, at most two building at once)
 
