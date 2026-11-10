@@ -923,6 +923,42 @@ fn a_later_stylesheet_replaces_the_earlier_one_and_is_sanitized_at_ingress() {
 }
 
 #[test]
+fn a_stylesheet_is_charged_to_the_retained_budget_and_a_replacement_releases_its_bytes() {
+    // Sheets already in the sanitizer's output form, so stored length equals raw length.
+    let sheet = |len: usize| format!("a {{\n--p: {};\n}}", "x".repeat(len - 12));
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[Mutation::SetStyleSheet(sheet(100))]).unwrap();
+    assert_eq!(tree.retained_bytes, 100);
+    // Fill the rest of the budget with text, leaving less than a full string of room.
+    let text = [
+        Mutation::CreateText("x".repeat(SurfaceTree::MAX_STRING_BYTES)),
+        Mutation::AppendChildren(1),
+    ];
+    for _ in 0..SurfaceTree::MAX_RETAINED_BYTES / SurfaceTree::MAX_STRING_BYTES - 1 {
+        tree.apply(&text).unwrap();
+    }
+    let leave = 1000;
+    let left = SurfaceTree::MAX_RETAINED_BYTES - tree.retained_bytes - leave;
+    tree.apply(&[
+        Mutation::CreateText("x".repeat(left)),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    let free = SurfaceTree::MAX_RETAINED_BYTES - tree.retained_bytes;
+    assert_eq!(free, leave);
+    // Replacing the 100-byte sheet releases it: the new one may use the free room plus those 100.
+    let mut fits = tree.clone();
+    fits.apply(&[Mutation::SetStyleSheet(sheet(free + 100))])
+        .unwrap();
+    assert_eq!(fits.retained_bytes, SurfaceTree::MAX_RETAINED_BYTES);
+    // One byte more is refused.
+    assert_eq!(
+        tree.apply(&[Mutation::SetStyleSheet(sheet(free + 101))]),
+        Err(PresentationError::Unsupported("retained byte limit".into()))
+    );
+}
+
+#[test]
 fn data_attribute_names_are_capped_per_surface() {
     let cap = SurfaceTree::MAX_DATA_ATTRIBUTE_NAMES;
     let set_names = |names: &mut dyn Iterator<Item = String>| {

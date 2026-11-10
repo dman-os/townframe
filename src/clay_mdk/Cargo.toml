@@ -112,4 +112,4 @@ package = ["dep:blake3"]
 # The guest backend: the same `Context` authoring surface over the WIT imports a wasm micro is
 # linked against, the Dioxus guest VirtualDom adapter (GuestDom, WireMutations), and the
 # `export_micro!` entry point.
-guest = ["wit", "contract", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]
+guest = ["wit", "contract", "dep:clay_surface", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]

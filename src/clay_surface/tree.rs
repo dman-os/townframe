@@ -68,7 +68,7 @@ pub struct SurfaceTree<C = ()> {
     pub(crate) revision: u64,
     retained_bytes: usize,
     /// The sanitized stylesheet of this mount (empty when the guest sent none). Bounded by the
-    /// per-string limit at ingress, so it is not charged against `retained_bytes`.
+    /// per-string limit at ingress and its length is part of `retained_bytes`.
     pub(crate) stylesheet: String,
     /// Distinct `data-*` names this surface has used, bounded by [`Self::MAX_DATA_ATTRIBUTE_NAMES`].
     /// Kept across `clear` so a surface cannot reset its budget by resetting its tree.
@@ -172,7 +172,12 @@ impl<C: Clone> SurfaceTree<C> {
                         element_id: None,
                     });
                 }
-                Mutation::SetStyleSheet(sheet) => self.stylesheet = sanitize_stylesheet(sheet),
+                Mutation::SetStyleSheet(sheet) => {
+                    let sanitized = sanitize_stylesheet(sheet);
+                    self.retained_bytes =
+                        self.retained_bytes - self.stylesheet.len() + sanitized.len();
+                    self.stylesheet = sanitized;
+                }
                 _ => replay(std::slice::from_ref(mutation), self)?,
             }
             if self

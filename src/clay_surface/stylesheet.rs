@@ -53,6 +53,44 @@ pub(crate) fn sanitize_stylesheet(sheet: &str) -> String {
     rules.join("\n")
 }
 
+/// Wraps `sheet` in `@media <query> { ... }` so a `document::Style { media }` keeps its meaning.
+/// The query is checked token by token first: anything that could end the `@media` prelude or
+/// its block early (a brace, semicolon, unbalanced bracket, bad string or url, at-keyword) would
+/// let the text escape the wrapper, so it is refused rather than escaped. The host sanitizes the
+/// result like any other sheet, so this check gives the guest an error; it is not the only guard.
+pub fn wrap_in_media_query(query: &str, sheet: &str) -> Result<String, String> {
+    fn well_formed(input: &mut Parser<'_>) -> bool {
+        while let Ok(token) = input.next() {
+            let nested = match token {
+                Token::CurlyBracketBlock
+                | Token::CloseCurlyBracket
+                | Token::CloseParenthesis
+                | Token::CloseSquareBracket
+                | Token::Semicolon
+                | Token::BadString(_)
+                | Token::BadUrl(_)
+                | Token::UnquotedUrl(_)
+                | Token::AtKeyword(_) => return false,
+                Token::Function(_) | Token::ParenthesisBlock | Token::SquareBracketBlock => true,
+                _ => false,
+            };
+            if nested
+                && !input
+                    .parse_nested_block(|inner| Ok::<_, ParseError<()>>(well_formed(inner)))
+                    .unwrap_or(false)
+            {
+                return false;
+            }
+        }
+        true
+    }
+    let query = query.trim();
+    if query.is_empty() || !well_formed(&mut Parser::new(query)) {
+        return Err(format!("`{query}` is not a media query"));
+    }
+    Ok(format!("@media {query} {{\n{sheet}\n}}"))
+}
+
 /// One parser for every context: top level (rules only) and rule bodies (`nested`, where
 /// declarations and nested rules mix, as in CSS nesting and inside `@media` within a style rule).
 struct Sanitizer {

@@ -316,11 +316,41 @@ impl dioxus::document::Document for HeadState {
     fn create_head_element(
         &self,
         name: &str,
-        _attributes: &[(&str, String)],
+        attributes: &[(&str, String)],
         contents: Option<String>,
     ) {
         match name {
-            "style" => *self.sheet.borrow_mut() = contents,
+            "style" => {
+                let mut media = None;
+                for (attribute, value) in attributes {
+                    match *attribute {
+                        "media" => media = Some(value),
+                        // The title and CSP nonce of a `<style>` mean something only to a
+                        // document head (alternate-stylesheet selection, script-src nonces).
+                        // A mount's sheet is not in a head, so they have no effect to honour.
+                        "title" | "nonce" => {}
+                        other => {
+                            *self.refused.borrow_mut() = Some(format!(
+                                "document::Style attribute `{other}` has no meaning for a micro's stylesheet"
+                            ));
+                            return;
+                        }
+                    }
+                }
+                let sheet = match (media, contents) {
+                    (Some(query), Some(text)) => {
+                        match clay_surface::wrap_in_media_query(query, &text) {
+                            Ok(wrapped) => Some(wrapped),
+                            Err(reason) => {
+                                *self.refused.borrow_mut() = Some(reason);
+                                return;
+                            }
+                        }
+                    }
+                    (_, contents) => contents,
+                };
+                *self.sheet.borrow_mut() = sheet;
+            }
             "link" | "script" => {
                 *self.refused.borrow_mut() = Some(format!(
                     "a micro's <{name}> head element would fetch or run external content; only inline document::Style text is supported"

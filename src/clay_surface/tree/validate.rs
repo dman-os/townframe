@@ -247,7 +247,17 @@ impl<C: Clone> SurfaceTree<C> {
             Mutation::SetText(text) => self.validate_text(top, text, bytes, work),
             Mutation::SetStyleSheet(sheet) => {
                 Self::charge_work(work, 1 + sheet.len() / 64)?;
-                Self::charge_string(bytes, sheet)
+                Self::charge_string(bytes, sheet)?;
+                // The stored sheet is charged to the surface's retained budget like node bytes
+                // are, and a replacement releases the sheet it replaces. The raw length bounds
+                // the sanitized one, so this check is conservative.
+                let mut retained = self.retained_bytes - self.stylesheet.len();
+                Self::charge(
+                    &mut retained,
+                    sheet.len(),
+                    Self::MAX_RETAINED_BYTES,
+                    "retained byte limit",
+                )
             }
             Mutation::AddEventListener(name) | Mutation::RemoveEventListener(name) => {
                 self.validate_listener(top, mutation, name, bytes)

@@ -1858,3 +1858,61 @@ fn sdk_document_style_sets_the_stylesheet_and_stylesheet_links_are_refused() {
     );
     assert!(dom.head.sheet.borrow().is_none());
 }
+
+/// `document::Style { media }` wraps the sheet in `@media`, a malformed query is refused, `title`
+/// and `nonce` are ignored, and any other attribute refuses the flush.
+#[test]
+fn sdk_document_style_attributes_are_honoured_ignored_or_refused() {
+    use dioxus::document::Style;
+    use dioxus::prelude::*;
+
+    fn flush(
+        app: fn() -> Element,
+    ) -> (
+        crate::GuestDom,
+        Result<(), crate::presentation::PresentationError>,
+    ) {
+        let mut dom = crate::GuestDom::new(app);
+        dom.mount_target(1);
+        let result = dom.render();
+        (dom, result)
+    }
+
+    let (dom, result) =
+        flush(|| rsx! { Style { media: "(min-width: 600px)", "a {{ color: red }}" } });
+    result.unwrap();
+    assert_eq!(
+        dom.head.sheet.borrow().as_deref(),
+        Some("@media (min-width: 600px) {\na { color: red }\n}")
+    );
+
+    let (dom, result) = flush(|| rsx! { Style { title: "t", nonce: "n", "a {{ color: red }}" } });
+    result.unwrap();
+    assert_eq!(dom.head.sheet.borrow().as_deref(), Some("a { color: red }"));
+
+    for (label, app) in [
+        (
+            "malformed media",
+            (|| rsx! { Style { media: "a }} @import x {{", "a {{ color: red }}" } })
+                as fn() -> Element,
+        ),
+        (
+            "empty media",
+            || rsx! { Style { media: "  ", "a {{ color: red }}" } },
+        ),
+        (
+            "unknown attribute",
+            || rsx! { Style { class: "x", "a {{ color: red }}" } },
+        ),
+    ] {
+        let (dom, result) = flush(app);
+        assert!(
+            matches!(
+                &result,
+                Err(crate::presentation::PresentationError::InvalidBatch(_))
+            ),
+            "{label}: {result:?}"
+        );
+        assert!(dom.head.sheet.borrow().is_none(), "{label}");
+    }
+}
