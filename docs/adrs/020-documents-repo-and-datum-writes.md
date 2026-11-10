@@ -205,10 +205,15 @@ single scalar, because each map adds operations a load rebuilds. So:
    map whose `signature` member is that same packed value; ordinary writes never produce one.
 3. **There is no document-level `updatedAt`.** When a document last changed is the latest of its
    datums' `updatedAt`, which is what every reader of the document-level set computed anyway.
-4. **The version tag is the datum's `updatedAt` entry.** Every write replaces that entry, so its
-   Automerge operation id changes on every write and never otherwise. Comparing the op ids a reader
-   saw is the version check, and the change that wrote it is recovered from the op id. No new field
-   and no new bytes.
+4. **The version tag is the datum's current signature set.** Every signed write, a Remove included,
+   inserts a new signature entry and replaces the ones it observed, so the set of current signature
+   IDs changes on every write and never otherwise; under concurrent writers it is the sorted set of
+   the competing entries, as heads are for a document. It costs no field and no bytes, it names the
+   signed claim rather than where an operation happened to land, it survives compaction and export
+   (an `inherited` witness keeps its signature), and it is already causal: a claim names its
+   predecessors by these IDs. A reader holding the IDs it saw compares them to know whether the datum
+   changed. An unsigned write has no version tag of this kind; unsigned writes exist only on the
+   unsigned branch kind of item 1, whose versions are document heads.
 5. **Aliases live under their datum:** `datums[key].uuids: Uuid7 -> true`, and `datumUuids` is
    removed. ADR 015's reason for one index stands: there is still one copy of each binding. Concurrent
    creators of a datum each create `datums[key]`, so Automerge keeps several copies and shows one;
