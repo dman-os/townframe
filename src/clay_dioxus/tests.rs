@@ -1,4 +1,5 @@
 use super::*;
+use clay_surface::ElementAction;
 type SurfaceTree = clay_surface::SurfaceTree<ComponentRef>;
 type Mutation = clay_surface::Mutation<ComponentRef>;
 use clay_surface::AttributeValue;
@@ -687,19 +688,15 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
                     top: 40.0,
                     behavior: ScrollBehavior::Instant,
                 };
-                for command in [
-                    ElementCommand::Scroll(offsets),
-                    ElementCommand::Read {
-                        request: 7,
-                        what: ElementRead::ScrollOffset,
-                    },
-                    ElementCommand::SetFocus(true),
-                    ElementCommand::Read {
-                        request: 8,
-                        what: ElementRead::ClientRect,
-                    },
+                for (request, action) in [
+                    (6, ElementAction::Scroll(offsets)),
+                    (7, ElementAction::Read(ElementRead::ScrollOffset)),
+                    (8, ElementAction::SetFocus(true)),
+                    (9, ElementAction::Read(ElementRead::ClientRect)),
                 ] {
-                    writer.element_command(event.element, command).unwrap();
+                    writer
+                        .element_command(event.element, ElementCommand { request, action })
+                        .unwrap();
                 }
                 // The host runs nothing until the dispatch has returned.
                 assert!(host_calls.borrow().is_empty());
@@ -729,7 +726,13 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
     // A command for an element that has not announced `mounted` is refused at the boundary.
     let writer = slot.borrow().clone().unwrap();
     assert!(matches!(
-        writer.element_command(1, ElementCommand::SetFocus(true)),
+        writer.element_command(
+            1,
+            ElementCommand {
+                request: 1,
+                action: ElementAction::SetFocus(true),
+            }
+        ),
         Err(PresentationError::InvalidBatch(_))
     ));
     let element = host_tree.listener_id("div", "mounted").unwrap();
@@ -744,7 +747,7 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
         ),
         element,
     );
-    while replies.borrow().len() < 2 {
+    while replies.borrow().len() < 4 {
         dom.wait_for_work().await;
         dom.render_immediate(&mut host_tree);
     }
@@ -753,13 +756,144 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
         &["scroll(0, 40)", "get_scroll_offset", "set_focus(true)"]
     );
     let replies = replies.borrow();
+    // Every command is answered, in order: the ones that answer nothing with `null`.
+    assert_eq!(replies[0], serde_json::json!({"request": 6, "value": null}));
     assert_eq!(
-        replies[0],
+        replies[1],
         serde_json::json!({"request": 7, "value": {"x": 1.0, "y": 2.0}})
     );
+    assert_eq!(replies[2], serde_json::json!({"request": 8, "value": null}));
     // The renderer cannot measure, so the guest gets an error reply it surfaces as a
     // `MountedError`; the micro is not faulted and the surface stays live.
-    assert_eq!(replies[1]["request"], 8);
-    assert!(replies[1]["error"].is_string());
+    assert_eq!(replies[3]["request"], 9);
+    assert!(replies[3]["error"].is_string());
     assert!(writer.is_live());
+}
+
+/// A virtualized list mounts and unmounts rows forever. The mounted set and the host handles
+/// must follow the tree, or they grow without bound and a command for a recycled id reaches a
+/// detached node.
+#[tokio::test]
+async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
+    use clay_surface::ElementRead;
+    use clay_surface::SurfaceSink;
+    const ROWS: u32 = 40;
+    dioxus_html::set_event_converter(Box::new(RecordingConverter));
+    let (_host, owner, mount, _writer) = mounted_writer();
+    let host_calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let replies = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
+    let slot = Rc::new(RefCell::new(None));
+    let factory = SurfaceFactory(Rc::new({
+        let (slot, replies) = (slot.clone(), replies.clone());
+        move |_mount, writer| {
+            *slot.borrow_mut() = Some(writer);
+            let replies = replies.clone();
+            Ok(SurfaceSession::new(move |event| {
+                if event.name == ELEMENT_REPLY {
+                    replies
+                        .borrow_mut()
+                        .push(serde_json::from_str(&event.data_json).unwrap());
+                }
+                EventResponse::default()
+            }))
+        }
+    }));
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        mount: SharedMount,
+        owner: Instance,
+        factory: SurfaceFactory,
+    }
+    fn app(props: Props) -> Element {
+        rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
+    }
+    let mut dom = VirtualDom::new_with_props(
+        app,
+        Props {
+            mount: SharedMount(mount),
+            owner,
+            factory,
+        },
+    );
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    let writer = slot.borrow().clone().unwrap();
+    for row in 1..=ROWS {
+        writer
+            .apply(&[
+                Mutation::PushId(0),
+                Mutation::CreateElement(("div".into(), None)),
+                Mutation::SetId(row),
+                Mutation::AddEventListener("mounted".into()),
+                Mutation::AppendChildren(1),
+                Mutation::Pop,
+            ])
+            .unwrap();
+        while host_tree.listener_id("div", "mounted").is_none() {
+            dom.wait_for_work().await;
+            dom.render_immediate(&mut host_tree);
+        }
+        dom.runtime().handle_event_for_target(
+            RenderTargetId::ROOT,
+            "mounted",
+            dioxus_core::Event::new(
+                Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                    RecordingElement(host_calls.clone()),
+                ))) as Rc<dyn std::any::Any>,
+                false,
+            ),
+            host_tree.listener_id("div", "mounted").unwrap(),
+        );
+        assert_eq!(writer.mounted.lock().unwrap().len(), 1);
+        writer
+            .apply(&[Mutation::PushId(row), Mutation::Remove])
+            .unwrap();
+        // The tree retired the element: the mounted set is empty at once, and a command for the
+        // removed id is refused at the boundary.
+        assert!(writer.mounted.lock().unwrap().is_empty());
+        assert!(matches!(
+            writer.element_command(
+                row,
+                ElementCommand {
+                    request: 1,
+                    action: ElementAction::SetFocus(true)
+                }
+            ),
+            Err(PresentationError::InvalidBatch(_))
+        ));
+        while host_tree.listener_id("div", "mounted").is_some() {
+            dom.wait_for_work().await;
+            dom.render_immediate(&mut host_tree);
+        }
+    }
+    // The host handles went with them: a command that raced the removals past the boundary
+    // finds no handle for any row and is answered with an error, not run on a detached node and
+    // not a panic.
+    for row in 1..=ROWS {
+        writer
+            .commands
+            .send((
+                row,
+                ElementCommand {
+                    request: row.into(),
+                    action: ElementAction::Read(ElementRead::ScrollOffset),
+                },
+            ))
+            .unwrap();
+    }
+    while replies.borrow().len() < ROWS as usize {
+        dom.wait_for_work().await;
+        dom.render_immediate(&mut host_tree);
+    }
+    assert!(host_calls.borrow().is_empty());
+    assert!(
+        replies
+            .borrow()
+            .iter()
+            .all(|reply| reply["error"] == "element is not mounted")
+    );
+    assert!(writer.retired.lock().unwrap().is_empty());
+    // Withdrawing clears the tree, which retires every element still in it.
+    writer.withdraw();
+    assert!(writer.mounted.lock().unwrap().is_empty());
 }

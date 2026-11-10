@@ -35,8 +35,8 @@ impl Slots {
     }
 }
 
-/// The guest end of the element-command channel of one [`GuestDom`]: the requests a read sent
-/// and is still waiting on. The host answers a read with an `element-reply` event, which
+/// The guest end of the element-command channel of one [`GuestDom`]: the commands sent and
+/// still waiting on their reply. The host answers every command with an `element-reply` event, which
 /// [`GuestDom::dispatch`] completes here.
 #[derive(Default)]
 pub(crate) struct ElementReplies {
@@ -46,8 +46,7 @@ pub(crate) struct ElementReplies {
 }
 
 impl ElementReplies {
-    /// Register a read: its request id (never 0, which names a fire-and-forget command in an
-    /// unsolicited reply) and the future its `element-reply` completes.
+    /// Register a command: its request id and the future its `element-reply` completes.
     pub(crate) fn begin(&self) -> (u64, ReplyFuture) {
         let id = self.next.get() + 1;
         self.next.set(id);
@@ -105,46 +104,37 @@ fn operation_failed<T: 'static>(message: String) -> MountedFuture<T> {
 }
 
 impl GuestElement {
-    /// Send `command` over the surface right away, from inside whatever handler called it. The
-    /// host does not run it there: it queues commands and runs them in the order they were
-    /// sent, after the dispatch that is on the stack has returned and its mutations were
-    /// applied, so a handler may scroll, read, and focus in sequence and see them applied in
-    /// that order.
-    fn send(&self, command: presentation::ElementCommand) -> Result<(), String> {
-        let surface = self
-            .surface
-            .upgrade()
-            .ok_or_else(|| "the element's surface is unmounted".to_owned())?;
-        surface
-            .element_command(self.element, command)
-            .map_err(|error| format!("{error:?}"))
-    }
-
-    /// Fire a command that answers nothing.
-    fn command(&self, command: presentation::ElementCommand) -> MountedFuture<()> {
-        match self.send(command) {
-            Ok(()) => Box::pin(async { Ok(()) }),
-            Err(message) => operation_failed(message),
-        }
-    }
-
-    /// Send a read and wait for its `element-reply`, decoded by `decode`.
-    fn read<T: 'static>(
+    /// Send `action` over the surface right away, from inside whatever handler called it, and
+    /// wait for its `element-reply`, decoded by `decode`. The host does not run the command
+    /// there: it queues commands and runs them in the order they were sent, after the dispatch
+    /// that is on the stack has returned and its mutations were applied, so a handler may scroll,
+    /// read, and focus in sequence and see them applied in that order. Every command is
+    /// answered, so the future resolves `Ok` or `Err` the way a plain Dioxus app's would.
+    fn request<T: 'static>(
         &self,
-        what: presentation::ElementRead,
+        action: presentation::ElementAction,
         decode: fn(&serde_json::Value) -> T,
     ) -> MountedFuture<T> {
-        let (id, wait) = self.replies.begin();
-        if let Err(message) = self.send(presentation::ElementCommand::Read((id, what))) {
-            self.replies.pending.borrow_mut().remove(&id);
+        let (request, wait) = self.replies.begin();
+        let sent = match self.surface.upgrade() {
+            Some(surface) => surface
+                .element_command(
+                    self.element,
+                    presentation::ElementCommand { request, action },
+                )
+                .map_err(|error| format!("{error:?}")),
+            None => Err("the element's surface is unmounted".to_owned()),
+        };
+        if let Err(message) = sent {
+            self.replies.pending.borrow_mut().remove(&request);
             return operation_failed(message);
         }
         settle(wait, decode)
     }
 }
 
-/// Wait for a read's reply and decode it. An error reply (the host renderer cannot answer the
-/// read, as Blitz cannot measure some geometry) is the standard Dioxus `MountedError`, which a
+/// Wait for a command's reply and decode it. An error reply (the host renderer cannot answer
+/// the command, as Blitz cannot measure some geometry) is the standard Dioxus `MountedError`, which a
 /// plain Dioxus app sees from the same call; it is not a panic.
 pub(crate) fn settle<T: 'static>(
     wait: ReplyFuture,
@@ -210,6 +200,13 @@ fn number(value: &serde_json::Value, key: &str) -> f64 {
         .unwrap_or_else(|| panic!("element reply has no number `{key}`: {value}"))
 }
 
+fn scroll_behavior(behavior: dioxus_html::ScrollBehavior) -> presentation::ScrollBehavior {
+    match behavior {
+        dioxus_html::ScrollBehavior::Instant => presentation::ScrollBehavior::Instant,
+        dioxus_html::ScrollBehavior::Smooth => presentation::ScrollBehavior::Smooth,
+    }
+}
+
 fn scroll_offsets(
     coordinates: dioxus_html::geometry::PixelsVector2D,
     behavior: dioxus_html::ScrollBehavior,
@@ -217,10 +214,7 @@ fn scroll_offsets(
     presentation::ScrollOffsets {
         left: coordinates.x,
         top: coordinates.y,
-        behavior: match behavior {
-            dioxus_html::ScrollBehavior::Instant => presentation::ScrollBehavior::Instant,
-            dioxus_html::ScrollBehavior::Smooth => presentation::ScrollBehavior::Smooth,
-        },
+        behavior: scroll_behavior(behavior),
     }
 }
 
@@ -230,27 +224,42 @@ impl dioxus_html::RenderedElementBacking for GuestElement {
     }
 
     fn get_scroll_offset(&self) -> MountedFuture<dioxus_html::geometry::PixelsVector2D> {
-        self.read(presentation::ElementRead::ScrollOffset, |value| {
-            dioxus_html::geometry::PixelsVector2D::new(number(value, "x"), number(value, "y"))
-        })
+        self.request(
+            presentation::ElementAction::Read(presentation::ElementRead::ScrollOffset),
+            |value| {
+                dioxus_html::geometry::PixelsVector2D::new(number(value, "x"), number(value, "y"))
+            },
+        )
     }
 
     fn get_scroll_size(&self) -> MountedFuture<dioxus_html::geometry::PixelsSize> {
-        self.read(presentation::ElementRead::ScrollSize, |value| {
-            dioxus_html::geometry::PixelsSize::new(number(value, "width"), number(value, "height"))
-        })
+        self.request(
+            presentation::ElementAction::Read(presentation::ElementRead::ScrollSize),
+            |value| {
+                dioxus_html::geometry::PixelsSize::new(
+                    number(value, "width"),
+                    number(value, "height"),
+                )
+            },
+        )
     }
 
     fn get_client_rect(&self) -> MountedFuture<dioxus_html::geometry::PixelsRect> {
-        self.read(presentation::ElementRead::ClientRect, |value| {
-            dioxus_html::geometry::PixelsRect::new(
-                dioxus_html::geometry::euclid::Point2D::new(number(value, "x"), number(value, "y")),
-                dioxus_html::geometry::euclid::Size2D::new(
-                    number(value, "width"),
-                    number(value, "height"),
-                ),
-            )
-        })
+        self.request(
+            presentation::ElementAction::Read(presentation::ElementRead::ClientRect),
+            |value| {
+                dioxus_html::geometry::PixelsRect::new(
+                    dioxus_html::geometry::euclid::Point2D::new(
+                        number(value, "x"),
+                        number(value, "y"),
+                    ),
+                    dioxus_html::geometry::euclid::Size2D::new(
+                        number(value, "width"),
+                        number(value, "height"),
+                    ),
+                )
+            },
+        )
     }
 
     fn scroll(
@@ -258,14 +267,31 @@ impl dioxus_html::RenderedElementBacking for GuestElement {
         coordinates: dioxus_html::geometry::PixelsVector2D,
         behavior: dioxus_html::ScrollBehavior,
     ) -> MountedFuture<()> {
-        self.command(presentation::ElementCommand::Scroll(scroll_offsets(
-            coordinates,
-            behavior,
-        )))
+        self.request(
+            presentation::ElementAction::Scroll(scroll_offsets(coordinates, behavior)),
+            |_| (),
+        )
+    }
+
+    fn scroll_to(&self, options: dioxus_html::ScrollToOptions) -> MountedFuture<()> {
+        let align = |position: &dioxus_html::ScrollLogicalPosition| match position {
+            dioxus_html::ScrollLogicalPosition::Start => presentation::ScrollAlign::Start,
+            dioxus_html::ScrollLogicalPosition::Center => presentation::ScrollAlign::Center,
+            dioxus_html::ScrollLogicalPosition::End => presentation::ScrollAlign::End,
+            dioxus_html::ScrollLogicalPosition::Nearest => presentation::ScrollAlign::Nearest,
+        };
+        self.request(
+            presentation::ElementAction::ScrollIntoView(presentation::ScrollIntoView {
+                behavior: scroll_behavior(options.behavior),
+                vertical: align(&options.vertical),
+                horizontal: align(&options.horizontal),
+            }),
+            |_| (),
+        )
     }
 
     fn set_focus(&self, focus: bool) -> MountedFuture<()> {
-        self.command(presentation::ElementCommand::SetFocus(focus))
+        self.request(presentation::ElementAction::SetFocus(focus), |_| ())
     }
 }
 
@@ -445,8 +471,7 @@ impl GuestDom {
         }
     }
 
-    /// Settle the read an `element-reply` answers. A reply with no request is the host reporting
-    /// a failed fire-and-forget command, which is a programming error in the micro.
+    /// Settle the command an `element-reply` answers.
     pub(crate) fn complete_reply(&self, reply: &serde_json::Value) {
         let request = reply["request"]
             .as_u64()
@@ -455,18 +480,12 @@ impl GuestDom {
             Some(error) => Err(error.as_str().unwrap_or("unknown failure").to_owned()),
             None => Ok(reply["value"].clone()),
         };
-        if request == 0 {
-            panic!(
-                "element command failed: {}",
-                outcome.expect_err("an unsolicited reply is an error")
-            );
-        }
         let slot = self
             .replies
             .pending
             .borrow_mut()
             .remove(&request)
-            .unwrap_or_else(|| panic!("element reply {request} answers no pending read"));
+            .unwrap_or_else(|| panic!("element reply {request} answers no pending command"));
         let mut slot = slot.borrow_mut();
         slot.value = Some(outcome);
         if let Some(waker) = slot.waker.take() {

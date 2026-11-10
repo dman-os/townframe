@@ -28,13 +28,16 @@ use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_surface::AttributeValue;
+use clay_surface::ElementAction;
 use clay_surface::ElementCommand;
 use clay_surface::ElementRead;
 use clay_surface::Event;
 use clay_surface::EventResponse;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
+use clay_surface::ScrollAlign;
 use clay_surface::ScrollBehavior;
+use clay_surface::ScrollIntoView;
 use clay_surface::ScrollOffsets;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
@@ -416,26 +419,36 @@ fn convert_mutation(mutation: wit_presentation::Mutation) -> Mutation<Resource<W
 }
 
 fn convert_element_command(command: wit_presentation::ElementCommand) -> ElementCommand {
-    use wit_presentation::ElementCommand as Wire;
-    let offsets = |offsets: wit_presentation::ScrollOffsets| ScrollOffsets {
-        left: offsets.left,
-        top: offsets.top,
-        behavior: match offsets.behavior {
-            wit_presentation::ScrollBehavior::Instant => ScrollBehavior::Instant,
-            wit_presentation::ScrollBehavior::Smooth => ScrollBehavior::Smooth,
-        },
+    use wit_presentation::ElementAction as Wire;
+    let behavior = |behavior| match behavior {
+        wit_presentation::ScrollBehavior::Instant => ScrollBehavior::Instant,
+        wit_presentation::ScrollBehavior::Smooth => ScrollBehavior::Smooth,
     };
-    match command {
-        Wire::Scroll(to) => ElementCommand::Scroll(offsets(to)),
-        Wire::ScrollBy(by) => ElementCommand::ScrollBy(offsets(by)),
-        Wire::SetFocus(focus) => ElementCommand::SetFocus(focus),
-        Wire::Read((request, what)) => ElementCommand::Read {
-            request,
-            what: match what {
+    let align = |align| match align {
+        wit_presentation::ScrollAlign::Start => ScrollAlign::Start,
+        wit_presentation::ScrollAlign::Center => ScrollAlign::Center,
+        wit_presentation::ScrollAlign::End => ScrollAlign::End,
+        wit_presentation::ScrollAlign::Nearest => ScrollAlign::Nearest,
+    };
+    ElementCommand {
+        request: command.request,
+        action: match command.action {
+            Wire::Scroll(to) => ElementAction::Scroll(ScrollOffsets {
+                left: to.left,
+                top: to.top,
+                behavior: behavior(to.behavior),
+            }),
+            Wire::ScrollIntoView(view) => ElementAction::ScrollIntoView(ScrollIntoView {
+                behavior: behavior(view.behavior),
+                vertical: align(view.vertical),
+                horizontal: align(view.horizontal),
+            }),
+            Wire::SetFocus(focus) => ElementAction::SetFocus(focus),
+            Wire::Read(what) => ElementAction::Read(match what {
                 wit_presentation::ElementRead::ClientRect => ElementRead::ClientRect,
                 wit_presentation::ElementRead::ScrollOffset => ElementRead::ScrollOffset,
                 wit_presentation::ElementRead::ScrollSize => ElementRead::ScrollSize,
-            },
+            }),
         },
     }
 }

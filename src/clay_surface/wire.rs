@@ -83,20 +83,48 @@ pub enum ElementRead {
     ScrollSize,
 }
 
-/// The imperative half of Dioxus's `MountedData`, sent by a guest to one element it was told is
-/// mounted. Fire-and-forget: a [`Self::Read`] is answered by an [`ELEMENT_REPLY`] event.
+/// Where `scroll_to` (`scrollIntoView`) aligns an element along one axis of its scroll container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollAlign {
+    Start,
+    Center,
+    End,
+    Nearest,
+}
+
+/// Dioxus's `ScrollToOptions`: scroll an element itself into view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollIntoView {
+    pub behavior: ScrollBehavior,
+    pub vertical: ScrollAlign,
+    pub horizontal: ScrollAlign,
+}
+
+/// What a guest asks the host to do to one mounted element: the imperative half of Dioxus's
+/// `MountedData`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ElementAction {
+    /// `MountedData::scroll`: scroll the element's own content to these offsets.
+    Scroll(ScrollOffsets),
+    /// `MountedData::scroll_to`: scroll the element into view.
+    ScrollIntoView(ScrollIntoView),
+    SetFocus(bool),
+    Read(ElementRead),
+}
+
+/// A command sent by a guest to one element it was told is mounted. Every command carries a
+/// request id the guest chose and is answered by exactly one [`ELEMENT_REPLY`] event carrying
+/// that id, `Ok` or `Err`, so the guest's future resolves the way a plain Dioxus app's would.
 ///
 /// Ordering contract: commands a guest issues while handling one event are applied by the host
 /// in the order issued, after that dispatch's mutations have been applied.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ElementCommand {
-    Scroll(ScrollOffsets),
-    ScrollBy(ScrollOffsets),
-    SetFocus(bool),
-    Read { request: u64, what: ElementRead },
+pub struct ElementCommand {
+    pub request: u64,
+    pub action: ElementAction,
 }
 
-/// The name of the event through which the host answers an [`ElementCommand::Read`]. It is not a
+/// The name of the event through which the host answers every [`ElementCommand`]. It is not a
 /// Dioxus event: the guest adapter consumes it before Dioxus sees it. `data_json` is
 /// `{"request": id, "value": ...}` or `{"request": id, "error": "..."}`.
 pub const ELEMENT_REPLY: &str = "element-reply";
@@ -122,6 +150,22 @@ impl ElementHandles {
 
     pub fn get(&self, element: NodeId) -> Option<Rc<dioxus_html::MountedData>> {
         self.0.borrow().get(&element).cloned()
+    }
+
+    /// Forget the handles of elements the guest removed.
+    pub fn remove(&self, elements: impl IntoIterator<Item = NodeId>) {
+        let mut handles = self.0.borrow_mut();
+        for element in elements {
+            handles.remove(&element);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.borrow().is_empty()
     }
 }
 

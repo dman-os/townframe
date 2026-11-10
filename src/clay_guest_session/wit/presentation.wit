@@ -61,19 +61,39 @@ interface presentation {
         scroll-size,
     }
 
-    /// The imperative half of Dioxus's `MountedData` (`scroll`, `set_focus`, and the reads),
-    /// addressed to one element the guest was told is mounted. Commands are fire-and-forget:
-    /// the host runs them after the call returns. Commands issued while handling one event run
-    /// in the order issued, after that dispatch's mutations were applied. A `read` is answered
-    /// later by an `element-reply` event carrying the same request id, or an error reply.
-    variant element-command {
-        /// `Element.scrollTo({ left, top, behavior })`.
+    /// Where `scroll-to` aligns an element along one axis of its scroll container.
+    enum scroll-align {
+        start,
+        center,
+        end,
+        nearest,
+    }
+
+    /// Dioxus's `ScrollToOptions`.
+    record scroll-into-view {
+        behavior: scroll-behavior,
+        vertical: scroll-align,
+        horizontal: scroll-align,
+    }
+
+    /// What to do to an element: the imperative half of Dioxus's `MountedData`.
+    variant element-action {
+        /// `Element.scrollTo({ left, top, behavior })` on the element's own content.
         scroll(scroll-offsets),
-        /// `Element.scrollBy({ left, top, behavior })`.
-        scroll-by(scroll-offsets),
+        /// `Element.scrollIntoView(...)`.
+        scroll-into-view(scroll-into-view),
         /// `focus()` for true, `blur()` for false.
         set-focus(bool),
-        read(tuple<u64, element-read>),
+        read(element-read),
+    }
+
+    /// A command to one element the guest was told is mounted. Every command is answered by
+    /// exactly one `element-reply` event carrying the same `request` id, a value or an error.
+    /// The host runs commands after the call returns; those issued while handling one event run
+    /// in the order issued, after that dispatch's mutations were applied.
+    record element-command {
+        request: u64,
+        action: element-action,
     }
 
     resource surface {

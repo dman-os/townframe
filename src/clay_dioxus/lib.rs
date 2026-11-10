@@ -10,6 +10,7 @@ use clay_host::Instance;
 use clay_host::Mount;
 use clay_host::RendererRegistry;
 use clay_surface::ELEMENT_REPLY;
+use clay_surface::ElementAction;
 use clay_surface::ElementCommand;
 use clay_surface::ElementHandles;
 use clay_surface::ElementRead;
@@ -17,6 +18,7 @@ use clay_surface::EventResponse;
 use clay_surface::Mutation;
 use clay_surface::NodeId;
 use clay_surface::PresentationError;
+use clay_surface::ScrollAlign;
 use clay_surface::ScrollBehavior;
 use clay_surface::SurfaceEventHandler;
 use clay_surface::SurfaceTree;
@@ -55,8 +57,12 @@ pub struct SurfaceWriter {
     commands: mpsc::UnboundedSender<(NodeId, ElementCommand)>,
     command_receiver: Arc<Mutex<Option<CommandReceiver>>>,
     /// Guest element ids whose `mounted` event the renderer has delivered: the only elements a
-    /// command may address.
+    /// command may address. Entries leave when the tree retires the element (see
+    /// [`Self::retire_elements`]).
     mounted: Arc<Mutex<BTreeSet<NodeId>>>,
+    /// Elements the tree retired whose host handle the renderer has not yet dropped; drained by
+    /// the mounted surface before each render. Bounded by the element id space.
+    retired: Arc<Mutex<BTreeSet<NodeId>>>,
 }
 
 impl SurfaceWriter {
@@ -76,6 +82,25 @@ impl SurfaceWriter {
             commands,
             command_receiver: Arc::new(Mutex::new(Some(command_receiver))),
             mounted: Arc::default(),
+            retired: Arc::default(),
+        }
+    }
+
+    /// Move the elements `tree` retired out of the mounted set and queue their host handles for
+    /// release. Dioxus recycles element ids, so an entry kept past its element would let a command
+    /// hit a detached node, and a virtualized list would grow the set without bound.
+    fn retire_elements(&self, tree: &mut SurfaceTree<ComponentRef>) {
+        let retired = tree.take_retired_elements();
+        if retired.is_empty() {
+            return;
+        }
+        let mut mounted = self.mounted.lock().unwrap();
+        let mut handles = self.retired.lock().unwrap();
+        for element in retired {
+            mounted.remove(&element);
+            // Also for an element that never announced `mounted`: its `mounted` event may have
+            // been dropped as stale after the host captured the handle.
+            handles.insert(element);
         }
     }
 
@@ -98,6 +123,7 @@ impl SurfaceWriter {
         if !self.is_live() {
             if !self.revoked.swap(true, Ordering::AcqRel) {
                 tree.clear();
+                self.retire_elements(&mut tree);
                 self.revisions.send_replace(tree.revision());
             }
             return Err(PresentationError::Revoked);
@@ -106,6 +132,7 @@ impl SurfaceWriter {
         if result.is_err() {
             self.revoked.store(true, Ordering::Release);
         }
+        self.retire_elements(&mut tree);
         self.revisions.send_replace(tree.revision());
         result
     }
@@ -114,6 +141,7 @@ impl SurfaceWriter {
         let mut tree = self.tree.lock().unwrap();
         if !self.revoked.swap(true, Ordering::AcqRel) {
             tree.clear();
+            self.retire_elements(&mut tree);
             self.revisions.send_replace(tree.revision());
         }
     }
@@ -155,43 +183,47 @@ impl clay_surface::SurfaceSink<ComponentRef> for SurfaceWriter {
     }
 }
 
-/// Run one element command against the element's host handle. A read answers with the JSON
-/// value of the `element-reply` event; a failure answers with its message, which the guest
-/// surfaces as `MountedError::OperationFailed` (hosts such as Blitz answer `Unsupported` for
-/// geometry they cannot measure).
-async fn run_element_command(
+/// Run one element command against the element's host handle and return the value of its reply:
+/// `null` for the actions that answer nothing, the measurement for a read. A failure is the
+/// message of the `MountedError` the renderer returned (hosts such as Blitz answer
+/// `NotSupported` for geometry they cannot measure), which the guest surfaces as a
+/// `MountedError` of its own.
+async fn run_element_action(
     mounted: &dioxus_html::MountedData,
-    command: ElementCommand,
+    action: ElementAction,
 ) -> Result<serde_json::Value, String> {
     use dioxus_html::geometry::PixelsVector2D;
     let behavior = |behavior| match behavior {
         ScrollBehavior::Instant => dioxus_html::ScrollBehavior::Instant,
         ScrollBehavior::Smooth => dioxus_html::ScrollBehavior::Smooth,
     };
+    let align = |align| match align {
+        ScrollAlign::Start => dioxus_html::ScrollLogicalPosition::Start,
+        ScrollAlign::Center => dioxus_html::ScrollLogicalPosition::Center,
+        ScrollAlign::End => dioxus_html::ScrollLogicalPosition::End,
+        ScrollAlign::Nearest => dioxus_html::ScrollLogicalPosition::Nearest,
+    };
     let failed = |error: dioxus_html::MountedError| error.to_string();
-    match command {
-        ElementCommand::Scroll(to) => mounted
-            .scroll(PixelsVector2D::new(to.left, to.top), behavior(to.behavior))
-            .await
-            .map(|()| serde_json::Value::Null)
-            .map_err(failed),
-        ElementCommand::ScrollBy(by) => {
-            let current = mounted.get_scroll_offset().await.map_err(failed)?;
+    let unit = |result: dioxus_html::MountedResult<()>| {
+        result.map(|()| serde_json::Value::Null).map_err(failed)
+    };
+    match action {
+        ElementAction::Scroll(to) => unit(
             mounted
-                .scroll(
-                    PixelsVector2D::new(current.x + by.left, current.y + by.top),
-                    behavior(by.behavior),
-                )
-                .await
-                .map(|()| serde_json::Value::Null)
-                .map_err(failed)
-        }
-        ElementCommand::SetFocus(focus) => mounted
-            .set_focus(focus)
-            .await
-            .map(|()| serde_json::Value::Null)
-            .map_err(failed),
-        ElementCommand::Read { what, .. } => Ok(match what {
+                .scroll(PixelsVector2D::new(to.left, to.top), behavior(to.behavior))
+                .await,
+        ),
+        ElementAction::ScrollIntoView(view) => unit(
+            mounted
+                .scroll_to_with_options(dioxus_html::ScrollToOptions {
+                    behavior: behavior(view.behavior),
+                    vertical: align(view.vertical),
+                    horizontal: align(view.horizontal),
+                })
+                .await,
+        ),
+        ElementAction::SetFocus(focus) => unit(mounted.set_focus(focus).await),
+        ElementAction::Read(what) => Ok(match what {
             ElementRead::ClientRect => {
                 let rect = mounted.get_client_rect().await.map_err(failed)?;
                 serde_json::json!({
@@ -498,8 +530,8 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     // never inside the event dispatch: a Blitz handler runs with the document borrowed, and a
     // geometry read that borrows it again panics. Ordering contract: the task drains one queue,
     // so the commands a guest issued while handling an event run in the order it issued them,
-    // and only after that dispatch has returned, i.e. after its mutations were applied. A
-    // read's answer re-enters the guest as an `element-reply` event through the raw session
+    // and only after that dispatch has returned, i.e. after its mutations were applied. Every
+    // command is answered, `Ok` or `Err`, by an `element-reply` event through the raw session
     // handler: a reply is not an input event and must not be dropped as stale.
     let handles = use_hook(ElementHandles::default);
     let command_session = session.as_ref().ok().cloned();
@@ -519,22 +551,14 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
                 .expect("one command drain per surface writer");
             let dispatch = session.handler();
             while let Some((element, command)) = commands.recv().await {
-                let mounted = handles
-                    .get(element)
-                    .expect("a command is only queued for an element that announced mounted");
-                let request = match command {
-                    ElementCommand::Read { request, .. } => request,
-                    _ => 0,
+                // A command can race the removal of its element, which dropped the handle.
+                let outcome = match handles.get(element) {
+                    Some(mounted) => run_element_action(&mounted, command.action).await,
+                    None => Err("element is not mounted".to_owned()),
                 };
-                let outcome = run_element_command(&mounted, command).await;
-                // A failed fire-and-forget command and every read answer the guest, so a
-                // failure is never silent; a successful fire-and-forget command needs none.
-                if request == 0 && outcome.is_ok() {
-                    continue;
-                }
                 let data_json = match outcome {
-                    Ok(value) => serde_json::json!({ "request": request, "value": value }),
-                    Err(error) => serde_json::json!({ "request": request, "error": error }),
+                    Ok(value) => serde_json::json!({ "request": command.request, "value": value }),
+                    Err(error) => serde_json::json!({ "request": command.request, "error": error }),
                 }
                 .to_string();
                 dispatch(clay_surface::Event {
@@ -549,6 +573,9 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
             }
         }
     });
+    // Drop the host handles of elements the tree retired since the last render, before this
+    // render can project (and so mount) a new element under a recycled id.
+    handles.remove(std::mem::take(&mut *writer.retired.lock().unwrap()));
 
     let _current_revision = revision();
     let session = match session {
@@ -569,6 +596,12 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
             return EventResponse::default();
         }
         if event.name == "mounted" {
+            // Under the tree lock, so a removal applied by another thread between the revision
+            // check above and this insert cannot leave a retired id marked mounted.
+            let tree = writer_for_event.tree.lock().unwrap();
+            if tree.revision() != current_revision {
+                return EventResponse::default();
+            }
             writer_for_event
                 .mounted
                 .lock()
