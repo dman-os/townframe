@@ -466,7 +466,7 @@ async fn a_service_provider_routes_by_nsid_and_carries_the_services_own_errors()
         panic!("the service must refuse a scope the handle does not cover");
     };
     assert_eq!(status, 400);
-    assert_eq!(body["error"], "DispatchError");
+    assert_eq!(body["error"], "Denied");
     assert_eq!(body["operationError"], json!("Denied"));
 
     // Input that is not the operation's request is the caller's mistake, not the service's.

@@ -14,6 +14,8 @@ pub use service_core_rs::xrpc::TIMEOUT_HEADER;
 pub use service_core_rs::xrpc::TRACEPARENT_HEADER;
 pub use service_core_rs::xrpc::XrpcDomainDetailsError;
 pub use service_core_rs::xrpc::XrpcErrorEnvelope;
+pub use service_core_rs::xrpc::domain_error_envelope;
+pub use service_core_rs::xrpc::error_name;
 #[cfg(feature = "iroh-http")]
 mod iroh;
 mod router;

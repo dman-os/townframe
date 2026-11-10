@@ -27,6 +27,15 @@ enum TestError {
     Refused { reason: String },
 }
 
+impl std::fmt::Display for TestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Context(error) => error.fmt(f),
+            Self::Refused { reason } => write!(f, "refused: {reason}"),
+        }
+    }
+}
+
 impl From<ContextError> for TestError {
     fn from(error: ContextError) -> Self {
         Self::Context(error)
@@ -121,8 +130,8 @@ async fn a_domain_error_is_the_envelope_the_router_writes() {
     assert_eq!(
         body,
         json!({
-            "error": "TestError",
-            "message": "Refused { reason: \"no name\" }",
+            "error": "Refused",
+            "message": "refused: no name",
             "operationError": { "Refused": { "reason": "no name" } },
         })
     );
@@ -198,6 +207,7 @@ async fn a_spent_budget_is_the_methods_deadline_error_and_the_handler_is_not_ent
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "DeadlineExceeded");
     assert_eq!(
         body["operationError"],
         json!({ "Context": "DeadlineExceeded" })

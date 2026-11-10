@@ -131,6 +131,16 @@ enum RelayError {
     UpstreamFailed(String),
 }
 
+impl std::fmt::Display for RelayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Context(error) => error.fmt(f),
+            Self::InvalidRequest(reason) => write!(f, "invalid request: {reason}"),
+            Self::UpstreamFailed(reason) => write!(f, "upstream failed: {reason}"),
+        }
+    }
+}
+
 impl From<method_core::ContextError> for RelayError {
     fn from(error: method_core::ContextError) -> Self {
         Self::Context(error)

@@ -120,8 +120,10 @@ pub trait Wire: fmt::Debug + Serialize + DeserializeOwned + Send + Sync + Unpin 
 impl<T> Wire for T where T: fmt::Debug + Serialize + DeserializeOwned + Send + Sync + Unpin + 'static
 {}
 
-pub trait ServiceError: From<ContextError> + Wire {}
-impl<E> ServiceError for E where E: From<ContextError> + Wire {}
+/// A method's error: wire-serializable, built from the common [`ContextError`], and with a
+/// `Display` text, which is the `message` of its XRPC error envelope.
+pub trait ServiceError: From<ContextError> + Wire + fmt::Display {}
+impl<E> ServiceError for E where E: From<ContextError> + Wire + fmt::Display {}
 
 pub trait Method: Serialize + DeserializeOwned + Send + Sync + 'static {
     type Output: Send + 'static;

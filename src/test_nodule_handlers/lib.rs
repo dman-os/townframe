@@ -55,6 +55,16 @@ enum FixtureError {
     UpstreamFailed(String),
 }
 
+impl std::fmt::Display for FixtureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Context(error) => error.fmt(f),
+            Self::InvalidRequest(reason) => write!(f, "invalid request: {reason}"),
+            Self::UpstreamFailed(reason) => write!(f, "upstream failed: {reason}"),
+        }
+    }
+}
+
 impl From<ContextError> for FixtureError {
     fn from(error: ContextError) -> Self {
         Self::Context(error)

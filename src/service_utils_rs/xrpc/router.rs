@@ -325,7 +325,7 @@ impl XrpcRouter {
                 let response = host
                     .invoke(envelope)
                     .await
-                    .map_err(|error| domain_error(P::XRPC, &error))?;
+                    .map_err(|error| domain_error(&error))?;
                 Ok(crate::ResponseEnvelope {
                     output: serde_json::to_value(response.output)
                         .expect("operation output must serialize"),
@@ -366,7 +366,7 @@ impl XrpcRouter {
                     let response = host
                         .invoke(envelope)
                         .await
-                        .map_err(|error| domain_error(P::XRPC, &error))?;
+                        .map_err(|error| domain_error(&error))?;
                     let stream = futures::StreamExt::map(response.output, |item| match item {
                         Ok(event) => Ok(serde_json::to_value(event)
                             .expect("subscription events must serialize")),
@@ -442,13 +442,13 @@ impl XrpcRouter {
 }
 
 /// Wraps a typed operation error in the shared XRPC error envelope.
-fn domain_error<E>(operation: XrpcMethod, error: &E) -> XrpcHandlerError
+fn domain_error<E>(error: &E) -> XrpcHandlerError
 where
-    E: Serialize + std::fmt::Debug,
+    E: Serialize + std::fmt::Display,
 {
     XrpcHandlerError::Domain {
         status: DOMAIN_ERROR_STATUS,
-        body: domain_error_envelope(operation, error),
+        body: domain_error_envelope(error),
     }
 }
 

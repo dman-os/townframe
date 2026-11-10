@@ -35,7 +35,7 @@ async fn domain_errors_travel_in_the_standard_envelope_with_a_typed_detail() {
         .expect("HTTP response");
     assert_eq!(response.status(), DOMAIN_ERROR_STATUS);
     let body: serde_json::Value = response.json().await.expect("JSON envelope");
-    assert_eq!(body["error"], PutValue::XRPC.error_schema);
+    assert_eq!(body["error"], "InvalidValue");
     assert!(body["message"].is_string());
     let detail: SampleError =
         serde_json::from_value(body[DOMAIN_ERROR_FIELD].clone()).expect("typed detail");

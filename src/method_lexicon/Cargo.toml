@@ -20,4 +20,5 @@ big_blobs_core = { path = "../big_blobs_core", features = ["schemars"] }
 big_cartridges_core = { path = "../big_cartridges_core", features = ["schemars"] }
 big_dispatch_core = { path = "../big_dispatch_core", features = ["schemars"] }
 big_nodule_core = { path = "../big_nodule_core", features = ["schemars"] }
+service_core_rs.workspace = true
 insta = { workspace = true, features = ["json"] }

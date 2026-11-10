@@ -1,7 +1,6 @@
 use http::HeaderMap;
 use http::HeaderValue;
 use http::StatusCode;
-use method_core::XrpcMethod;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -35,18 +34,44 @@ pub fn bearer_token(value: &str) -> Option<&str> {
         .map(|_| &value[BEARER_SCHEME.len()..])
 }
 
-/// Encodes a typed method error as the standard XRPC error envelope: `error` is the method's
-/// error schema name and the serialized error travels under [`DOMAIN_ERROR_FIELD`], answered
-/// with [`DOMAIN_ERROR_STATUS`]. A non-serializable error is a programming error in the error
-/// type.
-pub fn domain_error_envelope<E>(method: XrpcMethod, error: &E) -> XrpcErrorEnvelope
+/// The name of a method error as atproto declares it: the outer variant of the error enum,
+/// which is the entry in the method Lexicon's `errors` list. serde's externally tagged form
+/// carries it as the single key of an object, or as the string of a unit variant. The variant
+/// that carries [`method_core::ContextError`] (`Context`) is how the common errors reach every
+/// method's enum and the Lexicon lists none of them per method, so it is named by the common
+/// error inside (`DeadlineExceeded`, `Unauthenticated`, ...), as the refusals dispatch answers
+/// before a method runs are. A shape that is neither is an error type serde does not tag
+/// externally, which method errors must.
+pub fn error_name(error: &Value) -> &str {
+    let name = match error {
+        Value::String(name) => name,
+        Value::Object(variant) if variant.len() == 1 => {
+            let (name, payload) = variant.iter().next().expect("one entry");
+            if name == CONTEXT_VARIANT {
+                return error_name(payload);
+            }
+            name
+        }
+        other => panic!("method errors are externally tagged enums, found {other}"),
+    };
+    name
+}
+
+/// The variant of every method error enum that wraps [`method_core::ContextError`].
+const CONTEXT_VARIANT: &str = "Context";
+
+/// Encodes a typed method error as the standard XRPC error envelope: `error` is the error's
+/// variant name ([`error_name`]), `message` its `Display` text, and the serialized error travels
+/// under [`DOMAIN_ERROR_FIELD`], answered with [`DOMAIN_ERROR_STATUS`]. A non-serializable error
+/// is a programming error in the error type.
+pub fn domain_error_envelope<E>(error: &E) -> XrpcErrorEnvelope
 where
-    E: Serialize + std::fmt::Debug,
+    E: Serialize + std::fmt::Display,
 {
     let value = serde_json::to_value(error).expect("method errors must serialize");
     XrpcErrorEnvelope::new(
-        method.error_schema.to_owned(),
-        Some(format!("{error:?}")),
+        error_name(&value).to_owned(),
+        Some(error.to_string()),
         BTreeMap::from([(DOMAIN_ERROR_FIELD.to_owned(), value)]),
     )
     .expect("method error detail is not reserved")

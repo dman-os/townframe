@@ -34,9 +34,8 @@ use service_utils_rs::HttpMetadata;
 use service_utils_rs::Protocol;
 use service_utils_rs::RequestContext;
 use service_utils_rs::UnaryVisitor;
-use service_utils_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_utils_rs::xrpc::DOMAIN_ERROR_STATUS;
-use service_utils_rs::xrpc::XrpcErrorEnvelope;
+use service_utils_rs::xrpc::domain_error_envelope;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -101,19 +100,8 @@ where
                     // as it does when the same operation is served over HTTP.
                     Err(ClientError::Method(error)) => Err(ProviderError::Failed {
                         status: DOMAIN_ERROR_STATUS.as_u16(),
-                        body: serde_json::to_value(
-                            XrpcErrorEnvelope::new(
-                                operation.error_schema.to_owned(),
-                                Some(format!("{error:?}")),
-                                BTreeMap::from([(
-                                    DOMAIN_ERROR_FIELD.to_owned(),
-                                    serde_json::to_value(&error)
-                                        .expect("operation errors must serialize"),
-                                )]),
-                            )
-                            .expect("operation error detail is not reserved"),
-                        )
-                        .expect("an error envelope serializes"),
+                        body: serde_json::to_value(domain_error_envelope(&error))
+                            .expect("an error envelope serializes"),
                     }),
                     Err(ClientError::Transport { message, .. }) => Err(ProviderError::Failed {
                         status: BAD_GATEWAY,

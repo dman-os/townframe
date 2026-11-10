@@ -119,7 +119,7 @@ where
         },
         Err(error) => Reply {
             status: DOMAIN_ERROR_STATUS,
-            body: json!(domain_error_envelope(M::XRPC, &error)),
+            body: json!(domain_error_envelope(&error)),
         },
     }
 }

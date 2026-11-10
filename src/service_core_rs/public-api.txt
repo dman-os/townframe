@@ -74,7 +74,8 @@ pub mod service_core_rs::xrpc
 pub service_core_rs::cancellation::fn cancellation_channel (scope_capacity : usize ,) -> (CancellationTransport , CancellationReceiver)
 pub service_core_rs::xrpc::fn bearer_header_value (token : & str) -> String
 pub service_core_rs::xrpc::fn bearer_token (value : & str) -> Option < & str >
-pub service_core_rs::xrpc::fn domain_error_envelope < E > (method : XrpcMethod , error : & E) -> XrpcErrorEnvelope where E : Serialize + std :: fmt :: Debug ,
+pub service_core_rs::xrpc::fn domain_error_envelope < E > (error : & E) -> XrpcErrorEnvelope where E : Serialize + std :: fmt :: Display ,
+pub service_core_rs::xrpc::fn error_name (error : & Value) -> & str
 pub service_core_rs::xrpc::fn request_context (headers : & HeaderMap ,) -> Result < (crate :: RequestContext , crate :: HttpMetadata) , String >
 pub struct service_core_rs::cancellation::CancellationKey  { request_id: Uuid, token: Uuid }
 pub struct service_core_rs::cancellation::CancellationReceiver  {  }

@@ -9520,6 +9520,7 @@ dependencies = [
  "insta",
  "method_core",
  "serde_json",
+ "service_core_rs",
  "thiserror 2.0.21",
 ]
 
