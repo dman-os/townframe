@@ -1,73 +1,78 @@
 # ADR 039: The intxt capture adapter
 
-**Status:** Proposed. §4 (where captured work lives before it is in an intxt) needs the operator's decision.
+**Status:** Proposed.
 
-**Depends on:** ADR 036 (the datums it writes), ADR 037 (acting as a descendant actor, open question 2 there). Functional requirements: FDR 007, "Harness adapter". Evidence: `docs/scratch/intxt-ledger.md` F5 (session import), F7 (capture loop prototype), F8/F10 (document size limits).
+**Depends on:** ADR 036 (the datums it writes), ADR 037 (acting as a descendant actor, its open question 2). Functional requirements: FDR 007, "Harness adapter". Evidence: `docs/scratch/intxt-ledger.md` F5 (session import), F7 (capture loop prototype), F10 (document size limits); decisions D26 and P3.
 
 ## 1. Context
 
 FDR 007 asks the harness adapter to record the session, the edits made in it (including those made by commands), and the commits and branch moves, at no token cost to the agent, without steering it, and keeping observations nothing refers to local.
 
-A prototype (`/run/media/asdf/p3N/tmp/intxt-proto/session-import`, ledger F7) did this for Claude Code from hooks alone:
+Git commits are the base layer (D26). intxt does not shadow the working tree: file docs receive only the content of commits on tracked refs (ADR 036 §4). Everything between commits is a record in the session.
+
+A prototype (`/run/media/asdf/p3N/tmp/intxt-proto/session-import`, ledger F7) recorded Claude Code from hooks alone:
 
 - **Transcript import is incremental.** Each hook reads the transcript from the last byte offset; the result equals a one-shot import of the same 42 MB transcript. About 73 ms per hook after the first (395 ms).
 - **Command-made edits are observable.** Around each Bash call, hashing only the files that differ from the git index, plus the index listing, takes about 25 ms on this repository. The difference between the two snapshots is the call's edits (sed, formatters, generated files, deletions).
-- **Commits are observable** by comparing `HEAD` and the current branch's target with the last recorded position at each hook.
-- **Normalized sessions are small** (F5): 4.2% of the raw transcripts; the largest is 2.67 MB with 125 turns and 3,483 messages.
+- **Ref moves are observable** by comparing each tracked ref's target with the last recorded one at each hook.
+- **Normalized sessions are small** (F5): 4.2% of the raw transcripts; the largest is 2.67 MB.
 
-Two cabinet limits apply (F10): until the alias-scan fix lands, a document refuses updates to existing datums once it holds about 500 datums; and one datum's value is read within a 16,384-node budget.
+## 2. What capture records
 
-## 2. Decision: what runs, and when
+| Record | Source | Goes to |
+|---|---|---|
+| Session, turns, messages | The harness transcript, imported incrementally | Session doc (ADR 036 §6) |
+| Edits by edit tools | The transcript (`structuredPatch`, or the content of a Write-create) | `edit` datums, `observedBy: tool` |
+| Edits by commands | Snapshots of changed files around each Bash call | `edit` datums, `observedBy: filesystem`, with the call's `toolCall` |
+| Commits and ref moves | Each tracked ref's target, read at every hook | `gitCommit`, `refMove`, `gitRef` in the history doc; commit content into file docs (ADR 036 §4–§5) |
+
+Edits are patches attributed to the turn that made them. They show what the agent did between commits; they never write file docs.
+
+**Ref moves.** The adapter reads `refs/heads/<name>` for each ref the intxt tracks, not `HEAD`, so checking out another branch, staging, stashing and working-tree edits record nothing on the history side. When a tracked ref's target changed, it writes a `gitCommit` for each commit between the old and new targets not yet recorded, ingests their content into the file docs in first-parent order, then writes the `refMove` and the `gitRef`'s new target. `kind` is taken from the ref's reflog entry (`commit`, `commit (amend)`, `rebase (finish)`, `reset`), git's own account of the move, and is `unknown` when the reflog has none.
+
+## 3. How it runs
 
 The adapter is a subcommand of the intxt CLI, `capture <hook event>`, reading the hook's JSON on stdin. It is installed as Claude Code hooks:
 
 | Hook | What capture does |
 |---|---|
-| `SessionStart` | Record the session (`session/main`), check the branch position |
-| `PreToolUse` (Bash) | Snapshot files that differ from the index; check the branch position |
-| `PostToolUse`, `PostToolUseFailure` (Bash) | Snapshot again; record the difference as `edit` datums with `observedBy: filesystem` and the call's `toolCall`; check the branch position |
+| `SessionStart` | Record the session, check tracked refs |
+| `PreToolUse` (Bash) | Snapshot files that differ from the index |
+| `PostToolUse`, `PostToolUseFailure` (Bash) | Snapshot again and record the difference as edits; check tracked refs |
 | `PostToolUse` (Edit, Write, MultiEdit) | Note the written file's hash, so a concurrent Bash window doesn't record the same write twice |
-| `UserPromptSubmit`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | Import the transcript up to now; check the branch position |
+| `UserPromptSubmit`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | Import the transcript up to now; check tracked refs |
 
 Every invocation first imports the transcript from its stored offset, so any hook brings the session up to date. Hooks of parallel tool calls run concurrently, so each invocation takes a per-session file lock.
 
-**Edits made by the edit tools** come from the transcript (`structuredPatch` for Edit, the content for a Write-create), as in F5. **Edits made by commands** come from the snapshots. Claude Code also writes a `bashEditDiff` on Bash results (F7, undocumented); the snapshot stays the source because it is harness-independent and also sees deletions and index changes.
+Claude Code also writes a `bashEditDiff` on Bash results (F7, undocumented). The snapshot stays the source for command edits because it is harness-independent and also sees deletions.
 
-**Commits and branch moves.** At each check, if the current branch's target differs from the recorded one, the adapter writes a `gitCommit` datum for every commit between the old and new targets not already recorded, then a `refMove` from the old target to the new. `kind` is taken from the branch's reflog entry (`commit`, `commit (amend)`, `rebase (finish)`, `reset`), which is git's own account of the move, and is `unknown` when the reflog has none. The new revision's file contents go into the file docs as line-level splices (ADR 036 §4).
+**Errors.** Capture never blocks or feeds the agent. A failure exits non-zero with a message (Claude Code shows it to the operator, not to the model), and the next hook retries from the stored state. Exit code 2, which Claude Code feeds back to the model, is never used.
 
-**Attribution.** Every write acts as the agent's actor, `<operator>/agents/<harness>/<session id>`, through ADR 037's act-as mechanism (an environment variable the hook sets, read by every `day` call in that invocation). The signing actor of each datum is then the session that produced it, not the operator. Act-as is still a proposal in ADR 037 §2, waiting on the operator's decision there and on 037's earlier steps. Until it lands, captures are signed by the operator; the adapter uses no stand-in identity in the meantime.
+**Attribution.** Every write is meant to act as the agent's actor, `<operator>/agents/<harness>/<session id>`, through ADR 037's act-as mechanism (an environment variable the hook sets, read by every `day` call in that invocation). Act-as is still a proposal in ADR 037 §2, waiting on the operator's decision there and on 037's earlier steps. Until it lands, captures are signed by the operator; the adapter uses no stand-in identity in the meantime.
 
-**Errors.** Capture never blocks or feeds the agent. A failure exits non-zero with a message (Claude Code shows it to the operator, not to the model), and the next hook retries from the stored offset. Exit code 2, which Claude Code feeds back to the model, is never used.
+## 4. Before an intxt exists
 
-## 3. Decision: local capture state
+Code needs no working set: nothing reaches a file doc until a ref is tracked, and `intxt new <ref> [--base <ref>]` backfills the commits from the base to the tip. Only committed content enters an intxt, so a secret gets in only if it was committed, and then it is in git too.
 
-The adapter keeps its state under the repository's git directory (`git rev-parse --git-dir`, so each worktree has its own), in `intxt/`:
+Sessions are recorded before anyone decides which intxt they belong to. They stay in the adapter's local log (§5) as normalized datums, not Automerge changes, until attached: `intxt new` attaches the current session, and `intxt attach <session>` adds another. Attaching writes the session's datums into a session doc; from then on, capture writes that session straight into it. The log is datum-shaped because Automerge changes can't move between documents that don't share history.
 
-- per session: the transcript offset, the latest snapshot, the hashes of recent tool writes, and the last recorded branch position;
-- per repository: the drawer id of every intxt created here (there is no `day drawers ls` yet).
+## 5. Local state
 
-State is an append-only log per session, not a file rewritten on every hook (the prototype rewrote 4 MB per hook on a long session).
+Kept under the repository's git directory (`git rev-parse --git-dir`, so each worktree has its own), in `intxt/`, as an append-only log per session (the prototype rewrote 4 MB per hook on a long session):
 
-## 4. Proposal, for the operator: where captured work lives before an intxt
+- per session: the transcript offset, the latest snapshot, hashes of recent tool writes, and the normalized datums of a session not yet attached;
+- per repository: the drawer id of every intxt created here (there is no `day drawers ls` yet), the refs each one tracks, and the last recorded target of each.
 
-Ledger P1. Recorded work has to exist before anyone decides which intxt it belongs in, and Automerge can't unsync a change, so anything written into a shared document can only be superseded, never removed.
+## 6. Consequences
 
-**Proposed: captured work stays in the local log until it is promoted.** The log in §3 holds the normalized datums and the snapshot blobs, not only offsets. Nothing is written to any Automerge document until the operator or the agent runs `intxt new` or `intxt add <session|commits>`, which writes the chosen datums into the intxt's documents. From then on, a session that belongs to an intxt is captured straight into it.
+- Recording costs the agent no tokens; each hook costs about 100 ms of wall time.
+- Two machines recording the same branch independently make two intxts (D26). Two machines recording into the same intxt is handled by ADR 036 §4–§5 (pins, divergent refs).
+- Line provenance for edits between commits is not in the file docs. A per-edit live file doc is a separate future kind, tied to editor integration (D26).
 
-- What this buys: nothing leaves the machine, or enters a document with history, until it is chosen. The footgun disappears for unpromoted work.
-- What it costs: unpromoted work can't be read from the phone. That is the point of keeping it private, but it means "start an intxt" is the step that makes remote review possible, and the CLI has to make that one command.
-- The alternative, a private local drawer as the working set, keeps everything in documents from the start and so inherits the footgun the moment one of those documents is shared.
-
-## 5. Consequences
-
-- ADR 036 §6 changes. One message datum per transcript record exceeds the ~500-datum limit on long sessions (3,483 messages in one real session). A turn datum holds its messages as a list instead (125 datums for that session); updates don't accumulate signatures, so appending to the open turn on every hook is cheap (F10). Edits stay separate datums so that notes can target them.
-- Sessions longer than about 500 turns still exceed the limit until the cabinet fix lands; the adapter starts a continuation session document (`parent` pointing at the previous one) when one fills.
-- The agent's work costs it no tokens, and each hook costs about 100 ms of wall time.
-
-## 6. Open questions
+## 7. Open questions
 
 1. **Attribution of concurrent changes.** A background process, or a parallel tool call, writing during a Bash call is attributed to that call; hook data can't tell them apart.
-2. **Checkout and reset.** `git checkout` and `git reset` change files without the agent editing them. Record them as edits with a `kind`, or suppress edits when the branch position moved in the same window.
+2. **Checkout and reset during a Bash call** change files without the agent editing them, and are recorded as filesystem edits. Suppress edits from a window in which `HEAD` moved, or keep them marked.
 3. **Subagents.** Bash calls inside subagents never reach the main transcript, so their edits have no turn. Import subagent transcripts as linked sessions (D7) and attribute there.
-4. **Which refs.** The current branch only (proposed for the alpha), or every branch the session touches.
+4. **Which refs.** `intxt new` tracks the given ref. Whether capture should offer to track new branches the session creates is open.
 5. **Failed edits and synthetic messages.** Whether to record edits whose tool call failed, and how to mark harness-generated messages (session-limit notices, compaction summaries).
