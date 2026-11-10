@@ -13,6 +13,7 @@ mod model;
 mod observe;
 mod peer;
 mod wire;
+mod write_costs;
 mod writes;
 
 use super::*;
@@ -27,6 +28,9 @@ use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::Bundle;
+use big_cabinet_core::datum::DatumDecl;
+use big_cabinet_core::datum::Universe;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::doc::ObservedDatum;
 use big_repo::BigRepo;
@@ -46,6 +50,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 const NOTE: &str = "org.example.note";
+const TEXT_NOTE: &str = "org.example.textNote";
 const PLACEMENT: &str = "drawer test";
 
 fn note(text: &str) -> Value {
@@ -66,12 +71,42 @@ fn schemas() -> Arc<SchemaRepo> {
             "properties": {"value": {"type": "string"}}
         }}}
     });
+    let text_lexicon = json!({
+        "lexicon": 1,
+        "id": TEXT_NOTE,
+        "defs": {"main": {"type": "record", "key": "tid", "record": {
+            "type": "object",
+            "required": ["text"],
+            "properties": {"text": {"type": "string"}}
+        }}}
+    });
+    // The Automerge representation is a sidecar annotation: Lexicon has no place for it.
+    let text_storage = Universe {
+        datums: vec![DatumDecl {
+            id: TEXT_NOTE.to_owned(),
+            name: "Main".to_owned(),
+            schema: schemars::Schema::try_from(json!({
+                "type": "object",
+                "properties": {"text": {"type": "string", "x-automerge": "text"}}
+            }))
+            .unwrap(),
+            flags: Vec::new(),
+        }],
+        types: Vec::new(),
+    };
     Arc::new(
-        SchemaRepo::open([SchemaRegistrationGroup::new(
-            None,
-            [SchemaRegistration::new(NOTE, lexicon)],
-            Vec::new(),
-        )])
+        SchemaRepo::open([
+            SchemaRegistrationGroup::new(
+                None,
+                [SchemaRegistration::new(NOTE, lexicon)],
+                Vec::new(),
+            ),
+            SchemaRegistrationGroup::new(
+                Some(Bundle::new(&text_storage, Vec::new())),
+                [SchemaRegistration::new(TEXT_NOTE, text_lexicon)],
+                Vec::new(),
+            ),
+        ])
         .unwrap(),
     )
 }
