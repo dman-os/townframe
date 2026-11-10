@@ -148,7 +148,7 @@ Keys reuse the harness's own ids so a re-import converges on the same slots inst
 }
 ```
 
-- **Targets** are any `dtxt:` references, so a note can be about a line range (a text cursor range in a file doc pinned at a commit's state), a whole file (no fragment), a commit (`gitCommit/<sha>`), a session message or edit, a structure datum, or another note. `quote` is the fallback for re-attaching when a cursor can't follow (moved code, F1); tools fill it, humans' clients fill it for them.
+- **Targets** are any `dtxt:` references, so a note can be about a line range (a text cursor range in a file doc pinned at a commit's state), a whole file (no fragment), a commit (`gitCommit/<sha>`), a session message or edit, a structure datum, or another note. `quote` is **required on code anchors**. A cursor never fails to resolve: one whose text was deleted resolves to a neighbouring position (ledger F6), so a reader always compares the resolved text with `quote`, and on a mismatch re-attaches by quote matching or shows the note as outdated. In a real rebase (F6) 785 of 888 anchors resolved onto identical text and quote matching recovered 99 of the other 103. Tools fill `quote`; humans' clients fill it for them. A note about deleted lines targets the `base` state of the file.
 - A **span of datums** (turns 20–45) is a target with `from` and `to` references instead of `ref`.
 - **Threads** are the reply trees under root notes. Their shared state is one slot per root:
 
@@ -190,7 +190,7 @@ None of the loop's writes. Creating the intxt, recording history and sessions, c
 
 1. **Cost of seen state.** Per-slot heads grow with the number of notes, and `ListDatums` on a large notes doc is unmeasured. Measure before the alpha; a `since`-heads read mode is on the node lane's deferred list if it's needed.
 2. **refMove vs the ref datum's own history.** Keep the explicit append-only `refMove` list, or read past targets from the `gitRef` datum's history (D17) and drop `refMove`?
-3. **Session size.** One session doc holds every turn's datums; the largest normalized session is estimated at 1–3 MB. Confirm with a real import before deciding whether long sessions split.
-4. **Line-splice recorder for rewrites.** A rebase appends the rebased contents as splices from the previous state of the same file doc. Confirm with a real rebase that cursors made on the old commit resolve sensibly at the new one.
+3. **Session shape details** (F5: one doc per session is fine, largest 2.67 MB): add ordering fields (`seq`, `at`), a `marker` datum (compaction, subagent spawn), and message kinds for non-human records; decide whether failed edits and synthetic agent messages are recorded.
+4. **Merges.** A merge commit's first-parent diff pulls in everything merged from upstream (797 file docs for one merge in F6's sample). A revision's files should probably be the net base..target diff, and merges recorded without per-file states for upstream changes.
 5. **Hex in cursors.** Automerge's cursor string is `[-]<counter>@<actor hex>`, so a text-range fragment carries hex even though URLs otherwise avoid it (D24). Either accept Automerge's spelling inside the fragment (it is their grammar) or re-encode the actor in base58 and diverge. ADR 035 decides.
 6. **Evidence** (check results) is out of the loop's scope (FDR 007) and gets its own datums later.
