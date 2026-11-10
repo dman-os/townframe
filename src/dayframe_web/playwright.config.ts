@@ -17,7 +17,12 @@ export default defineConfig({
   },
   webServer: {
     command: "deno run --allow-all ../../x/dayframe-web.ts",
-    env: { HOST: "127.0.0.1", PORT: String(port) },
+    // The trapper package is what the sync-export trap spec opens (`e2e/trap.spec.ts`).
+    env: {
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      DAYFRAME_WEB_TRAPPER: "1",
+    },
     url: `http://127.0.0.1:${port}/`,
     reuseExistingServer: !process.env.CI,
     stdout: "pipe",

@@ -7,6 +7,7 @@ use crate::Capability;
 use crate::Collection;
 use crate::Facet;
 use crate::FacetSnapshot;
+use crate::RefStatus;
 use crate::Row;
 use crate::context::Mount;
 use crate::context::MountInner;
@@ -21,12 +22,19 @@ use clay_dioxus::ComponentMount;
 #[derive(Props, Clone, PartialEq)]
 pub struct PresentationSlotProps {
     pub reference: Capability,
+    /// Chrome the slot's owner wants whenever there is no presentation to show (still loading, or
+    /// unavailable): it is rendered above the placeholder. A mounted presentation brings its own
+    /// chrome, so a position that must always offer a way out (the shell's sidebar/back button)
+    /// has nothing to offer in the one state where the micro that would place it is absent.
+    #[props(default)]
+    pub placeholder_chrome: Option<Element>,
 }
 
 /// What a slot shows: the presentation it redeemed, or why there is none right now.
 enum SlotState {
     Loading,
-    Unavailable(crate::Error),
+    /// The failure, and the reference's status when it failed, which says why in words.
+    Unavailable(crate::Error, RefStatus),
     Mounted(Mount),
 }
 
@@ -60,7 +68,7 @@ async fn follow_provider(reference: Capability, mut show: impl FnMut(SlotState))
             Err(failure) => failure,
         };
         // Redeeming again before the status moves would only fail the same way.
-        show(SlotState::Unavailable(failure));
+        show(SlotState::Unavailable(failure, reference.status()));
         reference.status_changed(before).await;
     }
 }
@@ -72,24 +80,31 @@ async fn follow_provider(reference: Capability, mut show: impl FnMut(SlotState))
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn PresentationSlot(props: PresentationSlotProps) -> Element {
     let reference = props.reference;
+    let chrome = props.placeholder_chrome;
     #[cfg(feature = "guest")]
     if reference.is_guest() {
         // Keyed by the reference: a row that keeps its key but attaches another target gets a
         // fresh task, and dropping the old one releases the previous provider.
         let key = reference.identity();
-        return rsx! { GuestSlot { key: "{key}", reference } };
+        return rsx! { GuestSlot { key: "{key}", reference, chrome } };
     }
     #[cfg(feature = "view")]
-    return rsx! { InProcessSlot { reference } };
+    return rsx! { InProcessSlot { reference, chrome } };
     #[cfg(not(feature = "view"))]
     unreachable!("without the `view` feature every reference belongs to a guest")
 }
 
-fn render_state(state: &SlotState) -> Element {
+fn render_state(state: &SlotState, chrome: &Option<Element>) -> Element {
     match state {
-        SlotState::Loading => rsx! { p { role: "status", "Loading section…" } },
-        SlotState::Unavailable(failure) => {
-            rsx! { p { role: "alert", "Section unavailable: {failure:?}" } }
+        SlotState::Loading => {
+            rsx! { {chrome.clone()} p { role: "status", "Loading section…" } }
+        }
+        SlotState::Unavailable(failure, status) => {
+            let reason = match status.blocked_reason() {
+                Some(reason) => reason.to_owned(),
+                None => failure.to_string(),
+            };
+            rsx! { {chrome.clone()} p { role: "alert", "Section unavailable: {reason}." } }
         }
         SlotState::Mounted(mount) => rsx! { MountedSlot { mount: mount.clone() } },
     }
@@ -97,14 +112,14 @@ fn render_state(state: &SlotState) -> Element {
 
 #[cfg(feature = "view")]
 #[component]
-fn InProcessSlot(reference: Capability) -> Element {
+fn InProcessSlot(reference: Capability, chrome: Option<Element>) -> Element {
     let mut state = use_signal(|| SlotState::Loading);
     // Reactive over the prop: dropping the old future drops its redemption.
     use_future(use_reactive!(|(reference,)| async move {
         state.set(SlotState::Loading);
         follow_provider(reference, |next| state.set(next)).await;
     }));
-    render_state(&state.read())
+    render_state(&state.read(), &chrome)
 }
 
 /// A guest slot's state, shared between its component and the runtime task that follows the
@@ -113,7 +128,7 @@ fn InProcessSlot(reference: Capability) -> Element {
 /// component that subscribed to the tick.
 #[cfg(feature = "guest")]
 #[component]
-fn GuestSlot(reference: Capability) -> Element {
+fn GuestSlot(reference: Capability, chrome: Option<Element>) -> Element {
     let tick = use_context::<crate::guest::ChangeTick>().0;
     let _ = tick();
     let (state, cancel) = use_hook(|| {
@@ -130,7 +145,7 @@ fn GuestSlot(reference: Capability) -> Element {
         (state, cancel)
     });
     use_drop(move || cancel.cancel());
-    render_state(&state.borrow())
+    render_state(&state.borrow(), &chrome)
 }
 
 #[component]
@@ -254,6 +269,25 @@ where
     facet
         .current()
         .expect("the document watch outlives the view that reads it")
+}
+
+/// Bind a reference's [`RefStatus`] to Dioxus reactivity without activating its provider: the
+/// returned status is current at this render, and the calling component re-renders whenever the
+/// supervisor's status ticks move it (a disabled micro enabled, a faulted one retried). A view
+/// uses it to show an action whose provider cannot start as unavailable before it is pressed.
+/// A reference that changes between renders is followed from then on.
+pub fn use_ref_status(reference: &Capability) -> RefStatus {
+    let mut status = use_signal(|| reference.status());
+    use_resource(use_reactive((reference,), move |(reference,)| async move {
+        loop {
+            let seen = reference.status();
+            if *status.peek() != seen {
+                status.set(seen);
+            }
+            reference.status_changed(seen).await;
+        }
+    }));
+    status()
 }
 
 #[cfg(all(test, feature = "in_process"))]

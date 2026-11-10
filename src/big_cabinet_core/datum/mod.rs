@@ -10,9 +10,7 @@
 //! item's attributes and a derive cannot do that.
 
 mod grammar;
-mod member;
 pub mod operation;
-mod shape;
 mod value;
 
 #[cfg(feature = "schemars")]
@@ -26,35 +24,47 @@ pub use input::LexiconAdmissionError;
 
 #[cfg(feature = "schemars")]
 mod universe;
-mod wire;
 
 #[cfg(all(test, feature = "schemars"))]
 mod e2e;
 
-/// For the `datum` macro, which joins a const authority to a member's name at compile time.
+/// The vocabulary a wasm guest declares a type with lives in `datum_core`; everything the
+/// declaration macro emits against resolves through this path as well.
 #[doc(hidden)]
-pub use const_format;
+pub use datum_core::const_format;
+pub use datum_core::DatumMember;
+pub use datum_core::DatumShape;
+pub use datum_core::Extra;
+pub use datum_core::KnownString;
+pub use datum_core::Member;
+pub use datum_core::Openness;
+pub use datum_core::Shape;
+pub use datum_core::Tagging;
+pub use datum_core::UnionLayout;
+pub use datum_core::UnknownMember;
+pub use datum_core::deserialize_closed_str;
+pub use datum_core::deserialize_known_str;
+pub use datum_core::deserialize_union;
+pub use datum_core::is_nsid;
+pub use datum_core::is_nsid_authority;
+pub use datum_core::serialize_member;
+pub use datum_core::str_eq;
+#[cfg(feature = "schemars")]
+pub use datum_core::MemberSchema;
+#[cfg(feature = "schemars")]
+pub use datum_core::ShapeError;
+#[cfg(feature = "schemars")]
+pub use datum_core::ShapeFlag;
+#[cfg(feature = "schemars")]
+pub use datum_core::check_shape;
+#[cfg(feature = "schemars")]
+pub use datum_core::string_schema;
+#[cfg(feature = "schemars")]
+pub use datum_core::union_schema;
 pub use grammar::GrammarError;
 pub use grammar::parse_ref;
-pub use member::DatumMember;
-pub use member::is_nsid;
-pub use member::is_nsid_authority;
-pub use member::str_eq;
-pub use shape::DatumShape;
-pub use shape::Openness;
-pub use shape::Shape;
-pub use shape::Tagging;
-pub use value::Extra;
 pub use value::validate_object_schema;
 pub use value::validate_object_value;
-pub use wire::KnownString;
-pub use wire::Member;
-pub use wire::UnionLayout;
-pub use wire::UnknownMember;
-pub use wire::deserialize_closed_str;
-pub use wire::deserialize_known_str;
-pub use wire::deserialize_union;
-pub use wire::serialize_member;
 
 #[cfg(feature = "schemars")]
 pub use codec::Bytes;
@@ -87,12 +97,6 @@ pub use codec::hydrate_value;
 #[cfg(feature = "schemars")]
 pub use codec::reconcile_json_atomic;
 #[cfg(feature = "schemars")]
-pub use shape::ShapeError;
-#[cfg(feature = "schemars")]
-pub use shape::ShapeFlag;
-#[cfg(feature = "schemars")]
-pub use shape::check_shape;
-#[cfg(feature = "schemars")]
 pub use universe::Bundle;
 #[cfg(feature = "schemars")]
 pub use universe::DatumDecl;
@@ -108,9 +112,3 @@ pub use universe::TypeDecl;
 pub use universe::Universe;
 #[cfg(feature = "schemars")]
 pub use universe::UniverseError;
-#[cfg(feature = "schemars")]
-pub use wire::MemberSchema;
-#[cfg(feature = "schemars")]
-pub use wire::string_schema;
-#[cfg(feature = "schemars")]
-pub use wire::union_schema;

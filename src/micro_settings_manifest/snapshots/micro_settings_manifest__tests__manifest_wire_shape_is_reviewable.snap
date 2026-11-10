@@ -10,10 +10,17 @@ entrypoints:
   presentation: "townframe:dayframe/presentation-events@0.4.0"
   installer: ~
 publications:
-  - name: view
+  - name: list
     kind: presentation
     contract: ~
-requires: []
+  - name: section
+    kind: presentation
+    contract: ~
+requires:
+  - binding: opened
+    contract: org.example.dayframe.shell.opened
+  - binding: nav-button
+    contract: org.example.dayframe.shell.navButton
 configuration_requests:
   - binding: settings
     facets:
@@ -36,17 +43,23 @@ collection_requests:
   - binding: sections
     contract: org.example.dayframe.settings.sections
     access: read
-  - binding: roots
-    contract: org.example.clay.shell.roots
+  - binding: panels
+    contract: org.example.dayframe.shell.panels
     access: write
 contributions:
-  - id: root
-    binding: roots
+  - id: panel
+    binding: panels
     key: dayframe.settings
     payload:
       content:
         $attachment: 0
+      details:
+        $attachment: 1
+      sockets:
+        - list
       title: Settings
     attachments:
       - index: 0
-        publication: view
+        publication: list
+      - index: 1
+        publication: section

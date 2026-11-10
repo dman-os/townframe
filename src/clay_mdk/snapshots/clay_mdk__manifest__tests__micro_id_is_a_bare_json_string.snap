@@ -1,5 +1,0 @@
----
-source: src/clay_mdk/manifest_tests.rs
-expression: "serde_json::to_string_pretty(&id).unwrap()"
----
-"did:example:clay-local/dayframe.counter"

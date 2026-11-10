@@ -119,6 +119,7 @@ impl Incarnations for InProcess {
                     .collect(),
                 requirements,
                 collections: slots,
+                requests: manifest.collection_requests.clone(),
                 declared,
                 calls: calls.clone(),
             }

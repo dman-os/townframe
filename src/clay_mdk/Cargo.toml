@@ -14,6 +14,23 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [[example]]
+name = "overbudget"
+path = "overbudget_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
+name = "trapper"
+path = "trapper_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
+name = "emit_trapper_manifest"
+path = "emit_trapper_manifest.rs"
+required-features = ["guest"]
+
+[[example]]
 name = "context"
 path = "context_fixture.rs"
 crate-type = ["cdylib"]

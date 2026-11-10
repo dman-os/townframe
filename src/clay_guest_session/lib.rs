@@ -324,8 +324,9 @@ pub enum DeliveryOutcome {
     Skipped,
     /// The incarnation is gone; stop driving.
     Stopped,
-    /// The guest trapped; close the instance and stop driving.
-    Trapped,
+    /// The guest trapped, with this cause; record it as the instance's fault, close the instance
+    /// and stop driving.
+    Trapped(String),
 }
 
 /// Drive document deliveries into a guest until the instance closes, the work
@@ -365,7 +366,8 @@ pub async fn drive(
             }
             DeliveryOutcome::Skipped => {}
             DeliveryOutcome::Stopped => return,
-            DeliveryOutcome::Trapped => {
+            DeliveryOutcome::Trapped(cause) => {
+                host.record_fault(&instance, cause);
                 host.close_instance(&instance).unwrap();
                 return;
             }

@@ -9,6 +9,7 @@ path = "lib.rs"
 
 [dependencies]
 clay_mdk = { workspace = true, features = ["contract"] }
+micro_shell_manifest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
