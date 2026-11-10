@@ -17,6 +17,8 @@ Every vocabulary inside an intxt follows four rules:
 3. **Hand-writable** (D23). An agent can create or answer any of these datums by writing the JSON itself. No field requires a computation the agent can't do; it may need to read a value to copy it, never to derive one.
 4. **Authorship is the signature** (ADR 020 §5–§6). No datum carries an author field; the signing actor of a datum's current version is who wrote it. The read API must expose it (ledger L5).
 
+And every reader is robust to gaps: an intxt spans many documents, some in other drawers, and no reader is guaranteed to hold all of them, or all of their history. A missing document, an unreadable layer or a pin naming heads not yet synced is rendered as unresolved, never as an error, as a browser renders a page with a missing image.
+
 ## 2. Descriptor and layers
 
 The intxt's descriptor follows the drawer's own design (ADR 019): one datum identifies the intxt, and sibling datums on the same document each describe one aspect of it, in slots named by kind and name, so independent writers add aspects without touching each other.
@@ -105,7 +107,7 @@ Nothing in the core. Creating an intxt, adding layers and writing datums are pla
 
 ## 8. Open questions
 
-1. **Namespace owner** of `title`, `path`, `note`, `comment` and the other generic datums: big_cabinet_core's own vocabulary, or a shared core-datums plug.
-2. **Renderer precedence** when several rows match a tag: a user preference datum, or the plug that defines the tag.
+1. **Namespace owner** of `title`, `path`, `note`, `comment` and the other generic datums: big_cabinet_core's own vocabulary, or a shared core-datums plug. Tags stay under `org.example` until the project's domain is bought (operator).
+2. **Renderer precedence** when several rows match a tag: configuration, deferred; Clay's settings system can hold it (operator).
 3. **Layer `contains` granularity**: datum tags (as above) or vocabulary ids (one per plug or ADR). Tags are what renderers key on; vocabulary ids are shorter and stable as a vocabulary grows.
 4. **The signer in reads** (ledger L5): `readDatums` returns no signer today; the node lane adds it.

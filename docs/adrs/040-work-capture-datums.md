@@ -127,8 +127,7 @@ Names follow the Agent Client Protocol (ACP: session, prompt turn, tool call, pl
 { "seq": 41, "at": "…", "parentTurn": "<id>", "stopReason": "end_turn",
   "messages": [ { "id": "<harness id>", "seq": 0, "at": "…", "kind": "agentMessage", "text": "…" } ],
   "toolCalls": [ { "id": "toolu_01…", "seq": 3, "title": "Edit reference.rs", "kind": "edit", "status": "completed",
-                   "locations": [ { "path": "/run/…/reference.rs", "line": 120 } ],
-                   "ops": [ "dtxt:datum:zWt/org.example.work.worktreeOp/57" ] } ] }   // the changes it caused
+                   "locations": [ { "path": "/run/…/reference.rs", "line": 120 } ] } ] }
 
 // org.example.work.plan/main             (ACP plan: replaced whole on every update; its history is the plan's history)
 { "entries": [ { "content": "Rewrite reference.rs", "priority": "high", "status": "completed" } ] }
@@ -138,17 +137,35 @@ Names follow the Agent Client Protocol (ACP: session, prompt turn, tool call, pl
 - Keys reuse the harness's ids, so a re-import converges on the same slots.
 - Messages and tool calls live inside their turn: a long session has thousands of messages (3,483 in one, F5) but around a hundred turns, and a document refuses updates at about 500 datums (F10). Updating a datum replaces its signature rather than accumulating one (F10), so appending to the open turn on every hook is cheap. A session past the limit continues in a new document whose `parent` is the previous one.
 - **Subagents** are imported, each as its own session document with `parent` (D30).
-- **Which worktrees a session touched** is derived: each tool call's `locations` and `cwd` resolve to the deepest worktree containing them, and the recorder writes the resulting op references both ways (`toolCalls[].ops`, `worktreeOp.cause`).
+- **Which worktrees a session touched** is derived: each tool call's `locations` and `cwd` resolve to the deepest worktree containing them, and the recorder writes the link once, on the op (`worktreeOp.cause`); a tool call's changes are found through the reference index (ADR 035 §2.6).
 
-## 7. Open questions
+## 7. Documents
 
-1. **What ships into an intxt.** A layer's documents sync whole, with all earlier states: Automerge cannot send a later state without its past or drop a middle state. If a worktree's file doc ever held a secret or junk, including that worktree layer ships it. Options:
-   - (a) accept it, and give each intxt its own worktree documents so unrelated work never shares a doc;
-   - (b) record locally into documents that never sync, and when a state is referenced from an intxt, write that state into an intxt-owned document. Per-edit history stays local; the intxt gets only referenced states, without Automerge provenance across the boundary;
-   - (c) ADR 007 branches, which share genesis and so carry the history anyway.
-   
-   The recommendation is (b): it is the ledger's P1 made concrete, and it matches "only what is referenced ships". It needs a rule for what a reference to a local state pulls in (the state alone, or every op since the last shipped state).
-2. **Write granularity of file docs.** Every observed change (faithful; F1 measured a 1% edit across 20 files at 16 KB) or only op boundaries that matter (commit, checkout, end of turn), with per-edit detail kept as the tool call's diff. Under (b) above, local is every change and shipping picks states, so this question mostly disappears.
-3. **Repository matching.** Root commit shas match two clones of one project but also match forks and miss repos whose roots were rewritten. Good enough as a default with an explicit "same repo" override?
-4. **Non-repository directories.** An agent edits files outside any checkout (notes, `/tmp`, dotfiles). A worktree without a clone covers it; is that wanted, or do edits outside checkouts stay only in the session's tool-call diffs?
-5. **Ops written by jj and git hooks vs the recorder.** jj's own op log already records every snapshot; whether the recorder imports jj operations or derives worktree ops from them.
+How the datums above split into documents. Each split has a reason: one writer per document where possible, the ~500-datum update limit (F10), loading only what a view shows (F1), and access boundaries.
+
+| Document | Holds | Writers | How many |
+|---|---|---|---|
+| Repo | `gitRepo/<uuid>`, `gitCommit/<sha>` | every recorder of the project (commits are content-addressed, so concurrent writes are identical) | one per project; commits shard into more repo docs past ~400 |
+| Clone | `clone/<uuid>`, `gitRef/<clone>/<name>`, `jjOperation`, `jjChange` | that clone's recorder | one per clone |
+| Worktree | `worktree/main` (lists op-log and file docs) | that worktree's recorder | one per worktree |
+| Op log | `worktreeOp/<seq>` for one seq range | that worktree's recorder | one per ~256 ops; the worktree datum lists them |
+| File | `path`, `note`, `file` provenance | that worktree's recorder | one per path an op touched |
+| Session | `agentSession/main`, `promptTurn/<id>`, `plan/main` | the recorder of that harness | one per session, subagent and continuation |
+
+For example, one day of this lane's work (one repo, one clone, one worktree, 30 changed files, a main session and five subagents) is about 40 documents: 1 repo, 1 clone, 1 worktree, 1–2 op-log, 30 file and 6 session documents, plus the intxt's descriptor and a notes document per commenter (ADR 041).
+
+**Readers must expect gaps.** An intxt spread over many documents, some in other drawers, is never guaranteed to arrive whole or at once: a file doc may be missing, a session may be private, a pin may name heads not yet synced. Readers render what resolves and mark the rest, as a browser renders a page with a broken image (ADR 036 §1, ADR 035 §2.1).
+
+**Removing a document.** One document per file means a file doc that captured a secret can be removed from the drawer's roster. Relays and honest peers then stop holding and serving it, and the recorder writes a replacement doc from the cleaned state. Removal does not retract what peers already synced (ADR 019: a stable id is not a promise that an audience change erases earlier disclosure).
+
+## 8. Settled (operator, 2026-11-10)
+
+- **What ships:** the worktree's documents themselves, at per-document granularity; unwanted documents are removed and replaced, not filtered (§7).
+- **Granularity:** per observed change. The single writer per file doc puts this back in scope (D26's commit-only rule existed because ref-driven docs had several writers). Interactive editing over an intxt would edit a fork (ADR 007) live and fold back into the worktree's docs after a debounce, writing one op. The per-write dmeta and signature overhead for such fine-grained writes is not yet measured; the node lane is asked for a measurement and for whether intermediate changes can skip signing (ledger).
+- **Repository matching:** shared root commits only *suggest* that two clones are one project; they never merge repos automatically. Forks and clones of a starter repo share roots and aren't the same project.
+- **Directories outside any checkout:** an opt-in layer later (a worktree without a clone); nothing here blocks it.
+- **jj:** record jj operations' and changes' identities and structure (ids, parents, descriptions, which changes and bookmarks moved), not the full content of jj's op store. A jj backend on top of intxt is a future VCS conversation.
+
+## 9. Open questions
+
+1. **Op cost.** Every observed change is an op datum plus file-doc writes. Op-log chunking keeps documents under the limit, but the per-write dmeta cost (§8) decides whether per-change granularity is affordable on large sessions.
