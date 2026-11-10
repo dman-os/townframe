@@ -847,6 +847,98 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
 }
 
 #[test]
+fn open_data_attributes_and_overflow_anchor_pass_ingress_and_render() {
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        tree: SurfaceTree,
+    }
+    fn app(props: Props) -> Element {
+        let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
+        props.tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )
+    }
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetAttribute((
+            "data-line-index".into(),
+            None,
+            AttributeValue::Text("3,1".into()),
+        )),
+        Mutation::SetAttribute((
+            "overflow-anchor".into(),
+            Some("style".into()),
+            AttributeValue::Text("none".into()),
+        )),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    // A refused batch poisons the tree, so each malformed name gets a fresh one.
+    for bad in ["data-", "data-Line", "data-a:b", "data-a b"] {
+        let error = SurfaceTree::new()
+            .apply(&[
+                Mutation::CreateElement(("div".into(), None)),
+                Mutation::SetAttribute((bad.into(), None, AttributeValue::Text("x".into()))),
+                Mutation::AppendChildren(1),
+            ])
+            .expect_err("malformed data-* name must be refused");
+        assert_eq!(
+            error,
+            PresentationError::Unsupported("attribute name or namespace".into()),
+            "{bad}"
+        );
+    }
+    let mut dom = dioxus_core::VirtualDom::new_with_props(app, Props { tree });
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    let div = host_tree.node(host_tree.node(SurfaceNodeId::ROOT).children[0]);
+    let SurfaceNodeKind::Element { attributes, .. } = &div.kind else {
+        panic!("expected an element")
+    };
+    assert_eq!(
+        attributes.get(&("data-line-index".to_owned(), None)),
+        Some(&AttributeValue::Text("3,1".into()))
+    );
+}
+
+#[test]
+fn data_attribute_names_are_capped_per_surface() {
+    let cap = SurfaceTree::MAX_DATA_ATTRIBUTE_NAMES;
+    let set_names = |names: &mut dyn Iterator<Item = String>| {
+        let mut batch = vec![Mutation::CreateElement(("div".into(), None))];
+        batch.extend(names.map(|name| {
+            Mutation::SetAttribute((name, None, AttributeValue::Text("x".into())))
+        }));
+        batch.push(Mutation::AppendChildren(1));
+        batch
+    };
+    // Spread over batches: one element holds at most MAX_ATTRIBUTES_PER_NODE attributes.
+    let mut surface = SurfaceTree::new();
+    for chunk in (0..cap).collect::<Vec<_>>().chunks(SurfaceTree::MAX_ATTRIBUTES_PER_NODE) {
+        let mut names = chunk.iter().map(|index| format!("data-cap-a{index}"));
+        surface.apply(&set_names(&mut names)).expect("within the per-surface cap");
+    }
+    // Repeating names (including after other work) consumes no budget.
+    let mut repeats = (0..SurfaceTree::MAX_ATTRIBUTES_PER_NODE).map(|index| format!("data-cap-a{index}"));
+    surface.apply(&set_names(&mut repeats)).expect("repeats are free");
+    // A second surface has its own budget, though it shares names with the first.
+    let mut other = SurfaceTree::new();
+    let mut fresh = ["data-cap-a0".to_owned(), "data-cap-b0".to_owned()].into_iter();
+    other.apply(&set_names(&mut fresh)).expect("independent budget");
+    // The 513th distinct name on the first surface is refused.
+    let mut one_more = std::iter::once("data-cap-a-over".to_owned());
+    assert_eq!(
+        surface.apply(&set_names(&mut one_more)),
+        Err(PresentationError::InvalidBatch(
+            "too many distinct data-* attribute names on this surface".into()
+        ))
+    );
+}
+
+#[test]
 fn replacing_values_and_removing_subtrees_release_retained_bytes() {
     let mut tree = SurfaceTree::new();
     tree.apply(&counter_initial_batch()).unwrap();
