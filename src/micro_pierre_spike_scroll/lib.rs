@@ -437,6 +437,7 @@ fn view() -> Element {
     let mut correct = use_signal(|| 0_usize);
     let mut anchor = use_signal(|| true);
     let mut probe_resize = use_signal(|| false);
+    let mut spacer_sibling = use_signal(|| false);
     let mut resize_log = use_signal(String::new);
     // The last height each observed thread reported (`ResizeData`), and mode 3: correct the
     // scroller by the observed change, with no model of the new height.
@@ -523,6 +524,7 @@ fn view() -> Element {
                 }
                 button { "data-testid": "anchor-on", onclick: move |_| anchor.set(true), "anchor on" }
                 button { "data-testid": "anchor-off", onclick: move |_| anchor.set(false), "anchor off" }
+                button { "data-testid": "spacer-sibling", onclick: move |_| spacer_sibling.set(true), "spacer sibling" }
                 button { "data-testid": "resize-probe", onclick: move |_| probe_resize.set(true), "resize probe" }
                 span { "data-testid": "resize-log", style: "display:none", "{resize_log}" }
                 for lines in [1_usize, 4, 12] {
@@ -727,11 +729,18 @@ fn view() -> Element {
                         range.set(next);
                     }
                 },
-                div { style: "position:relative;height:{total_height}px",
-                    if source() == 3 {
-                        ThreadWindow { start, count, grown: grown(), probe: probe_resize(), on_size }
-                    } else {
-                        Window { start, count, tokens: tokens_now, offset: offset_now, source: source(), keyed: keyed() }
+                if source() == 3 && spacer_sibling() {
+                    // The spacer is not an ancestor of the rows: a height change on an ancestor of
+                    // the scroll anchor node suppresses the browser's scroll anchoring.
+                    ThreadWindow { start, count, grown: grown(), probe: probe_resize(), on_size }
+                    div { style: "height:{total_height}px" }
+                } else {
+                    div { style: "position:relative;height:{total_height}px",
+                        if source() == 3 {
+                            ThreadWindow { start, count, grown: grown(), probe: probe_resize(), on_size }
+                        } else {
+                            Window { start, count, tokens: tokens_now, offset: offset_now, source: source(), keyed: keyed() }
+                        }
                     }
                 }
             }

@@ -23,7 +23,12 @@ for line in open(sys.argv[1]):
     disp = [x for x in T if x[0] == "dispatch:scroll"]
     apps = [x for x in T if x[0] == "apply"]
     hrs = [x for x in T if x[0] == "host-render"]
-    native, frames, muts, phases = r["native"], r["frames"], r["muts"], r["phases"]
+    # phases[0] is the setup's draining click (it set the phases text); the rest follow the
+    # scroll dispatches in order. Check: the dispatches with mutations must be the same ones.
+    native, frames, muts, phases = r["native"], r["frames"], r["muts"], r["phases"][1:]
+    with_apply = [i for i, dp in enumerate(disp) if any(dp[1] <= a[1] <= dp[2] for a in apps)]
+    with_muts = [i for i, p in enumerate(phases) if p[4] > 0]
+    assert with_apply == [i for i in with_muts if i < len(disp)], (key, with_apply[:5], with_muts[:5])
     counts[key].append((len(native), len(ins), len(disp), len(phases), len(apps), len(muts)))
     # events: one listener-in per native scroll event (scroll listeners only: nothing else
     # dispatches during a run).
@@ -48,6 +53,12 @@ for line in open(sys.argv[1]):
             d["_no-response events"].append(1)
             continue
         d["_response events"].append(1)
+        for name, v in (("browser event -> host listener", t_in - native[i]), ("encode data_json", t_enc - t_in),
+                        ("host pre-dispatch (stale check)", dp[1] - t_enc), ("dispatch call total (host-measured)", dp[2] - dp[1]),
+                        ("guest: parse + handler", ph[0]), ("guest: VirtualDom diff", ph[1]), ("guest: batch encode (take)", ph[2]),
+                        ("guest total (handler..apply call)", guest)):
+            d["R " + name].append(v)
+        d["R mutations in the batch"].append(ph[4])
         d["guest apply call (host tree update, host-measured)"].append(ap[2] - ap[1])
         entry = ap[1] - (ph[0] + ph[1] + ph[2])
         d["boundary in: dispatch call -> guest handler entered"].append(entry - dp[1])
