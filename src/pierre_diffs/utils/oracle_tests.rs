@@ -5,6 +5,12 @@
 //! through the published dist (`oracle/golden/{patches,utilities}.json`) and
 //! must agree exactly: none of this logic depends on the diff algorithm.
 //! Test-only, original to this crate.
+//!
+//! The S4 layout differential tests are the child module `layout_oracle_tests`
+//! (nested here to keep `utils` inside the module item budget).
+
+#[cfg(test)]
+mod layout_oracle_tests;
 
 use serde::Deserialize;
 use serde_json::Value;

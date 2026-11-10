@@ -1,0 +1,39 @@
+[package]
+name = "pierre_diffs_dioxus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+pierre_diffs = { workspace = true }
+dioxus = { workspace = true }
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = [
+  "AddEventListenerOptions",
+  "Document",
+  "DocumentFragment",
+  "DomRect",
+  "Element",
+  "EventTarget",
+  "HtmlElement",
+  "IntersectionObserver",
+  "IntersectionObserverEntry",
+  "IntersectionObserverInit",
+  "Node",
+  "NodeList",
+  "ResizeObserver",
+  "ResizeObserverEntry",
+  "ResizeObserverSize",
+  "ScrollBehavior",
+  "ScrollToOptions",
+  "ShadowRoot",
+  "Window",
+  "console",
+] }
+
+[lints]
+workspace = true

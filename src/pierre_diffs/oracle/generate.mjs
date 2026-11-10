@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ensureOracle, pins } from "./ensure.mjs";
+import { buildVirtualizer } from "./virtualizer_scenarios.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const goldenDir = join(here, "golden");
@@ -2114,6 +2115,7 @@ const outputs = {
   "render_s5.json": buildRenderS5(),
   "render_s6.json": buildRenderS6(sharedDiffs()),
   "highlights.json": await buildHighlights(),
+  "virtualizer.json": await buildVirtualizer(oracle, makeRandom(0x5eed09)),
   "../../highlights/data/highlights_data.json": highlightsData(),
 };
 

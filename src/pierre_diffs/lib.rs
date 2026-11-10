@@ -12,12 +12,15 @@
 //!
 //! Offsets follow the policy documented in [`utf16`].
 
+pub mod components;
 pub mod constants;
 pub mod diff;
 pub mod hast;
 pub mod highlighter_types;
 pub mod highlights;
+pub mod js_collections;
 pub mod js_text;
+pub mod managers;
 pub mod renderers;
 pub mod scanners;
 pub mod sprite;
@@ -25,6 +28,8 @@ pub mod types;
 pub mod utf16;
 pub mod utils;
 
+#[cfg(test)]
+mod fake_dom;
 #[cfg(test)]
 mod oracle_testing;
 #[cfg(test)]

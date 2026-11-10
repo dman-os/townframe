@@ -3,7 +3,7 @@
 // Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
 // Changes: bun:test to nextest. `trims trim.patch fixture and matches snapshot`
 // compares against the published function's output for the same fixture
-// (`trims` in `layout.json`, checked by `utils::layout_oracle_tests`) rather than
+// (`trims` in `layout.json`, checked by `utils::oracle_tests::layout_oracle_tests`) rather than
 // the Bun snapshot file; here it also asserts the snapshot's first hunk header
 // and that every hunk stays within the context budget.
 
