@@ -9,7 +9,6 @@ use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
-use clay_mdk::RefStatus;
 use clay_mdk::hooks::use_ref_status;
 use clay_mdk::hooks::use_rows;
 use contract::Button;
@@ -69,13 +68,7 @@ fn ToolbarButton(
     failure: Signal<Option<String>>,
 ) -> Element {
     let status = use_ref_status(&action);
-    let blocked = match status {
-        RefStatus::Live | RefStatus::Dormant => None,
-        RefStatus::Disabled => Some("its provider is disabled"),
-        RefStatus::Faulted => Some("its provider faulted"),
-        RefStatus::Unavailable => Some("its provider does not offer it"),
-        RefStatus::Revoked => Some("it was revoked"),
-    };
+    let blocked = status.blocked_reason();
     let label_text = match blocked {
         Some(reason) => format!("{label} (unavailable: {reason})"),
         None => label.clone(),

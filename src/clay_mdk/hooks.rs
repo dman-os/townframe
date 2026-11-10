@@ -33,7 +33,8 @@ pub struct PresentationSlotProps {
 /// What a slot shows: the presentation it redeemed, or why there is none right now.
 enum SlotState {
     Loading,
-    Unavailable(crate::Error),
+    /// The failure, and the reference's status when it failed, which says why in words.
+    Unavailable(crate::Error, RefStatus),
     Mounted(Mount),
 }
 
@@ -67,7 +68,7 @@ async fn follow_provider(reference: Capability, mut show: impl FnMut(SlotState))
             Err(failure) => failure,
         };
         // Redeeming again before the status moves would only fail the same way.
-        show(SlotState::Unavailable(failure));
+        show(SlotState::Unavailable(failure, reference.status()));
         reference.status_changed(before).await;
     }
 }
@@ -98,8 +99,12 @@ fn render_state(state: &SlotState, chrome: &Option<Element>) -> Element {
         SlotState::Loading => {
             rsx! { {chrome.clone()} p { role: "status", "Loading section…" } }
         }
-        SlotState::Unavailable(failure) => {
-            rsx! { {chrome.clone()} p { role: "alert", "Section unavailable: {failure:?}" } }
+        SlotState::Unavailable(failure, status) => {
+            let reason = match status.blocked_reason() {
+                Some(reason) => reason.to_owned(),
+                None => failure.to_string(),
+            };
+            rsx! { {chrome.clone()} p { role: "alert", "Section unavailable: {reason}." } }
         }
         SlotState::Mounted(mount) => rsx! { MountedSlot { mount: mount.clone() } },
     }

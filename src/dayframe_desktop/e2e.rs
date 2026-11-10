@@ -674,12 +674,12 @@ async fn the_toolbar_button_of_a_disabled_counter_is_inert_until_it_is_enabled()
         ..
     } = Shell::start(WIDE_PX).await;
     drop(runtime.set_enabled(&counter, false));
-    ui.wait_until("the button says its provider is disabled", |ui| {
+    ui.wait_until("the button says its micro is disabled", |ui| {
         ui.attribute(TOOLBAR_INCREMENT, "disabled").is_some()
             && ui
                 .attribute(TOOLBAR_INCREMENT, "aria-description")
                 .as_deref()
-                == Some("Unavailable: its provider is disabled")
+                == Some("Unavailable: its micro is disabled")
     })
     .await;
     assert_eq!(runtime.state(&counter), MicroState::Disabled);
