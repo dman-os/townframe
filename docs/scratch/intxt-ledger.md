@@ -155,6 +155,8 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
     - Lexicons are embedded as JSON.
   - **Two drawers:** supported today (ADR 019, `AddDoc` with several drawers, removal from one keeps the others). ADR 039's open question is closed.
 
+- **F21 (2026-11-10, nodules lane) Cartridge sidecar, locations.** A nodule's datums lose their storage forms today (`big_nodule/state.rs` registers with no sidecar; Text, lists, float/counter and reference markers fall back to plain JSON). The nodules lane adds a `sidecar` member to the nodule description, carrying the cartridge's serialized `Universe`, checked like boot groups; they'll give the shape. Interim allowed: register intxt_core's group at boot, test-only, behind a dev feature kept out of the default build, deleted when the cartridge path works. `Location` gets its own storage form, `x-automerge: "location"` (stored like a reference, indexed by its datum part; `reference` still refuses fragments); `ActorUrl` gets text-form serde and isn't indexed; both land with their next push. A `refHeads` sibling pins every marked member of its object.
+
 ## In flight
 
 (2026-11-10, end of session) Anyone resuming: refresh on AGENTS.md and the docs it links, then this ledger, ADRs 035, 036, 039, 040, 041 and FDRs 006, 007.
