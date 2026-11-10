@@ -39,6 +39,7 @@ mod many_nodes;
 mod network;
 mod nodule_wasm;
 mod peers;
+mod relay;
 mod stress;
 
 const NOTE: &str = "org.example.note";

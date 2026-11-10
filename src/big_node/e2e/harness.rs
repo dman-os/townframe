@@ -16,6 +16,7 @@ use super::blobs::blob_cap;
 use super::blobs::inventory;
 use super::*;
 use crate::peers::PeersConfig;
+use crate::peers::PolicyChoice;
 use big_blobs::BlobService;
 use big_blobs::InventorySelection;
 use big_blobs_core::Blob;
@@ -95,6 +96,8 @@ struct Member {
     seed: u8,
     secrets: Arc<SecretStore>,
     home: PathBuf,
+    /// Kept across restarts, so a restarted node decides about peers as it did before.
+    policy: PolicyChoice,
     running: Option<Running>,
 }
 
@@ -141,6 +144,14 @@ pub(super) struct Cluster {
 impl Cluster {
     /// Boots one durable node per nickname, each in a directory of its own, unconnected.
     pub(super) async fn boot(nicknames: &[&'static str]) -> Self {
+        Self::boot_with(nicknames, |_| PolicyChoice::default()).await
+    }
+
+    /// [`Cluster::boot`] with each node's peer policy chosen by its nickname.
+    pub(super) async fn boot_with(
+        nicknames: &[&'static str],
+        policy: impl Fn(&'static str) -> PolicyChoice,
+    ) -> Self {
         utils_rs::testing::setup_tracing_once();
         let directory = tempfile::tempdir().unwrap();
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
@@ -160,6 +171,7 @@ impl Cluster {
                 seed: 100 + u8::try_from(index).unwrap(),
                 secrets: secrets().await,
                 home: cluster._directory.path().join(nickname),
+                policy: policy(nickname),
                 running: None,
             });
             cluster.start(index).await;
@@ -178,6 +190,7 @@ impl Cluster {
         cfg.repo.scope_key = member.nickname.into();
         cfg.peers = Some(PeersConfig {
             loopback_only: true,
+            policy: member.policy.clone(),
             // Only re-reads the dial targets; a peer's parts follow keyhive access changes.
             sweep_interval: std::time::Duration::from_millis(200),
             ..Default::default()
@@ -251,7 +264,7 @@ impl Cluster {
 
     /// Runs a keyhive round across every live link, so a membership change made on one node is
     /// held by every node it can reach in one hop.
-    async fn sync_keyhive(&self) {
+    pub(super) async fn sync_keyhive(&self) {
         for (from, to) in &self.links {
             let link = network::Link {
                 source: self.peer(*from),
