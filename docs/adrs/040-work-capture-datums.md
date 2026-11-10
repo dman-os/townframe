@@ -58,7 +58,8 @@ Two machines with checkouts of one project are two clones, each with its worktre
 { "at": "2026-11-10T21:04:11Z",
   "kind": "edit",                         // open: edit | checkout | reset | commit | amend | rebase | refMove | jjSnapshot
   "cause": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/<id>#toolCalls/{\"id\":\"toolu_01…\"}",   // when known
-  "files": { "src/big_cabinet_core/reference.rs": ["zbd7…"], "src/old.rs": null },   // path → file doc heads after this op; null = deleted
+  "files": { "src/big_cabinet_core/reference.rs": ["zbd7…"] },   // path → file doc heads after this op
+  "deleted": [ "src/old.rs" ],                                    // paths this op deleted
   "renames": { "src/url.rs": "src/uri.rs" },                      // new path → old path, continued in the old path's doc
   "git": { "head": "4c1f…", "ref": "refs/heads/feat/intxt", "from": "77b2…", "to": "4c1f…",
            "reflog": "commit (amend): …" },                       // HEAD after the op; for ref moves, the move and git's reflog message
@@ -82,7 +83,7 @@ One document per worktree per path that some op touched: the generic `path` and 
 
 - **Single writer.** Only the worktree's recorder writes it, so the multi-writer machinery the ref-driven design needed (reading only at pins, repairing concurrent splices, divergent refs) is gone. Content is still always read at a pin: an op's or a commit observation's.
 - **Line-level splices** (F1: Automerge's character-level `update_text` is 25× slower). The first content of a path is written in one change.
-- Binary and very large files carry a reference to a `Blob` datum instead of text and are shown as changed, not diffed. A deleted file keeps its doc; its pinned state at the deleting op is absent (`files` maps the path to null).
+- Binary and very large files carry a reference to a `Blob` datum instead of text and are shown as changed, not diffed. A deleted file keeps its doc; the deleting op lists the path in `deleted` (Lexicon has no nullable map values).
 - **A rename continues the document.** When the changes of one op include a deletion and an addition that git's rename detection pairs (`git diff -M` over the op's before and after), the recorder writes the new path's content into the old path's document, updates its `path` datum, and moves the `worktree.files` entry. So a comment on the old path still targets the same document, its cursors carry, and a diff shows the file as renamed. An unpaired delete and add (rewritten past the similarity threshold) are two documents, and comments on the old one fall back to quote matching or show as outdated.
 - Per-file documents keep loads small (F1: 404 files in one doc load at ~514 MB, as per-file docs at ~75 MB).
 
