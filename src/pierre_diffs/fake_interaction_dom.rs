@@ -145,15 +145,21 @@ impl FakeDom {
         key
     }
 
-    // `$button`, `$container`, `$slot`: nodes the manager created, by role.
+    // `$button`, `$container`, `$slot`: nodes the manager created, found under
+    // the scenario's roots by their role attribute.
     pub fn id(&self, name: &str) -> NodeKey {
         if name.starts_with('$') {
-            let created: Vec<NodeKey> = (0..10_000)
-                .take_while(|key| self.doc.exists(*key))
-                .collect();
-            return created
+            let (attribute, value) = match name {
+                "$container" => ("data-gutter-utility-slot", None),
+                "$button" => ("data-utility-button", None),
+                "$slot" => ("name", Some("gutter-utility-slot")),
+                other => panic!("unknown role {other}"),
+            };
+            let roots: Vec<NodeKey> = self.by_name.borrow().values().copied().collect();
+            return roots
                 .into_iter()
-                .find(|key| self.name_of(*key) == name)
+                .flat_map(|root| self.doc.query_by_attribute(root, attribute, value))
+                .next()
                 .expect("a node with that role exists");
         }
         self.by_name.borrow()[name]

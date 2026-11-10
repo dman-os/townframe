@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::rc::Weak;
 
+use crate::document::NodeKey;
 use crate::fake_interaction_dom::FakeDom;
 use crate::managers::interaction_manager::GetHoveredLineResult;
 use crate::managers::interaction_manager::InteractionManager;
@@ -33,11 +34,11 @@ use crate::types::view::SelectedLineRange;
 type Events = Rc<RefCell<Vec<(&'static str, Option<SelectedLineRange>)>>>;
 
 struct FilePreFixture {
-    content_rows: Vec<usize>,
-    gutter_rows: Vec<usize>,
-    pre: usize,
-    gutter: usize,
-    content: usize,
+    content_rows: Vec<NodeKey>,
+    gutter_rows: Vec<NodeKey>,
+    pre: NodeKey,
+    gutter: NodeKey,
+    content: NodeKey,
 }
 
 struct Pointer {
@@ -75,7 +76,7 @@ struct Harness {
 }
 
 impl Harness {
-    fn new(mode: InteractionManagerMode, options: InteractionManagerOptions<usize>) -> Self {
+    fn new(mode: InteractionManagerMode, options: InteractionManagerOptions<NodeKey>) -> Self {
         let dom = Rc::new(FakeDom::default());
         dom.hit_test_available.set(true);
         let manager = InteractionManager::new(
@@ -87,7 +88,7 @@ impl Harness {
         Self { dom, manager }
     }
 
-    fn create(&self, tag: &str, attrs: &[(&str, &str)]) -> usize {
+    fn create(&self, tag: &str, attrs: &[(&str, &str)]) -> NodeKey {
         let id = self.dom.doc.create_element(tag);
         for (name, value) in attrs {
             self.dom.doc.set_attribute(id, name, value);
@@ -139,7 +140,7 @@ impl Harness {
     }
 
     // `element.after(sibling)`
-    fn insert_after(&self, reference: usize, sibling: usize) {
+    fn insert_after(&self, reference: NodeKey, sibling: NodeKey) {
         let parent = self.dom.doc.parent(reference).expect("a parent");
         let next = self
             .dom
@@ -151,19 +152,19 @@ impl Harness {
         self.dom.doc.insert_before(parent, sibling, next);
     }
 
-    fn insert_first(&self, parent: usize, child: usize) {
+    fn insert_first(&self, parent: NodeKey, child: NodeKey) {
         let first = self.dom.doc.children(parent).first().copied();
         self.dom.doc.insert_before(parent, child, first);
     }
 
-    fn set_element_from_point(&self, x: f64, y: f64, element: usize) {
+    fn set_element_from_point(&self, x: f64, y: f64, element: NodeKey) {
         self.dom
             .hits
             .borrow_mut()
             .insert(format!("{x},{y}"), Some(element));
     }
 
-    fn has_descendant(&self, root: usize, attribute: &str) -> bool {
+    fn has_descendant(&self, root: NodeKey, attribute: &str) -> bool {
         !self
             .dom
             .doc
@@ -171,7 +172,7 @@ impl Harness {
             .is_empty()
     }
 
-    fn utility_button(&self, row: usize) -> usize {
+    fn utility_button(&self, row: NodeKey) -> NodeKey {
         *self
             .dom
             .doc
@@ -180,7 +181,7 @@ impl Harness {
             .expect("missing gutter utility button")
     }
 
-    fn dispatch(&self, target: usize, event_type: &str, pointer: &Pointer) -> bool {
+    fn dispatch(&self, target: NodeKey, event_type: &str, pointer: &Pointer) -> bool {
         let event = PointerEventData {
             pointer_id: pointer.pointer_id,
             pointer_type: pointer.pointer_type,
@@ -234,7 +235,7 @@ fn selection_recorder(events: &Events, name: &'static str) -> SelectionCallback 
     })
 }
 
-fn options_with_utility() -> InteractionManagerOptions<usize> {
+fn options_with_utility() -> InteractionManagerOptions<NodeKey> {
     let mut options = InteractionManagerOptions::default();
     options.base.enable_gutter_utility = Some(true);
     options
@@ -600,7 +601,7 @@ fn dragging_the_selected_gutter_utility_extends_selection_on_touch() {
     harness.manager.clean_up();
 }
 
-fn line_selection_options() -> InteractionManagerOptions<usize> {
+fn line_selection_options() -> InteractionManagerOptions<NodeKey> {
     let mut options = options_with_utility();
     options.base.enable_line_selection = Some(true);
     options
@@ -671,7 +672,7 @@ fn create_annotation_row_after(
     harness: &Harness,
     fixture: &FilePreFixture,
     line_index: usize,
-) -> usize {
+) -> NodeKey {
     let gutter_annotation = harness.create(
         "div",
         &[
@@ -720,7 +721,7 @@ fn normal_touch_line_selection_follows_annotation_rows() {
 
 // A slotted annotation: light-DOM content with a `slot` attribute, outside the
 // `pre` (jsdom assigns no slot, so the slot name is what the manager reads).
-fn slotted_annotation_button(harness: &Harness, slot: &str) -> usize {
+fn slotted_annotation_button(harness: &Harness, slot: &str) -> NodeKey {
     let content = harness.create("div", &[("slot", slot)]);
     let button = harness.create("button", &[("type", "button")]);
     harness.dom.doc.append_child(content, button);

@@ -22,6 +22,7 @@ use crate::components::file_diff::FileDiffHunkSeparators;
 use crate::components::file_diff::FileDiffOptions;
 use crate::components::file_diff::get_line_index_for_diff;
 use crate::diff::PatchOptions;
+use crate::document::NodeKey;
 use crate::js_collections::PtrEq;
 use crate::managers::interaction_manager::GetLineIndexUtility;
 use crate::managers::interaction_manager::LineCallback;
@@ -44,7 +45,7 @@ use crate::types::view::SelectionSide;
 use crate::utils::options::get_diff_hunks_renderer_options::get_diff_hunks_renderer_options;
 use crate::utils::predicates::are_options_equal::are_options_equal;
 
-type Options = FileDiffOptions<usize, u8, ()>;
+type Options = FileDiffOptions<NodeKey, u8, ()>;
 
 #[derive(Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -204,9 +205,9 @@ fn build(spec: &Spec, functions: &Functions) -> Options {
     interaction.enable_gutter_utility = spec.enable_gutter_utility;
     interaction.enable_line_selection = spec.enable_line_selection;
     interaction.controlled_selection = spec.controlled_selection;
-    let line = |field: &str, name: &Option<String>| -> Option<LineCallback<usize>> {
+    let line = |field: &str, name: &Option<String>| -> Option<LineCallback<NodeKey>> {
         name.as_ref()
-            .map(|name| functions.get(field, name, || Rc::new(|_: &_| {}) as LineCallback<usize>))
+            .map(|name| functions.get(field, name, || Rc::new(|_: &_| {}) as LineCallback<NodeKey>))
     };
     let selection = |field: &str, name: &Option<String>| -> Option<SelectionCallback> {
         name.as_ref().map(|name| {
@@ -271,8 +272,8 @@ fn build(spec: &Spec, functions: &Functions) -> Options {
     });
     options.on_post_render = spec.on_post_render.as_ref().map(|name| {
         PtrEq(functions.get("onPostRender", name, || {
-            Rc::new(|_: &usize, _: crate::types::options::PostRenderPhase| {})
-                as Rc<dyn Fn(&usize, crate::types::options::PostRenderPhase)>
+            Rc::new(|_: &NodeKey, _: crate::types::options::PostRenderPhase| {})
+                as Rc<dyn Fn(&NodeKey, crate::types::options::PostRenderPhase)>
         }))
     });
     options

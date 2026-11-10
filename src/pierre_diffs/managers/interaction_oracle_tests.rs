@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::document::NodeKey;
 use crate::fake_interaction_dom::FakeDom;
 use crate::fake_interaction_dom::TreeNode;
 use crate::managers::interaction_manager::GetLineIndexUtility;
@@ -232,7 +233,7 @@ fn pointer_type_name(pointer_type: PointerType) -> &'static str {
     }
 }
 
-fn event_out(dom: &FakeDom, event: &PointerEventData<usize>) -> Value {
+fn event_out(dom: &FakeDom, event: &PointerEventData<NodeKey>) -> Value {
     json!({
         "pointerId": event.pointer_id,
         "pointerType": pointer_type_name(event.pointer_type),
@@ -241,7 +242,7 @@ fn event_out(dom: &FakeDom, event: &PointerEventData<usize>) -> Value {
     })
 }
 
-fn event_props(dom: &FakeDom, props: &LineEventProps<usize>) -> Value {
+fn event_props(dom: &FakeDom, props: &LineEventProps<NodeKey>) -> Value {
     let base = &props.base;
     let mut out = json!({
         "type": match base.kind {
@@ -263,17 +264,17 @@ fn event_props(dom: &FakeDom, props: &LineEventProps<usize>) -> Value {
     out
 }
 
-fn build_base(dom: &Rc<FakeDom>, spec: &OptionsSpec) -> InteractionManagerBaseOptions<usize> {
-    let line = |name: &'static str, enabled: bool| -> Option<LineCallback<usize>> {
+fn build_base(dom: &Rc<FakeDom>, spec: &OptionsSpec) -> InteractionManagerBaseOptions<NodeKey> {
+    let line = |name: &'static str, enabled: bool| -> Option<LineCallback<NodeKey>> {
         enabled.then(|| {
             let dom = Rc::clone(dom);
-            Rc::new(move |props: &LineEventProps<usize>| {
+            Rc::new(move |props: &LineEventProps<NodeKey>| {
                 dom.emit(json!([
                     name,
                     event_props(&dom, props),
                     event_out(&dom, &props.event)
                 ]));
-            }) as LineCallback<usize>
+            }) as LineCallback<NodeKey>
         })
     };
     let selection = |name: &'static str, enabled: bool| -> Option<SelectionCallback> {
@@ -314,7 +315,7 @@ fn build_base(dom: &Rc<FakeDom>, spec: &OptionsSpec) -> InteractionManagerBaseOp
     }
 }
 
-fn pluck(dom: &Rc<FakeDom>, spec: &OptionsSpec) -> InteractionManagerOptions<usize> {
+fn pluck(dom: &Rc<FakeDom>, spec: &OptionsSpec) -> InteractionManagerOptions<NodeKey> {
     let base = build_base(dom, spec);
     let get_line_index = base.get_line_index.clone();
     let on_hunk_expand = spec.on_hunk_expand.then(|| {
@@ -352,7 +353,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .expect("a string panic")
 }
 
-type Handler = fn(&InteractionManager<FakeDom>, &PointerEventData<usize>) -> PointerResponse;
+type Handler = fn(&InteractionManager<FakeDom>, &PointerEventData<NodeKey>) -> PointerResponse;
 
 fn dispatch(dom: &FakeDom, manager: &InteractionManager<FakeDom>, spec: &EventSpec) {
     let target = spec.target.as_ref().map(|name| dom.id(name));
