@@ -64,36 +64,54 @@ late in 2000 events). That makes the read-then-scroll correction jump-free.
   from growing host memory without limit.
 - `aria-*` stays an allowlist (it's semantic and finite), and so does everything else.
 
-## 3. A stylesheet per mount
+## 3. A shadow root and stylesheet per mount
 
-**Change from the 2026-11-10 call:** shadow roots aren't available. Every Clay host renders through
-Dioxus, which creates elements with no shadow-root operation, and Blitz has no shadow DOM at all
-(`:host` never matches; gap log). So scoping is done by rewriting the micro's stylesheet, which
-works the same on every backend:
+Operator call (2026-11-10, reaffirmed 2026-11-11): each micro mount gets a shadow root with its own
+sanitized stylesheet, plus the shared theme sheet. Wry and web are the primary backends, and this
+is designed for them. Blitz is not a constraint here.
 
+**What Dioxus does today (pinned fork `a3e1e68`, `packages/interpreter/src/ts/core.ts`):** nothing
+for shadow DOM. The interpreter creates and appends nodes by id with no shadow-root operation, and
+it delegates bubbling events to the root listener, finding the Dioxus node from `event.target`.
+An event from inside a shadow tree reaches the root retargeted to the shadow host, so the inner
+element's id is lost.
+
+**Fork patch (dman-os/dioxus, the interpreter shared by desktop and web):**
+- A mount element the host marks (`data-clay-shadow`) gets `attachShadow({ mode: "open" })` when
+  the interpreter creates it, and the interpreter appends that element's children into its shadow
+  root instead of its light DOM. Attributes and listeners on the element itself stay on the host
+  element.
+- The delegated root handler resolves the target with `event.composedPath()[0]` instead of
+  `event.target`. For an event that never left a shadow tree this is the same node, so plain
+  Dioxus apps don't change.
+- Non-composed events (`scroll`, `load`, `toggle`, …) don't cross the shadow boundary, but Dioxus
+  already attaches non-bubbling listeners to the element itself, so they keep working. Verify per
+  event in the patch's tests.
+- The interpreter ships as generated JS (`src/js/*.js` with `hash.txt`), so the patch regenerates
+  it. Upstream it if Dioxus wants it: shadow-root support is a gap for any Dioxus web-components
+  story.
+
+**Stylesheets:**
 - **API:** standard `document::Style` / `document::Stylesheet` in the guest, with inline CSS text
   (an `href` to a URL is egress and is refused). The guest adapter sends it as a new mutation,
   `SetStyleSheet(String)`, once per mount; a later one replaces it.
-- **Sanitize (host):** parse with a real CSS parser (`cssparser`, already in the tree through
-  Stylo), then drop anything that can make the renderer fetch: `@import`, `@font-face`, `@namespace`,
-  and every declaration whose value contains a `url()` token or `image-set()`, `src()` or
-  `-webkit-image-set()`. Allowlist rather than denylist where the grammar allows it: unknown
-  at-rules are dropped. The no-egress memory's rule applies: anything URL-bearing needs an explicit
-  capability, and none exists yet.
-- **Scope (host):** prefix every selector with the mount's root, `[data-clay-mount="<id>"]` (an
-  attribute the host sets on the mount's root element), and rewrite `:host` and `:root` to that
-  root. Micro styles can't reach outside their mount.
-- **The theme sheet** is the host's own global stylesheet. Its custom properties inherit into
-  every mount, which is the shared theme the operator asked for, with no copy per mount. Host rules
-  can still match inside a mount, as they could with shadow roots that adopt the theme sheet; the
-  kit's rules all come from Tailwind utilities on the elements themselves, so this changes nothing
-  for them.
+- **Sanitize (host):** parse with a real CSS parser (`cssparser`), then drop anything that can make
+  the renderer fetch: `@import`, `@font-face`, `@namespace`, and every declaration whose value has
+  a `url()` token or `image-set()`, `src()` or `-webkit-image-set()`. Unknown at-rules are dropped.
+  Anything URL-bearing needs an explicit capability, and none exists yet.
+- **Into the shadow root:** the sanitized sheet as one `<style>` element as the root's first child.
+  `:host` and `:host(...)` then work as written, which Pierre's stylesheet relies on.
+- **The theme sheet:** custom properties inherit through the shadow boundary, so theme tokens reach
+  every mount. Tailwind utility rules don't, so the host also puts its shared utility sheet in each
+  root. Prefer one constructed `CSSStyleSheet` in `adoptedStyleSheets`, shared by every root
+  (parsed once); a `<style>` copy per root is the fallback if the patch can't reach it.
 - **Inline `style`:** add `overflow-anchor` to the allowed properties (host contract 3: Chromium's
   scroll anchoring is one of W2's two jump-free paths).
 
-What a shadow root would have given and this doesn't: host styles can't be kept out of a mount,
-and a micro's `id`s share the host document's namespace. Neither matters for the diff view; both
-are noted for the embed-contract design.
+**Blitz, later and not blocking:** no shadow DOM there. When the native backend needs micro
+stylesheets, the same sanitized sheet can be wrapped in `@scope ([data-clay-mount="<id>"]) to
+([data-clay-mount])`, if Stylo supports it then, or have its selectors rewritten. That's a fallback
+for one backend, not the design.
 
 ## 4. Forward `visible`
 
@@ -107,19 +125,42 @@ listener is added. Same for `resize` on Blitz, which panics the same way today.
 - A coalesced "sizes changed" event (host contract 4): wait for the X5 rerun on the real host.
 - Pointer capture, `transitionend`, the focus scope: the kit's needs, not the diff view's.
 
+## Platform primitives first (lessons from Chrome/Edge/Firefox/MDN's `modern-web-guidance`)
+
+The operator pointed at "Get your coding agent off ~2019 JavaScript" (GoogleChrome/
+modern-web-guidance, HN 2026-11). What carries over, for the primary (webview) backends:
+- **Prefer a platform primitive to hand-rolled behaviour**, because it comes with keyboard handling
+  and accessibility built in and needs no JS from the micro. Candidates, each to be checked against
+  WebKitGTK (Wry on Linux), Android WebView and current Firefox/Safari before use:
+  - `popover` with `popovertarget`, and `<dialog>` opened declaratively with invoker commands
+    (`commandfor` / `command="show-modal"`): Escape, light dismiss, the top layer and focus
+    handling without JS. Relevant to the kit's sheets and drawers (ledger P1) and to what the
+    surface allowlist must admit (`popover`, `popovertarget`, `commandfor`, `command`, and the
+    `toggle` / `beforetoggle` events).
+  - CSS anchor positioning for popovers, which respects KIT-040 (nothing measures).
+  - `content-visibility: auto` with `contain-intrinsic-size` as a measured alternative to some
+    JS virtualization cost. Not a replacement for the honest Pierre port; a later X5 comparison.
+  - `@scope` (the donut form) for any backend without shadow roots.
+- **Cross-browser, not Chrome-only:** the thread's main complaint was guidance that recommends
+  APIs only Chrome ships. Check every primitive against the engines we actually run.
+- **Guidance vs. instruction for agents:** models take a suggestion as a command. Sonnet briefs
+  and `.agents/skills` should say MUST only for real requirements and mark the rest as options.
+
 ## Build order (Sonnet, one item each, at most two at once)
 
-1. Element commands: rebase the spike's wire, guest backing and web host onto #80; add the
-   Dioxus-hosted renderer's side. Tests: a guest component's `scroll`, `get_scroll_offset` and
-   `set_focus` reach a fake host in order within one dispatch; an unsupported read comes back as a
-   `MountedError`.
-2. `data-*` interner: grammar, interning, the bound. Tests: Pierre's 60 names pass, a bad name is
-   refused, the 4097th distinct name is refused, a repeated name doesn't grow the interner.
-3. `visible` + `overflow-anchor`, with the Blitz refusals.
-4. Stylesheet: the mutation, sanitizer and scoper. Tests: insta snapshots of sanitized, scoped
-   output for Pierre's `style.css` and for a hostile sheet (every fetch path).
+1. Element commands: port the spike's wire, guest backing and host side onto #80. Tests: a guest
+   component's `scroll`, `get_scroll_offset` and `set_focus` reach the host in order within one
+   dispatch; an unsupported read comes back as a `MountedError`. **(Running, 2026-11-11.)**
+2. `data-*` interner: grammar, interning, the 4096 bound. Tests: Pierre's 60 names pass, a bad
+   name is refused, the 4097th distinct name is refused, a repeated name doesn't grow the interner.
+3. `visible` + `overflow-anchor`.
+4. Shadow roots: the interpreter patch in the dioxus fork (mount children into the shadow root,
+   `composedPath()` targets), with tests on desktop's and web's interpreter.
+5. Stylesheet: the `SetStyleSheet` mutation, the sanitizer, the `<style>` in the root and the
+   shared theme sheet. Tests: insta snapshots of sanitized output for Pierre's `style.css` and a
+   hostile sheet (every fetch path).
 
-## Questions for the operator
+## Operator decisions (2026-11-11)
 
-1. Selector scoping in place of shadow roots (section 3): fine?
-2. The `data-*` interner bound of 4096 distinct names per process: fine as a start?
+1. Real shadow roots on Wry and web, through the fork patch (section 3). Blitz doesn't block it.
+2. The `data-*` interner bound starts at 4096 distinct names per process.
