@@ -1,6 +1,6 @@
 # ADR 036 restructure: proposal
 
-Status: Proposal for operator review (2026-11-10). Feeds the rewrite of ADR 036 and ADR 039. Decisions it builds on: ledger D27–D30.
+Status: Superseded 2026-11-10 by ADR 036 (intxt core), ADR 040 (work capture) and ADR 041 (annotations), after operator review (ledger D31). Kept for the reasoning; §1's "discovery by tag instead of descriptor pointers" became layers. Decisions it builds on: ledger D27–D30.
 
 ## 1. Split
 

@@ -2,7 +2,7 @@
 
 **Status:** Proposed.
 
-**Supersedes:** the `db+datum:` grammar of ADR 007 ("Datum addresses have no URI authority") and ADR 021 §2, the hex encoding of the sibling `refHeads` pin (ADR 007 plug manifests, ADR 021), the `db+actor://` form of ADR 020/022, and the `db+blob:` form of ADR 001 ("Blob Identity and URIs"). **Keeps:** the semantics those records already gave references (§2 gathers them in one place). **Related:** ADR 020 (datum identity, signed claims), ADR 022 (authorization), ADR 025 (reference predicates), ADR 026 (blobs), ADR 036 (the first heavy user). Discussion and evidence: `docs/scratch/intxt-ledger.md` N3–N6, A1, D24, D25.
+**Supersedes:** the `db+datum:` grammar of ADR 007 ("Datum addresses have no URI authority") and ADR 021 §2, the hex encoding of the sibling `refHeads` pin (ADR 007 plug manifests, ADR 021), the `db+actor://` form of ADR 020/022, and the `db+blob:` form of ADR 001 ("Blob Identity and URIs"). **Keeps:** the semantics those records already gave references (§2 gathers them in one place). **Related:** ADR 020 (datum identity, signed claims), ADR 022 (authorization), ADR 025 (reference predicates), ADR 026 (blobs), ADRs 036, 040 and 041 (the first heavy users). Discussion and evidence: `docs/scratch/intxt-ledger.md` N3–N6, A1, D24, D25.
 
 ## 1. Context
 

@@ -1,8 +1,8 @@
 # ADR 039: The intxt capture adapter
 
-**Status:** Proposed.
+**Status:** Proposed; to be revised against ADR 040. Worktrees, not refs, are now the capture unit (ledger D29), so §1–§3 below describe the superseded ref-driven design (D26), and the datums it names moved from the earlier ADR 036 to ADR 040.
 
-**Depends on:** ADR 036 (the datums it writes), ADR 037 (acting as a descendant actor, its open question 2). Functional requirements: FDR 007, "Harness adapter". Evidence: `docs/scratch/intxt-ledger.md` F5 (session import), F7 (capture loop prototype), F10 (document size limits); decisions D26 and P3.
+**Depends on:** ADR 040 (the datums it writes), ADR 036 (intxt layers), ADR 037 (acting as a descendant actor, its open question 2). Functional requirements: FDR 007, "Harness adapter". Evidence: `docs/scratch/intxt-ledger.md` F5 (session import), F7 (capture loop prototype), F10 (document size limits); decisions D26 and P3.
 
 ## 1. Context
 

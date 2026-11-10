@@ -1,0 +1,80 @@
+# ADR 041: Annotation datums: comments, threads, structure, seen state
+
+**Status:** Proposed. Supersedes the notes, threads, structure and seen-state sections of the earlier ADR 036 ("intxt datums for the review loop").
+
+**Depends on:** ADR 035 (references and locations), ADR 036 (intxt core, generic datums). Not intxt-specific: any drawer can hold annotations on anything it can reference. Evidence: ledger F6, F8, F10.
+
+Tags are generic (`org.example.*`, ADR 036 §8 Q1 decides the namespace owner).
+
+## 1. Prior art
+
+- **W3C Web Annotation Data Model**: an annotation has 1+ `target`s and 0+ `body`s and a `motivation`. A target is a source plus selectors; `TextQuoteSelector { exact, prefix, suffix }` re-finds text when positions drift, and a target may carry both a position and a quote. Motivations are an open list (assessing, bookmarking, classifying, commenting, describing, editing, highlighting, identifying, linking, moderating, questioning, replying, tagging). A reply is an annotation whose target is another annotation. There is no resolved state.
+- **Patchwork** (inkandswitch, `comments-view`): threads live inside the commented document (`@comments.threads`), each with `refs` (automerge sub-document URLs), `isResolved` and a list of comments; a comment's content may instead be a reference to another document, rendered inline by the tool registered for its type.
+- **Leaflet** (`pub.leaflet.comment`, atproto): `subject`, `plaintext`, `reply.parent`, and an attachment quoting the commented text. schema.org `Comment` threads with `parentItem`.
+
+We take W3C's shape (targets, quote selectors, motivation), an explicit parent for replies (Leaflet, schema.org), and Patchwork's thread-level resolved flag. Unlike Patchwork, comments do not live in the commented document: the commenter often has read-only access to it (a recorded file, someone else's session), and a comment on two documents has no single home.
+
+## 2. Comments
+
+```jsonc
+// org.example.comment/<uuidv7>
+{
+  "targets": [
+    { "ref": "dtxt:datum:zFileA/org.example.note/main#content/[12@a3f-40@a3f]",
+      "refHeads": ["zbd7…"],                                              // ADR 035 §2.8: the pin, a sibling
+      "quote": { "exact": "fn parse(", "prefix": "pub ", "suffix": "value: &str)" } }
+  ],
+  "body": { "mime": "text/markdown", "content": "Why not reuse the fragment here?" },   // the generic note shape
+  "motivation": "commenting",                                             // open; W3C's list
+  "replyTo": "dtxt:datum:zNotes/org.example.comment/0193…"                // replies only
+}
+```
+
+- **Targets** are any `dtxt:` locations: a text range in a file document at a pinned state, a whole document or datum (no fragment), a commit, a session's tool call, another comment, a structure datum. A span of datums (turns 20–45) is a target with `from` and `to` instead of `ref`.
+- **`quote` is required on text targets.** A cursor never fails to resolve: one whose text was deleted resolves to a neighbouring position (F6), so a stale anchor looks valid. A reader compares the resolved text with `quote`; on a mismatch it re-attaches by quote matching or shows the comment as outdated. On a real rebase (F6), 785 of 888 anchors resolved onto identical text and quote matching recovered 99 of the other 103. Tools fill `quote`; people's clients fill it for them. A comment about deleted lines targets the earlier state.
+- **Replies** carry `replyTo` and `motivation: replying`, so a thread is one reference-index query (ADR 035 §2.6) rather than a walk over every comment's targets.
+- **Body** uses the generic note shape (ADR 036 §5). A body that is itself a datum to render (a suggested change, an embedded result) is a reference instead, rendered by the renderer registered for its tag (ADR 036 §4), as Patchwork renders typed comment content.
+- No `creator` or `created`: authorship is the signature, and time is the datum's change time.
+
+## 3. Thread state
+
+```jsonc
+// org.example.threadState/<root comment uuid>
+{ "resolved": false }
+```
+
+One slot per thread, written by anyone. Resolving and reopening at the same time is a visible conflict; otherwise one writer acts at a time. Whose turn a thread is waiting on is derived (the side that didn't write last), not stored.
+
+## 4. Structure
+
+```jsonc
+// org.example.structure/<uuidv7>         (D9: tasks, decisions, sections, groupings)
+{ "kind": "task",                         // open: task | decision | section | …
+  "title": "Move references to dtxt:", "body": { "mime": "text/markdown", "content": "…" },
+  "status": "done",                       // open, optional
+  "targets": [ { "from": "dtxt:datum:zSess/org.example.work.promptTurn/t20", "to": "dtxt:datum:zSess/org.example.work.promptTurn/t45" } ],
+  "parent": "dtxt:datum:zNotes/org.example.structure/0193…",
+  "order": 2.5 }                          // fractional, so writers can insert between
+```
+
+A guided review is a set of `section` structures with `order`. Adapters can map a harness's task lists here; ACP plans stay in the session (ADR 040 §6).
+
+## 5. What a reader has seen
+
+```jsonc
+// org.example.seen/<actor uuid>/<range>  (one writer: that reader)
+{ "datums": { "org.example.comment/0193…": "zbd7…" },   // per slot: the datum heads last read
+  "reviewed": { "<ref or layer>": "<position>" } }       // vocabulary-defined: e.g. a ref target last reviewed
+```
+
+"New" is any slot whose current datum version differs from what is recorded here: one `ListDatums` at current heads (per-slot versions, no values) compared on the client. Datum heads are global, so the comparison is the same on every device. `PollDatums` cursors are node-local and can't be synced seen state. Seen state is split by slot range because one map datum hits the native read budget at about 5,400 entries (F10).
+
+## 6. Where annotations live
+
+In an intxt, annotations are one layer (ADR 036 §2) with `docs: tagged`: any document in the drawer holding these tags. A writer puts its annotations in a document it can write, typically a notes document per writer or a shared one, and starts a new one before the ~500-datum update limit (F10). Outside intxts, any drawer can hold annotations the same way.
+
+## 7. Open questions
+
+1. **Suggested changes**: `motivation: editing` with a body that is a patch or a replacement text; shape deferred until the loop needs it.
+2. **Verdicts** (D18): `motivation: assessing` later.
+3. **Anchoring non-text targets** (images, structured datums): the fragment's automerge path covers structured positions; media fragments are deferred.
