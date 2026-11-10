@@ -2717,6 +2717,7 @@ dependencies = [
  "dioxus",
  "dioxus-core",
  "dioxus-html",
+ "serde_json",
  "tokio",
 ]
 
