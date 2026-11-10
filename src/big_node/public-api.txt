@@ -39,3 +39,4 @@ pub use big_node::listeners :: Listeners
 pub use big_node::peers::policy :: MirrorPolicy
 pub use big_node::peers::policy :: PeerPolicy
 pub use big_node::peers::policy :: PolicyContext
+pub use big_node::peers::policy :: RelayPolicy

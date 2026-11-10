@@ -1,67 +1,30 @@
 //! A relay-access member of a drawer (ADR 038): it stores what it is sent and cannot read it.
-//! The relay's peer policy is not written yet, so these tests pin what the node and keyhive do
-//! today for a member that holds `Access::Relay`, with the one thing a relay policy would
-//! supply (wanting the groups the node is a member of) stood in by [`Membership`].
+//! These tests pin what the node and keyhive do for a member that holds `Access::Relay`, under [`RelayPolicy`].
 
 use super::harness::Cluster;
 use super::harness::Topology;
 use super::*;
-use crate::peers::PeerPolicy;
 use crate::peers::PolicyChoice;
-use crate::peers::PolicyContext;
-use big_cabinet::drawer::Mirrored;
+use crate::peers::RelayPolicy;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::GroupKey;
 use big_cabinet_core::drawer::protocol::InvitePrincipal;
 use big_cabinet_core::drawer::protocol::Principal;
-use big_sync_core::PeerKey;
 use service_utils_rs::ClientError;
-use std::sync::Arc;
-use utils_rs::prelude::Res;
 
-/// Accepts everyone and dials nobody, and wants every group and document its own keyhive says
-/// this node is a member of at any level. The keyhive half still bounds it by what the peer
-/// may have.
-struct Membership {
-    changes: tokio::sync::watch::Sender<u64>,
-}
-
-#[async_trait::async_trait]
-impl PeerPolicy for Membership {
-    async fn dial(&self, _node: &PolicyContext) -> Vec<iroh::EndpointAddr> {
-        Vec::new()
-    }
-
-    async fn accept(&self, _node: &PolicyContext, _peer: &PeerKey) -> bool {
-        true
-    }
-
-    async fn wanted(&self, node: &PolicyContext, _peer: &PeerKey) -> Res<Mirrored> {
-        let local = node.repo.local_keyhive_agent().await?;
-        let held = node.repo.keyhive().membered_for_agent(&local.id()).await;
-        Ok(Mirrored {
-            groups: held.keys().map(|id| GroupKey(*id)).collect(),
-            docs: held.keys().map(|id| DocId::new(*id)).collect(),
-        })
-    }
-
-    fn changes(&self, _node: &PolicyContext) -> tokio::sync::watch::Receiver<u64> {
-        self.changes.subscribe()
+/// The node nicknamed `relay` runs the relay policy; every other node the default one.
+fn relay_policy(nickname: &'static str) -> PolicyChoice {
+    match nickname {
+        "relay" => PolicyChoice::Custom(std::sync::Arc::new(RelayPolicy::new(Vec::new()))),
+        _ => PolicyChoice::default(),
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_relay_access_member_holds_a_drawer_it_cannot_read() {
-    let membership = Arc::new(Membership {
-        changes: tokio::sync::watch::channel(0).0,
-    });
-    let mut cluster = Cluster::boot_with(&["dev", "relay"], |nickname| match nickname {
-        "relay" => PolicyChoice::Custom(Arc::clone(&membership) as Arc<dyn PeerPolicy>),
-        _ => PolicyChoice::default(),
-    })
-    .await;
+    let mut cluster = Cluster::boot_with(&["dev", "relay"], relay_policy).await;
     // dev dials the relay, and a keyhive round runs across the link. The test hands over no
     // contact card: the invite below resolves the relay's agent from what the connection
     // carried.
@@ -89,8 +52,6 @@ async fn a_relay_access_member_holds_a_drawer_it_cannot_read() {
         .await
         .unwrap();
     cluster.sync_keyhive().await;
-    // The relay's wanted groups follow its own membership, which has just changed.
-    membership.changes.send_modify(|revision| *revision += 1);
 
     cluster
         .until(async |cluster| {

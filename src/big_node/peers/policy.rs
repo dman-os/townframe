@@ -10,6 +10,8 @@
 use async_trait::async_trait;
 use big_cabinet::Drawers;
 use big_cabinet::drawer::Mirrored;
+use big_cabinet_core::DocId;
+use big_cabinet_core::drawer::GroupKey;
 use big_repo::SharedBigRepo;
 use big_sync_core::PeerKey;
 use service_utils_rs::RequestContext;
@@ -73,5 +75,61 @@ impl PeerPolicy for MirrorPolicy {
 
     fn changes(&self, node: &PolicyContext) -> tokio::sync::watch::Receiver<u64> {
         node.drawers.subscribe_changes()
+    }
+}
+
+/// The relay policy (ADR 038 section 3): accept every peer the transport authenticates, dial a
+/// fixed list (a relay may have none) and want everything this node is a member of.
+///
+/// It is membership-driven, not descriptor-driven, because a relay mirrors what keyhive says it
+/// is a member of and never learns a drawer's descriptor (it cannot read it), so the known-drawers
+/// intent [`MirrorPolicy`] consults has nothing to name.
+///
+/// Every keyhive access level counts, `Relay` (the lowest) included: membership at any level is
+/// what [`BigKeyhiveHandle::membered_for_agent`](big_repo::BigKeyhiveHandle::membered_for_agent)
+/// reports, and it is the level that decides what a member may read, not whether it syncs. The
+/// access half in `big_node` still bounds the result by what each peer may have.
+///
+/// A membership change reaches the node as a keyhive access delta, which `big_node` already
+/// re-applies every connected peer's parts for, so the policy has no change signal of its own
+/// and [`PeerPolicy::changes`] never fires.
+#[derive(Debug)]
+pub struct RelayPolicy {
+    dial: Vec<iroh::EndpointAddr>,
+    never: tokio::sync::watch::Sender<u64>,
+}
+
+impl RelayPolicy {
+    pub fn new(dial: Vec<iroh::EndpointAddr>) -> Self {
+        Self {
+            dial,
+            never: tokio::sync::watch::channel(0).0,
+        }
+    }
+}
+
+#[async_trait]
+impl PeerPolicy for RelayPolicy {
+    async fn dial(&self, _node: &PolicyContext) -> Vec<iroh::EndpointAddr> {
+        self.dial.clone()
+    }
+
+    async fn accept(&self, _node: &PolicyContext, _peer: &PeerKey) -> bool {
+        true
+    }
+
+    async fn wanted(&self, node: &PolicyContext, _peer: &PeerKey) -> Res<Mirrored> {
+        let local = node.repo.local_keyhive_agent().await?;
+        let held = node.repo.keyhive().membered_for_agent(&local.id()).await;
+        // The answer mixes groups and documents by id; asking for each id as both is harmless,
+        // since only the kind the id really is has a part or an object behind it.
+        Ok(Mirrored {
+            groups: held.keys().map(|id| GroupKey(*id)).collect(),
+            docs: held.keys().map(|id| DocId::new(*id)).collect(),
+        })
+    }
+
+    fn changes(&self, _node: &PolicyContext) -> tokio::sync::watch::Receiver<u64> {
+        self.never.subscribe()
     }
 }

@@ -39,6 +39,7 @@ mod policy;
 pub use policy::MirrorPolicy;
 pub use policy::PeerPolicy;
 pub use policy::PolicyContext;
+pub use policy::RelayPolicy;
 
 use big_blobs::sync::BlobSyncBackend;
 use big_repo::AccessSubject;
