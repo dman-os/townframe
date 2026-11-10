@@ -502,7 +502,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         })
     }
 
-    fn options(&self) -> Rc<InteractionManagerOptions<NodeKey>> {
+    pub fn options(&self) -> Rc<InteractionManagerOptions<NodeKey>> {
         Rc::clone(&self.options.borrow())
     }
 

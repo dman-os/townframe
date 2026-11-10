@@ -18,6 +18,7 @@ import { buildS11aUtils } from "./s11a_cases.mjs";
 import { buildS11aManagers } from "./s11a_managers.mjs";
 import { buildS11bInteraction } from "./s11b_interaction.mjs";
 import { buildS12aOptions } from "./s12a_file_diff.mjs";
+import { buildS12aLifecycle } from "./s12a_lifecycle.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const goldenDir = join(here, "golden");
@@ -2126,6 +2127,7 @@ const outputs = {
   },
   "s12a.json": await buildS12aOptions(oracle, makeRandom(0x5eed0d), sharedDiffs().slice(0, 6)),
   "s11b.json": await buildS11bInteraction(oracle, makeRandom(0x5eed0c)),
+  "s12a_lifecycle.json": await buildS12aLifecycle(oracle, makeRandom(0x5eed0e)),
   "../../highlights/data/highlights_data.json": highlightsData(),
 };
 

@@ -30,6 +30,7 @@ use crate::managers::interaction_manager::LineHoverHighlight;
 use crate::managers::interaction_manager::SelectionCallback;
 use crate::oracle_testing::assert_json_eq;
 use crate::oracle_testing::load_golden;
+use crate::renderers::diff_hunks_renderer::DiffHunksRendererOptions;
 use crate::types::options::DiffIndicators;
 use crate::types::options::DiffStyle;
 use crate::types::options::HighlighterTypes;
@@ -279,8 +280,7 @@ fn build(spec: &Spec, functions: &Functions) -> Options {
     options
 }
 
-fn renderer_options_json(options: &Options) -> Value {
-    let renderer = get_diff_hunks_renderer_options(options);
+pub(super) fn renderer_options_json(renderer: &DiffHunksRendererOptions) -> Value {
     let base = &renderer.base;
     let code = &base.base;
     let mut out = Map::new();
@@ -505,7 +505,7 @@ fn derived_option_state_matches_the_published_class() {
         assert_json_eq(
             &format!("renderer options of case {index}"),
             &expected["rendererOptions"],
-            &renderer_options_json(&options),
+            &renderer_options_json(&get_diff_hunks_renderer_options(&options)),
         );
         assert_eq!(
             json!(interaction.base.enable_gutter_utility),

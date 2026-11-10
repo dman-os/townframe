@@ -21,7 +21,7 @@ import { clone } from "./s11a_cases.mjs";
 
 // ---- the fake DOM -------------------------------------------------------------
 
-class FakeHTMLElement {}
+export class FakeHTMLElement {}
 
 /** The scenario being run: trace emitter, naming, listener tables. */
 let ctx;
@@ -31,7 +31,7 @@ function parseSelector(selector) {
   // Commas inside `[...]` (a split-view line index) do not separate selectors.
   return selector.split(/,(?![^[]*\])/).map((part) => {
     const conditions = [];
-    for (const match of part.trim().matchAll(/\[([a-z-]+)(?:(\^?=)"([^"]*)")?\]/g)) {
+    for (const match of part.trim().matchAll(/\[([a-z-]+)(?:([\^*]?=)"([^"]*)")?\]/g)) {
       conditions.push({ name: match[1], operator: match[2], value: match[3] });
     }
     return conditions;
@@ -44,12 +44,13 @@ function matches(element, parsed) {
       const actual = element.getAttribute(name);
       if (actual === null) return false;
       if (operator === undefined) return true;
-      return operator === "=" ? actual === value : actual.startsWith(value);
+      if (operator === "=") return actual === value;
+      return operator === "*=" ? actual.includes(value) : actual.startsWith(value);
     }),
   );
 }
 
-class FakeNode extends FakeHTMLElement {
+export class FakeNode extends FakeHTMLElement {
   constructor(tag) {
     super();
     this.tagName = tag.toUpperCase();
@@ -82,6 +83,33 @@ class FakeNode extends FakeHTMLElement {
   }
   set name(value) {
     this.setAttribute("name", value);
+  }
+  // What ResizeManager and ScrollSyncManager read (S12a-2a): a declared
+  // height, always connected, `data-*` attributes as `dataset`, a `style` that
+  // records, `scrollTo` and scroll listeners that record. None of it is used
+  // by InteractionManager, so the S11b traces are unchanged.
+  get isConnected() {
+    return true;
+  }
+  get dataset() {
+    return Object.fromEntries(
+      this.attrs.filter(([key]) => key.startsWith("data-")).map(([key]) => [key.slice(5), ""]),
+    );
+  }
+  get scrollLeft() {
+    return 0;
+  }
+  getBoundingClientRect() {
+    return { height: this.height ?? 0 };
+  }
+  get style() {
+    return {
+      setProperty: (property, value) => ctx.emit("style.set", ctx.nm(this), property, value),
+      removeProperty: (property) => ctx.emit("style.remove", ctx.nm(this), property),
+    };
+  }
+  scrollTo({ left }) {
+    ctx.emit("scrollTo", ctx.nm(this), left ?? null);
   }
   hasAttribute(name) {
     return this.getAttribute(name) !== null;
@@ -159,16 +187,24 @@ class FakeNode extends FakeHTMLElement {
     }
   }
   addEventListener(type) {
+    if (type === "scroll") {
+      ctx.emit("listener.add", ctx.nm(this), type);
+      return;
+    }
     ctx.emit("pre.addEventListener", ctx.nm(this), type);
     ctx.preListeners.set(type, this);
   }
   removeEventListener(type) {
+    if (type === "scroll") {
+      ctx.emit("listener.remove", ctx.nm(this), type);
+      return;
+    }
     ctx.emit("pre.removeEventListener", ctx.nm(this), type);
     ctx.preListeners.delete(type);
   }
 }
 
-class FakeButton extends FakeNode {
+export class FakeButton extends FakeNode {
   constructor() {
     super("button");
   }
@@ -201,7 +237,7 @@ function parseHtml(html) {
   return nodes;
 }
 
-function makeWorld(spec, rec) {
+export function makeWorld(spec, rec) {
   const state = { recording: false };
   const emit = (...entry) => {
     if (state.recording) rec(...entry);
@@ -634,7 +670,7 @@ function lineIndexTable(rows, split) {
   return table;
 }
 
-const DIFF_ROWS = [
+export const DIFF_ROWS = [
   { type: "context", del: 1, add: 1 },
   { type: "context", del: 2, add: 2, annotation: true },
   { type: "del", del: 3 },

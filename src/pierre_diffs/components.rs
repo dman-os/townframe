@@ -6,6 +6,8 @@ pub mod file_diff;
 pub mod virtualizer;
 
 #[cfg(test)]
+mod file_diff_lifecycle_oracle_tests;
+#[cfg(test)]
 mod file_diff_oracle_tests;
 #[cfg(test)]
 mod virtualizer_oracle_tests;

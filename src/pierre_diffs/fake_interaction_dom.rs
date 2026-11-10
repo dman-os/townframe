@@ -2,8 +2,8 @@
 //! `Document`: named nodes built from a scenario tree, a table-driven
 //! `elementFromPoint`, listener registration, and a recording trace that
 //! includes the document's mutations (through its observer). Shared by the
-//! oracle replay and the ported upstream tests. Test-only, original to this
-//! crate.
+//! oracle replay and the ported upstream tests. `fake_file_diff_host.rs` makes
+//! it a `FileDiffHost` (S12a-2a). Test-only, original to this crate.
 
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -20,6 +20,7 @@ use crate::document::NodeKey;
 use crate::fake_dom::FakeFrames;
 use crate::managers::interaction_manager::HitTest;
 use crate::managers::interaction_manager::InteractionHost;
+use crate::managers::scroll_sync_manager::TimeoutId;
 use crate::managers::universal_rendering_manager::AnimationFrames;
 use crate::managers::universal_rendering_manager::FrameId;
 
@@ -76,6 +77,9 @@ pub struct FakeDom {
     pub pre_listener: Cell<bool>,
     pub document_listener: Cell<bool>,
     pub frames: FakeFrames,
+    /// `getBoundingClientRect().height` by node; absent is 0.
+    pub heights: RefCell<HashMap<NodeKey, f64>>,
+    pub next_timer: Cell<TimeoutId>,
 }
 
 impl Default for FakeDom {
@@ -107,9 +111,16 @@ impl Default for FakeDom {
                     let names: Vec<String> = children.iter().map(|child| name(*child)).collect();
                     observed.emit(json!(["replaceChildren", name(*parent), names]));
                 }
-                Mutation::SetStyleProperty { .. }
-                | Mutation::RemoveStyleProperty { .. }
-                | Mutation::InsertBefore { .. } => {}
+                Mutation::SetStyleProperty {
+                    node,
+                    name: property,
+                    value,
+                } => observed.emit(json!(["style.set", name(*node), property, value])),
+                Mutation::RemoveStyleProperty {
+                    node,
+                    name: property,
+                } => observed.emit(json!(["style.remove", name(*node), property])),
+                Mutation::InsertBefore { .. } => {}
             }
         })));
         Self {
@@ -121,6 +132,8 @@ impl Default for FakeDom {
             pre_listener: Cell::new(false),
             document_listener: Cell::new(false),
             frames: FakeFrames::default(),
+            heights: RefCell::default(),
+            next_timer: Cell::new(0),
         }
     }
 }
