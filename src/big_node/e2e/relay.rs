@@ -136,6 +136,9 @@ async fn a_phone_reads_a_drawer_through_a_relay_while_the_dev_node_is_offline() 
                 .unwrap()
         })
         .await;
+    tracing::info!("INSTR relay-test pre-stop extra keyhive round"); // INSTR-TMP
+    cluster.sync_keyhive().await; // INSTR-TMP
+    tracing::info!("INSTR relay-test extra round done"); // INSTR-TMP
     cluster.stop(0).await;
 
     cluster
