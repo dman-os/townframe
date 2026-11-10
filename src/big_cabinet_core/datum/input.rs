@@ -1529,6 +1529,12 @@ impl jsonschema::Keyword for Data {
 pub struct PositionValidator(jsonschema::Validator);
 
 impl PositionValidator {
+    /// Whether `value` conforms to the position: the pass-or-fail check, cheaper than collecting
+    /// [`Self::violations`].
+    pub fn is_valid(&self, value: &Value) -> bool {
+        self.0.is_valid(value)
+    }
+
     /// Every way `value` departs from the position, as `path: message` lines; empty when it
     /// conforms.
     pub fn violations(&self, value: &Value) -> Vec<String> {

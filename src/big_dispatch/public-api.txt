@@ -9,6 +9,10 @@ pub struct big_dispatch::DispatchConfig  { authority: Client < AuthorityProtocol
 pub struct big_dispatch::DispatchService  {  }
 pub type big_dispatch::DispatchHandler = Arc < DispatchService >
 pub use big_dispatch::router :: Caller
+pub use big_dispatch::router :: Contract
+pub use big_dispatch::router :: ContractError
+pub use big_dispatch::router :: LexiconSource
+pub use big_dispatch::router :: Operation
 pub use big_dispatch::router :: Provider
 pub use big_dispatch::router :: ProviderEntry
 pub use big_dispatch::router :: ProviderError

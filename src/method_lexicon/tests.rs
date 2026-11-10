@@ -3,93 +3,11 @@ use method_core::schema::MethodSchema;
 use serde_json::Value;
 use serde_json::json;
 
-/// Every built-in method: its NSID with the result of assembling its Lexicon. One list, so a
-/// method added to a service is one line here, and the count below fails when a service grows one
-/// the list does not name.
+/// Every built-in method: its NSID with the result of assembling its Lexicon.
 fn every_builtin() -> Vec<(&'static str, Result<Value, super::MethodLexiconError>)> {
-    fn one<M: MethodSchema>() -> (&'static str, Result<Value, super::MethodLexiconError>) {
-        (M::XRPC.nsid, lexicon::<M>())
-    }
-    macro_rules! group {
-        ($($method:path),* $(,)?) => { vec![$(one::<$method>()),*] };
-    }
-    use big_blobs_core::protocol as blobs;
-    use big_cabinet_core::authority;
-    use big_cabinet_core::doc as docs;
-    use big_cabinet_core::drawer::protocol as drawers;
-    use big_cartridges_core::protocol as cartridges;
-    use big_dispatch_core as dispatch;
-    use big_nodule_core::protocol as nodules;
-    let mut all = group![
-        authority::OpenActor,
-        authority::ResolveActor,
-        authority::ResolveAuthority,
-        authority::MintCapability,
-        authority::AttenuateCapability,
-        authority::InspectCapability,
-        authority::RetractCapability,
-        authority::SignDatumClaim,
-        authority::ObserveCapability,
-        docs::MintDocCapability,
-        docs::CreateDoc,
-        docs::WriteDatums,
-        docs::BranchDoc,
-        docs::MergeDoc,
-        docs::ReadDatums,
-        docs::ListDatums,
-        docs::PollDatums,
-        docs::QueryDatumRefs,
-        docs::UnsafeInspectDatum,
-        docs::InspectDatumClaims,
-        docs::GetDocAvailability,
-        docs::ObserveDocAvailability,
-        drawers::MintDrawerCapability,
-        drawers::CreateDrawer,
-        drawers::AddDoc,
-        drawers::CreateMetaDoc,
-        drawers::RemoveDoc,
-        drawers::AddChild,
-        drawers::RemoveChild,
-        drawers::GetDrawer,
-        drawers::ListDocs,
-        drawers::RememberDrawer,
-        drawers::ForgetDrawer,
-        drawers::ListKnownDrawers,
-        drawers::SetDrawerPolicy,
-        drawers::SetDrawerSuccessor,
-        drawers::ResolveDrawerSuccessor,
-        drawers::ListDrawers,
-        drawers::GrantDrawer,
-        drawers::RevokeDrawer,
-        drawers::InvitePrincipal,
-        drawers::RevokePrincipal,
-        dispatch::Invoke,
-        dispatch::MintDispatchCapability,
-        nodules::MintNoduleCapability,
-        nodules::AdmitNodule,
-        nodules::ConfigureNodule,
-        nodules::SetNoduleEnabled,
-        nodules::SetNoduleDrawerGrants,
-        nodules::SetNoduleOperationGrants,
-        nodules::ConfirmNoduleResolution,
-        nodules::SetNoduleSubstitution,
-        nodules::UninstallNodule,
-        nodules::GetNodule,
-        nodules::ListNodules,
-        blobs::PutBlob,
-        blobs::ReadBlob,
-        blobs::StatBlob,
-        cartridges::MintCartridgesCapability,
-        cartridges::PublishCartridgeVersion,
-        cartridges::RemoveCartridgeVersion,
-        cartridges::RemoveCartridge,
-        cartridges::ImportCartridgeDocument,
-        cartridges::GetPublisher,
-        cartridges::ListCartridges,
-        cartridges::GetCartridge,
-        cartridges::GetCartridgeVersion,
-        cartridges::WatchCartridges,
-    ];
+    let mut all: Vec<_> = super::builtin_methods()
+        .map(|(nsid, assemble)| (nsid, assemble()))
+        .collect();
     all.sort_by_key(|(nsid, _)| *nsid);
     all
 }
@@ -450,6 +368,40 @@ fn a_query_string_coerces_to_the_types_the_parameters_declare() {
     );
 }
 
+/// atproto precedent: a name the Lexicon does not declare is dropped, not refused.
+#[test]
+fn an_undeclared_parameter_is_ignored() {
+    assert_eq!(
+        coercion(
+            &params(),
+            &[("name", "x"), ("cacheBuster", "9f3"), ("limit", "7")]
+        ),
+        Ok(json!({"name": "x", "limit": 7}))
+    );
+}
+
+/// A declared parameter the query omits takes the Lexicon's `default`; one it gives wins.
+#[test]
+fn an_omitted_parameter_takes_its_default() {
+    let declared = json!({
+        "type": "params",
+        "properties": {
+            "limit": {"type": "integer", "default": 50},
+            "flag": {"type": "boolean", "default": false},
+            "tags": {"type": "array", "items": {"type": "string"}, "default": ["a"]},
+            "plain": {"type": "string"},
+        }
+    });
+    assert_eq!(
+        coercion(&declared, &[]),
+        Ok(json!({"limit": 50, "flag": false, "tags": ["a"]}))
+    );
+    assert_eq!(
+        coercion(&declared, &[("limit", "3"), ("tags", "z")]),
+        Ok(json!({"limit": 3, "flag": false, "tags": ["z"]}))
+    );
+}
+
 #[test]
 fn each_bad_parameter_is_named_with_its_own_reason() {
     assert_eq!(
@@ -458,7 +410,6 @@ fn each_bad_parameter_is_named_with_its_own_reason() {
             &[
                 ("limit", "five"),
                 ("flag", "yes"),
-                ("flag2", "1"),
                 ("name", "a"),
                 ("name", "b"),
                 ("ns", "1"),
@@ -467,7 +418,6 @@ fn each_bad_parameter_is_named_with_its_own_reason() {
         ),
         Err(vec![
             "parameter `flag`: `yes` is not `true` or `false`".to_owned(),
-            "parameter `flag2`: is not a parameter of this method".to_owned(),
             "parameter `limit`: `five` is not an integer".to_owned(),
             "parameter `name`: is given 2 times but is not an array".to_owned(),
             "parameter `ns`: `x` is not an integer".to_owned(),

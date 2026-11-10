@@ -5,7 +5,14 @@
 
 pub enum method_lexicon::MethodLexiconError { # [error ("{nsid}: {part} does not project to a Lexicon: {reason}")] Projection { nsid : & 'static str , part : & 'static str , reason : String , }, # [error ("{nsid}: {part} is not an object, so it cannot be a {what}")] NotAnObject { nsid : & 'static str , part : & 'static str , what : & 'static str , }, # [error ("{nsid}: parameter `{name}` is not a primitive or an array of one")] NotFlat { nsid : & 'static str , name : String }, # [error ("{nsid}: the error type is not an enum of named variants")] ErrorNotAnEnum { nsid : & 'static str }, # [error ("{nsid}: the Lexicon file is refused: {reason}")] Frame { nsid : & 'static str , reason : String } }
 pub enum method_lexicon::Position { # [doc = " A procedure's `input.schema`."] Input, # [doc = " A query's or procedure's `output.schema`."] Output, # [doc = " A subscription's `message.schema`."] Message, # [doc = " A query's or subscription's `parameters`, as the object a query string coerces to."] Parameters }
+pub impl method_lexicon::MethodContract::fn check_output (& self , output : & Value) -> Result < () , Vec < String > >
+pub impl method_lexicon::MethodContract::fn check_request (& self , input : & Value) -> Result < () , Vec < String > >
+pub impl method_lexicon::MethodContract::fn coerce_query (& self , query : & [(& str , & str)] ,) -> Result < Map < String , Value > , Vec < ParameterError > >
+pub impl method_lexicon::MethodContract::fn compile (file : & Value , carried : & [& Value]) -> Result < Self , LexiconAdmissionError >
+pub impl method_lexicon::MethodContract::fn kind (& self) -> OperationKind
+pub method_lexicon::fn builtin_methods () -> impl Iterator < Item = (& 'static str , Assemble) >
 pub method_lexicon::fn coerce_parameters (parameters : & Value , query : & [(& str , & str)] ,) -> Result < Map < String , Value > , Vec < ParameterError > >
 pub method_lexicon::fn lexicon < M : MethodSchema > () -> Result < Value , MethodLexiconError >
 pub method_lexicon::fn position_validator (file : & Value , carried : & [& Value] , position : Position ,) -> Result < Option < PositionValidator > , LexiconAdmissionError >
+pub struct method_lexicon::MethodContract  {  }
 pub struct method_lexicon::ParameterError  { name: String, reason: String }

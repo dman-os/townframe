@@ -1,11 +1,12 @@
 version = 1
 role = "runtime"
-dependency_reason = "Dispatch is the node's one router: it verifies the caller's capability through the authority service, resolves the NSID to a provider in an in-memory routing table and calls it under the caller's deadline. Providers are registered by their owners, and the adapter that serves a hosted service by NSID needs only the service runtime."
+dependency_reason = "Dispatch is the node's one router: it verifies the caller's capability through the authority service, resolves the NSID to a provider in an in-memory routing table and calls it under the caller's deadline. It also checks every call's input and output against the method's Lexicon, compiled once at registration with `method_lexicon`. Providers are registered by their owners, and the adapter that serves a hosted service by NSID needs only the service runtime."
 allowed_dependencies = [
     "big_cabinet",
     "big_cabinet_core",
     "big_dispatch_core",
     "method_core",
+    "method_lexicon",
     "secrets_rs",
     "service_client_native_rs",
     "service_utils_rs",

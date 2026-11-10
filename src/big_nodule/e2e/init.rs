@@ -20,6 +20,7 @@ use big_cartridges_core::example_cartridge;
 use big_cartridges_core::request::Necessity;
 use big_cartridges_core::request::Request;
 use big_dispatch::Caller;
+use big_dispatch::Operation;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
 use big_dispatch::ProviderKind;
@@ -512,13 +513,19 @@ async fn a_foreign_initializer_goes_through_dispatch_under_the_nodules_operation
     let nodule_actor = record.actor.unwrap().actor_id;
     let revision = record.revision.unwrap();
 
-    node.dispatch.router.register(
-        "remote",
-        [(REMOTE.to_owned(), Some(OperationKind::Query))],
-        ProviderState::Ready(ProviderKind::BuiltIn(
-            Arc::clone(&remote) as Arc<dyn Provider>
-        )),
-    );
+    node.dispatch
+        .router
+        .register(
+            "remote",
+            [(
+                REMOTE.to_owned(),
+                Operation::unchecked(Some(OperationKind::Query)),
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(
+                Arc::clone(&remote) as Arc<dyn Provider>
+            )),
+        )
+        .unwrap();
     // Without a grant dispatch refuses the nodule's actor, and the provider is never entered.
     node.touch(ALPHA).await;
     let record = node.until(ALPHA, Readiness::InitFailed).await;
@@ -805,11 +812,17 @@ async fn a_required_request_needs_configuration_until_granted_and_an_optional_on
     .unwrap();
 
     // A native provider of the requested operation, so only the grant is missing.
-    node.dispatch.router.register(
-        "remote",
-        [(REMOTE.to_owned(), Some(OperationKind::Query))],
-        ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
-    );
+    node.dispatch
+        .router
+        .register(
+            "remote",
+            [(
+                REMOTE.to_owned(),
+                Operation::unchecked(Some(OperationKind::Query)),
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
+        )
+        .unwrap();
 
     // The required request has no grant: not ready, not a fault, and callers get the
     // retryable not-ready. The optional one has no readiness effect.

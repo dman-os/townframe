@@ -14,6 +14,8 @@
 //! admits only its own handles. Resource capabilities (`capability` fields) stay in the input.
 
 use crate::Caller;
+use crate::LexiconSource;
+use crate::Operation;
 use crate::Provider;
 use crate::ProviderError;
 use crate::ProviderKind;
@@ -135,18 +137,38 @@ impl ServiceProvider {
     }
 
     /// Registers this provider in `router` as `provider_id`, ready, claiming every operation it
-    /// serves.
+    /// serves with the Lexicon its method publishes. A served operation that has no Lexicon in
+    /// [`method_lexicon::builtin_methods`], or one that does not compile, is a programming error
+    /// and panics: a built-in that dispatch could not check would be served unchecked.
     pub fn register(self, router: &Router, provider_id: &str) {
+        let lexicons: BTreeMap<_, _> = method_lexicon::builtin_methods().collect();
         let operations: Vec<_> = self
             .routes
             .iter()
-            .map(|(nsid, route)| ((*nsid).to_owned(), Some(route.kind)))
+            .map(|(nsid, route)| {
+                let assemble = lexicons.get(nsid).unwrap_or_else(|| {
+                    panic!("built-in operation {nsid} is missing from `method_lexicon::builtin_methods`")
+                });
+                let file = assemble().unwrap_or_else(|error| panic!("{error}"));
+                (
+                    (*nsid).to_owned(),
+                    Operation {
+                        kind: Some(route.kind),
+                        lexicon: Some(LexiconSource {
+                            file,
+                            carried: Vec::new(),
+                        }),
+                    },
+                )
+            })
             .collect();
-        router.register(
-            provider_id,
-            operations,
-            ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(self))),
-        );
+        router
+            .register(
+                provider_id,
+                operations,
+                ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(self))),
+            )
+            .unwrap_or_else(|error| panic!("a built-in's Lexicon must compile: {error}"));
     }
 }
 

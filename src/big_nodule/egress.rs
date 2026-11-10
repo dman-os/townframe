@@ -108,7 +108,10 @@ pub async fn call(
             Invoke {
                 operation,
                 input,
-                context: InvocationContext { idempotency_key },
+                context: InvocationContext {
+                    idempotency_key,
+                    http: None,
+                },
             },
         )
         .await;
@@ -123,7 +126,7 @@ pub async fn call(
 
 /// The HTTP form of a dispatch failure, which is the inverse of
 /// [`crate::wire::provider_result`]'s mapping of a handler's response onto dispatch's errors:
-/// denied 403, unknown operation 404, not ready 503, invalid input 400 as an XRPC
+/// denied 403, unknown operation 404, not ready 503, invalid input 400 and an output off its Lexicon 500 as an XRPC
 /// `{ error, message }`, a provider's own error as it came, a deadline 504. The failures of the
 /// services behind dispatch are gateway errors.
 fn dispatch_error_response(error: DispatchError) -> (StatusCode, Value) {
@@ -141,6 +144,9 @@ fn dispatch_error_response(error: DispatchError) -> (StatusCode, Value) {
             StatusCode::BAD_REQUEST,
             json!({ "error": "InvalidRequest", "message": message }),
         ),
+        DispatchError::InvalidOutput(_) => {
+            named(StatusCode::INTERNAL_SERVER_ERROR, "InternalServerError")
+        }
         DispatchError::Context(ContextError::DeadlineExceeded) => {
             named(StatusCode::GATEWAY_TIMEOUT, "DeadlineExceeded")
         }

@@ -61,7 +61,7 @@ fn callee() -> Spec {
     }
 }
 
-fn procedure(nsid: &str) -> Value {
+fn procedure(nsid: &str, input: Value) -> Value {
     json!({
         "lexicon": 1,
         "id": nsid,
@@ -69,7 +69,7 @@ fn procedure(nsid: &str) -> Value {
             "type": "procedure",
             "input": {
                 "encoding": "application/json",
-                "schema": { "type": "object", "properties": {} }
+                "schema": input
             },
             "output": {
                 "encoding": "application/json",
@@ -82,6 +82,11 @@ fn procedure(nsid: &str) -> Value {
 /// The cartridge declaring `spec`'s echo and relay, with a handler artifact whose digest is a
 /// placeholder (its bytes are never put), requesting each of `calls`.
 fn cartridge(spec: &Spec, calls: &[String]) -> Cartridge {
+    cartridge_with_echo_input(spec, calls, json!({ "type": "object", "properties": {} }))
+}
+
+/// [`cartridge`] with `echo_input` as the input schema its `echo` declares.
+fn cartridge_with_echo_input(spec: &Spec, calls: &[String], echo_input: Value) -> Cartridge {
     let mut nodule = Nodule {
         requires: calls
             .iter()
@@ -95,9 +100,14 @@ fn cartridge(spec: &Spec, calls: &[String]) -> Cartridge {
     };
     let operations = [spec.echo(), spec.relay()];
     for nsid in &operations {
+        let input = if *nsid == spec.echo() {
+            echo_input.clone()
+        } else {
+            json!({ "type": "object", "properties": {} })
+        };
         nodule
             .lexicons
-            .push(serde_json::from_value(procedure(nsid)).unwrap());
+            .push(serde_json::from_value(procedure(nsid, input)).unwrap());
     }
     nodule.handler = Some(Handler {
         artifact: "handler".into(),
@@ -221,6 +231,39 @@ async fn admit_accepts_a_placeholder_handler_digest_whose_bytes_were_never_put()
     node.stop().await;
 }
 
+/// A nodule method's declared input is enforced by dispatch before the handler runs, as a
+/// built-in's is: the fixture would echo anything, so a refusal is dispatch's.
+#[tokio::test]
+async fn dispatch_refuses_a_nodule_methods_malformed_input_before_the_handler() {
+    let spec = caller();
+    let strict = json!({
+        "type": "object",
+        "required": ["n"],
+        "properties": { "n": { "type": "integer", "minimum": 0 } }
+    });
+    let node = super::node()
+        .with_nodule(cartridge_with_echo_input(&spec, &[], strict), Fixture)
+        .boot()
+        .await;
+    node.enable(&spec.cartridge).await;
+    let echo = spec.echo();
+    assert_eq!(
+        invoke(&node, &echo, json!({ "n": 1 }), Default::default())
+            .await
+            .unwrap()["input"],
+        json!({ "n": 1 })
+    );
+    for broken in [json!({}), json!({ "n": "one" }), json!({ "n": -1 })] {
+        let Err(DispatchError::InvalidInput(message)) =
+            invoke(&node, &echo, broken.clone(), Default::default()).await
+        else {
+            panic!("{broken} does not match the declared input and must be refused");
+        };
+        assert!(message.contains("Lexicon"), "{message}");
+    }
+    node.stop().await;
+}
+
 #[tokio::test]
 async fn a_native_handler_is_served_the_production_delivery_contract() {
     let spec = caller();
@@ -237,6 +280,7 @@ async fn a_native_handler_is_served_the_production_delivery_contract() {
     let operator_cap = serde_json::to_value(node.big_node().authority.root).unwrap();
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
+        ..Default::default()
     };
     let mut outer = RequestContext::root();
     outer.trace = TraceContext::from_headers(Some(OUTER_TRACEPARENT), None);
@@ -302,6 +346,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     let target = b.echo();
     let context = InvocationContext {
         idempotency_key: Some("nested-key".into()),
+        ..Default::default()
     };
 
     // Granted a different operation, A holds a capability that does not permit the callee's

@@ -41,6 +41,8 @@ use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
 use big_dispatch::Caller;
+use big_dispatch::LexiconSource;
+use big_dispatch::Operation;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
 use big_dispatch::ProviderKind;
@@ -1147,6 +1149,38 @@ impl State {
         self.inits.remove(cartridge_id);
     }
 
+    /// Registers `installed`'s operations in dispatch in `state`. Admission checks a Lexicon's
+    /// frame and references, but only the validator compiler knows whether a position can be
+    /// checked at all. A nodule whose contract cannot be enforced is not served: it is refused,
+    /// as if admission had refused it, and the state registered is that refusal.
+    fn register_claims(
+        &self,
+        provider_id: &str,
+        installed: &InstalledNodule,
+        state: ProviderState,
+    ) -> ProviderState {
+        match self
+            .stores
+            .dispatch
+            .register(provider_id, claims(installed, &state), state.clone())
+        {
+            Ok(()) => state,
+            Err(error) => {
+                tracing::error!(cartridge_id = %installed.cartridge_id, %error, "a nodule's method Lexicon does not compile");
+                let refused = ProviderState::NotReady(Readiness::Refused);
+                self.stores
+                    .dispatch
+                    .register(
+                        provider_id,
+                        unchecked_claims(&installed.admitted.operations),
+                        refused.clone(),
+                    )
+                    .expect("claims without a Lexicon compile nothing");
+                refused
+            }
+        }
+    }
+
     /// Stops the executor hosting `cartridge_id`, if it was. Dispatch must already have stopped
     /// routing to it.
     async fn retire(&mut self, cartridge_id: &CartridgeId) {
@@ -1208,11 +1242,14 @@ impl State {
         // until it is granted, and callers get the retryable not-ready.
         if installed.nodule.unmet_requests(granted).next().is_some() {
             self.retire(&cartridge_id).await;
-            self.stores.dispatch.register(
-                &provider_id,
-                installed.admitted.operations.clone(),
-                ProviderState::NotReady(Readiness::NeedsConfiguration),
-            );
+            self.stores
+                .dispatch
+                .register(
+                    &provider_id,
+                    unchecked_claims(&installed.admitted.operations),
+                    ProviderState::NotReady(Readiness::NeedsConfiguration),
+                )
+                .expect("claims without a Lexicon compile nothing");
             return Readiness::NeedsConfiguration;
         }
         // Likewise a required operation nobody (or more than one, or the wrong cartridge) provides:
@@ -1227,11 +1264,14 @@ impl State {
             .is_some()
         {
             self.retire(&cartridge_id).await;
-            self.stores.dispatch.register(
-                &provider_id,
-                installed.admitted.operations.clone(),
-                ProviderState::NotReady(Readiness::ProviderMissing),
-            );
+            self.stores
+                .dispatch
+                .register(
+                    &provider_id,
+                    unchecked_claims(&installed.admitted.operations),
+                    ProviderState::NotReady(Readiness::ProviderMissing),
+                )
+                .expect("claims without a Lexicon compile nothing");
             return Readiness::ProviderMissing;
         }
         let Some((executor, artifact_key)) = hosting else {
@@ -1247,11 +1287,14 @@ impl State {
                     .await
                     .unwrap_or(readiness);
             }
-            self.stores.dispatch.register(
-                &provider_id,
-                installed.admitted.operations.clone(),
-                ProviderState::NotReady(readiness),
-            );
+            self.stores
+                .dispatch
+                .register(
+                    &provider_id,
+                    unchecked_claims(&installed.admitted.operations),
+                    ProviderState::NotReady(readiness),
+                )
+                .expect("claims without a Lexicon compile nothing");
             return readiness;
         };
         // Upgrading to another revision replaces the workload: the old one stops being routed
@@ -1312,11 +1355,7 @@ impl State {
         {
             *artifact_state = ArtifactState::Available;
         }
-        self.stores.dispatch.register(
-            &provider_id,
-            installed.admitted.operations.clone(),
-            state.clone(),
-        );
+        let state = self.register_claims(&provider_id, installed, state);
         // The one place a hosted nodule's registration turns ready, whichever way it got
         // there (its inits finished, its bytes arrived, it was enabled or installed late).
         // Comparing with the previous reconcile's record makes it a transition, so a steady
@@ -1469,6 +1508,7 @@ impl State {
                 "nodule/{cartridge_id}/{}/{}",
                 installed.revision, init.key
             )),
+            ..Default::default()
         };
         let finished = InitFinished {
             cartridge_id: cartridge_id.clone(),
@@ -2087,6 +2127,60 @@ impl Stores {
         }
         Ok(cap_id)
     }
+}
+
+/// The operations a provider claims, with no Lexicon: for a provider that is not called.
+fn unchecked_claims(
+    operations: &BTreeMap<String, Option<OperationKind>>,
+) -> Vec<(String, Operation)> {
+    operations
+        .iter()
+        .map(|(nsid, kind)| (nsid.clone(), Operation::unchecked(*kind)))
+        .collect()
+}
+
+/// The operations a nodule's provider claims, each with the Lexicon its own file states, if the
+/// description carries one (a foreign operation no vendored Lexicon states is unchecked). The
+/// nodule's other Lexicon files travel with it: the cartridge carries copies of every Lexicon it
+/// depends on (ADR 028), so datum-typed fields resolve. A non-ready provider is never called, so
+/// it claims with no Lexicon.
+fn claims(installed: &InstalledNodule, state: &ProviderState) -> Vec<(String, Operation)> {
+    if !matches!(state, ProviderState::Ready(_)) {
+        return unchecked_claims(&installed.admitted.operations);
+    }
+    let files: Vec<Value> = installed
+        .nodule
+        .lexicons
+        .iter()
+        .map(|file| Value::Object(file.clone().into_iter().collect()))
+        .collect();
+    installed
+        .admitted
+        .operations
+        .iter()
+        .map(|(nsid, kind)| {
+            let lexicon =
+                files
+                    .iter()
+                    .position(|file| file["id"] == *nsid)
+                    .map(|at| LexiconSource {
+                        file: files[at].clone(),
+                        carried: files
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| *index != at)
+                            .map(|(_, file)| file.clone())
+                            .collect(),
+                    });
+            (
+                nsid.clone(),
+                Operation {
+                    kind: *kind,
+                    lexicon,
+                },
+            )
+        })
+        .collect()
 }
 
 fn dispatch_error(error: ClientError<DispatchError>) -> NodulesError {

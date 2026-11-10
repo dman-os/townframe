@@ -1608,12 +1608,16 @@ dependencies = [
  "irpc",
  "keyring-core",
  "method_core",
+ "method_lexicon",
  "secrets_rs",
  "serde_json",
+ "serde_urlencoded",
  "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
+ "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1705,6 +1709,7 @@ dependencies = [
  "iroh-tickets",
  "keyring-core",
  "method_core",
+ "method_lexicon",
  "rand 0.9.5",
  "secrets_rs",
  "serde",
@@ -1750,6 +1755,7 @@ dependencies = [
  "sqlite_rs",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "utils_rs",
 ]
 

@@ -25,6 +25,7 @@ use big_cabinet_core::datum::lexicon::project_position;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::datum::operation::validate;
 use big_cabinet_core::datum::rust_number_formats_to_bounds;
+use method_core::Method;
 use method_core::MethodKind;
 use method_core::schema::MethodSchema;
 use method_core::schema::MethodSchemas;
@@ -110,8 +111,10 @@ pub struct ParameterError {
 /// (`file["defs"]["main"]["parameters"]`): `boolean` is `true` or `false`, `integer` a base-10
 /// integer, `string` itself, and an `array` is every occurrence of the key, in order. This is the
 /// whole of the coercion: bounds, formats, enums and required names are the position validator's
-/// (compile [`Position::Parameters`] and validate the result), and a name the Lexicon does not
-/// declare is refused here.
+/// (compile [`Position::Parameters`] and validate the result). A name the Lexicon does not
+/// declare is ignored (atproto objects are open for extension, and clients add cache-busters:
+/// `@atproto/xrpc-server`'s `decodeQueryParams` only keeps keys with a declared property), and a
+/// declared parameter the query omits takes the Lexicon's `default`.
 pub fn coerce_parameters(
     parameters: &Value,
     query: &[(&str, &str)],
@@ -135,7 +138,6 @@ pub fn coerce_parameters(
             })
         };
         let Some(declaration) = declared.get(name) else {
-            fail("is not a parameter of this method".to_owned());
             continue;
         };
         let scalar = |kind: &str, text: &str| -> Result<Value, String> {
@@ -178,10 +180,177 @@ pub fn coerce_parameters(
             ));
         }
     }
+    for (name, declaration) in declared {
+        if let Some(default) = declaration.get("default")
+            && !coerced.contains_key(name)
+        {
+            coerced.insert(name.clone(), default.clone());
+        }
+    }
     if errors.is_empty() {
         Ok(coerced)
     } else {
         Err(errors)
+    }
+}
+
+type Assemble = fn() -> Result<Value, MethodLexiconError>;
+
+/// Every built-in method with the function that assembles its Lexicon. One list, so a method
+/// added to a service is one line here; a router that registers a built-in operation missing from
+/// it refuses to start (`big_dispatch::ServiceProvider::register`), so a new method cannot go
+/// unlisted unnoticed.
+pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
+    static LIST: std::sync::LazyLock<Vec<(&'static str, Assemble)>> = std::sync::LazyLock::new(
+        || {
+            macro_rules! group {
+                ($($method:path),* $(,)?) => { vec![$((<$method as Method>::XRPC.nsid, lexicon::<$method> as Assemble)),*] };
+            }
+            use big_blobs_core::protocol as blobs;
+            use big_cabinet_core::authority;
+            use big_cabinet_core::doc as docs;
+            use big_cabinet_core::drawer::protocol as drawers;
+            use big_cartridges_core::protocol as cartridges;
+            use big_dispatch_core as dispatch;
+            use big_nodule_core::protocol as nodules;
+            group![
+                authority::OpenActor,
+                authority::ResolveActor,
+                authority::ResolveAuthority,
+                authority::MintCapability,
+                authority::AttenuateCapability,
+                authority::InspectCapability,
+                authority::RetractCapability,
+                authority::SignDatumClaim,
+                authority::ObserveCapability,
+                docs::MintDocCapability,
+                docs::CreateDoc,
+                docs::WriteDatums,
+                docs::BranchDoc,
+                docs::MergeDoc,
+                docs::ReadDatums,
+                docs::ListDatums,
+                docs::PollDatums,
+                docs::QueryDatumRefs,
+                docs::UnsafeInspectDatum,
+                docs::InspectDatumClaims,
+                docs::GetDocAvailability,
+                docs::ObserveDocAvailability,
+                drawers::MintDrawerCapability,
+                drawers::CreateDrawer,
+                drawers::AddDoc,
+                drawers::CreateMetaDoc,
+                drawers::RemoveDoc,
+                drawers::AddChild,
+                drawers::RemoveChild,
+                drawers::GetDrawer,
+                drawers::ListDocs,
+                drawers::RememberDrawer,
+                drawers::ForgetDrawer,
+                drawers::ListKnownDrawers,
+                drawers::SetDrawerPolicy,
+                drawers::SetDrawerSuccessor,
+                drawers::ResolveDrawerSuccessor,
+                drawers::ListDrawers,
+                drawers::GrantDrawer,
+                drawers::RevokeDrawer,
+                drawers::InvitePrincipal,
+                drawers::RevokePrincipal,
+                dispatch::Invoke,
+                dispatch::MintDispatchCapability,
+                nodules::MintNoduleCapability,
+                nodules::AdmitNodule,
+                nodules::ConfigureNodule,
+                nodules::SetNoduleEnabled,
+                nodules::SetNoduleDrawerGrants,
+                nodules::SetNoduleOperationGrants,
+                nodules::ConfirmNoduleResolution,
+                nodules::SetNoduleSubstitution,
+                nodules::UninstallNodule,
+                nodules::GetNodule,
+                nodules::ListNodules,
+                blobs::PutBlob,
+                blobs::ReadBlob,
+                blobs::StatBlob,
+                cartridges::MintCartridgesCapability,
+                cartridges::PublishCartridgeVersion,
+                cartridges::RemoveCartridgeVersion,
+                cartridges::RemoveCartridge,
+                cartridges::ImportCartridgeDocument,
+                cartridges::GetPublisher,
+                cartridges::ListCartridges,
+                cartridges::GetCartridge,
+                cartridges::GetCartridgeVersion,
+                cartridges::WatchCartridges,
+            ]
+        },
+    );
+    LIST.iter().copied()
+}
+
+/// The compiled form of one method's Lexicon: what dispatch checks a call against, built once
+/// when the method's provider registers. `request` is a procedure's input body or a query's
+/// parameters object, `output` the success body; a position the Lexicon does not state (a method
+/// returning `()` has no output) is not checked.
+pub struct MethodContract {
+    kind: OperationKind,
+    request: Option<PositionValidator>,
+    output: Option<PositionValidator>,
+    parameters: Value,
+}
+
+fn check(validator: Option<&PositionValidator>, value: &Value) -> Result<(), Vec<String>> {
+    match validator {
+        Some(validator) if !validator.is_valid(value) => Err(validator.violations(value)),
+        _ => Ok(()),
+    }
+}
+
+impl MethodContract {
+    /// Compiles method `file` (a query, procedure or subscription Lexicon) with the files it may
+    /// reference in `carried`.
+    pub fn compile(file: &Value, carried: &[&Value]) -> Result<Self, LexiconAdmissionError> {
+        let main = &file["defs"]["main"];
+        let kind = match main["type"].as_str() {
+            Some("query") => OperationKind::Query,
+            Some("procedure") => OperationKind::Procedure,
+            Some("subscription") => OperationKind::Subscription,
+            other => unreachable!("a method Lexicon's main is an operation, not {other:?}"),
+        };
+        let request = match kind {
+            OperationKind::Procedure => Position::Input,
+            OperationKind::Query | OperationKind::Subscription => Position::Parameters,
+        };
+        Ok(Self {
+            kind,
+            request: position_validator(file, carried, request)?,
+            output: position_validator(file, carried, Position::Output)?,
+            parameters: main.get("parameters").cloned().unwrap_or_else(|| json!({})),
+        })
+    }
+
+    pub fn kind(&self) -> OperationKind {
+        self.kind
+    }
+
+    /// The typed object a query string carries, read through the method's `parameters`
+    /// ([`coerce_parameters`]).
+    pub fn coerce_query(
+        &self,
+        query: &[(&str, &str)],
+    ) -> Result<Map<String, Value>, Vec<ParameterError>> {
+        coerce_parameters(&self.parameters, query)
+    }
+
+    /// Whether `input` conforms to the method's request body or parameters; otherwise every way
+    /// it departs. The pass is the common case and allocates nothing.
+    pub fn check_request(&self, input: &Value) -> Result<(), Vec<String>> {
+        check(self.request.as_ref(), input)
+    }
+
+    /// Whether `output` conforms to the method's success body; otherwise every way it departs.
+    pub fn check_output(&self, output: &Value) -> Result<(), Vec<String>> {
+        check(self.output.as_ref(), output)
     }
 }
 

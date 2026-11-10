@@ -11,6 +11,7 @@ path = "lib.rs"
 
 [dependencies]
 method_core.workspace = true
+method_lexicon = { path = "../method_lexicon" }
 # internal
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }
@@ -21,11 +22,14 @@ service_utils_rs.workspace = true
 # encoding
 serde_json.workspace = true
 http.workspace = true
+serde_urlencoded = "0.7"
 irpc.workspace = true
 
 # errors and state
 futures.workspace = true
 async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]

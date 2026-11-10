@@ -5,6 +5,8 @@
 use crate::Caller;
 use crate::Dispatch;
 use crate::DispatchConfig;
+use crate::LexiconSource;
+use crate::Operation;
 use crate::Provider;
 use crate::ProviderError;
 use crate::ProviderKind;
@@ -18,6 +20,7 @@ use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
+use big_dispatch_core::HttpForm;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::MintDispatchCapability;
@@ -163,11 +166,17 @@ impl Harness {
 
     fn register_echo(&self) -> Arc<Echo> {
         let echo = Arc::new(Echo::default());
-        self.dispatch.router.register(
-            "echo",
-            [(ECHO.to_owned(), Some(OperationKind::Query))],
-            ProviderState::Ready(ProviderKind::BuiltIn(Arc::clone(&echo) as Arc<dyn Provider>)),
-        );
+        self.dispatch
+            .router
+            .register(
+                "echo",
+                [(
+                    ECHO.to_owned(),
+                    Operation::unchecked(Some(OperationKind::Query)),
+                )],
+                ProviderState::Ready(ProviderKind::BuiltIn(Arc::clone(&echo) as Arc<dyn Provider>)),
+            )
+            .unwrap();
         echo
     }
 
@@ -250,6 +259,7 @@ async fn the_operator_invokes_a_built_in_provider_and_its_refusals_pass_through(
 
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
+        ..Default::default()
     };
     assert_eq!(
         h.invoke_with(
@@ -474,5 +484,216 @@ async fn a_service_provider_routes_by_nsid_and_carries_the_services_own_errors()
         h.invoke(operator, MINT, json!({ "scope": 7 })).await,
         Err(DispatchError::InvalidInput(_))
     ));
+    h.shutdown().await;
+}
+
+const PUT: &str = "org.example.contract.put";
+const GET: &str = "org.example.contract.get";
+
+/// A provider that answers `output` whatever it is asked, after recording the input it was given.
+struct Canned {
+    output: Value,
+    seen: std::sync::Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl Provider for Canned {
+    async fn call(
+        &self,
+        _: &Caller,
+        _: &str,
+        _: &RequestContext,
+        _: &InvocationContext,
+        input: Value,
+    ) -> Result<Value, ProviderError> {
+        self.seen.lock().unwrap().push(input);
+        Ok(self.output.clone())
+    }
+}
+
+impl Harness {
+    /// Registers a procedure `PUT` (`{name: string, count?: integer}` -> `{ok: boolean}`) and a
+    /// query `GET` (`{limit: integer = 10, flag?: boolean, tags?: string[]}` -> `{ok: boolean}`),
+    /// both answered with `output`.
+    fn register_contract(&self, output: Value) -> Arc<Canned> {
+        let canned = Arc::new(Canned {
+            output,
+            seen: Default::default(),
+        });
+        let body = json!({"encoding": "application/json", "schema": {
+            "type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}
+        }});
+        let put = json!({"lexicon": 1, "id": PUT, "defs": {"main": {
+            "type": "procedure",
+            "input": {"encoding": "application/json", "schema": {
+                "type": "object", "required": ["name"],
+                "properties": {"name": {"type": "string"}, "count": {"type": "integer"}}
+            }},
+            "output": body,
+        }}});
+        let get = json!({"lexicon": 1, "id": GET, "defs": {"main": {
+            "type": "query",
+            "parameters": {"type": "params", "properties": {
+                "limit": {"type": "integer", "default": 10},
+                "flag": {"type": "boolean"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            }},
+            "output": body,
+        }}});
+        let operation = |kind, file| Operation {
+            kind: Some(kind),
+            lexicon: Some(LexiconSource {
+                file,
+                carried: Vec::new(),
+            }),
+        };
+        self.dispatch
+            .router
+            .register(
+                "contract",
+                [
+                    (PUT.to_owned(), operation(OperationKind::Procedure, put)),
+                    (GET.to_owned(), operation(OperationKind::Query, get)),
+                ],
+                ProviderState::Ready(ProviderKind::BuiltIn(
+                    Arc::clone(&canned) as Arc<dyn Provider>
+                )),
+            )
+            .unwrap();
+        canned
+    }
+
+    async fn invoke_http(
+        &self,
+        operation: &str,
+        input: Value,
+        http: HttpForm,
+    ) -> Result<Value, DispatchError> {
+        self.invoke_with(
+            self.operator(),
+            operation,
+            input,
+            InvocationContext {
+                http: Some(http),
+                ..Default::default()
+            },
+            RequestContext::root(),
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn an_input_off_the_methods_lexicon_is_refused_before_the_provider_is_called() {
+    let h = harness().await;
+    let canned = h.register_contract(json!({"ok": true}));
+    let operator = h.operator();
+    assert_eq!(
+        h.invoke(operator, PUT, json!({"name": "x", "count": 2}))
+            .await,
+        Ok(json!({"ok": true}))
+    );
+    for broken in [json!({"count": 2}), json!({"name": 7}), json!([])] {
+        let Err(DispatchError::InvalidInput(message)) =
+            h.invoke(operator, PUT, broken.clone()).await
+        else {
+            panic!("{broken} must be refused");
+        };
+        assert!(message.contains("Lexicon"), "{message}");
+    }
+    assert_eq!(
+        canned.seen.lock().unwrap().len(),
+        1,
+        "only the valid call arrived"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_built_ins_input_is_checked_against_its_method_lexicon() {
+    const MINT: &str = "org.example.daybook.dispatch.mintCapability";
+    let h = harness().await;
+    ServiceProvider::default()
+        .serve(&h.dispatch.client)
+        .register(&h.dispatch.router, "builtin:self");
+    let Err(DispatchError::InvalidInput(message)) = h
+        .invoke(h.operator(), MINT, json!({"scope": 7, "rights": "all"}))
+        .await
+    else {
+        panic!("a scope that is not an object is refused by dispatch");
+    };
+    assert!(message.contains("scope"), "{message}");
+    h.shutdown().await;
+}
+
+/// atproto's xrpc-server fails a call whose handler's output departs from the Lexicon with
+/// `InternalServerError` (500); dispatch does the same and does not hand the body on.
+#[tokio::test]
+async fn an_output_off_the_methods_lexicon_is_a_provider_failure() {
+    let h = harness().await;
+    h.register_contract(json!({"ok": "yes"}));
+    let Err(DispatchError::InvalidOutput(message)) =
+        h.invoke(h.operator(), PUT, json!({"name": "x"})).await
+    else {
+        panic!("an output that is not the declared shape is a provider failure");
+    };
+    assert!(message.contains(PUT), "{message}");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_get_is_typed_by_the_parameters_with_defaults_applied_and_unknown_names_ignored() {
+    let h = harness().await;
+    let canned = h.register_contract(json!({"ok": true}));
+    let get = |query: &str| HttpForm::Get {
+        query: query.to_owned(),
+    };
+    h.invoke_http(
+        GET,
+        Value::Null,
+        get("flag=true&limit=3&tags=a&tags=b&cacheBuster=9"),
+    )
+    .await
+    .unwrap();
+    h.invoke_http(GET, Value::Null, get("")).await.unwrap();
+    assert_eq!(
+        *canned.seen.lock().unwrap(),
+        [
+            json!({"limit": 3, "flag": true, "tags": ["a", "b"]}),
+            json!({"limit": 10}),
+        ]
+    );
+    let Err(DispatchError::InvalidInput(message)) =
+        h.invoke_http(GET, Value::Null, get("limit=many")).await
+    else {
+        panic!("a parameter of the wrong type is refused");
+    };
+    assert!(message.contains("limit"), "{message}");
+    h.shutdown().await;
+}
+
+/// atproto answers `InvalidRequest` ("Incorrect HTTP method (POST) expected GET") for the wrong
+/// verb; so does dispatch, after admission.
+#[tokio::test]
+async fn the_wrong_http_verb_for_a_methods_kind_is_invalid() {
+    let h = harness().await;
+    h.register_contract(json!({"ok": true}));
+    for (operation, http, expected) in [
+        (GET, HttpForm::Post, "expected GET"),
+        (
+            PUT,
+            HttpForm::Get {
+                query: String::new(),
+            },
+            "expected POST",
+        ),
+    ] {
+        let Err(DispatchError::InvalidInput(message)) =
+            h.invoke_http(operation, json!({}), http).await
+        else {
+            panic!("{operation}: the wrong verb is refused");
+        };
+        assert!(message.contains(expected), "{message}");
+    }
     h.shutdown().await;
 }

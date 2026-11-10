@@ -303,6 +303,7 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     let operator_cap = serde_json::to_value(node.authority.root).unwrap();
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
+        ..Default::default()
     };
     let mut outer = RequestContext::root();
     outer.trace = TraceContext::from_headers(Some(OUTER_TRACEPARENT), None);
@@ -417,6 +418,7 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     let target = b.echo();
     let context = InvocationContext {
         idempotency_key: Some("nested-key".into()),
+        ..Default::default()
     };
 
     // Granted a different operation, A holds a capability that does not permit the callee's:

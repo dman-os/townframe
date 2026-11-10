@@ -13,6 +13,10 @@ mod service;
 mod xrpc;
 
 pub use router::Caller;
+pub use router::Contract;
+pub use router::ContractError;
+pub use router::LexiconSource;
+pub use router::Operation;
 pub use router::Provider;
 pub use router::ProviderEntry;
 pub use router::ProviderError;
@@ -32,16 +36,20 @@ use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::Uuid7;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchMessage;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::DispatchScope;
+use big_dispatch_core::HttpForm;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::InvokeOutput;
 use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::NotReadyReason;
 use method_core::ContextError;
+use method_lexicon::MethodContract;
+use serde_json::Value;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
@@ -169,13 +177,11 @@ impl DispatchService {
                 });
             }
         };
-        let call = kind.provider().call(
-            &caller,
-            &params.operation,
-            context,
-            &params.context,
-            params.input,
-        );
+        let contract = entry.contract.as_deref().map(Contract::compiled);
+        let input = admit_input(&params, entry.operation_kind, contract)?;
+        let call =
+            kind.provider()
+                .call(&caller, &params.operation, context, &params.context, input);
         let result = match budget {
             Some(budget) => tokio::time::timeout(budget, call)
                 .await
@@ -183,7 +189,29 @@ impl DispatchService {
             None => call.await,
         };
         match result {
-            Ok(output) => Ok(InvokeOutput { output }),
+            Ok(output) => {
+                // atproto's xrpc-server validates every response against the method's Lexicon
+                // (unless `validateResponse` is turned off) and fails the call with
+                // `InternalServerError` (500) when the handler's output departs from it: the
+                // handler is the one in the wrong, not the caller. Here that is a provider bug,
+                // so it is logged at error as well as answered.
+                if let Some(contract) = contract
+                    && let Err(violations) = contract.check_output(&output)
+                {
+                    let violations = violations.join("; ");
+                    tracing::error!(
+                        operation = %params.operation,
+                        provider = %entry.provider_id,
+                        %violations,
+                        "a provider answered off its method's Lexicon"
+                    );
+                    return Err(DispatchError::InvalidOutput(format!(
+                        "{} answered off its Lexicon: {violations}",
+                        params.operation
+                    )));
+                }
+                Ok(InvokeOutput { output })
+            }
             Err(ProviderError::InvalidInput(reason)) => Err(DispatchError::InvalidInput(reason)),
             Err(ProviderError::Failed { status, body }) => {
                 Err(DispatchError::Provider { status, body })
@@ -215,6 +243,65 @@ impl DispatchService {
             .await
             .map_err(authority_error)
     }
+}
+
+/// The input a provider is called with. An HTTP call is first held to the method's kind, as
+/// atproto holds it (`@atproto/xrpc-server` answers `InvalidRequest`, "Incorrect HTTP method
+/// (POST) expected GET", for the wrong verb): a GET names a query and builds its input from the
+/// query string through the Lexicon's `parameters` (undeclared names ignored, defaults applied),
+/// a POST names a procedure and its body is the input. Then the input must conform to the
+/// Lexicon's `input` (a query's `parameters`): atproto's `InvalidRequest`, 400. A method with no
+/// Lexicon here (a foreign contract no Lexicon states, a query like `getNodeInfo` that has none)
+/// is passed through as given, with a GET's input empty.
+fn admit_input(
+    params: &Invoke,
+    kind: Option<OperationKind>,
+    contract: Option<&MethodContract>,
+) -> Res<Value> {
+    let refuse = |message: String| Err(DispatchError::InvalidInput(message));
+    let is_query = kind == Some(OperationKind::Query);
+    let input = match &params.context.http {
+        Some(HttpForm::Get { .. }) if !is_query => {
+            return refuse("Incorrect HTTP method (GET) expected POST".to_owned());
+        }
+        Some(HttpForm::Post) if is_query => {
+            return refuse("Incorrect HTTP method (POST) expected GET".to_owned());
+        }
+        Some(HttpForm::Get { query }) => {
+            let query: Vec<(String, String)> =
+                serde_urlencoded::from_str(query).map_err(|error| {
+                    DispatchError::InvalidInput(format!("invalid query string: {error}"))
+                })?;
+            match contract {
+                None => Value::Object(Default::default()),
+                Some(contract) => {
+                    let query: Vec<(&str, &str)> = query
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str()))
+                        .collect();
+                    Value::Object(contract.coerce_query(&query).map_err(|errors| {
+                        DispatchError::InvalidInput(
+                            errors
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("; "),
+                        )
+                    })?)
+                }
+            }
+        }
+        Some(HttpForm::Post) | None => params.input.clone(),
+    };
+    if let Some(contract) = contract
+        && let Err(violations) = contract.check_request(&input)
+    {
+        return refuse(format!(
+            "the input does not match the method's Lexicon: {}",
+            violations.join("; ")
+        ));
+    }
+    Ok(input)
 }
 
 macro_rules! handlers {

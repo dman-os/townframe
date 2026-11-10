@@ -15,6 +15,7 @@ use big_cartridges_core::Cartridge;
 use big_cartridges_core::Digest;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::request::Necessity;
+use big_dispatch::Operation;
 use big_dispatch::Provider;
 use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
@@ -84,11 +85,19 @@ impl Node {
 async fn node_with_beta_and(fork: Cartridge) -> (Node, Arc<FakeExecutor>) {
     let executor = FakeExecutor::hosting(Probe::new(), true);
     let node = super::node_with(Some(Arc::clone(&executor) as _)).await;
-    node.dispatch.router.register(
-        "native-remote",
-        [SYNC, MORE].map(|nsid| (nsid.to_owned(), Some(OperationKind::Query))),
-        ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
-    );
+    node.dispatch
+        .router
+        .register(
+            "native-remote",
+            [SYNC, MORE].map(|nsid| {
+                (
+                    nsid.to_owned(),
+                    Operation::unchecked(Some(OperationKind::Query)),
+                )
+            }),
+            ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
+        )
+        .unwrap();
     node.admit(node.operator(), beta("1.0.0")).await.unwrap();
     node.grant_operations(BETA, &["org.example.remote"]).await;
     node.admit(node.operator(), fork).await.unwrap();

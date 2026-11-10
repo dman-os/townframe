@@ -48,6 +48,8 @@ use super::listeners::MAX_RESPONSE;
 use super::listeners::post;
 use super::listeners::tcp_client;
 use super::*;
+use big_cabinet_core::doc::WriteDatums;
+use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use method_core::Method;
 use service_client_native_rs::XrpcClient;
@@ -664,6 +666,17 @@ async fn long_test_cost_table() {
     table.print();
 }
 
+/// The calls of `dispatch_costs` alone, counted: what a call through the router costs, which is
+/// where every call's input and output are validated against its method's Lexicon.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dispatched_call_costs() {
+    let mut table = Table::default();
+    COUNTING.store(true, Relaxed);
+    dispatch_costs(&mut table).await;
+    COUNTING.store(false, Relaxed);
+    table.print();
+}
+
 /// One `readDatums` per path through the node's router: the in-process dispatch client, the Unix
 /// socket and TCP. The difference between the rows is the transport; the operation is the same.
 async fn dispatch_costs(table: &mut Table) {
@@ -679,7 +692,10 @@ async fn dispatch_costs(table: &mut Table) {
         unix_socket: Some(socket.clone()),
         ..super::listeners::tcp()
     };
-    let (node, stop) = BigNode::boot(config).await.unwrap();
+    let (node, stop) = table
+        .run("boot one node", BigNode::boot(config))
+        .await
+        .unwrap();
     let note = create(
         &node,
         "costs-dispatch",
@@ -702,10 +718,52 @@ async fn dispatch_costs(table: &mut Table) {
     })
     .unwrap();
     let operator = Authorization::identity(node.authority.root);
+    let write_capability = capability(
+        &node,
+        DocScope {
+            write: BTreeSet::from([note.doc_id.clone()]),
+            ..DocScope::default()
+        },
+    )
+    .await;
     let unix = XrpcClient::unix(&socket, MAX_RESPONSE).unwrap();
     let tcp = tcp_client(&node);
-    for _ in 0..20 {
+    let contract = method_lexicon::MethodContract::compile(
+        &method_lexicon::lexicon::<ReadDatums>().unwrap(),
+        &[],
+    )
+    .unwrap();
+    for ordinal in 0..20 {
+        let write = serde_json::to_value(WriteDatums {
+            capability: write_capability,
+            command: None,
+            doc_id: note.doc_id.clone(),
+            mode: WriteMode::AtCurrent,
+            set: BTreeMap::from([(
+                format!("{NOTE}/body").parse().unwrap(),
+                json!({"$type": NOTE, "value": format!("v{ordinal}")}),
+            )]),
+            remove: BTreeSet::new(),
+        })
+        .unwrap();
         table
+            .run("dispatch writeDatums in-process", async {
+                node.dispatch
+                    .client
+                    .call_with(
+                        RequestContext::root(),
+                        operator.metadata(),
+                        big_dispatch_core::Invoke {
+                            operation: WriteDatums::XRPC.nsid.to_owned(),
+                            input: write.clone(),
+                            context: Default::default(),
+                        },
+                    )
+                    .await
+                    .unwrap()
+            })
+            .await;
+        let read = table
             .run("dispatch readDatums in-process", async {
                 node.dispatch
                     .client
@@ -720,6 +778,14 @@ async fn dispatch_costs(table: &mut Table) {
                     )
                     .await
                     .unwrap()
+                    .output
+            })
+            .await;
+        // The check dispatch adds to every call, alone: compiled once, run per call.
+        table
+            .run("validate readDatums input and output", async {
+                contract.check_request(&input).unwrap();
+                contract.check_output(&read).unwrap();
             })
             .await;
         for (op, client, authorization) in [

@@ -74,7 +74,10 @@ pub fn xrpc_router(
                             Invoke {
                                 operation: request.nsid,
                                 input: request.params,
-                                context: InvocationContext { idempotency_key },
+                                context: InvocationContext {
+                                    idempotency_key,
+                                    http: None,
+                                },
                             },
                         )
                         .await
@@ -119,6 +122,11 @@ fn refusal(error: ClientError<DispatchError>) -> XrpcHandlerError {
             XrpcHandlerError::Unavailable(error.to_string())
         }
         DispatchError::Authority(_) => XrpcHandlerError::Internal(error.to_string()),
+        DispatchError::InvalidOutput(_) => XrpcHandlerError::domain(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalServerError",
+            error.to_string(),
+        ),
         DispatchError::Provider { status, body } => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
             match serde_json::from_value::<XrpcErrorEnvelope>(body.clone()) {

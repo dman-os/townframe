@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_dispatch::Caller;
+use big_dispatch::Operation;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
 use big_dispatch::ProviderKind;
@@ -65,15 +66,21 @@ pub(crate) fn register(
     known_drawers_id: DrawerId,
     peers: Option<Peers>,
 ) {
-    router.register(
-        provider_id,
-        [(GET_NODE_INFO.to_owned(), Some(OperationKind::Query))],
-        ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(NodeInfoProvider {
-            node_id,
-            known_drawers_id,
-            peers,
-        }))),
-    );
+    // The node's facts are not a `Method` and publish no Lexicon, so calls are unchecked.
+    router
+        .register(
+            provider_id,
+            [(
+                GET_NODE_INFO.to_owned(),
+                Operation::unchecked(Some(OperationKind::Query)),
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(NodeInfoProvider {
+                node_id,
+                known_drawers_id,
+                peers,
+            }))),
+        )
+        .expect("a provider without a Lexicon compiles nothing");
 }
 
 #[async_trait]

@@ -123,6 +123,24 @@ impl Readiness {
 pub struct InvocationContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// How the call arrived when it came over HTTP; `None` for a call that did not (a direct
+    /// client call, a nodule's egress), whose `input` is already the method's JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<HttpForm>,
+}
+
+/// The HTTP form of a call through the `/xrpc/<nsid>` surface. Dispatch holds it to the method's
+/// kind (a query is a GET, a procedure a POST, as in atproto) and, for a GET, builds the input
+/// from the query string by the method's Lexicon parameters, after admitting the caller, so what
+/// a method declares is not revealed to a caller dispatch would refuse.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "camelCase")]
+pub enum HttpForm {
+    /// The JSON body is the call's `input`.
+    Post,
+    /// The call's `input` is ignored: the query string, still percent-encoded, is the request.
+    Get { query: String },
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -169,8 +187,12 @@ pub enum DispatchError {
     /// Retryable: the provider exists but is not serving yet.
     #[error("the operation's provider is not ready: {reason:?}")]
     NotReady { reason: NotReadyReason },
-    #[error("the provider refused the input: {0}")]
+    #[error("the input is refused: {0}")]
     InvalidInput(String),
+    /// The provider answered with a body its method's Lexicon does not describe: a provider bug,
+    /// as atproto's `InternalServerError`.
+    #[error("the provider's answer is not what its method declares: {0}")]
+    InvalidOutput(String),
     /// The provider's own XRPC error, passed through untouched.
     #[error("the provider failed with status {status}")]
     Provider { status: u16, body: Value },
