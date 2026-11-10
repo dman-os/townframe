@@ -122,6 +122,7 @@ const W2_CASES: Case[] = [
   { name: "guest-readwrite", anchor: false, correct: 2 },
   { name: "native-anchor", anchor: true, correct: 0 },
   { name: "guest-resize", anchor: false, correct: 3 },
+  { name: "guest-resize-readwrite", anchor: false, correct: 4 },
   { name: "native-anchor-sibling-spacer", anchor: true, correct: 0, sibling: true },
 ];
 const W2_N = (process.env.W2_N ?? "0,1,4,12").split(",").map(Number);
@@ -158,13 +159,13 @@ if (MODE === "w2") {
   for (const n of W2_N) {
     for (const c of W2_CASES) {
       if (n === 0 && !["none", "native-anchor", "native-anchor-sibling-spacer"].includes(c.name)) continue;
-      if (c.name === "guest-resize" && n === 0) continue;
+      if (c.name.startsWith("guest-resize") && n === 0) continue;
       test(`w2 ${c.name} N${n} r${ROUND}`, async ({ browser }) => {
         const loadStart = load();
         const { page, failures } = await openMicro(browser, "pierre", true);
         await page.getByTestId(c.anchor ? "anchor-on" : "anchor-off").click();
         await page.getByTestId(`correct-${c.correct}`).click();
-        if (c.correct === 3) await page.getByTestId("resize-probe").click();
+        if (c.correct >= 3) await page.getByTestId("resize-probe").click();
         if (c.sibling) await page.getByTestId("spacer-sibling").click();
         await page.evaluate(async () => { for (let i = 0; i < 6; i++) await (window as any).Ladder.nextFrame(); });
         await page.evaluate(([n, speed]) => {

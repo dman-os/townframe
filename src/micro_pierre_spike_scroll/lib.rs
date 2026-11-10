@@ -451,15 +451,23 @@ fn view() -> Element {
         let previous = heights.borrow_mut().insert(k, height);
         let top = last_top_for_resize.get();
         let above = y_of_line((k + 1) * THREAD_EVERY, &grown.peek()) <= top;
+        let mode = *correct.peek();
         if let Some(previous) = previous
-            && *correct.peek() == 3
+            && (mode == 3 || mode == 4)
             && above
             && height != previous
         {
             let handle = scroller.peek().clone().expect("the scroller has mounted");
+            let delta = height - previous;
             spawn(async move {
+                // 3: from the last scroll event's position; 4: read the position first.
+                let from = if mode == 4 {
+                    handle.get_scroll_offset().await.expect("the host read the offset").y
+                } else {
+                    top
+                };
                 handle
-                    .scroll(PixelsVector2D::new(0.0, top + (height - previous)), ScrollBehavior::Instant)
+                    .scroll(PixelsVector2D::new(0.0, from + delta), ScrollBehavior::Instant)
                     .await
                     .expect("the host corrected the scroller");
             });
@@ -514,7 +522,7 @@ fn view() -> Element {
                     },
                     "threads corpus"
                 }
-                for mode in [0_usize, 1, 2, 3] {
+                for mode in [0_usize, 1, 2, 3, 4] {
                     button {
                         key: "correct-{mode}",
                         "data-testid": "correct-{mode}",
@@ -563,7 +571,7 @@ fn view() -> Element {
                                                 .expect("the host corrected the scroller");
                                         });
                                     }
-                                    // 3: the thread's resize event drives the correction (`on_size`).
+                                    // 3 and 4: the thread's resize event drives the correction (`on_size`).
                                     _ => {}
                                 }
                             }
