@@ -82,6 +82,7 @@ pub struct Note {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Body {
+    #[schemars(extend("x-automerge" = "list"))]
     pub order: Vec<DatumReference>,
     #[serde(flatten)]
     pub extra: Extra,

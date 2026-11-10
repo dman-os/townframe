@@ -29,7 +29,6 @@ mod executor;
 #[cfg(test)]
 mod smoke;
 
-use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet::SchemaRepo;
 use big_cabinet_core::authority::Authorization;
 use big_cartridges_core::Cartridge;
@@ -68,14 +67,12 @@ pub fn node() -> TestNodeBuilder {
     TestNodeBuilder {
         nodules: Vec::new(),
         ceiling: DispatchScope::default(),
-        schemas: Vec::new(),
     }
 }
 
 pub struct TestNodeBuilder {
     nodules: Vec<(Cartridge, Box<dyn Registered>)>,
     ceiling: DispatchScope,
-    schemas: Vec<SchemaRegistrationGroup<'static>>,
 }
 
 impl TestNodeBuilder {
@@ -100,22 +97,12 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Registers `group` at boot, beside the node's own schemas, as an embedder registers its
-    /// built-in datums. It stands in for a cartridge's Lexicons when they need storage annotations
-    /// (collaborative text, lists), which an admitted cartridge cannot carry yet: a cartridge
-    /// registers Lexicons only, so its text fields would be stored as plain strings.
-    pub fn with_schemas(mut self, group: SchemaRegistrationGroup<'static>) -> Self {
-        self.schemas.push(group);
-        self
-    }
-
     /// Boots the node and admits every registered cartridge. The nodules are not enabled: grants are
     /// set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
     pub async fn boot(self) -> TestNode {
         let Self {
             nodules,
             mut ceiling,
-            schemas,
         } = self;
         let mut cartridges = Vec::new();
         let mut registered = BTreeMap::new();
@@ -134,7 +121,6 @@ impl TestNodeBuilder {
             sql,
             big_repo::Storage::memory(&runtime).expect("in-memory repo storage"),
             ceiling,
-            schemas,
         );
         let (node, stop) = BigNode::boot_with(config, move |deps| async move {
             let executor = NativeExecutor::new(registered, deps.dispatch);
@@ -252,6 +238,17 @@ impl TestNode {
             })
     }
 
+    /// Admits `cartridge` after boot. For a cartridge whose nodule only holds records, which no
+    /// executor hosts, so [`TestNodeBuilder::with_nodule`] has nothing to register for it; a
+    /// cartridge with a handler is registered there instead.
+    pub async fn admit(&self, cartridge: Cartridge) -> NoduleRecord {
+        self.nodules(AdmitNodule {
+            cartridge,
+            drawers: None,
+        })
+        .await
+    }
+
     /// Enables the nodule of `cartridge_id`, which starts hosting it.
     pub async fn enable(&self, cartridge_id: &CartridgeId) -> NoduleRecord {
         self.set_enabled(cartridge_id, true).await
@@ -321,7 +318,6 @@ fn config(
     sql: Database,
     storage: big_repo::Storage,
     nodule_operations: DispatchScope,
-    schemas: Vec<SchemaRegistrationGroup<'static>>,
 ) -> Config {
     Config {
         repo: big_repo::Config {
@@ -334,7 +330,7 @@ fn config(
             group_part_group_scope: Default::default(),
         },
         sql,
-        schemas: Arc::new(SchemaRepo::open(schemas).expect("the test's schemas register")),
+        schemas: Arc::new(SchemaRepo::open([]).expect("an empty schema repo")),
         secrets,
         index_concurrency: NonZeroUsize::new(2).unwrap(),
         blob_storage: big_blobs::Storage::memory().unwrap(),

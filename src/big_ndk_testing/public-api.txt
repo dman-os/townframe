@@ -5,6 +5,7 @@
 
 pub big_ndk_testing::fn node () -> TestNodeBuilder
 pub enum big_ndk_testing::CallError< E > { # [doc = " The method's own typed error, from the handler."] Method (E), # [doc = " Dispatch refused or could not complete the call (denied, not ready, a provider failure"] # [doc = " that is not the method's error, ..)."] Dispatch (DispatchError) }
+pub impl big_ndk_testing::TestNode::async fn admit (& self , cartridge : Cartridge) -> NoduleRecord
 pub impl big_ndk_testing::TestNode::async fn call < M : Unary > (& self , input : M) -> Result < M :: Output , CallError < M :: Error > >
 pub impl big_ndk_testing::TestNode::async fn enable (& self , cartridge_id : & CartridgeId) -> NoduleRecord
 pub impl big_ndk_testing::TestNode::async fn grant (& self , cartridge_id : & CartridgeId , operations : DispatchScope ,) -> NoduleRecord

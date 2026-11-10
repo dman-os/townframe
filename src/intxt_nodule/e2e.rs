@@ -1,18 +1,10 @@
-//! intxt's vocabularies written and read through a real node.
-//!
-//! The node registers them at boot, the way it registers its built-in datums, because a cartridge
-//! cannot yet ship the storage annotations (`x-automerge: text` on `note.content`) a cartridge's
-//! Lexicons would need: admitted as a cartridge, the note would be stored as a plain string. When
-//! cartridges carry them, these tests admit intxt's cartridge instead.
+//! intxt's vocabularies written and read through a real node that admitted intxt's cartridge,
+//! so they are stored as its sidecar says.
 
-use crate::*;
-use big_cabinet::SchemaRegistration;
-use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Rights;
-use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
@@ -25,31 +17,32 @@ use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
 use big_ndk_testing::TestNode;
+use intxt_core::generic;
+use intxt_core::work;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-fn schema_group() -> SchemaRegistrationGroup<'static> {
-    let bundle = Bundle::new(&UNIVERSE, Vec::new());
-    let registrations = bundle
-        .lexicons()
-        .expect("intxt's declarations publish lexicons")
-        .into_iter()
-        .map(|lexicon| SchemaRegistration::new(lexicon.id, lexicon.file));
-    SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new())
-}
-
 async fn boot() -> TestNode {
-    big_ndk_testing::node()
-        .with_schemas(schema_group())
-        .boot()
-        .await
+    let node = big_ndk_testing::node().boot().await;
+    let cartridge = crate::cartridge();
+    let id = cartridge.id.clone();
+    node.admit(cartridge).await;
+    node.enable(&id).await;
+    node
 }
 
 fn key<T: DatumMember>(slot: &str) -> DatumKey {
     format!("{}/{slot}", T::ID).parse().unwrap()
+}
+
+/// A `T` datum at `slot` holding `value`, tagged with its record's `$type` as every record value
+/// is.
+fn datum<T: DatumMember>(slot: &str, mut value: Value) -> (DatumKey, Value) {
+    value["$type"] = T::ID.into();
+    (key::<T>(slot), value)
 }
 
 /// A capability over `scope` for the node's operator.
@@ -166,16 +159,13 @@ async fn read(node: &TestNode, document: &DocId, datums: &[DatumKey]) -> BTreeMa
 async fn a_file_document_reads_back_as_written() {
     let node = boot().await;
     let datums = BTreeMap::from([
-        (
-            key::<generic::PathName>("main"),
-            json!({"path": "src/big_cabinet_core/reference.rs"}),
-        ),
-        (
-            key::<generic::Note>("main"),
+        datum::<generic::PathName>("main", json!({"path": "src/big_cabinet_core/reference.rs"})),
+        datum::<generic::Note>(
+            "main",
             json!({"mime": "text/x-rust", "content": "fn parse() {}\n"}),
         ),
-        (
-            key::<work::File>("main"),
+        datum::<work::File>(
+            "main",
             json!({"worktree": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.worktree/main"}),
         ),
     ]);
@@ -196,13 +186,14 @@ async fn a_file_document_reads_back_as_written() {
 #[tokio::test]
 async fn concurrent_line_edits_to_a_note_both_land() {
     let node = boot().await;
-    let note = key::<generic::Note>("main");
-    let content = |lines: [&str; 3]| json!({"mime": "text/plain", "content": lines.join("\n")});
-    let receipt = create(
-        &node,
-        BTreeMap::from([(note.clone(), content(["one", "two", "three"]))]),
-    )
-    .await;
+    let content = |lines: [&str; 3]| {
+        datum::<generic::Note>(
+            "main",
+            json!({"mime": "text/plain", "content": lines.join("\n")}),
+        )
+    };
+    let (note, _) = content(["one", "two", "three"]);
+    let receipt = create(&node, BTreeMap::from([content(["one", "two", "three"])])).await;
     for edited in [["ONE", "two", "three"], ["one", "two", "THREE"]] {
         write(
             &node,
@@ -210,11 +201,11 @@ async fn concurrent_line_edits_to_a_note_both_land() {
             WriteMode::AtHeads {
                 heads: receipt.heads.clone(),
             },
-            BTreeMap::from([(note.clone(), content(edited))]),
+            BTreeMap::from([content(edited)]),
         )
         .await;
     }
     let read = read(&node, &receipt.doc_id, std::slice::from_ref(&note)).await;
-    assert_eq!(read[&note], content(["ONE", "two", "THREE"]));
+    assert_eq!(read[&note], content(["ONE", "two", "THREE"]).1);
     node.stop().await;
 }

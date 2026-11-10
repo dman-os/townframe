@@ -8085,6 +8085,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "intxt_core"
+version = "0.1.0"
+dependencies = [
+ "automerge",
+ "big_cabinet_core",
+ "jiff",
+ "macros",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "intxt_nodule"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_ndk_testing",
+ "big_nodule_core",
+ "indexmap 2.14.2",
+ "intxt_core",
+ "serde_json",
+ "service_utils_rs",
+ "tokio",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"

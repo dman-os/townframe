@@ -1,0 +1,24 @@
+[package]
+name = "intxt_nodule"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+intxt_core = { path = "../intxt_core" }
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
+big_cartridges_core.workspace = true
+big_nodule_core.workspace = true
+indexmap = { version = "2", features = ["serde"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+big_cabinet_core = { path = "../big_cabinet_core" }
+big_ndk_testing = { path = "../big_ndk_testing" }
+service_utils_rs.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

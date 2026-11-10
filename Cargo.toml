@@ -18,6 +18,7 @@ members = [
   "./src/big_blobs/",
   "./src/big_blobs_core/",
   "./src/intxt_core/",
+  "./src/intxt_nodule/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",

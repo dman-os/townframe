@@ -52,6 +52,4 @@ pub fn declarations() -> Universe {
 pub static UNIVERSE: LazyLock<Universe> = LazyLock::new(declarations);
 
 #[cfg(test)]
-mod e2e;
-#[cfg(test)]
 mod tests;
