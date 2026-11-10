@@ -2,7 +2,7 @@
 
 Status: Draft
 Owner: Townframe maintainers
-Updated: 2026-11-06
+Updated: 2026-11-11
 Scope: Draft description for the `feat/big-node` -> `main` PR. Numbers come from `docs/scratch/nodule-runtime-ledger.md`; `TODO(verify)` marks anything the ledger or log does not settle.
 
 ## Summary
@@ -17,6 +17,10 @@ A node is now a value you boot, not a test helper. `big_node` boots the standard
 - **Test arena.** An N-node harness (`e2e/harness.rs` `Cluster`), a ladder suite, a seeded randomized stress test, a cross-node nodule test, and a costs harness with a counting allocator and a note-cost growth pin.
 - **`day` CLI.** The node's first client, in-process or over the daemon socket. Node-scoped keyring secrets and socket (`$XDG_RUNTIME_DIR/day/<node-id>.sock`), idempotent `day init`, bootstrap peers in `node.json`, and the built-in `getNodeInfo` query.
 - **Datum cleanup (D32).** Datums drop Rust number widths and shapes that Lexicon and Automerge lack.
+- **Stacked on #82 (`datum_core`).** #82 and current main are merged in; this branch's datum changes were ported into `datum_core`.
+- **`method_core`.** `Operation` is now `Method` (D35) in its own crate building for native, wasm32-unknown-unknown and wasm32-wasip3, shared by micros and nodules. Five duplicated `operations!` macros became one `methods!`.
+- **One XRPC header contract on every hop (D39).** `Authorization: Bearer` (the guest only ever sees capability ids; the signer comes from the host), relative `x-timeout-ms` re-derived per hop, per-hop request ids, W3C trace context carried through nested calls. `Provider::call` receives the request context. One deadline error. Transports enforce deadlines; `Client` is runtime-free, so it works inside wasm guests.
+- **`big_ndk` v0.** The nodule kit: `Handler<M>`, `Cx` (caller and nodule capabilities, request context, typed nested calls over wasi:http), `export_nodule!`. `test_nodule_guest` is written on it.
 - **Docs.** ADR 033 revised; ADR 022 explained from the caller's side; ADR 025 section 7 and ADR 020 amended; scratch docs for cartridge naming (D34) and Windows.
 
 ## Major fixes
@@ -104,31 +108,32 @@ No `file://` patch remains. Both revs are the tips of the `townframe-changes` bo
 - Windows transport, admission and builds: `docs/scratch/windows-todo.md`.
 - GET/query operations through the `/xrpc` fallback; dispatch Lexicon validation of input and output (D31).
 - Narrowing tokens over the wire (`mintCapability` is not routed) and client-side token storage (D22).
-- Orphan dispatch authority after a crash is never retracted (slice 2c follow-up).
-- Causal checkpoint resolver liveness: if the lowest issuer is offline, lacks write access or lacks the doc, the others defer until it returns (a stall, not a loop).
-- big_repo wrong turns flagged but not fixed (D30; big_repo is a rewrite candidate): one SQLite transaction per change in `persist_local_commits`; `load_doc_snapshot` rebuilds the whole doc on each call; `register_bundle_lease` swallows a send error; the frontier worker's keyed `replace` cancels in-flight publishes; `seen_head_hashes` grows without bound.
-- big_cabinet: ~340 `resolveActor` and ~40 capability mint/retract per note, ~800 write and ~2,600 read SQLite leases per note (as measured before the later fixes; TODO(verify) current counts); `PollDatums` pages re-deliver the polled doc, not a delta.
+- Causal checkpoint root resolution (`establish_pcs_root`): only the first listed issuer resolves a conflicted root; if it is offline the others wait for it. A fork workaround, kept until the upstream keyhive rewrite.
+- big_repo wrong turns flagged but not fixed (D30; big_repo is a rewrite candidate): one SQLite transaction per change in `persist_local_commits`; `load_doc_snapshot` rebuilds the whole doc on each call; `register_bundle_lease` swallows a send error; the frontier worker's keyed `replace` cancels in-flight publishes; `seen_head_hashes` grows without bound (parked with options in the ledger).
+- big_cabinet: ~340 `resolveActor` and ~40 capability mint/retract per note, ~800 write and ~2,600 read SQLite leases per note (as measured before the later fixes; not re-measured since); `PollDatums` pages re-deliver the polled doc, not a delta.
 - A member admitted by a peer's drawer cannot `ImportPlugDocument` from it (the registry actor needs a drawer grant, and `GrantDrawer` takes Admin). D24 plans install with the caller's capability.
-- Flakes pinned, not fixed: `big_blobs sync::transfer_tests::completion_releases_capacity_for_the_ninth_eligible_transfer` under `-j 6` load; `big_repo test2::stress::tests::long_test_big_repo_tier10_stress_*` hit the 240 s timeout on a loaded box; the `big_node` `blob_discovery` e2e tests take 95-105 s alone and exceed the default nextest kill in parallel.
+- Flakes pinned, not fixed: `big_blobs sync::transfer_tests::completion_releases_capacity_for_the_ninth_eligible_transfer` under `-j 6` load; `big_repo test2::stress::tests::long_test_big_repo_tier10_stress_*` hit the 240 s timeout on a loaded box; the `big_node` `blob_discovery` e2e tests take 95-105 s alone; a nextest test group now runs at most 2 at a time with a longer slow-timeout.
 - Four heavy `big_cabinet` drawer e2e tests hit the 120 s nextest kill under load; compare timings against an origin/main baseline (our branch adds a fourth boot drawer).
 - `listeners`, `nodule_wasm` and `dispatch` tests need `test_nodule_guest.wasm` built.
-- main-side: `src/big_node/e2e/blob_discovery/mod.rs` is not rustfmt-clean on main; two ADRs are numbered 007; unused workspace dependencies flagged by cargo.
-- Not part of this PR: the "plug" -> "cartridge" rename (D34) and the `Operation` -> `Method` crate (D35) wait for the datum_core PR.
+- main-side: unused workspace dependencies flagged by cargo. The duplicate ADR 007 is fixed here (doc-branch identity is now ADR 034; the node ADR is 033 because #80 takes 032).
+- Not part of this PR: the "plug" -> "cartridge" rename (D34); `big_ndk`'s native test harness, cartridge builder and directory mounts (next PRs).
+- `RequestContext::expired()` is still a tokio sleep in a wasm-buildable crate; only native code calls it now.
 
 ## How to review
 
-Commit groups, in order (`git log --oneline main..feat/big-node`, about 117 commits):
+Commit groups, in order (`git log --oneline main..feat/big-node`, about 150 commits):
 1. **Node design and dispatch:** `85b3f287`, `5e34392c`, `66321166` (ADR 033), `38ca61dd` (big_dispatch), `679af51b` (listeners), `c70ac20f` (credential header).
 2. **Bindings and peers:** `8ef60a2b` (storage bindings), `b85e19df` (peers), `7e2c2963` (follow keyhive access, replay reset fix).
 3. **Test arena:** `b0f58bec` (harness and ladder), `3f2fc461` (stress, scale, cross-node plug), `f5971214` (cost table).
 4. **Performance and correctness fixes:** the `perf(...)`, `fix(...)` and `refactor(...)` commits listed under Major fixes, plus `f34241c9` (operator superuser, plug install on the caller's handles).
 5. **`day` CLI and datums:** `39888307`, `eb217b24`, `f7f1f89c`, `9e6ec666`.
 6. **Dependency pins:** `dbc84be2`, `c087fd50`.
-7. **Docs:** `docs(...)` commits and scratch docs; the ledger is a working log, not a normative record.
+7. **Stack and kit (latest):** `0484534d` (#82 and mbx merged), `a1f67718`, `a1b20739` (`method_core`), `bc55f903`, `82a0d3e5` (D39), `1edfbf4f`, `10026a24`, `01999cb1`, `fda5d45d` (`big_ndk` v0, runtime-free client).
+8. **Docs:** `docs(...)` commits and scratch docs; the ledger is a working log, not a normative record.
 
 `instr(...)` commits are instrumentation (traces, samplers, counters). They are kept in their own commits so they can be dropped independently of the fixes and pin bumps.
 
-TODO(verify): whether the `docs(agents)` commits (`cd0166e0`, `16f920e5`, `e240cba7`, `1abb2f04`) belong in this PR.
+The `docs(agents)` commits (`cd0166e0`, `16f920e5`, `e240cba7`, `1abb2f04`) are agent-workflow rules in AGENTS.md and ship with this PR.
 
 ## Verification
 
@@ -146,4 +151,5 @@ From the ledger; no run was repeated while drafting this description.
 - Ladder suite: 14/14 at `2d79a768` (11 of 13 at N5; both stalls fixed since).
 - At `2d79a768`: `cargo clippy --workspace --all-targets --all-features -- --deny warnings` clean; `cargo x guardrails lint` 0 diagnostics; `guardrails api --all --check` and `doctor` pass; big_repo 446/446.
 - Load-only: four big_node blob_discovery tests can hit nextest's 120 s timeout at `--test-threads 12` under ~13 load. Traced as CPU starvation (same work, 4-10x slower, no wait over 1 s), not a stall.
-- TODO(verify): `nix flake check` and `./x/check-dayb.ts` (operator).
+- At `41198158`: `cargo clippy --workspace --all-targets` clean; guardrails lint 0 diagnostics, `api --all --check` and `doctor` pass; `big_dispatch` 12/12, `big_node nodule_wasm` 5/5, `service_client_core_rs`+`service_client_native_rs`+`service_utils_rs`+`big_ndk` 79/79.
+- Not run: `nix flake check`, `./x/check-dayb.ts`.
