@@ -31,7 +31,7 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 }
 ```
 
-- **Targets** are any `dtxt:` locations: a text range in a file document at a pinned state, a whole document or datum (no fragment), a commit, a session's tool call, another comment, a structure datum. A span of datums (turns 20–45) is a target with `from` and `to` instead of `ref`.
+- **Targets** are any `dtxt:` locations: a text range in a file document at a pinned state, a whole document or datum (no fragment), a commit, a session's tool call, another comment, a structure datum. A span of datums (turns 20–45) is a target whose `ref` is the first datum and `to` the last.
 - **Text positions** are given either as a line range at the pinned heads (`lines`) or as an Automerge cursor range in the fragment (`#content/[12@a3f-40@a3f]`). Cursors can't be written by hand: an agent would need a tool to turn a line into a cursor. A line range at a pin is exact, because the pin fixes the text, so it is the hand-writable form; a tool may add the cursor, which carries the position to later revisions more cheaply than quote matching. Readers accept either.
 - **Placing a comment in a diff** (claytxt, 2026-11-10). A viewer showing a diff between two pins maps a target's `refHeads` to a side by equality: the diff's base pin is the deletions side, its head pin the additions side, and `lines` are then that side's line numbers. So `refHeads` must be exactly the heads of a pin the reader can name (an op's or a commit observation's), never a superset. A target pinned at neither end of the diff on screen is re-resolved through its cursor, else its quote, against the head side, and shown as outdated at file level if neither resolves. A range is drawn from start to end and its thread is placed after its last visible line; that placement is the viewer's policy, not the datum's.
 - **File-level targets** (no fragment, no `lines`) are shown in the file's header. They survive renames because a renamed file keeps its document (ADR 040 §4).
@@ -55,10 +55,10 @@ One slot per thread, written by anyone. Resolving and reopening at the same time
 // org.example.structure/<uuidv7>         (D9: tasks, decisions, sections, groupings)
 { "kind": "task",                         // open: task | decision | section | …
   "title": "Move references to dtxt:", "body": { "mime": "text/markdown", "content": "…" },
-  "status": "done",                       // open, optional
-  "targets": [ { "from": "dtxt:datum:zSess/org.example.work.promptTurn/t20", "to": "dtxt:datum:zSess/org.example.work.promptTurn/t45" } ],
+  "status": "completed",                  // open, optional; ACP's spelling: pending | in_progress | completed
+  "targets": [ { "ref": "dtxt:datum:zSess/org.example.work.promptTurn/t20", "to": "dtxt:datum:zSess/org.example.work.promptTurn/t45" } ],
   "parent": "dtxt:datum:zNotes/org.example.structure/0193…",
-  "order": 2.5 }                          // fractional, so writers can insert between
+  "order": "15" }                         // fractional index: siblings sort by this string; between "1" and "2" write "15"
 ```
 
 A guided review is a set of `section` structures with `order`. Adapters can map a harness's task lists here; ACP plans stay in the session (ADR 040 §6).
@@ -67,7 +67,7 @@ A guided review is a set of `section` structures with `order`. Adapters can map 
 
 ```jsonc
 // org.example.seen/<actor uuid>/<range>  (one writer: that reader)
-{ "datums": { "org.example.comment/0193…": "zbd7…" },   // per slot: the datum heads last read
+{ "datums": { "org.example.comment/0193…": ["zbd7…"] },   // per slot: the datum heads last read
   "reviewed": { "<ref or layer>": "<position>" } }       // vocabulary-defined: e.g. a ref target last reviewed
 ```
 

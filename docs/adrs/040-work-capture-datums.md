@@ -30,7 +30,7 @@ Git has no repository identity. Two clones of one project share nothing but hist
 | Datum | Is | Identity | jj equivalent |
 |---|---|---|---|
 | `gitRepo/<uuid>` | a project, as far as we can tell | a UUID minted by the first recorder; `roots` (its root commit shas) let recorders on other machines match it; `remotes` are fetch hints | — |
-| `clone/<uuid>` | one `.git` directory (or jj repo) on one machine; refs and the jj op log live here | a UUID stored in the clone (`.git/intxt-id`) | repo |
+| `gitClone/<uuid>` | one `.git` directory (or jj repo) on one machine; refs and the jj op log live here | a UUID stored in the clone (`.git/intxt-id`) | repo |
 | `worktree/<uuid>` | one checkout directory of a clone; HEAD, index and working files live here | a UUID stored in the worktree's own git dir (`.git/worktrees/<name>/intxt-id`, or `.git/intxt-id` for the main worktree) | workspace |
 
 Paths are recorded (`path`, the current absolute path) but are not identity: worktrees move, are deleted, and a new one may reuse an old path for unrelated work. A stored UUID survives the first two and distinguishes the third.
@@ -39,13 +39,14 @@ Paths are recorded (`path`, the current absolute path) but are not identity: wor
 // org.example.work.gitRepo/<uuid>
 { "roots": ["a1b2…"], "remotes": ["git@github.com:dman-os/townframe.git"] }
 
-// org.example.work.clone/<uuid>
+// org.example.work.gitClone/<uuid>
 { "repo": "dtxt:datum:zRepo/org.example.work.gitRepo/<uuid>", "machine": "dtxt:actor:zNode", "path": "/run/media/…/townframe-p3N-3/.git",
   "vcs": ["git", "jj"] }
 
 // org.example.work.worktree/main         (one per worktree document)
-{ "clone": "dtxt:datum:zRepo/org.example.work.clone/<uuid>", "id": "<uuid>", "path": "/run/media/…/townframe-p3N-3",
-  "files": { "src/big_cabinet_core/reference.rs": "zFileA" } }   // path → file doc, for every path an op touched
+{ "clone": "dtxt:datum:zRepo/org.example.work.gitClone/<uuid>", "id": "<uuid>", "path": "/run/media/…/townframe-p3N-3",
+  "files": { "src/big_cabinet_core/reference.rs": "zFileA" },    // path → file doc, for every path an op touched
+  "opLogs": [ { "doc": "zOps0", "from": 0 }, { "doc": "zOps1", "from": 256 } ] }   // op-log documents in sequence order
 ```
 
 Two machines with checkouts of one project are two clones, each with its worktrees; one intxt may include any of them as separate layers, and a viewer shows them as separate lines of work.
@@ -55,16 +56,18 @@ Two machines with checkouts of one project are two clones, each with its worktre
 ```jsonc
 // org.example.work.worktreeOp/<seq>      (seq: 0, 1, 2 … written only by the worktree's recorder)
 { "at": "2026-11-10T21:04:11Z",
-  "kind": "edit",                         // open: edit | checkout | reset | commit | refMove | jjSnapshot | unknown
+  "kind": "edit",                         // open: edit | checkout | reset | commit | amend | rebase | refMove | jjSnapshot
   "cause": "dtxt:datum:zSess/org.example.work.promptTurn/<id>#toolCalls/{\"id\":\"toolu_01…\"}",   // when known
-  "files": { "src/big_cabinet_core/reference.rs": "zbd7…" },      // path → file doc heads after this op
-  "git": { "head": "4c1f…", "ref": "refs/heads/feat/intxt" },    // HEAD after the op, when it changed or was observed
+  "files": { "src/big_cabinet_core/reference.rs": ["zbd7…"], "src/old.rs": null },   // path → file doc heads after this op; null = deleted
+  "renames": { "src/url.rs": "src/uri.rs" },                      // new path → old path, continued in the old path's doc
+  "git": { "head": "4c1f…", "ref": "refs/heads/feat/intxt", "from": "77b2…", "to": "4c1f…",
+           "reflog": "commit (amend): …" },                       // HEAD after the op; for ref moves, the move and git's reflog message
   "jj": { "operation": "e1f0…", "change": "kxqoltvm…" } }         // when the op came from jj
 ```
 
 - **Single writer, sequential keys.** The slot is the sequence number, so the log is linear by construction and readers page it by key. It is the worktree's equivalent of jj's operation log, at the granularity the recorder observes.
 - **Every observed change is an op.** An edit by a tool call, a formatter run inside a Bash call (filesystem-observed, F7), a commit, an amend, a rebase, a `git checkout` or `reset`. Checkout and reset need no revert semantics: file docs follow the working tree, so a checkout is one op after which the touched files hold the checked-out content, and the earlier content stays readable at earlier pins.
-- **`cause`** points at the tool call that made the change when the recorder knows it (tool-reported edits, a Bash call's window). Changes with no known cause are `unknown`; a background process writing during a Bash call is attributed to that call (F7's limit). Which turn produced which commit is then a reading of these links by the viewer (D30), not a stored field.
+- **`cause`** points at the tool call that made the change when the recorder knows it (tool-reported edits, a Bash call's window). A change with no known cause is an `edit` with no `cause`; a background process writing during a Bash call is attributed to that call (F7's limit). Which turn produced which commit is then a reading of these links by the viewer (D30), not a stored field.
 
 ## 4. File documents
 
@@ -129,7 +132,8 @@ Names follow the Agent Client Protocol (ACP: session, prompt turn, tool call, pl
 { "seq": 41, "at": "…", "parentTurn": "<id>", "stopReason": "end_turn",
   "messages": [ { "id": "<harness id>", "seq": 0, "at": "…", "kind": "agentMessage", "text": "…" } ],
   "toolCalls": [ { "id": "toolu_01…", "seq": 3, "title": "Edit reference.rs", "kind": "edit", "status": "completed",
-                   "locations": [ { "path": "/run/…/reference.rs", "line": 120 } ] } ] }
+                   "locations": [ { "path": "/run/…/reference.rs", "line": 120 } ],
+                   "diffs": [ { "path": "src/reference.rs", "patch": "@@ -120 +120 @@ …" } ] } ] }   // what the harness reported, when it did
 
 // org.example.work.plan/main             (ACP plan: replaced whole on every update; its history is the plan's history)
 { "entries": [ { "content": "Rewrite reference.rs", "priority": "high", "status": "completed" } ] }
@@ -148,7 +152,7 @@ How the datums above split into documents. Each split has a reason: one writer p
 | Document | Holds | Writers | How many |
 |---|---|---|---|
 | Repo | `gitRepo/<uuid>`, `gitCommit/<sha>` | every recorder of the project (commits are content-addressed, so concurrent writes are identical) | one per project; commits shard into more repo docs past ~400 |
-| Clone | `clone/<uuid>`, `gitRef/<clone>/<name>`, `jjOperation`, `jjChange` | that clone's recorder | one per clone |
+| Clone | `gitClone/<uuid>`, `gitRef/<clone>/<name>`, `jjOperation`, `jjChange` | that clone's recorder | one per clone |
 | Worktree | `worktree/main` (lists op-log and file docs) | that worktree's recorder | one per worktree |
 | Op log | `worktreeOp/<seq>` for one seq range | that worktree's recorder | one per ~256 ops; the worktree datum lists them |
 | File | `path`, `note`, `file` provenance | that worktree's recorder | one per path an op touched |

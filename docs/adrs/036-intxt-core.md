@@ -100,6 +100,7 @@ Nothing in the core. Creating an intxt, adding entries and writing datums are pl
 
 - The previous descriptor fields `historyDoc`, `notesDoc` and `repo` are gone: entry datums and `body` replace the first two, and repositories are ADR 040 entries, so an intxt can span repos.
 - Daybook's generic datums gain Lexicon object shapes in the shared namespace; daybook_core's migration moves its documents to them.
+- The vocabularies of ADRs 036, 040 and 041 are drafted as Lexicons in `src/intxt_core`; its tests run every example in these ADRs through declaration, admission and the codec round trip, which is the check that they can be written by hand.
 - The intxt micro reads `body` and the entries to decide what to show. Its review UI is one set of renderers over ADR 040 and 041 parts.
 
 ## 8. Open questions
