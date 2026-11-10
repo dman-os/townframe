@@ -27,6 +27,13 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 - **D11 (2026-11-10, operator)** Evidence coverage across stacks (U10) is deferred past this week; keep it enumerated.
 - **D12 (2026-11-10, operator)** FDRs: one for the general system, one per shipped feature, starting with the first. FDRs describe what users do, and users include harness adapters, GitHub, agents, humans and supporting software. No reference-model internals in FDRs.
 - **D13 (2026-11-10, operator)** Multiplayer is a requirement for every datum: concurrent writers must not clobber each other.
+- **D14 (2026-11-10, operator)** First feature: the agent review loop (capture → phone review → agent picks up feedback → next revision), aimed at needs today's tooling serves poorly (e.g. Claude remote control shows no files or diffs).
+- **D15 (2026-11-10, operator)** The intxt graph is over arbitrary datums, not filesystem-first. A reference is a datum ref pinned at heads plus a selector into that datum; nothing more is needed in the core. Code (file docs), git/jj objects, sessions, guides and CI results are all just datums. Supersedes the multi-kind `Target` union in `intxt-design.md` §3.
+- **D16 (2026-11-10, operator)** No VCS units in the intxt. intxt and a future VCS may have separate change units. "Logical change" (O5) is not a v0 concept; grouping is a structure datum with several references.
+- **D17 (2026-11-10, operator)** Git/jj objects are imported as datums (commits; jj op log objects if needed). All observed commits are kept; a separate ref/bookmark datum points at a commit, and walking parents from it visits only reachable commits. No predecessor links: the ref datum's own Automerge history records what it pointed at before (a reflog for free), which gives revision-to-revision pairing.
+- **D18 (2026-11-10, operator)** No verdicts in the alpha: intxt isn't managing trunks, so approve/request-changes vocabulary waits.
+- **D19 (2026-11-10, operator)** Agent interface order: harness hooks + CLI first, MCP after.
+- **N1** dpaths ADR 010 explicitly excludes git integration and keeps reps as latest state, not history, so it offers no git-like history model to reuse.
 
 ## Open
 
