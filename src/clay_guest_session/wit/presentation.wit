@@ -39,8 +39,47 @@ interface presentation {
         remove,
     }
 
+    enum scroll-behavior {
+        instant,
+        smooth,
+    }
+
+    /// Offsets of an element's own scrollable content, in CSS pixels.
+    record scroll-offsets {
+        left: f64,
+        top: f64,
+        behavior: scroll-behavior,
+    }
+
+    /// A geometry value the host reads from an element.
+    enum element-read {
+        /// `getBoundingClientRect`: left, top, width, height.
+        client-rect,
+        /// `scrollLeft` and `scrollTop`.
+        scroll-offset,
+        /// `scrollWidth` and `scrollHeight`.
+        scroll-size,
+    }
+
+    /// The imperative half of Dioxus's `MountedData` (`scroll`, `set_focus`, and the reads),
+    /// addressed to one element the guest was told is mounted. Commands are fire-and-forget:
+    /// the host runs them after the call returns. Commands issued while handling one event run
+    /// in the order issued, after that dispatch's mutations were applied. A `read` is answered
+    /// later by an `element-reply` event carrying the same request id, or an error reply.
+    variant element-command {
+        /// `Element.scrollTo({ left, top, behavior })`.
+        scroll(scroll-offsets),
+        /// `Element.scrollBy({ left, top, behavior })`.
+        scroll-by(scroll-offsets),
+        /// `focus()` for true, `blur()` for false.
+        set-focus(bool),
+        read(tuple<u64, element-read>),
+    }
+
     resource surface {
         apply: func(edits: list<mutation>) -> result<u64, presentation-error>;
+        /// Send `command` to `element`, which must have announced `mounted` on this surface.
+        element-command: func(element: node-id, command: element-command) -> result<_, presentation-error>;
         retain: func() -> result<surface, presentation-error>;
         identity: func() -> u64;
     }

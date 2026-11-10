@@ -29,10 +29,14 @@ use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_surface::AttributeValue;
+use clay_surface::ElementCommand;
+use clay_surface::ElementRead;
 use clay_surface::Event;
 use clay_surface::EventResponse;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
+use clay_surface::ScrollBehavior;
+use clay_surface::ScrollOffsets;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
 use std::cell::RefCell;
@@ -318,6 +322,31 @@ pub fn convert_mutation(
     }
 }
 
+pub fn convert_element_command(command: wit_presentation::ElementCommand) -> ElementCommand {
+    use wit_presentation::ElementCommand as Wire;
+    let offsets = |offsets: wit_presentation::ScrollOffsets| ScrollOffsets {
+        left: offsets.left,
+        top: offsets.top,
+        behavior: match offsets.behavior {
+            wit_presentation::ScrollBehavior::Instant => ScrollBehavior::Instant,
+            wit_presentation::ScrollBehavior::Smooth => ScrollBehavior::Smooth,
+        },
+    };
+    match command {
+        Wire::Scroll(to) => ElementCommand::Scroll(offsets(to)),
+        Wire::ScrollBy(by) => ElementCommand::ScrollBy(offsets(by)),
+        Wire::SetFocus(focus) => ElementCommand::SetFocus(focus),
+        Wire::Read((request, what)) => ElementCommand::Read {
+            request,
+            what: match what {
+                wit_presentation::ElementRead::ClientRect => ElementRead::ClientRect,
+                wit_presentation::ElementRead::ScrollOffset => ElementRead::ScrollOffset,
+                wit_presentation::ElementRead::ScrollSize => ElementRead::ScrollSize,
+            },
+        },
+    }
+}
+
 fn convert_error(error: PresentationError) -> wit_presentation::PresentationError {
     match error {
         PresentationError::Revoked => wit_presentation::PresentationError::Revoked,
@@ -378,6 +407,19 @@ impl wit_presentation::HostSurface for WcmpStoreState {
         Ok(self
             .presentation
             .apply(&surface, &converted)
+            .map_err(convert_error))
+    }
+
+    fn element_command(
+        &mut self,
+        surface: Resource<WcmpSurface>,
+        element: u32,
+        command: wit_presentation::ElementCommand,
+    ) -> wcmp::Result<Result<(), wit_presentation::PresentationError>> {
+        let surface = self.table.get(&surface)?;
+        Ok(self
+            .presentation
+            .element_command(surface, element, convert_element_command(command))
             .map_err(convert_error))
     }
 

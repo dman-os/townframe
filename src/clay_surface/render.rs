@@ -5,6 +5,7 @@ use crate::tree::SurfaceNodeId;
 use crate::tree::SurfaceNodeKind;
 use crate::tree::SurfaceTree;
 use crate::wire::AttributeValue;
+use crate::wire::ElementHandles;
 use crate::wire::Event;
 use crate::wire::NodeId;
 use crate::wire::SurfaceEventHandler;
@@ -17,11 +18,12 @@ impl<C: Clone> SurfaceTree<C> {
         &self,
         dispatch: &SurfaceEventHandler,
         component: &dyn Fn(&C) -> Element,
+        handles: &ElementHandles,
     ) -> Element {
         let root_children = &self.node(SurfaceNodeId::ROOT).children;
         rsx! {
             for &child in root_children {
-                {self.render_node(child, dispatch, component)}
+                {self.render_node(child, dispatch, component, handles)}
             }
         }
     }
@@ -31,6 +33,7 @@ impl<C: Clone> SurfaceTree<C> {
         id: SurfaceNodeId,
         dispatch: &SurfaceEventHandler,
         component: &dyn Fn(&C) -> Element,
+        handles: &ElementHandles,
     ) -> Element {
         let node = self.node(id);
         match &node.kind {
@@ -76,6 +79,7 @@ impl<C: Clone> SurfaceTree<C> {
                                 self.revision,
                                 guest_node_id,
                                 dispatch.clone(),
+                                handles,
                             )
                             .expect("validated surface listener"),
                         );
@@ -84,7 +88,7 @@ impl<C: Clone> SurfaceTree<C> {
                 let children = node
                     .children
                     .iter()
-                    .map(|&child| self.render_node(child, dispatch, component));
+                    .map(|&child| self.render_node(child, dispatch, component, handles));
                 let key = id.1;
                 render_element_tag(tag, namespace.as_deref(), key, attrs, children)
             }
@@ -174,17 +178,19 @@ macro_rules! expand_surface_event_listener {
             revision: u64,
             element: NodeId,
             dispatch: SurfaceEventHandler,
+            handles: &ElementHandles,
         ) -> Option<dioxus_core::Attribute> {
             match raw_name {
                 $(
                     $(
                         stringify!($raw) => {
                             let event_name = stringify!($raw);
+                            let handles = handles.clone();
                             let listener = ListenerCallback::new(
                                 move |evt: dioxus_core::Event<PlatformEventData>| {
                                     let platform_rc = evt.data();
                                     let data_json = expand_surface_event_listener!(
-                                        @serialize $group, $data, platform_rc.as_ref()
+                                        @serialize $group, $data, platform_rc.as_ref(), element, &handles
                                     );
                                     let response = dispatch(Event {
                                         revision,
@@ -214,11 +220,16 @@ macro_rules! expand_surface_event_listener {
             }
         }
     };
-    (@serialize Mounted, $data:ident, $platform:expr) => {{
-        let _ = $platform;
+    // A mounted element's host handle is what element commands act on; the guest is told only
+    // that the element exists (its payload is `null`) and builds its own `MountedData` that
+    // sends commands back over the surface.
+    (@serialize Mounted, $data:ident, $platform:expr, $element:expr, $handles:expr) => {{
+        let platform: &PlatformEventData = $platform;
+        $handles.insert($element, dioxus_html::MountedData::from(platform));
         "null".to_owned()
     }};
-    (@serialize $group:ident, $data:ident, $platform:expr) => {{
+    (@serialize $group:ident, $data:ident, $platform:expr, $element:expr, $handles:expr) => {{
+        let _ = (&$element, &$handles);
         pastey::paste! {
             let platform: &PlatformEventData = $platform;
             if let Some(serialized) = platform.downcast::<dioxus_html::[<Serialized $data>]>() {
