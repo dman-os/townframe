@@ -43,7 +43,7 @@ async fn import_plug_oci(
         .doc_id
         .ok_or_eyre("imported plug missing manifest doc id")?;
     let ref_url: Url =
-        format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
+        format!("dtxt:datum:{doc_id}/org.example.daybook.plugManifest/main?branch=main")
             .parse()?;
     test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
     // TEMPORARY HACK: let the async config-consumer walker publish the

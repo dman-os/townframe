@@ -135,7 +135,7 @@ impl PlugsRepo {
     ) -> Res<url::Url> {
         let at = am_utils_rs::serialize_commit_heads(heads.as_ref()).join("|");
         let url = format!(
-            "db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch={branch}&at={at}"
+            "dtxt:datum:{doc_id}/org.example.daybook.plugManifest/main?branch={branch}&at={at}"
         );
         Ok(url.parse()?)
     }
@@ -272,7 +272,7 @@ impl PlugsRepo {
     /// its pinned heads (None when not locally readable); an id resolves
     /// through the known-manifest cache.
     pub async fn resolve_manifest(&self, target: &str) -> Res<Option<Arc<manifest::PlugManifest>>> {
-        if target.starts_with("db+facet://") {
+        if target.starts_with("dtxt:datum:") {
             let ref_url = url::Url::parse(target)?;
             let Some((_, manifest)) = self.read_manifest_at_ref(&ref_url).await? else {
                 return Ok(None);

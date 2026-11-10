@@ -12,12 +12,12 @@ pub enum PlugsCommands {
     List,
     /// Show a plug's manifest summary, facets, and refs
     Show {
-        /// Plug id (e.g. @daybook/core) or a db+facet:// ref
+        /// Plug id (e.g. @daybook/core) or a dtxt:datum: ref
         target: String,
     },
     /// Enable a plug by facet ref or doc id
     Enable {
-        /// db+facet:// ref or bare manifest doc id
+        /// dtxt:datum: ref or bare manifest doc id
         target: String,
         /// Pin to explicit heads (pipe-separated) instead of current main
         #[arg(long)]
@@ -31,7 +31,7 @@ pub enum PlugsCommands {
     Pending,
     /// Import a plug from a doc id, facet ref, OCI registry ref, or local OCI layout
     Import {
-        /// db+facet:// ref, bare doc id, oci://<registry-ref>, or a local OCI layout path
+        /// dtxt:datum: ref, bare doc id, oci://<registry-ref>, or a local OCI layout path
         target: String,
         /// Leave the plug known but not enabled
         #[arg(long)]
@@ -243,7 +243,7 @@ async fn import(
     no_enable: bool,
     heads: Option<ChangeHashSet>,
 ) -> Res<ExitCode> {
-    let imported = if target.starts_with("db+facet://") {
+    let imported = if target.starts_with("dtxt:datum:") {
         // Facet ref → doc import at the ref's pinned heads.
         let ref_url = url::Url::parse(target)?;
         let parsed = daybook_types::url::parse_facet_ref(&ref_url)?;

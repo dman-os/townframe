@@ -1649,11 +1649,11 @@ private fun ledgerMetaFacetJson(): String =
           "title": "Ledger Overview",
           "journalCommodity": "USD",
           "accountRefs": [
-            "db+facet:///doc/assets/main",
-            "db+facet:///doc/income/main"
+            "dtxt:datum:doc/assets/main",
+            "dtxt:datum:doc/income/main"
           ],
           "transactionRefs": [
-            "db+facet:///doc/txn-1/main"
+            "dtxt:datum:doc/txn-1/main"
           ]
         }
     """.trimIndent()

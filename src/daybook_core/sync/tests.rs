@@ -504,7 +504,7 @@ async fn long_af_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
                         length_octets: payload.len() as u64,
                         digest: hash.clone(),
                         inline: None,
-                        urls: Some(vec![format!("db+blob:///{hash}")]),
+                        urls: Some(vec![format!("dtxt:blob:{hash}")]),
                     })),
                 )]
                 .into(),
@@ -586,7 +586,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
                     length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
+                    urls: Some(vec![format!("dtxt:blob:{hash}")]),
                 })),
             )]
             .into(),
@@ -692,7 +692,7 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
                     length_octets: payload.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                    urls: Some(vec![format!("dtxt:blob:{plaintext}")]),
                 })),
             )]
             .into(),
@@ -1078,7 +1078,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
                     length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
+                    urls: Some(vec![format!("dtxt:blob:{hash}")]),
                 })),
             )]
             .into(),
@@ -2576,7 +2576,7 @@ async fn long_test_told_not_cloned_inventory_part_is_refused_until_the_inventory
                     length_octets: payload.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                    urls: Some(vec![format!("dtxt:blob:{plaintext}")]),
                 })),
             )]
             .into(),
@@ -3002,7 +3002,7 @@ async fn relay_granted_only_the_encrypted_inventory_cannot_decrypt_but_retains_a
                     length_octets: payload.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                    urls: Some(vec![format!("dtxt:blob:{plaintext}")]),
                 })),
             )]
             .into(),

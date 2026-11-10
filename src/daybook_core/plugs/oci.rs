@@ -284,10 +284,7 @@ impl PlugsRepo {
                         "OCI URL '{url_str}' references missing layer digest '{digest_key}'"
                     );
                 };
-                *url_value = serde_json::Value::String(format!(
-                    "{}:///{repo_hash}",
-                    crate::blobs::BLOB_SCHEME
-                ));
+                *url_value = serde_json::Value::String(crate::blobs::blob_url(&repo_hash));
             }
         }
 

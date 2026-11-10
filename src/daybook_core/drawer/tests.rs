@@ -4181,7 +4181,7 @@ async fn write_claim(
             length_octets: 4,
         },
         content_encoding: big_blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
-        key_ref: format!("db+facet:///{}/{jwk_key}", staged.doc_id).parse()?,
+        key_ref: format!("dtxt:datum:{}/{jwk_key}", staged.doc_id).parse()?,
         key_ref_heads: staged.branch_heads.clone(),
         encoding_parameters: big_blobs::encrypt::EncodingParams::DEFAULT.to_encoding_parameters(),
     };
@@ -4368,7 +4368,7 @@ async fn the_claim_scan_skips_malformed_cipher_blobs_and_keeps_valid_claims() ->
             length_octets: 4,
         },
         content_encoding: big_blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
-        key_ref: format!("db+facet:///{candidate}/grp:testdomain/key").parse()?,
+        key_ref: format!("dtxt:datum:{candidate}/grp:testdomain/key").parse()?,
         key_ref_heads: ChangeHashSet(Vec::new().into()),
         encoding_parameters: big_blobs::encrypt::EncodingParams::DEFAULT.to_encoding_parameters(),
     };

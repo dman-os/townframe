@@ -814,7 +814,7 @@ fn encryption_facet_key(branch_id: &BranchId) -> EncryptionKey {
 /// The plaintext blob a `Blob` facet names.
 ///
 /// The facet's `digest` is authoritative (ADR 003 §3 makes the multihash
-/// spelling canonical), and the `db+blob` URL is the same digest in the bare
+/// spelling canonical), and the `dtxt:blob:` URL is the same digest in the bare
 /// spelling, which is what a URL carries (`blob_url_contract_unchanged`).
 /// Shared with the facet-set index's value-digest projection, which is also
 /// keyed by what the facet VALUE names (`plaintext_blob_id` is the one
@@ -827,10 +827,9 @@ pub(crate) fn plaintext_blob_id(blob: &Blob) -> Option<BlobId> {
         let Ok(url) = url_str.parse::<url::Url>() else {
             continue;
         };
-        if url.scheme() != crate::blobs::BLOB_SCHEME && url.scheme() != "daybook-blob" {
-            continue;
-        }
-        if let Some(blob_id) = digest_str_to_blob_id_lenient(url.path().trim_start_matches('/')) {
+        if let Some(blob_id) = crate::blobs::blob_facet_url_digest(&url)
+            .and_then(digest_str_to_blob_id_lenient)
+        {
             return Some(blob_id);
         }
     }
@@ -1773,7 +1772,7 @@ impl Ctx {
             })
             .await?;
         let key_doc_id = staged_key.doc_id.clone();
-        let key_ref = format!("db+facet:///{key_doc_id}/{jwk_key}");
+        let key_ref = format!("dtxt:datum:{key_doc_id}/{jwk_key}");
 
         // 3. The facet update, built at fresh heads (a change has to descend
         // from the state it replaces) — the claim, and the operation's commit
@@ -1872,7 +1871,7 @@ impl Ctx {
             })
             .await?;
         let key_doc_id = staged_key.doc_id.clone();
-        let key_ref = format!("db+facet:///{key_doc_id}/{jwk_key}");
+        let key_ref = format!("dtxt:datum:{key_doc_id}/{jwk_key}");
 
         // 3. The cipherBlob facet — the claim, and the operation's commit
         // point: from here the staged key document is named (keyRef + the
@@ -2098,19 +2097,14 @@ impl Ctx {
         }
         // The path must name the plaintext digest, not the facet key's own id:
         // every reader of `Blob.urls` (`blob_pins_from_facet_value` in the pin
-        // worker, `plaintext_blob_id` here) treats the `db+blob` path as a
+        // worker, `plaintext_blob_id` here) treats the `dtxt:blob:` path as a
         // blob digest, and a production facet's id may be any base58 string —
         // `BlobId`'s zero-padding parse of foreign ids would turn it into a
         // pin on a hash that names no blob.
         let plaintext = plaintext_blob_id(&blob).ok_or_else(|| {
             eyre::eyre!("the Blob facet {blob_key} of document {doc_id} names no blob digest")
         })?;
-        let url = format!(
-            "{}:///{}?via={}",
-            crate::blobs::BLOB_SCHEME,
-            plaintext,
-            cipher_key
-        );
+        let url = format!("{}?via={cipher_key}", crate::blobs::blob_url(&plaintext));
         blob.urls.get_or_insert_with(Vec::new).push(url);
         self.drawer_repo
             .update_at_heads(

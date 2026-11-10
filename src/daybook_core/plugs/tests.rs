@@ -590,7 +590,7 @@ async fn test_plug_component_url_validation() -> Res<()> {
         manifest::WflowBundleManifest {
             keys: vec![],
             component_urls: vec![
-                format!("{}:///nonexistent_hash", crate::blobs::BLOB_SCHEME)
+                crate::blobs::blob_url("nonexistent_hash")
                     .parse()
                     .unwrap(),
             ],
@@ -967,7 +967,7 @@ async fn test_plug_file_to_blob_conversion() -> Res<()> {
         .into(),
     );
 
-    // Add plug - should convert file:// to db+blob://
+    // Add plug - should convert file:// to dtxt:blob:
     repo.add(plug.clone()).await?;
 
     // Retrieve the plug and verify URL was converted
@@ -975,10 +975,8 @@ async fn test_plug_file_to_blob_conversion() -> Res<()> {
     let bundle = saved.wflow_bundles.get("bundle1").unwrap();
     assert_eq!(bundle.component_urls.len(), 1);
     let converted_url = &bundle.component_urls[0];
-    assert_eq!(converted_url.scheme(), crate::blobs::BLOB_SCHEME);
-
     // Verify the blob exists and contains the correct content
-    let hash = converted_url.path().trim_start_matches('/');
+    let hash = crate::blobs::blob_url_digest(converted_url).expect("converted to a dtxt:blob: URL");
     let blob_path = repo
         .blobs
         .get_path(hash.parse::<crate::blobs::BlobId>()?)

@@ -682,7 +682,7 @@ mod tests {
 
     fn src_ref() -> daybook_types::doc::FacetRef {
         daybook_types::doc::FacetRef {
-            r#ref: "db+facet:///doc/note/main".parse().unwrap(),
+            r#ref: "dtxt:datum:doc/note/main".parse().unwrap(),
             heads: vec!["head".into()],
         }
     }
@@ -814,7 +814,7 @@ mod tests {
         let mut existing = existing_from(&original);
         let existing_id = existing.keys().next().unwrap().clone();
         let second_source = daybook_types::doc::FacetRef {
-            r#ref: "db+facet:///doc/note/secondary".parse().unwrap(),
+            r#ref: "dtxt:datum:doc/note/secondary".parse().unwrap(),
             heads: vec!["head-2".into()],
         };
         let preserved_src_refs = vec![src_ref(), second_source.clone()];

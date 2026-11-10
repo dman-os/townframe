@@ -138,7 +138,30 @@ pub enum BlobMaterializeRequest {
     Extension(String),
 }
 
-pub const BLOB_SCHEME: &str = "db+blob";
+/// A blob URL: `dtxt:blob:<digest>` (ADR 035 §3).
+///
+/// This crate still appends a `?via=<cipher key>` query to a `Blob` facet's URL as the
+/// resolution hint of its encryption worker, which ADR 035 retires for the Cabinet in favour
+/// of the naming convention. The hint goes away with this crate's migration.
+pub fn blob_url(digest: &(impl std::fmt::Display + ?Sized)) -> String {
+    format!("dtxt:blob:{digest}")
+}
+
+/// The digest text of a `dtxt:blob:<digest>` URL, ignoring any query; `None` for any other URL.
+pub fn blob_url_digest(url: &url::Url) -> Option<&str> {
+    if url.scheme() != "dtxt" {
+        return None;
+    }
+    url.path().strip_prefix("blob:")
+}
+
+/// The digest text of a `Blob` facet's URL: a `dtxt:blob:` URL or the older `daybook-blob`
+/// spelling that stored facets may still carry.
+pub fn blob_facet_url_digest(url: &url::Url) -> Option<&str> {
+    blob_url_digest(url).or_else(|| {
+        (url.scheme() == "daybook-blob").then(|| url.path().trim_start_matches('/'))
+    })
+}
 
 /// The content digest of a blob: the blake3 hash of its bytes.
 ///
@@ -207,7 +230,7 @@ pub struct BlobIdDecodeError;
 
 impl std::fmt::Display for BlobId {
     /// The digest as multibase base58btc, which is what names the blob's object
-    /// on disk and in a `db+blob` URL. It never contains a path separator, and
+    /// on disk and in a `dtxt:blob:` URL. It never contains a path separator, and
     /// that is the point: the blob's paths are built from this text.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&utils_rs::hash::encode_base58_multibase(self.0))
@@ -227,7 +250,7 @@ impl std::str::FromStr for BlobId {
     ///
     /// One is the blake3 multihash text [`blob_id_to_digest_str`] emits and
     /// that facet digests carry, the other is the plain multibase text
-    /// `Display` emits and that `db+blob` URLs carry. Both decode to the same
+    /// `Display` emits and that `dtxt:blob:` URLs carry. Both decode to the same
     /// 32 bytes and so name the same blob; reserved `/…` keys, `o:` object-part
     /// keys, arbitrary text and the empty string are not digests and are
     /// rejected here, at the boundary the text enters through.
@@ -284,7 +307,7 @@ impl<'de> Deserialize<'de> for BlobId {
 
 /// The blob id a text spelling names.
 ///
-/// The text is peer-authored (a facet digest, a `db+blob` URL, a pin in the
+/// The text is peer-authored (a facet digest, a `dtxt:blob:` URL, a pin in the
 /// local state), so text that names no digest is an error rather than a fresh
 /// identity or a panic.
 pub fn blob_id_from_hash(hash: &str) -> Res<BlobId> {
@@ -1101,7 +1124,7 @@ pub fn digest_str_to_blob_id(digest: &str) -> Res<BlobId> {
 /// Parse a digest string in either spelling of the same 32-octet BLAKE3 digest.
 ///
 /// ADR 003 §3 makes the multihash form canonical for `representation.digest`
-/// and for a plaintext content digest; a `db+blob:///` URL instead carries the
+/// and for a plaintext content digest; a `dtxt:blob:` URL instead carries the
 /// bare base58 form. A facet value is authored by whoever wrote the facet, so a
 /// reader cannot assume one spelling. Both forms decode to the same digest, so
 /// accepting either cannot name a different blob.
@@ -1333,7 +1356,7 @@ mod tests {
         assert_eq!(
             digest_str_to_blob_id_lenient(&bare).map(|id| id.to_bytes32()),
             Some(bytes),
-            "a db+blob URL's bare spelling must resolve"
+            "a `dtxt:blob:` URL's bare spelling must resolve"
         );
     }
 
@@ -1341,10 +1364,9 @@ mod tests {
     async fn blob_url_contract_unchanged() -> Res<()> {
         let (repo, _temp) = setup().await;
         let hash = repo.put(b"url").await?;
-        let url = format!("{BLOB_SCHEME}:///{hash}");
-        let parsed_hash = url
-            .strip_prefix(&format!("{BLOB_SCHEME}:///"))
-            .ok_or_eyre("invalid blob URL")?;
+        let url = blob_url(&hash);
+        let parsed = url::Url::parse(&url)?;
+        let parsed_hash = blob_url_digest(&parsed).ok_or_eyre("invalid blob URL")?;
         let path = repo.get_path(parsed_hash.parse::<BlobId>()?).await?;
         assert!(tokio::fs::try_exists(path).await?);
         Ok(())
@@ -1486,7 +1508,7 @@ mod tests {
         Ok(())
     }
 
-    /// Blob id text arrives from peers (facet digests, `db+blob` URLs, part
+    /// Blob id text arrives from peers (facet digests, `dtxt:blob:` URLs, part
     /// store keys). Text that is not a digest must be rejected where it enters:
     /// a blob id is what the on-disk path is built from, and `Path::join` reads
     /// an absolute spelling as a replacement for the blob root.
@@ -1508,7 +1530,7 @@ mod tests {
     }
 
     /// The multihash spelling our writers put in facet digests
-    /// (`blob_id_to_digest_str`) and the plain `Display` spelling of a `db+blob`
+    /// (`blob_id_to_digest_str`) and the plain `Display` spelling of a `dtxt:blob:`
     /// URL name one digest: both parse to the same 32 bytes, and so to the same
     /// blob on disk.
     #[tokio::test]

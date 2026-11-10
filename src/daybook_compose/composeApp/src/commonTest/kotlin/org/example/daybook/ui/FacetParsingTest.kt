@@ -10,7 +10,7 @@ class FacetParsingTest {
     fun `decode body facet parses order urls`() {
         val raw =
             """
-            {"order":["db+facet:///self/org.example.daybook.imageMetadata/main#","db+facet:///self/org.example.daybook.note/main#abc"]}
+            {"order":["dtxt:datum:self/org.example.daybook.imageMetadata/main#","dtxt:datum:self/org.example.daybook.note/main#abc"]}
             """.trimIndent()
 
         val decoded = decodeWellKnownFacet<WellKnownFacet.Body>(raw)
@@ -18,8 +18,8 @@ class FacetParsingTest {
         assertTrue(decoded.isSuccess, decoded.exceptionOrNull()?.stackTraceToString() ?: "decode failed")
         assertEquals(
             listOf(
-                "db+facet:///self/org.example.daybook.imageMetadata/main#",
-                "db+facet:///self/org.example.daybook.note/main#abc",
+                "dtxt:datum:self/org.example.daybook.imageMetadata/main#",
+                "dtxt:datum:self/org.example.daybook.note/main#abc",
             ),
             decoded.getOrThrow().v1.order,
         )

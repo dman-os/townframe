@@ -386,7 +386,7 @@ mod tests {
         let provider = Arc::new(CipherBlobProvider::new());
         let key = MasterKey::random();
         let (key_doc_id, key_heads) = stage_key_doc(&drawer, &key).await?;
-        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        let key_ref = format!("dtxt:datum:{key_doc_id}/org.example.daybook.jwk/relay");
         let doc_id = stage_content_doc(&drawer).await?;
         let source = DocKeySource::new(
             Arc::clone(&drawer),
@@ -485,7 +485,7 @@ mod tests {
         let provider = Arc::new(CipherBlobProvider::new());
         let key_a = MasterKey::random();
         let (key_doc_id, heads_a) = stage_key_doc(&drawer, &key_a).await?;
-        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        let key_ref = format!("dtxt:datum:{key_doc_id}/org.example.daybook.jwk/relay");
 
         let plaintext = b"encrypted under the key the facet pinned".to_vec();
         let encoding = EncodingParams::DEFAULT;
@@ -571,7 +571,7 @@ mod tests {
         let drawer = Arc::clone(&ctx.drawer_repo);
         let key = MasterKey::random();
         let (key_doc_id, key_heads) = stage_key_doc(&drawer, &key).await?;
-        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        let key_ref = format!("dtxt:datum:{key_doc_id}/org.example.daybook.jwk/relay");
         let encoding = EncodingParams::DEFAULT;
 
         // A resolvable representation: the positive control, and the document
@@ -638,7 +638,7 @@ mod tests {
                     length_octets: 128,
                 },
                 content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
-                key_ref: "db+facet:///nosuchkeydoc/org.example.daybook.jwk/relay".parse()?,
+                key_ref: "dtxt:datum:nosuchkeydoc/org.example.daybook.jwk/relay".parse()?,
                 key_ref_heads: key_heads.clone(),
                 encoding_parameters: encoding.to_encoding_parameters(),
             },
@@ -723,7 +723,7 @@ mod tests {
         };
         let err = good
             .jwk_at(&reference(
-                "db+facet:///self/org.example.daybook.jwk/relay",
+                "dtxt:datum:self/org.example.daybook.jwk/relay",
                 key_heads.clone(),
             ))
             .await
@@ -736,7 +736,7 @@ mod tests {
             .expect_err("a cross-document reference that pinned no heads cannot resolve");
         assert!(err.to_string().contains("pins no heads"), "{err}");
 
-        let wrong_tag = format!("db+facet:///{key_doc_id}/org.example.daybook.blob/main");
+        let wrong_tag = format!("dtxt:datum:{key_doc_id}/org.example.daybook.blob/main");
         let err = good
             .jwk_at(&reference(&wrong_tag, key_heads))
             .await
