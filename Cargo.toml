@@ -136,6 +136,7 @@ clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
 pierre_diffs = { path = "./src/pierre_diffs" }
 clay_dioxus_kit = { path = "./src/clay_dioxus_kit" }
+pierre_diffs_dioxus = { path = "./src/pierre_diffs_dioxus" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
@@ -354,6 +355,7 @@ irpc-iroh = "0.17.0"
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 blitz-dom = "=0.3.0-beta.4"
