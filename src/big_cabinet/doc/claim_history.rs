@@ -267,7 +267,7 @@ impl<'a> Reconstruction<'a> {
         }
         if heads
             .iter()
-            .any(|hash| self.doc.get_change_by_hash(hash).is_none())
+            .any(|hash| self.doc.get_change_meta_by_hash(hash).is_none())
         {
             return Err(ClaimHistoryError::MalformedWitness("unknown heads"));
         }
@@ -325,12 +325,14 @@ impl Reconstruction<'_> {
         hash: ChangeHash,
         marker: ObjId,
     ) -> Result<ReconstructedClaim, ClaimHistoryError> {
+        // Metadata, not `get_change_by_hash`: the latter re-encodes the change by scanning every
+        // operation in the document, which made verifying each slot cost the whole document.
         let change = self
             .doc
-            .get_change_by_hash(&hash)
+            .get_change_meta_by_hash(&hash)
             .expect("an observed operation belongs to an applied change");
-        let parents = change.deps().to_vec();
-        let automerge_actor = change.actor_id().clone();
+        let parents = change.deps;
+        let automerge_actor = change.actor.into_owned();
         let resulting_heads = vec![hash];
         let entry = self
             .entries(&resulting_heads)?
