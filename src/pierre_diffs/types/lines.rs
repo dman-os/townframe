@@ -24,6 +24,7 @@
 use crate::types::view::DiffLineAnnotation;
 use serde::Deserialize;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,20 +167,36 @@ pub struct HunkExpansionRegion {
     pub from_end: usize,
 }
 
-/// `Map<number, HunkExpansionRegion> | true`
+/// `Map<number, HunkExpansionRegion> | true`. `Regions` borrows the renderer's
+/// live map (upstream shares the `Map`; `getExpandedHunksMap()` returns it
+/// without a copy) or owns one (callers that build their own).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExpandedHunks {
+pub enum ExpandedHunks<'regions> {
     All,
-    Regions(HashMap<usize, HunkExpansionRegion>),
+    Regions(Cow<'regions, HashMap<usize, HunkExpansionRegion>>),
+}
+
+impl ExpandedHunks<'static> {
+    /// An expansion map the value owns.
+    pub fn owned(regions: HashMap<usize, HunkExpansionRegion>) -> Self {
+        Self::Regions(Cow::Owned(regions))
+    }
+}
+
+impl<'regions> ExpandedHunks<'regions> {
+    /// The renderer's live map, shared as upstream's `getExpandedHunksMap()` does.
+    pub fn borrowed(regions: &'regions HashMap<usize, HunkExpansionRegion>) -> Self {
+        Self::Regions(Cow::Borrowed(regions))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ForceDiffPlainTextOptions {
+pub struct ForceDiffPlainTextOptions<'regions> {
     pub force_plain_text: bool,
     pub lazy_line_ast: Option<bool>,
     pub starting_line: Option<usize>,
     pub total_lines: Option<usize>,
-    pub expanded_hunks: Option<ExpandedHunks>,
+    pub expanded_hunks: Option<ExpandedHunks<'regions>>,
     pub collapsed_context_threshold: Option<usize>,
 }
 

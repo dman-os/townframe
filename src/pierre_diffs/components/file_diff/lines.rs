@@ -7,9 +7,9 @@
 //   the gap start behaves as JavaScript's signed arithmetic does.
 // * `direction: 'up' | 'down'` is `RenderableDirection`.
 // * `this.hunksRenderer.getExpandedHunksMap()` is handed to the layout helpers
-//   as `ExpandedHunks::Regions(map.clone())`: the helpers take an owned map
-//   where upstream shares the `Map`, so each query copies the (one entry per
-//   expanded hunk) map.
+//   as `ExpandedHunks::borrowed(map)`, shared as upstream shares the `Map`
+//   (the renderer stays borrowed while a query runs; `revealLine` releases it
+//   before `expandHunk` writes).
 // * `this.expandHunk(...)` is `FileDiff::expand_hunk`; the `VirtualizedFileDiff`
 //   override that upstream's comment mentions (CodeView's deferred
 //   `pendingExpansions`) is S12b's.
@@ -37,17 +37,18 @@ where
     Rendered: RenderedContent + 'static,
     LAnnotation: Clone + PartialEq + 'static,
 {
-    /// `expandedHunks: expandUnchanged ? true : this.hunksRenderer.getExpandedHunksMap()`
-    fn expanded_hunks(&self, expand_unchanged: bool) -> ExpandedHunks {
+    /// `expandedHunks: expandUnchanged ? true : this.hunksRenderer.getExpandedHunksMap()`,
+    /// handed to `body` while the renderer is borrowed (the map is shared, not copied).
+    fn with_expanded_hunks<Output>(
+        &self,
+        expand_unchanged: bool,
+        body: impl FnOnce(&ExpandedHunks<'_>) -> Output,
+    ) -> Output {
         if expand_unchanged {
-            ExpandedHunks::All
+            body(&ExpandedHunks::All)
         } else {
-            ExpandedHunks::Regions(
-                self.hunks_renderer
-                    .borrow()
-                    .get_expanded_hunks_map()
-                    .clone(),
-            )
+            let renderer = self.hunks_renderer.borrow();
+            body(&ExpandedHunks::borrowed(renderer.get_expanded_hunks_map()))
         }
     }
 
@@ -71,11 +72,13 @@ where
             return true;
         };
         let (expand_unchanged, collapsed_context_threshold) = self.expansion_options();
-        is_addition_line_renderable(IsAdditionLineRenderableProps {
-            file_diff: &file_diff,
-            line_number,
-            expanded_hunks: Some(&self.expanded_hunks(expand_unchanged)),
-            collapsed_context_threshold,
+        self.with_expanded_hunks(expand_unchanged, |expanded_hunks| {
+            is_addition_line_renderable(IsAdditionLineRenderableProps {
+                file_diff: &file_diff,
+                line_number,
+                expanded_hunks: Some(expanded_hunks),
+                collapsed_context_threshold,
+            })
         })
     }
 
@@ -90,15 +93,17 @@ where
             return Some(line_number);
         };
         let (expand_unchanged, collapsed_context_threshold) = self.expansion_options();
-        get_nearest_renderable_addition_line(
-            IsAdditionLineRenderableProps {
-                file_diff: &file_diff,
-                line_number,
-                expanded_hunks: Some(&self.expanded_hunks(expand_unchanged)),
-                collapsed_context_threshold,
-            },
-            direction,
-        )
+        self.with_expanded_hunks(expand_unchanged, |expanded_hunks| {
+            get_nearest_renderable_addition_line(
+                IsAdditionLineRenderableProps {
+                    file_diff: &file_diff,
+                    line_number,
+                    expanded_hunks: Some(expanded_hunks),
+                    collapsed_context_threshold,
+                },
+                direction,
+            )
+        })
     }
 
     // Expand collapsed context so a one-based new-file line can render: one
@@ -122,7 +127,8 @@ where
         let Some(file_diff) = file_diff.filter(|diff| !diff.is_partial && !expand_unchanged) else {
             return false;
         };
-        let expanded_hunks = self.expanded_hunks(false);
+        let renderer = self.hunks_renderer.borrow();
+        let expanded_hunks = ExpandedHunks::borrowed(renderer.get_expanded_hunks_map());
         let line = line_number as isize;
 
         for (hunk_index, hunk) in file_diff.hunks.iter().enumerate() {
@@ -149,6 +155,9 @@ where
                 } else {
                     (ExpansionDirections::Down, from_end_distance)
                 };
+                // `expandHunk` writes the renderer's map: release the shared borrow.
+                drop(expanded_hunks);
+                drop(renderer);
                 self.expand_hunk(
                     hunk_index as i64,
                     direction,
@@ -168,6 +177,9 @@ where
             collapsed_context_threshold,
             error_prefix: "FileDiff.revealLine",
         });
+        // `expandHunk` writes the renderer's map: release the shared borrow.
+        drop(expanded_hunks);
+        drop(renderer);
         let Some(trailing_region) = trailing_region.filter(|region| !region.render_all) else {
             return false;
         };

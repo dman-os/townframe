@@ -71,7 +71,7 @@ pub struct IterateOverDiffProps<'diff> {
     pub starting_line: usize,
     /// `None` is upstream's default `Infinity`.
     pub total_lines: Option<usize>,
-    pub expanded_hunks: Option<&'diff ExpandedHunks>,
+    pub expanded_hunks: Option<&'diff ExpandedHunks<'diff>>,
     pub collapsed_context_threshold: usize,
 }
 

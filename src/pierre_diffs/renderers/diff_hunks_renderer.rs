@@ -472,7 +472,7 @@ impl<LAnnotation> DiffHunksRenderer<LAnnotation> {
                 expanded_hunks: Some(if is_default_range || defaults.expand_unchanged {
                     ExpandedHunks::All
                 } else {
-                    ExpandedHunks::Regions(self.expanded_hunks.clone())
+                    ExpandedHunks::borrowed(&self.expanded_hunks)
                 }),
                 collapsed_context_threshold: Some(defaults.collapsed_context_threshold),
             }

@@ -211,11 +211,11 @@ struct RenderDiffCase {
 }
 
 /// `null | true | [[hunkIndex, {fromStart, fromEnd}]]`
-fn decode_expanded(value: &Value) -> Option<ExpandedHunks> {
+fn decode_expanded(value: &Value) -> Option<ExpandedHunks<'static>> {
     match value {
         Value::Null => None,
         Value::Bool(true) => Some(ExpandedHunks::All),
-        Value::Array(entries) => Some(ExpandedHunks::Regions(
+        Value::Array(entries) => Some(ExpandedHunks::owned(
             entries
                 .iter()
                 .map(|entry| {

@@ -2,7 +2,7 @@
 // 75e00805b44e193c0fb235c1bd9d7fadfa06acf6): packages/diffs/test/isAdditionLineRenderable.test.ts.
 // Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
 // Changes: bun:test to nextest; test titles are snake_case; the
-// `Map<number, HunkExpansionRegion>` arguments are `ExpandedHunks::Regions`.
+// `Map<number, HunkExpansionRegion>` arguments are `ExpandedHunks::owned`.
 // The fixture diff (a 40-line file with lines 10 and 30 changed) has one
 // minimal diff, so `similar`'s hunks equal jsdiff's and no assertion changes.
 
@@ -50,8 +50,8 @@ fn make_diff() -> FileDiffMetadata {
     .value
 }
 
-fn regions(entries: &[(usize, usize, usize)]) -> ExpandedHunks {
-    ExpandedHunks::Regions(
+fn regions(entries: &[(usize, usize, usize)]) -> ExpandedHunks<'static> {
+    ExpandedHunks::owned(
         entries
             .iter()
             .map(|&(index, from_start, from_end)| {

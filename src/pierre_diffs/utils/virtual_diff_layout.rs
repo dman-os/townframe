@@ -31,7 +31,7 @@ pub struct ExpandedRegionResult {
 pub struct GetExpandedRegionProps<'expanded> {
     pub is_partial: bool,
     pub range_size: usize,
-    pub expanded_hunks: Option<&'expanded ExpandedHunks>,
+    pub expanded_hunks: Option<&'expanded ExpandedHunks<'expanded>>,
     pub hunk_index: usize,
     pub collapsed_context_threshold: usize,
 }
@@ -173,7 +173,7 @@ pub fn get_trailing_context_range_size(file_diff: &FileDiffMetadata, error_prefi
 pub struct GetTrailingExpandedRegionProps<'diff> {
     pub file_diff: &'diff FileDiffMetadata,
     pub hunk_index: usize,
-    pub expanded_hunks: Option<&'diff ExpandedHunks>,
+    pub expanded_hunks: Option<&'diff ExpandedHunks<'diff>>,
     pub collapsed_context_threshold: usize,
     pub error_prefix: &'static str,
 }
@@ -229,7 +229,7 @@ pub struct IsAdditionLineRenderableProps<'diff> {
     pub file_diff: &'diff FileDiffMetadata,
     /// One-based line number in the new file.
     pub line_number: usize,
-    pub expanded_hunks: Option<&'diff ExpandedHunks>,
+    pub expanded_hunks: Option<&'diff ExpandedHunks<'diff>>,
     pub collapsed_context_threshold: usize,
 }
 

@@ -166,8 +166,8 @@ impl LayoutOptions {
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutContext<'ctx> {
     pub options: LayoutOptions,
-    /// `this.hunksRenderer.getExpandedHunksMap()`, as `ExpandedHunks::Regions`.
-    pub expanded_hunks: &'ctx ExpandedHunks,
+    /// `this.hunksRenderer.getExpandedHunksMap()`, shared (`ExpandedHunks::borrowed`).
+    pub expanded_hunks: &'ctx ExpandedHunks<'ctx>,
     /// `getLayoutDiff()`: `pendingRender?.diff ?? getRenderedDiff()`.
     pub layout_diff: Option<&'ctx FileDiffMetadata>,
     /// `this.getSimpleVirtualizer()?.config.resizeDebugging ?? false`
@@ -176,7 +176,7 @@ pub struct LayoutContext<'ctx> {
 
 impl LayoutContext<'_> {
     /// `expandUnchanged ? true : this.hunksRenderer.getExpandedHunksMap()`
-    fn effective_expanded_hunks(&self) -> &ExpandedHunks {
+    fn effective_expanded_hunks(&self) -> &ExpandedHunks<'_> {
         if self.options.expand_unchanged {
             &ExpandedHunks::All
         } else {

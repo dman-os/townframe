@@ -30,7 +30,7 @@ pub struct ComputeEstimatedDiffHeightsOptions<'diff> {
     pub disable_file_header: bool,
     pub hunk_separators: HunkSeparators,
     pub expand_unchanged: bool,
-    pub expanded_hunks: Option<&'diff ExpandedHunks>,
+    pub expanded_hunks: Option<&'diff ExpandedHunks<'diff>>,
     pub collapsed_context_threshold: usize,
     pub can_hydrate_partial_diff: bool,
 }

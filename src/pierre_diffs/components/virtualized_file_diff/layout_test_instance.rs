@@ -60,7 +60,7 @@ impl LayoutInstance {
         &mut self,
         body: impl FnOnce(&mut DiffLayout, &LayoutContext<'_>) -> Output,
     ) -> Output {
-        let expanded_hunks = ExpandedHunks::Regions(self.renderer.get_expanded_hunks_map().clone());
+        let expanded_hunks = ExpandedHunks::borrowed(self.renderer.get_expanded_hunks_map());
         let context = LayoutContext {
             options: LayoutOptions::of(&self.options),
             expanded_hunks: &expanded_hunks,

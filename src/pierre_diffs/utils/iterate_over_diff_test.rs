@@ -65,7 +65,7 @@ struct Options<'diff> {
     diff_style: IterationDiffStyle,
     starting_line: usize,
     total_lines: Option<usize>,
-    expanded_hunks: Option<&'diff ExpandedHunks>,
+    expanded_hunks: Option<&'diff ExpandedHunks<'diff>>,
 }
 
 impl<'diff> Options<'diff> {
@@ -113,8 +113,8 @@ fn collect_rows(options: Options<'_>) -> Vec<RowSnapshot> {
     rows
 }
 
-fn regions(entries: &[(usize, usize, usize)]) -> ExpandedHunks {
-    ExpandedHunks::Regions(
+fn regions(entries: &[(usize, usize, usize)]) -> ExpandedHunks<'static> {
+    ExpandedHunks::owned(
         entries
             .iter()
             .map(|&(index, from_start, from_end)| {

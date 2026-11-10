@@ -389,7 +389,7 @@ impl<LAnnotation> DiffHunksRenderer<LAnnotation> {
         let expanded_hunks = if defaults.expand_unchanged {
             ExpandedHunks::All
         } else {
-            ExpandedHunks::Regions(self.expanded_hunks.clone())
+            ExpandedHunks::borrowed(&self.expanded_hunks)
         };
         iterate_over_diff(
             IterateOverDiffProps {

@@ -122,7 +122,7 @@ struct ComputeOverrides<'diff> {
     metrics: VirtualFileMetrics,
     hunk_separators: HunkSeparators,
     expand_unchanged: bool,
-    expanded_hunks: Option<&'diff ExpandedHunks>,
+    expanded_hunks: Option<&'diff ExpandedHunks<'diff>>,
     can_hydrate_partial_diff: bool,
 }
 
@@ -337,8 +337,8 @@ fn expands_unchanged_context_as_rows_without_separators() {
     );
 }
 
-fn one_expansion(hunk_index: usize, from_start: usize, from_end: usize) -> ExpandedHunks {
-    ExpandedHunks::Regions(HashMap::from([(
+fn one_expansion(hunk_index: usize, from_start: usize, from_end: usize) -> ExpandedHunks<'static> {
+    ExpandedHunks::owned(HashMap::from([(
         hunk_index,
         HunkExpansionRegion {
             from_start,

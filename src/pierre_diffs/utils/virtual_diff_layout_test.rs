@@ -66,8 +66,8 @@ fn expanded_region(
     })
 }
 
-fn one_region(from_start: usize, from_end: usize) -> ExpandedHunks {
-    ExpandedHunks::Regions(HashMap::from([(
+fn one_region(from_start: usize, from_end: usize) -> ExpandedHunks<'static> {
+    ExpandedHunks::owned(HashMap::from([(
         1,
         HunkExpansionRegion {
             from_start,
