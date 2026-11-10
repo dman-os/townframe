@@ -434,6 +434,7 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 
 ## In flight
 
+- 2026-11-10 (operator): ADR 037 Q1, Q2 decided; Q4 settled as P2 (`99ada224`); P2 design appended to the ADR (`b2526fd3`). Q5 (order of work) is the manager's call: a0, a1, b, a2, c. Next: implement a0 with P2. The operator: own this lane's PRs and push fixes without asking; mothership is approved for all agents. #85 cfg fix pushed (`164ccd15`); feat/big-node merged main and absorbed the remote's superseded commits (`07e29b94`), no force-push.
 - Operator principle (2026-11-04): settle runtime and dispatch design questions by following established reverse proxies and RPC systems (gRPC, Envoy, wash, XRPC), and name the precedent.
 - Operator (2026-11-04): the fork push, repin and `[patch]` cleanup are deferred until later; don't block on them. The manager makes design calls and reports them.
 - big_plugs: P1–P7 done. P7 follow-ups:
